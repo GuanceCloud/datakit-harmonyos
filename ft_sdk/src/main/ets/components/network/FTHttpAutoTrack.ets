@@ -3,6 +3,7 @@
  */
 
 import { rcp } from '@kit.RemoteCommunicationKit';
+import { http } from '@kit.NetworkKit';
 import { FTTraceInterceptor, DefaultFTTraceInterceptor, HttpRequestData, HttpResponseData } from '../trace/FTTraceInterceptor';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
 import { TraceType } from '../trace/TraceType';
@@ -16,6 +17,8 @@ import { Constants } from '../Constants';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 
 const TAG = "FTHttpAutoTrack";
+const FT_RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
+const HTTP_METHOD_UNKNOWN = 'UNKNOWN';
 
 function summarizeHeaderKeys(headers: Record<string, string>): string {
   const keys = Object.keys(headers);
@@ -103,6 +106,126 @@ interface TimeInfoStructure {
  */
 interface PerformanceMetricValue {
   value: number;
+}
+
+interface HttpAutoTrackState {
+  resourceId: string;
+  url: string;
+  method: string;
+  startTime: number;
+  requestHeaders: Record<string, string>;
+  actionId?: string;
+}
+
+class HttpAutoTrackStateStore {
+  private static instance: HttpAutoTrackStateStore | null = null;
+  private readonly stateMap: Map<string, HttpAutoTrackState> = new Map();
+
+  public static getInstance(): HttpAutoTrackStateStore {
+    if (HttpAutoTrackStateStore.instance === null) {
+      HttpAutoTrackStateStore.instance = new HttpAutoTrackStateStore();
+    }
+    return HttpAutoTrackStateStore.instance;
+  }
+
+  public put(state: HttpAutoTrackState): void {
+    if (this.stateMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
+      FTInnerLogger.w(TAG, `[HTTP-AutoTrack] stateMap size (${this.stateMap.size}) exceeds limit, clearing stale states`);
+      this.stateMap.clear();
+    }
+    this.stateMap.set(state.resourceId, state);
+  }
+
+  public get(resourceId: string): HttpAutoTrackState | undefined {
+    return this.stateMap.get(resourceId);
+  }
+
+  public delete(resourceId: string): void {
+    this.stateMap.delete(resourceId);
+  }
+}
+
+function normalizeObjectHeaders(headers?: Object | null): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  if (!headers) {
+    return normalized;
+  }
+
+  const rawHeaders = headers as Record<string, Object>;
+  const keys = Object.keys(rawHeaders);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = rawHeaders[key];
+    if (typeof value === 'string') {
+      normalized[key] = value;
+    } else if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
+      normalized[key] = value[0] as string;
+    } else if (value !== undefined && value !== null) {
+      normalized[key] = String(value);
+    }
+  }
+  return normalized;
+}
+
+function applyNormalizedHeadersToHttpContext(context: http.HttpRequestContext, headers: Record<string, string>): void {
+  const mutableHeaders: Record<string, string> = {};
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    mutableHeaders[key] = headers[key];
+  }
+  context.header = mutableHeaders as Object;
+}
+
+function buildRequestHeaderMap(headers: Record<string, string>): Map<string, string[]> {
+  const headerMap = new Map<string, string[]>();
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    headerMap.set(key, [headers[key]]);
+  }
+  return headerMap;
+}
+
+function buildResponseHeaderMap(headers: Record<string, string>): Map<string, string[]> {
+  const headerMap = new Map<string, string[]>();
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    headerMap.set(key, [headers[key]]);
+  }
+  return headerMap;
+}
+
+function ensureHttpResourceId(headers: Record<string, string>): string {
+  const existingId = headers[FT_RESOURCE_ID_HEADER];
+  if (existingId && existingId.length > 0) {
+    return existingId;
+  }
+  const generatedId = Utils.generateUUID();
+  headers[FT_RESOURCE_ID_HEADER] = generatedId;
+  return generatedId;
+}
+
+function buildAutoTrackResourceId(method: string, url: string, uniqueId: string): string {
+  return `${method}_${url}_${uniqueId}`;
+}
+
+function extractContentLength(headers: Record<string, string>): number {
+  const contentLength = headers['content-length'] || headers['Content-Length'];
+  if (!contentLength) {
+    return 0;
+  }
+
+  const parsedValue = parseInt(contentLength, 10);
+  return isNaN(parsedValue) ? 0 : parsedValue;
+}
+
+function tryGetResponseBodyText(result: string | Object | ArrayBuffer): string | undefined {
+  if (typeof result === 'string') {
+    return result;
+  }
+  return undefined;
 }
 
 /**
@@ -847,6 +970,243 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
 }
 
 /**
+ * HTTP INITIAL_REQUEST interceptor.
+ * It injects trace headers and records the resource start point so it can be finished in FINAL_RESPONSE.
+ */
+export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
+  interceptorType: http.InterceptorType = http.InterceptorType.INITIAL_REQUEST;
+
+  private traceInterceptor: FTTraceInterceptor | null = null;
+  private readonly traceEnabled: boolean;
+  private readonly resourceEnabled: boolean;
+
+  constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
+    this.traceEnabled = traceEnabled !== undefined
+      ? traceEnabled
+      : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
+    this.resourceEnabled = resourceEnabled !== undefined
+      ? resourceEnabled
+      : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+
+    if (this.traceEnabled) {
+      const traceConfigManager = FTTraceConfigManager.getInstance();
+      this.traceInterceptor = new DefaultFTTraceInterceptor(
+        traceConfigManager.getTraceTypeEnum(),
+        traceConfigManager.getOverrideHeaderHandler()
+      );
+    }
+  }
+
+  async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
+    try {
+      const url = reqContext.url;
+      const method = HTTP_METHOD_UNKNOWN;
+      const headers = normalizeObjectHeaders(reqContext.header);
+      const uniqueId = ensureHttpResourceId(headers);
+      const resourceId = buildAutoTrackResourceId(method, url, uniqueId);
+
+      let finalHeaders = headers;
+      if (this.traceEnabled && this.traceInterceptor) {
+        const traceManager = FTTraceManager.getInstance();
+        const traceHeaders = traceManager.getTraceHeader(resourceId, url);
+
+        const headersMap = new Map<string, string>();
+        const initialHeaderKeys = Object.keys(headers);
+        for (let i = 0; i < initialHeaderKeys.length; i++) {
+          const key = initialHeaderKeys[i];
+          headersMap.set(key, headers[key]);
+        }
+        const traceHeaderKeys = Object.keys(traceHeaders);
+        for (let i = 0; i < traceHeaderKeys.length; i++) {
+          const key = traceHeaderKeys[i];
+          headersMap.set(key, traceHeaders[key]);
+        }
+
+        const interceptedRequest = this.traceInterceptor.interceptRequest({
+          url: url,
+          method: method,
+          headers: headersMap,
+          body: undefined,
+          timestamp: Date.now()
+        });
+
+        finalHeaders = {};
+        const interceptedHeaders = Array.from(interceptedRequest.headers.entries());
+        for (let i = 0; i < interceptedHeaders.length; i++) {
+          const entry = interceptedHeaders[i];
+          finalHeaders[entry[0]] = entry[1];
+        }
+        finalHeaders[FT_RESOURCE_ID_HEADER] = uniqueId;
+      }
+
+      applyNormalizedHeadersToHttpContext(reqContext, finalHeaders);
+
+      let actionId: string | undefined = undefined;
+      if (this.resourceEnabled) {
+        FTRUMInnerManager.getInstance().startResource(resourceId);
+        const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
+        if (activeAction && !activeAction.isActionClose()) {
+          actionId = activeAction.getId();
+        }
+      }
+
+      HttpAutoTrackStateStore.getInstance().put({
+        resourceId: resourceId,
+        url: url,
+        method: method,
+        startTime: Date.now(),
+        requestHeaders: finalHeaders,
+        actionId: actionId
+      });
+
+      FTInnerLogger.d(
+        TAG,
+        `[HTTP-Initial] Prepared ${url}, resourceId=${resourceId}, trace=${this.traceEnabled}, resource=${this.resourceEnabled}, ${summarizeHeaderKeys(finalHeaders)}`
+      );
+    } catch (error) {
+      FTInnerLogger.e(TAG, `[HTTP-Initial] Failed to process interceptor: ${error}`);
+    }
+    return true;
+  }
+}
+
+/**
+ * HTTP FINAL_RESPONSE interceptor.
+ * It complements the INITIAL_REQUEST interceptor by transforming the final response into the existing resource model.
+ */
+export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
+  interceptorType: http.InterceptorType = http.InterceptorType.FINAL_RESPONSE;
+
+  private traceInterceptor: FTTraceInterceptor | null = null;
+  private readonly traceEnabled: boolean;
+  private readonly resourceEnabled: boolean;
+
+  constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
+    this.traceEnabled = traceEnabled !== undefined
+      ? traceEnabled
+      : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
+    this.resourceEnabled = resourceEnabled !== undefined
+      ? resourceEnabled
+      : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+
+    if (this.traceEnabled) {
+      const traceConfigManager = FTTraceConfigManager.getInstance();
+      this.traceInterceptor = new DefaultFTTraceInterceptor(
+        traceConfigManager.getTraceTypeEnum(),
+        traceConfigManager.getOverrideHeaderHandler()
+      );
+    }
+  }
+
+  async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
+    const requestHeaders = normalizeObjectHeaders(reqContext.header);
+    const uniqueId = requestHeaders[FT_RESOURCE_ID_HEADER];
+    const url = reqContext.url;
+    const fallbackResourceId = uniqueId
+      ? buildAutoTrackResourceId(HTTP_METHOD_UNKNOWN, url, uniqueId)
+      : undefined;
+    const state = fallbackResourceId ? HttpAutoTrackStateStore.getInstance().get(fallbackResourceId) : undefined;
+
+    if (!state) {
+      FTInnerLogger.w(TAG, `[HTTP-Final] Missing initial interceptor state for ${url}, uniqueId=${uniqueId ?? 'N/A'}`);
+      return true;
+    }
+
+    const resourceId = state.resourceId;
+    try {
+      if (this.traceEnabled && this.traceInterceptor) {
+        const responseHeaders = normalizeObjectHeaders(rspContext.header);
+        const responseHeaderMap = new Map<string, string>();
+        const responseHeaderKeys = Object.keys(responseHeaders);
+        for (let i = 0; i < responseHeaderKeys.length; i++) {
+          const key = responseHeaderKeys[i];
+          responseHeaderMap.set(key, responseHeaders[key]);
+        }
+
+        const traceHandler = FTTraceManager.getInstance().getHandler(resourceId);
+        const traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
+        const spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+        this.traceInterceptor.interceptResponse({
+          url: url,
+          statusCode: rspContext.responseCode || 0,
+          headers: responseHeaderMap,
+          body: tryGetResponseBodyText(rspContext.result),
+          timestamp: Date.now(),
+          traceId: traceId,
+          spanId: spanId,
+          duration: Date.now() - state.startTime
+        });
+      }
+
+      if (this.resourceEnabled) {
+        const resourceParams = new ResourceParams();
+        resourceParams.setUrl(url);
+        resourceParams.setResourceMethod(state.method);
+        resourceParams.setRequestHeaderMap(buildRequestHeaderMap(state.requestHeaders));
+        resourceParams.setRequestHeader(JSON.stringify(state.requestHeaders));
+        resourceParams.setResourceStatus(rspContext.responseCode || 0);
+
+        const responseHeaders = normalizeObjectHeaders(rspContext.header);
+        resourceParams.setResponseHeaderMap(buildResponseHeaderMap(responseHeaders));
+        resourceParams.setResponseHeader(JSON.stringify(responseHeaders));
+
+        const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
+        const contentEncoding = responseHeaders['content-encoding'] || responseHeaders['Content-Encoding'];
+        const connection = responseHeaders['connection'] || responseHeaders['Connection'];
+        if (contentType) {
+          resourceParams.setResponseContentType(contentType);
+        }
+        if (contentEncoding) {
+          resourceParams.setResponseContentEncoding(contentEncoding);
+        }
+        if (connection) {
+          resourceParams.setResponseConnection(connection);
+        }
+
+        const contentLength = extractContentLength(responseHeaders);
+        if (contentLength > 0) {
+          resourceParams.setResponseContentLength(contentLength);
+        }
+
+        const durationNs = (Date.now() - state.startTime) * 1000000;
+        const metricValue: PerformanceMetricValue = { value: durationNs };
+        resourceParams.addProperty('resourceLoad', metricValue);
+
+        if ((rspContext.responseCode || 0) >= 400) {
+          const responseBodyText = tryGetResponseBodyText(rspContext.result);
+          if (responseBodyText) {
+            resourceParams.setRequestErrorMsg(responseBodyText);
+          }
+        }
+
+        FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+        FTRUMInnerManager.getInstance().stopResource(resourceId, state.actionId);
+
+        FTInnerLogger.d(
+          TAG,
+          `[HTTP-Final] Completed ${url}, resourceId=${resourceId}, status=${rspContext.responseCode || 0}, duration=${Date.now() - state.startTime}ms`
+        );
+      }
+    } catch (error) {
+      FTInnerLogger.e(TAG, `[HTTP-Final] Failed to process interceptor for ${resourceId}: ${error}`);
+      if (this.resourceEnabled) {
+        const resourceParams = new ResourceParams();
+        resourceParams.setUrl(url);
+        resourceParams.setResourceMethod(state.method);
+        resourceParams.setRequestErrorMsg(String(error));
+        resourceParams.setResourceStatus(0);
+        FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+        FTRUMInnerManager.getInstance().stopResource(resourceId, state.actionId);
+      }
+    } finally {
+      HttpAutoTrackStateStore.getInstance().delete(resourceId);
+    }
+
+    return true;
+  }
+}
+
+/**
  * Options for building a session configuration with FT interceptors.
  */
 export interface FTRCPSessionConfigurationOptions {
@@ -854,6 +1214,12 @@ export interface FTRCPSessionConfigurationOptions {
   headers?: Record<string, string>;
   interceptors?: rcp.Interceptor[];
   requestConfiguration?: FTRCPRequestConfiguration;
+  enableTraceInterceptor?: boolean;
+  enableResourceInterceptor?: boolean;
+}
+
+export interface FTHttpInterceptorChainOptions {
+  interceptors?: http.HttpInterceptor[];
   enableTraceInterceptor?: boolean;
   enableResourceInterceptor?: boolean;
 }
@@ -897,6 +1263,64 @@ export function createDefaultFTInterceptors(
     interceptors.push(new RCPResourceInterceptor());
   }
   return interceptors;
+}
+
+/**
+ * Build the default FT interceptor list for @kit.NetworkKit http requests.
+ */
+export function createDefaultFTHttpInterceptors(
+  enableTraceInterceptor?: boolean,
+  enableResourceInterceptor?: boolean
+): http.HttpInterceptor[] {
+  const traceEnabled = enableTraceInterceptor !== undefined
+    ? enableTraceInterceptor
+    : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
+  const resourceEnabled = enableResourceInterceptor !== undefined
+    ? enableResourceInterceptor
+    : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+
+  const interceptors: http.HttpInterceptor[] = [];
+  if (traceEnabled || resourceEnabled) {
+    interceptors.push(new HttpInitialRequestInterceptor(traceEnabled, resourceEnabled));
+    interceptors.push(new HttpFinalResponseInterceptor(traceEnabled, resourceEnabled));
+  }
+  return interceptors;
+}
+
+/**
+ * Create an HTTP interceptor chain that can be attached to a specific HttpRequest instance.
+ */
+export function createDefaultFTHttpInterceptorChain(
+  options: FTHttpInterceptorChainOptions = {}
+): http.HttpInterceptorChain {
+  const chain = new http.HttpInterceptorChain();
+  const interceptors = createDefaultFTHttpInterceptors(
+    options.enableTraceInterceptor,
+    options.enableResourceInterceptor
+  );
+
+  if (options.interceptors && options.interceptors.length > 0) {
+    for (let i = 0; i < options.interceptors.length; i++) {
+      interceptors.push(options.interceptors[i]);
+    }
+  }
+
+  if (interceptors.length > 0) {
+    chain.addChain(interceptors);
+  }
+  return chain;
+}
+
+/**
+ * Attach the default FT http interceptor chain to a specific HttpRequest.
+ */
+export function applyDefaultFTHttpInterceptorChain(
+  httpRequest: http.HttpRequest,
+  options: FTHttpInterceptorChainOptions = {}
+): http.HttpInterceptorChain {
+  const chain = createDefaultFTHttpInterceptorChain(options);
+  chain.apply(httpRequest);
+  return chain;
 }
 
 /**
