@@ -4,6 +4,9 @@ import * as ftcrash from 'libftcrash.so';
 import { SimpleAPMManager } from '../utils/SimpleAPMManager';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
+import { DemoLogger } from '../utils/DemoLogger';
+
+const TAG = 'CrashTestPage';
 
 @Entry
 @Component
@@ -85,6 +88,11 @@ export struct CrashTestPage {
   private addTestResult(result: string): void {
     const timestamp = new Date().toLocaleTimeString();
     this.testResults += `[${timestamp}] ${result}\n`;
+    const lines = this.testResults.split('\n');
+    if (lines.length > 60) {
+      this.testResults = lines.slice(lines.length - 60).join('\n');
+    }
+    DemoLogger.i(TAG, result);
   }
 
   private showToast(message: string): void {
@@ -149,45 +157,15 @@ export struct CrashTestPage {
           Button('Refresh Status')
             .layoutWeight(1)
             .height(40)
-            .margin({ right: 5 })
+            .width('100%')
             .onClick(() => {
               this.checkSDKStatus();
-            })
-
-          Button('Clear Results')
-            .layoutWeight(1)
-            .height(40)
-            .margin({ left: 5 })
-            .onClick(() => {
-              this.clearResults();
             })
         }
         .width('100%')
         .margin({ top: 10, bottom: 16 })
       }
       .width('100%')
-
-      Column() {
-        Text('Test Results')
-          .fontSize(16)
-          .fontWeight(FontWeight.Medium)
-          .margin({ bottom: 8 })
-
-        Scroll() {
-          Text(this.testResults || 'No test results yet')
-            .fontSize(12)
-            .fontFamily('monospace')
-            .width('100%')
-            .padding(12)
-            .backgroundColor(Color.Black)
-            .fontColor(Color.White)
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .border({ width: 1, color: Color.Gray })
-      }
-      .width('100%')
-      .layoutWeight(1)
     }
     .width('100%')
     .height('100%')

@@ -17,6 +17,40 @@ import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 
 const TAG = "FTHttpAutoTrack";
 
+function summarizeHeaderKeys(headers: Record<string, string>): string {
+  const keys = Object.keys(headers);
+  if (keys.length === 0) {
+    return '0 headers';
+  }
+  const preview = keys.slice(0, 5).join(', ');
+  return keys.length > 5 ? `${keys.length} headers (${preview}, ...)` : `${keys.length} headers (${preview})`;
+}
+
+function summarizeResponseHeaders(headers: Record<string, string | string[] | undefined>): string {
+  const keys = Object.keys(headers);
+  if (keys.length === 0) {
+    return '0 headers';
+  }
+  const preview = keys.slice(0, 5).join(', ');
+  return keys.length > 5 ? `${keys.length} headers (${preview}, ...)` : `${keys.length} headers (${preview})`;
+}
+
+function summarizePerformanceMetrics(metrics: Map<string, number>): string {
+  const keys = Array.from(metrics.keys());
+  if (keys.length === 0) {
+    return '0 metrics';
+  }
+  const summary: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = metrics.get(key);
+    if (value !== undefined) {
+      summary.push(`${key}=${(value / 1000000).toFixed(2)}ms`);
+    }
+  }
+  return summary.join(', ');
+}
+
 /**
  * Interface for TimeInfo structure from RCP response
  * Represents possible timing data fields
@@ -96,11 +130,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
   }
 
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
-    FTInnerLogger.d(TAG, `[RCP-Resource] ========== Interceptor called ==========`);
-    FTInnerLogger.d(TAG, `[RCP-Resource] isEnabled: ${this.isEnabled}`);
-    
     if (!this.isEnabled) {
-      FTInnerLogger.w(TAG, `[RCP-Resource] Interceptor disabled, bypassing`);
       return await next.handle(context);
     }
 
@@ -117,7 +147,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const headerValue = context.request.headers['X-FT-Resource-ID'];
       if (typeof headerValue === 'string') {
         uniqueId = headerValue;
-        FTInnerLogger.d(TAG, `[RCP-Resource] Reusing resourceId UUID from header (set by trace interceptor): ${uniqueId}`);
       }
     }
     
@@ -135,18 +164,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     
     // Format: "method_url_uuid" to maintain compatibility with existing trace handler logic
     const resourceId = `${method}_${url}_${uniqueId}`;
-
-    FTInnerLogger.d(TAG, `[RCP-Resource] ========== Intercepting request ==========`);
-    FTInnerLogger.d(TAG, `[RCP-Resource] URL: ${url}`);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Method: ${method}`);
-    FTInnerLogger.d(TAG, `[RCP-Resource] ResourceId: ${resourceId}`);
-    
-    // Log request headers (NOTE: These may contain stale trace_id from previous requests)
-    // We will get the correct trace_id from handler and merge it below
-    if (context.request.headers) {
-      const headerStr = JSON.stringify(context.request.headers);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Headers (may contain stale trace_id): ${headerStr.substring(0, 200)}...`);
-    }
 
     // IMPORTANT: Get trace headers from FTTraceManager handler to ensure we get the correct trace_id
     // In RCP, interceptors may execute in reverse order (last-in-first-out), so trace interceptor may execute after resource interceptor
@@ -177,17 +194,14 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     // The correct trace_id will be set in setTransformContent() from handler.getTraceID()/getSpanID()
     const traceManager = FTTraceManager.getInstance();
     const handler = traceManager.getHandler(resourceId);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Checking handler for resourceId=${resourceId}: handler=${handler ? 'exists' : 'null'}`);
     if (handler && handler.getTraceID && handler.getSpanID) {
       try {
         const traceId = handler.getTraceID();
         const spanId = handler.getSpanID();
-        FTInnerLogger.d(TAG, `[RCP-Resource] Got traceId=${traceId}, spanId=${spanId} from handler`);
         if (traceId && spanId) {
           // Get trace type from config to build correct headers
           const traceConfigManager = FTTraceConfigManager.getInstance();
           const traceType = traceConfigManager.getTraceType();
-          FTInnerLogger.d(TAG, `[RCP-Resource] Trace type: ${traceType}`);
           
           // Build trace headers based on trace type (aligned with FTTraceHandler.generateDataDogHeaders, etc.)
           if (traceType === 'ddtrace') {
@@ -196,44 +210,32 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
             savedRequestHeaders[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY] = spanId;
             savedRequestHeaders[FTTraceHandler.DD_TRACE_ORIGIN_KEY] = "rum";
             savedRequestHeaders[FTTraceHandler.DD_TRACE_SAMPLING_PRIORITY_KEY] = "2"; // Default to sampled
-            FTInnerLogger.d(TAG, `[RCP-Resource] Merged DataDog trace headers from handler: traceId=${traceId}, spanId=${spanId}`);
           } else if (traceType === 'zipkin_single_header') {
             // Zipkin Single Header: only b3 header (format: traceId-spanId-sampled)
             const sampled = "1"; // Default to sampled
             savedRequestHeaders[FTTraceHandler.ZIPKIN_B3_HEADER] = `${traceId}-${spanId}-${sampled}`;
-            FTInnerLogger.d(TAG, `[RCP-Resource] Merged Zipkin Single Header (b3) from handler: traceId=${traceId}, spanId=${spanId}`);
           } else if (traceType === 'zipkin' || traceType === 'zipkin_multi_header') {
             // Zipkin Multi Header: X-B3-* headers
             savedRequestHeaders[FTTraceHandler.ZIPKIN_TRACE_ID] = traceId;
             savedRequestHeaders[FTTraceHandler.ZIPKIN_SPAN_ID] = spanId;
             savedRequestHeaders[FTTraceHandler.ZIPKIN_SAMPLED] = "1"; // Default to sampled
-            FTInnerLogger.d(TAG, `[RCP-Resource] Merged Zipkin Multi Header (X-B3-*) from handler: traceId=${traceId}, spanId=${spanId}`);
           } else if (traceType === 'traceparent') {
             // W3C Traceparent header
             const version = "00";
             const sampledStr = "01"; // Default to sampled
             savedRequestHeaders[FTTraceHandler.W3C_TRACEPARENT_KEY] = `${version}-${traceId}-${spanId}-${sampledStr}`;
-            FTInnerLogger.d(TAG, `[RCP-Resource] Merged W3C traceparent header from handler: traceId=${traceId}, spanId=${spanId}`);
           } else if (traceType === 'jaeger') {
             // Jaeger trace headers
             const parentSpanID = "0";
             savedRequestHeaders[FTTraceHandler.JAEGER_KEY] = `${traceId}:${spanId}:${parentSpanID}:1`;
-            FTInnerLogger.d(TAG, `[RCP-Resource] Merged Jaeger trace headers from handler: traceId=${traceId}, spanId=${spanId}`);
           }
         } else {
-          FTInnerLogger.w(TAG, `[RCP-Resource] Handler exists but traceId or spanId is empty: traceId=${traceId}, spanId=${spanId}`);
+          FTInnerLogger.w(TAG, `[RCP-Resource] Trace handler is missing trace identifiers, resourceId=${resourceId}`);
         }
       } catch (error) {
         FTInnerLogger.w(TAG, `[RCP-Resource] Failed to get trace headers from handler: ${error}`);
       }
-    } else {
-      FTInnerLogger.d(TAG, `[RCP-Resource] Handler not found for resourceId=${resourceId}, using headers from context.request.headers`);
     }
-    
-    // Log final saved headers to confirm correct trace_id is used
-    const finalHeaderStr = JSON.stringify(savedRequestHeaders);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Final saved request headers (after trace header merge): ${finalHeaderStr.substring(0, 200)}...`);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Saved request headers before next.handle(): ${Object.keys(savedRequestHeaders).length} headers`);
 
     // IMPORTANT: Update context.request.headers with correct trace headers to ensure the actual request sent to server uses the correct trace_id
     // This is critical because next.handle(context) will use context.request.headers, not savedRequestHeaders
@@ -246,14 +248,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const key = savedHeaderKeys[i];
       context.request.headers[key] = savedRequestHeaders[key];
     }
-    // Log updated context.request.headers to confirm correct trace_id and span_id are set
-    const updatedHeaderStr = JSON.stringify(context.request.headers);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Updated context.request.headers with correct trace headers: ${updatedHeaderStr.substring(0, 200)}...`);
+    FTInnerLogger.d(TAG, `[RCP-Resource] Tracking request ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(savedRequestHeaders)}`);
 
     // Record request start
-    FTInnerLogger.d(TAG, `[RCP-Resource] Starting resource tracking...`);
     FTRUMInnerManager.getInstance().startResource(resourceId);
-    FTInnerLogger.d(TAG, `[RCP-Resource] Resource tracking started`);
     
     // Clean up resourceActionMap if it exceeds limit (aligned with resourceBeanMap cleanup)
     if (this.resourceActionMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
@@ -268,7 +266,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     if (activeAction && !activeAction.isActionClose()) {
       const actionId = activeAction.getId();
       this.resourceActionMap.set(resourceId, actionId);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Saved resourceId->actionId mapping: ${resourceId} -> ${actionId}`);
     }
 
     const startTime = Date.now();
@@ -277,23 +274,13 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
     try {
       // Continue with the request (now context.request.headers contains the correct trace_id)
-      FTInnerLogger.d(TAG, `[RCP-Resource] About to call next.handle() for resourceId=${resourceId}`);
       response = await next.handle(context);
-      FTInnerLogger.d(TAG, `[RCP-Resource] next.handle() completed, response=${response ? 'exists' : 'null'}`);
-      
-      if (response) {
-        FTInnerLogger.d(TAG, `[RCP-Resource] Response statusCode: ${response.statusCode || 'undefined'}`);
-        FTInnerLogger.d(TAG, `[RCP-Resource] Response timeInfo: ${response.timeInfo ? 'exists' : 'null/undefined'}`);
-        if (response.timeInfo) {
-          FTInnerLogger.d(TAG, `[RCP-Resource] Response timeInfo type: ${typeof response.timeInfo}`);
-        }
-      } else {
-        FTInnerLogger.w(TAG, `[RCP-Resource] ⚠️ Response is null after next.handle()`);
+      if (!response) {
+        FTInnerLogger.w(TAG, `[RCP-Resource] Response is null after next.handle(), resourceId=${resourceId}`);
       }
 
       // Record response data
       const responseTime = Date.now() - startTime;
-      FTInnerLogger.d(TAG, `[RCP-Resource] Calculated responseTime: ${responseTime}ms`);
       
       // Build ResourceParams for RUM
       const resourceParams = new ResourceParams();
@@ -360,16 +347,11 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
       // Extract time info if available and store performance metrics
       if (response.timeInfo) {
-        FTInnerLogger.d(TAG, `[RCP-Resource] TimeInfo available: ${JSON.stringify(response.timeInfo).substring(0, 200)}...`);
-        
         // Extract performance metrics from timeInfo
         // timeInfo structure may vary, try to extract common metrics
         // Convert TimeInfo to TimeInfoStructure via object for type safety
         // (TimeInfo type doesn't overlap with TimeInfoStructure, so we use object as intermediate)
         const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
-        
-        // Debug: Log all available TimeInfo fields to verify preTransferTimeMs availability
-        FTInnerLogger.d(TAG, `[RCP-Resource-TimeInfo] nameLookupTimeMs=${timeInfoObj.nameLookupTimeMs}, connectTimeMs=${timeInfoObj.connectTimeMs}, tlsHandshakeTimeMs=${timeInfoObj.tlsHandshakeTimeMs}, preTransferTimeMs=${timeInfoObj.preTransferTimeMs}, startTransferTimeMs=${timeInfoObj.startTransferTimeMs}, totalTimeMs=${timeInfoObj.totalTimeMs}`);
         
         // Performance metrics to extract (similar to Android NetStatusBean)
         // Use Map instead of Record to avoid indexed access
@@ -497,47 +479,38 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
         // So HarmonyOS TTFB will be larger than Android TTFB, and this is expected behavior.
         let ttfbValue: number | undefined = undefined;
         
-        // Debug: Check if preTransferTimeMs is available
         const hasPreTransfer = timeInfoObj.preTransferTimeMs !== undefined;
         const hasStartTransfer = timeInfoObj.startTransferTimeMs !== undefined;
         const hasTlsHandshake = timeInfoObj.tlsHandshakeTimeMs !== undefined;
-        FTInnerLogger.d(TAG, `[TTFB-CALC] Field availability check: preTransferTimeMs=${hasPreTransfer}, startTransferTimeMs=${hasStartTransfer}, tlsHandshakeTimeMs=${hasTlsHandshake}`);
         
         if (hasStartTransfer && hasPreTransfer) {
           // Preferred: use preTransferTimeMs to align with Android's headerStartTime
           const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
           const preTransfer = (typeof timeInfoObj.preTransferTimeMs === 'number' ? timeInfoObj.preTransferTimeMs : 0) * MS_TO_NS;
-          FTInnerLogger.d(TAG, `[TTFB-CALC] ✅ Using preTransferTimeMs: startTransfer=${startTransfer / MS_TO_NS}ms, preTransfer=${preTransfer / MS_TO_NS}ms`);
           if (startTransfer > preTransfer) {
             ttfbValue = startTransfer - preTransfer;
-            FTInnerLogger.d(TAG, `[TTFB-CALC] ✅ TTFB = ${ttfbValue / MS_TO_NS}ms (startTransfer - preTransfer)`);
           } else if (startTransfer > 0) {
             ttfbValue = startTransfer;
-            FTInnerLogger.d(TAG, `[TTFB-CALC] ⚠️ TTFB = ${ttfbValue / MS_TO_NS}ms (startTransfer only, preTransfer invalid: ${preTransfer / MS_TO_NS}ms >= ${startTransfer / MS_TO_NS}ms)`);
+            FTInnerLogger.w(TAG, `[RCP-Resource] Invalid preTransferTimeMs for TTFB, fallback to startTransferTimeMs, resourceId=${resourceId}`);
           }
         } else if (hasStartTransfer && hasTlsHandshake) {
           // Fallback: if preTransferTimeMs not available, use tlsHandshakeTimeMs
           // This gives SSL completion to first byte (longer, but still valid)
           const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
           const tlsHandshake = (typeof timeInfoObj.tlsHandshakeTimeMs === 'number' ? timeInfoObj.tlsHandshakeTimeMs : 0) * MS_TO_NS;
-          FTInnerLogger.d(TAG, `[TTFB-CALC] ⚠️ Fallback: preTransferTimeMs not available, using tlsHandshakeTimeMs: startTransfer=${startTransfer / MS_TO_NS}ms, tlsHandshake=${tlsHandshake / MS_TO_NS}ms`);
           if (startTransfer > tlsHandshake) {
             ttfbValue = startTransfer - tlsHandshake;
-            FTInnerLogger.d(TAG, `[TTFB-CALC] ⚠️ TTFB = ${ttfbValue / MS_TO_NS}ms (startTransfer - tlsHandshake)`);
           } else if (startTransfer > 0) {
             ttfbValue = startTransfer;
-            FTInnerLogger.d(TAG, `[TTFB-CALC] ⚠️ TTFB = ${ttfbValue / MS_TO_NS}ms (startTransfer only, tlsHandshake invalid)`);
           }
         } else if (timeInfoObj.ttfbTime !== undefined && typeof timeInfoObj.ttfbTime === 'number') {
           // Assume ttfbTime is already in nanoseconds if not from RCP
           ttfbValue = timeInfoObj.ttfbTime as number;
-          FTInnerLogger.d(TAG, `[TTFB-CALC] Using ttfbTime directly: ${ttfbValue / MS_TO_NS}ms`);
         } else if (timeInfoObj.firstByteTime !== undefined && typeof timeInfoObj.firstByteTime === 'number') {
           // Assume firstByteTime is already in nanoseconds if not from RCP
           ttfbValue = timeInfoObj.firstByteTime as number;
-          FTInnerLogger.d(TAG, `[TTFB-CALC] Using firstByteTime directly: ${ttfbValue / MS_TO_NS}ms`);
         } else {
-          FTInnerLogger.w(TAG, `[TTFB-CALC] No TTFB calculation method available, TTFB will be missing`);
+          FTInnerLogger.w(TAG, `[RCP-Resource] No TTFB calculation method available, resourceId=${resourceId}`);
         }
         
         // Set both resourceTTFB and resourceFirstByte (aligned with Android: getFirstByteTime() returns getTTFB())
@@ -621,15 +594,12 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
             // The value will be stored and can be extracted as a number later
             const metricValue: PerformanceMetricValue = { value: value };
             resourceParams.addProperty(key, metricValue);
-            // Log in both nanoseconds and milliseconds for debugging (value is in nanoseconds)
-            const valueMs = value / 1000000;
-            FTInnerLogger.d(TAG, `[RCP-Resource] Performance metric ${key}: ${value}ns (${valueMs.toFixed(2)}ms)`);
           }
         }
         
         // Note: Android does not store raw timeInfo in ResourceParams.property
         // All performance metrics are extracted and stored individually (aligned with Android)
-        FTInnerLogger.d(TAG, `[RCP-Resource] Extracted ${perfKeys.length} performance metrics`);
+        FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(performanceMetrics)}`);
       } else {
         // If no timeInfo, at least store the calculated responseTime
         // Convert from milliseconds to nanoseconds (aligned with Android)
@@ -638,24 +608,21 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
         // Wrap number in object to satisfy addProperty signature (object type)
         const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
         resourceParams.addProperty('resourceLoad', metricValue);
-        FTInnerLogger.d(TAG, `[RCP-Resource] No timeInfo available, using calculated responseTime: ${responseTime}ms (${resourceLoadNs}ns)`);
+        FTInnerLogger.d(TAG, `[RCP-Resource] No timeInfo available, fallback resourceLoad=${responseTime}ms, resourceId=${resourceId}`);
       }
 
       // If error response, try to capture response body
       if (resourceParams.resourceStatus >= 400) {
         // Note: response.body may be available depending on RCP API
-        FTInnerLogger.d(TAG, `[RCP-Resource] Error response detected: ${resourceParams.resourceStatus}`);
+        FTInnerLogger.w(TAG, `[RCP-Resource] Error response detected: status=${resourceParams.resourceStatus}, url=${url}`);
       }
 
-      FTInnerLogger.d(TAG, `[RCP-Resource] ========== Request completed ==========`);
-      FTInnerLogger.d(TAG, `[RCP-Resource] URL: ${url}`);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Status: ${resourceParams.resourceStatus}`);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Response time: ${responseTime}ms`);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Content-Type: ${resourceParams.responseContentType}`);
-      FTInnerLogger.d(TAG, `[RCP-Resource] Content-Length: ${resourceParams.responseContentLength}`);
+      FTInnerLogger.d(
+        TAG,
+        `[RCP-Resource] Completed ${method} ${url}, status=${resourceParams.resourceStatus}, duration=${responseTime}ms, contentType=${resourceParams.responseContentType}, contentLength=${resourceParams.responseContentLength}`
+      );
 
       // Set resource data and stop resource
-      FTInnerLogger.d(TAG, `[RCP-Resource] Setting resource data and stopping resource...`);
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
       // Get actionId from mapping for fallback (in case ResourceBean was deleted)
       const fallbackActionId = this.resourceActionMap.get(resourceId);
@@ -664,7 +631,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
-      FTInnerLogger.d(TAG, `[RCP-Resource] Resource data collected and uploaded`);
 
       return response;
 
@@ -680,15 +646,12 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       resourceParams.setRequestErrorStack(error.stack || '');
       resourceParams.setResourceStatus(0);
 
-      FTInnerLogger.e(TAG, `[RCP-Resource] ========== Request failed ==========`);
-      FTInnerLogger.e(TAG, `[RCP-Resource] URL: ${url}`);
-      FTInnerLogger.e(TAG, `[RCP-Resource] Method: ${method}`);
-      FTInnerLogger.e(TAG, `[RCP-Resource] Error message: ${error.message}`);
-      FTInnerLogger.e(TAG, `[RCP-Resource] Error stack: ${error.stack || 'N/A'}`);
-      FTInnerLogger.e(TAG, `[RCP-Resource] Response time: ${responseTime}ms`);
+      FTInnerLogger.e(
+        TAG,
+        `[RCP-Resource] Request failed ${method} ${url}, duration=${responseTime}ms, error=${error.message}, stack=${error.stack || 'N/A'}`
+      );
 
       // Set error resource data and stop resource
-      FTInnerLogger.d(TAG, `[RCP-Resource] Setting error resource data and stopping resource...`);
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
       // Get actionId from mapping for fallback (in case ResourceBean was deleted)
       const fallbackActionId = this.resourceActionMap.get(resourceId);
@@ -697,7 +660,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
-      FTInnerLogger.d(TAG, `[RCP-Resource] Error resource data collected and uploaded`);
 
       // Re-throw the error
       throw error;
@@ -752,12 +714,7 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
   }
 
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
-    // Log interceptor entry point (hook point for session.fetch())
-    FTInnerLogger.d(TAG, `[RCP-Trace] ========== Interceptor triggered (session.fetch() hook) ==========`);
-    FTInnerLogger.d(TAG, `[RCP-Trace] Interceptor entry: URL=${context.request.url.href}, Method=${context.request.method || 'GET'}`);
-    
     if (!this.isEnabled || !this.traceInterceptor) {
-      FTInnerLogger.d(TAG, `[RCP-Trace] Interceptor disabled or not initialized, bypassing trace header injection`);
       return await next.handle(context);
     }
 
@@ -775,14 +732,12 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         const headerValue = context.request.headers['X-FT-Resource-ID'];
         if (typeof headerValue === 'string') {
           uniqueId = headerValue;
-          FTInnerLogger.d(TAG, `[RCP-Trace] Reusing resourceId UUID from header: ${uniqueId}`);
         }
       }
       
       // Generate new UUID (RCPTraceInterceptor executes first, so this is the source of truth)
       if (!uniqueId) {
         uniqueId = Utils.generateUUID();
-        FTInnerLogger.d(TAG, `[RCP-Trace] Generated new resourceId UUID: ${uniqueId}`);
         
         // Store UUID in request headers so RCPResourceInterceptor can reuse it
         // This ensures both interceptors use the same resourceId
@@ -790,20 +745,15 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
           context.request.headers = {};
         }
         context.request.headers['X-FT-Resource-ID'] = uniqueId;
-        FTInnerLogger.d(TAG, `[RCP-Trace] Stored resourceId UUID in header for resource interceptor: ${uniqueId}`);
       }
       
       // Format: "method_url_uuid" to maintain compatibility with existing trace handler logic
       const resourceId = `${method}_${url}_${uniqueId}`;
       
-      FTInnerLogger.d(TAG, `[RCP-Trace] Generated resourceId: ${resourceId}`);
-      
       // Get trace headers from FTTraceManager (this will create and store handler)
       // Aligned with Android: FTTraceManager.get().getTraceHeader(resourceId, url)
       const traceManager = FTTraceManager.getInstance();
       const traceHeaders = traceManager.getTraceHeader(resourceId, url);
-      
-      FTInnerLogger.d(TAG, `[RCP-Trace] Got trace headers from FTTraceManager: ${Object.keys(traceHeaders).length} headers`);
       
       // Build request data for trace interceptor
       const headersMap = new Map<string, string>();
@@ -850,29 +800,13 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         context.request.headers[entry[0]] = entry[1];
       }
 
-      FTInnerLogger.d(TAG, `[RCP-Trace] ========== Adding trace headers ==========`);
-      FTInnerLogger.d(TAG, `[RCP-Trace] URL: ${url}`);
-      FTInnerLogger.d(TAG, `[RCP-Trace] Method: ${method}`);
-      
-      // Log added trace headers
-      const addedHeaders: string[] = [];
-      // Reuse traceHeaderKeys from above (line 507)
-      for (let i = 0; i < traceHeaderKeys.length; i++) {
-        const key = traceHeaderKeys[i];
-        addedHeaders.push(`${key}: ${traceHeaders[key]}`);
-      }
-      FTInnerLogger.d(TAG, `[RCP-Trace] Added trace headers (${addedHeaders.length}): ${addedHeaders.join(', ')}`);
-      FTInnerLogger.d(TAG, `[RCP-Trace] Handler stored with resourceId: ${resourceId}`);
+      FTInnerLogger.d(TAG, `[RCP-Trace] Added trace headers for ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(traceHeaders)}`);
 
       // Continue with the request
       const response = await next.handle(context);
 
       // Intercept response (if needed)
       if (response) {
-        FTInnerLogger.d(TAG, `[RCP-Trace] ========== Processing trace response ==========`);
-        FTInnerLogger.d(TAG, `[RCP-Trace] URL: ${context.request.url.href}`);
-        FTInnerLogger.d(TAG, `[RCP-Trace] Status: ${response.statusCode || 0}`);
-        
         const responseHeadersMap = new Map<string, string>();
         if (response.headers) {
           const respHeaderKeys = Object.keys(response.headers);
@@ -895,20 +829,11 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
           timestamp: Date.now()
         };
 
-        if (responseHeadersMap.size > 0) {
-          // Convert Map to object manually (avoid Object.fromEntries)
-          const headerObj: Record<string, string> = {};
-          const headerEntries = Array.from(responseHeadersMap.entries());
-          for (let i = 0; i < headerEntries.length; i++) {
-            const entry = headerEntries[i];
-            headerObj[entry[0]] = entry[1];
-          }
-          const respHeaderStr = JSON.stringify(headerObj);
-          FTInnerLogger.d(TAG, `[RCP-Trace] Response headers: ${respHeaderStr.substring(0, 200)}...`);
-        }
-
         this.traceInterceptor.interceptResponse(responseData);
-        FTInnerLogger.d(TAG, `[RCP-Trace] Trace response processed`);
+        FTInnerLogger.d(
+          TAG,
+          `[RCP-Trace] Processed trace response for ${method} ${url}, status=${response.statusCode || 0}, ${summarizeResponseHeaders(response.headers ?? {})}`
+        );
       }
 
       return response;

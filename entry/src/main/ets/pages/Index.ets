@@ -24,44 +24,6 @@ struct Index {
             .textAlign(TextAlign.Center)
 
           List() {
-            // Button click auto-tracking test page
-            ListItem() {
-              Button() {
-                Text("Button Click Auto-Tracking Test")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/ButtonClickTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
-            // Batch Upload Test
-            ListItem() {
-              Button() {
-                Text("Batch Upload Test")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/BatchUploadTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
-            // Crash and ANR test page
-            ListItem() {
-              Button() {
-                Text("Crash & ANR")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50)
-              .backgroundColor('#FF5252')
-              .onClick(() => {
-                router.pushUrl({ url: 'pages/CrashTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
             // Unified RUM data test page
             ListItem() {
               Button() {
@@ -119,6 +81,56 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Crash and ANR test page
+            ListItem() {
+              Button() {
+                Text("Crash & ANR")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#FF5252')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/CrashTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Button click auto-tracking test page
+            ListItem() {
+              Button() {
+                Text("Button Click Auto-Tracking Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/ButtonClickTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Navigation Stack Demo (application-track)
+            ListItem() {
+              Button() {
+                Text("Navigation Stack Demo")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/NavigationStackDemoPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // WebView test page
+            ListItem() {
+              Button() {
+                Text("WebView Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/WebViewPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Trace test page
             ListItem() {
               Button() {
@@ -143,6 +155,41 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // LogBackground test page
+            ListItem() {
+              Button() {
+                Text("LogBackground Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/LogBackgroundTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Batch Upload Test
+            ListItem() {
+              Button() {
+                Text("Batch Upload Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/BatchUploadTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Data Sync & Clear test page
+            ListItem() {
+              Button() {
+                Text("Data Sync & Clear Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50).onClick(() => {
+                router.pushUrl({ url: 'pages/DataSyncTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
 
             // Rate limit test page
             ListItem() {
@@ -168,30 +215,6 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
-            // Data Sync & Clear test page
-            ListItem() {
-              Button() {
-                Text("Data Sync & Clear Test")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/DataSyncTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
-            // Navigation Stack Demo (application-track)
-            ListItem() {
-              Button() {
-                Text("Navigation Stack Demo")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/NavigationStackDemoPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
             // Real App Stress Test Page
             ListItem() {
               Button() {
@@ -202,30 +225,6 @@ struct Index {
               .backgroundColor('#4CAF50')
               .onClick(() => {
                 router.pushUrl({ url: 'pages/RealAppStressTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
-            // LogBackground test page
-            ListItem() {
-              Button() {
-                Text("LogBackground Test")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/LogBackgroundTestPage' })
-              })
-            }
-            .margin({ bottom: 10 })
-
-            // WebView test page
-            ListItem() {
-              Button() {
-                Text("WebView Test")
-              }.width(CommonConstants.FULL_PERCENT)
-              .fontColor(Color.White)
-              .height(50).onClick(() => {
-                router.pushUrl({ url: 'pages/WebViewPage' })
               })
             }
             .margin({ bottom: 10 })

@@ -62,7 +62,10 @@ export struct HttpAutoTrackTestPage {
    * Add test result
    */
   addTestResult(result: string) {
-    this.testResults.push(`[${new Date().toLocaleTimeString()}] ${result}`);
+    const nextResults = [...this.testResults, `[${new Date().toLocaleTimeString()}] ${result}`];
+    this.testResults = nextResults.length > 60
+      ? nextResults.slice(nextResults.length - 60)
+      : nextResults;
     DemoLogger.i(TAG, result);
   }
 
@@ -84,8 +87,6 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createTrackedSession();
 
-      this.addTestResult("📤 Sending GET request to httpbin.org/get...");
-      
       // Send GET request (should be automatically intercepted)
       const request = new rcp.Request('https://httpbin.org/get', 'GET');
       const response = await session.fetch(request);
@@ -93,22 +94,11 @@ export struct HttpAutoTrackTestPage {
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ GET request successful: ${response.statusCode}`);
-        this.addTestResult(`Response effective URL: ${response.effectiveUrl?.href || 'N/A'}`);
-        
-        // Log time info if available
-        if (response.timeInfo) {
-          this.addTestResult(`TimeInfo available: ${JSON.stringify(response.timeInfo).substring(0, 100)}...`);
-        }
+        this.addTestResult(`✅ GET request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ GET request returned status: ${response.statusCode}`);
+        this.addTestResult(`⚠️ GET request returned status=${response.statusCode}`);
       }
-
-      // Wait a moment for RUM data to be collected
-      setTimeout(() => {
-        this.addTestResult("✅ GET request with FT session helper completed");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -147,8 +137,6 @@ export struct HttpAutoTrackTestPage {
         timestamp: Date.now()
       };
 
-      this.addTestResult("📤 Sending POST request to httpbin.org/post...");
-      
       // Send POST request (should be automatically intercepted)
       const headers: rcp.RequestHeaders = {
         'Content-Type': 'application/json'
@@ -159,15 +147,11 @@ export struct HttpAutoTrackTestPage {
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ POST request successful: ${response.statusCode}`);
+        this.addTestResult(`✅ POST request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ POST request returned status: ${response.statusCode}`);
+        this.addTestResult(`⚠️ POST request returned status=${response.statusCode}`);
       }
-
-      setTimeout(() => {
-        this.addTestResult("✅ POST request with FT session helper completed");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -193,8 +177,6 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createTrackedSession('https://httpbin.org');
 
-      this.addTestResult("📤 Sending GET request with custom session...");
-      
       // Send GET request (should be automatically intercepted)
       const request = new rcp.Request('/get', 'GET');
       const response = await session.fetch(request);
@@ -202,15 +184,11 @@ export struct HttpAutoTrackTestPage {
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ Custom session GET request successful: ${response.statusCode}`);
+        this.addTestResult(`✅ Custom session request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ Custom session GET request returned status: ${response.statusCode}`);
+        this.addTestResult(`⚠️ Custom session request returned status=${response.statusCode}`);
       }
-
-      setTimeout(() => {
-        this.addTestResult("✅ Custom session with interceptors test completed");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -236,25 +214,19 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createTrackedSession();
 
-      this.addTestResult("📤 Sending GET request to non-existent endpoint...");
-      
       // Send GET request to non-existent endpoint (should return 404)
       const request = new rcp.Request('https://httpbin.org/status/404', 'GET');
       const response = await session.fetch(request);
       
       this.requestCount++;
       if (response.statusCode === 404) {
-        this.addTestResult(`✅ Error request intercepted correctly: ${response.statusCode}`);
+        this.addTestResult(`✅ Error request handled as expected: status=404`);
         // 404 is expected, so we don't count it as an error
         this.successCount++;
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ Unexpected status code: ${response.statusCode}`);
+        this.addTestResult(`⚠️ Error request returned unexpected status=${response.statusCode}`);
       }
-
-      setTimeout(() => {
-        this.addTestResult("✅ Error request test completed");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -288,8 +260,6 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createTrackedSession();
 
-      this.addTestResult("📤 Sending GET request to check trace headers...");
-      
       // Send GET request (trace headers should be added automatically)
       const request = new rcp.Request('https://httpbin.org/headers', 'GET');
       const response = await session.fetch(request);
@@ -297,18 +267,11 @@ export struct HttpAutoTrackTestPage {
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ Trace headers request successful: ${response.statusCode}`);
-        
-        // Note: Response body access depends on RCP API
-        this.addTestResult(`Response URL: ${response.effectiveUrl?.href || 'N/A'}`);
+        this.addTestResult(`✅ Trace headers request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ Trace headers request returned status: ${response.statusCode}`);
+        this.addTestResult(`⚠️ Trace headers request returned status=${response.statusCode}`);
       }
-
-      setTimeout(() => {
-        this.addTestResult("✅ Trace headers test completed");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -338,15 +301,11 @@ export struct HttpAutoTrackTestPage {
       
       if (!isTraceEnabled) {
         this.addTestResult("⚠️ Trace is not enabled, skipping trace id test");
-        this.addTestResult("   Please enable trace in SDK config: setEnableAutoTrace(true)");
         return;
       }
 
       const session = this.createTrackedSession();
 
-      this.addTestResult(`📤 Sending GET request to ${testUrl}...`);
-      this.addTestResult("   Check logs for: [RCP-Trace] Added trace headers");
-      
       // Send GET request (trace headers should be added automatically)
       const request = new rcp.Request(testUrl, 'GET');
       const response = await session.fetch(request);
@@ -354,22 +313,11 @@ export struct HttpAutoTrackTestPage {
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ Request successful: ${response.statusCode}`);
-        this.addTestResult(`   Response URL: ${response.effectiveUrl?.href || 'N/A'}`);
-        this.addTestResult("   ✅ Trace headers should be added automatically");
-        this.addTestResult("   📋 Check logs for trace header details:");
-        this.addTestResult("      - [RCP-Trace] Added trace headers");
-        this.addTestResult("      - Look for: x-datadog-trace-id, x-datadog-parent-id");
+        this.addTestResult(`✅ Trace-id request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ Request returned status: ${response.statusCode}`);
-        this.addTestResult("   Trace headers may still be added (check logs)");
+        this.addTestResult(`⚠️ Trace-id request returned status=${response.statusCode}`);
       }
-
-      setTimeout(() => {
-        this.addTestResult("✅ Trace id in resource request test completed");
-        this.addTestResult("   💡 Tip: Check logcat/logs for '[RCP-Trace] Added trace headers'");
-      }, 500);
 
     } catch (error) {
       this.requestCount++;
@@ -395,8 +343,6 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createTrackedSession();
 
-      this.addTestResult("📤 Sending 5 concurrent GET requests...");
-      
       const promises: Promise<rcp.Response>[] = [];
       for (let i = 0; i < 5; i++) {
         const request = new rcp.Request(`https://httpbin.org/get?request=${i}`, 'GET');
@@ -436,7 +382,6 @@ export struct HttpAutoTrackTestPage {
     this.requestCount = 0;
     this.successCount = 0;
     this.errorCount = 0;
-    this.addTestResult("Test results cleared");
   }
 
   build() {
@@ -500,32 +445,6 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testMultipleRequests())
             .customProperty('test-multiple-requests-btn', 'Test Multiple Requests')
 
-          Button('Clear Results')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .type(ButtonType.Normal)
-            .backgroundColor('#FF6B6B')
-            .onClick(() => this.clearResults())
-            .customProperty('clear-results-btn', 'Clear Results')
-
-          Divider()
-            .margin({ top: 20, bottom: 10 })
-
-          Text('Test Results:')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .width('100%')
-            .textAlign(TextAlign.Start)
-
-          ForEach(this.testResults, (result: string, index: number) => {
-            Text(result)
-              .fontSize(12)
-              .width('100%')
-              .textAlign(TextAlign.Start)
-              .padding({ top: 5, bottom: 5 })
-              .borderRadius(4)
-              .backgroundColor(index % 2 === 0 ? '#F5F5F5' : '#FFFFFF')
-          }, (item: string) => item)
 
         }
         .width('100%')

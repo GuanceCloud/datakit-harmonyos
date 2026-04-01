@@ -38,120 +38,103 @@ export struct DBCacheLimitTestPage {
   }
 
   build() {
-    Column({ space: 20 }) {
-      TestPageHeader({
-        title: 'Database Cache Limit Test'
-      })
+    Scroll() {
+      Column({ space: 20 }) {
+        TestPageHeader({
+          title: 'Database Cache Limit Test'
+        })
 
-      // Show the current database status
-      Column({ space: 10 }) {
-        Text(`Current DB Size: ${this.currentDbSize} bytes`)
-          .fontSize(16)
-        Text(`DB Limit: ${this.dbLimit} bytes`)
-          .fontSize(16)
-        Text(`Limit Reached: ${this.isLimitReached ? 'YES ⚠️' : 'NO ✅'}`)
-          .fontSize(16)
-          .fontColor(this.isLimitReached ? Color.Red : Color.Green)
-        Text(`Written Count: ${this.writeCount}`)
-          .fontSize(14)
-          .fontColor(Color.Gray)
-        if (this.autoWriteEnabled) {
-          Text('🔄 Auto Writing...')
+        // Show the current database status
+        Column({ space: 10 }) {
+          Text(`Current DB Size: ${this.currentDbSize} bytes`)
+            .fontSize(16)
+          Text(`DB Limit: ${this.dbLimit} bytes`)
+            .fontSize(16)
+          Text(`Limit Reached: ${this.isLimitReached ? 'YES ⚠️' : 'NO ✅'}`)
+            .fontSize(16)
+            .fontColor(this.isLimitReached ? Color.Red : Color.Green)
+          Text(`Written Count: ${this.writeCount}`)
             .fontSize(14)
-            .fontColor(Color.Blue)
+            .fontColor(Color.Gray)
+          if (this.autoWriteEnabled) {
+            Text('🔄 Auto Writing...')
+              .fontSize(14)
+              .fontColor(Color.Blue)
+          }
         }
+        .padding(20)
+        .backgroundColor('#F5F5F5')
+        .borderRadius(8)
+        .width('90%')
+
+        // Test buttons
+        Button(this.autoWriteEnabled ? 'Stop Auto Write' : 'Start Auto Write (Logs)')
+          .width('90%')
+          .height(50)
+          .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            if (this.autoWriteEnabled) {
+              this.stopAutoWrite();
+            } else {
+              this.startAutoWriteLogs();
+            }
+          })
+
+        Button(this.autoWriteEnabled ? 'Stop Auto Write' : 'Start Auto Write (RUM)')
+          .width('90%')
+          .height(50)
+          .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            if (this.autoWriteEnabled) {
+              this.stopAutoWrite();
+            } else {
+              this.startAutoWriteRUM();
+            }
+          })
+
+        Button('Write 100 Logs Once')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#28A745')
+          .enabled(!this.autoWriteEnabled && !this.isRunning)
+          .onClick(() => {
+            this.writeLogsBatch(100);
+          })
+
+        Button('Write 100 RUM Data Once')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#28A745')
+          .enabled(!this.autoWriteEnabled && !this.isRunning)
+          .onClick(() => {
+            this.writeRUMBatch(100);
+          })
+
+        Button('Refresh DB Size')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#FFC107')
+          .onClick(() => {
+            this.updateDbSizeInfo();
+          })
+
+        Button('Test Cache Policy')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#007DFF')
+          .enabled(!this.autoWriteEnabled && !this.isRunning)
+          .onClick(() => {
+            this.runCachePolicyTest();
+          })
+
       }
+      .width('100%')
       .padding(20)
-      .backgroundColor('#F5F5F5')
-      .borderRadius(8)
-      .width('90%')
-
-      // Test buttons
-      Button(this.autoWriteEnabled ? 'Stop Auto Write' : 'Start Auto Write (Logs)')
-        .width('90%')
-        .height(50)
-        .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          if (this.autoWriteEnabled) {
-            this.stopAutoWrite();
-          } else {
-            this.startAutoWriteLogs();
-          }
-        })
-
-      Button(this.autoWriteEnabled ? 'Stop Auto Write' : 'Start Auto Write (RUM)')
-        .width('90%')
-        .height(50)
-        .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          if (this.autoWriteEnabled) {
-            this.stopAutoWrite();
-          } else {
-            this.startAutoWriteRUM();
-          }
-        })
-
-      Button('Write 100 Logs Once')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#28A745')
-        .enabled(!this.autoWriteEnabled && !this.isRunning)
-        .onClick(() => {
-          this.writeLogsBatch(100);
-        })
-
-      Button('Write 100 RUM Data Once')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#28A745')
-        .enabled(!this.autoWriteEnabled && !this.isRunning)
-        .onClick(() => {
-          this.writeRUMBatch(100);
-        })
-
-      Button('Refresh DB Size')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#FFC107')
-        .onClick(() => {
-          this.updateDbSizeInfo();
-        })
-
-      Button('Test Cache Policy')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#007DFF')
-        .enabled(!this.autoWriteEnabled && !this.isRunning)
-        .onClick(() => {
-          this.runCachePolicyTest();
-        })
-
-      Button('Clear Results')
-        .width('90%')
-        .height(40)
-        .backgroundColor('#DC3545')
-        .onClick(() => {
-          this.testResults = '';
-          this.writeCount = 0;
-        })
-
-      // Test result display
-      Scroll() {
-        Text(this.testResults)
-          .fontSize(12)
-          .textAlign(TextAlign.Start)
-          .width('100%')
-      }
-      .width('90%')
-      .height(200)
-      .border({ width: 1, color: Color.Gray })
-      .padding(10)
     }
     .width('100%')
     .height('100%')
-    .padding(20)
     .backgroundColor(TestPageTheme.PAGE_BACKGROUND)
   }
 
@@ -358,6 +341,10 @@ export struct DBCacheLimitTestPage {
    */
   private appendResult(text: string) {
     this.testResults += text;
+    const lines = this.testResults.split('\n');
+    if (lines.length > 80) {
+      this.testResults = lines.slice(lines.length - 80).join('\n');
+    }
     DemoLogger.i(TAG, text.trim());
   }
 }

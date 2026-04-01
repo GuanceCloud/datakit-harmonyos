@@ -64,7 +64,23 @@ export struct TraceTestPage {
    * Add test result
    */
   addTestResult(result: string) {
-    this.testResults.push(`[${new Date().toLocaleTimeString()}] ${result}`);
+    DemoLogger.i(TAG, result);
+    if (result.startsWith('━━━━━━━━')) {
+      return;
+    }
+    if (result.startsWith('   -') || result.startsWith('      -')) {
+      return;
+    }
+    if (result.startsWith('🔍 Testing ') || result.startsWith('📤 Testing ') || result.startsWith('📡 Sending GET request')) {
+      return;
+    }
+    if (result.startsWith('📋 Verification:') || result.includes('Check logs') || result.startsWith('   Expected headers:')) {
+      return;
+    }
+    const nextResults = [...this.testResults, `[${new Date().toLocaleTimeString()}] ${result}`];
+    this.testResults = nextResults.length > 120
+      ? nextResults.slice(nextResults.length - 120)
+      : nextResults;
   }
 
   private getTraceTestUrl(): string {
@@ -1373,30 +1389,6 @@ export struct TraceTestPage {
           .margin({ bottom: 10 })
           .onClick(() => this.runAllTests())
 
-        Button('Clear Test Results')
-          .width('100%')
-          .height(50)
-          .margin({ bottom: 20 })
-          .onClick(() => this.clearTestResults())
-
-        // Test results display
-        Text('Test Results:')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .margin({ bottom: 10 })
-
-        Column() {
-          ForEach(this.testResults, (result: string, index: number) => {
-            Text(result)
-              .fontSize(14)
-              .margin({ bottom: 5 })
-              .textAlign(TextAlign.Start)
-              .width('100%')
-          }, (result: string, index: number) => `${index}-${result}`)
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ bottom: 20 })
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)

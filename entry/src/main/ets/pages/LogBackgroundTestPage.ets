@@ -8,6 +8,9 @@ import { SyncTaskManager } from 'shareLibrary/src/main/ets/components/SyncTaskMa
 import { FTSDK } from 'shareLibrary/src/main/ets/components/FTSDK';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
+import { DemoLogger } from '../utils/DemoLogger';
+
+const TAG = 'LogBackgroundTestPage';
 
 /**
  * LogBackground feature test page
@@ -53,10 +56,11 @@ export struct LogBackgroundTestPage {
    */
   addTestResult(message: string): void {
     const timestamp = new Date().toLocaleTimeString();
-    this.testResults.unshift(`[${timestamp}] ${message}`);
-    if (this.testResults.length > 50) {
-      this.testResults.pop();
-    }
+    const nextResults = [`[${timestamp}] ${message}`, ...this.testResults];
+    this.testResults = nextResults.length > 40
+      ? nextResults.slice(0, 40)
+      : nextResults;
+    DemoLogger.i(TAG, message);
   }
 
 
@@ -65,23 +69,16 @@ export struct LogBackgroundTestPage {
    */
   testBasicLogBackground() {
     try {
-      this.addTestResult("🧪 Testing basic logBackground functionality...");
-      
       // Test string status
       FTLogger.logBackground("Basic test log with string status", "info");
-      this.addTestResult("✅ String status log sent");
-      
       // Test the Status enum
       FTLogger.logBackground("Basic test log with Status enum", Status.INFO);
-      this.addTestResult("✅ Status enum log sent");
-      
       // Test different levels
       FTLogger.logBackground("Debug level log", Status.DEBUG);
       FTLogger.logBackground("Warning level log", Status.WARN);
       FTLogger.logBackground("Error level log", Status.ERROR);
-      this.addTestResult("✅ Multiple log levels sent");
-      
       this.logCount += 4;
+      this.addTestResult("✅ Basic logBackground test completed: 4 logs sent");
     } catch (error) {
       this.addTestResult(`❌ Basic logBackground test failed: ${error}`);
     }
@@ -92,8 +89,6 @@ export struct LogBackgroundTestPage {
    */
   testLogBackgroundWithProperties() {
     try {
-      this.addTestResult("🧪 Testing logBackground with properties...");
-      
       const properties = new Map<string, object>();
       properties.set("userId", new String("12345"));
       properties.set("sessionId", new String("session_abc123"));
@@ -103,13 +98,10 @@ export struct LogBackgroundTestPage {
       
       // Test string status with properties
       FTLogger.logBackground("Log with properties (string status)", "info", properties);
-      this.addTestResult("✅ String status with properties sent");
-      
       // Test the Status enum with properties
       FTLogger.logBackground("Log with properties (Status enum)", Status.INFO, properties);
-      this.addTestResult("✅ Status enum with properties sent");
-      
       this.logCount += 2;
+      this.addTestResult("✅ Properties logBackground test completed: 2 logs sent");
     } catch (error) {
       this.addTestResult(`❌ Properties logBackground test failed: ${error}`);
     }
@@ -120,17 +112,12 @@ export struct LogBackgroundTestPage {
    */
   testSilentMode() {
     try {
-      this.addTestResult("🧪 Testing silent mode...");
-      
       // Test silent mode
       FTLogger.logBackground("Silent log message", Status.INFO.name, undefined, true);
-      this.addTestResult("✅ Silent mode log sent");
-      
       // Test non-silent mode
       FTLogger.logBackground("Non-silent log message", Status.INFO.name, undefined, false);
-      this.addTestResult("✅ Non-silent mode log sent");
-      
       this.logCount += 2;
+      this.addTestResult("✅ Silent mode test completed: 2 logs sent");
     } catch (error) {
       this.addTestResult(`❌ Silent mode test failed: ${error}`);
     }
@@ -141,8 +128,6 @@ export struct LogBackgroundTestPage {
    */
   testAllOverloads() {
     try {
-      this.addTestResult("🧪 Testing all logBackground overloads...");
-      
       const properties = new Map<string, object>();
       properties.set("testType", new String("overload_test"));
       
@@ -156,8 +141,8 @@ export struct LogBackgroundTestPage {
       FTLogger.logBackground("Overload test 7", "debug", properties, false);
       FTLogger.logBackground("Overload test 8", Status.DEBUG, properties, false);
       
-      this.addTestResult("✅ All overload methods tested");
       this.logCount += 8;
+      this.addTestResult("✅ Overload test completed: 8 logs sent");
     } catch (error) {
       this.addTestResult(`❌ Overload test failed: ${error}`);
     }
@@ -168,8 +153,6 @@ export struct LogBackgroundTestPage {
    */
   testBatchLogging() {
     try {
-      this.addTestResult("🧪 Testing batch logging...");
-      
       const batchSize = 10;
       for (let i = 0; i < batchSize; i++) {
         const properties = new Map<string, object>();
@@ -192,8 +175,6 @@ export struct LogBackgroundTestPage {
    */
   testBatchLogging20() {
     try {
-      this.addTestResult("🧪 Testing batch logging (20 logs)...");
-      
       const batchSize = 20;
       for (let i = 0; i < batchSize; i++) {
         const properties = new Map<string, object>();
@@ -216,8 +197,6 @@ export struct LogBackgroundTestPage {
    */
   testAllStatusLevels() {
     try {
-      this.addTestResult("🧪 Testing all status levels...");
-      
       interface StatusTest {
         status: Status;
         name: string;
@@ -233,12 +212,11 @@ export struct LogBackgroundTestPage {
       
       statuses.forEach((item: StatusTest) => {
         const status = item.status;
-        const name = item.name;
-        FTLogger.logBackground(`${name} level test log`, status);
-        this.addTestResult(`✅ ${name} level log sent`);
+        FTLogger.logBackground(`${item.name} level test log`, status);
       });
       
       this.logCount += statuses.length;
+      this.addTestResult(`✅ Status levels test completed: ${statuses.length} logs sent`);
     } catch (error) {
       this.addTestResult(`❌ Status levels test failed: ${error}`);
     }
@@ -249,14 +227,12 @@ export struct LogBackgroundTestPage {
    */
   testConsoleOutput() {
     try {
-      this.addTestResult("🧪 Testing console output...");
-      
       // These logs should be printed to the console if printCustomLogToConsole is enabled
       FTLogger.logBackground("Console output test - INFO", Status.INFO);
       FTLogger.logBackground("Console output test - WARN", Status.WARN);
       FTLogger.logBackground("Console output test - ERROR", Status.ERROR);
       
-      this.addTestResult("✅ Console output test completed (check console logs)");
+      this.addTestResult("✅ Console output test completed: 3 logs sent");
       this.logCount += 3;
     } catch (error) {
       this.addTestResult(`❌ Console output test failed: ${error}`);
@@ -268,16 +244,13 @@ export struct LogBackgroundTestPage {
    */
   testServiceNameSetting() {
     try {
-      this.addTestResult("🧪 Testing service name setting...");
-      
       const properties = new Map<string, object>();
       properties.set("testType", new String("service_name_test"));
       properties.set("expectedService", new String("harmonyos_log_test"));
       
       FTLogger.logBackground("Service name test log", Status.INFO, properties);
-      this.addTestResult("✅ Service name test completed (check if service name is set)");
-      
       this.logCount += 1;
+      this.addTestResult("✅ Service name test completed: 1 log sent");
     } catch (error) {
       this.addTestResult(`❌ Service name test failed: ${error}`);
     }
@@ -308,7 +281,6 @@ export struct LogBackgroundTestPage {
   clearTestResults() {
     this.testResults = [];
     this.logCount = 0;
-    this.addTestResult("🧹 Test results cleared");
   }
 
   /**
@@ -450,41 +422,14 @@ export struct LogBackgroundTestPage {
             .fontWeight(FontWeight.Bold)
             .onClick(() => this.runAllTests())
 
-          Button('🧹 Clear Results')
-            .width('100%')
-            .height(50)
-            .backgroundColor('#6C757D')
-            .onClick(() => this.clearTestResults())
         }
         .padding(15)
         .backgroundColor('#FFFFFF')
 
-        // Test result display area
-        Column() {
-          Text('Test Results')
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#333333')
-            .margin({ bottom: 10 })
-
-          Column({ space: 5 }) {
-            ForEach(this.testResults, (result: string, index: number) => {
-              Text(result)
-                .fontSize(14)
-                .fontColor('#666666')
-                .width('100%')
-                .textAlign(TextAlign.Start)
-                .padding(5)
-                .backgroundColor(index % 2 === 0 ? '#F8F9FA' : '#FFFFFF')
-            })
-          }
-          .height(200)
-          .border({ width: 1, color: '#CCCCCC' })
-          .borderRadius(8)
-        }
         .width('100%')
         .padding(15)
         .backgroundColor('#F8F9FA')
+        .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
       .padding(20)

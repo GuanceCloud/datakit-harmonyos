@@ -69,145 +69,129 @@ export struct DataSyncTestPage {
   }
 
   build() {
-    Column({ space: 20 }) {
-      TestPageHeader({
-        title: 'Data Sync & Clear Test'
-      })
-
-      // Show the current data status
-      Column({ space: 10 }) {
-        Text(`Database Size: ${this.dbSize}`)
-          .fontSize(16)
-        Text(`Data Count: ${this.dbSize !== '0 B' ? 'Has Data' : 'No Data'}`)
-          .fontSize(14)
-          .fontColor(this.dbSize !== '0 B' ? Color.Green : Color.Gray)
-        Text(`Auto Sync: ${this.autoSyncEnabled ? 'Enabled ✅' : 'Disabled ❌'}`)
-          .fontSize(14)
-          .fontColor(this.autoSyncEnabled ? Color.Green : Color.Orange)
-          .margin({ top: 5 })
-      }
-      .padding(20)
-      .backgroundColor('#F5F5F5')
-      .borderRadius(8)
-      .width('90%')
-      .margin({ top: 10 })
-
-      // Generate test data buttons
-      Button('Generate Test Data (10 Logs + 10 Actions)')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#007DFF')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          this.generateTestData();
+    Scroll() {
+      Column({ space: 20 }) {
+        TestPageHeader({
+          title: 'Data Sync & Clear Test'
         })
 
-      Button('Generate More Test Data (100 Logs + 100 Actions)')
+        // Show the current data status
+        Column({ space: 10 }) {
+          Text(`Database Size: ${this.dbSize}`)
+            .fontSize(16)
+          Text(`Data Count: ${this.dbSize !== '0 B' ? 'Has Data' : 'No Data'}`)
+            .fontSize(14)
+            .fontColor(this.dbSize !== '0 B' ? Color.Green : Color.Gray)
+          Text(`Auto Sync: ${this.autoSyncEnabled ? 'Enabled ✅' : 'Disabled ❌'}`)
+            .fontSize(14)
+            .fontColor(this.autoSyncEnabled ? Color.Green : Color.Orange)
+            .margin({ top: 5 })
+        }
+        .padding(20)
+        .backgroundColor('#F5F5F5')
+        .borderRadius(8)
         .width('90%')
-        .height(50)
-        .backgroundColor('#28A745')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          this.generateMoreTestData();
-        })
+        .margin({ top: 10 })
 
-      Divider()
-        .width('90%')
-        .margin({ top: 10, bottom: 10 })
+        // Generate test data buttons
+        Button('Generate Test Data (10 Logs + 10 Actions)')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#007DFF')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.generateTestData();
+          })
 
-      // Data sync test
-      Text('Data Sync Test')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .width('90%')
-        .textAlign(TextAlign.Start)
+        Button('Generate More Test Data (100 Logs + 100 Actions)')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#28A745')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.generateMoreTestData();
+          })
 
-      Button(this.autoSyncEnabled ? 'Disable Auto Sync' : 'Enable Auto Sync')
-        .width('90%')
-        .height(50)
-        .backgroundColor(this.autoSyncEnabled ? '#FF9800' : '#4CAF50')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          this.toggleAutoSync();
-        })
+        Divider()
+          .width('90%')
+          .margin({ top: 10, bottom: 10 })
 
-      Button('Flush Sync Data (Manual Sync)')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#FFC107')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          this.testFlushSyncData();
-        })
-
-      Text('Note: When autoSync is disabled, use flushSyncData() to manually trigger data synchronization')
-        .fontSize(12)
-        .fontColor(Color.Gray)
-        .width('90%')
-        .textAlign(TextAlign.Start)
-        .margin({ top: 5, bottom: 10 })
-
-      Divider()
-        .width('90%')
-        .margin({ top: 10, bottom: 10 })
-
-      // Clear data test
-      Text('Clear Data Test')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .width('90%')
-        .textAlign(TextAlign.Start)
-
-      Button('Clear All Data')
-        .width('90%')
-        .height(50)
-        .backgroundColor('#DC3545')
-        .enabled(!this.isRunning)
-        .onClick(() => {
-          this.testClearAllData();
-        })
-
-      Text('Warning: This will delete ALL cached data (sync_data_flat, rum_view, rum_action)')
-        .fontSize(12)
-        .fontColor(Color.Red)
-        .width('90%')
-        .textAlign(TextAlign.Start)
-        .margin({ top: 5, bottom: 10 })
-
-      Button('Refresh Data Info')
-        .width('90%')
-        .height(40)
-        .backgroundColor('#6C757D')
-        .onClick(() => {
-          this.updateDataInfo();
-          if (this.updateTimer === -1) {
-            this.startAutoUpdate();
-          }
-        })
-
-      Button('Clear Results')
-        .width('90%')
-        .height(40)
-        .backgroundColor('#6C757D')
-        .onClick(() => {
-          this.testResults = '';
-        })
-
-      // Test result display
-      Scroll() {
-        Text(this.testResults)
-          .fontSize(12)
+        // Data sync test
+        Text('Data Sync Test')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .width('90%')
           .textAlign(TextAlign.Start)
-          .width('100%')
+
+        Button(this.autoSyncEnabled ? 'Disable Auto Sync' : 'Enable Auto Sync')
+          .width('90%')
+          .height(50)
+          .backgroundColor(this.autoSyncEnabled ? '#FF9800' : '#4CAF50')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.toggleAutoSync();
+          })
+
+        Button('Flush Sync Data (Manual Sync)')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#FFC107')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.testFlushSyncData();
+          })
+
+        Text('Note: When autoSync is disabled, use flushSyncData() to manually trigger data synchronization')
+          .fontSize(12)
+          .fontColor(Color.Gray)
+          .width('90%')
+          .textAlign(TextAlign.Start)
+          .margin({ top: 5, bottom: 10 })
+
+        Divider()
+          .width('90%')
+          .margin({ top: 10, bottom: 10 })
+
+        // Clear data test
+        Text('Clear Data Test')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .width('90%')
+          .textAlign(TextAlign.Start)
+
+        Button('Clear All Data')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#DC3545')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.testClearAllData();
+          })
+
+        Text('Warning: This will delete ALL cached data (sync_data_flat, rum_view, rum_action)')
+          .fontSize(12)
+          .fontColor(Color.Red)
+          .width('90%')
+          .textAlign(TextAlign.Start)
+          .margin({ top: 5, bottom: 10 })
+
+        Button('Refresh Data Info')
+          .width('90%')
+          .height(40)
+          .backgroundColor('#6C757D')
+          .onClick(() => {
+            this.updateDataInfo();
+            if (this.updateTimer === -1) {
+              this.startAutoUpdate();
+            }
+          })
+
       }
-      .width('90%')
-      .height(200)
-      .border({ width: 1, color: Color.Gray })
-      .padding(10)
+      .width('100%')
+      .padding(20)
     }
     .width('100%')
     .height('100%')
-    .padding(20)
     .backgroundColor(TestPageTheme.PAGE_BACKGROUND)
   }
 
@@ -425,6 +409,10 @@ export struct DataSyncTestPage {
    */
   private appendResult(text: string) {
     this.testResults += text;
+    const lines = this.testResults.split('\n');
+    if (lines.length > 80) {
+      this.testResults = lines.slice(lines.length - 80).join('\n');
+    }
     DemoLogger.i(TAG, text.trim());
   }
 }

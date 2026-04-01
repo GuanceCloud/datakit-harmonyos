@@ -63,7 +63,10 @@ export struct ViewUpdateTimeTestPage {
    * Add test result
    */
   addTestResult(result: string) {
-    this.testResults.push(`[${new Date().toLocaleTimeString()}] ${result}`);
+    const nextResults = [...this.testResults, `[${new Date().toLocaleTimeString()}] ${result}`];
+    this.testResults = nextResults.length > 60
+      ? nextResults.slice(nextResults.length - 60)
+      : nextResults;
     DemoLogger.i(TAG, result);
   }
 
@@ -72,9 +75,6 @@ export struct ViewUpdateTimeTestPage {
    */
   async testStartView() {
     try {
-      this.addTestResult("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      this.addTestResult("📋 Test: Start New View");
-      
       const rumGlobalManager = FTRUMGlobalManager.getInstance();
       
       // Start a new view
@@ -102,9 +102,7 @@ export struct ViewUpdateTimeTestPage {
       // For testing, we'll use FTRUMInnerManager's internal state if accessible
       // or wait for data to be uploaded and check logs
       
-      this.addTestResult("📊 Querying view data from database...");
-      this.addTestResult("ℹ️ Note: Check logs for view_update_time value in line protocol");
-      this.addTestResult("ℹ️ Initial view_update_time should be: 1");
+      this.addTestResult("ℹ️ View data query triggered, expected initial view_update_time=1");
       
     } catch (error) {
       this.addTestResult(`❌ Failed to query view: ${error}`);
@@ -116,21 +114,15 @@ export struct ViewUpdateTimeTestPage {
    */
   async testResourceRequest() {
     try {
-      this.addTestResult("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      this.addTestResult(`🌐 Test ${this.resourceRequestCount + 1}: Send Resource Request`);
-      
       const isEnabled = FTRUMGlobalManager.getInstance().isInitialized();
       
       if (!isEnabled) {
         this.addTestResult("⚠️ RCP interceptor session helper is not available");
-        this.addTestResult("💡 Initialize SDK first and enable resource tracing in FTRUMConfig");
         return;
       }
 
       const session = this.createTrackedSession();
 
-      this.addTestResult("📤 Sending GET request...");
-      
       // Send HTTP request which should trigger stopResource and updateViewUpdateTime
       const request = new rcp.Request('https://httpbin.org/get', 'GET');
       const response = await session.fetch(request);
@@ -143,8 +135,7 @@ export struct ViewUpdateTimeTestPage {
         // Wait for resource to be processed and view_update_time to be updated
         await new Promise<void>(resolve => setTimeout(resolve, 1000));
         
-        this.addTestResult(`📊 After ${this.resourceRequestCount} resource request(s), view_update_time should be: ${this.resourceRequestCount + 1}`);
-        this.addTestResult("ℹ️ Check logs for view_update_time in line protocol output");
+        this.addTestResult(`ℹ️ Expected view_update_time after ${this.resourceRequestCount} request(s): ${this.resourceRequestCount + 1}`);
         
       } else {
         this.addTestResult(`⚠️ Request returned status: ${response.statusCode}`);
@@ -160,41 +151,30 @@ export struct ViewUpdateTimeTestPage {
    */
   async testMultipleResourceRequests() {
     try {
-      this.addTestResult("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      this.addTestResult("🔄 Test: Multiple Resource Requests");
-      this.addTestResult("📝 Sending 5 sequential HTTP requests...");
-      
       const session = this.createTrackedSession();
+      let successCount = 0;
 
       for (let i = 1; i <= 5; i++) {
-        this.addTestResult(`📤 Request ${i}/5...`);
-        
         try {
           const request = new rcp.Request(`https://httpbin.org/get?req=${i}`, 'GET');
           const response = await session.fetch(request);
           
           if (response.statusCode >= 200 && response.statusCode < 300) {
-            this.addTestResult(`  ✅ Request ${i} completed: ${response.statusCode}`);
-          } else {
-            this.addTestResult(`  ⚠️ Request ${i} returned: ${response.statusCode}`);
+            successCount++;
           }
           
           // Small delay between requests
           await new Promise<void>(resolve => setTimeout(resolve, 300));
         } catch (error) {
-          this.addTestResult(`  ❌ Request ${i} failed: ${error}`);
+          DemoLogger.e(TAG, `Request ${i} failed: ${error}`);
         }
       }
       
       // Wait for all resources to be processed
       await new Promise<void>(resolve => setTimeout(resolve, 2000));
       
-      this.addTestResult("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      this.addTestResult(`📊 Summary: Sent ${this.resourceRequestCount + 5} total resource requests`);
-      this.addTestResult(`📊 Expected view_update_time: ${this.resourceRequestCount + 5 + 1}`);
-      this.addTestResult("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      this.addTestResult("💡 Check logs for 'view_update_time' in line protocol");
-      this.addTestResult("💡 Expected pattern: view_update_time=1, then 2, then 3...");
+      this.resourceRequestCount += 5;
+      this.addTestResult(`✅ Multiple requests completed: ${successCount}/5 succeeded, expected view_update_time=${this.resourceRequestCount + 1}`);
       
     } catch (error) {
       this.addTestResult(`❌ Multiple requests test failed: ${error}`);
@@ -207,7 +187,6 @@ export struct ViewUpdateTimeTestPage {
   clearResults() {
     this.testResults = [];
     this.resourceRequestCount = 0;
-    this.addTestResult("Test results cleared");
   }
 
   build() {
@@ -239,40 +218,11 @@ export struct ViewUpdateTimeTestPage {
             this.testMultipleResourceRequests();
           })
 
-        Button("Clear Results")
-          .width('90%')
-          .margin({ top: 5, bottom: 10 })
-          .type(ButtonType.Normal)
-          .onClick(() => {
-            this.clearResults();
-          })
       }
       .width('100%')
       .padding({ left: 20, right: 20 })
-
-      // Test results log
-      Scroll() {
-        Column() {
-          if (this.testResults.length === 0) {
-            Text("No test results yet. Click buttons to start testing.")
-              .fontSize(14)
-              .fontColor('#666666')
-              .padding(20)
-          } else {
-            ForEach(this.testResults, (result: string, index: number) => {
-              Text(result)
-                .fontSize(12)
-                .fontColor('#333333')
-                .width('100%')
-                .textAlign(TextAlign.Start)
-                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-            }, (result: string, index: number) => `${index}-${result}`)
-          }
-        }
-      }
-      .layoutWeight(1)
-      .width('100%')
       .padding(10)
+      .alignItems(HorizontalAlign.Start)
       .backgroundColor('#FFFFFF')
 
       // Instructions

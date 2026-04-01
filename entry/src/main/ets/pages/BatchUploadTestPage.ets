@@ -28,7 +28,10 @@ export struct BatchUploadTestPage {
 
   private addTestResult(message: string): void {
     const timestamp = new Date().toLocaleTimeString();
-    this.testResults.push(`[${timestamp}] ${message}`);
+    const nextResults = [...this.testResults, `[${timestamp}] ${message}`];
+    this.testResults = nextResults.length > 60
+      ? nextResults.slice(nextResults.length - 60)
+      : nextResults;
     DemoLogger.i(TAG, message);
   }
 
@@ -412,35 +415,6 @@ export struct BatchUploadTestPage {
             })
 
           Divider().margin({ top: 10, bottom: 10 })
-
-          // Test results
-          Text('Test Results:')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .margin({ bottom: 10 })
-
-          if (this.testResults.length > 0) {
-            Column() {
-              ForEach(this.testResults, (result: string, index: number) => {
-                Text(result)
-                  .fontSize(12)
-                  .fontColor(result.includes('❌') ? Color.Red : 
-                            result.includes('✅') ? Color.Green : 
-                            result.includes('💡') ? Color.Blue : Color.Black)
-                  .margin({ bottom: 4 })
-                  .width('100%')
-              }, (item: string, index: number) => `${index}-${item}`)
-            }
-            .width('100%')
-            .padding(10)
-            .backgroundColor('#F5F5F5')
-            .borderRadius(8)
-          } else {
-            Text('No test results yet. Click buttons above to run tests.')
-              .fontSize(14)
-              .fontColor(Color.Gray)
-              .margin({ top: 20 })
-          }
 
           // Instructions
           Divider().margin({ top: 20, bottom: 10 })

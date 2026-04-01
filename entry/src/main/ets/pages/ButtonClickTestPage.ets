@@ -628,33 +628,9 @@ export struct ButtonClickTestPage {
             .fontColor(Color.White)
             .onClick(() => this.showStats())
 
-          Button('Clear Results')
-            .layoutWeight(1)
-            .height(50)
-            .backgroundColor('#FF5722')
-            .fontColor(Color.White)
-            .onClick(() => this.clearResults())
         }
         .width('100%')
         .margin({ top: 20, bottom: 10 })
-
-        // Test Results Display
-        Text('Test Results:')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .width('100%')
-          .margin({ top: 10, bottom: 5 })
-
-        Text(this.testResults)
-          .fontSize(12)
-          .fontColor('#333333')
-          .textAlign(TextAlign.Start)
-          .width('100%')
-          .backgroundColor('#FFFFFF')
-          .padding(12)
-          .borderRadius(8)
-          .border({ width: 1, color: '#E0E0E0' })
-          .margin({ bottom: 20 })
         
         // Info Section
         Column({ space: 8 }) {

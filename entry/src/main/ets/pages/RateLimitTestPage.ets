@@ -68,30 +68,6 @@ export struct RateLimitTestPage {
           this.runComprehensiveTest();
         })
 
-      // Clear results button
-      Button('Clear Results')
-        .width('90%')
-        .height(40)
-        .backgroundColor('#FF4757')
-        .onClick(() => {
-          this.testResults = '';
-        })
-
-      // Test results display area
-      Scroll() {
-        Text(this.testResults)
-          .fontSize(14)
-          .fontFamily('monospace')
-          .textAlign(TextAlign.Start)
-          .width('100%')
-          .padding(10)
-      }
-      .width('90%')
-      .height(300)
-      .border({ width: 1, color: Color.Gray })
-      .borderRadius(8)
-      .margin({ top: 20 })
-
       // Running status indicator
       if (this.isRunning) {
         Row() {
@@ -203,6 +179,11 @@ export struct RateLimitTestPage {
    */
   private appendResult(text: string) {
     this.testResults += text;
+    const lines = this.testResults.split('\n');
+    if (lines.length > 80) {
+      this.testResults = lines.slice(lines.length - 80).join('\n');
+    }
+    DemoLogger.i(TAG, text.trim());
   }
 
   private formatError(error: Object): string {

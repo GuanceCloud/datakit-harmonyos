@@ -5,6 +5,9 @@ import { ErrorType, AppState } from 'shareLibrary/src/main/ets/components/rum/en
 import { StringWrapper } from 'shareLibrary/src/main/ets/components/utils/StringWrapper';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
+import { DemoLogger } from '../utils/DemoLogger';
+
+const TAG = 'RUMDataTestPage';
 
 class PropertyWrapper {
   value: string | number | boolean | object;
@@ -134,6 +137,11 @@ export struct RUMDataTestPage {
   private appendResult(message: string): void {
     const timestamp = new Date().toLocaleTimeString();
     this.testResults += `[${timestamp}] ${message}\n`;
+    const lines = this.testResults.split('\n');
+    if (lines.length > 80) {
+      this.testResults = lines.slice(lines.length - 80).join('\n');
+    }
+    DemoLogger.i(TAG, message);
   }
 
   private clearResults(): void {
@@ -653,26 +661,6 @@ export struct RUMDataTestPage {
           Text('Utilities').fontSize(18).fontWeight(FontWeight.Bold).margin({ top: 8, bottom: 12 })
           Button('Refresh SDK Status').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.checkSDKStatus())
           Button('Reset Counts').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.resetCounts())
-          Button('Clear Results').width('100%').height(48).margin({ bottom: 18 }).backgroundColor(Color.Orange).onClick(() => this.clearResults())
-
-          Text('Test Results')
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .margin({ top: 8, bottom: 12 })
-
-          Scroll() {
-            Text(this.testResults || 'No test results yet.')
-              .fontSize(14)
-              .fontFamily('monospace')
-              .textAlign(TextAlign.Start)
-              .width('100%')
-              .padding(10)
-              .backgroundColor(Color.Black)
-              .fontColor(Color.White)
-          }
-          .width('100%')
-          .height(320)
-          .border({ width: 1, color: Color.Gray })
         }
         .padding({ left: 20, right: 20, bottom: 24 })
       }

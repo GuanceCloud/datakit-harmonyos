@@ -408,16 +408,8 @@ export struct UIBlockTestPage {
 
           // Control buttons
           Row() {
-            Button('Clear Results')
-              .width('45%')
-              .height(40)
-              .backgroundColor('#FF9800')
-              .onClick(() => {
-                this.clearResults();
-              })
-
             Button('Refresh Status')
-              .width('45%')
+              .width('90%')
               .height(40)
               .backgroundColor('#4CAF50')
               .onClick(() => {
@@ -433,33 +425,6 @@ export struct UIBlockTestPage {
       }
       .layoutWeight(1)
       .width('100%')
-
-      Divider()
-
-      // Test results
-      Column() {
-        Text('Test Results')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .margin({ bottom: 10 })
-          .width('100%')
-
-        Scroll() {
-          Text(this.testResults)
-            .fontSize(12)
-            .fontFamily('monospace')
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .border({ width: 1, color: '#CCCCCC' })
-        .borderRadius(4)
-        .padding(10)
-        .backgroundColor('#FAFAFA')
-      }
-      .height(200)
-      .width('100%')
-      .padding(10)
     }
     .width('100%')
     .height('100%')
