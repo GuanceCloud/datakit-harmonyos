@@ -1,0 +1,10 @@
+# Build outputs
+build/
+.cxx/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

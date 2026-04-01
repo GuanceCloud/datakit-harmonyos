@@ -1,0 +1,949 @@
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig } from './Configs';
+import { DataType } from './enum/Enums';
+import { StringUtils } from './utils/StringUtils';
+import { Constants } from './Constants';
+import { FTInnerLogger } from './log/FTLogger';
+import { DataModifier, LineDataModifier, DefaultDataModifier, DefaultLineDataModifier } from './DataModifier';
+import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
+import { CollectType } from './rum/enum/RUMEnums';
+
+const TAG = "SyncDataHelper";
+
+export class SyncDataHelper {
+  private basePublicTags: Map<string, string> = new Map();
+  private logTags: Map<string, string> = new Map();
+  private rumTags: Map<string, string> = new Map();
+  private dynamicBaseTags: Map<string, string> = new Map();
+  private dynamicLogTags: Map<string, string> = new Map();
+  private dynamicRumTags: Map<string, string> = new Map();
+  private rumStaticFields: Map<string, string> = new Map(); // Aligned with Android: rumStaticFields
+  private config: FTSDKConfig | null = null;
+  private logConfig: FTLoggerConfig | null = null;
+  private dataModifier: DataModifier = new DefaultDataModifier();
+  private lineDataModifier: LineDataModifier = new DefaultLineDataModifier();
+  private enableDataIntegerCompatible: boolean = false; // Aligned with Android: integerCompatible
+
+  initBaseConfig(config: FTSDKConfig): void {
+    this.config = config;
+    this.dataModifier = config.getDataModifier() || new DefaultDataModifier();
+    this.lineDataModifier = config.getLineDataModifier() || new DefaultLineDataModifier();
+    this.enableDataIntegerCompatible = config.isDataIntegerCompatible(); // Aligned with Android
+    this.basePublicTags.clear();
+    const globalContext = config.getGlobalContext();
+
+    // Iterate through global context directly
+    globalContext.forEach((value: object, key: string) => {
+      // Use string value directly for tags (no JSON.stringify for simple strings)
+      // Convert object to string: String objects should use String(value), not JSON.stringify
+      // JSON.stringify would escape quotes in String objects, which is not desired
+      const stringValue = typeof value === 'string' ? value as string : String(value);
+      this.basePublicTags.set(key, this.dataModifier.modify(key, stringValue));
+    });
+  }
+
+  initLogConfig(config: FTLoggerConfig): void {
+    this.logTags.clear();
+    // Copy base public tags
+    this.basePublicTags.forEach((value, key) => {
+      this.logTags.set(key, value);
+    });
+    // Copy log configuration global context
+    const globalContext = config.getGlobalContext();
+
+    // Iterate through global context directly
+    globalContext.forEach((value: object, key: string) => {
+      // Use string value directly for tags (no JSON.stringify for simple strings)
+      let stringValue: string;
+      if (typeof value === 'string') {
+        stringValue = value as string;
+      } else if (typeof value === 'object' && value !== null) {
+        stringValue = JSON.stringify(value);
+      } else {
+        stringValue = String(value);
+      }
+      this.logTags.set(key, this.dataModifier.modify(key, stringValue));
+    });
+  }
+
+  initRUMConfig(config: FTRUMConfig): void {
+    this.rumTags.clear();
+    // Copy base public tags
+    this.basePublicTags.forEach((value, key) => {
+      this.rumTags.set(key, value);
+    });
+    // Copy RUM configuration global context
+    const globalContext = config.getGlobalContext();
+
+    // Iterate through global context directly
+    globalContext.forEach((value: object, key: string) => {
+      // Use string value directly for tags (no JSON.stringify for simple strings)
+      // Convert object to string: String objects should use String(value), not JSON.stringify
+      // JSON.stringify would escape quotes in String objects, which is not desired
+      const stringValue = typeof value === 'string' ? value as string : String(value);
+      this.rumTags.set(key, stringValue);
+    });
+
+    // Aligned with Android: add session sampling rate fields to rumStaticFields
+    // Android: rumStaticFields.put(Constants.KEY_SESSION_SAMPLE_RATE, applyModifier(...))
+    this.rumStaticFields.clear();
+    this.rumStaticFields.set(Constants.KEY_SESSION_SAMPLE_RATE, String(config.getSamplingRate()));
+    this.rumStaticFields.set(Constants.KEY_SESSION_ON_ERROR_SAMPLE_RATE, String(config.getSessionErrorSampleRate()));
+  }
+
+  appendGlobalContext(globalContext: Map<string, string>): void {
+    if (globalContext) {
+      globalContext.forEach((value, key) => {
+        this.dynamicBaseTags.set(key, this.dataModifier.modify(key, value));
+      });
+    }
+  }
+
+  appendGlobalContextByKeyValue(key: string, value: string): void {
+    if (key && value) {
+      this.dynamicBaseTags.set(key, this.dataModifier.modify(key, value));
+    }
+  }
+
+  /**
+   * Dynamically set RUM global tag
+   * @param globalContext RUM global context map
+   */
+  appendRUMGlobalContext(globalContext: Map<string, string>): void {
+    if (globalContext) {
+      globalContext.forEach((value, key) => {
+        this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+      });
+    }
+
+    // Add all hashmap keys as a JSON string array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
+    const keys = Array.from(globalContext.keys());
+    const existingCustomKeys = this.rumTags.get(Constants.KEY_RUM_CUSTOM_KEYS);
+    let customKeysArray: string[] = [];
+
+    if (existingCustomKeys) {
+      try {
+        customKeysArray = JSON.parse(existingCustomKeys);
+      } catch (e) {
+        // If parsing fails, start fresh
+        customKeysArray = [];
+      }
+    }
+
+    // Add new keys (avoid duplicates)
+    keys.forEach(key => {
+      if (!customKeysArray.includes(key)) {
+        customKeysArray.push(key);
+      }
+    });
+
+    this.rumTags.set(Constants.KEY_RUM_CUSTOM_KEYS, JSON.stringify(customKeysArray));
+  }
+
+  /**
+   * Dynamically set RUM global tag
+   * @param key Tag key
+   * @param value Tag value
+   */
+  appendRUMGlobalContextByKeyValue(key: string, value: string): void {
+    if (key && value) {
+      this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+    }
+
+    // Add key to custom_keys array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
+    const newKey = key;
+    const existingCustomKeys = this.rumTags.get(Constants.KEY_RUM_CUSTOM_KEYS);
+    let customKeysArray: string[] = [];
+
+    if (existingCustomKeys) {
+      try {
+        customKeysArray = JSON.parse(existingCustomKeys);
+      } catch (e) {
+        // If parsing fails, start fresh
+        customKeysArray = [];
+      }
+    }
+
+    // Add new key (avoid duplicates)
+    if (!customKeysArray.includes(newKey)) {
+      customKeysArray.push(newKey);
+    }
+
+    this.rumTags.set(Constants.KEY_RUM_CUSTOM_KEYS, JSON.stringify(customKeysArray));
+  }
+
+  /**
+   * Dynamically set log global tag
+   * @param globalContext Log global context map
+   */
+  appendLogGlobalContext(globalContext: Map<string, string>): void {
+    if (globalContext) {
+      globalContext.forEach((value, key) => {
+        this.dynamicLogTags.set(key, this.dataModifier.modify(key, value));
+      });
+    }
+  }
+
+  /**
+   * Dynamically set log global tag
+   * @param key Tag key
+   * @param value Tag value
+   */
+  appendLogGlobalContextByKeyValue(key: string, value: string): void {
+    if (key && value) {
+      this.dynamicLogTags.set(key, this.dataModifier.modify(key, value));
+    }
+  }
+
+
+  /**
+   * Check if session should be collected
+   * Aligned with Android: checks sampling rate via FTRUMInnerManager
+   */
+  checkSessionWillCollect(sessionId: string): boolean {
+    if (!sessionId) {
+      return true; // If no session ID, collect by default
+    }
+
+    // Check session collection based on sampling rate (aligned with Android)
+    try {
+      const collectType = FTRUMInnerManager.getInstance().checkSessionWillCollect(sessionId);
+      // Return true only if CollectType is ALL (not DROP or SAMPLING)
+      const willCollect = collectType === CollectType.ALL;
+
+      return willCollect;
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error checking session collection: ${error}`);
+      // Default to collect if error occurs
+      return true;
+    }
+  }
+
+  getBodyContent(
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    timeStamp: number,
+    dataType: DataType,
+    uuid: string
+  ): string {
+    let mergeTags: Map<string, string> = new Map();
+    mergeTags.set(Constants.KEY_SDK_DATA_FLAG, uuid);
+    if (tags) {
+      tags.forEach((value, key) => mergeTags.set(key, value));
+    }
+
+    let bodyContent = "";
+
+    switch (dataType) {
+      case DataType.LOG:
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicLogTags, this.logTags);
+        // Aligned with Android: if logConfig.isEnableLinkRumData(), merge rumTags
+        if (this.logConfig !== null) {
+          if (this.logConfig.isEnableLinkRumData()) {
+            // Merge RUM tags (static RUM tags from SyncDataHelper)
+            this.rumTags.forEach((value, key) => {
+              mergeTags.set(key, value);
+            });
+          }
+        }
+        // Apply line data modifier
+        const logModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
+        // Save tag keys before clearing
+        const tagKeys = new Set(mergeTags.keys());
+        mergeTags.clear();
+        fields.clear();
+        logModifiedData.forEach((value, key) => {
+          if (tagKeys.has(key)) {
+            mergeTags.set(key, value);
+          } else {
+            fields.set(key, value);
+          }
+        });
+        bodyContent = SyncDataHelper.convertToLineProtocolLine(
+          measurement,
+          mergeTags,
+          fields,
+          timeStamp,
+          this.enableDataIntegerCompatible
+        );
+        break;
+      case DataType.RUM_APP:
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.rumTags);
+        // Aligned with Android: add rumStaticFields to fields (fields.putAll(rumStaticFields))
+        this.rumStaticFields.forEach((value, key) => {
+          fields.set(key, value);
+        });
+        // Apply line data modifier
+        const rumModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
+        // Save tag keys before clearing
+        const rumTagKeys = new Set(mergeTags.keys());
+        mergeTags.clear();
+        fields.clear();
+        rumModifiedData.forEach((value, key) => {
+          if (rumTagKeys.has(key)) {
+            mergeTags.set(key, value);
+          } else {
+            fields.set(key, value);
+          }
+        });
+        // Aligned with Android: re-add rumStaticFields after lineDataModifier (fields.putAll(rumStaticFields))
+        // This ensures sampling rate fields are not lost after lineDataModifier processing
+        this.rumStaticFields.forEach((value, key) => {
+          fields.set(key, value);
+        });
+        bodyContent = SyncDataHelper.convertToLineProtocolLine(
+          measurement,
+          mergeTags,
+          fields,
+          timeStamp,
+          this.enableDataIntegerCompatible
+        );
+        break;
+      case DataType.RUM_WEBVIEW:
+        // Aligned with Android: SyncDataHelper.getBodyContent() for RUM_WEBVIEW
+        // IMPORTANT: Save webview's service and sdk_version fields BEFORE merging tags, as they should be preserved
+        // Android logic: service=browser from webview is preserved by skipping KEY_SERVICE in rumTags iteration
+        const webviewService = mergeTags.get(Constants.KEY_SERVICE);
+        // IMPORTANT: Save webview's sdk_version BEFORE merging tags, as native SDK's sdk_version will override it
+        // This ensures we get the correct Web SDK version for sdk_pkg_info
+        const webviewSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
+
+        // Merge dynamic base tags and RUM tags first (aligned with Android: mergeTags.putAll(dynamicBaseTags); mergeTags.putAll(dynamicLRumTags))
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, new Map());
+
+        // Restore webview's service field if it exists (preserve service=browser from webview)
+        if (webviewService && webviewService.length > 0) {
+          mergeTags.set(Constants.KEY_SERVICE, webviewService);
+        }
+
+        // Restore webview's sdk_version field if it exists (preserve Web SDK version from webview)
+        // This ensures mergeTags has the correct sdk_version for any other use cases
+        if (webviewSDKVersion && webviewSDKVersion.length > 0) {
+          mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
+        }
+
+        // IMPORTANT: Get Web SDK version from saved webviewSDKVersion, not from mergeTags after merging
+        // Android logic: Object webSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
+        // But Android doesn't merge dynamic tags that would override sdk_version, so we need to preserve it
+        const webSDKVersion = (webviewSDKVersion && webviewSDKVersion.length > 0) ? webviewSDKVersion :
+          (mergeTags.get(Constants.KEY_SDK_VERSION) || "");
+        // FTInnerLogger.d(TAG,
+        //   `[RUM-WEBVIEW] Web SDK version: "${webSDKVersion}" (saved from webview: ${webviewSDKVersion ||
+        //     'none'}, from mergeTags after restore: ${mergeTags.get(Constants.KEY_SDK_VERSION) || 'none'})`);
+
+        // Debug: Check if webSDKVersion looks like a version number (contains digits and dots) or SDK name
+        if (webSDKVersion && !webSDKVersion.match(/^\d+\.\d+/)) {
+          // FTInnerLogger.w(TAG,
+          //   `[RUM-WEBVIEW] ⚠️ Web SDK version "${webSDKVersion}" doesn't look like a version number (expected format: X.Y.Z). This might be SDK name instead of version.`);
+        }
+
+        // Aligned with Android: iterate through rumTags and replace all except KEY_SERVICE
+        // Android logic: Iterator<String> keys = rumTags.keySet().iterator(); while (keys.hasNext()) { String key = keys.next(); if (!key.equals(Constants.KEY_SERVICE)) { ... } }
+        // Debug: Log app_id in rumTags and mergeTags before replacement
+        // const rumTagsAppId = this.rumTags.get(Constants.KEY_RUM_APP_ID);
+        // const mergeTagsAppIdBefore = mergeTags.get(Constants.KEY_RUM_APP_ID);
+        // FTInnerLogger.d(TAG,
+        //   `[RUM-WEBVIEW] app_id in rumTags: "${rumTagsAppId}", in mergeTags before replacement: "${mergeTagsAppIdBefore}"`);
+
+        this.rumTags.forEach((value, key) => {
+          if (key !== Constants.KEY_SERVICE) {
+            if (key === Constants.KEY_SDK_PACKAGE_INFO) {
+              // Append Web SDK version to sdk_pkg_info (aligned with Android: PackageUtils.appendPackageVersion)
+              // Android SDK always calls appendPackageVersion even if webSDKVersion is null (converts to empty string)
+              if (value && typeof value === 'string' && value.trim().startsWith('{')) {
+                // Check if web version already exists in the JSON
+                const hasWebVersion = value.includes(`"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`);
+                if (!hasWebVersion) {
+                  // Aligned with Android: always append web version, even if webSDKVersion is empty/null
+                  // Android: PackageUtils.appendPackageVersion(pkgInfo.toString(), KEY_RUM_SDK_PACKAGE_WEB, webSDKVersion + "")
+                  const webVersionStr = webSDKVersion || ""; // Convert null/undefined to empty string
+                  // Use helper function to parse and append web version
+                  const updatedPkgInfo = this.parseAndAppendWebVersion(value, webVersionStr);
+                  if (updatedPkgInfo) {
+                    mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                  } else {
+                    // Fallback: use string manipulation if JSON parsing fails (aligned with Android's appendPackageVersion)
+                    const appendPkgInfo = value.substring(0, 1) +
+                      `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
+                    value.substring(1);
+                    mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                  }
+                } else {
+                  // Already has web version, use original value
+                  mergeTags.set(key, value);
+                }
+              } else {
+                // If not JSON format, use original value
+                mergeTags.set(key, value);
+              }
+            } else {
+              mergeTags.set(key, value);
+            }
+          }
+          // Aligned with Android: KEY_SERVICE is skipped, so webview's service=browser is preserved
+        });
+
+        // Apply line data modifier
+        const webviewModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
+        // Save tag keys before clearing
+        const webviewTagKeys = new Set(mergeTags.keys());
+        mergeTags.clear();
+        fields.clear();
+        webviewModifiedData.forEach((value, key) => {
+          if (webviewTagKeys.has(key)) {
+            mergeTags.set(key, value);
+          } else {
+            fields.set(key, value);
+          }
+        });
+
+        // After line data modifier, ensure sdk_pkg_info has web SDK version
+        // The line data modifier might have modified sdk_pkg_info, so we need to check again
+        // Aligned with Android: always append web version, even if webSDKVersion is empty/null
+        if (mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
+          let finalPkgInfo = mergeTags.get(Constants.KEY_SDK_PACKAGE_INFO);
+
+          // Remove surrounding quotes if present (line data modifier may add quotes)
+          if (finalPkgInfo && typeof finalPkgInfo === 'string') {
+            const trimmed = finalPkgInfo.trim();
+            if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+                (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+              finalPkgInfo = trimmed.substring(1, trimmed.length - 1);
+            }
+          }
+
+          if (finalPkgInfo && typeof finalPkgInfo === 'string') {
+            try {
+              // Check if web version already exists by searching for the key in the string
+              const webKeyPattern = `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`;
+              const hasWebVersion = finalPkgInfo.includes(webKeyPattern);
+              const webVersionStr =
+                webSDKVersion || ""; // Convert null/undefined to empty string (aligned with Android)
+              // FTInnerLogger.d(TAG,
+              //   `[RUM-WEBVIEW] Has web version in sdk_pkg_info: ${hasWebVersion}, webSDKVersion: "${webVersionStr}"`);
+
+              if (!hasWebVersion) {
+                // Aligned with Android: always append web version, even if webSDKVersion is empty/null
+                // Use helper function to parse and append web version
+                const updatedPkgInfo = this.parseAndAppendWebVersion(finalPkgInfo, webVersionStr);
+                if (updatedPkgInfo) {
+                  mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                    this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                } else {
+                  // Fallback: use string manipulation if JSON parsing fails (aligned with Android's appendPackageVersion)
+                  const jsonStr = finalPkgInfo.trim();
+                  if (jsonStr.startsWith('{') && jsonStr.endsWith('}')) {
+                    // Insert "web":"version" after the first {
+                    const appendPkgInfo = jsonStr.substring(0, 1) +
+                      `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
+                    jsonStr.substring(1);
+                    mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                  }
+                }
+              }
+            } catch (error) {
+              FTInnerLogger.e(TAG, `Error processing sdk_pkg_info: ${error}`);
+            }
+          }
+        }
+        bodyContent = SyncDataHelper.convertToLineProtocolLine(
+          measurement,
+          mergeTags,
+          fields,
+          timeStamp,
+          this.enableDataIntegerCompatible
+        );
+        break;
+      default:
+        // Use base tags by default
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.basePublicTags);
+        // Apply line data modifier
+        const defaultModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
+        // Save tag keys before clearing
+        const defaultTagKeys = new Set(mergeTags.keys());
+        mergeTags.clear();
+        fields.clear();
+        defaultModifiedData.forEach((value, key) => {
+          if (defaultTagKeys.has(key)) {
+            mergeTags.set(key, value);
+          } else {
+            fields.set(key, value);
+          }
+        });
+        bodyContent = SyncDataHelper.convertToLineProtocolLine(
+          measurement,
+          mergeTags,
+          fields,
+          timeStamp,
+          this.enableDataIntegerCompatible
+        );
+        break;
+    }
+    return bodyContent;
+  }
+
+  private mergeDynamicTags(
+    mergeTags: Map<string, string>,
+    baseTags: Map<string, string>,
+    dynamicTags: Map<string, string>,
+    staticTags: Map<string, string>
+  ): void {
+    // Merge all tags with priority: dynamic tags > static tags > base tags
+    const allTags = new Map<string, string>();
+
+    // Add base tags
+    baseTags.forEach((value, key) => allTags.set(key, value));
+
+    // Add static tags (override base tags)
+    staticTags.forEach((value, key) => allTags.set(key, value));
+
+    // Add dynamic tags (override static tags)
+    dynamicTags.forEach((value, key) => allTags.set(key, value));
+
+    // Add passed tags (highest priority)
+    mergeTags.forEach((value, key) => allTags.set(key, value));
+
+    // Update mergeTags
+    mergeTags.clear();
+    allTags.forEach((value, key) => mergeTags.set(key, value));
+  }
+
+  /**
+   * Generate Line Protocol string from measurement, tags, fields and timestamp
+   * @param measurement - The measurement name
+   * @param tags - Map of tag key-value pairs
+   * @param fields - Map of field key-value pairs
+   * @param timeStamp - Timestamp in microseconds
+   * @param integerCompatible - Whether to use integer format for numbers (default: false)
+   * @returns Line Protocol formatted string
+   */
+  static convertToLineProtocolLine(
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    timeStamp: number,
+    integerCompatible: boolean = false
+  ): string {
+
+    if (!measurement) {
+      throw new Error("Measurement cannot be null");
+    }
+    if (!fields) {
+      throw new Error("Fields cannot be null");
+    }
+
+    const sb = SyncDataHelper.buildLineProtocol(measurement, tags, fields, timeStamp, integerCompatible);
+
+    return sb;
+  }
+
+  /**
+   * Build Line Protocol string
+   * @param measurement - The measurement name
+   * @param tags - Map of tag key-value pairs
+   * @param fields - Map of field key-value pairs
+   * @param timeStamp - Timestamp in microseconds
+   * @param integerCompatible - Whether to use integer format for numbers
+   * @returns Line Protocol formatted string
+   */
+  private static buildLineProtocol(
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    timeStamp: number,
+    integerCompatible: boolean
+  ): string {
+    let sb = "";
+
+    // Escape measurement
+    const escapedMeasurement = SyncDataHelper.translateMeasurements(measurement);
+    sb += escapedMeasurement;
+
+    // Add tags
+    const tagsStr = SyncDataHelper.getCustomHash(tags, true, integerCompatible);
+    if (tagsStr && tagsStr.length > 0) {
+      sb += "," + tagsStr;
+    }
+
+    // Add fields
+    const fieldsStr = SyncDataHelper.getCustomHash(fields, false, integerCompatible);
+    if (fieldsStr && fieldsStr.length > 0) {
+      sb += " " + fieldsStr;
+    }
+
+    // Add timestamp
+    if (timeStamp) {
+      sb += " " + timeStamp;
+    }
+
+    return sb;
+  }
+
+  /**
+   * Get custom hash - 
+   * @param obj - Map of key-value pairs
+   * @param isTag - true for tags, false for fields
+   * @param integerCompatible - Whether to use integer format for numbers
+   */
+  static getCustomHash(obj: Map<string, string>, isTag: boolean, integerCompatible: boolean): string {
+    let sb = "";
+    let first = true;
+
+    obj.forEach((value, key) => {
+
+      // Check if value is null or undefined
+      if (value === null || value === undefined) {
+        return; // Skip null and undefined values
+      }
+
+      // Check if string value is empty
+      if (typeof value === 'string' && StringUtils.isEmpty(value)) {
+        return; // Skip empty string values
+      }
+
+      if (!first) {
+        sb += ",";
+      }
+      first = false;
+
+      // Escape key
+      const escapedKey = SyncDataHelper.translateTagKeyValue(key);
+
+      if (typeof value === 'number') {
+        // Aligned with Android: if integerCompatible=true, output as integer (no "i" suffix)
+        // if integerCompatible=false, output as integer with "i" suffix
+        if (integerCompatible && Number.isInteger(value)) {
+          sb += `${escapedKey}=${value}`;
+        } else if (Number.isInteger(value)) {
+          sb += `${escapedKey}=${value}i`;
+        } else {
+          sb += `${escapedKey}=${value}`;
+        }
+      } else if (typeof value === 'boolean') {
+        sb += `${escapedKey}=${value}`;
+      } else if (typeof value === 'string') {
+        // Try to parse string as number for integerCompatible mode (aligned with Android)
+        // Android outputs Long/Integer as numbers, not strings
+        if (integerCompatible && !isTag) {
+          // Try to parse as integer first
+          const intValue = Number.parseInt(value, 10);
+          if (!Number.isNaN(intValue) && String(intValue) === value.trim()) {
+            // It's a valid integer string, output as number (aligned with Android)
+            sb += `${escapedKey}=${intValue}`;
+            return; // Skip to next iteration in forEach
+          }
+          // Try to parse as float
+          const floatValue = Number.parseFloat(value);
+          if (!Number.isNaN(floatValue) && String(floatValue) === value.trim()) {
+            // It's a valid float string, output as number
+            sb += `${escapedKey}=${floatValue}`;
+            return; // Skip to next iteration in forEach
+          }
+        }
+
+        let cleanValue = value;
+
+        // Check if it's a JSON object string like {"value":"harmonyos"}
+        if (value.startsWith('{') && value.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(value) as Record<string, object>;
+            if (parsed && typeof parsed === 'object' && parsed.value !== undefined) {
+              let extractedValue = String(parsed.value);
+              // Remove quotes if present
+              if (extractedValue.startsWith('"') && extractedValue.endsWith('"')) {
+                extractedValue = extractedValue.slice(1, -1);
+              }
+              cleanValue = extractedValue;
+            }
+          } catch (parseError) {
+            // JSON parsing failed, keep original value
+          }
+        } else if (value.startsWith('"') && value.endsWith('"')) {
+          // Remove leading and trailing quotes if present
+          cleanValue = value.slice(1, -1);
+        }
+
+        // Check if it's a numeric or boolean string - if so, don't add quotes in line protocol
+        // This handles values like "123", "-436", "true", "false" which should not have quotes
+        if (!isTag) {
+          // For fields, check if the string represents a number or boolean
+          const numericPattern = /^-?\d+(\.\d+)?$/;
+          if (cleanValue && (numericPattern.test(cleanValue) || cleanValue === 'true' || cleanValue === 'false' || cleanValue === 'T' || cleanValue === 'F')) {
+            // It's a numeric or boolean string, output without quotes
+            sb += `${escapedKey}=${cleanValue}`;
+          } else {
+            // It's a real string, add quotes
+            const fieldValue = SyncDataHelper.translateFieldValue(cleanValue);
+            sb += `${escapedKey}=${fieldValue}`;
+          }
+        } else {
+          // For tags, use translateTagKeyValue
+          // Special handling for JSON strings like sdk_pkg_info: don't escape commas inside JSON
+          let tagValue: string;
+          if (key === Constants.KEY_SDK_PACKAGE_INFO && cleanValue.startsWith('{') && cleanValue.endsWith('}')) {
+            // For JSON strings in sdk_pkg_info, only escape special characters outside JSON structure
+            // Don't escape commas inside the JSON string
+            tagValue = SyncDataHelper.translateTagKeyValueForJson(cleanValue);
+          } else {
+            tagValue = SyncDataHelper.translateTagKeyValue(cleanValue);
+          }
+          sb += `${escapedKey}=${tagValue}`;
+        }
+      } else {
+        // Object type, check if it's a StringWrapper or simple string value
+        if (typeof value === 'object' && value !== null) {
+          const valueObj = value as Record<string, object>;
+
+          // Check if it's a StringWrapper instance
+
+          // Simplified approach: Check for 'value' property first
+          if (valueObj['value'] !== undefined && typeof valueObj['value'] === 'string') {
+            // It's an object with 'value' property containing string, extract the string value
+            let stringValue = valueObj['value'] as string;
+            // Remove quotes if present
+            if (stringValue.startsWith('"') && stringValue.endsWith('"')) {
+              stringValue = stringValue.slice(1, -1);
+            }
+            const fieldValue = isTag ?
+              SyncDataHelper.translateTagKeyValue(stringValue) :
+              SyncDataHelper.translateFieldValue(stringValue);
+            sb += `${escapedKey}=${fieldValue}`;
+          } else if (typeof valueObj['getValue'] === 'function') {
+            // It has getValue method, try calling it
+            try {
+              const stringValue = (valueObj['getValue'] as () => string)();
+              const fieldValue = isTag ?
+                SyncDataHelper.translateTagKeyValue(stringValue) :
+                SyncDataHelper.translateFieldValue(stringValue);
+              sb += `${escapedKey}=${fieldValue}`;
+            } catch (error) {
+              // Fallback to toString() for String objects
+              try {
+                const stringValue = String(value);
+                const fieldValue = isTag ?
+                  SyncDataHelper.translateTagKeyValue(stringValue) :
+                  SyncDataHelper.translateFieldValue(stringValue);
+                sb += `${escapedKey}=${fieldValue}`;
+              } catch (error2) {
+                FTInnerLogger.e(TAG, `Failed to convert object to string for key ${key}`);
+              }
+            }
+          } else {
+            // Try to convert object to string (handles String wrapper objects)
+            try {
+              const stringValue = String(value);
+              if (stringValue.startsWith('{"') && stringValue.endsWith('}')) {
+                // Try to parse as JSON and extract value if possible
+                try {
+                  const parsed = JSON.parse(stringValue) as Record<string, object>;
+                  if (parsed && typeof parsed === 'object' && parsed.value !== undefined) {
+                    let extractedValue = String(parsed.value);
+                    // Remove quotes if present
+                    if (extractedValue.startsWith('"') && extractedValue.endsWith('"')) {
+                      extractedValue = extractedValue.slice(1, -1);
+                    }
+                    const fieldValue = isTag ?
+                      SyncDataHelper.translateTagKeyValue(extractedValue) :
+                      SyncDataHelper.translateFieldValue(extractedValue);
+                    sb += `${escapedKey}=${fieldValue}`;
+                  } else {
+                    // Not a value wrapper, use as is
+                    const fieldValue = isTag ?
+                      SyncDataHelper.translateTagKeyValue(stringValue) :
+                      SyncDataHelper.translateFieldValue(stringValue);
+                    sb += `${escapedKey}=${fieldValue}`;
+                  }
+                } catch (parseError) {
+                  // JSON parsing failed, use as regular string
+                  const fieldValue = isTag ?
+                    SyncDataHelper.translateTagKeyValue(stringValue) :
+                    SyncDataHelper.translateFieldValue(stringValue);
+                  sb += `${escapedKey}=${fieldValue}`;
+                }
+              } else {
+                const fieldValue = isTag ?
+                  SyncDataHelper.translateTagKeyValue(stringValue) :
+                  SyncDataHelper.translateFieldValue(stringValue);
+                sb += `${escapedKey}=${fieldValue}`;
+              }
+            } catch (error) {
+              const jsonValue = JSON.stringify(value);
+              const fieldValue = isTag ?
+                SyncDataHelper.translateTagKeyValue(jsonValue) :
+                SyncDataHelper.translateFieldValue(jsonValue);
+              sb += `${escapedKey}=${fieldValue}`;
+            }
+          }
+        }
+      }
+    });
+
+    return sb;
+  }
+
+  /**
+   * Convert Tag Key, Tag Value or Field Key
+   * Aligned with Android: Utils.translateTagKeyValue()
+   */
+  static translateTagKeyValue(oldStr: string): string {
+    if (!oldStr) return "";
+
+    // Aligned with Android: oldStr = oldStr.replace("\n", " ");
+    oldStr = oldStr.replace(/\n/g, " "); // Replace newline with space
+    // Aligned with Android: oldStr = oldStr.replace("\\", "");
+    oldStr = oldStr.replace(/\\/g, ""); // Remove backslashes (Android SDK behavior)
+    oldStr = SyncDataHelper.translateSpecialCharacters(",", oldStr);
+    oldStr = SyncDataHelper.translateSpecialCharacters("=", oldStr);
+    return SyncDataHelper.translateSpecialCharacters(" ", oldStr);
+  }
+
+  /**
+   * Convert Tag Value for JSON strings (like sdk_pkg_info)
+   * In line protocol, tag values with commas must be escaped, even inside JSON strings
+   * This method ensures proper escaping while preserving JSON structure
+   */
+  static translateTagKeyValueForJson(jsonStr: string): string {
+    if (!jsonStr) return "";
+
+    // For JSON strings in line protocol tags, we need to escape special characters
+    // Aligned with Android SDK's translateTagKeyValue: escape comma, equals, and space
+    // Android format: {"agent":"1.6.15-alpha02"\,\ "native":"1.1.2"\,\ "track":"1.3.5"}
+    // The comma and space are both escaped: \, and \ (resulting in \,\ )
+
+    // Replace newlines, carriage returns, and tabs with spaces (aligned with Android)
+    let result = jsonStr.replace(/\n/g, " ");
+    result = result.replace(/\r/g, " ");
+    result = result.replace(/\t/g, " ");
+
+    // Escape commas, equals signs, and spaces (aligned with Android SDK's translateTagKeyValue)
+    // Android SDK: oldStr = translateSpecialCharacters(",", oldStr);
+    //              oldStr = translateSpecialCharacters("=", oldStr);
+    //              return translateSpecialCharacters(" ", oldStr);
+    result = SyncDataHelper.translateSpecialCharacters(",", result);
+    result = SyncDataHelper.translateSpecialCharacters("=", result);
+    result = SyncDataHelper.translateSpecialCharacters(" ", result); // Space escaping is enabled
+
+    return result;
+  }
+
+  /**
+   * Convert Measurement
+   * Aligned with Android: Utils.translateMeasurements()
+   */
+  static translateMeasurements(oldStr: string): string {
+    if (!oldStr) return "";
+
+    // Aligned with Android: oldStr = oldStr.replace("\\", "");
+    oldStr = oldStr.replace(/\\/g, ""); // Remove backslashes (Android SDK behavior)
+    oldStr = SyncDataHelper.translateSpecialCharacters(",", oldStr);
+    return SyncDataHelper.translateSpecialCharacters(" ", oldStr);
+  }
+
+  /**
+   * Convert Field Value - Always adds quotes (Android SDK logic)
+   */
+  static translateFieldValue(oldStr: string): string {
+    if (!oldStr) return '""';
+
+    // Escape special characters and wrap in quotes (Android SDK logic)
+    // Note: Android's JSONObject.quote() always adds quotes, even for valid JSON
+    oldStr = oldStr.replace(/\\/g, "\\\\"); // Escape backslash
+    oldStr = SyncDataHelper.translateSpecialCharacters("\"", oldStr); // Escape quotes
+    return `"${oldStr}"`; // Wrap in quotes
+  }
+
+  /**
+   * Escape special characters
+   */
+  static translateSpecialCharacters(special: string, oldStr: string): string {
+    if (!oldStr || !special) return oldStr;
+
+    const specialRegex = new RegExp(special.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g");
+    return oldStr.replace(specialRegex, `\\${special}`);
+  }
+
+  /**
+   * Helper to unescape JSON string (e.g., {\"agent\":\"0.1.0\"} -> {"agent":"0.1.0"})
+   * @param jsonStr JSON string that may be escaped
+   * @returns Unescaped JSON string
+   */
+  private unescapeJsonString(jsonStr: string): string {
+    // Replace escaped quotes and backslashes
+    // \" -> "
+    // \\ -> \
+    let unescaped = jsonStr;
+    // Replace \\" with " (escaped quote)
+    unescaped = unescaped.replace(/\\"/g, '"');
+    // Replace \\\\ with \\ (escaped backslash)
+    unescaped = unescaped.replace(/\\\\/g, '\\');
+    return unescaped;
+  }
+
+  /**
+   * Format JSON string to match Android SDK format (spaces after commas)
+   * Android SDK uses PackageUtils.appendPackageVersion which adds ", " (comma + space)
+   * @param jsonStr JSON string
+   * @returns Formatted JSON string with spaces after commas
+   */
+  private formatJsonStringWithSpaces(jsonStr: string): string {
+    // Replace "," with ", " (comma followed by space) to match Android format
+    // This only replaces commas between key-value pairs, not commas inside string values
+    // Pattern: "key":"value","key2" -> "key":"value", "key2"
+    return jsonStr.replace(/","/g, '", "');
+  }
+
+  /**
+   * Helper to parse JSON string that may be escaped, and add web SDK version
+   * @param jsonStr JSON string (may be escaped)
+   * @param webSDKVersion Web SDK version to add
+   * @returns Updated JSON string with web SDK version, or null if parsing fails
+   */
+  private parseAndAppendWebVersion(jsonStr: string, webSDKVersion: string): string | null {
+    if (!jsonStr || !webSDKVersion) {
+      return null;
+    }
+
+    let pkgInfoObj: object | null = null;
+
+    // Try to parse as-is first
+    try {
+      pkgInfoObj = JSON.parse(jsonStr.trim());
+    } catch (parseError) {
+      // If parsing fails, try unescaping first
+      try {
+        const unescaped = this.unescapeJsonString(jsonStr.trim());
+        pkgInfoObj = JSON.parse(unescaped);
+      } catch (parseError2) {
+        return null;
+      }
+    }
+
+    if (!pkgInfoObj || typeof pkgInfoObj !== 'object') {
+      return null;
+    }
+
+    // Check if web version already exists
+    const pkgInfoRecord = pkgInfoObj as Record<string, string>;
+    if (pkgInfoRecord[Constants.KEY_RUM_SDK_PACKAGE_WEB]) {
+      // Already has web version, return as-is with spaces after commas
+      return this.formatJsonStringWithSpaces(JSON.stringify(pkgInfoObj));
+    }
+
+    // Add web version to the object
+    const updatedPkgInfo: Record<string, string> = {};
+    updatedPkgInfo[Constants.KEY_RUM_SDK_PACKAGE_WEB] = webSDKVersion;
+
+    // Copy existing properties
+    const existingKeys = Object.keys(pkgInfoRecord);
+    for (let i = 0; i < existingKeys.length; i++) {
+      const key = existingKeys[i];
+      updatedPkgInfo[key] = pkgInfoRecord[key];
+    }
+
+    // Return as JSON string with spaces after commas (to match Android SDK format)
+    return this.formatJsonStringWithSpaces(JSON.stringify(updatedPkgInfo));
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "modelVersion": "5.0.0",
+  "description": "FT SDK HarmonyOS - 监控、分析和性能管理SDK",
+  "dependencies": {
+    "@abner/dialog": "^1.2.6"
+  },
+  "devDependencies": {
+    "@ohos/hypium": "1.0.19"
+  },
+  "dynamicDependencies": {}
+}

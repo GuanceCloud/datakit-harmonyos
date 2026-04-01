@@ -1,0 +1,25 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/WebViewPage",
+    "pages/NavigationStackDemoPage",
+    "pages/NavSubPage1",
+    "pages/NavSubPage2",
+    "pages/BatchUploadTestPage",
+    "pages/ViewUpdateTimeTestPage",
+    "pages/RealAppStressTestPage",
+    "pages/StressTestAPage",
+    "pages/StressTestBPage",
+    "pages/ButtonClickTestPage",
+    "pages/CrashTestPage",
+    "pages/UIBlockTestPage",
+    "pages/RUMDataTestPage",
+    "pages/ActionCountTestPage",
+    "pages/TraceTestPage",
+    "pages/HttpAutoTrackTestPage",
+    "pages/RateLimitTestPage",
+    "pages/DBCacheLimitTestPage",
+    "pages/DataSyncTestPage",
+    "pages/LogBackgroundTestPage"
+  ]
+}
