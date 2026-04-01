@@ -119,6 +119,8 @@ interface HttpAutoTrackState {
 
 class HttpAutoTrackStateStore {
   private static instance: HttpAutoTrackStateStore | null = null;
+  // INITIAL_REQUEST and FINAL_RESPONSE run in different callbacks, so we keep
+  // the request context here until the final response interceptor completes.
   private readonly stateMap: Map<string, HttpAutoTrackState> = new Map();
 
   public static getInstance(): HttpAutoTrackStateStore {
@@ -151,6 +153,8 @@ function normalizeObjectHeaders(headers?: Object | null): Record<string, string>
     return normalized;
   }
 
+  // Harmony http interceptor headers are exposed as Object, so normalize them
+  // before we reuse the existing trace/resource helpers.
   const rawHeaders = headers as Record<string, Object>;
   const keys = Object.keys(rawHeaders);
   for (let i = 0; i < keys.length; i++) {
@@ -972,6 +976,9 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
 /**
  * HTTP INITIAL_REQUEST interceptor.
  * It injects trace headers and records the resource start point so it can be finished in FINAL_RESPONSE.
+ * @syscap SystemCapability.Communication.NetStack
+ * @atomicservice
+ * @since 22
  */
 export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
   interceptorType: http.InterceptorType = http.InterceptorType.INITIAL_REQUEST;
@@ -1000,6 +1007,8 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
     try {
       const url = reqContext.url;
+      // HttpRequestContext does not currently expose the request method, so we
+      // keep a stable placeholder to preserve the resourceId contract.
       const method = HTTP_METHOD_UNKNOWN;
       const headers = normalizeObjectHeaders(reqContext.header);
       const uniqueId = ensureHttpResourceId(headers);
@@ -1031,6 +1040,8 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
         });
 
         finalHeaders = {};
+        // Rebuild a plain object here because HttpRequestContext.header expects
+        // an Object instead of a Map-like structure.
         const interceptedHeaders = Array.from(interceptedRequest.headers.entries());
         for (let i = 0; i < interceptedHeaders.length; i++) {
           const entry = interceptedHeaders[i];
@@ -1073,6 +1084,9 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 /**
  * HTTP FINAL_RESPONSE interceptor.
  * It complements the INITIAL_REQUEST interceptor by transforming the final response into the existing resource model.
+ * @syscap SystemCapability.Communication.NetStack
+ * @atomicservice
+ * @since 22
  */
 export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
   interceptorType: http.InterceptorType = http.InterceptorType.FINAL_RESPONSE;
@@ -1168,6 +1182,8 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
           resourceParams.setResponseContentLength(contentLength);
         }
 
+        // NetworkKit's interceptor API does not expose the detailed timing
+        // breakdown available in RCP timeInfo, so we only provide total load.
         const durationNs = (Date.now() - state.startTime) * 1000000;
         const metricValue: PerformanceMetricValue = { value: durationNs };
         resourceParams.addProperty('resourceLoad', metricValue);
@@ -1267,6 +1283,10 @@ export function createDefaultFTInterceptors(
 
 /**
  * Build the default FT interceptor list for @kit.NetworkKit http requests.
+ * @returns { http.HttpInterceptor[] } The FT interceptor list for Harmony HTTP requests.
+ * @syscap SystemCapability.Communication.NetStack
+ * @atomicservice
+ * @since 22
  */
 export function createDefaultFTHttpInterceptors(
   enableTraceInterceptor?: boolean,
@@ -1289,6 +1309,11 @@ export function createDefaultFTHttpInterceptors(
 
 /**
  * Create an HTTP interceptor chain that can be attached to a specific HttpRequest instance.
+ * @param { FTHttpInterceptorChainOptions } options - The FT HTTP interceptor chain options.
+ * @returns { http.HttpInterceptorChain } The FT HTTP interceptor chain.
+ * @syscap SystemCapability.Communication.NetStack
+ * @atomicservice
+ * @since 22
  */
 export function createDefaultFTHttpInterceptorChain(
   options: FTHttpInterceptorChainOptions = {}
@@ -1313,6 +1338,15 @@ export function createDefaultFTHttpInterceptorChain(
 
 /**
  * Attach the default FT http interceptor chain to a specific HttpRequest.
+ * Only one chain can be attached to a given request.
+ * @param { http.HttpRequest } httpRequest - Initiates an HTTP request to a given URL.
+ * @param { FTHttpInterceptorChainOptions } options - The FT HTTP interceptor chain options.
+ * @returns { http.HttpInterceptorChain } The applied FT HTTP interceptor chain.
+ * @throws { BusinessError } 2300801 - Parameter type not supported by the interceptor.
+ * @throws { BusinessError } 2300999 - Internal error.
+ * @syscap SystemCapability.Communication.NetStack
+ * @atomicservice
+ * @since 22
  */
 export function applyDefaultFTHttpInterceptorChain(
   httpRequest: http.HttpRequest,

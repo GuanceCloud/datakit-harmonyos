@@ -65,6 +65,8 @@ export struct HttpAutoTrackTestPage {
     method: 'get' | 'post',
     data?: Object
   ): Promise<string> {
+    // The demo project does not bundle axios itself, so we exercise the
+    // adapter directly here while keeping the request path identical.
     const adapter = createFTAxiosAdapter();
     const headers: Record<string, string> = {
       'Accept': 'application/json',
@@ -570,7 +572,8 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test axios-compatible POST adapter
+   * Test axios-compatible POST adapter.
+   * This mirrors `axios.post(..., { adapter: createFTAxiosAdapter() })`.
    */
   async testAxiosAdapterPostRequest() {
     try {
@@ -662,40 +665,40 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testTraceHeaders())
             .customProperty('test-trace-headers-btn', 'Test Trace Headers')
 
-          Button('Test HTTP GET Request (Interceptor Chain)')
+          Button('Test HTTP GET Request (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#1976D2')
             .onClick(() => this.testHttpGetRequestWithInterceptorChain())
-            .customProperty('test-http-get-btn', 'Test HTTP GET Request (Interceptor Chain)')
+            .customProperty('test-http-get-btn', 'Test HTTP GET Request (API 22+)')
 
-          Button('Test HTTP POST Request (Interceptor Chain)')
+          Button('Test HTTP POST Request (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#1976D2')
             .onClick(() => this.testHttpPostRequestWithInterceptorChain())
-            .customProperty('test-http-post-btn', 'Test HTTP POST Request (Interceptor Chain)')
+            .customProperty('test-http-post-btn', 'Test HTTP POST Request (API 22+)')
 
-          Button('Test HTTP Trace Headers')
+          Button('Test HTTP Trace Headers (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#1976D2')
             .onClick(() => this.testHttpTraceHeaders())
-            .customProperty('test-http-trace-btn', 'Test HTTP Trace Headers')
+            .customProperty('test-http-trace-btn', 'Test HTTP Trace Headers (API 22+)')
 
-          Button('Test Axios Adapter GET')
+          Button('Test Axios Adapter GET (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FF9800')
             .onClick(() => this.testAxiosAdapterGetRequest())
-            .customProperty('test-axios-get-btn', 'Test Axios Adapter GET')
+            .customProperty('test-axios-get-btn', 'Test Axios Adapter GET (API 22+)')
 
-          Button('Test Axios Adapter POST')
+          Button('Test Axios Adapter POST (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FF9800')
             .onClick(() => this.testAxiosAdapterPostRequest())
-            .customProperty('test-axios-post-btn', 'Test Axios Adapter POST')
+            .customProperty('test-axios-post-btn', 'Test Axios Adapter POST (API 22+)')
 
           Button('Test Trace ID in /api/user')
             .width('100%')

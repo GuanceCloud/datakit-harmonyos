@@ -55,6 +55,8 @@ function buildAxiosAdapterError(
   request?: Object,
   response?: FTAxiosResponse
 ): FTAxiosAdapterError {
+  // ArkTS only allows throwing proper Error objects, so centralize error
+  // creation here and reuse it across the adapter branches.
   const error = new FTAxiosAdapterError(message);
   error.code = code;
   error.config = config;
@@ -156,6 +158,8 @@ function normalizeRequestBody(data?: Object | string | ArrayBuffer): string | Ob
   if (typeof data === 'string' || data instanceof ArrayBuffer) {
     return data;
   }
+  // Keep object payload handling close to axios defaults: plain objects are
+  // serialized to JSON before handing them to NetworkKit.
   return JSON.stringify(data);
 }
 
@@ -205,6 +209,9 @@ export function createFTAxiosAdapter(): FTAxiosAdapter {
   return async (config: FTAxiosRequestConfig): Promise<FTAxiosResponse> => {
     const url = resolveAxiosUrl(config);
     const request = http.createHttp();
+    // The adapter intentionally routes through our tracked HttpRequest so axios
+    // traffic can reuse the same trace/resource auto instrumentation.
+    // This path depends on HarmonyOS HTTP interceptors, so it requires API 22+.
     applyDefaultFTHttpInterceptorChain(request);
 
     const headers = normalizeAxiosHeaders(config.headers);
