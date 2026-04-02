@@ -3,10 +3,8 @@
  * Test view_update_time counter functionality
  */
 import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
-import { FTDBManager } from 'shareLibrary/src/main/ets/components/db/FTDBManager';
-import { createDefaultFTSessionConfiguration } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
 import { rcp } from '@kit.RemoteCommunicationKit';
-import { ViewBean } from 'shareLibrary/src/main/ets/components/db/bean/ViewBean';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -28,7 +26,7 @@ export struct ViewUpdateTimeTestPage {
   }
 
   private createTrackedSession(baseAddress?: string): rcp.Session {
-    return rcp.createSession(createDefaultFTSessionConfiguration({
+    return rcp.createSession(createFTRCPTrackConfig({
       baseAddress: baseAddress
     }));
   }

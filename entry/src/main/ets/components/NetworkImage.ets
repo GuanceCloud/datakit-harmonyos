@@ -1,7 +1,7 @@
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { image } from '@kit.ImageKit';
 import { BusinessError } from '@ohos.base';
-import { createDefaultFTSessionConfiguration } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
 import { DemoLogger } from '../utils/DemoLogger';
 
 const TAG = "NetworkImage";
@@ -143,7 +143,7 @@ export struct NetworkImage {
    * Fetch image from network and cache it
    */
   private async fetchAndCacheImage(): Promise<image.PixelMap> {
-    const session = rcp.createSession(createDefaultFTSessionConfiguration());
+    const session = rcp.createSession(createFTRCPTrackConfig());
 
     const startTime = Date.now();
     DemoLogger.i(TAG, `Starting to load image from: ${this.src} using RCP`);

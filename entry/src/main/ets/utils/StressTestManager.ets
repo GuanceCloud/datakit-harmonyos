@@ -5,7 +5,7 @@ import { StringWrapper } from 'shareLibrary/src/main/ets/components/utils/String
 import { ResourceParams } from 'shareLibrary/src/main/ets/components/rum/bean/ResourceParams';
 import { NetStatusBean } from 'shareLibrary/src/main/ets/components/rum/bean/NetStatusBean';
 import { rcp } from '@kit.RemoteCommunicationKit';
-import { createDefaultFTSessionConfiguration } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
 
@@ -231,7 +231,7 @@ export class StressTestManager {
         // Use real API request
         const realApiUrl = this.getTraceTestUrl();
         
-        const session = rcp.createSession(createDefaultFTSessionConfiguration());
+        const session = rcp.createSession(createFTRCPTrackConfig());
 
         // Use a session configured with FT interceptors to generate resource data
         const request = new rcp.Request(realApiUrl, 'GET');

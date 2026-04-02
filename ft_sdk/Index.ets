@@ -110,6 +110,18 @@ export {
 export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
 
 // ============================================================================
+// Network Auto Track Helpers
+// ============================================================================
+
+export {
+  createFTRCPInterceptors,
+  createFTHttpInterceptors,
+  createFTHttpInterceptorChain,
+  applyFTHttpTrack,
+  createFTRCPTrackConfig,
+} from './src/main/ets/components/network/FTHttpAutoTrack';
+
+// ============================================================================
 // SDK Version
 // ============================================================================
 

@@ -1,12 +1,18 @@
 /**
  * HTTP Interceptor Test Page
- * Test RCP HTTP request interception with FT session helpers
+ * Test RCP HTTP Axios
  */
-import { createDefaultFTSessionConfiguration } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
-import { applyDefaultFTHttpInterceptorChain } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
-import { createFTAxiosAdapter } from 'shareLibrary/src/main/ets/components/network/FTAxiosAdapter';
+import {
+  createFTHttpInterceptorChain,
+  applyFTHttpTrack,
+  createFTRCPTrackConfig
+} from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { http } from '@kit.NetworkKit';
+import axios, {
+  AxiosInstance,
+  AxiosResponse
+} from '@ohos/axios';
 import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
 import { FTTraceConfigManager } from 'shareLibrary/src/main/ets/components/trace/FTTraceConfigManager';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -41,18 +47,18 @@ export struct HttpAutoTrackTestPage {
     this.checkAutoTrackStatus();
   }
 
-  private createTrackedSession(baseAddress?: string): rcp.Session {
-    return rcp.createSession(createDefaultFTSessionConfiguration({
+  private createRCPSession(baseAddress?: string): rcp.Session {
+    return rcp.createSession(createFTRCPTrackConfig({
       baseAddress: baseAddress
     }));
   }
 
-  private async executeTrackedHttpRequest(
+  private async executeHttpRequest(
     url: string,
     options: http.HttpRequestOptions = {}
   ): Promise<http.HttpResponse> {
     const request = http.createHttp();
-    applyDefaultFTHttpInterceptorChain(request);
+    applyFTHttpTrack(request);
     try {
       return await request.request(url, options);
     } finally {
@@ -60,31 +66,43 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
-  private async executeAxiosStyleRequest(
+  private async executeAxiosRequest(
     url: string,
     method: 'get' | 'post',
     data?: Object
   ): Promise<string> {
-    // The demo project does not bundle axios itself, so we exercise the
-    // adapter directly here while keeping the request path identical.
-    const adapter = createFTAxiosAdapter();
-    const headers: Record<string, string> = {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    };
-
-    const response = await adapter({
+    const client = this.createAxiosInstance();
+    const response: AxiosResponse<string | Object, Object> = await client.request<
+      string | Object,
+      AxiosResponse<string | Object, Object>,
+      Object
+    >({
       url: url,
       method: method,
-      headers: headers,
       data: data,
-      responseType: 'text'
+      responseType: 'string',
+      interceptorChain: createFTHttpInterceptorChain(),
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
     });
 
-    if (typeof response.data === 'string') {
-      return response.data;
-    }
-    return JSON.stringify(response.data);
+    return typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(response.data);
+  }
+
+  private createAxiosInstance(): AxiosInstance {
+    const client = axios.create({
+      interceptorChain:createFTHttpInterceptorChain(),
+      timeout: 10000,
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+    return client;
   }
 
   /**
@@ -116,16 +134,16 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test GET request with FT session helper
+   * Test GET request with RCP
    */
-  async testGetRequestWithDefaultSession() {
+  async testRCPGetRequest() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       // Send GET request (should be automatically intercepted)
       const request = new rcp.Request('https://httpbin.org/get', 'GET');
@@ -150,16 +168,16 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test POST request with FT session helper
+   * Test POST request with RCP helper
    */
-  async testPostRequestWithDefaultSession() {
+  async testRCPPostRequest() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       // Define post data interface
       interface PostData {
@@ -202,14 +220,14 @@ export struct HttpAutoTrackTestPage {
   /**
    * Test creating custom session with interceptors
    */
-  async testCustomSessionWithInterceptors() {
+  async testRCPWithInterceptors() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
       }
 
-      const session = this.createTrackedSession('https://httpbin.org');
+      const session = this.createRCPSession('https://httpbin.org');
 
       // Send GET request (should be automatically intercepted)
       const request = new rcp.Request('/get', 'GET');
@@ -236,14 +254,14 @@ export struct HttpAutoTrackTestPage {
   /**
    * Test error request (404)
    */
-  async testErrorRequest() {
+  async testRCPErrorRequest() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       // Send GET request to non-existent endpoint (should return 404)
       const request = new rcp.Request('https://httpbin.org/status/404', 'GET');
@@ -271,7 +289,7 @@ export struct HttpAutoTrackTestPage {
   /**
    * Test trace headers (if trace is enabled)
    */
-  async testTraceHeaders() {
+  async testRCPTraceHeaders() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
@@ -286,7 +304,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       // Send GET request (trace headers should be added automatically)
       const request = new rcp.Request('https://httpbin.org/headers', 'GET');
@@ -313,7 +331,7 @@ export struct HttpAutoTrackTestPage {
   /**
    * Test trace id in resource request to the configured traceUrl
    */
-  async testTraceIdInResourceRequest() {
+  async testRCPTraceWithRequest() {
     try {
       const testUrl = this.getTraceTestUrl();
       if (!this.isAutoTrackEnabled) {
@@ -329,7 +347,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       // Send GET request (trace headers should be added automatically)
       const request = new rcp.Request(testUrl, 'GET');
@@ -363,7 +381,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const session = this.createTrackedSession();
+      const session = this.createRCPSession();
 
       const promises: Promise<rcp.Response>[] = [];
       for (let i = 0; i < 5; i++) {
@@ -405,7 +423,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const response = await this.executeTrackedHttpRequest('https://httpbin.org/get', {
+      const response = await this.executeHttpRequest('https://httpbin.org/get', {
         method: http.RequestMethod.GET,
         header: {
           'Accept': 'application/json'
@@ -439,7 +457,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const response = await this.executeTrackedHttpRequest('https://httpbin.org/post', {
+      const response = await this.executeHttpRequest('https://httpbin.org/post', {
         method: http.RequestMethod.POST,
         header: {
           'Content-Type': 'application/json'
@@ -484,7 +502,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const response = await this.executeTrackedHttpRequest('https://httpbin.org/headers', {
+      const response = await this.executeHttpRequest('https://httpbin.org/headers', {
         method: http.RequestMethod.GET,
         header: {
           'Accept': 'application/json'
@@ -509,33 +527,32 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test axios-compatible GET adapter
+   * Test real axios GET request with FT auto track
    */
-  async testAxiosAdapterGetRequest() {
+  async testAxiosGetRequest() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping axios GET test");
         return;
       }
 
-      const responseText = await this.executeAxiosStyleRequest('https://httpbin.org/get?from=axios-adapter', 'get');
+      const responseText = await this.executeAxiosRequest('https://httpbin.org/get?from=axios-adapter', 'get');
       this.requestCount++;
       this.successCount++;
-      this.addTestResult(`✅ Axios-style GET request succeeded: bodyLength=${responseText.length}`);
+      this.addTestResult(`✅ Axios GET request succeeded: bodyLength=${responseText.length}`);
     } catch (error) {
       this.requestCount++;
       this.errorCount++;
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios-style GET request failed: ${errorMsg}`);
+      this.addTestResult(`❌ Axios GET request failed: ${errorMsg}`);
     }
   }
 
   /**
-   * Test axios-compatible POST adapter.
-   * This mirrors `axios.post(..., { adapter: createFTAxiosAdapter() })`.
+   * Test real axios POST request with FT auto track.
    */
-  async testAxiosAdapterPostRequest() {
+  async testAxiosPostRequest() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping axios POST test");
@@ -543,24 +560,24 @@ export struct HttpAutoTrackTestPage {
       }
 
       const postData: AxiosStylePostData = {
-        source: 'axios-adapter',
-        message: 'Testing FT axios adapter',
+        source: 'axios',
+        message: 'Testing FT axios auto track',
         timestamp: Date.now()
       };
-      const responseText = await this.executeAxiosStyleRequest(
+      const responseText = await this.executeAxiosRequest(
         'https://httpbin.org/post',
         'post',
         postData
       );
       this.requestCount++;
       this.successCount++;
-      this.addTestResult(`✅ Axios-style POST request succeeded: bodyLength=${responseText.length}`);
+      this.addTestResult(`✅ Axios POST request succeeded: bodyLength=${responseText.length}`);
     } catch (error) {
       this.requestCount++;
       this.errorCount++;
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios-style POST request failed: ${errorMsg}`);
+      this.addTestResult(`❌ Axios POST request failed: ${errorMsg}`);
     }
   }
 
@@ -592,34 +609,34 @@ export struct HttpAutoTrackTestPage {
 
       Scroll() {
         Column() {
-	          Button('Test GET Request (FT Session)')
+	          Button('Test GET Request (RCP)')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testGetRequestWithDefaultSession())
-	            .customProperty('test-get-btn', 'Test GET Request (FT Session)')
+            .onClick(() => this.testRCPGetRequest())
+	            .customProperty('test-get-btn', 'Test GET Request (RCP)')
 
-	          Button('Test POST Request (FT Session)')
+	          Button('Test POST Request (RCP)')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testPostRequestWithDefaultSession())
-	            .customProperty('test-post-btn', 'Test POST Request (FT Session)')
+            .onClick(() => this.testRCPPostRequest())
+	            .customProperty('test-post-btn', 'Test POST Request (RCP)')
 
           Button('Test Custom Session (With Interceptors)')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testCustomSessionWithInterceptors())
+            .onClick(() => this.testRCPWithInterceptors())
             .customProperty('test-custom-session-btn', 'Test Custom Session (With Interceptors)')
 
           Button('Test Error Request (404)')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testErrorRequest())
+            .onClick(() => this.testRCPErrorRequest())
             .customProperty('test-error-btn', 'Test Error Request (404)')
 
           Button('Test Trace Headers')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testTraceHeaders())
+            .onClick(() => this.testRCPTraceHeaders())
             .customProperty('test-trace-headers-btn', 'Test Trace Headers')
 
           Button('Test HTTP GET Request (API 22+)')
@@ -643,25 +660,25 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testHttpTraceHeaders())
             .customProperty('test-http-trace-btn', 'Test HTTP Trace Headers (API 22+)')
 
-          Button('Test Axios Adapter GET (API 22+)')
+          Button('Test Axios GET (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FF9800')
-            .onClick(() => this.testAxiosAdapterGetRequest())
-            .customProperty('test-axios-get-btn', 'Test Axios Adapter GET (API 22+)')
+            .onClick(() => this.testAxiosGetRequest())
+            .customProperty('test-axios-get-btn', 'Test Axios GET (API 22+)')
 
-          Button('Test Axios Adapter POST (API 22+)')
+          Button('Test Axios POST (API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FF9800')
-            .onClick(() => this.testAxiosAdapterPostRequest())
-            .customProperty('test-axios-post-btn', 'Test Axios Adapter POST (API 22+)')
+            .onClick(() => this.testAxiosPostRequest())
+            .customProperty('test-axios-post-btn', 'Test Axios POST (API 22+)')
 
           Button('Test Trace ID in /api/user')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#4CAF50')
-            .onClick(() => this.testTraceIdInResourceRequest())
+            .onClick(() => this.testRCPTraceWithRequest())
             .customProperty('test-trace-id-btn', 'Test Trace ID in /api/user')
 
           Button('Test Multiple Requests')

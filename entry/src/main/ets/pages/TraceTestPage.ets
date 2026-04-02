@@ -10,7 +10,7 @@ import { FTTraceInterceptor, HeaderHandler, HttpRequestData, HttpResponseData, T
 import { FTTraceManager } from 'shareLibrary/src/main/ets/components/trace/FTTraceManager';
 import { Status } from 'shareLibrary/src/main/ets/components/bean/Status';
 // import { FTHttpClient } from 'shareLibrary/src/main/ets/components/network/FTHttpClient';
-import { createDefaultFTSessionConfiguration } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
@@ -88,7 +88,7 @@ export struct TraceTestPage {
   }
 
   private createTrackedSession(baseAddress?: string): rcp.Session {
-    return rcp.createSession(createDefaultFTSessionConfiguration({
+    return rcp.createSession(createFTRCPTrackConfig({
       baseAddress: baseAddress
     }));
   }

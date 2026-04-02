@@ -6,8 +6,8 @@
   "author": "",
   "license": "",
   "dependencies":  {
+    "@ohos/axios": "2.2.8",
     "shareLibrary":"file:../ft_sdk",
     "ft_native": "file:../ft_native"
   }
 }
-

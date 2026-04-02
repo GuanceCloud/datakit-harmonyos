@@ -1016,8 +1016,7 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 
       let finalHeaders = headers;
       if (this.traceEnabled && this.traceInterceptor) {
-        const traceManager = FTTraceManager.getInstance();
-        const traceHeaders = traceManager.getTraceHeader(resourceId, url);
+        const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
 
         const headersMap = new Map<string, string>();
         const initialHeaderKeys = Object.keys(headers);
@@ -1240,6 +1239,10 @@ export interface FTHttpInterceptorChainOptions {
   enableResourceInterceptor?: boolean;
 }
 
+export interface FTHttpTrackConfigTarget {
+  interceptorChain?: http.HttpInterceptorChain;
+}
+
 interface FTRCPInfoToCollectConfiguration {
   incomingHeader: boolean;
   outgoingHeader: boolean;
@@ -1260,7 +1263,7 @@ interface FTRCPRequestConfiguration {
 /**
  * Build the default FT interceptor list for an RCP session.
  */
-export function createDefaultFTInterceptors(
+export function createFTRCPInterceptors(
   enableTraceInterceptor?: boolean,
   enableResourceInterceptor?: boolean
 ): rcp.Interceptor[] {
@@ -1288,7 +1291,7 @@ export function createDefaultFTInterceptors(
  * @atomicservice
  * @since 22
  */
-export function createDefaultFTHttpInterceptors(
+export function createFTHttpInterceptors(
   enableTraceInterceptor?: boolean,
   enableResourceInterceptor?: boolean
 ): http.HttpInterceptor[] {
@@ -1315,11 +1318,11 @@ export function createDefaultFTHttpInterceptors(
  * @atomicservice
  * @since 22
  */
-export function createDefaultFTHttpInterceptorChain(
+export function createFTHttpInterceptorChain(
   options: FTHttpInterceptorChainOptions = {}
 ): http.HttpInterceptorChain {
   const chain = new http.HttpInterceptorChain();
-  const interceptors = createDefaultFTHttpInterceptors(
+  const interceptors = createFTHttpInterceptors(
     options.enableTraceInterceptor,
     options.enableResourceInterceptor
   );
@@ -1348,11 +1351,11 @@ export function createDefaultFTHttpInterceptorChain(
  * @atomicservice
  * @since 22
  */
-export function applyDefaultFTHttpInterceptorChain(
+export function applyFTHttpTrack(
   httpRequest: http.HttpRequest,
   options: FTHttpInterceptorChainOptions = {}
 ): http.HttpInterceptorChain {
-  const chain = createDefaultFTHttpInterceptorChain(options);
+  const chain = createFTHttpInterceptorChain(options);
   chain.apply(httpRequest);
   return chain;
 }
@@ -1361,7 +1364,7 @@ export function applyDefaultFTHttpInterceptorChain(
  * Create a default RCP session configuration that includes FT interceptors.
  * Users still own the session lifecycle and can override any configuration they need.
  */
-export function createDefaultFTSessionConfiguration(
+export function createFTRCPTrackConfig(
   options: FTRCPSessionConfigurationOptions = {}
 ): rcp.SessionConfiguration {
   const defaultInfoToCollect: FTRCPInfoToCollectConfiguration = {
@@ -1377,7 +1380,7 @@ export function createDefaultFTSessionConfiguration(
     collectTimeInfo: true
   };
 
-  const interceptors = createDefaultFTInterceptors(
+  const interceptors = createFTRCPInterceptors(
     options.enableTraceInterceptor,
     options.enableResourceInterceptor
   );
