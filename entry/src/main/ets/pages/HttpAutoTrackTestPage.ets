@@ -95,15 +95,8 @@ export struct HttpAutoTrackTestPage {
       const rumEnabled = FTRUMGlobalManager.getInstance().isInitialized();
       this.isAutoTrackEnabled = rumEnabled;
       this.addTestResult(`RCP interceptor session helper: ${this.isAutoTrackEnabled ? '✅ Available' : '❌ Unavailable'}`);
-      
-      if (this.isAutoTrackEnabled) {
-        DemoLogger.i(TAG, "RCP interceptor session helper is available");
-      } else {
-        DemoLogger.w(TAG, "SDK is not initialized. Make sure RUM config has enableTraceUserResource=true");
-      }
     } catch (error) {
       this.addTestResult(`❌ Failed to check interceptor helper status: ${error}`);
-      DemoLogger.e(TAG, `Failed to check interceptor helper status: ${error}`);
     }
   }
 
@@ -127,8 +120,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testGetRequestWithDefaultSession() {
     try {
-      DemoLogger.i(TAG, "Testing GET request with FT session helper...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -155,7 +146,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ GET request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `GET request test failed: ${error}`);
     }
   }
 
@@ -164,8 +154,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testPostRequestWithDefaultSession() {
     try {
-      DemoLogger.i(TAG, "Testing POST request with FT session helper...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -208,7 +196,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ POST request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `POST request test failed: ${error}`);
     }
   }
 
@@ -217,8 +204,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testCustomSessionWithInterceptors() {
     try {
-      DemoLogger.i(TAG, "Testing custom session with interceptors...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -245,7 +230,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Custom session test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Custom session test failed: ${error}`);
     }
   }
 
@@ -254,8 +238,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testErrorRequest() {
     try {
-      DemoLogger.i(TAG, "Testing error request (404)...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -283,7 +265,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Error request test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Error request test failed: ${error}`);
     }
   }
 
@@ -292,8 +273,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testTraceHeaders() {
     try {
-      DemoLogger.i(TAG, "Testing trace headers...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -328,7 +307,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Trace headers test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Trace headers test failed: ${error}`);
     }
   }
 
@@ -338,8 +316,6 @@ export struct HttpAutoTrackTestPage {
   async testTraceIdInResourceRequest() {
     try {
       const testUrl = this.getTraceTestUrl();
-      DemoLogger.i(TAG, `Testing trace id in resource request to ${testUrl}...`);
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -374,7 +350,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Trace id test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Trace id test failed: ${error}`);
     }
   }
 
@@ -383,8 +358,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testMultipleRequests() {
     try {
-      DemoLogger.i(TAG, "Testing multiple requests...");
-      
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -419,7 +392,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Multiple requests test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Multiple requests test failed: ${error}`);
     }
   }
 
@@ -428,8 +400,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testHttpGetRequestWithInterceptorChain() {
     try {
-      DemoLogger.i(TAG, "Testing GET request with NetworkKit http interceptor chain...");
-
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping http GET test");
         return;
@@ -456,7 +426,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP GET request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `HTTP GET request test failed: ${error}`);
     }
   }
 
@@ -465,8 +434,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testHttpPostRequestWithInterceptorChain() {
     try {
-      DemoLogger.i(TAG, "Testing POST request with NetworkKit http interceptor chain...");
-
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping http POST test");
         return;
@@ -498,7 +465,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP POST request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `HTTP POST request test failed: ${error}`);
     }
   }
 
@@ -507,8 +473,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testHttpTraceHeaders() {
     try {
-      DemoLogger.i(TAG, "Testing trace headers with NetworkKit http interceptor chain...");
-
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping http trace test");
         return;
@@ -541,7 +505,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP trace headers test failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `HTTP trace headers test failed: ${error}`);
     }
   }
 
@@ -550,8 +513,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testAxiosAdapterGetRequest() {
     try {
-      DemoLogger.i(TAG, "Testing axios-compatible GET adapter...");
-
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping axios GET test");
         return;
@@ -567,7 +528,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Axios-style GET request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Axios-style GET request test failed: ${error}`);
     }
   }
 
@@ -577,8 +537,6 @@ export struct HttpAutoTrackTestPage {
    */
   async testAxiosAdapterPostRequest() {
     try {
-      DemoLogger.i(TAG, "Testing axios-compatible POST adapter...");
-
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping axios POST test");
         return;
@@ -603,7 +561,6 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ Axios-style POST request failed: ${errorMsg}`);
-      DemoLogger.e(TAG, `Axios-style POST request test failed: ${error}`);
     }
   }
 

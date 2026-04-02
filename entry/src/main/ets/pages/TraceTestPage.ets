@@ -109,7 +109,6 @@ export struct TraceTestPage {
       DemoLogger.d(TAG, `Applied trace type: ${this.getTraceTypeName(this.selectedTraceType)}`);
     } catch (error) {
       this.addTestResult(`❌ Failed to apply trace type: ${error}`);
-      DemoLogger.e(TAG, `Failed to apply trace type: ${error}`);
     }
   }
 
@@ -138,11 +137,9 @@ export struct TraceTestPage {
       FTSDK.installTraceConfig(traceConfig);
       
       this.addTestResult("✅ Basic trace configuration test passed");
-      DemoLogger.d(TAG, "Basic trace config test passed");
       
     } catch (error) {
       this.addTestResult(`❌ Basic trace configuration test failed: ${error}`);
-      DemoLogger.e(TAG, `Basic trace config test failed: ${error}`);
     }
   }
 
@@ -162,11 +159,8 @@ export struct TraceTestPage {
       FTSDK.installTraceConfig(traceConfig);
       this.addTestResult(`✅ ${this.getTraceTypeName(this.selectedTraceType)} configuration test passed`);
       
-      DemoLogger.d(TAG, "Trace type test passed");
-      
     } catch (error) {
       this.addTestResult(`❌ Trace type test failed: ${error}`);
-      DemoLogger.e(TAG, `Trace type test failed: ${error}`);
     }
   }
 
@@ -614,7 +608,6 @@ export struct TraceTestPage {
    */
   testSamplingRateZero() {
     try {
-      DemoLogger.d(TAG, `Testing sampling rate = 0 behavior (selected trace type: ${this.getTraceTypeName(this.selectedTraceType)})...`);
       this.addTestResult(`🔍 Testing Sampling Rate = 0 (Selected: ${this.getTraceTypeName(this.selectedTraceType)}, Aligned with Android SDK)`);
       
       const traceManager = FTTraceManager.getInstance();
@@ -653,7 +646,6 @@ export struct TraceTestPage {
       
     } catch (error) {
       this.addTestResult(`❌ Sampling rate = 0 test failed: ${error}`);
-      DemoLogger.e(TAG, `Sampling rate = 0 test failed: ${error}`);
     }
   }
 
@@ -911,7 +903,6 @@ export struct TraceTestPage {
    */
   testTraceIDGeneration() {
     try {
-      DemoLogger.d(TAG, `Testing Trace ID generation logic (${this.getTraceTypeName(this.selectedTraceType)})...`);
       this.addTestResult(`🔍 Testing Trace ID Generation Logic (${this.getTraceTypeName(this.selectedTraceType)})`);
       
       const traceManager = FTTraceManager.getInstance();
@@ -957,7 +948,6 @@ export struct TraceTestPage {
       
     } catch (error) {
       this.addTestResult(`❌ Trace ID generation test failed: ${error}`);
-      DemoLogger.e(TAG, `Trace ID generation test failed: ${error}`);
     }
   }
 
@@ -976,7 +966,6 @@ export struct TraceTestPage {
    */
   async testTraceIdInResourceData() {
     try {
-      DemoLogger.d(TAG, "Testing trace_id and span_id in resource data...");
       this.addTestResult("🔍 Testing Trace ID and Span ID in Resource Data");
       
       // Step 1: Enable trace config with enableLinkRUMData = true
@@ -1136,15 +1125,12 @@ export struct TraceTestPage {
         const err = requestError as BusinessError;
         const errorMsg = err.message || String(requestError);
         this.addTestResult(`❌ Request error: ${errorMsg}`);
-        DemoLogger.e(TAG, `Request failed: ${requestError}`);
       }
       
       this.addTestResult("✅ Trace ID and Span ID in Resource Data test completed!");
-      DemoLogger.d(TAG, "Trace ID and Span ID in Resource Data test completed");
       
     } catch (error) {
       this.addTestResult(`❌ Trace ID and Span ID in Resource Data test failed: ${error}`);
-      DemoLogger.e(TAG, `Trace ID and Span ID in Resource Data test failed: ${error}`);
     }
   }
 
@@ -1154,7 +1140,6 @@ export struct TraceTestPage {
    */
   async testRCPRequestWithTraceHeaders() {
     try {
-      DemoLogger.d(TAG, "Testing RCP request with trace headers injection...");
       this.addTestResult("🔍 Testing RCP Request with Trace Headers Injection");
       
       // Step 1: Create a session with the FT interceptors
@@ -1177,7 +1162,6 @@ export struct TraceTestPage {
         expectedHeaders.push('sw8');
       }
       
-      DemoLogger.d(TAG, `Testing trace type: ${this.getTraceTypeName(this.selectedTraceType)}`);
       this.addTestResult(`📤 Testing ${this.getTraceTypeName(this.selectedTraceType)}...`);
       
       // Configure trace type
@@ -1193,7 +1177,6 @@ export struct TraceTestPage {
       const testUrl = this.getTraceTestUrl();
       const request = new rcp.Request(testUrl, 'GET');
       
-      DemoLogger.d(TAG, `Sending RCP request to ${testUrl}`);
       this.addTestResult(`📡 Sending GET request to ${testUrl}`);
       
       try {
@@ -1221,15 +1204,12 @@ export struct TraceTestPage {
         const err = requestError as BusinessError;
         const errorMsg = err.message || String(requestError);
         this.addTestResult(`❌ Request error: ${errorMsg}`);
-        DemoLogger.e(TAG, `Request failed: ${requestError}`);
       }
       
       this.addTestResult("✅ RCP Request Trace Headers test completed");
-      DemoLogger.d(TAG, "RCP Request Trace Headers test completed");
       
     } catch (error) {
       this.addTestResult(`❌ RCP Request Trace Headers test failed: ${error}`);
-      DemoLogger.e(TAG, `RCP Request Trace Headers test failed: ${error}`);
     }
   }
 

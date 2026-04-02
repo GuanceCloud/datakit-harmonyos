@@ -110,7 +110,6 @@ export struct BatchUploadTestPage {
       this.addTestResult("💡 Wait a few seconds, then click 'Trigger Immediate Upload'");
     } catch (error) {
       this.addTestResult(`❌ Error generating test data: ${error}`);
-      DemoLogger.e(TAG, `Generate test data failed: ${error}`);
     }
   }
 
@@ -145,7 +144,6 @@ export struct BatchUploadTestPage {
       this.addTestResult("💡 Filter logs: grep 'RUM-UPLOAD' | grep 'Response Code'");
     } catch (error) {
       this.addTestResult(`❌ Error triggering upload: ${error}`);
-      DemoLogger.e(TAG, `Trigger immediate upload failed: ${error}`);
     }
   }
 
@@ -168,7 +166,6 @@ export struct BatchUploadTestPage {
       this.addTestResult("💡 Will upload after interval if autoSync is enabled");
     } catch (error) {
       this.addTestResult(`❌ Error triggering scheduled upload: ${error}`);
-      DemoLogger.e(TAG, `Trigger scheduled upload failed: ${error}`);
     }
   }
 
@@ -195,7 +192,6 @@ export struct BatchUploadTestPage {
       this.addTestResult(`✅ Sync Sleep Time: ${status.syncSleepTime}ms`);
     } catch (error) {
       this.addTestResult(`❌ Error checking status: ${error}`);
-      DemoLogger.e(TAG, `Check sync status failed: ${error}`);
     }
   }
 
@@ -229,7 +225,6 @@ export struct BatchUploadTestPage {
       }, 2000);
     } catch (error) {
       this.addTestResult(`❌ Batch upload test failed: ${error}`);
-      DemoLogger.e(TAG, `Batch upload test failed: ${error}`);
     }
   }
 
@@ -254,7 +249,6 @@ export struct BatchUploadTestPage {
       this.addTestResult("💡 Filter logs: grep 'errorSampledConsume'");
     } catch (error) {
       this.addTestResult(`❌ Error testing error sampled: ${error}`);
-      DemoLogger.e(TAG, `Test error sampled failed: ${error}`);
     }
   }
 
@@ -338,7 +332,6 @@ export struct BatchUploadTestPage {
 
     } catch (error) {
       this.addTestResult(`❌ Error testing batch upload size: ${error}`);
-      DemoLogger.e(TAG, `Test batch upload size failed: ${error}`);
     }
   }
 
