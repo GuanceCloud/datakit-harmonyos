@@ -1262,6 +1262,12 @@ interface FTRCPRequestConfiguration {
 
 /**
  * Build the default FT interceptor list for an RCP session.
+ * The returned list can be appended to a custom `rcp.SessionConfiguration`.
+ * Trace and resource interceptors follow the current SDK switches unless the
+ * optional flags are provided explicitly.
+ * @param { boolean } enableTraceInterceptor - Overrides whether trace headers are injected automatically.
+ * @param { boolean } enableResourceInterceptor - Overrides whether RUM resource data is collected automatically.
+ * @returns { rcp.Interceptor[] } The FT interceptor list for RCP sessions.
  */
 export function createFTRCPInterceptors(
   enableTraceInterceptor?: boolean,
@@ -1286,6 +1292,10 @@ export function createFTRCPInterceptors(
 
 /**
  * Build the default FT interceptor list for @kit.NetworkKit http requests.
+ * Use this helper when you want to assemble an `http.HttpInterceptorChain`
+ * yourself, for example before wiring it into Axios or a custom request layer.
+ * @param { boolean } enableTraceInterceptor - Overrides whether trace headers are injected automatically.
+ * @param { boolean } enableResourceInterceptor - Overrides whether RUM resource data is collected automatically.
  * @returns { http.HttpInterceptor[] } The FT interceptor list for Harmony HTTP requests.
  * @syscap SystemCapability.Communication.NetStack
  * @atomicservice
@@ -1313,6 +1323,7 @@ export function createFTHttpInterceptors(
 /**
  * Create an HTTP interceptor chain that can be attached to a specific HttpRequest instance.
  * @param { FTHttpInterceptorChainOptions } options - The FT HTTP interceptor chain options.
+ * Custom interceptors are appended after the FT defaults returned by `createFTHttpInterceptors`.
  * @returns { http.HttpInterceptorChain } The FT HTTP interceptor chain.
  * @syscap SystemCapability.Communication.NetStack
  * @atomicservice
@@ -1343,7 +1354,7 @@ export function createFTHttpInterceptorChain(
  * Attach the default FT http interceptor chain to a specific HttpRequest.
  * Only one chain can be attached to a given request.
  * @param { http.HttpRequest } httpRequest - Initiates an HTTP request to a given URL.
- * @param { FTHttpInterceptorChainOptions } options - The FT HTTP interceptor chain options.
+ * @param { FTHttpInterceptorChainOptions } options - Optional FT toggles and any extra interceptors to append.
  * @returns { http.HttpInterceptorChain } The applied FT HTTP interceptor chain.
  * @throws { BusinessError } 2300801 - Parameter type not supported by the interceptor.
  * @throws { BusinessError } 2300999 - Internal error.
@@ -1363,6 +1374,10 @@ export function applyFTHttpTrack(
 /**
  * Create a default RCP session configuration that includes FT interceptors.
  * Users still own the session lifecycle and can override any configuration they need.
+ * The default tracing block keeps `collectTimeInfo` enabled so RUM resource
+ * metrics such as DNS, TCP, SSL, TTFB, and total load can be calculated.
+ * @param { FTRCPSessionConfigurationOptions } options - Base RCP config and optional FT overrides.
+ * @returns { rcp.SessionConfiguration } A session configuration ready for `rcp.createSession(...)`.
  */
 export function createFTRCPTrackConfig(
   options: FTRCPSessionConfigurationOptions = {}
