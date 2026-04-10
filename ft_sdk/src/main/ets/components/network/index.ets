@@ -5,8 +5,8 @@
 // RCP interceptors and session configuration helpers
 export {
   createFTRCPInterceptors,
-  createFTHttpInterceptors,
   createFTHttpInterceptorChain,
+  applyFTAxiosTrack,
   RCPResourceInterceptor,
   RCPTraceInterceptor,
   HttpInitialRequestInterceptor,

@@ -232,6 +232,13 @@ function tryGetResponseBodyText(result: string | Object | ArrayBuffer): string |
   return undefined;
 }
 
+function tryGetOptionalResponseBodyText(result?: string | Object | ArrayBuffer): string | undefined {
+  if (result === undefined) {
+    return undefined;
+  }
+  return tryGetResponseBodyText(result);
+}
+
 /**
  * RCP Resource Interceptor
  * Automatically intercepts HTTP requests and collects resource data
@@ -988,12 +995,8 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
   private readonly resourceEnabled: boolean;
 
   constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
-    this.traceEnabled = traceEnabled !== undefined
-      ? traceEnabled
-      : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
-    this.resourceEnabled = resourceEnabled !== undefined
-      ? resourceEnabled
-      : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+    this.traceEnabled = traceEnabled !== undefined ? traceEnabled : true;
+    this.resourceEnabled = resourceEnabled !== undefined ? resourceEnabled : true;
 
     if (this.traceEnabled) {
       const traceConfigManager = FTTraceConfigManager.getInstance();
@@ -1095,12 +1098,8 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
   private readonly resourceEnabled: boolean;
 
   constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
-    this.traceEnabled = traceEnabled !== undefined
-      ? traceEnabled
-      : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
-    this.resourceEnabled = resourceEnabled !== undefined
-      ? resourceEnabled
-      : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+    this.traceEnabled = traceEnabled !== undefined ? traceEnabled : true;
+    this.resourceEnabled = resourceEnabled !== undefined ? resourceEnabled : true;
 
     if (this.traceEnabled) {
       const traceConfigManager = FTTraceConfigManager.getInstance();
@@ -1243,6 +1242,55 @@ export interface FTHttpTrackConfigTarget {
   interceptorChain?: http.HttpInterceptorChain;
 }
 
+export interface FTAxiosRequestConfigTarget {
+  url?: string;
+  baseURL?: string;
+  method?: string;
+  headers?: Object;
+  data?: Object | string | ArrayBuffer;
+  context?: Object;
+}
+
+export interface FTAxiosResponseTarget<T = Object | string | ArrayBuffer> {
+  config: FTAxiosRequestConfigTarget;
+  status: number;
+  headers?: Object;
+  data?: T;
+}
+
+export interface FTAxiosErrorTarget {
+  config?: FTAxiosRequestConfigTarget;
+  response?: FTAxiosResponseTarget;
+  message?: string;
+  stack?: string;
+}
+
+export interface FTAxiosInterceptorManager<T> {
+  use(
+    onFulfilled?: (value: T) => T | Promise<T>,
+    onRejected?: (error: Object) => Object | Promise<Object>
+  ): number;
+}
+
+export interface FTAxiosInterceptors {
+  request: FTAxiosInterceptorManager<FTAxiosRequestConfigTarget>;
+  response: FTAxiosInterceptorManager<FTAxiosResponseTarget>;
+}
+
+export interface FTAxiosInterceptorTarget {
+  interceptors: FTAxiosInterceptors;
+}
+
+export interface FTAxiosTrackRegistration {
+  requestInterceptorId: number;
+  responseInterceptorId: number;
+}
+
+interface FTAxiosAutoTrackState extends HttpAutoTrackState {
+  traceEnabled: boolean;
+  resourceEnabled: boolean;
+}
+
 interface FTRCPInfoToCollectConfiguration {
   incomingHeader: boolean;
   outgoingHeader: boolean;
@@ -1258,6 +1306,236 @@ interface FTRCPTracingConfiguration {
 
 interface FTRCPRequestConfiguration {
   tracing?: FTRCPTracingConfiguration;
+}
+
+interface FTAxiosHeadersSerializable {
+  toJSON?: () => Object;
+}
+
+const FT_AXIOS_AUTOTRACK_CONTEXT_KEY = '__ftAxiosAutoTrackState';
+
+function resolveAxiosFullUrl(config: FTAxiosRequestConfigTarget): string {
+  const requestUrl = config.url || '';
+  if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
+    return requestUrl;
+  }
+
+  const baseURL = config.baseURL || '';
+  if (!baseURL) {
+    return requestUrl;
+  }
+
+  if (!requestUrl) {
+    return baseURL;
+  }
+
+  const baseEndsWithSlash = baseURL.endsWith('/');
+  const requestStartsWithSlash = requestUrl.startsWith('/');
+  if (baseEndsWithSlash && requestStartsWithSlash) {
+    return `${baseURL}${requestUrl.slice(1)}`;
+  }
+  if (!baseEndsWithSlash && !requestStartsWithSlash) {
+    return `${baseURL}/${requestUrl}`;
+  }
+  return `${baseURL}${requestUrl}`;
+}
+
+function normalizeAxiosHeaders(headers?: Object | null): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+
+  const toJSONCandidate = headers as FTAxiosHeadersSerializable;
+  if (typeof toJSONCandidate.toJSON === 'function') {
+    return normalizeObjectHeaders(toJSONCandidate.toJSON());
+  }
+
+  return normalizeObjectHeaders(headers);
+}
+
+function ensureAxiosContext(config: FTAxiosRequestConfigTarget): Record<string, Object> {
+  const existingContext = config.context as Record<string, Object> | undefined;
+  if (existingContext) {
+    return existingContext;
+  }
+
+  const context: Record<string, Object> = {};
+  config.context = context;
+  return context;
+}
+
+function getAxiosAutoTrackState(config?: FTAxiosRequestConfigTarget): FTAxiosAutoTrackState | undefined {
+  if (!config || !config.context) {
+    return undefined;
+  }
+  const context = config.context as Record<string, Object>;
+  const rawState = context[FT_AXIOS_AUTOTRACK_CONTEXT_KEY];
+  return rawState as FTAxiosAutoTrackState | undefined;
+}
+
+function setAxiosAutoTrackState(config: FTAxiosRequestConfigTarget, state: FTAxiosAutoTrackState): void {
+  const context = ensureAxiosContext(config);
+  context[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] = state as Object;
+}
+
+function clearAxiosAutoTrackState(config?: FTAxiosRequestConfigTarget): void {
+  return;
+}
+
+function createAxiosTraceInterceptor(): FTTraceInterceptor | null {
+  const traceConfigManager = FTTraceConfigManager.getInstance();
+  return new DefaultFTTraceInterceptor(
+    traceConfigManager.getTraceTypeEnum(),
+    traceConfigManager.getOverrideHeaderHandler()
+  );
+}
+
+function buildAxiosAutoTrackState(
+  config: FTAxiosRequestConfigTarget,
+  traceEnabled: boolean,
+  resourceEnabled: boolean
+): FTAxiosAutoTrackState {
+  const url = resolveAxiosFullUrl(config);
+  const method = (config.method || 'GET').toUpperCase();
+  const headers = normalizeAxiosHeaders(config.headers);
+  const uniqueId = ensureHttpResourceId(headers);
+  const resourceId = buildAutoTrackResourceId(method, url, uniqueId);
+
+  let finalHeaders = headers;
+  if (traceEnabled) {
+    const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
+    const headersMap = new Map<string, string>();
+
+    const headerKeys = Object.keys(headers);
+    for (let i = 0; i < headerKeys.length; i++) {
+      const key = headerKeys[i];
+      headersMap.set(key, headers[key]);
+    }
+
+    const traceHeaderKeys = Object.keys(traceHeaders);
+    for (let i = 0; i < traceHeaderKeys.length; i++) {
+      const key = traceHeaderKeys[i];
+      headersMap.set(key, traceHeaders[key]);
+    }
+
+    const traceInterceptor = createAxiosTraceInterceptor();
+    if (traceInterceptor) {
+      const interceptedRequest = traceInterceptor.interceptRequest({
+        url: url,
+        method: method,
+        headers: headersMap,
+        body: typeof config.data === 'string' ? config.data : undefined,
+        timestamp: Date.now()
+      });
+
+      finalHeaders = {};
+      const interceptedHeaders = Array.from(interceptedRequest.headers.entries());
+      for (let i = 0; i < interceptedHeaders.length; i++) {
+        const entry = interceptedHeaders[i];
+        finalHeaders[entry[0]] = entry[1];
+      }
+    }
+  }
+
+  finalHeaders[FT_RESOURCE_ID_HEADER] = uniqueId;
+
+  return {
+    resourceId: resourceId,
+    url: url,
+    method: method,
+    startTime: Date.now(),
+    requestHeaders: finalHeaders,
+    traceEnabled: traceEnabled,
+    resourceEnabled: resourceEnabled
+  };
+}
+
+function completeAxiosTrace(state: FTAxiosAutoTrackState, status: number, headers: Record<string, string>, body?: string): void {
+  if (!state.traceEnabled) {
+    return;
+  }
+
+  const traceInterceptor = createAxiosTraceInterceptor();
+  if (!traceInterceptor) {
+    return;
+  }
+
+  const responseHeaderMap = new Map<string, string>();
+  const responseHeaderKeys = Object.keys(headers);
+  for (let i = 0; i < responseHeaderKeys.length; i++) {
+    const key = responseHeaderKeys[i];
+    responseHeaderMap.set(key, headers[key]);
+  }
+
+  const traceHandler = FTTraceManager.getInstance().getHandler(state.resourceId);
+  const traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
+  const spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+
+  traceInterceptor.interceptResponse({
+    url: state.url,
+    statusCode: status,
+    headers: responseHeaderMap,
+    body: body,
+    timestamp: Date.now(),
+    traceId: traceId,
+    spanId: spanId,
+    duration: Date.now() - state.startTime
+  });
+}
+
+function completeAxiosResource(
+  state: FTAxiosAutoTrackState,
+  status: number,
+  headers: Record<string, string>,
+  responseBody?: string,
+  errorMessage?: string,
+  errorStack?: string
+): void {
+  if (!state.resourceEnabled) {
+    return;
+  }
+
+  const resourceParams = new ResourceParams();
+  resourceParams.setUrl(state.url);
+  resourceParams.setResourceMethod(state.method);
+  resourceParams.setRequestHeaderMap(buildRequestHeaderMap(state.requestHeaders));
+  resourceParams.setRequestHeader(JSON.stringify(state.requestHeaders));
+  resourceParams.setResourceStatus(status);
+
+  resourceParams.setResponseHeaderMap(buildResponseHeaderMap(headers));
+  resourceParams.setResponseHeader(JSON.stringify(headers));
+
+  const contentType = headers['content-type'] || headers['Content-Type'];
+  const contentEncoding = headers['content-encoding'] || headers['Content-Encoding'];
+  const connection = headers['connection'] || headers['Connection'];
+  if (contentType) {
+    resourceParams.setResponseContentType(contentType);
+  }
+  if (contentEncoding) {
+    resourceParams.setResponseContentEncoding(contentEncoding);
+  }
+  if (connection) {
+    resourceParams.setResponseConnection(connection);
+  }
+
+  const contentLength = extractContentLength(headers);
+  if (contentLength > 0) {
+    resourceParams.setResponseContentLength(contentLength);
+  }
+
+  const durationNs = (Date.now() - state.startTime) * 1000000;
+  const metricValue: PerformanceMetricValue = { value: durationNs };
+  resourceParams.addProperty('resourceLoad', metricValue);
+
+  if (errorMessage) {
+    resourceParams.setRequestErrorMsg(errorMessage);
+  }
+  if (errorStack) {
+    resourceParams.setRequestErrorStack(errorStack);
+  }
+
+  FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
+  FTRUMInnerManager.getInstance().stopResource(state.resourceId, state.actionId);
 }
 
 /**
@@ -1301,7 +1579,7 @@ export function createFTRCPInterceptors(
  * @atomicservice
  * @since 22
  */
-export function createFTHttpInterceptors(
+function createFTHttpInterceptors(
   enableTraceInterceptor?: boolean,
   enableResourceInterceptor?: boolean
 ): http.HttpInterceptor[] {
@@ -1323,7 +1601,10 @@ export function createFTHttpInterceptors(
 /**
  * Create an HTTP interceptor chain that can be attached to a specific HttpRequest instance.
  * @param { FTHttpInterceptorChainOptions } options - The FT HTTP interceptor chain options.
- * Custom interceptors are appended after the FT defaults returned by `createFTHttpInterceptors`.
+ * The chain always starts with the FT defaults returned by
+ * `createFTHttpInterceptors`. When `options.interceptors` is provided, those
+ * custom interceptors are appended afterwards in the same order they appear in
+ * the array.
  * @returns { http.HttpInterceptorChain } The FT HTTP interceptor chain.
  * @syscap SystemCapability.Communication.NetStack
  * @atomicservice
@@ -1354,7 +1635,8 @@ export function createFTHttpInterceptorChain(
  * Attach the default FT http interceptor chain to a specific HttpRequest.
  * Only one chain can be attached to a given request.
  * @param { http.HttpRequest } httpRequest - Initiates an HTTP request to a given URL.
- * @param { FTHttpInterceptorChainOptions } options - Optional FT toggles and any extra interceptors to append.
+ * @param { FTHttpInterceptorChainOptions } options - Optional FT toggles and
+ * any custom interceptors to append after the FT defaults.
  * @returns { http.HttpInterceptorChain } The applied FT HTTP interceptor chain.
  * @throws { BusinessError } 2300801 - Parameter type not supported by the interceptor.
  * @throws { BusinessError } 2300999 - Internal error.
@@ -1369,6 +1651,148 @@ export function applyFTHttpTrack(
   const chain = createFTHttpInterceptorChain(options);
   chain.apply(httpRequest);
   return chain;
+}
+
+/**
+ * Attach FT auto-track to an Axios-like client by using request/response interceptors.
+ * This path is intended for @ohos/axios versions that do not expose NetworkKit's
+ * `interceptorChain` entry point.
+ *
+ * Example: shared `client.interceptors` and adjustable ordering.
+ * Request interceptors usually run in registration order, while response interceptors
+ * are typically chained in reverse around the request lifecycle. If your app already
+ * shares one Axios client across auth, signing, logging, or retry logic, choose the
+ * registration order based on which headers/body snapshot FT should observe.
+ *
+ * ```ts
+ * const client = axios.create({
+ *   baseURL: 'https://example.com'
+ * });
+ *
+ * // Scenario A: let business request interceptors run first, then FT captures
+ * // the final request headers after auth/signing fields have been added.
+ * client.interceptors.request.use((config) => {
+ *   config.headers = {
+ *     ...(config.headers || {}),
+ *     Authorization: 'Bearer token',
+ *     'X-Signature': 'signed-value'
+ *   };
+ *   return config;
+ * });
+ *
+ * const ftTrack = applyFTAxiosTrack(client);
+ *
+ * // Scenario B: if you want FT to run first, register it before other shared
+ * // interceptors so later interceptors can continue mutating the same client.
+ * const client2 = axios.create();
+ * const ftTrack2 = applyFTAxiosTrack(client2);
+ * client2.interceptors.request.use((config) => {
+ *   config.headers = {
+ *     ...(config.headers || {}),
+ *     Authorization: 'Bearer token'
+ *   };
+ *   return config;
+ * });
+ *
+ * // When needed, you can still adjust order later via eject + re-register.
+ * client.interceptors.request.eject(ftTrack.requestInterceptorId);
+ * client.interceptors.response.eject(ftTrack.responseInterceptorId);
+ * const ftTrackReordered = applyFTAxiosTrack(client);
+ * ```
+ *
+ * @param { FTAxiosInterceptorTarget } axiosTarget - The Axios instance or compatible target.
+ * @param { FTHttpInterceptorChainOptions } options - Optional FT toggles.
+ * @returns { FTAxiosTrackRegistration } Registered interceptor ids.
+ */
+export function applyFTAxiosTrack(
+  axiosTarget: Object,
+  options: FTHttpInterceptorChainOptions = {}
+): FTAxiosTrackRegistration {
+  const target = axiosTarget as FTAxiosInterceptorTarget;
+  const traceEnabled = options.enableTraceInterceptor !== undefined
+    ? options.enableTraceInterceptor
+    : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
+  const resourceEnabled = options.enableResourceInterceptor !== undefined
+    ? options.enableResourceInterceptor
+    : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+
+  const requestInterceptorId = target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
+    const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled);
+    config.headers = state.requestHeaders as Object;
+
+    if (resourceEnabled) {
+      FTRUMInnerManager.getInstance().startResource(state.resourceId);
+      const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
+      if (activeAction && !activeAction.isActionClose()) {
+        state.actionId = activeAction.getId();
+      }
+    }
+
+    setAxiosAutoTrackState(config, state);
+    FTInnerLogger.d(
+      TAG,
+      `[Axios-Request] Prepared ${state.method} ${state.url}, resourceId=${state.resourceId}, trace=${traceEnabled}, resource=${resourceEnabled}, ${summarizeHeaderKeys(state.requestHeaders)}`
+    );
+    return config;
+  });
+
+  const responseInterceptorId = target.interceptors.response.use(
+    (response: FTAxiosResponseTarget) => {
+      const state = getAxiosAutoTrackState(response.config);
+      if (!state) {
+        return response;
+      }
+
+      const responseHeaders = normalizeAxiosHeaders(response.headers);
+      const responseBodyText = tryGetOptionalResponseBodyText(response.data);
+
+      completeAxiosTrace(state, response.status || 0, responseHeaders, responseBodyText);
+      completeAxiosResource(state, response.status || 0, responseHeaders, undefined);
+
+      FTInnerLogger.d(
+        TAG,
+        `[Axios-Response] Completed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${response.status || 0}, duration=${Date.now() - state.startTime}ms`
+      );
+      clearAxiosAutoTrackState(response.config);
+      return response;
+    },
+    (rawError: Object) => {
+      const error = rawError as FTAxiosErrorTarget;
+      const responseConfig = error.config || (error.response ? error.response.config : undefined);
+      const state = getAxiosAutoTrackState(responseConfig);
+      if (state) {
+        const responseHeaders = normalizeAxiosHeaders(error.response ? error.response.headers : undefined);
+        const responseBodyText = error.response ? tryGetOptionalResponseBodyText(error.response.data) : undefined;
+        const status = error.response ? error.response.status || 0 : 0;
+
+        completeAxiosTrace(state, status, responseHeaders, responseBodyText);
+        completeAxiosResource(
+          state,
+          status,
+          responseHeaders,
+          responseBodyText,
+          error.message || responseBodyText || 'Unknown error',
+          error.stack
+        );
+
+        FTInnerLogger.e(
+          TAG,
+          `[Axios-Response] Request failed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${status}, error=${error.message || 'Unknown error'}`
+        );
+        clearAxiosAutoTrackState(responseConfig);
+      }
+
+      if (rawError instanceof Error) {
+        throw rawError;
+      }
+      throw new Error(String(rawError));
+    }
+  );
+
+  return {
+    requestInterceptorId: requestInterceptorId,
+    responseInterceptorId: responseInterceptorId
+  };
 }
 
 /**

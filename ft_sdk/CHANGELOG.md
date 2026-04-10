@@ -5,12 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14-alpha02] - 2026-04-10
+- Added `applyFTAxiosTrack` for `@ohos/axios` versions without `interceptorChain`, 
+   enabling axios auto-track through request/response interceptors.
+- Kept the existing `interceptorChain`-based axios path for newer `@ohos/axios` 
+   versions so compat and chain integrations can coexist.
+
 ## [0.1.14-alpha01] - 2026-04-02
 - Added HTTP auto-track support based on @kit.NetworkKit interceptors.
 - Added @ohos/axios auto-track support via reusable HTTP interceptor chains.
 - Unified FT network tracking APIs, including RCP and HTTP helper exports.
-- Improved test page coverage and API 22+ usage guidance for HTTP interceptors.
-
 
 ## [0.1.13-alpha01] - 2026-03-13
 - The ft_native library is decoupled from ft_sdk and will automatically capture native crashes based on the dependency situation.
@@ -727,4 +731,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compatible with HarmonyOS API 5.0+
 - HAR package format for easy integration
 - Automatic permission handling (INTERNET, GET_WIFI_INFO, GET_NETWORK_INFO)
-
