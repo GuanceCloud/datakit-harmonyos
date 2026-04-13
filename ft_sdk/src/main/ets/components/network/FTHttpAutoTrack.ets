@@ -147,6 +147,46 @@ class HttpAutoTrackStateStore {
   }
 }
 
+class AxiosChainMethodStore {
+  private static instance: AxiosChainMethodStore | null = null;
+  private readonly methodMap: Map<string, string> = new Map();
+
+  public static getInstance(): AxiosChainMethodStore {
+    if (AxiosChainMethodStore.instance === null) {
+      AxiosChainMethodStore.instance = new AxiosChainMethodStore();
+    }
+    return AxiosChainMethodStore.instance;
+  }
+
+  public put(uniqueId: string, method: string): void {
+    if (!uniqueId || !method) {
+      return;
+    }
+    if (this.methodMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
+      FTInnerLogger.w(TAG, `[Axios-Chain] methodMap size (${this.methodMap.size}) exceeds limit, clearing stale methods`);
+      this.methodMap.clear();
+    }
+    this.methodMap.set(uniqueId, method);
+  }
+
+  public get(uniqueId: string): string | undefined {
+    return this.methodMap.get(uniqueId);
+  }
+
+  public delete(uniqueId: string): void {
+    this.methodMap.delete(uniqueId);
+  }
+}
+
+function resolveAxiosChainMethod(headers: Record<string, string>): string {
+  const uniqueId = headers[FT_RESOURCE_ID_HEADER] || headers[FT_RESOURCE_ID_HEADER.toLowerCase()];
+  if (!uniqueId) {
+    return HTTP_METHOD_UNKNOWN;
+  }
+  const method = AxiosChainMethodStore.getInstance().get(uniqueId);
+  return method ?? HTTP_METHOD_UNKNOWN;
+}
+
 function normalizeObjectHeaders(headers?: Object | null): Record<string, string> {
   const normalized: Record<string, string> = {};
   if (!headers) {
@@ -202,8 +242,9 @@ function buildResponseHeaderMap(headers: Record<string, string>): Map<string, st
 }
 
 function ensureHttpResourceId(headers: Record<string, string>): string {
-  const existingId = headers[FT_RESOURCE_ID_HEADER];
+  const existingId = headers[FT_RESOURCE_ID_HEADER] || headers[FT_RESOURCE_ID_HEADER.toLowerCase()];
   if (existingId && existingId.length > 0) {
+    headers[FT_RESOURCE_ID_HEADER] = existingId;
     return existingId;
   }
   const generatedId = Utils.generateUUID();
@@ -1010,11 +1051,9 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
     try {
       const url = reqContext.url;
-      // HttpRequestContext does not currently expose the request method, so we
-      // keep a stable placeholder to preserve the resourceId contract.
-      const method = HTTP_METHOD_UNKNOWN;
       const headers = normalizeObjectHeaders(reqContext.header);
       const uniqueId = ensureHttpResourceId(headers);
+      const method = resolveAxiosChainMethod(headers);
       const resourceId = buildAutoTrackResourceId(method, url, uniqueId);
 
       let finalHeaders = headers;
@@ -1112,10 +1151,11 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
 
   async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
     const requestHeaders = normalizeObjectHeaders(reqContext.header);
-    const uniqueId = requestHeaders[FT_RESOURCE_ID_HEADER];
+    const uniqueId = requestHeaders[FT_RESOURCE_ID_HEADER] || requestHeaders[FT_RESOURCE_ID_HEADER.toLowerCase()];
     const url = reqContext.url;
+    const method = resolveAxiosChainMethod(requestHeaders);
     const fallbackResourceId = uniqueId
-      ? buildAutoTrackResourceId(HTTP_METHOD_UNKNOWN, url, uniqueId)
+      ? buildAutoTrackResourceId(method, url, uniqueId)
       : undefined;
     const state = fallbackResourceId ? HttpAutoTrackStateStore.getInstance().get(fallbackResourceId) : undefined;
 
@@ -1213,6 +1253,9 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
         FTRUMInnerManager.getInstance().stopResource(resourceId, state.actionId);
       }
     } finally {
+      if (uniqueId) {
+        AxiosChainMethodStore.getInstance().delete(uniqueId);
+      }
       HttpAutoTrackStateStore.getInstance().delete(resourceId);
     }
 
@@ -1399,6 +1442,7 @@ function buildAxiosAutoTrackState(
   const method = (config.method || 'GET').toUpperCase();
   const headers = normalizeAxiosHeaders(config.headers);
   const uniqueId = ensureHttpResourceId(headers);
+  AxiosChainMethodStore.getInstance().put(uniqueId, method);
   const resourceId = buildAutoTrackResourceId(method, url, uniqueId);
 
   let finalHeaders = headers;
@@ -1448,6 +1492,18 @@ function buildAxiosAutoTrackState(
     traceEnabled: traceEnabled,
     resourceEnabled: resourceEnabled
   };
+}
+
+export function applyFTAxiosChainMethodBridge(axiosTarget: Object): number {
+  const target = axiosTarget as FTAxiosInterceptorTarget;
+  return target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
+    const method = (config.method || 'GET').toUpperCase();
+    const headers = normalizeAxiosHeaders(config.headers);
+    const uniqueId = ensureHttpResourceId(headers);
+    AxiosChainMethodStore.getInstance().put(uniqueId, method);
+    config.headers = headers as Object;
+    return config;
+  });
 }
 
 function completeAxiosTrace(state: FTAxiosAutoTrackState, status: number, headers: Record<string, string>, body?: string): void {

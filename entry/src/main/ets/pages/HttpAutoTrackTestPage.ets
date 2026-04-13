@@ -4,6 +4,7 @@
  */
 import {
   applyFTAxiosTrack,
+  applyFTAxiosChainMethodBridge,
   applyFTHttpTrack,
   createFTHttpInterceptorChain,
   createFTRCPTrackConfig
@@ -11,10 +12,7 @@ import {
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { http } from '@kit.NetworkKit';
 import axios, {
-  AxiosHeaders,
-  AxiosInstance,
-  AxiosRequestConfig,
-  AxiosResponse
+  AxiosHeaders, AxiosInstance, AxiosRequestConfig, AxiosResponse
 } from '@ohos/axios';
 import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
 import { FTTraceConfigManager } from 'shareLibrary/src/main/ets/components/trace/FTTraceConfigManager';
@@ -23,6 +21,12 @@ import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from '../utils/DemoLogger';
+import {
+  preInitChainClient,
+  preInitChainClientInfo,
+  preInitCompatClient,
+  preInitCompatClientInfo
+} from '../utils/PreInitAxiosClients';
 
 const TAG = "HttpAutoTrackTestPage";
 
@@ -102,11 +106,34 @@ export struct HttpAutoTrackTestPage {
       responseType: 'string',
       headers: requestHeaders
     };
-    const response: AxiosResponse<string | Object, Object> = await client.request<
-      string | Object,
-      AxiosResponse<string | Object, Object>,
-      Object
-    >(requestConfig as AxiosRequestConfig<Object>);
+    const response: AxiosResponse<string | Object, Object> = await client.request<string | Object,
+    AxiosResponse<string | Object, Object>,
+    Object>(requestConfig as AxiosRequestConfig<Object>);
+
+    return typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(response.data);
+  }
+
+  private async executeAxiosRequestWithClient(
+    client: AxiosInstance,
+    url: string,
+    method: 'get' | 'post',
+    data?: Object
+  ): Promise<string> {
+    const requestHeaders = new AxiosHeaders();
+    requestHeaders.setAccept('application/json');
+    requestHeaders.setContentType('application/json');
+    const requestConfig: AxiosPageRequestConfig = {
+      url: url,
+      method: method,
+      data: data,
+      responseType: 'string',
+      headers: requestHeaders
+    };
+    const response: AxiosResponse<string | Object, Object> = await client.request<string | Object,
+    AxiosResponse<string | Object, Object>,
+    Object>(requestConfig as AxiosRequestConfig<Object>);
 
     return typeof response.data === 'string'
       ? response.data
@@ -131,6 +158,8 @@ export struct HttpAutoTrackTestPage {
     const client = axios.create(axiosConfig);
     if (mode === 'compat') {
       applyFTAxiosTrack(client);
+    } else if (mode === 'chain') {
+      applyFTAxiosChainMethodBridge(client);
     }
     return client;
   }
@@ -142,7 +171,8 @@ export struct HttpAutoTrackTestPage {
     try {
       const rumEnabled = FTRUMGlobalManager.getInstance().isInitialized();
       this.isAutoTrackEnabled = rumEnabled;
-      this.addTestResult(`RCP interceptor session helper: ${this.isAutoTrackEnabled ? '✅ Available' : '❌ Unavailable'}`);
+      this.addTestResult(`RCP interceptor session helper: ${this.isAutoTrackEnabled ? '✅ Available' :
+        '❌ Unavailable'}`);
     } catch (error) {
       this.addTestResult(`❌ Failed to check interceptor helper status: ${error}`);
     }
@@ -566,7 +596,8 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const responseText = await this.executeAxiosRequest('https://httpbin.org/get?from=axios-adapter', 'get', undefined, 'compat');
+      const responseText =
+        await this.executeAxiosRequest('https://httpbin.org/get?from=axios-adapter', 'get', undefined, 'compat');
       this.requestCount++;
       this.successCount++;
       this.addTestResult(`✅ Axios compat GET request succeeded: bodyLength=${responseText.length}`);
@@ -622,7 +653,8 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const responseText = await this.executeAxiosRequest('https://httpbin.org/get?from=axios-chain', 'get', undefined, 'chain');
+      const responseText =
+        await this.executeAxiosRequest('https://httpbin.org/get?from=axios-chain', 'get', undefined, 'chain');
       this.requestCount++;
       this.successCount++;
       this.addTestResult(`✅ Axios chain GET request succeeded: bodyLength=${responseText.length}`);
@@ -668,6 +700,48 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
+  async testSharedPreInitAxiosCompatRequest() {
+    try {
+      const responseText = await this.executeAxiosRequestWithClient(
+        preInitCompatClient,
+        'https://httpbin.org/get?from=shared-preinit-compat',
+        'get'
+      );
+      this.requestCount++;
+      this.successCount++;
+      this.addTestResult(
+        `✅ Shared pre-init Axios compat request succeeded: createdAt=${preInitCompatClientInfo.createdAt}, bodyLength=${responseText.length}`
+      );
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      const errorMsg = err.message || String(error);
+      this.addTestResult(`❌ Shared pre-init Axios compat request failed: ${errorMsg}`);
+    }
+  }
+
+  async testSharedPreInitAxiosChainRequest() {
+    try {
+      const responseText = await this.executeAxiosRequestWithClient(
+        preInitChainClient,
+        'https://httpbin.org/get?from=shared-preinit-chain',
+        'get'
+      );
+      this.requestCount++;
+      this.successCount++;
+      this.addTestResult(
+        `✅ Shared pre-init Axios chain request succeeded: createdAt=${preInitChainClientInfo.createdAt}, bodyLength=${responseText.length}`
+      );
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      const errorMsg = err.message || String(error);
+      this.addTestResult(`❌ Shared pre-init Axios chain request failed: ${errorMsg}`);
+    }
+  }
+
   /**
    * Clear test results
    */
@@ -703,11 +777,11 @@ export struct HttpAutoTrackTestPage {
             .customProperty('test-get-btn', 'Test GET Request (RCP)')
             .onClick(() => this.testRCPGetRequest())
 
-	          Button('Test POST Request (RCP)')
+          Button('Test POST Request (RCP)')
             .width('100%')
             .margin({ bottom: 10 })
             .onClick(() => this.testRCPPostRequest())
-	            .customProperty('test-post-btn', 'Test POST Request (RCP)')
+            .customProperty('test-post-btn', 'Test POST Request (RCP)')
 
           Button('Test Custom Session (With Interceptors)')
             .width('100%')
@@ -759,6 +833,27 @@ export struct HttpAutoTrackTestPage {
             .margin({ bottom: 10 })
             .width('100%')
 
+          Text(`Shared pre-init clients are created at module load before FTSDK.initFTSDK() runs. CompatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`)
+            .fontSize(12)
+            .margin({ bottom: 10 })
+            .width('100%')
+
+          Button('Use Shared Pre-init Axios (Compat)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#7B1FA2')
+            .onClick(() => {
+              this.testSharedPreInitAxiosCompatRequest()
+            })
+            .customProperty('test-shared-preinit-compat-btn', 'Use Shared Pre-init Axios (Compat)')
+
+          Button('Use Shared Pre-init Axios (Chain)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#6A1B9A')
+            .onClick(() => this.testSharedPreInitAxiosChainRequest())
+            .customProperty('test-shared-preinit-chain-btn', 'Use Shared Pre-init Axios (Chain)')
+
           Button('Test Axios GET (Compat)')
             .width('100%')
             .margin({ bottom: 10 })
@@ -784,7 +879,9 @@ export struct HttpAutoTrackTestPage {
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FB8C00')
-            .onClick(() => this.testAxiosPostChainRequest())
+            .onClick(() => {
+              this.testAxiosPostChainRequest()
+            })
             .customProperty('test-axios-chain-post-btn', 'Test Axios POST (Chain)')
 
           Button('Test Trace ID in /api/user')

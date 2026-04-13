@@ -13,9 +13,18 @@ import { DBCacheDiscard } from 'shareLibrary/src/main/ets/components/enum/Enums'
 import { Status } from 'shareLibrary/src/main/ets/components/bean/Status';
 import { TraceType } from 'shareLibrary/src/main/ets/components/trace/TraceType';
 import { DemoLogger } from '../utils/DemoLogger';
+import {
+  runPreInitAxiosSmokeTestsWithMode,
+  PreInitAxiosSmokeExecutionMode,
+  PreInitAxiosSmokeUrls,
+  preInitControlChainClientInfo,
+  preInitChainClientInfo,
+  preInitCompatClientInfo
+} from '../utils/PreInitAxiosClients';
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
+const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequential';
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -80,6 +89,7 @@ export default class EntryAbility extends UIAbility {
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to load runtime config: ${error}`);
     }
+    // this.verifyPreInitAxiosClients();
     this.initFTSDK();
   }
 
@@ -175,6 +185,67 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
+  }
+
+  /**
+   * Verify the axios/http clients that were created at module-load time before FTSDK.initFTSDK().
+   * This smoke test is intentionally executed before SDK install so we can compare:
+   * 1. compat axios interceptor mode
+   * 2. axios + NetworkKit interceptorChain mode
+   * 3. the plain control chain created without FT interceptors
+   *
+   * The requests use distinct query markers so the resulting resource/trace logs can be
+   * mapped back to the exact pre-init path that produced them.
+   */
+  private async verifyPreInitAxiosClients(): Promise<void> {
+    const compatSmokeTestUrl = this.resolvePreInitCompatSmokeTestUrl();
+    const chainSmokeTestUrl = this.resolvePreInitChainSmokeTestUrl();
+    DemoLogger.i(
+      LOG_TAG,
+      `Pre-init axios clients already created before SDK init: compatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`
+    );
+    DemoLogger.i(
+      LOG_TAG,
+      `Running pre-init axios smoke tests before FTSDK.install: executionMode=${PRE_INIT_SMOKE_EXECUTION_MODE}, compatUrl=${compatSmokeTestUrl}, chainUrl=${chainSmokeTestUrl}, compatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}, chainControlAt=${preInitControlChainClientInfo.createdAt}`
+    );
+
+    try {
+      const smokeUrls: PreInitAxiosSmokeUrls = {
+        compatUrl: compatSmokeTestUrl,
+        chainUrl: chainSmokeTestUrl
+      };
+      // Keep execution order stable so startup logs are easier to compare across modes.
+      const results = await runPreInitAxiosSmokeTestsWithMode(smokeUrls, "sequential");
+      const summary = results.map((result) =>
+        result.success
+          ? `${result.mode}=ok(status=${result.statusCode},body=${result.bodyLength})`
+          : `${result.mode}=fail(error=${result.errorMessage})`
+      ).join(', ');
+      DemoLogger.i(LOG_TAG, `Pre-init axios smoke test finished before SDK init: ${summary}`);
+    } catch (error) {
+      DemoLogger.e(LOG_TAG, `Pre-init axios smoke test crashed unexpectedly before SDK init: ${error}`);
+    }
+  }
+
+  private resolvePreInitCompatSmokeTestUrl(): string {
+    return this.buildPreInitSmokeTestUrl('compat');
+  }
+
+  private resolvePreInitChainSmokeTestUrl(): string {
+    return this.buildPreInitSmokeTestUrl('chain');
+  }
+
+  private buildPreInitSmokeTestUrl(mode: 'compat' | 'chain'): string {
+    const traceUrl = this.runtimeConfig.traceUrl.trim();
+    if (traceUrl.length > 0) {
+      const smokeSource = mode === 'compat' ? 'entry-preinit-compat' : 'entry-preinit-chain';
+      return `${traceUrl}${traceUrl.includes('?') ? '&' : '?'}from=${smokeSource}`;
+    }
+
+    if (mode === 'compat') {
+      return 'https://httpbin.org/get?from=entry-preinit-compat';
+    }
+    return 'https://httpbin.org/get?from=entry-preinit-chain';
   }
 
   private initFTSDK():void{
