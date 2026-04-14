@@ -42,6 +42,10 @@
       "srcPath": "./ft_sdk",
     },
     {
+      "name": "ft_sdk_ext",
+      "srcPath": "./ft_sdk_ext",
+    },
+    {
       "name": "ft_native",
       "srcPath": "./ft_native"
     }

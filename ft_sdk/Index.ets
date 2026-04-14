@@ -115,8 +115,6 @@ export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
 
 export {
   createFTRCPInterceptors,
-  createFTHttpInterceptorChain,
-  applyFTHttpTrack,
   createFTRCPTrackConfig,
 } from './src/main/ets/components/network/FTHttpAutoTrack';
 

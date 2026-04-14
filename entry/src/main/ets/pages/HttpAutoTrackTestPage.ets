@@ -4,11 +4,13 @@
  */
 import {
   applyFTAxiosTrack,
-  applyFTAxiosChainMethodBridge,
-  applyFTHttpTrack,
-  createFTHttpInterceptorChain,
   createFTRCPTrackConfig
 } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import {
+  applyFTAxiosChainMethodBridge,
+  applyFTHttpTrack,
+  createFTHttpInterceptorChain
+} from 'shareLibraryExt/src/main/ets/components/network/FTHttpAutoTrackExt';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { http } from '@kit.NetworkKit';
 import axios, {
@@ -159,7 +161,7 @@ export struct HttpAutoTrackTestPage {
     if (mode === 'compat') {
       applyFTAxiosTrack(client);
     } else if (mode === 'chain') {
-      applyFTAxiosChainMethodBridge(client);
+      // applyFTAxiosChainMethodBridge(client);
     }
     return client;
   }

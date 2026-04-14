@@ -1,10 +1,12 @@
 import {
-  applyFTHttpTrack,
   applyFTAxiosTrack,
-  applyFTAxiosChainMethodBridge,
-  createFTHttpInterceptorChain,
   createFTRCPTrackConfig
 } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import {
+  applyFTAxiosChainMethodBridge,
+  applyFTHttpTrack,
+  createFTHttpInterceptorChain
+} from 'shareLibraryExt/src/main/ets/components/network/FTHttpAutoTrackExt';
 import { http } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import axios, { AxiosHeaders, AxiosInstance, AxiosRequestConfig, AxiosResponse } from '@ohos/axios';

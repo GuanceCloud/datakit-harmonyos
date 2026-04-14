@@ -8,6 +8,7 @@
   "dependencies":  {
     "@ohos/axios": "2.2.8",
     "shareLibrary":"file:../ft_sdk",
+    "shareLibraryExt":"file:../ft_sdk_ext",
     "ft_native": "file:../ft_native"
   }
 }
