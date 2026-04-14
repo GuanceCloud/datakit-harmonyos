@@ -2,7 +2,6 @@ import { Constants } from "./Constants";
 import { DetectFrequency, EnvType, LogCacheDiscard, Status, SyncPageSize } from "./enum/Enums";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
-import { util } from "@kit.ArkTS";
 import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { HeaderHandler } from "./trace/FTTraceInterceptor";
 import { DataModifier, LineDataModifier } from "./DataModifier";

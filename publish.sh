@@ -70,14 +70,8 @@ for MODULE_NAME in "${MODULE_NAMES[@]}"; do
         exit 1
     fi
 
-    # Extract version number (using grep and sed or jq)
-    # Use jq if available, otherwise fallback to grep/sed
-    if command -v jq &> /dev/null; then
-        VERSION=$(jq -r '.version' "$PACKAGE_JSON_PATH")
-    else
-        # If jq is not available, use grep and sed to extract
-        VERSION=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$PACKAGE_JSON_PATH" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-    fi
+    # oh-package.json5 is JSON5, so avoid jq and extract the version directly.
+    VERSION=$(grep -E '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$PACKAGE_JSON_PATH" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | head -n 1)
 
     if [ -z "$VERSION" ]; then
         echo "Error: Failed to extract version from $PACKAGE_JSON_PATH"
