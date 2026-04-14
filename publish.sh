@@ -29,6 +29,7 @@ elif [ "$MODULE_TYPE" == "native" ]; then
     MODULE_NAMES=("ft_native")
 fi
 OSS_UTIL_PATH=~/ossutilmac64
+FT_SDK_EXT_DEPENDENCY_HAR_PATH="ft_sdk_ext/ft_sdk.har"
 
 # Check required environment variables
 if [ -z "$HARMONY_OS_NODE_PATH" ]; then
@@ -63,6 +64,18 @@ for MODULE_NAME in "${MODULE_NAMES[@]}"; do
     fi
 
     echo "HAR package built successfully: $HAR_SOURCE_PATH"
+
+    if [ "$MODULE_NAME" == "ft_sdk" ] && [ "$MODULE_TYPE" == "agent" ]; then
+        echo "Syncing $HAR_SOURCE_PATH to $FT_SDK_EXT_DEPENDENCY_HAR_PATH for ft_sdk_ext build..."
+        cp -f "$HAR_SOURCE_PATH" "$FT_SDK_EXT_DEPENDENCY_HAR_PATH"
+
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to sync ft_sdk HAR to $FT_SDK_EXT_DEPENDENCY_HAR_PATH"
+            exit 1
+        fi
+
+        echo "Synced successfully: $FT_SDK_EXT_DEPENDENCY_HAR_PATH"
+    fi
 
     # Step 2: Extract version number from oh-package.json5
     if [ ! -f "$PACKAGE_JSON_PATH" ]; then
