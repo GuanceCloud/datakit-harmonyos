@@ -9,7 +9,7 @@
     // Build-time local HAR reference for ft_sdk_ext itself.
     // In app/demo consumption this entry is expected to be overridden by the
     // root oh-package.json5 `overrides.ft_sdk` configuration.
-    "ft_sdk": "file:./ft_sdk.har"
+    "ft_sdk": "0.1.14-alpha03"
   },
 
 }

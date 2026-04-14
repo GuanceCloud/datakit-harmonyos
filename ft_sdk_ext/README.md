@@ -1,24 +1,20 @@
-# ft_sdk_ext Notes
+# ft_sdk_ext
 
-This module has a special dependency resolution setup for local HAR development.
+Guance HarmonyOS extension SDK for newer HarmonyOS compiler and platform capabilities.
 
-## Why `oh-package.json5` still references `ft_sdk`
+## Features
 
-[`oh-package.json5`](/Users/Brandon/DevEcoStudioProjects/ft-sdk-harmonyos/ft_sdk_ext/oh-package.json5) contains a local `ft_sdk` reference so `ft_sdk_ext` can pass its own module-level dependency parsing during local build and packaging.
+- Extension APIs built on top of `ft_sdk`
+- NetworkKit and interceptor-based HTTP auto tracking helpers
+- Compatibility layer for newer HarmonyOS capabilities
 
-That reference is not the final dependency source used by the consumer app.
+## Package
 
-At app/demo integration time, the root [`oh-package.json5`](/Users/Brandon/DevEcoStudioProjects/ft-sdk-harmonyos/oh-package.json5) uses `overrides` to replace that module-local reference with the consumer-side local HAR mapping.
+- Name: `ft_sdk_ext`
+- Current version: `0.1.14-alpha03`
+- Depends on: `ft_sdk`
+- License: `Apache-2.0`
 
-In short:
+## Documentation
 
-- `ft_sdk_ext/oh-package.json5`: build-time placeholder/reference for this module
-- root `oh-package.json5` `overrides`: final consumer-side resolution
-
-## Why there is an empty `ft_sdk.har`
-
-The empty [`ft_sdk.har`](/Users/Brandon/DevEcoStudioProjects/ft-sdk-harmonyos/ft_sdk_ext/ft_sdk.har) file exists only to avoid syntax/path validation failures while `ft_sdk_ext` is being parsed locally.
-
-It is not a real SDK artifact and must not be used for publishing or app integration.
-
-The real package used for build output and app/demo consumption should come from the actual `ft_sdk` HAR artifact.
+- https://docs.guance.com/real-user-monitoring/harmonyos/app-access/
