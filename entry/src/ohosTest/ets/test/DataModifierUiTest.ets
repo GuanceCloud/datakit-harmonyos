@@ -55,9 +55,9 @@ export default function dataModifierUiTest() {
      * Test steps:
      * 1. Launch application
      * 2. Wait for app to load
-     * 3. Click "运行RUM测试" button
+     * 3. Click "Run RUM Test" button
      * 4. Wait for test to complete
-     * 5. Verify "✅ RUM测试通过" is displayed
+     * 5. Verify "✅ RUM Test Passed" is displayed
      */
     it('automatedRumTest', 0, async () => {
       console.info('[DataModifierUiTest] Starting automated RUM test');
@@ -75,9 +75,9 @@ export default function dataModifierUiTest() {
       // Step 2: Wait for page to load
       await driver.waitForMilliseconds(2000);
 
-      // Step 3: Find and click "运行RUM测试" button
+      // Step 3: Find and click "Run RUM Test" button
       try {
-        const rumTestButton = await driver.findComponent(BY.text('运行RUM测试').type('Button'));
+        const rumTestButton = await driver.findComponent(BY.text('Run RUM Test').type('Button'));
         await rumTestButton.click();
         console.info('[DataModifierUiTest] Clicked RUM test button');
       } catch (error) {
@@ -92,7 +92,7 @@ export default function dataModifierUiTest() {
       // Step 5: Verify success message
       try {
         const resultText = await driver.findComponent(
-          ON.byTextSubstring('RUM测试通过')
+          ON.byTextSubstring('RUM Test Passed')
         );
         const text = await resultText.getText();
         console.info('[DataModifierUiTest] RUM test result: ' + text);
@@ -112,16 +112,16 @@ export default function dataModifierUiTest() {
      * Aligned with Android SDK: logDataTest
      *
      * Test steps:
-     * 1. Click "运行Log测试" button
+     * 1. Click "Run Log Test" button
      * 2. Wait for test to complete
-     * 3. Verify "✅ Log测试通过" is displayed
+     * 3. Verify "✅ Log Test Passed" is displayed
      */
     it('automatedLogTest', 0, async () => {
       console.info('[DataModifierUiTest] Starting automated Log test');
 
-      // Step 1: Click "运行Log测试" button
+      // Step 1: Click "Run Log Test" button
       try {
-        const logTestButton = await driver.findComponent(BY.text('运行Log测试').type('Button'));
+        const logTestButton = await driver.findComponent(BY.text('Run Log Test').type('Button'));
         await logTestButton.click();
         console.info('[DataModifierUiTest] Clicked Log test button');
       } catch (error) {
@@ -136,7 +136,7 @@ export default function dataModifierUiTest() {
       // Step 3: Verify success message
       try {
         const resultText = await driver.findComponent(
-          ON.byTextSubstring('Log测试通过')
+          ON.byTextSubstring('Log Test Passed')
         );
         const text = await resultText.getText();
         console.info('[DataModifierUiTest] Log test result: ' + text);
@@ -155,16 +155,16 @@ export default function dataModifierUiTest() {
      * Automated test for running all tests
      *
      * Test steps:
-     * 1. Click "运行全部测试" button
+     * 1. Click "Run All Tests" button
      * 2. Wait for all tests to complete
      * 3. Verify both RUM and Log tests passed
      */
     it('automatedAllTests', 0, async () => {
       console.info('[DataModifierUiTest] Starting automated all tests');
 
-      // Step 1: Click "运行全部测试" button
+      // Step 1: Click "Run All Tests" button
       try {
-        const runAllButton = await driver.findComponent(BY.text('运行全部测试').type('Button'));
+        const runAllButton = await driver.findComponent(BY.text('Run All Tests').type('Button'));
         await runAllButton.click();
         console.info('[DataModifierUiTest] Clicked run all button');
       } catch (error) {
@@ -179,11 +179,11 @@ export default function dataModifierUiTest() {
       // Step 3: Verify both tests passed
       try {
         const rumResult = await driver.findComponent(
-          ON.byTextSubstring('RUM测试通过')
+          ON.byTextSubstring('RUM Test Passed')
         );
 
         const logResult = await driver.findComponent(
-          ON.byTextSubstring('Log测试通过')
+          ON.byTextSubstring('Log Test Passed')
         );
 
         const rumText = await rumResult.getText();
