@@ -1,15 +1,13 @@
 {
-  "name": "ft_sdk_ext",
+  "name": "@guancecloud/ft_sdk_ext",
   "version": "0.1.14-alpha03",
   "description": "Guance HarmonyOS SDK extensions for newer compiler and platform capabilities.",
   "main": "Index.ets",
   "author": "Guance",
   "license": "Apache-2.0",
   "dependencies": {
-    // Build-time local HAR reference for ft_sdk_ext itself.
-    // In app/demo consumption this entry is expected to be overridden by the
-    // root oh-package.json5 `overrides.ft_sdk` configuration.
-    "ft_sdk": "0.1.14-alpha03"
+    // Keep ft_sdk_ext aligned with the published ft_sdk version it extends.
+    "@guancecloud/ft_sdk": "0.1.14-alpha03"
   },
 
 }

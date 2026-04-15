@@ -1,6 +1,6 @@
-import { FTDBCachePolicy } from 'shareLibrary/src/main/ets/components/db/FTDBCachePolicy';
-import { DataType } from 'shareLibrary/src/main/ets/components/enum/Enums';
-import { SamplingUtils } from 'shareLibrary/src/main/ets/components/utils/SamplingUtils';
+import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
+import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { SamplingUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/SamplingUtils';
 import { DemoLogger } from './DemoLogger';
 
 const TAG = 'RateLimitTestUtils';

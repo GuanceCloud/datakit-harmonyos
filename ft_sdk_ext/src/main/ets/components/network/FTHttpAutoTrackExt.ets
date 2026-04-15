@@ -1,11 +1,11 @@
 import { http } from '@kit.NetworkKit';
-import { FTInnerLogger } from 'ft_sdk/src/main/ets/components/log/FTLogger';
-import { FTRUMConfigManager } from 'ft_sdk/src/main/ets/components/rum/FTRUMConfigManager';
-import { FTRUMInnerManager } from 'ft_sdk/src/main/ets/components/rum/FTRUMInnerManager';
-import { ResourceParams } from 'ft_sdk/src/main/ets/components/rum/bean/ResourceParams';
-import { FTTraceConfigManager } from 'ft_sdk/src/main/ets/components/trace/FTTraceConfigManager';
-import { FTTraceInterceptor, DefaultFTTraceInterceptor } from 'ft_sdk/src/main/ets/components/trace/FTTraceInterceptor';
-import { FTTraceManager } from 'ft_sdk/src/main/ets/components/trace/FTTraceManager';
+import { FTInnerLogger } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { FTRUMConfigManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMConfigManager';
+import { FTRUMInnerManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMInnerManager';
+import { ResourceParams } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/ResourceParams';
+import { FTTraceConfigManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceConfigManager';
+import { FTTraceInterceptor, DefaultFTTraceInterceptor } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceInterceptor';
+import { FTTraceManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceManager';
 import {
   AxiosChainMethodStore,
   buildAutoTrackResourceId,
@@ -20,8 +20,8 @@ import {
   resolveAxiosChainMethod,
   summarizeHeaderKeys,
   tryGetResponseBodyText
-} from 'ft_sdk/src/main/ets/components/network/FTHttpAutoTrackShared';
-import { FTAxiosInterceptorTarget, FTAxiosRequestConfigTarget } from 'ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
+} from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrackShared';
+import { FTAxiosInterceptorTarget, FTAxiosRequestConfigTarget } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
 
 const TAG = 'FTHttpAutoTrackExt';
 

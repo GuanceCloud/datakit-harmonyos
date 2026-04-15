@@ -1,7 +1,7 @@
 import { RateLimitTestUtils } from '../utils/RateLimitTestUtils';
-import { FTDBCachePolicy } from 'shareLibrary/src/main/ets/components/db/FTDBCachePolicy';
-import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
-import { DataType, Status } from 'shareLibrary/src/main/ets/components/enum/Enums';
+import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
+import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
+import { DataType, Status } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';

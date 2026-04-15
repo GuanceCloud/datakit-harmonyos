@@ -1,7 +1,7 @@
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { image } from '@kit.ImageKit';
 import { BusinessError } from '@ohos.base';
-import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
 import { DemoLogger } from '../utils/DemoLogger';
 
 const TAG = "NetworkImage";

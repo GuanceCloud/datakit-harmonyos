@@ -1,7 +1,7 @@
-import { FTSDK } from 'shareLibrary/src/main/ets/components/FTSDK';
-import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
-import { FTDBCachePolicy } from 'shareLibrary/src/main/ets/components/db/FTDBCachePolicy';
-import { SyncTaskManager } from 'shareLibrary/src/main/ets/components/SyncTaskManager';
+import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
+import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
+import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
+import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';

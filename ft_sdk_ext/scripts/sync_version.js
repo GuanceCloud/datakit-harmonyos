@@ -25,7 +25,9 @@ function replaceInFile(filePath, replacer) {
 const sourceVersion = readVersionFromPackage(path.join(sdkDir, 'oh-package.json5'));
 
 replaceInFile(path.join(extDir, 'oh-package.json5'), (content) => {
-  return content.replace(/("version"\s*:\s*")([^"]+)(")/, `$1${sourceVersion}$3`);
+  return content
+    .replace(/("version"\s*:\s*")([^"]+)(")/, `$1${sourceVersion}$3`)
+    .replace(/("@guancecloud\/ft_sdk"\s*:\s*")([^"]+)(")/, `$1${sourceVersion}$3`);
 });
 
 replaceInFile(path.join(extDir, 'BuildProfile.ets'), (content) => {

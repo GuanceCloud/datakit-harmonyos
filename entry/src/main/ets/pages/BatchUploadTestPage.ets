@@ -1,8 +1,8 @@
-import { FTLogger } from 'shareLibrary/src/main/ets/components/log/FTLogger';
-import { Status, SyncPageSize } from 'shareLibrary/src/main/ets/components/enum/Enums';
-import { SyncTaskManager } from 'shareLibrary/src/main/ets/components/SyncTaskManager';
-import { DataType } from 'shareLibrary/src/main/ets/components/enum/Enums';
-import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
+import { FTLogger } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { Status, SyncPageSize } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
+import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
 import { CommonConstants } from '../constants/CommonConstants';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';

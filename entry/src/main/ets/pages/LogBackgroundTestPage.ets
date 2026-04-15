@@ -1,11 +1,11 @@
 import { Context } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
-import { FTLogger } from 'shareLibrary/src/main/ets/components/log/FTLogger';
-import { Status } from 'shareLibrary/src/main/ets/components/bean/Status';
-import { FTLoggerConfig } from 'shareLibrary/src/main/ets/components/Configs';
-import FTTrackInner from 'shareLibrary/src/main/ets/components/FTTrackInner';
-import { SyncTaskManager } from 'shareLibrary/src/main/ets/components/SyncTaskManager';
-import { FTSDK } from 'shareLibrary/src/main/ets/components/FTSDK';
+import { FTLogger } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
+import { FTLoggerConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
+import FTTrackInner from '@guancecloud/ft_sdk/src/main/ets/components/FTTrackInner';
+import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
+import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';

@@ -2,15 +2,15 @@
  * Trace Function Test Page
  * Test HarmonyOS SDK Trace functionality
  */
-import { FTSDK } from 'shareLibrary/src/main/ets/components/FTSDK';
-import { FTTraceConfig } from 'shareLibrary/src/main/ets/components/Configs';
-import { TraceType } from 'shareLibrary/src/main/ets/components/trace/TraceType';
-import { FTTraceConfigManager } from 'shareLibrary/src/main/ets/components/trace/FTTraceConfigManager';
-import { FTTraceInterceptor, HeaderHandler, HttpRequestData, HttpResponseData, TraceData, DefaultFTTraceInterceptor } from 'shareLibrary/src/main/ets/components/trace/FTTraceInterceptor';
-import { FTTraceManager } from 'shareLibrary/src/main/ets/components/trace/FTTraceManager';
-import { Status } from 'shareLibrary/src/main/ets/components/bean/Status';
-// import { FTHttpClient } from 'shareLibrary/src/main/ets/components/network/FTHttpClient';
-import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
+import { FTTraceConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
+import { TraceType } from '@guancecloud/ft_sdk/src/main/ets/components/trace/TraceType';
+import { FTTraceConfigManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceConfigManager';
+import { FTTraceInterceptor, HeaderHandler, HttpRequestData, HttpResponseData, TraceData, DefaultFTTraceInterceptor } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceInterceptor';
+import { FTTraceManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceManager';
+import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
+// import { FTHttpClient } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpClient';
+import { createFTRCPTrackConfig } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';

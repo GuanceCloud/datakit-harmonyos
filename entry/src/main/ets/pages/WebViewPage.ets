@@ -1,6 +1,6 @@
 import { webview } from "@kit.ArkWeb";
-import { FTWebViewHandler } from "shareLibrary/src/main/ets/components/web/FTWebViewHandler";
-import { FTRUMConfig } from "shareLibrary/src/main/ets/components/Configs";
+import { FTWebViewHandler } from "@guancecloud/ft_sdk/src/main/ets/components/web/FTWebViewHandler";
+import { FTRUMConfig } from "@guancecloud/ft_sdk/src/main/ets/components/Configs";
 import { KEY_WEB_VIEW_URL } from "../entryability/EntryAbility";
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';

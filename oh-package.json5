@@ -10,9 +10,10 @@
   "overrides": {
     // Consumer-side compatibility override for local HAR integration.
     // This entry takes precedence over ft_sdk_ext/oh-package.json5 so the app
-    // resolves ft_sdk from the consumer workspace instead of the module's
+    // resolves @guancecloud/ft_sdk from the consumer workspace instead of the
+    // module's
     // internal build-time relative reference.
-    "ft_sdk": "file:./ft_sdk" //
+    "@guancecloud/ft_sdk": "file:./ft_sdk" //
   },
   "dynamicDependencies": {}
 }

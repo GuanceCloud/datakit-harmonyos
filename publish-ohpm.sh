@@ -11,9 +11,10 @@ OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
 OHPM_KEY_PATH_VALUE="${OHPM_KEY_PATH:-${KEY_PATH:-}}"
 OHPM_KEY_PASSPHRASE_VALUE="${OHPM_KEY_PASSPHRASE:-${KEY_PASSPHRASE:-}}"
 
-if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
-  echo "Usage: $0 [agent|native|all]"
+if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
+  echo "Usage: $0 [agent|ft_sdk_ext|native|all]"
   echo "  agent: build and publish ft_sdk + ft_sdk_ext"
+  echo "  ft_sdk_ext: build and publish ft_sdk_ext only"
   echo "  native: build and publish ft_native"
   echo "  all: build and publish ft_sdk + ft_sdk_ext + ft_native"
   exit 1
@@ -46,9 +47,18 @@ fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/publish-ohpm.XXXXXX")"
 PREVIOUS_REGISTRY=""
+PREVIOUS_KEY_PASSPHRASE=""
+RESTORE_KEY_PASSPHRASE=0
 cleanup() {
   if [[ -n "$PREVIOUS_REGISTRY" ]]; then
     "$OHPM_BIN" config set registry "$PREVIOUS_REGISTRY" >/dev/null 2>&1 || true
+  fi
+  if [[ "$RESTORE_KEY_PASSPHRASE" -eq 1 ]]; then
+    if [[ -n "$PREVIOUS_KEY_PASSPHRASE" ]]; then
+      "$OHPM_BIN" config set key_passphrase "$PREVIOUS_KEY_PASSPHRASE" >/dev/null 2>&1 || true
+    else
+      "$OHPM_BIN" config delete key_passphrase >/dev/null 2>&1 || true
+    fi
   fi
   rm -rf "$WORK_DIR"
 }
@@ -125,6 +135,18 @@ ensure_key_path() {
   fi
 }
 
+ensure_key_passphrase() {
+  if [[ -z "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
+    return
+  fi
+
+  PREVIOUS_KEY_PASSPHRASE="$("$OHPM_BIN" config get key_passphrase 2>/dev/null | tail -n 1 | tr -d '\r')"
+  RESTORE_KEY_PASSPHRASE=1
+
+  echo "Setting ohpm key_passphrase from environment variable"
+  "$OHPM_BIN" config set key_passphrase "$OHPM_KEY_PASSPHRASE_VALUE" >/dev/null
+}
+
 set_registry() {
   if "$OHPM_BIN" config get registry >/dev/null 2>&1; then
     PREVIOUS_REGISTRY="$("$OHPM_BIN" config get registry 2>/dev/null | tail -n 1 | tr -d '\r')"
@@ -146,19 +168,6 @@ build_har() {
   )
 }
 
-sync_ft_sdk_for_ext_build() {
-  local sdk_har="$ROOT_DIR/ft_sdk/build/${PRODUCT_NAME}/outputs/${BUILD_TARGET}/ft_sdk.har"
-  local ext_placeholder="$ROOT_DIR/ft_sdk_ext/ft_sdk.har"
-
-  if [[ ! -f "$sdk_har" ]]; then
-    echo "Error: ft_sdk HAR not found at $sdk_har"
-    exit 1
-  fi
-
-  echo "Syncing ft_sdk HAR into ft_sdk_ext build placeholder..."
-  cp -f "$sdk_har" "$ext_placeholder"
-}
-
 rewrite_har_dependency_for_ohpm() {
   local source_har="$1"
   local dependency_name="$2"
@@ -178,11 +187,15 @@ rewrite_har_dependency_for_ohpm() {
     exit 1
   fi
 
-  perl -0pi -e "s/\"${dependency_name}\"\\s*:\\s*\"file:\\.\\/[^\\\"]+\"/\"${dependency_name}\": \"${dependency_version}\"/g" "$package_json_path"
+  if grep -q "\"${dependency_name}\"[[:space:]]*:[[:space:]]*\"${dependency_version}\"" "$package_json_path"; then
+    echo "Dependency ${dependency_name} already points to version ${dependency_version}, skip rewrite"
+  else
+    perl -0pi -e "s/\"${dependency_name}\"\\s*:\\s*\"file:\\.\\/[^\\\"]+\"/\"${dependency_name}\": \"${dependency_version}\"/g" "$package_json_path"
 
-  if ! grep -q "\"${dependency_name}\"[[:space:]]*:[[:space:]]*\"${dependency_version}\"" "$package_json_path"; then
-    echo "Error: failed to rewrite ${dependency_name} dependency in $package_json_path"
-    exit 1
+    if ! grep -q "\"${dependency_name}\"[[:space:]]*:[[:space:]]*\"${dependency_version}\"" "$package_json_path"; then
+      echo "Error: failed to rewrite ${dependency_name} dependency in $package_json_path"
+      exit 1
+    fi
   fi
 
   (
@@ -194,40 +207,7 @@ rewrite_har_dependency_for_ohpm() {
 publish_har() {
   local har_path="$1"
   echo "Publishing $(basename "$har_path") to $REGISTRY"
-  if [[ -n "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
-    if ! command -v expect >/dev/null 2>&1; then
-      echo "Error: expect command not found, but OHPM_KEY_PASSPHRASE is set"
-      echo "Install expect or unset OHPM_KEY_PASSPHRASE to use interactive input"
-      exit 1
-    fi
-
-    OHPM_BIN="$OHPM_BIN" \
-    OHPM_PUBLISH_TARGET="$har_path" \
-    OHPM_KEY_PASSPHRASE="$OHPM_KEY_PASSPHRASE_VALUE" \
-    expect <<'EOF'
-set timeout -1
-set prompt_seen 0
-
-spawn $env(OHPM_BIN) publish $env(OHPM_PUBLISH_TARGET)
-
-expect {
-  -re {(?i)(passphrase|password).*:?\s*$} {
-    set prompt_seen 1
-    send -- "$env(OHPM_KEY_PASSPHRASE)\r"
-    exp_continue
-  }
-  eof {
-    catch wait result
-    set exit_code [lindex $result 3]
-    if {$exit_code != 0} {
-      exit $exit_code
-    }
-  }
-}
-EOF
-  else
-    "$OHPM_BIN" publish "$har_path"
-  fi
+  "$OHPM_BIN" publish "$har_path"
 }
 
 publish_module() {
@@ -253,7 +233,7 @@ publish_module() {
     fi
 
     echo "Rewriting ft_sdk_ext dependency from local HAR to version ${sdk_version}"
-    rewrite_har_dependency_for_ohpm "$staged_har" "ft_sdk" "$sdk_version" "$WORK_DIR/${module_name}.publish.har"
+    rewrite_har_dependency_for_ohpm "$staged_har" "@guancecloud/ft_sdk" "$sdk_version" "$WORK_DIR/${module_name}.publish.har"
     staged_har="$WORK_DIR/${module_name}.publish.har"
   fi
 
@@ -263,12 +243,15 @@ publish_module() {
 main() {
   ensure_publish_id
   ensure_key_path
+  ensure_key_passphrase
   set_registry
 
   case "$MODULE_TYPE" in
     agent)
       publish_module "ft_sdk"
-      sync_ft_sdk_for_ext_build
+      publish_module "ft_sdk_ext"
+      ;;
+    ft_sdk_ext)
       publish_module "ft_sdk_ext"
       ;;
     native)
@@ -276,7 +259,6 @@ main() {
       ;;
     all)
       publish_module "ft_sdk"
-      sync_ft_sdk_for_ext_build
       publish_module "ft_sdk_ext"
       publish_module "ft_native"
       ;;

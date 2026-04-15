@@ -137,7 +137,7 @@ export { StringWrapper } from './src/main/ets/components/utils/StringWrapper';
 
 // Export native crash data types for type reference
 // To enable native crash monitoring:
-// 1. Add ft_native to your project's oh-package.json5
+// 1. Add @guancecloud/ft_native to your project's oh-package.json5
 // 2. Set the handler during RUM config initialization:
 //    const rumConfig = new FTRUMConfig()
 //        .setEnableTrackAppCrash(true)

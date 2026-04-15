@@ -1,11 +1,11 @@
-import { FTLogger } from 'shareLibrary/src/main/ets/components/log/FTLogger';
-import { FTRUMGlobalManager } from 'shareLibrary/src/main/ets/components/rum/FTRUMGlobalManager';
-import { Status } from 'shareLibrary/src/main/ets/components/bean/Status';
-import { StringWrapper } from 'shareLibrary/src/main/ets/components/utils/StringWrapper';
-import { ResourceParams } from 'shareLibrary/src/main/ets/components/rum/bean/ResourceParams';
-import { NetStatusBean } from 'shareLibrary/src/main/ets/components/rum/bean/NetStatusBean';
+import { FTLogger } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
+import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
+import { StringWrapper } from '@guancecloud/ft_sdk/src/main/ets/components/utils/StringWrapper';
+import { ResourceParams } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/ResourceParams';
+import { NetStatusBean } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/NetStatusBean';
 import { rcp } from '@kit.RemoteCommunicationKit';
-import { createFTRCPTrackConfig } from 'shareLibrary/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
 

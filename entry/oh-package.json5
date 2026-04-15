@@ -7,8 +7,8 @@
   "license": "",
   "dependencies":  {
     "@ohos/axios": "2.2.8",
-    "shareLibrary":"file:../ft_sdk",
-    "shareLibraryExt":"file:../ft_sdk_ext",
-    "ft_native": "file:../ft_native"
+    "@guancecloud/ft_sdk":"file:../ft_sdk",
+    "@guancecloud/ft_sdk_ext":"file:../ft_sdk_ext",
+    "@guancecloud/ft_native": "file:../ft_native"
   }
 }
