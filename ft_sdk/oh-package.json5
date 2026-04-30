@@ -1,6 +1,6 @@
 {
   "name": "@guancecloud/ft_sdk",
-  "version": "0.1.14-alpha03",
+  "version": "0.1.14-alpha04",
   "description": "Guance HarmonyOS SDK is a full-featured data collection and monitoring SDK designed specifically for HarmonyOS applications. It provides comprehensive RUM (Real User Monitoring), log collection, distributed tracing, and other features to help developers understand application performance, user experience, and error conditions in real-time.",
   "main": "Index.ets",
   "author": "Guance",
