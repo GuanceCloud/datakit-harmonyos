@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14-alpha04] - 2026-04-30
+- Fixed missing dynamic attributes, including user data, during View data confirmation.
+- Fixed occasional instability in randomly assigned user IDs.
+
 ## [0.1.14-alpha03] - 2026-04-14
 - Split HarmonyOS NetworkKit `HttpInterceptor` APIs out of `ft_sdk` into the new `ft_sdk_ext` module so older compilers can continue consuming the core SDK.
 - Kept RCP and axios compatibility auto-track helpers in `ft_sdk`, while moving `createFTHttpInterceptorChain`, `applyFTHttpTrack`, and the axios chain bridge to the extension package.

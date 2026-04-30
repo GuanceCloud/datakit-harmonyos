@@ -431,6 +431,8 @@ export class ActiveViewBean {
     viewBean.setResourceCount(this.resourceCount);
     viewBean.setLongTaskCount(this.longTaskCount);
     viewBean.setLastErrorTime(this.lastErrorTime); // Aligned with Android: bean.lastErrorTime = this.lastErrorTime;
+    viewBean.setProperty(this.property);
+    viewBean.setTags(this.tags);
     
     // Set monitor data from extraAttr
     const batteryCurrentMax = this.extraAttr.get("battery_current_max");

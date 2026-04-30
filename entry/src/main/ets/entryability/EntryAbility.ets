@@ -68,6 +68,7 @@ interface RuntimeConfig {
  * Behavior:
  * - Parameters passed in onCreate are persisted to preferences.
  * - If a parameter is empty or omitted, the persisted value is used instead.
+ * - SDK upload uses DataKit when datakitUrl is configured; DataWay is used only as fallback.
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {

@@ -5,7 +5,6 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import { DeviceUtils } from '../utils/DeviceUtils';
-import { Utils } from '../utils';
 import { FTRUMConfig } from '../Configs';
 import { UserDataManager } from './UserDataManager';
 
@@ -61,15 +60,16 @@ export class FTRUMConfigManager {
   public getRUMPublicDynamicTags(): Record<string, string> {
     const tags: Record<string, string> = {};
 
-    const userData = UserDataManager.getInstance().getUserData()
+    const userDataManager = UserDataManager.getInstance();
+    const userData = userDataManager.getUserData();
 
     // Network type
     tags[Constants.KEY_RUM_NETWORK_TYPE] = this.getNetworkType();
-    tags[Constants.KEY_RUM_IS_SIGN_IN] = userData?"T":"F";
+    tags[Constants.KEY_RUM_IS_SIGN_IN] = userData ? "T" : "F";
 
     // User data
     if (userData) {
-      tags[Constants.KEY_RUM_USER_ID] = userData.getId() || Utils.generateUUID();
+      tags[Constants.KEY_RUM_USER_ID] = userData.getId() || userDataManager.getRandomUserId();
 
       if (userData.getName()) {
         tags[Constants.KEY_RUM_USER_NAME] = userData.getName();
@@ -93,7 +93,7 @@ export class FTRUMConfigManager {
         }
       }
     } else {
-      tags[Constants.KEY_RUM_USER_ID] = Utils.generateUUID();
+      tags[Constants.KEY_RUM_USER_ID] = userDataManager.getRandomUserId();
     }
     return tags;
   }

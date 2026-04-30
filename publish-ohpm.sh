@@ -10,6 +10,8 @@ MODULE_TYPE="${1:-agent}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
 OHPM_KEY_PATH_VALUE="${OHPM_KEY_PATH:-${KEY_PATH:-}}"
 OHPM_KEY_PASSPHRASE_VALUE="${OHPM_KEY_PASSPHRASE:-${KEY_PASSPHRASE:-}}"
+# Toggle whether this script should try to preload the publish key into ssh-agent.
+OHPM_USE_SSH_AGENT_VALUE="${OHPM_USE_SSH_AGENT:-1}"
 
 if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
   echo "Usage: $0 [agent|ft_sdk_ext|native|all]"
@@ -47,19 +49,17 @@ fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/publish-ohpm.XXXXXX")"
 PREVIOUS_REGISTRY=""
-PREVIOUS_KEY_PASSPHRASE=""
-RESTORE_KEY_PASSPHRASE=0
+STARTED_SSH_AGENT=0
+SSH_ASKPASS_SCRIPT=""
 cleanup() {
   if [[ -n "$PREVIOUS_REGISTRY" ]]; then
     "$OHPM_BIN" config set registry "$PREVIOUS_REGISTRY" >/dev/null 2>&1 || true
   fi
-  if [[ "$RESTORE_KEY_PASSPHRASE" -eq 1 ]]; then
-    if [[ -n "$PREVIOUS_KEY_PASSPHRASE" ]]; then
-      "$OHPM_BIN" config set key_passphrase "$PREVIOUS_KEY_PASSPHRASE" >/dev/null 2>&1 || true
-    else
-      "$OHPM_BIN" config delete key_passphrase >/dev/null 2>&1 || true
-    fi
+  if [[ "$STARTED_SSH_AGENT" -eq 1 && -n "${SSH_AGENT_PID:-}" ]]; then
+    ssh-agent -k >/dev/null 2>&1 || true
   fi
+  # The askpass helper contains the passphrase bridge for ssh-add, so always delete it.
+  rm -f "$SSH_ASKPASS_SCRIPT"
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -135,16 +135,56 @@ ensure_key_path() {
   fi
 }
 
-ensure_key_passphrase() {
-  if [[ -z "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
+ensure_ssh_agent() {
+  local normalized_use_ssh_agent
+  normalized_use_ssh_agent="$(printf '%s' "$OHPM_USE_SSH_AGENT_VALUE" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$normalized_use_ssh_agent" != "1" && "$normalized_use_ssh_agent" != "true" && "$normalized_use_ssh_agent" != "yes" ]]; then
     return
   fi
 
-  PREVIOUS_KEY_PASSPHRASE="$("$OHPM_BIN" config get key_passphrase 2>/dev/null | tail -n 1 | tr -d '\r')"
-  RESTORE_KEY_PASSPHRASE=1
+  if ! command -v ssh-agent >/dev/null 2>&1 || ! command -v ssh-add >/dev/null 2>&1; then
+    echo "Warning: ssh-agent or ssh-add not found; continuing without ssh-agent"
+    return
+  fi
 
-  echo "Setting ohpm key_passphrase from environment variable"
-  "$OHPM_BIN" config set key_passphrase "$OHPM_KEY_PASSPHRASE_VALUE" >/dev/null
+  if [[ -z "${SSH_AUTH_SOCK:-}" ]] || ! ssh-add -l >/dev/null 2>&1; then
+    echo "Starting temporary ssh-agent for publish"
+    eval "$(ssh-agent -s)" >/dev/null
+    STARTED_SSH_AGENT=1
+  else
+    # Reuse an existing agent when available so repeated publishes stay non-interactive.
+    echo "Using existing ssh-agent"
+  fi
+
+  local configured_key_path
+  configured_key_path="$("$OHPM_BIN" config get key_path 2>/dev/null | tail -n 1 | tr -d '\r')"
+  if [[ -z "$configured_key_path" || "$configured_key_path" == "undefined" || "$configured_key_path" == "null" ]]; then
+    echo "Warning: key_path is empty after configuration; skipping ssh-agent setup"
+    return
+  fi
+
+  if [[ -n "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
+    # Force ssh-add to consume the passphrase via SSH_ASKPASS so the script can run non-interactively.
+    SSH_ASKPASS_SCRIPT="$WORK_DIR/ssh-askpass.sh"
+    printf '%s\n' '#!/bin/sh' 'printf %s "$SSH_KEY_PASSPHRASE_FOR_AGENT"' > "$SSH_ASKPASS_SCRIPT"
+    chmod 700 "$SSH_ASKPASS_SCRIPT"
+
+    echo "Loading publish key into ssh-agent via SSH_ASKPASS"
+    if ! SSH_KEY_PASSPHRASE_FOR_AGENT="$OHPM_KEY_PASSPHRASE_VALUE" \
+      SSH_ASKPASS="$SSH_ASKPASS_SCRIPT" \
+      SSH_ASKPASS_REQUIRE=force \
+      DISPLAY="${DISPLAY:-dummy}" \
+      ssh-add "$configured_key_path" </dev/null >/dev/null; then
+      echo "Warning: failed to load publish key into ssh-agent; continuing with ohpm direct key usage"
+    fi
+    return
+  fi
+
+  # Fall back to regular ssh-add behavior when no passphrase is provided by the environment.
+  echo "Loading publish key into ssh-agent"
+  if ! ssh-add "$configured_key_path"; then
+    echo "Warning: failed to load publish key into ssh-agent; continuing with ohpm direct key usage"
+  fi
 }
 
 set_registry() {
@@ -243,7 +283,7 @@ publish_module() {
 main() {
   ensure_publish_id
   ensure_key_path
-  ensure_key_passphrase
+  ensure_ssh_agent
   set_registry
 
   case "$MODULE_TYPE" in

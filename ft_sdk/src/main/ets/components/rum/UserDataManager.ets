@@ -69,12 +69,24 @@ export class UserDataManager {
   private createNewRandomUserId(): void {
     this.randomUserId = "ft.rd_" + Utils.generateUUID();
 
-    if (this.preferencesStore) {
-       this.preferencesStore.put(UserDataManager.KEY_RANDOM_USER_ID, this.randomUserId);
-       this.preferencesStore.flush();
-    } else {
+    this.saveRandomUserId();
+  }
+
+  private saveRandomUserId(): void {
+    if (!this.preferencesStore) {
       FTInnerLogger.e(TAG, " Preferences store not available, cannot save random user ID");
+      return;
     }
+
+    const saveTask = async (): Promise<void> => {
+      try {
+        await this.preferencesStore!.put(UserDataManager.KEY_RANDOM_USER_ID, this.randomUserId);
+        await this.preferencesStore!.flush();
+      } catch (error) {
+        FTInnerLogger.e(TAG, ` Failed to save random user ID: ${error}`);
+      }
+    };
+    saveTask();
   }
 
   /**
@@ -87,9 +99,13 @@ export class UserDataManager {
     }
 
     try {
-      this.randomUserId = this.preferencesStore.getSync(UserDataManager.KEY_RANDOM_USER_ID, '') as string;
-      if (!this.randomUserId) {
+      const storedRandomUserId = this.preferencesStore.getSync(UserDataManager.KEY_RANDOM_USER_ID, '') as string;
+      if (storedRandomUserId) {
+        this.randomUserId = storedRandomUserId;
+      } else if (!this.randomUserId) {
         this.createNewRandomUserId();
+      } else {
+        this.saveRandomUserId();
       }
     } catch (error) {
       FTInnerLogger.e(TAG, ` Failed to load random user ID: ${error}`);
@@ -100,6 +116,9 @@ export class UserDataManager {
    * Get random user ID
    */
   public getRandomUserId(): string {
+    if (!this.randomUserId) {
+      this.createNewRandomUserId();
+    }
     return this.randomUserId;
   }
 

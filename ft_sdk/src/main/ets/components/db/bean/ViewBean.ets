@@ -4,6 +4,7 @@
  */
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
+import { Constants } from '../../Constants';
 
 /**
  * ViewBean JSON interface
@@ -26,6 +27,8 @@ interface ViewBeanJSON {
   dataUploadTime: number;
   viewUpdateTime: number;
   extraAttr: Record<string, object>;
+  property?: Record<string, object>;
+  tags?: Record<string, string>;
 }
 
 /**
@@ -131,6 +134,16 @@ export class ViewBean {
    * Extended properties
    */
   private extraAttr: Map<string, object> = new Map();
+
+  /**
+   * View custom properties
+   */
+  private property: Record<string, object> = {};
+
+  /**
+   * View dynamic tags
+   */
+  private tags: Record<string, string> = {};
 
   /**
    * Constructor
@@ -296,6 +309,8 @@ export class ViewBean {
       this.extraAttr.forEach((value, key) => {
         obj[key] = value;
       });
+      obj[Constants.KEY_RUM_PROPERTY] = this.property;
+      obj[Constants.KEY_RUM_TAGS] = this.tags;
       return JSON.stringify(obj);
     } catch (error) {
       return "{}";
@@ -311,10 +326,24 @@ export class ViewBean {
       if (StringUtils.isNotEmpty(jsonString)) {
         const obj = JSON.parse(jsonString) as Record<string, object>;
         this.extraAttr.clear();
+        this.property = {};
+        this.tags = {};
         const keys = ViewBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
-          this.extraAttr.set(key, obj[key] as object);
+          const value = obj[key] as object;
+          if (key === Constants.KEY_RUM_PROPERTY && value && typeof value === 'object') {
+            this.property = value as Record<string, object>;
+          } else if (key === Constants.KEY_RUM_TAGS && value && typeof value === 'object') {
+            const tagsObj = value as Record<string, object>;
+            const tagKeys = ViewBean.getObjectKeys(tagsObj);
+            for (let j = 0; j < tagKeys.length; j++) {
+              const tagKey = tagKeys[j];
+              this.tags[tagKey] = String(tagsObj[tagKey]);
+            }
+          } else {
+            this.extraAttr.set(key, value);
+          }
         }
       }
     } catch (error) {
@@ -474,7 +503,9 @@ export class ViewBean {
       dataUpdateTime: this.dataUpdateTime,
       dataUploadTime: this.dataUploadTime,
       viewUpdateTime: this.viewUpdateTime,
-      extraAttr: extraAttrObj
+      extraAttr: extraAttrObj,
+      property: this.property,
+      tags: this.tags
     };
   }
 
@@ -507,6 +538,12 @@ export class ViewBean {
         viewBean.extraAttr.set(key, json.extraAttr[key] as object);
       }
     }
+    if (json.property) {
+      viewBean.property = json.property;
+    }
+    if (json.tags) {
+      viewBean.tags = json.tags;
+    }
     
     return viewBean;
   }
@@ -531,6 +568,8 @@ export class ViewBean {
     cloned.dataUploadTime = this.dataUploadTime;
     cloned.viewUpdateTime = this.viewUpdateTime;
     cloned.extraAttr = new Map(this.extraAttr);
+    cloned.property = this.property;
+    cloned.tags = this.tags;
     
     return cloned;
   }
@@ -541,14 +580,20 @@ export class ViewBean {
    */
   public getTags(): Record<string, string> {
     const tags: Record<string, string> = {};
-    this.extraAttr.forEach((value, key) => {
-      if (typeof value === 'string') {
-        tags[key] = value;
-      } else {
-        tags[key] = String(value);
-      }
-    });
+    const keys = Object.keys(this.tags);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      tags[key] = this.tags[key];
+    }
     return tags;
+  }
+
+  /**
+   * Set tag data
+   * @param tags tag data
+   */
+  public setTags(tags: Record<string, string>): void {
+    this.tags = tags || {};
   }
 
   /**
@@ -557,10 +602,20 @@ export class ViewBean {
    */
   public getProperty(): Record<string, object> {
     const property: Record<string, object> = {};
-    this.extraAttr.forEach((value, key) => {
-      property[key] = value;
-    });
+    const keys = Object.keys(this.property);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      property[key] = this.property[key];
+    }
     return property;
+  }
+
+  /**
+   * Set property data
+   * @param property property data
+   */
+  public setProperty(property: Record<string, object>): void {
+    this.property = property || {};
   }
 
   /**

@@ -15,8 +15,6 @@ import {
 import FTTrackInner from '../FTTrackInner';
 import { FTDBManager } from '../db/FTDBManager';
 import { FTInnerLogger } from "../log/FTLogger";
-import { BatteryUtils } from '../utils/BatteryUtils';
-import { MemoryUtils } from '../utils/MemoryUtils';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
@@ -122,20 +120,6 @@ interface ActionFields {
   action_resource_count?: number;
   action_error_count?: number;
   action_duration?: number;
-}
-
-/**
- * View-specific fields for line protocol
- */
-interface ViewFields {
-  view_load?: number;
-  view_action_count?: number;
-  view_resource_count?: number;
-  view_error_count?: number;
-  view_time_spent?: number;
-  view_long_task_count?: number;
-  view_is_active?: boolean;
-  view_update_time?: number;
 }
 
 /**
@@ -839,10 +823,21 @@ export class FTRUMInnerManager {
       const tagsMap = new Map<string, string>();
       const fieldsMap = new Map<string, string>();
       
-      // Convert Map to Record for setCommonRUMTags
       const tags: Record<string, string> = {};
-      
-      // Set common RUM tags
+
+      const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+      const dynamicTagKeys = Object.keys(dynamicTags);
+      for (let i = 0; i < dynamicTagKeys.length; i++) {
+        const key = dynamicTagKeys[i];
+        tags[key] = dynamicTags[key];
+      }
+
+      const viewTags = viewBean.getTags();
+      const viewTagKeys = Object.keys(viewTags);
+      for (let i = 0; i < viewTagKeys.length; i++) {
+        const key = viewTagKeys[i];
+        tags[key] = viewTags[key];
+      }
 
       // View-specific tags
       tags[Constants.KEY_RUM_VIEW_ID] = viewBean.getId();
@@ -3044,196 +3039,6 @@ export class FTRUMInnerManager {
     }
   }
   
-  /**
-   * Send view data
-   */
-  private async sendViewData(activeViewBean: ActiveViewBean): Promise<void> {
-    try {
-      const isClose = activeViewBean.isClose();
-      
-      // Aligned with Android SDK: use view startTime in nanoseconds (19 digits) for Line Protocol timestamp
-      const time = activeViewBean.getStartTime();
-      
-      // Get device performance data
-      const batteryUtils = BatteryUtils.getInstance();
-      const memoryUtils = MemoryUtils.getInstance();
-      await batteryUtils.init();
-      await memoryUtils.init();
-      
-      // const batteryInfo = await batteryUtils.getBatteryInfo();
-      // const appMemoryUsage = await memoryUtils.getAppMemoryUsage();
-      // const systemMemoryInfo = await memoryUtils.getSystemMemoryInfo();
-      
-      // Build View-specific fields
-      const viewBean = activeViewBean.convertToViewBean();
-      const viewFieldsData = this.buildViewFields(viewBean);
-      
-      // Merge with global RUM context and dynamic tags
-      const allTags: Record<string, string> = {};
-      
-      // Layer 2: Dynamic tags
-      const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
-      const dynamicKeys = Object.keys(dynamicTags);
-      for (let i = 0; i < dynamicKeys.length; i++) {
-        const key = dynamicKeys[i];
-        allTags[key] = dynamicTags[key];
-      }
-      
-      // Layer 3: RUM association
-      allTags[Constants.KEY_RUM_VIEW_ID] = activeViewBean.getId();
-      allTags[Constants.KEY_RUM_VIEW_NAME] = activeViewBean.getViewName();
-      allTags[Constants.KEY_RUM_SESSION_ID] =  activeViewBean.getSessionId();
-      allTags[Constants.KEY_RUM_VIEW_REFERRER] =  activeViewBean.getViewReferrer();
-      // Build all fields
-      const allFields: Record<string, string> = {};
-      
-      // View-specific fields (aligned with Android field names)
-      // Aligned with Android: only output loading_time if > 0 (Android: if (bean.getLoadTime() > 0))
-      if (viewFieldsData.view_load !== undefined && viewFieldsData.view_load > 0) {
-        allFields[Constants.KEY_RUM_VIEW_LOAD_TIME] = String(viewFieldsData.view_load);
-      }
-      if (viewFieldsData.view_action_count !== undefined) allFields[Constants.KEY_RUM_VIEW_ACTION_COUNT] = String(viewFieldsData.view_action_count);
-      if (viewFieldsData.view_resource_count !== undefined) allFields[Constants.KEY_RUM_VIEW_RESOURCE_COUNT] = String(viewFieldsData.view_resource_count);
-      if (viewFieldsData.view_error_count !== undefined) allFields[Constants.KEY_RUM_VIEW_ERROR_COUNT] = String(viewFieldsData.view_error_count);
-      if (viewFieldsData.view_time_spent) allFields[Constants.KEY_RUM_VIEW_TIME_SPENT] = String(viewFieldsData.view_time_spent);
-      if (viewFieldsData.view_long_task_count !== undefined) allFields[Constants.KEY_RUM_VIEW_LONG_TASK_COUNT] = String(viewFieldsData.view_long_task_count);
-      if (viewFieldsData.view_is_active !== undefined) allFields[Constants.KEY_RUM_VIEW_IS_ACTIVE] = String(viewFieldsData.view_is_active);
-      if (viewFieldsData.view_update_time) allFields[Constants.KEY_SDK_VIEW_UPDATE_TIME] = String(viewFieldsData.view_update_time);
-      
-      // Device performance fields (aligned with Android: conditional based on DeviceMetricsMonitorType)
-      // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
-      const extraAttr = viewBean.getExtraAttr();
-      
-      // Define MonitorValue interface locally (same as in ViewBean.ets)
-      interface MonitorValue {
-        value: string;
-      }
-      
-      // CPU monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)))
-      if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)) {
-        const cpuTickCountPerSecond = extraAttr.get("cpu_tick_count_per_second");
-        const cpuTickCount = extraAttr.get("cpu_tick_count");
-        if (cpuTickCountPerSecond) {
-          const monitorValue = cpuTickCountPerSecond as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            allFields[Constants.KEY_CPU_TICK_COUNT_PER_SECOND] = monitorValue.value;
-          }
-        }
-        if (cpuTickCount) {
-          const monitorValue = cpuTickCount as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            allFields[Constants.KEY_CPU_TICK_COUNT] = monitorValue.value;
-          }
-        }
-      }
-      
-      // Memory monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)))
-      if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-        const memoryMax = extraAttr.get("memory_max");
-        const memoryAvg = extraAttr.get("memory_avg");
-        if (memoryMax) {
-          const monitorValue = memoryMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_MEMORY_MAX] = monitorValue.value;
-          }
-        }
-        if (memoryAvg) {
-          const monitorValue = memoryAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_MEMORY_AVG] = monitorValue.value;
-          }
-        }
-      }
-      
-      // Battery monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)))
-      if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)) {
-        const batteryCurrentAvg = extraAttr.get("battery_current_avg");
-        const batteryCurrentMax = extraAttr.get("battery_current_max");
-        if (batteryCurrentAvg) {
-          const monitorValue = batteryCurrentAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_BATTERY_CURRENT_AVG] = monitorValue.value;
-          }
-        }
-        if (batteryCurrentMax) {
-          const monitorValue = batteryCurrentMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_BATTERY_CURRENT_MAX] = monitorValue.value;
-          }
-        }
-      }
-      
-      // FPS monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)))
-      if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
-        const fpsAvg = extraAttr.get("fps_avg");
-        const fpsMini = extraAttr.get("fps_mini");
-        if (fpsAvg) {
-          const monitorValue = fpsAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_FPS_AVG] = monitorValue.value;
-          }
-        }
-        if (fpsMini) {
-          const monitorValue = fpsMini as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            allFields[Constants.KEY_FPS_MINI] = monitorValue.value;
-          }
-        }
-      }
-      
-      // Session error timestamp (aligned with Android: if (bean.getLastErrorTime() > 0))
-      if (viewBean.getLastErrorTime() > 0) {
-        allFields[Constants.KEY_SESSION_ERROR_TIMESTAMP] = viewBean.getLastErrorTime().toString();
-      }
-      
-      // Add extended properties
-      const properties = activeViewBean.getProperty();
-      if (properties && Object.keys(properties).length > 0) {
-        const propertyKeys = Object.keys(properties);
-        for (let i = 0; i < propertyKeys.length; i++) {
-          const key = propertyKeys[i];
-          const value = (properties as Record<string, object>)[key];
-          // Only add primitive types to avoid [object Object] issues
-          if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-            allFields[key] = String(value);
-          } else if (typeof value === 'object' && value !== null) {
-            // Convert objects to JSON string
-            allFields[key] = JSON.stringify(value);
-          }
-        }
-      }
-      
-      // Convert to Map format
-      const tagsMap = this.convertRecordToMap(allTags);
-      const fieldsMap = this.convertRecordToMap(allFields);
-      
-      // Send view data
-        FTTrackInner.getInstance().rum(
-          time,
-          Constants.FT_MEASUREMENT_RUM_VIEW,
-          tagsMap,
-          fieldsMap,
-          null,
-          CollectType.ALL
-        );
-      
-      // Mark view as inserted to prevent duplicate uploads from generateRumData
-      // Use viewId + view_update_time as unique identifier (same as insertView)
-      const viewId = viewBean.getId();
-      const viewUpdateTime = viewBean.getViewUpdateTime();
-      const viewKey = `${viewId}_${viewUpdateTime}`;
-
-      FTInnerLogger.d(
-        TAG,
-        `sendViewData success: ${activeViewBean.getViewName()}, isClose=${isClose}, viewId=${viewId}, viewUpdateTime=${viewUpdateTime}, viewKey=${viewKey}`
-      );
-      
-    } catch (error) {
-      FTInnerLogger.e(TAG, ` Error sending view data: ${error}`);
-    }
-  }
-  
-
   // Statistical counting methods
   
   /**
@@ -3996,41 +3801,6 @@ export class FTRUMInnerManager {
     fields.action_long_task_count = actionBean.getLongTaskCount();
     fields.action_resource_count = actionBean.getResourceCount();
     fields.action_error_count = actionBean.getErrorCount();
-    return fields;
-  }
-
-  /**
-   * Build View-specific fields from ViewBean
-   * @param viewBean View bean
-   * @returns View fields object
-   */
-  private buildViewFields(viewBean: ViewBean): ViewFields {
-    const fields: ViewFields = {};
-    if (viewBean.getViewLoadTime() > 0) {
-      fields.view_load = viewBean.getViewLoadTime();
-    }
-    fields.view_action_count = viewBean.getActionCount();
-    fields.view_resource_count = viewBean.getResourceCount();
-    fields.view_error_count = viewBean.getErrorCount();
-    // Calculate time_spent with safety check to prevent abnormal values
-    // Maximum reasonable time_spent: 4 hours (14400000000000 nanoseconds)
-    const MAX_TIME_SPENT_NS = 14400000000000; // 4 hours in nanoseconds
-    let timeSpent: number;
-    if (viewBean.getIsClose()) {
-      timeSpent = viewBean.getTimeSpent();
-    } else {
-      timeSpent = Utils.getCurrentNanoTime() - viewBean.getStartTime();
-    }
-    // Cap time_spent to prevent abnormal values (e.g., when app is killed and restarted)
-    if (timeSpent > MAX_TIME_SPENT_NS || timeSpent < 0) {
-      FTInnerLogger.w(TAG, `Abnormal view time_spent detected in buildViewFields: ${timeSpent}ns, capping to ${MAX_TIME_SPENT_NS}ns`);
-      timeSpent = Math.min(timeSpent, MAX_TIME_SPENT_NS);
-      timeSpent = Math.max(timeSpent, 0);
-    }
-    fields.view_time_spent = timeSpent;
-    fields.view_long_task_count = viewBean.getLongTaskCount();
-    fields.view_is_active = !viewBean.getIsClose();
-    fields.view_update_time = viewBean.getViewUpdateTime();
     return fields;
   }
 
