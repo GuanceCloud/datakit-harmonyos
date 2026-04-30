@@ -22,10 +22,22 @@ if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TY
   exit 1
 fi
 
-if command -v ohpm >/dev/null 2>&1; then
+if [[ -n "${OHPM_BIN:-}" ]]; then
+  if [[ "$OHPM_BIN" == */* ]]; then
+    if [[ ! -x "$OHPM_BIN" || -d "$OHPM_BIN" ]]; then
+      echo "Error: OHPM_BIN is set but not executable or not found: $OHPM_BIN"
+      exit 1
+    fi
+  elif command -v "$OHPM_BIN" >/dev/null 2>&1; then
+    OHPM_BIN="$(command -v "$OHPM_BIN")"
+  else
+    echo "Error: OHPM_BIN is set but not executable or not found: $OHPM_BIN"
+    exit 1
+  fi
+elif command -v ohpm >/dev/null 2>&1; then
   OHPM_BIN="$(command -v ohpm)"
 else
-  echo "Error: ohpm command not found in PATH"
+  echo "Error: ohpm command not found. Set OHPM_BIN or add ohpm to PATH"
   exit 1
 fi
 
