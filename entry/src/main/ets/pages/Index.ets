@@ -229,12 +229,12 @@ struct Index {
             }
             .margin({ bottom: 10 })
           }
+          .layoutWeight(1)
           .backgroundColor(Color.White)
           .scrollBar(BarState.Off)
           .borderRadius($r('app.float.ohos_id_corner_radius_default_l'))
-          .backgroundColor(Color.White)
           .width(CommonConstants.FULL_PERCENT)
-          .padding(20)
+          .padding({ left: 20, right: 20, top: 20, bottom: 36 })
         }
         .width(CommonConstants.FULL_PERCENT)
         .height(CommonConstants.FULL_PERCENT)
