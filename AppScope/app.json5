@@ -1,6 +1,6 @@
 {
   "app": {
-    "bundleName": "com.guance.example",
+    "bundleName": "com.guance.hm.example",
     "vendor": "example",
     "versionCode": 1000000,
     "versionName": "1.0.0",
