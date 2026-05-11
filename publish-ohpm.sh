@@ -5,6 +5,9 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY="${OHPM_REGISTRY:-https://ohpm.openharmony.cn/ohpm/}"
 PRODUCT_NAME="${PRODUCT_NAME:-default}"
+FT_SDK_PRODUCT_NAME="${FT_SDK_PRODUCT_NAME:-ft_sdk}"
+FT_SDK_EXT_PRODUCT_NAME="${FT_SDK_EXT_PRODUCT_NAME:-ft_sdk_ext}"
+FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
 MODULE_TYPE="${1:-agent}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
@@ -208,15 +211,36 @@ set_registry() {
   "$OHPM_BIN" config set registry "$REGISTRY"
 }
 
+product_for_module() {
+  local module_name="$1"
+
+  case "$module_name" in
+    ft_sdk)
+      echo "$FT_SDK_PRODUCT_NAME"
+      ;;
+    ft_sdk_ext)
+      echo "$FT_SDK_EXT_PRODUCT_NAME"
+      ;;
+    ft_native)
+      echo "$FT_NATIVE_PRODUCT_NAME"
+      ;;
+    *)
+      echo "$PRODUCT_NAME"
+      ;;
+  esac
+}
+
 build_har() {
   local module_name="$1"
   local build_module="${module_name}@${BUILD_TARGET}"
+  local product_name
+  product_name="$(product_for_module "$module_name")"
 
-  echo "Building HAR for ${module_name}..."
+  echo "Building HAR for ${module_name} with product ${product_name}..."
   (
     cd "$ROOT_DIR"
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$PRODUCT_NAME" -p module="$build_module" clean --analyze=normal
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$PRODUCT_NAME" -p module="$build_module" assembleHar --analyze=normal --parallel
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" clean --analyze=normal
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" assembleHar --analyze=normal --parallel
   )
 }
 
@@ -264,7 +288,9 @@ publish_har() {
 
 publish_module() {
   local module_name="$1"
-  local built_har="$ROOT_DIR/${module_name}/build/${PRODUCT_NAME}/outputs/${BUILD_TARGET}/${module_name}.har"
+  local product_name
+  product_name="$(product_for_module "$module_name")"
+  local built_har="$ROOT_DIR/${module_name}/build/${product_name}/outputs/${BUILD_TARGET}/${module_name}.har"
   local staged_har="$WORK_DIR/${module_name}.har"
 
   build_har "$module_name"
