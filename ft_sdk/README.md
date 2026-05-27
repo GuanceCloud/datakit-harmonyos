@@ -5,6 +5,7 @@ Guance HarmonyOS core SDK for application monitoring, analytics, logging, and tr
 ## Introduction
 
 `@guancecloud/ft_sdk` is the core Guance HarmonyOS SDK. It provides RUM, logging, tracing, common network tracking helpers, and related monitoring capabilities for HarmonyOS applications.
+Native crash monitoring is optional and lives in `@guancecloud/ft_native`.
 
 ## Features
 
@@ -108,7 +109,15 @@ export default class EntryAbility extends UIAbility {
 
 - Call `FTSDK.install(...)` before `installRUMConfig`, `installLogConfig`, and `installTraceConfig`
 - Add `@guancecloud/ft_sdk_ext` when you need HarmonyOS `HttpInterceptor` chain integration
-- Add `@guancecloud/ft_native` when you need native crash monitoring
+- Add `@guancecloud/ft_native` when you need native crash monitoring. `ft_sdk` initializes `libftnativecrash.so` internally when crash tracking is enabled:
+
+```ts
+import { FTRUMConfig } from '@guancecloud/ft_sdk/Index'
+
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTrackAppCrash(true)
+```
 
 ## Documentation
 

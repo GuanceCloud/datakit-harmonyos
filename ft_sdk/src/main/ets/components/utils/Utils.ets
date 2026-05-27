@@ -179,10 +179,32 @@ export class Utils {
    * @returns UUID string
    */
   public static generateUUID(): string {
-    // Use HarmonyOS official API for better security and performance
-    const uuid = util.generateRandomUUID(true);
-    // Remove dashes and convert to lowercase (aligned with Android)
-    return uuid.replace(/-/g, '').toLowerCase();
+    try {
+      const uuid = util.generateRandomUUID(true);
+      const normalized = Utils.normalizeUUID(uuid);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Failed to generate UUID with system API: ${error}`);
+    }
+    return Utils.generateFallbackUUID();
+  }
+
+  private static normalizeUUID(uuid: string): string {
+    const normalized = uuid.replace(/-/g, '').toLowerCase();
+    if (/^[0-9a-f]{32}$/.test(normalized)) {
+      return normalized;
+    }
+    return '';
+  }
+
+  private static generateFallbackUUID(): string {
+    let uuid = '';
+    for (let i = 0; i < 32; i++) {
+      uuid += Math.floor(Math.random() * 16).toString(16);
+    }
+    return uuid;
   }
 
   /**

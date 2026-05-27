@@ -119,6 +119,29 @@ export {
 } from './src/main/ets/components/network/FTHttpAutoTrack';
 
 // ============================================================================
+// Extension Integration Contract
+// ============================================================================
+// Versioned integration contract consumed by @guancecloud/ft_sdk_ext.
+// FTSDKExtensionBridge is the stable bridge surface; function facade exports
+// are deprecated/internal compatibility exports and should not be used by new code.
+
+export {
+  FT_SDK_EXTENSION_CONTRACT_VERSION,
+  FTSDKExtensionBridge,
+  FTSDKExtensionAutoTrackOptions,
+  FTSDKExtensionResolvedAutoTrackOptions,
+  FTSDKExtensionRequestInput,
+  FTSDKExtensionPreparedRequest,
+  FTSDKExtensionResponseInput,
+  resolveFTSDKExtensionAutoTrackOptions,
+  prepareFTSDKHttpRequest,
+  completeFTSDKHttpResponse,
+  completeFTSDKHttpError,
+  prepareFTSDKAxiosChainRequest,
+  logFTSDKExtensionError
+} from './src/main/ets/components/integration';
+
+// ============================================================================
 // SDK Version
 // ============================================================================
 
@@ -130,21 +153,6 @@ export { HAR_VERSION };
 
 // String wrapper for global context
 export { StringWrapper } from './src/main/ets/components/utils/StringWrapper';
-
-// ============================================================================
-// Native Crash Monitoring (Optional Dependency)
-// ============================================================================
-
-// Export native crash data types for type reference
-// To enable native crash monitoring:
-// 1. Add @guancecloud/ft_native to your project's oh-package.json5
-// 2. Set the handler during RUM config initialization:
-//    const rumConfig = new FTRUMConfig()
-//        .setEnableTrackAppCrash(true)
-//        .setNativeCrashHandler(new FTNativeCrashHandler());
-// export type {
-//   NativeCrashData,
-// } from './src/main/ets/components/monitor/crash/INativeCrashHandler';
 
 // ============================================================================
 // NOTE: The following are internal classes and should NOT be used by SDK users

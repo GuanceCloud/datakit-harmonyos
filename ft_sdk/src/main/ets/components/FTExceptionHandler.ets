@@ -2,13 +2,15 @@ import { errorManager } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { FTInnerLogger } from './log/FTLogger';
-import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import { FTRUMConfig } from './Configs';
 import { ErrorType } from './rum/enum/RUMEnums';
 import { AppState } from './rum/enum/RUMEnums';
-import { FTSDK } from './FTSDK';
 import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
-import { FTNativeCrashHandler } from './FTNativeCrashHandler';
+import {
+  DefaultFTExceptionHandlerRuntime,
+  FTExceptionNativeCrashHandler,
+  FTExceptionHandlerRuntime
+} from './FTExceptionHandlerRuntime';
 
 const TAG = "FTExceptionHandler";
 
@@ -27,14 +29,15 @@ export const IS_PRE_CRASH = "is_pre_crash";
  */
 export class FTExceptionHandler {
   private static instance: FTExceptionHandler | null = null;
+  private static runtime: FTExceptionHandlerRuntime = new DefaultFTExceptionHandlerRuntime();
   private errorManagerId: number = -1;
   private registerHandled: boolean = false;
   private isHandlingCrash: boolean = false;  // Flag to prevent infinite loop when rethrowing exception
-  private nativeCrashAdapter: FTNativeCrashHandler | null = null;
+  private nativeCrashAdapter: FTExceptionNativeCrashHandler | null = null;
+  private nativeCrashGeneration: number = 0;
 
   private constructor() {
-    // Get native crash adapter instance
-    this.nativeCrashAdapter = new FTNativeCrashHandler();
+    this.nativeCrashAdapter = FTExceptionHandler.runtime.createNativeCrashHandler();
   }
 
   public static getInstance(): FTExceptionHandler {
@@ -42,6 +45,16 @@ export class FTExceptionHandler {
       FTExceptionHandler.instance = new FTExceptionHandler();
     }
     return FTExceptionHandler.instance;
+  }
+
+  public static setRuntimeForTest(runtime: FTExceptionHandlerRuntime): void {
+    FTExceptionHandler.release();
+    FTExceptionHandler.runtime = runtime;
+  }
+
+  public static resetRuntimeForTest(): void {
+    FTExceptionHandler.release();
+    FTExceptionHandler.runtime = new DefaultFTExceptionHandlerRuntime();
   }
 
   /**
@@ -61,24 +74,62 @@ export class FTExceptionHandler {
       this.registerHandled = true;
     }
 
-    // Initialize Native (C++) crash handler
-    // Gets handler directly from FTRUMConfig to avoid HAR package isolation issues
-    // The handler should be set via config.setNativeCrashHandler(new FTNativeCrashHandler())
-    // Note: Native crash tracking only takes effect when setEnableTrackAppCrash(true) is set to true
+    // Initialize Native (C++) crash handler through the implicit native module.
     if (config.getRumAppId().length > 0 &&
-        config.isEnableTrackAppCrash() &&
-        this.nativeCrashAdapter) {
-      // Initialize the native crash adapter
-      // Note: The project must set the handler via config.setNativeCrashHandler() before calling installRUMConfig
-      this.nativeCrashAdapter.initialize().then((enabled: boolean) => {
+        config.isEnableTrackAppCrash()) {
+      if (!this.nativeCrashAdapter) {
+        this.nativeCrashAdapter = FTExceptionHandler.runtime.createNativeCrashHandler();
+      }
+      const nativeCrashHandler = this.nativeCrashAdapter;
+      this.nativeCrashGeneration++;
+      const nativeCrashGeneration = this.nativeCrashGeneration;
+
+      let initializePromise: Promise<boolean>;
+      try {
+        initializePromise = nativeCrashHandler.initialize();
+      } catch (error) {
+        if (this.nativeCrashGeneration === nativeCrashGeneration &&
+            this.nativeCrashAdapter === nativeCrashHandler) {
+          this.shutdownNativeCrashAdapter();
+        }
+        FTInnerLogger.e(TAG, `Failed to initialize native crash adapter: ${error}`);
+        return;
+      }
+
+      initializePromise.then((enabled: boolean) => {
+        if (this.nativeCrashGeneration !== nativeCrashGeneration ||
+            this.nativeCrashAdapter !== nativeCrashHandler) {
+          if (this.nativeCrashAdapter !== nativeCrashHandler) {
+            nativeCrashHandler.shutdown();
+          }
+          return;
+        }
+
         if (enabled) {
-          FTInnerLogger.i(TAG, "Native crash adapter initialized and started");
+          FTInnerLogger.i(TAG, "Native crash handler initialized and started");
         } else {
-          FTInnerLogger.i(TAG, "Native crash monitoring not available (no handler set in config)");
+          this.shutdownNativeCrashAdapter();
+          FTInnerLogger.i(TAG, "Native crash monitoring not available (native module initialization returned false)");
         }
       }).catch((error: Error) => {
+        if (this.nativeCrashGeneration === nativeCrashGeneration &&
+            this.nativeCrashAdapter === nativeCrashHandler) {
+          this.shutdownNativeCrashAdapter();
+        }
         FTInnerLogger.e(TAG, `Failed to initialize native crash adapter: ${error}`);
       });
+    } else {
+      this.shutdownNativeCrashAdapter();
+    }
+  }
+
+  private shutdownNativeCrashAdapter(): void {
+    this.nativeCrashGeneration++;
+    const nativeCrashAdapter = this.nativeCrashAdapter;
+    this.nativeCrashAdapter = null;
+
+    if (nativeCrashAdapter) {
+      nativeCrashAdapter.shutdown();
     }
   }
 
@@ -98,8 +149,10 @@ export class FTExceptionHandler {
           if (this.isHandlingCrash) {
             FTInnerLogger.w(TAG, "Already handling crash, skipping duplicate exception handling to prevent infinite loop");
             // Still rethrow to ensure app terminates
-            setTimeout((): void => {
-              throw errObject;
+            FTExceptionHandler.runtime.schedule((): void => {
+              if (FTExceptionHandler.runtime.shouldRethrowException()) {
+                throw errObject;
+              }
             }, 10);
             return;
           }
@@ -117,17 +170,19 @@ export class FTExceptionHandler {
           // Use setTimeout to rethrow asynchronously, allowing errorManager to complete processing
           // Android SDK calls mDefaultExceptionHandler.uncaughtException(t, e) to rethrow
           // Note: This will trigger onException again, but the isHandlingCrash flag will prevent infinite loop
-          setTimeout((): void => {
+          FTExceptionHandler.runtime.schedule((): void => {
             FTInnerLogger.i(TAG, "Rethrowing exception after crash handling (aligned with Android SDK)");
             // Stop errorManager to prevent it from catching the rethrown exception again
             // This ensures the app terminates properly
             this.stopErrorManager();
-            throw errObject;
+            if (FTExceptionHandler.runtime.shouldRethrowException()) {
+              throw errObject;
+            }
           }, 100);
         }
       };
       
-      this.errorManagerId = errorManager.on("error", callback);
+      this.errorManagerId = FTExceptionHandler.runtime.registerErrorObserver(callback);
       FTInnerLogger.i(TAG, `errorManager.on("error") errorManagerId:${this.errorManagerId}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to start errorManager: ${error}`);
@@ -140,7 +195,7 @@ export class FTExceptionHandler {
   private stopErrorManager(): void {
     if (this.errorManagerId > -1) {
       try {
-        errorManager.off("error", this.errorManagerId, (err: BusinessError | null) => {
+        FTExceptionHandler.runtime.unregisterErrorObserver(this.errorManagerId, (err: BusinessError | null) => {
           if (err) {
             FTInnerLogger.d(TAG, `errorManager.off("error") errorManagerId:${this.errorManagerId}, errCode:${err.code}, errMessage:${err.message}`);
           } else {
@@ -161,9 +216,7 @@ export class FTExceptionHandler {
     this.stopErrorManager();
 
     // Stop native crash adapter
-    if (this.nativeCrashAdapter) {
-      this.nativeCrashAdapter.stopWatching();
-    }
+    this.shutdownNativeCrashAdapter();
 
     FTInnerLogger.i(TAG, "FTExceptionHandler stopped");
   }
@@ -203,28 +256,28 @@ export class FTExceptionHandler {
           
           // Step 1: Stop current view to generate RUM data
           // Aligned with Android: stopView(null, callBack) in addError callback
-          const rumManager = FTRUMInnerManager.getInstance();
+          const rumManager = FTExceptionHandler.runtime.getRumManager();
           rumManager.stopView().then(() => {
             FTInnerLogger.i(TAG, "View stopped after crash");
             
             // Step 2: Wait a bit for data to be written to database
             // This ensures all pending data operations complete before closing
-            setTimeout((): void => {
+            FTExceptionHandler.runtime.schedule((): void => {
               FTInnerLogger.i(TAG, "Ensuring data is written to database");
               
               // Step 3: Flush sync data to ensure data is written to database
               // This triggers immediate database write and upload
-              FTSDK.flushSyncData();
+              FTExceptionHandler.runtime.flushSyncData();
               
               // Step 4: Wait a bit more for database write to complete
-              setTimeout((): void => {
+              FTExceptionHandler.runtime.schedule((): void => {
                 FTInnerLogger.i(TAG, "Data written to database, now closing window");
                 
                 // Step 5: Close current window
                 exceptionHandler.closeCurrentWindow();
                 
                 // Step 6: Wait a bit before rethrowing exception to ensure window closes
-                setTimeout((): void => {
+                FTExceptionHandler.runtime.schedule((): void => {
                   FTInnerLogger.i(TAG, "Window closed, app will crash");
                 }, 100);
               }, 200); // Wait 200ms for database write
@@ -232,8 +285,8 @@ export class FTExceptionHandler {
           }).catch((err: Error) => {
             FTInnerLogger.e(TAG, `Failed to stop view after crash: ${err}`);
             // Still try to flush data and close window even if stopView fails
-            FTSDK.flushSyncData();
-            setTimeout((): void => {
+            FTExceptionHandler.runtime.flushSyncData();
+            FTExceptionHandler.runtime.schedule((): void => {
               exceptionHandler.closeCurrentWindow();
             }, 200);
           });
@@ -245,7 +298,7 @@ export class FTExceptionHandler {
       // Upload crash log
       // Aligned with Android: uploadCrashLog(crash, message, state, callBack)
       // Note: HarmonyOS uses ErrorType.CRASH instead of ErrorType.JAVA (Android uses ErrorType.JAVA for Java exceptions)
-      const rumManager = FTRUMInnerManager.getInstance();
+      const rumManager = FTExceptionHandler.runtime.getRumManager();
       rumManager.addError(
         crashStack,
         crashMessage,
@@ -274,7 +327,7 @@ export class FTExceptionHandler {
   private closeCurrentWindow(): void {
     try {
       // Try to get context from RUM manager
-      const rumManager = FTRUMInnerManager.getInstance();
+      const rumManager = FTExceptionHandler.runtime.getRumManager();
       const context = rumManager.getContext();
       
       if (context && (context as common.UIAbilityContext).terminateSelf) {
@@ -310,9 +363,7 @@ export class FTExceptionHandler {
       FTExceptionHandler.instance.stopErrorManager();
 
       // Shutdown native crash adapter
-      if (FTExceptionHandler.instance.nativeCrashAdapter) {
-        FTExceptionHandler.instance.nativeCrashAdapter.shutdown();
-      }
+      FTExceptionHandler.instance.shutdownNativeCrashAdapter();
 
       FTExceptionHandler.instance = null;
     }

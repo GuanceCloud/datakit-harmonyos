@@ -8,6 +8,18 @@ import { FTInnerLogger } from '../../log/FTLogger';
 
 const TAG = "DatabaseHelper";
 
+export interface DatabaseHelperRuntime {
+  getRdbStore(context: Context, config: relationalStore.StoreConfig): Promise<relationalStore.RdbStore>;
+}
+
+class DefaultDatabaseHelperRuntime implements DatabaseHelperRuntime {
+  async getRdbStore(context: Context, config: relationalStore.StoreConfig): Promise<relationalStore.RdbStore> {
+    return await relationalStore.getRdbStore(context, config);
+  }
+}
+
+let databaseHelperRuntime: DatabaseHelperRuntime = new DefaultDatabaseHelperRuntime();
+
 /**
  * Database helper class
  * Responsible for database creation, upgrade and table structure management
@@ -32,6 +44,59 @@ export class DatabaseHelper {
       DatabaseHelper.instance = new DatabaseHelper(context);
     }
     return DatabaseHelper.instance;
+  }
+
+  public static setRuntimeForTest(runtime: DatabaseHelperRuntime): void {
+    databaseHelperRuntime = runtime;
+  }
+
+  public static resetRuntimeForTest(): void {
+    databaseHelperRuntime = new DefaultDatabaseHelperRuntime();
+  }
+
+  public static resetInstanceForTest(): void {
+    DatabaseHelper.instance = null;
+  }
+
+  public setRdbStoreForTest(rdbStore: relationalStore.RdbStore | null): void {
+    this.rdbStore = rdbStore;
+  }
+
+  public resetStateForTest(): void {
+    this.rdbStore = null;
+    this.initPromise = null;
+  }
+
+  public async checkTablesExistForTest(): Promise<boolean> {
+    return await this.checkTablesExist();
+  }
+
+  public async checkAndUpgradeDatabaseForTest(): Promise<void> {
+    await this.checkAndUpgradeDatabase();
+  }
+
+  public async hasVersionColumnsForTest(): Promise<boolean> {
+    return await this.hasVersionColumns();
+  }
+
+  public async hasTableForTest(tableName: string): Promise<boolean> {
+    return await this.hasTable(tableName);
+  }
+
+  public async createTablesForTest(): Promise<void> {
+    await this.createTables();
+  }
+
+  public async createIndexesForTest(): Promise<void> {
+    await this.createIndexes();
+  }
+
+  public createIndexesSyncForTest(rdbStore: relationalStore.RdbStore): void {
+    this.createIndexesSync(rdbStore);
+  }
+
+  public handleUpgradeSyncForTest(rdbStore: relationalStore.RdbStore, oldVersion: number, newVersion: number): void {
+    this.handleUpgradeSync(rdbStore, oldVersion, newVersion);
   }
 
   /**
@@ -70,7 +135,7 @@ export class DatabaseHelper {
       // Get RDB store (HarmonyOS getRdbStore API: getRdbStore(context, config))
       // Note: HarmonyOS doesn't support RdbHelper for automatic version management like Android
       // We need to manually check version and handle upgrades
-      this.rdbStore = await relationalStore.getRdbStore(this.context, config);
+      this.rdbStore = await databaseHelperRuntime.getRdbStore(this.context, config);
       
       // Always create tables first (CREATE TABLE IF NOT EXISTS is safe and idempotent)
       // This ensures tables exist even if checkTablesExist() has race conditions
@@ -101,18 +166,13 @@ export class DatabaseHelper {
       return false;
     }
 
-    try {
-      // Check if all three main tables exist
-      const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
-      const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
-      const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-      
-      // All tables must exist
-      return hasViewTable && hasActionTable && hasSyncTable;
-    } catch (error) {
-      FTInnerLogger.w(TAG, `Error checking tables existence: ${error}`);
-      return false;
-    }
+    // Check if all three main tables exist
+    const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
+    const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
+    const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+
+    // All tables must exist
+    return hasViewTable && hasActionTable && hasSyncTable;
   }
 
   /**
@@ -269,11 +329,6 @@ export class DatabaseHelper {
           this.update1to2Sync(rdbStore);
         }
       }
-      // Handle direct upgrade from 1 to 3
-      else if (oldVersion === 1 && newVersion === 3) {
-        this.update1to2Sync(rdbStore);
-        this.update2to3Sync(rdbStore);
-      }
 
       FTInnerLogger.i(TAG, "Database upgrade completed successfully");
     } catch (error) {
@@ -356,19 +411,16 @@ export class DatabaseHelper {
    * Version 1 to version 2 upgrade (asynchronous version)
    */
   private async update1to2(): Promise<void> {
-    if (!this.rdbStore) {
-      throw new Error("Database not initialized");
-    }
-
     try {
+      const rdbStore = this.rdbStore as relationalStore.RdbStore;
       // Add new fields to rum_view table
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_DATA_UPLOAD_TIME} BIGINT DEFAULT 0`
       );
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_DATA_UPDATE_TIME} BIGINT DEFAULT 0`
       );
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_VIEW_UPDATE_TIME} BIGINT DEFAULT 1`
       );
 
@@ -383,13 +435,10 @@ export class DatabaseHelper {
    * Version 2 to version 3 upgrade (asynchronous version)
    */
   private async update2to3(): Promise<void> {
-    if (!this.rdbStore) {
-      throw new Error("Database not initialized");
-    }
-
     try {
+      const rdbStore = this.rdbStore as relationalStore.RdbStore;
       // Create a new sync data table
-      await this.rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
+      await rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
       FTInnerLogger.d(TAG, "Database upgraded from version 2 to 3");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to upgrade from version 2 to 3: ${error}`);

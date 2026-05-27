@@ -10,13 +10,26 @@ import * as FTSQL from './FTSQL';
 import { SyncData } from './bean/SyncData';
 import { ViewBean } from './bean/ViewBean';
 import { ActionBean } from './bean/ActionBean';
-import { DataType } from '../enum/Enums';
+import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
 import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
 
 const TAG = "FTDBManager";
+const DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS = 30 * 1000;
+
+export interface FTDBManagerRuntime {
+  getDatabaseHelper(context: Context): DatabaseHelper;
+}
+
+class DefaultFTDBManagerRuntime implements FTDBManagerRuntime {
+  getDatabaseHelper(context: Context): DatabaseHelper {
+    return DatabaseHelper.getInstance(context);
+  }
+}
+
+let ftDBManagerRuntime: FTDBManagerRuntime = new DefaultFTDBManagerRuntime();
 
 /**
  * Action counts interface
@@ -40,9 +53,12 @@ interface ActionInfo {
  */
 export class FTDBManager extends DBManager {
   private static instance: FTDBManager | null = null;
+  private static delayedActionCleanupDelayMs: number = DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS;
   private databaseHelper: DatabaseHelper | null = null;
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
+  private dbOperationErrorForTest: Error | null = null;
+  private dbOperationErrorOnceForTest: Error | null = null;
   
   // Thread-safe Set for deduplication (using Map for thread-safety in async operations)
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
@@ -56,6 +72,26 @@ export class FTDBManager extends DBManager {
     this.context = context;
   }
 
+  public static setDbRuntimeForTest(runtime: FTDBManagerRuntime): void {
+    ftDBManagerRuntime = runtime;
+  }
+
+  public static resetDbRuntimeForTest(): void {
+    ftDBManagerRuntime = new DefaultFTDBManagerRuntime();
+  }
+
+  public static resetInstanceForTest(): void {
+    FTDBManager.instance = null;
+  }
+
+  public static setDelayedActionCleanupDelayForTest(delayMs: number): void {
+    FTDBManager.delayedActionCleanupDelayMs = delayMs;
+  }
+
+  public static resetDelayedActionCleanupDelayForTest(): void {
+    FTDBManager.delayedActionCleanupDelayMs = DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS;
+  }
+
   /**
    * Get FTDBManager singleton instance
    * @param context Application context
@@ -65,7 +101,7 @@ export class FTDBManager extends DBManager {
     if (!FTDBManager.instance) {
       FTDBManager.instance = new FTDBManager(context);
       // Initialize database helper immediately
-      FTDBManager.instance.databaseHelper = DatabaseHelper.getInstance(context);
+      FTDBManager.instance.databaseHelper = ftDBManagerRuntime.getDatabaseHelper(context);
     }
     return FTDBManager.instance;
   }
@@ -91,7 +127,7 @@ export class FTDBManager extends DBManager {
     // Start initialization
     this.initPromise = (async () => {
       try {
-        this.databaseHelper = DatabaseHelper.getInstance(this.context);
+        this.databaseHelper = ftDBManagerRuntime.getDatabaseHelper(this.context);
         await this.databaseHelper.initDatabase();
         FTInnerLogger.i(TAG, "FTDBManager initialized successfully");
       } catch (error) {
@@ -119,6 +155,66 @@ export class FTDBManager extends DBManager {
     return await this.databaseHelper.initDatabase();
   }
 
+  protected async getDBWithCount(write: boolean, operationCount: number, callback: DataBaseCallBack): Promise<void> {
+    if (this.dbOperationErrorOnceForTest) {
+      const error = this.dbOperationErrorOnceForTest;
+      this.dbOperationErrorOnceForTest = null;
+      throw error;
+    }
+    if (this.dbOperationErrorForTest) {
+      throw this.dbOperationErrorForTest;
+    }
+    await super.getDBWithCount(write, operationCount, callback);
+  }
+
+  public setDatabaseHelperForTest(databaseHelper: DatabaseHelper | null): void {
+    this.databaseHelper = databaseHelper;
+  }
+
+  public extractUniqueIdForTest(dataType: DataType, dataString: string): string | null {
+    return this.extractUniqueId(dataType, dataString);
+  }
+
+  public async checkDataExistsForTest(dataType: DataType, dataString: string): Promise<boolean> {
+    return await this.checkDataExists(dataType, dataString);
+  }
+
+  public async deleteDuplicateDataForTest(dataType: DataType, uniqueId: string): Promise<boolean> {
+    return await this.deleteDuplicateData(dataType, uniqueId);
+  }
+
+  public async markDataAsInsertedForTest(dataType: DataType, dataString: string): Promise<void> {
+    await this.markDataAsInserted(dataType, dataString);
+  }
+
+  public getInsertedDataIdCountForTest(): number {
+    return this.insertedDataIds.size;
+  }
+
+  public addInsertedDataIdForTest(key: string): void {
+    this.insertedDataIds.set(key, true);
+  }
+
+  public setDedupLockForTest(dedupLock: Promise<void>): void {
+    this.dedupLock = dedupLock;
+  }
+
+  public setDBOperationErrorForTest(message: string | null): void {
+    this.dbOperationErrorForTest = message ? new Error(message) : null;
+  }
+
+  public setDBOperationErrorOnceForTest(message: string): void {
+    this.dbOperationErrorOnceForTest = new Error(message);
+  }
+
+  public async cleanupOldDataForTest(rdbStore: relationalStore.RdbStore): Promise<void> {
+    await this.cleanupOldData(rdbStore);
+  }
+
+  public onDBSizeCacheChangeForTest(rdbStore: relationalStore.RdbStore, fileSize: number): void {
+    this.onDBSizeCacheChange(rdbStore, fileSize);
+  }
+
   /**
    * Whether database size limit is enabled
    * @returns boolean
@@ -141,7 +237,7 @@ export class FTDBManager extends DBManager {
     // Check if database size exceeds limit
     if (FTDBCachePolicy.getInstance().isReachDbLimit()) {
       const cachePolicy = FTDBCachePolicy.getInstance();
-      if (cachePolicy.getDBCacheDiscard() === 'DISCARD_OLDEST') {
+      if (cachePolicy.getDBCacheDiscard() === DBCacheDiscard.DISCARD_OLDEST) {
         FTInnerLogger.w(TAG, `DB size limit reached, cleaning oldest data`);
         this.cleanupOldData(rdbStore);
       }
@@ -314,21 +410,11 @@ export class FTDBManager extends DBManager {
                 const uuid = uniqueId.substring(5);
                 searchPattern = uuid;
               } else if (uniqueId.startsWith('error_type=')) {
-                const parts = uniqueId.split(':');
-                if (parts.length >= 2) {
-                  const errorType = parts[0].substring(11);
-                  searchPattern = `error_type=${errorType}`;
-                } else {
-                  searchPattern = uniqueId;
-                }
+                const errorType = uniqueId.split(':')[0].substring(11);
+                searchPattern = `error_type=${errorType}`;
               } else if (uniqueId.startsWith('long_task_name=')) {
-                const parts = uniqueId.split(':');
-                if (parts.length >= 1) {
-                  const longTaskName = parts[0].substring(15);
-                  searchPattern = `long_task_name=${longTaskName}`;
-                } else {
-                  searchPattern = uniqueId;
-                }
+                const longTaskName = uniqueId.split(':')[0].substring(15);
+                searchPattern = `long_task_name=${longTaskName}`;
               } else {
                 searchPattern = uniqueId;
               }
@@ -467,8 +553,7 @@ export class FTDBManager extends DBManager {
           const uniqueId = this.extractUniqueId(dataType, dataString);
           if (uniqueId && (uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id='))) {
             const deleted = await this.deleteDuplicateData(dataType, uniqueId);
-            if (deleted) {
-            } else {
+            if (!deleted) {
               // Keep warning log for failed delete operation
               FTInnerLogger.w(TAG, `Duplicate data skipped: uuid=${data.getUuid()}, type=${dataType}`);
               return false; // Failed to delete old record, skip insert
@@ -476,7 +561,6 @@ export class FTDBManager extends DBManager {
           } else {
             return false; // Data already exists, skip insert
           }
-        } else {
         }
       }
       
@@ -632,43 +716,7 @@ export class FTDBManager extends DBManager {
           }
         }
       } catch (dbError) {
-        // Check if it's an "Already closed" error and retry once
-        if (dbError && dbError.toString().includes("Already closed")) {
-          // Keep warning log for important case
-          FTInnerLogger.w(TAG, `DB closed during insert, retrying once`);
-          
-          // Force reinitialize database
-          this.resetDatabaseConnection();
-          await this.init();
-          
-          // Retry the insert operation with a fresh callback
-          const retryCallback: InsertCallback = new InsertCallback();
-          
-          // Use getDBAsync for retry operation but with a fresh callback
-          // This will trigger the retry logic in getDBAsync
-          try {
-            await this.getDB(true, retryCallback);
-            
-            const retrySuccess = retryCallback.getInsertSuccess();
-            const retryRowId = retryCallback.getRowId();
-            const retryErrorMessage = retryCallback.getErrorMessage();
-            
-            if (retrySuccess && retryRowId > 0) {
-              data.setId(retryRowId);
-              FTInnerLogger.d(TAG, `Sync data generated after retry: type=${data.getDataType()}, uuid=${data.getUuid()}`);
-              return true;
-            } else {
-              FTInnerLogger.e(TAG, `Retry insert failed: uuid=${data.getUuid()}, error=${retryErrorMessage}`);
-              return false;
-            }
-          } catch (retryError) {
-            FTInnerLogger.e(TAG, `Retry insert failed: ${retryError}`);
-            return false;
-          }
-        } else {
-          // Re-throw other errors
-          throw new Error(`Database insert failed: ${dbError}`);
-        }
+        throw new Error(`Database insert failed: ${dbError}`);
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Insert sync data failed: ${error as string}`);
@@ -716,7 +764,6 @@ export class FTDBManager extends DBManager {
           if (!exists) {
             seenInBatch.set(key, true);
             filteredDataList.push(data);
-          } else {
           }
         }
         
@@ -793,7 +840,7 @@ export class FTDBManager extends DBManager {
    * @param limit Limit count
    * @returns Promise<SyncData[]>
    */
-  public async queryFtOperation(types: DataType[], limit: number = 100): Promise<SyncData[]> {
+  public async queryFtOperation(types: DataType[], limit: number = 100, newestFirst: boolean = false): Promise<SyncData[]> {
     const result: SyncData[] = [];
 
     try {
@@ -816,8 +863,13 @@ export class FTDBManager extends DBManager {
             // FTInnerLogger.d(TAG, ` Query predicate: table=${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}, all types`);
           }
           
-          // Order by timestamp ascending (aligned with Android: ORDER by tm ASC)
-          predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
+          // Order by timestamp ascending by default (aligned with Android: ORDER by tm ASC).
+          // Tests that assert the most recent crash/ANR data can opt into newest-first queries.
+          if (newestFirst) {
+            predicates.orderByDesc(FTSQL.RECORD_COLUMN_TM);
+          } else {
+            predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
+          }
           
           // Apply limit using limitAs (aligned with Android: LIMIT pageSize)
           // Note: limit <= 0 means no limit (query all), but we use a reasonable default
@@ -2402,7 +2454,7 @@ export class FTDBManager extends DBManager {
               FTInnerLogger.e(TAG, `Delayed action pending resource cleanup failed: ${error}`);
             }
           })();
-        }, 30 * 1000); // 30 seconds delay
+        }, FTDBManager.delayedActionCleanupDelayMs);
       }
       
       return callback.getWasClosed();
@@ -3034,13 +3086,7 @@ export class FTDBManager extends DBManager {
     const expireTimeline = now - expireDuration;
     let deleteCount = 0;
     
-    // Convert to string if DataType enum
-    let dataTypeStr: string;
-    if (typeof dataType === 'string') {
-      dataTypeStr = dataType;
-    } else {
-      dataTypeStr = String(dataType);
-    }
+    const dataTypeStr: string = String(dataType);
     
     try {
       class DeleteExpireCallback implements DataBaseCallBack {

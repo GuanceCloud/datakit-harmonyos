@@ -1,38 +1,30 @@
 import ftnativecrash from 'libftnativecrash.so';
+import { Constants } from './Constants';
 import { FTInnerLogger } from './log/FTLogger';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
-import { ErrorType } from './rum/enum/RUMEnums';
-import { AppState } from './rum/enum/RUMEnums';
-import { Constants } from './Constants';
-
+import { AppState, ErrorType } from './rum/enum/RUMEnums';
 
 const TAG = "FTNativeCrashHandler";
 
-/**
- * Native crash data interface from C++ layer
- */
 export interface NativeCrashData {
   timestamp: number;
-  crashType: string; // "JsError" or "NativeCrash"
+  crashType: string;
   foreground: boolean;
   bundleVersion: string;
   bundleName: string;
   pid: number;
   uid: number;
   uuid: string;
-  exception: string; // JSON string containing exception details
+  exception: string;
   hilogSize: number;
-  externalLog: string; // JSON string containing external log paths
+  externalLog: string;
   logOverLimit: boolean;
-  memoryNearRegisters: string; // Memory dump near registers
-  maps: string; // Memory maps information
-  hilog: string; // System log content
+  memoryNearRegisters: string;
+  maps: string;
+  hilog: string;
 }
 
-/**
- * Callback interface for receiving native crash events
- */
-export type NativeCrashCallback = (crashData: NativeCrashData) => void;
+export type NativeCrashCallback = (crashData: NativeCrashData) => void | Promise<void>;
 
 interface CrashExceptionData {
   signal?: CrashSignalData;
@@ -73,72 +65,57 @@ interface PrimitiveWrapper {
   value: string | number | boolean;
 }
 
-/**
- * FT Native Crash Handler
- * Handles native crash events from the native layer and reports them into RUM.
- *
- * Current flow:
- * 1. `initialize()` initializes the native module
- * 2. the native callback is bound to `handleNativeCrash()`
- * 3. watcher startup happens immediately after initialization
- * 4. `handleNativeCrash()` formats crash data and writes it through `FTRUMInnerManager`
- */
 export class FTNativeCrashHandler {
   private isInitialized: boolean = false;
   private isWatching: boolean = false;
 
-  constructor() {
-    // No-op constructor for singleton-style lifecycle owned by FTExceptionHandler.
-  }
-
-
-  /**
-   * Initialize the native crash handler
-   * Initializes the native module, binds the crash callback, and starts watching.
-   */
   public async initialize(): Promise<boolean> {
-
     if (this.isInitialized) {
       FTInnerLogger.w(TAG, "Already initialized");
-      return true;
+      return this.isWatching || this.startWatching();
     }
 
     try {
       FTInnerLogger.i(TAG, "=== Native Crash Handler Initialization Start ===");
-
-      // Initialize native handler
       const initResult: boolean = ftnativecrash.initNativeCrashHandler();
       FTInnerLogger.i(TAG, `initNativeCrashHandler result: ${initResult}`);
-
       if (!initResult) {
         FTInnerLogger.e(TAG, "Failed to initialize native crash handler");
         return false;
       }
 
-      // Set internal crash callback
-      ftnativecrash.setCrashCallback(this.handleNativeCrash.bind(this));
+      const callback: NativeCrashCallback = (crashData: NativeCrashData): Promise<void> => {
+        return this.handleNativeCrash(crashData);
+      };
+      const callbackResult: boolean = ftnativecrash.setCrashCallback(callback);
+      FTInnerLogger.i(TAG, `setCrashCallback result: ${callbackResult}`);
+      if (!callbackResult) {
+        FTInnerLogger.e(TAG, "Failed to bind native crash callback");
+        this.clearCrashCallbackSafely();
+        return false;
+      }
 
       this.isInitialized = true;
       const watchResult = this.startWatching();
       if (!watchResult) {
         FTInnerLogger.e(TAG, "Native crash handler initialized but failed to start watching");
+        this.clearCrashCallbackSafely();
+        this.isInitialized = false;
         return false;
       }
 
       FTInnerLogger.i(TAG, "=== Native Crash Handler Initialized Successfully ===");
       return true;
-
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize native crash handler: ${error}`);
+      this.clearCrashCallbackSafely();
+      this.isInitialized = false;
+      this.isWatching = false;
       return false;
     }
   }
 
-  /**
-   * Start watching for crash events
-   */
   private startWatching(): boolean {
-
     if (!this.isInitialized) {
       FTInnerLogger.w(TAG, "Not initialized, call initialize first");
       return false;
@@ -164,9 +141,14 @@ export class FTNativeCrashHandler {
     }
   }
 
-  /**
-   * Stop watching for crash events
-   */
+  private clearCrashCallbackSafely(): void {
+    try {
+      ftnativecrash.clearCrashCallback();
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error clearing native crash callback: ${error}`);
+    }
+  }
+
   public stopWatching(): void {
     if (!this.isWatching) {
       return;
@@ -181,14 +163,23 @@ export class FTNativeCrashHandler {
     }
   }
 
-  /**
-   * Handle native crash event from C++ layer
-   * @param crashData Crash data from native layer
-   */
+  public shutdown(): void {
+    this.stopWatching();
+    this.clearCrashCallbackSafely();
+    this.isInitialized = false;
+    this.isWatching = false;
+    FTInnerLogger.i(TAG, "Native crash handler shutdown");
+  }
+
+  public isReady(): boolean {
+    return this.isInitialized && this.isWatching;
+  }
+
   private async handleNativeCrash(crashData: NativeCrashData): Promise<void> {
     FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** ARKTS CALLBACK CALLED ***");
     FTInnerLogger.i(TAG, `<FT-ARKTS-CALLBACK> Crash data received: type=${crashData.crashType}`);
 
+    const rumManager = FTRUMInnerManager.getInstance();
     try {
       const crashReport = this.formatCrashReport(crashData);
       const errorContext: Record<string, string | number | boolean | object> = {};
@@ -214,9 +205,7 @@ export class FTNativeCrashHandler {
       }
 
       try {
-        const rumManager = FTRUMInnerManager.getInstance();
         const savedContext = await rumManager.getSavedRumContext();
-
         if (savedContext.viewId && savedContext.viewId !== '') {
           errorContext[Constants.KEY_RUM_VIEW_ID] = this.wrapPrimitive(savedContext.viewId);
           errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive(savedContext.viewName);
@@ -232,35 +221,21 @@ export class FTNativeCrashHandler {
         errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive('error');
       }
 
-      const rumManager = FTRUMInnerManager.getInstance();
-      await rumManager.addError(
-        crashReport,
-        `Native Crash: ${crashData.crashType}`,
-        ErrorType.NATIVE_CRASH,
-        AppState.RUN,
-        this.convertToRecordStringObject(errorContext)
-      );
-      rumManager.clearSavedRumContext();
+      try {
+        await rumManager.addError(
+          crashReport,
+          `Native Crash: ${crashData.crashType}`,
+          ErrorType.NATIVE_CRASH,
+          AppState.RUN,
+          this.convertToRecordStringObject(errorContext)
+        );
+      } finally {
+        rumManager.clearSavedRumContext();
+      }
       FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** CRASH REPORTED TO RUM SUCCESSFULLY ***");
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ARKTS-CALLBACK> *** CALLBACK ERROR ***: ${error}`);
     }
-  }
-
-  /**
-   * Check if the handler is initialized
-   */
-  public isReady(): boolean {
-    return this.isInitialized && this.isWatching;
-  }
-
-  /**
-   * Shutdown the handler
-   */
-  public shutdown(): void {
-    this.stopWatching();
-    this.isInitialized = false;
-    FTInnerLogger.i(TAG, "Native crash handler shutdown");
   }
 
   private formatCrashReport(crashData: NativeCrashData): string {
@@ -339,9 +314,13 @@ export class FTNativeCrashHandler {
       const code = exception.signal.code ?? 0;
       const address = exception.signal.address ?? '0';
       let signalName = 'UNKNOWN';
-      if (signo === 11) signalName = 'SIGSEGV';
-      else if (signo === 6) signalName = 'SIGABRT';
-      else if (signo === 8) signalName = 'SIGFPE';
+      if (signo === 11) {
+        signalName = 'SIGSEGV';
+      } else if (signo === 6) {
+        signalName = 'SIGABRT';
+      } else if (signo === 8) {
+        signalName = 'SIGFPE';
+      }
 
       result += `Reason:Signal:${signalName}(${code})@${address}`;
       if (exception.message) {
@@ -394,12 +373,6 @@ export class FTNativeCrashHandler {
     return result;
   }
 
-  /**
-   * Add a log entry to the runtime log buffer for crash reporting
-   * @param level Log level (e.g., "D", "I", "W", "E")
-   * @param tag Log tag
-   * @param message Log message
-   */
   public addLog(level: string, tag: string, message: string): boolean {
     try {
       return ftnativecrash.addLog(level, tag, message);
@@ -409,11 +382,6 @@ export class FTNativeCrashHandler {
     }
   }
 
-  /**
-   * Get collected runtime logs
-   * @param maxLines Maximum number of lines to retrieve (0 for all)
-   * @returns Collected logs as a string
-   */
   public getCollectedLogs(maxLines?: number): string {
     try {
       return ftnativecrash.getCollectedLogs(maxLines || 0);
@@ -423,9 +391,6 @@ export class FTNativeCrashHandler {
     }
   }
 
-  /**
-   * Clear the runtime log buffer
-   */
   public clearLogs(): boolean {
     try {
       return ftnativecrash.clearLogs();
@@ -435,10 +400,6 @@ export class FTNativeCrashHandler {
     }
   }
 
-  /**
-   * Set the maximum log buffer size
-   * @param maxSize Maximum number of log entries to keep
-   */
   public setMaxLogSize(maxSize: number): boolean {
     try {
       return ftnativecrash.setMaxLogSize(maxSize);
@@ -447,9 +408,15 @@ export class FTNativeCrashHandler {
       return false;
     }
   }
+
+  public getVersion(): string {
+    try {
+      return ftnativecrash.getVersion();
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error getting native crash version: ${error}`);
+      return "";
+    }
+  }
 }
 
-/**
- * Export the module
- */
 export default FTNativeCrashHandler;

@@ -3226,22 +3226,12 @@ export class FTRUMInnerManager {
         this.addSessionToFilter(this.notSessionErrorCollectArr, sessionId);
       } else {
         // If error sampling is enabled, remove from notSessionErrorCollectArr if present
-        const errorIndex = this.notSessionErrorCollectArr.indexOf(sessionId);
-        if (errorIndex >= 0) {
-          this.notSessionErrorCollectArr.splice(errorIndex, 1);
-        }
+        this.removeSessionFromFilter(this.notSessionErrorCollectArr, sessionId);
       }
     } else {
       // Session is collected by normal sampling, remove from both filter lists
-      const normalIndex = this.notCollectArr.indexOf(sessionId);
-      if (normalIndex >= 0) {
-        this.notCollectArr.splice(normalIndex, 1);
-      }
-      
-      const errorIndex = this.notSessionErrorCollectArr.indexOf(sessionId);
-      if (errorIndex >= 0) {
-        this.notSessionErrorCollectArr.splice(errorIndex, 1);
-      }
+      this.removeSessionFromFilter(this.notCollectArr, sessionId);
+      this.removeSessionFromFilter(this.notSessionErrorCollectArr, sessionId);
     }
   }
 
@@ -3251,10 +3241,26 @@ export class FTRUMInnerManager {
    * @param sessionId Session ID
    */
   private addSessionToFilter(sessionList: string[], sessionId: string): void {
+    if (sessionList.includes(sessionId)) {
+      return;
+    }
     if (sessionList.length >= FTRUMInnerManager.SESSION_FILTER_CAPACITY) {
       sessionList.shift(); // Remove oldest Session ID
     }
     sessionList.push(sessionId);
+  }
+
+  /**
+   * Remove all occurrences of a Session from a filter list
+   * @param sessionList Filter list
+   * @param sessionId Session ID
+   */
+  private removeSessionFromFilter(sessionList: string[], sessionId: string): void {
+    let index = sessionList.indexOf(sessionId);
+    while (index >= 0) {
+      sessionList.splice(index, 1);
+      index = sessionList.indexOf(sessionId);
+    }
   }
 
   /**

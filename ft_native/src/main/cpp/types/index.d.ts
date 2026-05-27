@@ -24,6 +24,8 @@ export interface NativeCrashData {
     hilog: string;          // System log content
 }
 
+export type NativeCrashCallback = (crashData: NativeCrashData) => void | Promise<void>;
+
 /**
  * FT Native Crash module interface
  */
@@ -39,7 +41,12 @@ export interface FTNativeCrashModule {
      * @param callback Callback function to receive crash events
      * @returns true if successful, false otherwise
      */
-    setCrashCallback(callback: (crashData: NativeCrashData) => void): boolean;
+    setCrashCallback(callback: NativeCrashCallback): boolean;
+
+    /**
+     * Clear the crash callback function.
+     */
+    clearCrashCallback(): boolean;
 
     /**
      * Start watching for crash events
@@ -81,6 +88,12 @@ export interface FTNativeCrashModule {
      * @returns true if successful, false otherwise
      */
     setMaxLogSize(maxSize: number): boolean;
+
+    /**
+     * Get the native crash handler version.
+     * @returns Version string reported by the C++ module
+     */
+    getVersion(): string;
 }
 
 /**

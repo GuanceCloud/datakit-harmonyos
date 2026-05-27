@@ -258,6 +258,7 @@ export class UnifiedConsumerThreadPool {
      */
     public shutdown(): void {
         this.smartThreadPool.shutdown();
+        UnifiedConsumerThreadPool.instance = null;
         FTInnerLogger.i(TAG, "UnifiedConsumerThreadPool has been shut down");
     }
 
@@ -266,6 +267,7 @@ export class UnifiedConsumerThreadPool {
      */
     public shutdownNow(): void {
         this.smartThreadPool.shutdownNow();
+        UnifiedConsumerThreadPool.instance = null;
         FTInnerLogger.i(TAG, "UnifiedConsumerThreadPool has been force shut down");
     }
 }

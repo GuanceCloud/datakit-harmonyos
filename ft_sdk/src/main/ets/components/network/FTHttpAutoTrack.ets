@@ -690,8 +690,20 @@ function setAxiosAutoTrackState(config: FTAxiosRequestConfigTarget, state: FTAxi
   context[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] = state as Object;
 }
 
-function clearAxiosAutoTrackState(_config?: FTAxiosRequestConfigTarget): void {
-  return;
+function clearAxiosAutoTrackState(config?: FTAxiosRequestConfigTarget): void {
+  if (!config || !config.context) {
+    return;
+  }
+  const context = config.context as Record<string, Object>;
+  const cleanContext: Record<string, Object> = {};
+  const contextKeys = Object.keys(context);
+  for (let i = 0; i < contextKeys.length; i++) {
+    const key = contextKeys[i];
+    if (key !== FT_AXIOS_AUTOTRACK_CONTEXT_KEY) {
+      cleanContext[key] = context[key];
+    }
+  }
+  config.context = cleanContext;
 }
 
 function createAxiosTraceInterceptor(): FTTraceInterceptor | null {

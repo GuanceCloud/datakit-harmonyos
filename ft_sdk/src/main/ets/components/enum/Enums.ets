@@ -1,3 +1,6 @@
+export { Status } from '../bean/Status';
+export { TraceType } from '../trace/TraceType';
+
 export enum EnvType {
   PROD = "prod",
   GRAY = "gray",
@@ -22,91 +25,6 @@ export enum LogCacheDiscard {
    * Drop the newest entries
    */
   DISCARD_OLDEST
-}
-
-export enum Status {
-  /**
-   * Info
-   */
-  INFO = "info",
-
-  /**
-   * Debug
-   */
-  DEBUG = "debug",
-
-  /**
-   * Warning
-   */
-  WARNING = "warning",
-
-  /**
-   * Error
-   */
-  ERROR = "error",
-
-  /**
-   * Critical
-   */
-  CRITICAL = "critical",
-
-  /**
-   * Recovery
-   */
-  OK = "ok"
-}
-
-export enum TraceType {
-  /**
-   * Datadog trace, default value, {@link FTTraceConfig#traceType}
-   * <p>
-   * x-datadog-trace-id
-   * x-datadog-parent-id
-   * x-datadog-sampling-priority
-   * x-datadog-origin
-   *
-   * <a href="https://docs.datadoghq.com/synthetics/apm/">Learn more</a>
-   *
-   */
-  DDTRACE,
-
-  /**
-   * zipkin multi header
-   * <p>
-   * X-B3-TraceId
-   * X-B3-SpanId
-   * X-B3-Sampled
-   *
-   * <a href="https://github.com/openzipkin/b3-propagation">Learn more</a>
-   *
-   */
-  ZIPKIN_MULTI_HEADER,
-
-  /**
-   * zipkin single header,b3
-   *
-   * <a href="https://github.com/openzipkin/b3-propagation">Learn more</a>
-   */
-  ZIPKIN_SINGLE_HEADER,
-
-  /**
-   * w3c, traceparent
-   *
-   * <a href="https://www.w3.org/TR/trace-context/#traceparent-header-field-values">Learn more</a>
-   */
-  TRACEPARENT,
-
-  /**
-   * skywalking 8.0+, sw-8
-   *
-   * <a href="https://skywalking.apache.org/docs/main/next/en/api/x-process-propagation-headers-v3/#skywalking-cross-process-propagation-headers-protocol">Learn more</a>
-   */
-  SKYWALKING,
-
-  /**
-   * jaeger, header uber-trace-id
-   */
-  JAEGER
 }
 
 export enum DetectFrequency {
@@ -154,7 +72,6 @@ export enum RUMCacheDiscard {
   DISCARD = "discard",
   DISCARD_OLDEST = "discard_oldest"
 }
-
 
 
 

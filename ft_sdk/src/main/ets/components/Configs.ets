@@ -1,5 +1,6 @@
 import { Constants } from "./Constants";
-import { DetectFrequency, EnvType, LogCacheDiscard, Status, SyncPageSize } from "./enum/Enums";
+import { DetectFrequency, EnvType, LogCacheDiscard, SyncPageSize } from "./enum/Enums";
+import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
 import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
@@ -446,14 +447,13 @@ export class FTLoggerConfig {
   /**
    * Set log level filters
    * Aligned with Android: setLogLevelFilters(Status[]) and setLogLevelFilters(String[])
-   * @param logLevelFilters Array of Status enum values, Status class instances, or string values
+   * @param logLevelFilters Array of Status class instances, named status-like objects, or string values
    */
   setLogLevelFilters(logLevelFilters: Array<Status | string | StatusWithName>): FTLoggerConfig {
     const array: Array<string> = [];
     for (let i = 0; i < logLevelFilters.length; i++) {
       const item: Status | string | StatusWithName = logLevelFilters[i];
       if (typeof item === 'string') {
-        // String value or Status enum (which is a string enum)
         array.push(item as string);
       } else if (item && typeof item === 'object') {
         // Check if it's a Status class instance (has .name property)
@@ -462,12 +462,9 @@ export class FTLoggerConfig {
         if (statusObj.name !== undefined && typeof statusObj.name === 'string') {
           array.push(statusObj.name);
         } else {
-          // Status enum value (from enum/Enums.ets) - value is already a string
           array.push(String(item));
         }
       } else {
-        // Status enum value (from enum/Enums.ets) - value is already a string
-        // Convert enum to string by accessing its value
         const statusValue: string = String(item);
         array.push(statusValue);
       }

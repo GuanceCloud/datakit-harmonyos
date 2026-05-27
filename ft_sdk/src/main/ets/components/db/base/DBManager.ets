@@ -9,6 +9,28 @@ import { DataProcessThreadPool } from '../../thread/DataProcessThreadPool';
 
 const TAG = "DBManager";
 
+export interface DBManagerRuntime {
+  now(): number;
+  scheduleCloseTask(callback: () => void): void;
+  clearTimer(timerId: number): void;
+}
+
+class DefaultDBManagerRuntime implements DBManagerRuntime {
+  now(): number {
+    return Date.now();
+  }
+
+  scheduleCloseTask(callback: () => void): void {
+    DataProcessThreadPool.getInstance().execute(callback);
+  }
+
+  clearTimer(timerId: number): void {
+    clearTimeout(timerId);
+  }
+}
+
+let dbManagerRuntime: DBManagerRuntime = new DefaultDBManagerRuntime();
+
 /**
  * Database management abstract base class
  * Provides basic functionality for database connection management, thread safety, transaction management, etc.
@@ -30,6 +52,14 @@ export abstract class DBManager {
   // Thread safety locks
   private readonly counterLock = new Object();
   private readonly dbLock = new Object();
+
+  public static setRuntimeForTest(runtime: DBManagerRuntime): void {
+    dbManagerRuntime = runtime;
+  }
+
+  public static resetRuntimeForTest(): void {
+    dbManagerRuntime = new DefaultDBManagerRuntime();
+  }
 
   /**
    * Initialize database helper
@@ -145,7 +175,7 @@ export abstract class DBManager {
    * Check if database size should be checked
    */
   private shouldCheckDatabaseSize(): boolean {
-    const now = Date.now();
+    const now = dbManagerRuntime.now();
     if (now - this.lastDbSizeCheckTime >= DBManager.DB_SIZE_CHECK_INTERVAL) {
       this.lastDbSizeCheckTime = now;
       return true;
@@ -222,7 +252,7 @@ export abstract class DBManager {
       }
       
       this.openCounter++;
-      this.lastUsedTime = Date.now();
+      this.lastUsedTime = dbManagerRuntime.now();
       this.cancelPendingClose();
       
       // Warn if connection count is too high
@@ -250,7 +280,7 @@ export abstract class DBManager {
       const currentCount = this.openCounter;
       const newCount = Math.max(0, currentCount - 1);
       this.openCounter = newCount;
-      this.lastUsedTime = Date.now();
+      this.lastUsedTime = dbManagerRuntime.now();
       
 
       // Only schedule close if no active connections
@@ -272,8 +302,8 @@ export abstract class DBManager {
       // Removed test debug log to reduce log output
       // FTInnerLogger.d(TAG, ` Scheduling database close in ${DBManager.IDLE_TIMEOUT}ms`);
       // Use DataProcessThreadPool instead of setTimeout
-      DataProcessThreadPool.getInstance().execute(() => {
-        if (this.openCounter === 0 && (Date.now() - this.lastUsedTime) >= DBManager.IDLE_TIMEOUT) {
+      dbManagerRuntime.scheduleCloseTask(() => {
+        if (this.openCounter === 0 && (dbManagerRuntime.now() - this.lastUsedTime) >= DBManager.IDLE_TIMEOUT) {
           this.closeDatabase();
         }
       });
@@ -285,7 +315,7 @@ export abstract class DBManager {
    */
   private cancelPendingClose(): void {
     if (this.pendingCloseTask !== null) {
-      clearTimeout(this.pendingCloseTask);
+      dbManagerRuntime.clearTimer(this.pendingCloseTask);
       this.pendingCloseTask = null;
       // Removed test debug log to reduce log output
       // FTInnerLogger.d(TAG, ` Cancelled previous close task`);
@@ -303,15 +333,7 @@ export abstract class DBManager {
       if (this.rdbStore && this.openCounter <= 0) {
         try {
           // FTInnerLogger.d(TAG, ` Closing database connection`);
-          
-          // Check if database is already closed before attempting to close
-          if (this.isDatabaseClosed()) {
-            FTInnerLogger.w(TAG, ` Database is already closed, skipping close operation`);
-            this.rdbStore = null;
-            this.pendingCloseTask = null;
-            return;
-          }
-          
+
           // Attempt to close the database
           await this.rdbStore.close();
           this.rdbStore = null;
@@ -380,6 +402,66 @@ export abstract class DBManager {
       this.openCounter = 0;
       this.pendingCloseTask = null;
     });
+  }
+
+  public async getDBForTest(write: boolean, operationCount: number, callback: DataBaseCallBack): Promise<void> {
+    await this.getDBWithCount(write, operationCount, callback);
+  }
+
+  public async getDataBaseHelperForTest(): Promise<relationalStore.RdbStore> {
+    return await this.getDataBaseHelper();
+  }
+
+  public async checkDatabaseSizeForTest(rdbStore: relationalStore.RdbStore): Promise<void> {
+    await this.checkDatabaseSize(rdbStore);
+  }
+
+  public shouldCheckDatabaseSizeForTest(): boolean {
+    return this.shouldCheckDatabaseSize();
+  }
+
+  public getDatabaseStoreStatusForTest(): string {
+    return this.getDatabaseStoreStatus();
+  }
+
+  public resetDatabaseConnectionForTest(): void {
+    this.resetDatabaseConnection();
+  }
+
+  public acquireForTest(): void {
+    this.acquire();
+  }
+
+  public tryToCloseForTest(): void {
+    this.tryToClose();
+  }
+
+  public scheduleCloseIfIdleForTest(): void {
+    this.scheduleCloseIfIdle();
+  }
+
+  public cancelPendingCloseForTest(): void {
+    this.cancelPendingClose();
+  }
+
+  public closeDatabaseForTest(): void {
+    this.closeDatabase();
+  }
+
+  public setOpenCounterForTest(openCounter: number): void {
+    this.openCounter = openCounter;
+  }
+
+  public setLastUsedTimeForTest(lastUsedTime: number): void {
+    this.lastUsedTime = lastUsedTime;
+  }
+
+  public setLastDbSizeCheckTimeForTest(lastDbSizeCheckTime: number): void {
+    this.lastDbSizeCheckTime = lastDbSizeCheckTime;
+  }
+
+  public setPendingCloseTaskForTest(pendingCloseTask: number | null): void {
+    this.pendingCloseTask = pendingCloseTask;
   }
 }
 

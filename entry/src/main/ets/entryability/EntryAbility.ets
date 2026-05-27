@@ -3,15 +3,21 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
-import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
-import { UserData } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/UserData';
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
-import { ErrorMonitorType } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/ErrorMonitorType';
-import { DeviceMetricsMonitorType } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/DeviceMetricsMonitorType';
-import { EnvType, SyncPageSize } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
-import { DBCacheDiscard } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
-import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
-import { TraceType } from '@guancecloud/ft_sdk/src/main/ets/components/trace/TraceType';
+import {
+  DBCacheDiscard,
+  DeviceMetricsMonitorType,
+  EnvType,
+  ErrorMonitorType,
+  FTLoggerConfig,
+  FTRUMConfig,
+  FTSDK,
+  FTSDKConfig,
+  FTTraceConfig,
+  Status,
+  SyncPageSize,
+  TraceType,
+  UserData
+} from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
   runPreInitAxiosSmokeTestsWithMode,
@@ -307,7 +313,7 @@ export default class EntryAbility extends UIAbility {
       }
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
-        .setEnableTrackAppCrash(true)  // JS crash monitoring (must be true for native crash monitoring to take effect)
+        .setEnableTrackAppCrash(true)  // JS and native crash monitoring
         .setSamplingRate(1.0)          // Set the sampling rate to 100%
         .setSessionErrorSampleRate(1.0) // Set the error sampling rate to 100%
         .setEnableTraceUserAction(true)

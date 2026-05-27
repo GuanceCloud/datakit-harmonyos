@@ -42,6 +42,7 @@ export class SyncDataHelper {
   }
 
   initLogConfig(config: FTLoggerConfig): void {
+    this.logConfig = config;
     this.logTags.clear();
     // Copy base public tags
     this.basePublicTags.forEach((value, key) => {
@@ -109,11 +110,13 @@ export class SyncDataHelper {
    * @param globalContext RUM global context map
    */
   appendRUMGlobalContext(globalContext: Map<string, string>): void {
-    if (globalContext) {
-      globalContext.forEach((value, key) => {
-        this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
-      });
+    if (!globalContext) {
+      return;
     }
+
+    globalContext.forEach((value, key) => {
+      this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+    });
 
     // Add all hashmap keys as a JSON string array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
     const keys = Array.from(globalContext.keys());
@@ -145,9 +148,11 @@ export class SyncDataHelper {
    * @param value Tag value
    */
   appendRUMGlobalContextByKeyValue(key: string, value: string): void {
-    if (key && value) {
-      this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+    if (!key || !value) {
+      return;
     }
+
+    this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
 
     // Add key to custom_keys array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
     const newKey = key;
@@ -348,14 +353,14 @@ export class SyncDataHelper {
         this.rumTags.forEach((value, key) => {
           if (key !== Constants.KEY_SERVICE) {
             if (key === Constants.KEY_SDK_PACKAGE_INFO) {
-              // Append Web SDK version to sdk_pkg_info (aligned with Android: PackageUtils.appendPackageVersion)
+              // Append Web SDK version to sdk_pkg_info (aligned with Android appendPackageVersion behavior)
               // Android SDK always calls appendPackageVersion even if webSDKVersion is null (converts to empty string)
               if (value && typeof value === 'string' && value.trim().startsWith('{')) {
                 // Check if web version already exists in the JSON
                 const hasWebVersion = value.includes(`"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`);
                 if (!hasWebVersion) {
                   // Aligned with Android: always append web version, even if webSDKVersion is empty/null
-                  // Android: PackageUtils.appendPackageVersion(pkgInfo.toString(), KEY_RUM_SDK_PACKAGE_WEB, webSDKVersion + "")
+                  // Android SDK appends KEY_RUM_SDK_PACKAGE_WEB with webSDKVersion + ""
                   const webVersionStr = webSDKVersion || ""; // Convert null/undefined to empty string
                   // Use helper function to parse and append web version
                   const updatedPkgInfo = this.parseAndAppendWebVersion(value, webVersionStr);
@@ -669,10 +674,15 @@ export class SyncDataHelper {
         // Check if it's a numeric or boolean string - if so, don't add quotes in line protocol
         // This handles values like "123", "-436", "true", "false" which should not have quotes
         if (!isTag) {
-          // For fields, check if the string represents a number or boolean
+          // For fields, check if the string represents a number or boolean.
+          // ArkTS data maps commonly carry numeric fields as strings, so integerCompatible
+          // must still control the Line Protocol integer suffix for integer strings.
+          const integerPattern = /^-?\d+$/;
           const numericPattern = /^-?\d+(\.\d+)?$/;
-          if (cleanValue && (numericPattern.test(cleanValue) || cleanValue === 'true' || cleanValue === 'false' || cleanValue === 'T' || cleanValue === 'F')) {
-            // It's a numeric or boolean string, output without quotes
+          if (cleanValue && integerPattern.test(cleanValue)) {
+            sb += integerCompatible ? `${escapedKey}=${cleanValue}` : `${escapedKey}=${cleanValue}i`;
+          } else if (cleanValue && (numericPattern.test(cleanValue) || cleanValue === 'true' || cleanValue === 'false' || cleanValue === 'T' || cleanValue === 'F')) {
+            // It's a float or boolean string, output without quotes
             sb += `${escapedKey}=${cleanValue}`;
           } else {
             // It's a real string, add quotes
@@ -714,7 +724,8 @@ export class SyncDataHelper {
           } else if (typeof valueObj['getValue'] === 'function') {
             // It has getValue method, try calling it
             try {
-              const stringValue = (valueObj['getValue'] as () => string)();
+              const getValue = valueObj['getValue'] as Function;
+              const stringValue = getValue() as string;
               const fieldValue = isTag ?
                 SyncDataHelper.translateTagKeyValue(stringValue) :
                 SyncDataHelper.translateFieldValue(stringValue);
@@ -884,7 +895,7 @@ export class SyncDataHelper {
 
   /**
    * Format JSON string to match Android SDK format (spaces after commas)
-   * Android SDK uses PackageUtils.appendPackageVersion which adds ", " (comma + space)
+   * Android SDK appendPackageVersion behavior adds ", " (comma + space)
    * @param jsonStr JSON string
    * @returns Formatted JSON string with spaces after commas
    */

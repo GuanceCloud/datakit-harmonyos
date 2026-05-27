@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14-alpha06] - 2026-05-14
+- Added the versioned `FTSDKExtensionBridge` integration contract for extension modules.
+- Added a versioned extension contract export so `ft_sdk_ext` can avoid depending on internal `ft_sdk/src/main` paths.
+
 ## [0.1.14-alpha05] - 2026-05-11
 - No changes, aligned with the ft_sdk_ext version
 
