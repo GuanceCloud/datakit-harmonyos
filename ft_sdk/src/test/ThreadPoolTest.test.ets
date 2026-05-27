@@ -9,6 +9,11 @@ import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from
 import { DataProcessThreadPool } from '../main/ets/components/thread/DataProcessThreadPool';
 import { ThreadPoolManager } from '../main/ets/components/thread/ThreadPoolManager';
 
+async function resetThreadPoolForTest(): Promise<void> {
+  ThreadPoolManager.getInstance().reset();
+  await new Promise<void>(resolve => setTimeout(resolve, 100));
+}
+
 export default function threadPoolTest() {
   describe('ThreadPoolTest', () => {
     beforeAll(async () => {
@@ -17,12 +22,14 @@ export default function threadPoolTest() {
       await ThreadPoolManager.getInstance().initialize();
     });
 
-    beforeEach(() => {
+    beforeEach(async () => {
       console.info('ThreadPoolTest', 'beforeEach called');
+      await resetThreadPoolForTest();
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       console.info('ThreadPoolTest', 'afterEach called');
+      await resetThreadPoolForTest();
     });
 
     afterAll(() => {
@@ -35,37 +42,56 @@ export default function threadPoolTest() {
      * We test the equivalent functionality: shutdown and reset
      */
     it('testReThreadPool', 0, async () => {
-      // Get the singleton instance
-      const pool = DataProcessThreadPool.getInstance();
+      try {
+        // Get the singleton instance
+        const pool = DataProcessThreadPool.getInstance();
 
-      // Execute a task (in Android this is an infinite loop, we use a simpler task)
-      let taskExecuted = false;
-      pool.execute(() => {
-        taskExecuted = true;
-      });
+        // Execute a task (in Android this is an infinite loop, we use a simpler task)
+        let taskExecuted = false;
+        pool.execute(() => {
+          taskExecuted = true;
+        });
 
-      // Wait a bit for task to be queued
-      await new Promise<void>(resolve => setTimeout(resolve, 100));
+        // Wait a bit for task to run through the simulated thread pool loop
+        await new Promise<void>(resolve => setTimeout(resolve, 300));
+        expect(taskExecuted).assertTrue();
 
-      // Shutdown the thread pool
-      ThreadPoolManager.getInstance().shutdown();
+        // Shutdown the thread pool
+        ThreadPoolManager.getInstance().shutdown();
 
-      // Verify pool is shut down
-      const status = ThreadPoolManager.getInstance().getStatus();
-      expect(status.isShutdown).assertTrue();
+        // Verify pool is shut down
+        const status = ThreadPoolManager.getInstance().getStatus();
+        expect(status.isShutdown).assertTrue();
 
-      // Restart the pool (equivalent to reStartPool in Android)
-      ThreadPoolManager.getInstance().reset();
+        let rejectedAfterShutdown = false;
+        try {
+          pool.execute(() => {
+            taskExecuted = false;
+          });
+        } catch (error) {
+          rejectedAfterShutdown = true;
+        }
+        expect(rejectedAfterShutdown).assertTrue();
 
-      // Wait for initialization
-      await new Promise<void>(resolve => setTimeout(resolve, 100));
+        // Restart the pool (equivalent to reStartPool in Android)
+        await resetThreadPoolForTest();
 
-      // Verify pool is running again
-      const newStatus = ThreadPoolManager.getInstance().getStatus();
-      expect(newStatus.isInitialized).assertTrue();
-      expect(newStatus.isShutdown).assertFalse();
+        // Verify pool is running again
+        const newStatus = ThreadPoolManager.getInstance().getStatus();
+        expect(newStatus.isInitialized).assertTrue();
+        expect(newStatus.isShutdown).assertFalse();
 
-      console.info('ThreadPoolTest', 'testReThreadPool passed');
+        let taskExecutedAfterReset = false;
+        pool.execute(() => {
+          taskExecutedAfterReset = true;
+        });
+        await new Promise<void>(resolve => setTimeout(resolve, 300));
+        expect(taskExecutedAfterReset).assertTrue();
+
+        console.info('ThreadPoolTest', 'testReThreadPool passed');
+      } finally {
+        await resetThreadPoolForTest();
+      }
     });
   });
 }

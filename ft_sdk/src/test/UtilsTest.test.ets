@@ -7,9 +7,7 @@
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
 import { SyncDataHelper } from '../main/ets/components/SyncDataHelper';
-import { DataType } from '../main/ets/components/enum/Enums';
 import { Constants } from '../main/ets/components/Constants';
-import { Utils } from '../main/ets/components/utils/Utils';
 
 export default function utilsTest() {
   describe('UtilsTest', () => {
@@ -78,9 +76,6 @@ export default function utilsTest() {
       const fields: Map<string, string> = new Map();
       fields.set(KEY_FIELD, VALUE_FIELD);
 
-      // Get current nano time
-      const currentTime = Utils.getCurrentNanoTime();
-
       // Convert to line protocol line
       const lineData = SyncDataHelper.convertToLineProtocolLine(
         TEST_MEASUREMENT_INFLUX_DB_LINE,
@@ -91,12 +86,7 @@ export default function utilsTest() {
       );
 
       // Verify the line data format
-      expect(lineData.includes(TEST_MEASUREMENT_INFLUX_DB_LINE)).assertTrue();
-      expect(lineData.includes(KEY_TAGS)).assertTrue();
-      expect(lineData.includes(VALUE_TAGS)).assertTrue();
-      expect(lineData.includes(KEY_FIELD)).assertTrue();
-      expect(lineData.includes(VALUE_FIELD)).assertTrue();
-      expect(lineData.includes(VALUE_TIME.toString())).assertTrue();
+      expect(lineData).assertEqual(SINGLE_LINE_NORMAL_DATA);
 
       console.info('UtilsTest', 'multiLineProtocolFormatTest passed');
     });
@@ -164,8 +154,7 @@ export default function utilsTest() {
       // Test with special characters
       const specialString = "test\nvalue";
       const specialResult = SyncDataHelper.translateFieldValue(specialString);
-      expect(specialResult.includes('"test')).assertTrue();
-      expect(specialResult.includes('value"')).assertTrue();
+      expect(specialResult).assertEqual('"test\nvalue"');
 
       console.info('UtilsTest', 'testTranslateFieldValue passed');
     });
@@ -176,12 +165,7 @@ export default function utilsTest() {
     it('testTranslateMeasurements', 0, () => {
       const testString = "test,measurement";
       const result = SyncDataHelper.translateMeasurements(testString);
-      // Comma should be escaped
-      expect(result.includes('\\,')).assertTrue();
-      // After escaping, the original comma should not exist unescaped
-      // The result should have the escaped comma but not the raw comma in the same position
-      const rawCommaIndex = testString.indexOf(',');
-      expect(result.substring(rawCommaIndex, rawCommaIndex + 2)).assertEqual('\\,');
+      expect(result).assertEqual('test\\,measurement');
 
       console.info('UtilsTest', 'testTranslateMeasurements passed');
     });
@@ -192,8 +176,7 @@ export default function utilsTest() {
     it('testTranslateTagKeyValue', 0, () => {
       const testString = "test=value=with=equals";
       const result = SyncDataHelper.translateTagKeyValue(testString);
-      // Equals should be escaped
-      expect(result.includes('\\=')).assertTrue();
+      expect(result).assertEqual('test\\=value\\=with\\=equals');
 
       console.info('UtilsTest', 'testTranslateTagKeyValue passed');
     });

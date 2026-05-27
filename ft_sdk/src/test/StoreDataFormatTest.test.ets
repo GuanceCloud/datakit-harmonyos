@@ -5,7 +5,15 @@
  * @author FT SDK Team
  */
 
-import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
+import { describe, it, expect } from '@ohos/hypium';
+
+class JsonArrayValue {
+  public value: Object;
+
+  constructor(value: Object) {
+    this.value = value;
+  }
+}
 
 /**
  * Determine whether it is a valid Values
@@ -28,83 +36,63 @@ function isLegalValues(jsonObject: Record<string, Object> | null): boolean {
 export default function storeDataFormatTest() {
   describe('StoreDataFormat', () => {
 
-    /**
-     * Empty data validity verification
-     */
-    it('isLegalValues', 0, () => {
-      const result = isLegalValues(null);
-      expect(result).assertFalse();
-      console.info('StoreDataFormatTest', 'isLegalValues passed');
+    it('nullValuesShouldBeInvalid', 0, () => {
+      expect(isLegalValues(null)).assertFalse();
     });
 
-    /**
-     * String type data validity verification
-     */
-    it('isLegalValues1', 0, () => {
+    it('emptyObjectShouldBeInvalid', 0, () => {
+      expect(isLegalValues({})).assertFalse();
+    });
+
+    it('stringValueShouldBeValid', 0, () => {
       const jsonObject: Record<string, Object> = {};
       jsonObject['test'] = '1';
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues1 passed');
+
+      expect(isLegalValues(jsonObject)).assertTrue();
     });
 
-    /**
-     * JSON object data validity verification (number type)
-     */
-    it('isLegalValues2', 0, () => {
+    it('numberValueShouldBeValid', 0, () => {
       const jsonObject: Record<string, Object> = {};
       jsonObject['test'] = 2;
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues2 passed');
+
+      expect(isLegalValues(jsonObject)).assertTrue();
     });
 
-    /**
-     * Boolean type data validity verification
-     */
-    it('isLegalValues3', 0, () => {
+    it('booleanValueShouldBeValid', 0, () => {
       const jsonObject: Record<string, Object> = {};
       jsonObject['test'] = true;
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues3 passed');
+
+      expect(isLegalValues(jsonObject)).assertTrue();
     });
 
-    /**
-     * JSON object data validity verification (empty object)
-     */
-    it('isLegalValues4', 0, () => {
+    it('emptyObjectValueShouldBeValidWhenParentHasKey', 0, () => {
       const jsonObject: Record<string, Object> = {};
-      const emptyObj: Record<string, Object> = {};
-      jsonObject['test'] = emptyObj;
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues4 passed');
+      const emptyObject: Record<string, Object> = {};
+      jsonObject['test'] = emptyObject;
+
+      expect(isLegalValues(jsonObject)).assertTrue();
+      expect(Object.keys(jsonObject['test'] as Record<string, Object>).length).assertEqual(0);
     });
 
-    /**
-     * JSON object data validity verification (nested object)
-     */
-    it('isLegalValues5', 0, () => {
+    it('nestedObjectValueShouldBeValid', 0, () => {
       const jsonObject: Record<string, Object> = {};
       const jsonObject1: Record<string, Object> = {};
       jsonObject1['subTest'] = 'jack';
       jsonObject['test'] = jsonObject1;
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues5 passed');
+
+      expect(isLegalValues(jsonObject)).assertTrue();
+      expect((jsonObject['test'] as Record<string, Object>)['subTest']).assertEqual('jack');
     });
 
-    /**
-     * JSON array data validity verification
-     */
-    it('isLegalValues6', 0, () => {
+    it('arrayValueShouldBeValid', 0, () => {
       const jsonObject: Record<string, Object> = {};
       const jsonArray: Object[] = [];
+      jsonArray.push(new JsonArrayValue('first' as Object));
+      jsonArray.push(new JsonArrayValue(2 as Object));
       jsonObject['test'] = jsonArray;
-      const result = isLegalValues(jsonObject);
-      expect(result).assertTrue();
-      console.info('StoreDataFormatTest', 'isLegalValues6 passed');
+
+      expect(isLegalValues(jsonObject)).assertTrue();
+      expect((jsonObject['test'] as Object[]).length).assertEqual(2);
     });
   });
 }
