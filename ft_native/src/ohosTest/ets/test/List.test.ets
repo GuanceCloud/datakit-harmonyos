@@ -1,5 +1,4 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import ftnativecrash from 'libftnativecrash.so';
 import { HAR_VERSION } from '../../../../Index';
 
@@ -17,20 +16,6 @@ interface NativeCrashModule {
 
 function nativeModule(): NativeCrashModule {
   return ftnativecrash as Object as NativeCrashModule;
-}
-
-interface TestArguments {
-  parameters?: TestParameters;
-  enableNativeCrashAnr?: string;
-}
-
-interface TestParameters {
-  enableNativeCrashAnr?: string;
-}
-
-function isDangerousSuiteEnabled(): boolean {
-  const args = AbilityDelegatorRegistry.getArguments() as Object as TestArguments;
-  return String(args.parameters?.enableNativeCrashAnr ?? args.enableNativeCrashAnr) === 'true';
 }
 
 export default function testsuite() {
@@ -87,39 +72,7 @@ export default function testsuite() {
     it('nativeCrashVersionShouldMatchPublicHarVersion', 0, () => {
       const version = nativeModule().getVersion();
 
-      expect(version.length > 0).assertTrue();
-      expect(HAR_VERSION.length > 0).assertTrue();
-    });
-  });
-
-  describe('FTNativeCrashDangerousSuite', () => {
-    afterEach(() => {
-      nativeModule().stopWatching();
-      nativeModule().clearLogs();
-    });
-
-    it('dangerousNativeCrashSuiteShouldBeDisabledByDefault', 0, () => {
-      const enabled = isDangerousSuiteEnabled();
-      expect(enabled === true || enabled === false).assertTrue();
-    });
-
-    it('dangerousNativeCrashSuiteShouldOnlyArmWatcherWhenFlagIsEnabled', 0, () => {
-      if (!isDangerousSuiteEnabled()) {
-        expect(true).assertTrue();
-        return;
-      }
-
-      let callbackObserved = false;
-      const module = nativeModule();
-
-      expect(module.initNativeCrashHandler()).assertTrue();
-      expect(module.setCrashCallback((_crashData: Object) => {
-        callbackObserved = true;
-      })).assertTrue();
-
-      const startResult = module.startWatching();
-      expect(startResult === true || startResult === false).assertTrue();
-      expect(callbackObserved).assertFalse();
+      expect(version).assertEqual(HAR_VERSION);
     });
   });
 }

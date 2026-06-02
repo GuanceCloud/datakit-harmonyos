@@ -112,6 +112,7 @@ export struct RUMDataTestPage {
   @State isViewActive: boolean = false;
   @State loadTime: number = 0;
   @State testResults: string = '';
+  @State lastResult: string = '';
 
   aboutToAppear(): void {
     this.checkSDKStatus();
@@ -139,6 +140,7 @@ export struct RUMDataTestPage {
 
   private appendResult(message: string): void {
     const timestamp = new Date().toLocaleTimeString();
+    this.lastResult = message;
     this.testResults += `[${timestamp}] ${message}\n`;
     const lines = this.testResults.split('\n');
     if (lines.length > 80) {
@@ -618,7 +620,8 @@ export struct RUMDataTestPage {
         Text(`Resource Count: ${this.resourceCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`View Count: ${this.viewCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`Current View: ${this.currentViewName || 'None'}`).fontSize(15).margin({ bottom: 6 })
-        Text(`Load Time: ${this.loadTime}ms`).fontSize(15)
+        Text(`Load Time: ${this.loadTime}ms`).fontSize(15).margin({ bottom: 6 })
+        Text(`Last Result: ${this.lastResult || 'None'}`).fontSize(13)
       }
       .width('100%')
       .padding(12)
@@ -637,13 +640,13 @@ export struct RUMDataTestPage {
 
           Text('Error Tests').fontSize(18).fontWeight(FontWeight.Bold).margin({ top: 8, bottom: 12 })
           Button('Run Error Suite').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.runErrorSuite())
-          Button('Basic addError').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendBasicError())
+          Button('Basic addError').id('rum-basic-add-error').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendBasicError())
           Button('addError with Properties').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendErrorWithProperties())
           Button('addCustomError').width('100%').height(48).margin({ bottom: 18 }).onClick(() => this.sendCustomError())
 
           Text('Long Task Tests').fontSize(18).fontWeight(FontWeight.Bold).margin({ top: 8, bottom: 12 })
           Button('Run Long Task Suite').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.runLongTaskSuite())
-          Button('Basic addLongTask').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendBasicLongTask())
+          Button('Basic addLongTask').id('rum-basic-add-long-task').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendBasicLongTask())
           Button('addLongTask with Properties').width('100%').height(48).margin({ bottom: 10 }).onClick(() => this.sendLongTaskWithProperties())
           Button('Long Task Duration Suite').width('100%').height(48).margin({ bottom: 18 }).onClick(() => this.sendLongTaskDurations())
 
@@ -668,7 +671,7 @@ export struct RUMDataTestPage {
         .padding({ left: 20, right: 20, bottom: 24 })
       }
       .width('100%')
-      .height('100%')
+      .layoutWeight(1)
       .scrollBar(BarState.Auto)
     }
     .width('100%')

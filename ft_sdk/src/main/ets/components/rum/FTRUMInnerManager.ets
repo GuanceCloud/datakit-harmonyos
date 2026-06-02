@@ -1060,6 +1060,60 @@ export class FTRUMInnerManager {
     }
     return FTRUMInnerManager.instance;
   }
+
+  public static resetStateForTest(): void {
+    if (FTRUMInnerManager.instance !== null) {
+      FTRUMInnerManager.instance.resetInternalStateForTest();
+    }
+    FTRUMInnerManager.instance = null;
+  }
+
+  private resetInternalStateForTest(): void {
+    if (this.actionCheckTimer !== null) {
+      clearTimeout(this.actionCheckTimer);
+      this.actionCheckTimer = null;
+    }
+    if (this.sessionCheckTimer !== null) {
+      clearInterval(this.sessionCheckTimer);
+      this.sessionCheckTimer = null;
+    }
+    if (this.rumGenerateTimer !== null) {
+      clearTimeout(this.rumGenerateTimer);
+      this.rumGenerateTimer = null;
+    }
+    if (this.rumDataGenerateTimer !== null) {
+      clearTimeout(this.rumDataGenerateTimer);
+      this.rumDataGenerateTimer = null;
+    }
+
+    this.sessionId = Utils.generateUUID();
+    this.rumAppId = "";
+    this.context = null;
+    this.sampleRate = 1.0;
+    this.sessionErrorSampleRate = 1.0;
+    this.activeView = null;
+    this.activeAction = null;
+    this.resourceBeanMap.clear();
+    this.viewList = [];
+    this.notCollectArr = [];
+    this.notSessionErrorCollectArr = [];
+    this.lastActionTime = 0;
+    this.lastUserActiveTime = Utils.getCurrentNanoTime();
+    this.lastSessionTime = Utils.getCurrentNanoTime();
+    this.preActivityDuration.clear();
+    this.userData = null;
+    this.rumConfig = null;
+    this.isGeneratingActionSum = false;
+    this.isGeneratingViewSum = false;
+    this.skipCleanCloseViewData = false;
+    this.processedActionIds.clear();
+    this.insertedActionIds.clear();
+    this.actionInsertLock = Promise.resolve();
+    this.viewOperationLock = Promise.resolve();
+    this.sessionRefreshLock = Promise.resolve();
+    this.preferencesStore = null;
+    this.preferencesInitialized = false;
+  }
   
   /**
    * Initialize RUM application ID

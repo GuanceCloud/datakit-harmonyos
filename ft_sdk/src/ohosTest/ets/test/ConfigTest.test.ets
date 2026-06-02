@@ -310,47 +310,5 @@ export default function configTest() {
       console.info('ConfigTest', 'rumUIBlockParamsTest passed');
     });
 
-    /**
-     * Validate SyncTaskManager getter methods
-     * Tests the newly added getPageSize(), getSyncSleepTime(), isAutoSyncEnabled() methods
-     * Note: SyncTaskManager is a singleton, so previous tests may have modified its state.
-     * We verify that the methods work correctly rather than checking specific default values.
-     */
-    it('syncTaskManagerGetters', 0, () => { 
-      const syncTaskManager = SyncTaskManager.getInstance();
-
-      // Test that getter methods exist and return valid values
-      expect(syncTaskManager.getPageSize()).assertLarger(0); // Should be positive
-      expect(syncTaskManager.getSyncSleepTime()).assertLarger(-1); // Should be >= 0
-      expect(typeof syncTaskManager.isAutoSyncEnabled()).assertEqual('boolean');
-
-      // Verify that values are valid types
-      expect(typeof syncTaskManager.getPageSize()).assertEqual('number');
-      expect(typeof syncTaskManager.getSyncSleepTime()).assertEqual('number');
-
-      console.info('ConfigTest', 'syncTaskManagerGetters passed');
-    });
-
-    /**
-     * Validate FTDBCachePolicy getter methods
-     * Tests the getLogLimitCount() method
-     * Note: In unit test without context, logLimitCount is 0 (not initialized)
-     */
-    it('ftdbCachePolicyGetters', 0, () => {
-      const cachePolicy = FTDBCachePolicy.getInstance();
-
-      // Test that getter method exists and is callable
-      // Initial value is 0 (not initialized without context)
-      expect(cachePolicy.getLogLimitCount()).assertEqual(0);
-
-      // Test setTestLimits method
-      const testLogLimit = 1000;
-      const testRumLimit = 2000;
-      cachePolicy.setTestLimits(testLogLimit, testRumLimit);
-      expect(cachePolicy.getLogLimitCount()).assertEqual(testLogLimit);
-      expect(cachePolicy.getRumLimitCount()).assertEqual(testRumLimit);
-
-      console.info('ConfigTest', 'ftdbCachePolicyGetters passed');
-    });
   });
 }

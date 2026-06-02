@@ -1,0 +1,355 @@
+import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { http } from '@kit.NetworkKit';
+import {
+  EnvType,
+  ErrorMonitorType,
+  FTLoggerConfig,
+  FTRUMConfig,
+  FTRUMGlobalManager,
+  FTSDK,
+  FTSDKConfig,
+  FTTraceConfig,
+  TraceType
+} from '@guancecloud/ft_sdk/Index';
+import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { FTTraceHandler } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceHandler';
+import { applyFTHttpTrack } from '../../../../Index';
+import { ExtDBAssert } from './helpers/ExtDBAssert';
+import { ExtMockCollector } from './helpers/ExtMockCollector';
+import { WaitUtils } from './helpers/WaitUtils';
+
+const TEST_FAKE_RUM_ID = 'rumId';
+const TEST_HOST = 'http://127.0.0.1:9529';
+
+class ChainRequestContext implements http.HttpRequestContext {
+  url: string;
+  header: Object;
+  body: Object;
+
+  constructor(url: string, header: Object) {
+    const emptyBody: Record<string, Object> = {};
+    this.url = url;
+    this.header = header;
+    this.body = emptyBody;
+  }
+}
+
+class ChainPerformanceTiming implements http.PerformanceTiming {
+  dnsTiming: number = 0;
+  tcpTiming: number = 0;
+  tlsTiming: number = 0;
+  firstSendTiming: number = 0;
+  firstReceiveTiming: number = 0;
+  totalFinishTiming: number = 0;
+  redirectTiming: number = 0;
+  responseHeaderTiming: number = 0;
+  responseBodyTiming: number = 0;
+  totalTiming: number = 0;
+}
+
+class ChainResponse implements http.HttpResponse {
+  result: string | Object | ArrayBuffer;
+  resultType: http.HttpDataType = http.HttpDataType.STRING;
+  responseCode: http.ResponseCode | number;
+  header: Object;
+  cookies: string = '';
+  performanceTiming: http.PerformanceTiming = new ChainPerformanceTiming();
+
+  constructor(responseCode: number, header: Object, result: string) {
+    this.responseCode = responseCode;
+    this.header = header;
+    this.result = result;
+  }
+}
+
+function readHeader(headers: Object | undefined | null, key: string): string {
+  if (!headers) {
+    return '';
+  }
+  const headerRecord = headers as Record<string, Object>;
+  const value = headerRecord[key];
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return String(value);
+}
+
+function assertTraceparentHeaders(headers: Object | undefined | null): string[] {
+  const traceparent = readHeader(headers, FTTraceHandler.W3C_TRACEPARENT_KEY);
+  const ddTraceId = readHeader(headers, FTTraceHandler.DD_TRACE_TRACE_ID_KEY);
+  const ddSpanId = readHeader(headers, FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY);
+  const resourceId = readHeader(headers, 'X-FT-Resource-ID');
+  const parts = traceparent.split('-');
+
+  expect(parts.length).assertEqual(4);
+  expect(parts[0]).assertEqual('00');
+  expect(parts[1].length).assertEqual(32);
+  expect(parts[2].length).assertEqual(16);
+  expect(parts[3]).assertEqual('01');
+  expect(ddTraceId.length).assertEqual(0);
+  expect(ddSpanId.length).assertEqual(0);
+  expect(resourceId.length > 0).assertTrue();
+
+  return [parts[1], parts[2]];
+}
+
+function assertNoTraceHeaders(headers: Object | undefined | null): void {
+  expect(readHeader(headers, FTTraceHandler.W3C_TRACEPARENT_KEY).length).assertEqual(0);
+  expect(readHeader(headers, FTTraceHandler.DD_TRACE_TRACE_ID_KEY).length).assertEqual(0);
+  expect(readHeader(headers, FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY).length).assertEqual(0);
+}
+
+async function installExtResourceSdk(): Promise<void> {
+  const context = await ExtDBAssert.getAppContext();
+  FTSDK.install(FTSDKConfig.builder(TEST_HOST)
+    .setDebug(true)
+    .setAutoSync(false)
+    .setEnv(EnvType.GRAY), context);
+
+  FTSDK.installRUMConfig(new FTRUMConfig()
+    .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
+    .setRumAppId(TEST_FAKE_RUM_ID)
+    .setEnableTraceUserAction(true)
+    .setEnableTraceUserView(true)
+    .setEnableTraceUserResource(true));
+
+  FTSDK.installLogConfig(new FTLoggerConfig().setEnableCustomLog(true));
+
+  FTSDK.installTraceConfig(new FTTraceConfig()
+    .setEnableAutoTrace(true)
+    .setEnableLinkRUMData(true)
+    .setTraceType(TraceType.TRACEPARENT));
+}
+
+async function flushAndAssertUploaded(
+  collector: ExtMockCollector,
+  fragments: string[],
+  recordUuid: string
+): Promise<string> {
+  FTSDK.flushSyncData();
+
+  const uploaded = await collector.waitForPayloadContaining(fragments, 5000);
+  const consumed = await ExtDBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, recordUuid, 5000);
+
+  expect(uploaded.length > 0).assertTrue();
+  expect(consumed).assertTrue();
+  return uploaded;
+}
+
+export default function httpChainModeDeviceTest() {
+  describe('HttpChainModeDeviceTest', () => {
+    let collector: ExtMockCollector;
+
+    beforeEach(async () => {
+      collector = new ExtMockCollector(200, '');
+      collector.start();
+      await installExtResourceSdk();
+      await ExtDBAssert.resetAll();
+      collector.clearRequests();
+    });
+
+    afterEach(async () => {
+      collector.stop();
+      FTSDK.shutDown();
+      await ExtDBAssert.cleanupAll();
+    });
+
+    it('httpInterceptorChainStableShouldWriteUploadAndDelete', 0, async () => {
+      const viewName = 'http_chain_resource_view';
+      const resourceUrl = 'http://device.test/http-chain-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const request = http.createHttp();
+      try {
+        const chain = applyFTHttpTrack(request, {
+          enableTraceInterceptor: true,
+          enableResourceInterceptor: true
+        });
+
+        const interceptors = chain.getChain();
+        expect(interceptors.length).assertEqual(2);
+        expect(interceptors[0].interceptorType).assertEqual(http.InterceptorType.INITIAL_REQUEST);
+        expect(interceptors[1].interceptorType).assertEqual(http.InterceptorType.FINAL_RESPONSE);
+
+        const requestHeaders: Record<string, Object> = {};
+        requestHeaders['Accept'] = 'application/json' as Object;
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+        const traceIds = assertTraceparentHeaders(requestContext.header);
+        await WaitUtils.delay(5);
+
+        const responseHeaders: Record<string, Object> = {};
+        responseHeaders['content-type'] = 'application/json' as Object;
+        responseHeaders['content-length'] = '14' as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(202, responseHeaders, '{"chain":true}')
+        );
+
+        const fragments = [
+          'resource',
+          `resource_url=${resourceUrl}`,
+          'resource_status=202',
+          `view_name=${viewName}`,
+          `trace_id=${traceIds[0]}`,
+          `span_id=${traceIds[1]}`
+        ];
+        const record = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+        if (record === null) {
+          throw new Error(
+            `Expected stable chain resource record.\nCurrent sync records:\n${await ExtDBAssert.dumpSyncRecords()}`
+          );
+        }
+        await flushAndAssertUploaded(collector, fragments, record.getUuid());
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('traceOnlyShouldInjectHeadersWithoutResourceRecord', 0, async () => {
+      const resourceUrl = 'http://device.test/http-chain-trace-only';
+      const request = http.createHttp();
+      try {
+        const chain = applyFTHttpTrack(request, {
+          enableTraceInterceptor: true,
+          enableResourceInterceptor: false
+        });
+
+        const interceptors = chain.getChain();
+        expect(interceptors.length).assertEqual(2);
+
+        const requestHeaders: Record<string, Object> = {};
+        requestHeaders['Accept'] = 'application/json' as Object;
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+        assertTraceparentHeaders(requestContext.header);
+
+        const responseHeaders: Record<string, Object> = {};
+        responseHeaders['content-type'] = 'application/json' as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(204, responseHeaders, '')
+        );
+
+        const stayedEmpty = await ExtDBAssert.waitForSyncCount([DataType.RUM_APP], 0, 1500);
+        expect(stayedEmpty).assertTrue();
+        expect(await ExtDBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('resourceOnlyShouldWriteUploadAndDeleteWithoutTraceIds', 0, async () => {
+      const viewName = 'http_chain_resource_only_view';
+      const resourceUrl = 'http://device.test/http-chain-resource-only';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const request = http.createHttp();
+      try {
+        const chain = applyFTHttpTrack(request, {
+          enableTraceInterceptor: false,
+          enableResourceInterceptor: true
+        });
+
+        const interceptors = chain.getChain();
+        expect(interceptors.length).assertEqual(2);
+
+        const requestHeaders: Record<string, Object> = {};
+        requestHeaders['Accept'] = 'application/json' as Object;
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+        assertNoTraceHeaders(requestContext.header);
+        expect(readHeader(requestContext.header, 'X-FT-Resource-ID').length > 0).assertTrue();
+        await WaitUtils.delay(5);
+
+        const responseHeaders: Record<string, Object> = {};
+        responseHeaders['content-type'] = 'application/json' as Object;
+        responseHeaders['content-length'] = '18' as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(201, responseHeaders, '{"resource":true}')
+        );
+
+        const fragments = [
+          'resource',
+          `resource_url=${resourceUrl}`,
+          'resource_status=201',
+          `view_name=${viewName}`
+        ];
+        const record = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+        if (record === null) {
+          throw new Error(
+            `Expected resource-only chain record.\nCurrent sync records:\n${await ExtDBAssert.dumpSyncRecords()}`
+          );
+        }
+        const line = record.getDataString();
+        expect(line.includes('trace_id=')).assertFalse();
+        expect(line.includes('span_id=')).assertFalse();
+
+        const uploaded = await flushAndAssertUploaded(collector, fragments, record.getUuid());
+        expect(uploaded.includes('trace_id=')).assertFalse();
+        expect(uploaded.includes('span_id=')).assertFalse();
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('httpErrorStatusShouldWriteUploadAndDelete', 0, async () => {
+      const viewName = 'http_chain_error_resource_view';
+      const resourceUrl = 'http://device.test/http-chain-error-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const request = http.createHttp();
+      try {
+        const chain = applyFTHttpTrack(request, {
+          enableTraceInterceptor: true,
+          enableResourceInterceptor: true
+        });
+
+        const interceptors = chain.getChain();
+        expect(interceptors.length).assertEqual(2);
+
+        const requestHeaders: Record<string, Object> = {};
+        requestHeaders['Accept'] = 'application/json' as Object;
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+        const traceIds = assertTraceparentHeaders(requestContext.header);
+        await WaitUtils.delay(5);
+
+        const responseHeaders: Record<string, Object> = {};
+        responseHeaders['content-type'] = 'text/plain' as Object;
+        responseHeaders['content-length'] = '12' as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(503, responseHeaders, 'server-error')
+        );
+
+        const fragments = [
+          'resource',
+          `resource_url=${resourceUrl}`,
+          'resource_status=503',
+          'resource_status_group=5xx',
+          `view_name=${viewName}`,
+          `trace_id=${traceIds[0]}`,
+          `span_id=${traceIds[1]}`
+        ];
+        const record = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+        if (record === null) {
+          throw new Error(
+            `Expected chain HTTP error resource record.\nCurrent sync records:\n${await ExtDBAssert.dumpSyncRecords()}`
+          );
+        }
+        await flushAndAssertUploaded(collector, fragments, record.getUuid());
+      } finally {
+        request.destroy();
+      }
+    });
+  });
+}

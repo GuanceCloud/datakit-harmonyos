@@ -1,18 +1,13 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import relationalStore from '@ohos.data.relationalStore';
-import { Context } from '@kit.AbilityKit';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import * as FTSQL from '../../../main/ets/components/db/FTSQL';
+import { DBAssert } from './helpers/DBAssert';
 
 const TEST_NOW_NS = 1700000000000;
-
-function getAppContext(): Context {
-  return AbilityDelegatorRegistry.getAbilityDelegator().getAppContext() as Context;
-}
 
 function createLogSyncData(label: string, time: number = TEST_NOW_NS): SyncData {
   const syncData = new SyncData(DataType.LOG);
@@ -76,7 +71,7 @@ export default function ftDBManagerDeviceTest() {
     let dbManager: FTDBManager;
 
     beforeEach(async () => {
-      dbManager = FTDBManager.getInstance(getAppContext());
+      dbManager = FTDBManager.getInstance(await DBAssert.getAppContext());
       await dbManager.init();
       await dbManager.resetDatabase();
     });

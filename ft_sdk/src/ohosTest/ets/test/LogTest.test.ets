@@ -12,6 +12,7 @@ import { Status } from '../../../main/ets/components/bean/Status';
 import { LogCacheDiscard, DataType } from '../../../main/ets/components/enum/Enums';
 import { FTDBCachePolicy } from '../../../main/ets/components/db/FTDBCachePolicy';
 import { DBAssert } from './helpers/DBAssert';
+import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -33,6 +34,7 @@ export default function logTest() {
 
     beforeEach(async () => {
       console.info('LogTest', 'beforeEach called');
+      await SdkTestLifecycle.resetRuntimeState();
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false));
       await DBAssert.resetAll();
     });
@@ -40,7 +42,7 @@ export default function logTest() {
     afterEach(async () => {
       console.info('LogTest', 'afterEach called');
       FTDBCachePolicy.getInstance().resetTestConfig();
-      FTSDK.shutDown();
+      await SdkTestLifecycle.resetRuntimeState();
       await DBAssert.cleanupAll();
       await WaitUtils.delay(300);
     });

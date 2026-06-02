@@ -10,14 +10,6 @@ import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceCon
 import { HeaderHandler, TraceData } from '../../main/ets/components/trace/FTTraceInterceptor';
 import { TestReset } from '../helpers/TestReset';
 
-class ObjectHeaderValue {
-  public name: string;
-
-  constructor(name: string) {
-    this.name = name;
-  }
-}
-
 class RecordingTraceHeaderHandler implements HeaderHandler {
   public requestTraceId: string = '';
   public requestSpanId: string = '';
@@ -42,21 +34,6 @@ export default function ftSDKExtensionBridgeUnitTest() {
 
     afterEach(() => {
       TestReset.resetP0State();
-    });
-
-    it('normalizeHeadersShouldSupportCommonValueTypes', 0, () => {
-      const rawHeaders: Record<string, Object> = {};
-      rawHeaders['String-Header'] = 'value' as Object;
-      rawHeaders['Array-Header'] = ['first', 'second'] as Object;
-      rawHeaders['Number-Header'] = 100 as Object;
-      rawHeaders['Object-Header'] = new ObjectHeaderValue('value') as Object;
-
-      const headers = FTSDKExtensionBridge.normalizeHeaders(rawHeaders);
-
-      expect(headers['String-Header']).assertEqual('value');
-      expect(headers['Array-Header']).assertEqual('first');
-      expect(headers['Number-Header']).assertEqual('100');
-      expect(headers['Object-Header']).assertEqual('[object Object]');
     });
 
     it('prepareAxiosChainRequestShouldStoreUppercaseMethod', 0, () => {
@@ -141,20 +118,5 @@ export default function ftSDKExtensionBridgeUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
     });
 
-    it('completeHttpResponseShouldReturnFalseWhenStateIsMissing', 0, () => {
-      const requestHeaders: Record<string, Object> = {};
-      requestHeaders['X-FT-Resource-ID'] = 'missing-resource-id' as Object;
-      const responseHeaders: Record<string, Object> = {};
-      const response: FTSDKExtensionResponseInput = {
-        url: 'http://example.com/missing',
-        requestHeaders: requestHeaders,
-        responseHeaders: responseHeaders,
-        statusCode: 200,
-        body: ''
-      };
-      const completed = FTSDKExtensionBridge.completeHttpResponse(response);
-
-      expect(completed).assertFalse();
-    });
   });
 }

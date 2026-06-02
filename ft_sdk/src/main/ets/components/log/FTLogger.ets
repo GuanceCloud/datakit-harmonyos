@@ -297,12 +297,12 @@ export class FTLogger {
     // Get log configuration
     const logConfig = FTLogger.trackLogManager?.getLogConfig();
     if (!logConfig) {
-      FTInnerLogger.w(TAG, "Log config not available, using default settings");
-    } else {
+      FTInnerLogger.w(TAG, "Log config not available, discarding custom log");
+      return;
     }
     
     // Check if custom log is enabled
-    if (logConfig && !logConfig.isEnableCustomLog()) {
+    if (!logConfig.isEnableCustomLog()) {
       return;
     }
     
@@ -311,7 +311,7 @@ export class FTLogger {
     const statusString = typeof status === 'string' ? status : status.name;
     
       // Console output
-    if (logConfig && logConfig.isPrintCustomLogToConsole()) {
+    if (logConfig.isPrintCustomLogToConsole()) {
       const propertyString = property ? "," + JSON.stringify(Array.from(property.entries())) : "";
       const message = `[${statusString.toUpperCase()}]${content}${propertyString}`;
       
@@ -347,9 +347,7 @@ export class FTLogger {
       logBean.setStatus(statusString);
       
       // Set service name
-      if (logConfig) {
-        logBean.setServiceName(logConfig.getServiceName());
-      }
+      logBean.setServiceName(logConfig.getServiceName());
       
       // Add additional properties - optimized to use direct merge
       if (property) {
@@ -362,7 +360,7 @@ export class FTLogger {
       }
       
       // Check log level before sending
-      if (!logConfig || logConfig.checkLogLevel(statusString)) {
+      if (logConfig.checkLogLevel(statusString)) {
         FTLogger.trackLogManager?.trackLog(logBean, isSilence || false);
         
       } else {

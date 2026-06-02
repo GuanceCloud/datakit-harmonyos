@@ -1,9 +1,15 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import preferences from '@ohos.data.preferences';
 import { Context } from '@kit.AbilityKit';
+import { FTSDK } from '../../../main/ets/components/FTSDK';
+import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
+import { Constants } from '../../../main/ets/components/Constants';
+import { DataType } from '../../../main/ets/components/enum/Enums';
 import { UserData } from '../../../main/ets/components/rum/bean/UserData';
-import { UserDataManager } from '../../../main/ets/components/rum/UserDataManager';
+import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { DBAssert } from './helpers/DBAssert';
+import { MockCollector } from './helpers/MockCollector';
+import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 
 const PREFERENCES_NAME = 'ft_sdk_user_data';
 const KEY_RANDOM_USER_ID = 'ft.user.session.id';
@@ -11,10 +17,8 @@ const KEY_USER_ID = 'ft.user.userid';
 const KEY_USER_NAME = 'ft.user.username';
 const KEY_USER_EMAIL = 'ft.user.email';
 const KEY_USER_EXT = 'ft.user.extdata';
-
-function getAppContext(): Context {
-  return AbilityDelegatorRegistry.getAbilityDelegator().getAppContext() as Context;
-}
+const TEST_FAKE_URL = 'http://www.test.url';
+const TEST_FAKE_RUM_ID = 'rumId';
 
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve: Function) => {
@@ -37,47 +41,84 @@ async function clearUserDataPreferences(context: Context): Promise<void> {
 export default function userDataManagerPersistenceTest() {
   describe('UserDataManagerPersistenceTest', () => {
     let context: Context;
+    let collector: MockCollector;
 
     beforeEach(async () => {
-      context = getAppContext();
+      await SdkTestLifecycle.resetRuntimeState();
+      context = await DBAssert.getAppContext();
       await clearUserDataPreferences(context);
-      UserDataManager.getInstance().init(context);
+      collector = new MockCollector(200, '');
+      collector.start();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      await DBAssert.resetAll();
+      collector.clearRequests();
       await delay(120);
     });
 
     afterEach(async () => {
-      UserDataManager.getInstance().unbindUserData();
-      await delay(120);
+      collector.stop();
+      FTSDK.unbindRumUserData();
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.cleanupAll();
       await clearUserDataPreferences(context);
     });
 
-    it('bindUserDataShouldPersistAllIdentityAndExtFieldsToPreferences', 0, async () => {
+    it('bindRumUserDataShouldPersistAllIdentityAndExtFieldsToPreferences', 0, async () => {
       const exts: Record<string, string> = {};
       exts['region'] = 'cn';
       exts['role'] = 'qa';
-      const userData = new UserData('device-user-id', 'device-user-name', 'device@example.com', exts);
 
-      UserDataManager.getInstance().bindUserData(userData);
+      FTSDK.bindRumUserData(new UserData('device-user-id', 'device-user-name', 'device@example.com', exts));
       await delay(200);
 
       const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
-      const storedId = await store.get(KEY_USER_ID, '');
-      const storedName = await store.get(KEY_USER_NAME, '');
-      const storedEmail = await store.get(KEY_USER_EMAIL, '');
-      const storedExt = await store.get(KEY_USER_EXT, '');
+      const storedExt = String(await store.get(KEY_USER_EXT, ''));
 
-      expect(storedId).assertEqual('device-user-id');
-      expect(storedName).assertEqual('device-user-name');
-      expect(storedEmail).assertEqual('device@example.com');
-      expect(String(storedExt).includes('"region":"cn"')).assertTrue();
-      expect(String(storedExt).includes('"role":"qa"')).assertTrue();
+      expect(await store.get(KEY_USER_ID, '')).assertEqual('device-user-id');
+      expect(await store.get(KEY_USER_NAME, '')).assertEqual('device-user-name');
+      expect(await store.get(KEY_USER_EMAIL, '')).assertEqual('device@example.com');
+      expect(storedExt.includes('"region":"cn"')).assertTrue();
+      expect(storedExt.includes('"role":"qa"')).assertTrue();
     });
 
-    it('unbindUserDataShouldClearPersistedIdentityFields', 0, async () => {
-      UserDataManager.getInstance().bindUserData(new UserData('clear-id', 'clear-name', 'clear@example.com'));
+    it('boundUserDataShouldAppearInRumLineProtocolFromPublicApi', 0, async () => {
+      const exts: Record<string, string> = {};
+      exts['region'] = 'cn';
+
+      FTSDK.bindRumUserData(new UserData('line-user-id', 'line-user-name', 'line@example.com', exts));
+      await FTRUMGlobalManager.getInstance().startView('user_data_view');
+      FTRUMGlobalManager.getInstance().addAction('user_data_action', 'click');
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        `${Constants.KEY_RUM_USER_ID}=line-user-id`,
+        `${Constants.KEY_RUM_USER_NAME}=line-user-name`,
+        `${Constants.KEY_RUM_USER_EMAIL}=line@example.com`,
+        'region=cn'
+      ], 5000);
+
+      expect(record !== null).assertTrue();
+
+      FTSDK.flushSyncData();
+
+      const uploaded = await collector.waitForPayloadContaining([
+        `${Constants.KEY_RUM_USER_ID}=line-user-id`,
+        `${Constants.KEY_RUM_USER_NAME}=line-user-name`,
+        `${Constants.KEY_RUM_USER_EMAIL}=line@example.com`,
+        'region=cn'
+      ], 5000);
+      const consumed =
+        await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
+
+      expect(uploaded.length > 0).assertTrue();
+      expect(consumed).assertTrue();
+    });
+
+    it('unbindRumUserDataShouldClearPersistedIdentityFields', 0, async () => {
+      FTSDK.bindRumUserDataById('clear-id');
       await delay(200);
 
-      UserDataManager.getInstance().unbindUserData();
+      FTSDK.unbindRumUserData();
       await delay(200);
 
       const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
@@ -85,18 +126,14 @@ export default function userDataManagerPersistenceTest() {
       expect(await store.get(KEY_USER_NAME, '')).assertEqual('');
       expect(await store.get(KEY_USER_EMAIL, '')).assertEqual('');
       expect(await store.get(KEY_USER_EXT, '')).assertEqual('');
-      expect(UserDataManager.getInstance().getUserData() === null).assertTrue();
     });
 
-    it('randomUserIdShouldBePersistedInPreferencesAfterInit', 0, async () => {
-      const randomUserId = UserDataManager.getInstance().getRandomUserId();
-      await delay(200);
-
+    it('randomUserIdShouldBePersistedInPreferencesAfterInstall', 0, async () => {
       const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
-      const storedRandomUserId = await store.get(KEY_RANDOM_USER_ID, '');
+      const storedRandomUserId = String(await store.get(KEY_RANDOM_USER_ID, ''));
 
-      expect(randomUserId.startsWith('ft.rd_')).assertTrue();
-      expect(storedRandomUserId).assertEqual(randomUserId);
+      expect(storedRandomUserId.startsWith('ft.rd_')).assertTrue();
+      expect(storedRandomUserId.length > 'ft.rd_'.length).assertTrue();
     });
   });
 }

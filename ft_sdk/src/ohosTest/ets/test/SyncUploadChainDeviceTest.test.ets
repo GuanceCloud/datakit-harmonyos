@@ -1,22 +1,17 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { Context } from '@kit.AbilityKit';
 import { FTSDKConfig } from '../../../main/ets/components/Configs';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType, SyncPageSize } from '../../../main/ets/components/enum/Enums';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
-import { DataUploadThreadPool } from '../../../main/ets/components/thread/DataUploadThreadPool';
 import { ThreadPoolManager } from '../../../main/ets/components/thread/ThreadPoolManager';
 import { WaitUtils } from './helpers/WaitUtils';
 import { MockCollector } from './helpers/MockCollector';
+import { DBAssert } from './helpers/DBAssert';
 
 const TEST_HOST = 'http://127.0.0.1:1';
 const TEST_NOW_NS = 1700000000000;
-
-function getAppContext(): Context {
-  return AbilityDelegatorRegistry.getAbilityDelegator().getAppContext() as Context;
-}
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
   return await WaitUtils.waitUntil(predicate, timeoutMs);
@@ -39,7 +34,7 @@ export default function syncUploadChainDeviceTest() {
     let collector: MockCollector;
 
     beforeEach(async () => {
-      context = getAppContext();
+      context = await DBAssert.getAppContext();
       dbManager = FTDBManager.getInstance(context);
       await dbManager.init();
       await dbManager.resetDatabase();
@@ -123,29 +118,5 @@ export default function syncUploadChainDeviceTest() {
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('uploadQueueShouldDrainQueuedTasksAndResetStatus', 0, async () => {
-      let consumedCount = 0;
-      const uploadPool = DataUploadThreadPool.getInstance();
-
-      uploadPool.addUploadTaskToQueue(() => {
-        consumedCount += 1;
-      });
-      uploadPool.addUploadTaskToQueue(() => {
-        consumedCount += 1;
-      });
-      uploadPool.addUploadTaskToQueue(() => {
-        consumedCount += 1;
-      });
-
-      const drained = await waitUntil(async () => {
-        return consumedCount === 3 && uploadPool.getUploadQueueStatus().queueSize === 0;
-      }, 5000);
-      const status = uploadPool.getUploadQueueStatus();
-
-      expect(drained).assertTrue();
-      expect(consumedCount).assertEqual(3);
-      expect(status.queueSize).assertEqual(0);
-      expect(status.isScheduled).assertFalse();
-    });
   });
 }

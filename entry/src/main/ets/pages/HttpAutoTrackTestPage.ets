@@ -32,8 +32,9 @@ import {
 
 const TAG = "HttpAutoTrackTestPage";
 
-interface AxiosStylePostData {
+interface AxiosStyleRequestData {
   source: string;
+  method: string;
   message: string;
   timestamp: number;
 }
@@ -46,13 +47,14 @@ interface AxiosPageCreateConfig {
 
 interface AxiosPageRequestConfig {
   url: string;
-  method: 'get' | 'post';
+  method: AxiosHttpMethod;
   data?: Object;
   responseType: 'string';
   headers: AxiosHeaders;
 }
 
 type AxiosAutoTrackMode = 'chain' | 'compat';
+type AxiosHttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
 /**
  * HTTP Interceptor Test Page Component
@@ -93,7 +95,7 @@ export struct HttpAutoTrackTestPage {
 
   private async executeAxiosRequest(
     url: string,
-    method: 'get' | 'post',
+    method: AxiosHttpMethod,
     data?: Object,
     mode: AxiosAutoTrackMode = 'compat'
   ): Promise<string> {
@@ -120,7 +122,7 @@ export struct HttpAutoTrackTestPage {
   private async executeAxiosRequestWithClient(
     client: AxiosInstance,
     url: string,
-    method: 'get' | 'post',
+    method: AxiosHttpMethod,
     data?: Object
   ): Promise<string> {
     const requestHeaders = new AxiosHeaders();
@@ -161,7 +163,7 @@ export struct HttpAutoTrackTestPage {
     if (mode === 'compat') {
       applyFTAxiosTrack(client);
     } else if (mode === 'chain') {
-      // applyFTAxiosChainMethodBridge(client);
+      applyFTAxiosChainMethodBridge(client);
     }
     return client;
   }
@@ -193,6 +195,57 @@ export struct HttpAutoTrackTestPage {
 
   private getTraceTestUrl(): string {
     return this.storedTraceUrl.trim();
+  }
+
+  private getAxiosRequestUrl(method: AxiosHttpMethod, mode: AxiosAutoTrackMode): string {
+    const from = mode === 'chain' ? 'axios-chain' : 'axios-adapter';
+    if (method === 'get') {
+      return `https://httpbin.org/get?from=${from}`;
+    }
+    if (method === 'delete') {
+      return `https://httpbin.org/delete?from=${from}`;
+    }
+    return `https://httpbin.org/${method}`;
+  }
+
+  private createAxiosRequestData(method: AxiosHttpMethod, mode: AxiosAutoTrackMode): AxiosStyleRequestData {
+    const methodName = method.toUpperCase();
+    return {
+      source: mode === 'chain' ? 'axios-chain' : 'axios',
+      method: methodName,
+      message: `Testing FT axios ${mode === 'chain' ? 'interceptorChain' : 'auto track'} ${methodName} request`,
+      timestamp: Date.now()
+    };
+  }
+
+  private async testAxiosMethodRequest(mode: AxiosAutoTrackMode, method: AxiosHttpMethod) {
+    const modeName = mode === 'chain' ? 'chain' : 'compat';
+    const methodName = method.toUpperCase();
+    try {
+      if (!this.isAutoTrackEnabled) {
+        this.addTestResult(`⚠️ Auto Track not enabled, skipping axios ${modeName} ${methodName} test`);
+        return;
+      }
+
+      const requestData = method === 'get' || method === 'delete'
+        ? undefined
+        : this.createAxiosRequestData(method, mode);
+      const responseText = await this.executeAxiosRequest(
+        this.getAxiosRequestUrl(method, mode),
+        method,
+        requestData,
+        mode
+      );
+      this.requestCount++;
+      this.successCount++;
+      this.addTestResult(`✅ Axios ${modeName} ${methodName} request succeeded: bodyLength=${responseText.length}`);
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      const errorMsg = err.message || String(error);
+      this.addTestResult(`❌ Axios ${modeName} ${methodName} request failed: ${errorMsg}`);
+    }
   }
 
   /**
@@ -592,114 +645,49 @@ export struct HttpAutoTrackTestPage {
    * Test real axios GET request with FT auto track compat interceptors.
    */
   async testAxiosGetCompatRequest() {
-    try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping axios compat GET test");
-        return;
-      }
-
-      const responseText =
-        await this.executeAxiosRequest('https://httpbin.org/get?from=axios-adapter', 'get', undefined, 'compat');
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(`✅ Axios compat GET request succeeded: bodyLength=${responseText.length}`);
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios compat GET request failed: ${errorMsg}`);
-    }
+    await this.testAxiosMethodRequest('compat', 'get');
   }
 
   /**
    * Test real axios POST request with FT auto track compat interceptors.
    */
   async testAxiosPostCompatRequest() {
-    try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping axios compat POST test");
-        return;
-      }
-
-      const postData: AxiosStylePostData = {
-        source: 'axios',
-        message: 'Testing FT axios auto track',
-        timestamp: Date.now()
-      };
-      const responseText = await this.executeAxiosRequest(
-        'https://httpbin.org/post',
-        'post',
-        postData,
-        'compat'
-      );
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(`✅ Axios compat POST request succeeded: bodyLength=${responseText.length}`);
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios compat POST request failed: ${errorMsg}`);
-    }
+    await this.testAxiosMethodRequest('compat', 'post');
   }
 
   /**
    * Test real axios GET request with interceptorChain.
    */
   async testAxiosGetChainRequest() {
-    try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping axios chain GET test");
-        return;
-      }
-
-      const responseText =
-        await this.executeAxiosRequest('https://httpbin.org/get?from=axios-chain', 'get', undefined, 'chain');
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(`✅ Axios chain GET request succeeded: bodyLength=${responseText.length}`);
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios chain GET request failed: ${errorMsg}`);
-    }
+    await this.testAxiosMethodRequest('chain', 'get');
   }
 
   /**
    * Test real axios POST request with interceptorChain.
    */
   async testAxiosPostChainRequest() {
-    try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping axios chain POST test");
-        return;
-      }
+    await this.testAxiosMethodRequest('chain', 'post');
+  }
 
-      const postData: AxiosStylePostData = {
-        source: 'axios-chain',
-        message: 'Testing FT axios interceptorChain auto track',
-        timestamp: Date.now()
-      };
-      const responseText = await this.executeAxiosRequest(
-        'https://httpbin.org/post',
-        'post',
-        postData,
-        'chain'
-      );
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(`✅ Axios chain POST request succeeded: bodyLength=${responseText.length}`);
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Axios chain POST request failed: ${errorMsg}`);
-    }
+  /**
+   * Test real axios PUT request with interceptorChain.
+   */
+  async testAxiosPutChainRequest() {
+    await this.testAxiosMethodRequest('chain', 'put');
+  }
+
+  /**
+   * Test real axios PATCH request with interceptorChain.
+   */
+  async testAxiosPatchChainRequest() {
+    await this.testAxiosMethodRequest('chain', 'patch');
+  }
+
+  /**
+   * Test real axios DELETE request with interceptorChain.
+   */
+  async testAxiosDeleteChainRequest() {
+    await this.testAxiosMethodRequest('chain', 'delete');
   }
 
   async testSharedPreInitAxiosCompatRequest() {
@@ -830,7 +818,7 @@ export struct HttpAutoTrackTestPage {
             .margin({ top: 6, bottom: 8 })
             .width('100%')
 
-          Text('Compat uses axios request/response interceptors for @ohos/axios 2.2.8. Chain uses NetworkKit interceptorChain for newer versions.')
+          Text('Compat: applyFTAxiosTrack(client). Chain: createFTHttpInterceptorChain() + applyFTAxiosChainMethodBridge(client).')
             .fontSize(12)
             .margin({ bottom: 10 })
             .width('100%')
@@ -885,6 +873,27 @@ export struct HttpAutoTrackTestPage {
               this.testAxiosPostChainRequest()
             })
             .customProperty('test-axios-chain-post-btn', 'Test Axios POST (Chain)')
+
+          Button('Test Axios PUT (Chain)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FB8C00')
+            .onClick(() => this.testAxiosPutChainRequest())
+            .customProperty('test-axios-chain-put-btn', 'Test Axios PUT (Chain)')
+
+          Button('Test Axios PATCH (Chain)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FB8C00')
+            .onClick(() => this.testAxiosPatchChainRequest())
+            .customProperty('test-axios-chain-patch-btn', 'Test Axios PATCH (Chain)')
+
+          Button('Test Axios DELETE (Chain)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FB8C00')
+            .onClick(() => this.testAxiosDeleteChainRequest())
+            .customProperty('test-axios-chain-delete-btn', 'Test Axios DELETE (Chain)')
 
           Button('Test Trace ID in /api/user')
             .width('100%')

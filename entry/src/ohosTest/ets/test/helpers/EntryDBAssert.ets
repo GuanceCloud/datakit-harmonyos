@@ -70,8 +70,7 @@ export class EntryDBAssert {
   static async waitForWebViewPayload(timeoutMs: number = 6000): Promise<boolean> {
     return await EntryWaitUtils.waitUntil(async () => {
       const records = await (await EntryDBAssert.getManager()).queryFtOperation([DataType.RUM_WEBVIEW], 100);
-      const view = await EntryDBAssert.waitForViewMatching(['WebViewPage', 'WebView'], 300);
-      return records.length > 0 || view !== null;
+      return records.length > 0;
     }, timeoutMs);
   }
 
@@ -139,5 +138,71 @@ export class EntryDBAssert {
       return false;
     }, timeoutMs);
     return found ? matched : null;
+  }
+
+  static async waitForRecentSyncRecordContainingAnySince(
+    type: DataType,
+    requiredFragments: string[],
+    anyFragments: string[],
+    sinceTime: number,
+    timeoutMs: number = 6000
+  ): Promise<SyncData | null> {
+    let matched: SyncData | null = null;
+    const found = await EntryWaitUtils.waitUntil(async () => {
+      const manager = await EntryDBAssert.getManager();
+      const records = await manager.queryFtOperation([type], 1000, true);
+      const fallbackRecords = await manager.queryFtOperation([], 1000, true);
+      const candidates = records.concat(fallbackRecords);
+
+      for (const record of candidates) {
+        if (record.getTime() < sinceTime) {
+          continue;
+        }
+
+        const data = record.getDataString();
+        const lowerData = data.toLowerCase();
+        let containsRequired = true;
+        for (const fragment of requiredFragments) {
+          if (!lowerData.includes(fragment.toLowerCase())) {
+            containsRequired = false;
+            break;
+          }
+        }
+        if (!containsRequired) {
+          continue;
+        }
+
+        let containsAny = anyFragments.length === 0;
+        for (const fragment of anyFragments) {
+          if (lowerData.includes(fragment.toLowerCase())) {
+            containsAny = true;
+            break;
+          }
+        }
+        if (containsAny) {
+          matched = record;
+          return true;
+        }
+      }
+      return false;
+    }, timeoutMs);
+    return found ? matched : null;
+  }
+
+  static async dumpSyncRecords(limit: number = 20): Promise<string> {
+    const manager = await EntryDBAssert.getManager();
+    const records = await manager.queryFtOperation([], limit, true);
+    if (records.length === 0) {
+      return '<empty>';
+    }
+
+    const lines: string[] = [];
+    for (let index = 0; index < records.length; index++) {
+      const record = records[index];
+      lines.push(
+        `#${index + 1} [${record.getDataType()}] time=${record.getTime()} uuid=${record.getUuid()} ${record.getDataString()}`
+      );
+    }
+    return lines.join('\n');
   }
 }

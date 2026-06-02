@@ -6,7 +6,7 @@
  */
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
-import { SyncDataHelper } from '../main/ets/components/SyncDataHelper';
+import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 
 export default function lineProtocolEscapeTest() {
   describe('LineProtocolEscape', () => {

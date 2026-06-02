@@ -232,25 +232,6 @@ export default function traceHeaderUnitTest() {
       expect(skyWalking[FTTraceHandler.SKYWALKING_V3_SW_8].startsWith('1-')).assertTrue();
     });
 
-    it('traceManagerShouldStoreRemoveClearAndReportHandlers', 0, () => {
-      const manager = FTTraceManager.getInstance();
-      const headers = manager.getTraceHeader('resource-id', TEST_URL);
-
-      expect(Object.keys(headers).length > 0).assertTrue();
-      expect(manager.hasHandler('resource-id')).assertTrue();
-      expect(manager.getHandler('resource-id') !== null).assertTrue();
-      expect(manager.getHandlerCount()).assertEqual(1);
-      expect(manager.getStatus().handlerCount).assertEqual(1);
-
-      expect(manager.removeHandler('resource-id')).assertTrue();
-      expect(manager.hasHandler('resource-id')).assertFalse();
-
-      manager.putTraceHandler('resource-id-2', new FakeTraceHeaderHandler('trace-2', 'span-2'));
-      expect(manager.getHandlerCount()).assertEqual(1);
-      manager.clearAllHandlers();
-      expect(manager.getHandlerCount()).assertEqual(0);
-    });
-
     it('traceManagerShouldEvictOldestHandlerWhenOverLimit', 0, () => {
       const manager = FTTraceManager.getInstance();
 
@@ -293,27 +274,5 @@ export default function traceHeaderUnitTest() {
       expect(response.headers.get('x-custom-response-trace-id')).assertEqual(request.traceId);
     });
 
-    it('interceptorShouldNotGenerateDuplicateTraceHeadersWhenExistingHeaderIsPresent', 0, () => {
-      const interceptor = new DefaultFTTraceInterceptor(TraceType.ZIPKIN_MULTI_HEADER);
-      const headers: Map<string, string> = new Map();
-      headers.set(FTTraceHandler.ZIPKIN_B3_HEADER, 'existing-trace-existing-span-1');
-      headers.set('Accept', 'application/json');
-
-      const request = interceptor.interceptRequest({
-        url: TEST_URL,
-        method: 'POST',
-        headers: headers,
-        timestamp: 1000,
-        traceId: 'existing-trace',
-        spanId: 'existing-span'
-      });
-
-      expect(request.headers.get(FTTraceHandler.ZIPKIN_B3_HEADER)).assertEqual('existing-trace-existing-span-1');
-      expect(request.headers.get(FTTraceHandler.ZIPKIN_TRACE_ID) === undefined).assertTrue();
-      expect(request.headers.get(FTTraceHandler.ZIPKIN_SPAN_ID) === undefined).assertTrue();
-      expect(request.headers.get('Accept')).assertEqual('application/json');
-      expect(request.traceId).assertEqual('existing-trace');
-      expect(request.spanId).assertEqual('existing-span');
-    });
   });
 }

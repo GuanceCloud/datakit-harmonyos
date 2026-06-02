@@ -129,6 +129,14 @@ export class FTRUMGlobalManager {
     return FTRUMGlobalManager.instance;
   }
 
+  public static resetStateForTest(): void {
+    if (FTRUMGlobalManager.instance) {
+      FTRUMGlobalManager.instance.innerManager = null;
+    }
+    FTRUMGlobalManager.instance = null;
+    FTRUMInnerManager.resetStateForTest();
+  }
+
   /**
    * Initialize RUM manager with config (aligned with Android: FTRUMGlobalManager.initConfig)
    * @param config RUM configuration

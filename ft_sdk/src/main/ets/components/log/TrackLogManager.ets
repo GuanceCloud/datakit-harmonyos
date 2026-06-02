@@ -70,6 +70,18 @@ export class TrackLogManager {
     }
     return TrackLogManager.instance;
   }
+
+  public static resetStateForTest(): void {
+    if (TrackLogManager.instance !== null) {
+      TrackLogManager.instance.resetInternalStateForTest();
+    }
+  }
+
+  private resetInternalStateForTest(): void {
+    this.shutdown();
+    this.logConfig = null;
+    this.bufferLocked = false;
+  }
   
   /**
    * Set log configuration
@@ -173,8 +185,8 @@ export class TrackLogManager {
   private shouldProcessLog(logBean: LogBean): boolean {
     // Check log configuration
     if (!this.logConfig) {
-      FTInnerLogger.w(TAG, "Log config not set, using default sampling rate 1.0");
-      return true;
+      FTInnerLogger.w(TAG, "Log config not set, discarding log");
+      return false;
     }
     
     // Check if custom log is enabled

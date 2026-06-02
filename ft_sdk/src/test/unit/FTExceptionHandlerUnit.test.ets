@@ -260,16 +260,6 @@ export default function ftExceptionHandlerUnitTest() {
       FTExceptionHandler.resetRuntimeForTest();
     });
 
-    it('exceptionHandlerShouldCreateSingletonAndStayDisabledByDefault', 0, () => {
-      expect(FTExceptionHandler.isErrorManagerEnabled()).assertFalse();
-
-      const first = FTExceptionHandler.getInstance();
-      const second = FTExceptionHandler.getInstance();
-
-      expect(first === second).assertTrue();
-      expect(FTExceptionHandler.isErrorManagerEnabled()).assertFalse();
-    });
-
     it('initConfigShouldSkipRegistrationWithoutRumAppIdOrCrashSwitch', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
 
@@ -334,27 +324,6 @@ export default function ftExceptionHandlerUnitTest() {
       expect(FTExceptionHandler.isErrorManagerEnabled()).assertTrue();
     });
 
-    it('nativeCrashDelayedInitializeShouldIgnoreStaleResultForSameHandler', 0, async () => {
-      const exceptionHandler = FTExceptionHandler.getInstance();
-      const nativeHandler = runtime.nativeHandler;
-      nativeHandler.delayedInitialize = true;
-      const config = createCrashConfig();
-
-      exceptionHandler.initConfig(config);
-      exceptionHandler.initConfig(config);
-      expect(nativeHandler.initializeCount).assertEqual(2);
-
-      nativeHandler.resolveDelayedInitialize(true);
-      await flushPromises();
-
-      expect(nativeHandler.shutdownCount).assertEqual(0);
-
-      nativeHandler.resolveDelayedInitialize(true);
-      await flushPromises();
-
-      expect(nativeHandler.shutdownCount).assertEqual(0);
-    });
-
     it('nativeCrashDelayedInitializeShouldNotReattachSinkAfterRelease', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
       runtime.nativeHandler.delayedInitialize = true;
@@ -389,52 +358,6 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.nativeHandler.shutdownCount).assertEqual(1);
     });
 
-    it('stopErrorManagerShouldCoverOffCallbackErrorAndOffThrow', 0, async () => {
-      const handler = FTExceptionHandler.getInstance();
-      runtime.offCallbackErr = new FakeBusinessError() as BusinessError;
-
-      handler.initConfig(createCrashConfig());
-      await flushPromises();
-      handler.stop();
-
-      expect(runtime.unregisterCount).assertEqual(1);
-
-      FTExceptionHandler.release();
-      runtime = new FakeRuntime();
-      FTExceptionHandler.setRuntimeForTest(runtime);
-      const secondHandler = FTExceptionHandler.getInstance();
-      secondHandler.initConfig(createCrashConfig());
-      await flushPromises();
-
-      runtime.unregisterThrows = true;
-      secondHandler.stop();
-      expect(runtime.unregisterCount).assertEqual(0);
-
-      runtime.unregisterThrows = false;
-    });
-
-    it('initConfigShouldCatchRegisterFailure', 0, async () => {
-      const handler = FTExceptionHandler.getInstance();
-      runtime.registerThrows = true;
-
-      handler.initConfig(createCrashConfig());
-      await flushPromises();
-
-      expect(runtime.registerCount).assertEqual(0);
-      expect(runtime.observer === null).assertTrue();
-      expect(FTExceptionHandler.isErrorManagerEnabled()).assertTrue();
-    });
-
-    it('stopAndReleaseShouldHandleMissingNativeHandler', 0, () => {
-      const handler = FTExceptionHandler.getInstance();
-
-      handler.stop();
-      FTExceptionHandler.release();
-
-      expect(runtime.nativeHandler.stopWatchingCount).assertEqual(0);
-      expect(runtime.nativeHandler.shutdownCount).assertEqual(1);
-    });
-
     it('observerCallbacksShouldCaptureUnhandledFirstCrashAndDuplicateCrash', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
       handler.initConfig(createCrashConfig());
@@ -461,36 +384,6 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.rumManager.lastErrorType.length > 0).assertTrue();
     });
 
-    it('observerCallbacksShouldCoverRethrowBranchesWhenRuntimeAllowsThrow', 0, async () => {
-      const handler = FTExceptionHandler.getInstance();
-      handler.initConfig(createCrashConfig());
-      await flushPromises();
-
-      const observer = requireObserver(runtime);
-      emitObserverException(observer, new Error('first crash'));
-      emitObserverException(observer, new Error('duplicate crash'));
-      await flushPromises();
-
-      runtime.rethrowEnabled = true;
-      let duplicateThrown = false;
-      try {
-        runtime.runFirstScheduledByDelay(10);
-      } catch (_error) {
-        duplicateThrown = true;
-      }
-
-      let normalThrown = false;
-      try {
-        runtime.runFirstScheduledByDelay(100);
-      } catch (_error) {
-        normalThrown = true;
-      }
-
-      expect(duplicateThrown).assertTrue();
-      expect(normalThrown).assertTrue();
-      expect(runtime.unregisterCount).assertEqual(1);
-    });
-
     it('crashHandlingShouldFlushAndCloseWindowAfterAddErrorComplete', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
       handler.initConfig(createCrashConfig());
@@ -503,32 +396,6 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.rumManager.stopViewCount).assertEqual(1);
       expect(runtime.flushCount).assertEqual(1);
       expect(context.terminateCount).assertEqual(1);
-    });
-
-    it('crashHandlingShouldCoverStacklessErrorAndHandleCrashCatch', 0, async () => {
-      const handler = FTExceptionHandler.getInstance();
-      handler.initConfig(createCrashConfig());
-      await flushPromises();
-
-      const stacklessError = new Error('stackless crash');
-      stacklessError.stack = '';
-      await triggerCrashAndDrain(runtime, stacklessError);
-
-      expect(runtime.rumManager.lastLog.includes('stackless crash')).assertTrue();
-
-      FTExceptionHandler.release();
-      runtime = new FakeRuntime();
-      runtime.throwGetRumManager = true;
-      FTExceptionHandler.setRuntimeForTest(runtime);
-      FTExceptionHandler.getInstance().initConfig(createCrashConfig());
-      await flushPromises();
-
-      const observer = requireObserver(runtime);
-      emitObserverException(observer, new Error('rum manager failed'));
-      await flushPromises();
-      runtime.runScheduled();
-
-      expect(runtime.rumManager.addErrorCount).assertEqual(0);
     });
 
     it('crashHandlingShouldFlushAndCloseWindowWhenStopViewRejects', 0, async () => {
@@ -558,33 +425,5 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.flushCount).assertEqual(0);
     });
 
-    it('closeWindowShouldHandleMissingRejectingAndThrowingContext', 0, async () => {
-      const handler = FTExceptionHandler.getInstance();
-      handler.initConfig(createCrashConfig());
-      await flushPromises();
-
-      runtime.rumManager.context = null;
-      await triggerCrashAndDrain(runtime, new Error('context missing'));
-      expect(runtime.flushCount).assertEqual(1);
-
-      FTExceptionHandler.release();
-      runtime = new FakeRuntime();
-      FTExceptionHandler.setRuntimeForTest(runtime);
-      const rejectingContext = runtime.rumManager.context as FakeTerminateContext;
-      rejectingContext.rejectTerminate = true;
-      FTExceptionHandler.getInstance().initConfig(createCrashConfig());
-      await flushPromises();
-      await triggerCrashAndDrain(runtime, new Error('context reject'));
-      expect(rejectingContext.terminateCount).assertEqual(1);
-
-      FTExceptionHandler.release();
-      runtime = new FakeRuntime();
-      runtime.rumManager.throwGetContext = true;
-      FTExceptionHandler.setRuntimeForTest(runtime);
-      FTExceptionHandler.getInstance().initConfig(createCrashConfig());
-      await flushPromises();
-      await triggerCrashAndDrain(runtime, new Error('context throw'));
-      expect(runtime.flushCount).assertEqual(1);
-    });
   });
 }

@@ -8,12 +8,29 @@ import { DataType } from '../../../../main/ets/components/enum/Enums';
 import { WaitUtils } from './WaitUtils';
 
 export class DBAssert {
-  static getAppContext(): Context {
-    return AbilityDelegatorRegistry.getAbilityDelegator().getAppContext() as Context;
+  static async getAppContext(): Promise<Context> {
+    const delegator = AbilityDelegatorRegistry.getAbilityDelegator();
+    try {
+      const ability = await delegator.getCurrentTopAbility();
+      if (ability?.context) {
+        return ability.context as Context;
+      }
+    } catch (_error) {
+    }
+
+    try {
+      const context = globalThis.getContext() as Context;
+      if (context) {
+        return context;
+      }
+    } catch (_error) {
+    }
+
+    return delegator.getAppContext() as Context;
   }
 
   static async getManager(): Promise<FTDBManager> {
-    const dbManager = FTDBManager.getInstance(DBAssert.getAppContext());
+    const dbManager = FTDBManager.getInstance(await DBAssert.getAppContext());
     await dbManager.init();
     return dbManager;
   }
@@ -67,6 +84,34 @@ export class DBAssert {
       return false;
     }, timeoutMs);
     return found ? matched : null;
+  }
+
+  static async waitForNoSyncRecordContaining(type: DataType, fragments: string[], timeoutMs: number = 5000): Promise<boolean> {
+    return await WaitUtils.waitUntil(async () => {
+      const records = await DBAssert.querySyncData([type], 100);
+      for (const record of records) {
+        if (DBAssert.containsAll(record.getDataString(), fragments)) {
+          return false;
+        }
+      }
+      return true;
+    }, timeoutMs);
+  }
+
+  static async waitForNoSyncRecordWithUuid(type: DataType, uuid: string, timeoutMs: number = 5000): Promise<boolean> {
+    if (uuid.length === 0) {
+      return false;
+    }
+
+    return await WaitUtils.waitUntil(async () => {
+      const records = await DBAssert.querySyncData([type], 100);
+      for (const record of records) {
+        if (record.getUuid() === uuid) {
+          return false;
+        }
+      }
+      return true;
+    }, timeoutMs);
   }
 
   static async waitForViewNamed(viewName: string, timeoutMs: number = 5000): Promise<ViewBean | null> {
