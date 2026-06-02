@@ -4,20 +4,20 @@
  */
 import {
   applyFTAxiosTrack,
-  createFTRCPTrackConfig
-} from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
+  createFTRCPTrackConfig,
+  FTRUMGlobalManager,
+  FTTraceConfigManager
+} from '@guancecloud/ft_sdk/Index';
 import {
   applyFTAxiosChainMethodBridge,
   applyFTHttpTrack,
   createFTHttpInterceptorChain
-} from '@guancecloud/ft_sdk_ext/src/main/ets/components/network/FTHttpAutoTrackExt';
+} from '@guancecloud/ft_sdk_ext/Index';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { http } from '@kit.NetworkKit';
 import axios, {
   AxiosHeaders, AxiosInstance, AxiosRequestConfig, AxiosResponse
 } from '@ohos/axios';
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
-import { FTTraceConfigManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceConfigManager';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';

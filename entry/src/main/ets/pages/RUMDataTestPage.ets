@@ -1,8 +1,11 @@
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
-import { ResourceParams } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/ResourceParams';
-import { NetStatusBean } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/NetStatusBean';
-import { ErrorType, AppState } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/RUMEnums';
-import { StringWrapper } from '@guancecloud/ft_sdk/src/main/ets/components/utils/StringWrapper';
+import {
+  AppState,
+  ErrorType,
+  FTRUMGlobalManager,
+  NetStatusBean,
+  ResourceParams,
+  StringWrapper
+} from '@guancecloud/ft_sdk/Index';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';

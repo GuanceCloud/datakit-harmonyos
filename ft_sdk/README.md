@@ -98,6 +98,10 @@ export default class EntryAbility extends UIAbility {
 - `FTRUMGlobalManager`: RUM reporting API
 - `FTLogger`: custom log API
 - `FTTraceManager`: trace helper API
+- `FTWebViewHandler`: WebView bridge integration API
+- `createFTRCPTrackConfig` / `createFTRCPInterceptors`: RCP auto-track helpers
+- `RCPTraceInterceptor` / `RCPResourceInterceptor`: advanced manual RCP interceptor assembly
+- `DefaultFTTraceInterceptor`: default low-level trace interceptor implementation
 
 ## Requirements
 

@@ -53,7 +53,14 @@ export { FTLogger } from './src/main/ets/components/log/FTLogger';
 export { FTTraceManager } from './src/main/ets/components/trace/FTTraceManager';
 export { FTTraceConfigManager } from './src/main/ets/components/trace/FTTraceConfigManager';
 export { TraceType } from './src/main/ets/components/trace/TraceType';
-export { FTTraceInterceptor, HeaderHandler, TraceData } from './src/main/ets/components/trace/FTTraceInterceptor';
+export {
+  FTTraceInterceptor,
+  DefaultFTTraceInterceptor,
+  HeaderHandler,
+  HttpRequestData,
+  HttpResponseData,
+  TraceData
+} from './src/main/ets/components/trace/FTTraceInterceptor';
 
 // ============================================================================
 // Enums
@@ -108,6 +115,7 @@ export {
 // ============================================================================
 
 export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
+export { FTWebViewHandler } from './src/main/ets/components/web/FTWebViewHandler';
 
 // ============================================================================
 // Network Auto Track Helpers
@@ -115,6 +123,9 @@ export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
 
 export {
   createFTRCPInterceptors,
+  RCPTraceInterceptor,
+  RCPResourceInterceptor,
+  applyFTAxiosTrack,
   createFTRCPTrackConfig,
 } from './src/main/ets/components/network/FTHttpAutoTrack';
 
