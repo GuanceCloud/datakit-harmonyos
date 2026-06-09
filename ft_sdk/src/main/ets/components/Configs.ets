@@ -56,7 +56,8 @@ export class FTRUMConfig {
    * Set error sampling rate
    * When the session is not sampled by setSamplingRate,
    * if an error occurs during the session, data within 1 minute before the error can be collected.
-   * Range [0,1], 0 means no collection, 1 means full collection, default is 0.
+   * Range [0,1], 0 means no collection, 1 means full collection.
+   * FTRUMConfig defaults to 1.0 for compatibility; calling this setter without an argument sets 0.0.
    */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));
@@ -454,7 +455,8 @@ export class FTLoggerConfig {
     for (let i = 0; i < logLevelFilters.length; i++) {
       const item: Status | string | StatusWithName = logLevelFilters[i];
       if (typeof item === 'string') {
-        array.push(item as string);
+        const status = Status.fromName(item);
+        array.push(status ? status.name : (item as string));
       } else if (item && typeof item === 'object') {
         // Check if it's a Status class instance (has .name property)
         // Use type assertion to access .name property

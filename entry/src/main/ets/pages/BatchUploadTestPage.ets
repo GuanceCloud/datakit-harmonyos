@@ -1,4 +1,4 @@
-import { FTLogger, FTRUMGlobalManager, Status, SyncPageSize } from '@guancecloud/ft_sdk/Index';
+import { FTLogger, FTSDK, FTRUMGlobalManager, Status, SyncPageSize } from '@guancecloud/ft_sdk/Index';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { CommonConstants } from '../constants/CommonConstants';
@@ -123,21 +123,14 @@ export struct BatchUploadTestPage {
   }
 
   /**
-   * Trigger immediate upload (executePoll without sleep)
+   * Trigger immediate upload through the SDK public flush API.
    */
-  private triggerImmediateUpload(): void {
+  private flushSyncData(): void {
     this.addTestResult("=== Triggering Immediate Upload ===");
     
     try {
-      const syncTaskManager = SyncTaskManager.getInstance();
-      if (!syncTaskManager) {
-        this.addTestResult("❌ SyncTaskManager instance not found");
-        return;
-      }
-
-      this.addTestResult("✅ Calling triggerImmediateUpload() - immediate upload");
-      // Use public method to trigger immediate upload
-      syncTaskManager.triggerImmediateUpload();
+      this.addTestResult("✅ Calling FTSDK.flushSyncData() - immediate upload");
+      FTSDK.flushSyncData();
       this.addTestResult("✅ Upload triggered, check logs for upload details");
       this.addTestResult("💡 Filter logs: grep 'RUM-UPLOAD' | grep 'Response Code'");
     } catch (error) {
@@ -210,7 +203,7 @@ export struct BatchUploadTestPage {
       this.checkSyncStatus();
       
       // Step 4: Trigger upload
-      this.triggerImmediateUpload();
+      this.flushSyncData();
       
       // Step 5: Wait and show results
       setTimeout(() => {
@@ -298,7 +291,7 @@ export struct BatchUploadTestPage {
 
       // Trigger immediate upload
       this.addTestResult("🚀 Triggering immediate upload...");
-      syncTaskManager.triggerImmediateUpload();
+      FTSDK.flushSyncData();
 
       // Calculate expected batch counts
       const expectedFullBatches = Math.floor(testLogCount / currentPageSize);
@@ -357,7 +350,7 @@ export struct BatchUploadTestPage {
             .height(50)
             .margin({ bottom: 10 })
             .onClick(() => {
-              this.triggerImmediateUpload();
+              this.flushSyncData();
             })
 
           // Scheduled upload

@@ -3,22 +3,20 @@ import { DataType } from './enum/Enums';
 import { CollectType } from './rum/enum/RUMEnums';
 import { FTInnerLogger } from './log/FTLogger';
 import { SyncData } from './db/bean/SyncData';
-import { QueueStatus } from './log/TrackLogManager';
+import { TrackLogManager } from './log/TrackLogManager';
 import { LogBean } from './bean/LogBean';
 import { BaseContentBean } from './bean/BaseContentBean';
 import { Context } from '@kit.AbilityKit';
-import { NetCodeStatus } from './http/HttpEngine';
 import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
 import { Constants } from './Constants';
-import {
-  DefaultFTTrackInnerRuntime,
-  FTTrackDataHelper,
-  FTTrackInnerRuntime,
-  FTTrackLogCallback,
-  FTTrackLogManager,
-  FTTrackSyncTaskManager,
-  FTTrackValueAccessor
-} from './FTTrackInnerRuntime';
+import { SyncDataHelper } from './SyncDataHelper';
+import { SyncTaskManager } from './SyncTaskManager';
+import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
+import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
+import { DataProcessThreadPool } from './thread/DataProcessThreadPool';
+import { Utils } from './utils/Utils';
+import { FTDBCachePolicy } from './db/FTDBCachePolicy';
+import { FTDBManager } from './db/FTDBManager';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
@@ -34,16 +32,19 @@ interface SyncDataParams {
   time: number;
 }
 
+interface FTTrackValueAccessor {
+  getValue(): string;
+}
+
 /**
  * Data Tracking Core Class
  * Responsible for data collection, storage, and sync triggering
  */
 class FTTrackInner {
   private static instance: FTTrackInner | null = null;
-  private static runtime: FTTrackInnerRuntime = new DefaultFTTrackInnerRuntime();
-  private dataHelper: FTTrackDataHelper;
-  private syncTaskManager: FTTrackSyncTaskManager;
-  private trackLogManager: FTTrackLogManager;
+  private dataHelper: SyncDataHelper;
+  private syncTaskManager: SyncTaskManager;
+  private trackLogManager: TrackLogManager;
   // SessionReplay functionality has been migrated to independent library
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
@@ -65,9 +66,9 @@ class FTTrackInner {
   }
 
   private constructor() {
-    this.dataHelper = FTTrackInner.runtime.createDataHelper();
-    this.syncTaskManager = FTTrackInner.runtime.getSyncTaskManager();
-    this.trackLogManager = FTTrackInner.runtime.getTrackLogManager();
+    this.dataHelper = new SyncDataHelper();
+    this.syncTaskManager = SyncTaskManager.getInstance();
+    this.trackLogManager = TrackLogManager.getInstance();
     // SessionReplay functionality has been migrated to independent library
     // this.sessionReplayManager = FTSessionReplayManager.getInstance();
 
@@ -82,27 +83,8 @@ class FTTrackInner {
     return FTTrackInner.instance;
   }
 
-  public static setRuntimeForTest(runtime: FTTrackInnerRuntime): void {
-    FTTrackInner.runtime = runtime;
-  }
-
-  public static resetRuntimeForTest(): void {
-    FTTrackInner.runtime = new DefaultFTTrackInnerRuntime();
-  }
-
-  public static resetInstanceForTest(): void {
+  public static resetInstanceInternal(): void {
     FTTrackInner.instance = null;
-  }
-
-  public static getObjectKeysForTest(obj: Record<string, object>): string[] {
-    return FTTrackInner.getObjectKeys(obj);
-  }
-
-  /**
-   * Check if already initialized
-   */
-  public isInitialized(): boolean {
-    return this.context !== null;
   }
 
   /**
@@ -131,7 +113,7 @@ class FTTrackInner {
 
     // Initialize hilog interceptor if console log capture is enabled
     if (config.isEnableConsoleLog()) {
-      FTTrackInner.runtime.getHiLogInterceptor().init();
+      FTHiLogInterceptor.getInstance().init();
     }
 
     FTInnerLogger.i(TAG, "FTTrackInner log config initialized");
@@ -156,7 +138,7 @@ class FTTrackInner {
    * Get data helper instance for RUM data consistency
    * @returns SyncDataHelper instance
    */
-  getDataHelper(): FTTrackDataHelper {
+  getDataHelper(): SyncDataHelper {
     return this.dataHelper;
   }
 
@@ -204,7 +186,7 @@ class FTTrackInner {
     tags: Map<string, string>,
     fields: Map<string, string>,
     callBack: RunnerCompleteCallBack | null = null,
-    collectTypeParam: CollectType = CollectType.ALL
+    collectTypeParam: CollectType | null = null
   ): void {
 
     // Debug log - use more obvious tags
@@ -241,14 +223,16 @@ class FTTrackInner {
     // Check if session should be collected
     const sessionId = tags.get('session_id');
 
-    if (!sessionId) {
+    if (!sessionId && (collectTypeParam === null || collectTypeParam === undefined)) {
       // If no session ID, collect by default
       this.syncDataBackground(DataType.RUM_APP, time, measurement, tags, fields, callBack);
       return;
     }
 
     // Check session collection type (aligned with Android)
-    const collectType = FTTrackInner.runtime.getRumManager().checkSessionWillCollect(sessionId);
+    const collectType = collectTypeParam !== null && collectTypeParam !== undefined
+      ? collectTypeParam
+      : FTRUMInnerManager.getInstance().checkSessionWillCollect(sessionId);
 
     if (collectType === CollectType.ALL) {
       // Normal collection - store as RUM_APP
@@ -325,41 +309,6 @@ class FTTrackInner {
   }
 
   /**
-   * Log data tracking - single log
-   */
-  trackLogAsync(bean: object | undefined, callback: FTTrackLogCallback): void {
-    if (bean) {
-      this.syncDataBackgroundForLog(bean, callback);
-    } else {
-      callback.onResponse(400, "Invalid bean parameter", "INVALID_PARAM");
-    }
-  }
-
-  /**
-   * Log data tracking - processed through TrackLogManager
-   */
-  trackLog(logBean: LogBean, isSilence: boolean = false): void {
-    try {
-      this.trackLogManager.trackLog(logBean, isSilence);
-      FTInnerLogger.d(TAG, `Log tracked successfully: ${logBean.getDescription()}`);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error tracking log: ${error}`);
-    }
-  }
-
-  /**
-   * Batch log data tracking
-   */
-  trackLogBatch(logBeans: LogBean[], isSilence: boolean = false): void {
-    try {
-      this.trackLogManager.trackLogBatch(logBeans, isSilence);
-      FTInnerLogger.d(TAG, `Batch logs tracked: ${logBeans.length} logs`);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error tracking log batch: ${error}`);
-    }
-  }
-
-  /**
    * Batch LogBean sync processing - called by TrackLogManager
    */
   batchLogBeanSync(batchData: BaseContentBean[], isSilence: boolean): void {
@@ -420,13 +369,13 @@ class FTTrackInner {
       let result = false;
 
       if (this.context) {
-        const cachePolicy = FTTrackInner.runtime.getCachePolicy();
+        const cachePolicy = FTDBCachePolicy.getInstance();
         const status = await cachePolicy.optLogCachePolicy(this.context, 1);
 
         // Insert data based on cache policy result (aligned with Android)
         // -1: discard, 0: can insert, 1: delete old data and insert
         if (status >= 0) {
-          const dbManager = FTTrackInner.runtime.getDbManager(this.context);
+          const dbManager = FTDBManager.getInstance(this.context);
           if (dbManager) {
             // Ensure database manager is initialized
 
@@ -480,7 +429,7 @@ class FTTrackInner {
 
     // Use DataProcessThreadPool instead of setTimeout
     try {
-      FTTrackInner.runtime.getDataProcessThreadPool().execute(async () => {
+      DataProcessThreadPool.getInstance().execute(async () => {
         try {
           // Create sync data record using dataTypeForContent for getBodyContent
           const syncDataParams: SyncDataParams = {
@@ -503,7 +452,7 @@ class FTTrackInner {
           let result = false;
           let status = 0;
           if (this.context) {
-            const cachePolicy = FTTrackInner.runtime.getCachePolicy();
+            const cachePolicy = FTDBCachePolicy.getInstance();
 
             // Check cache policy for RUM data (use dataTypeForContent for policy check)
             if (dataTypeForContent === DataType.RUM_APP || dataTypeForContent === DataType.RUM_WEBVIEW) {
@@ -514,7 +463,7 @@ class FTTrackInner {
 
             // Insert data based on cache policy result
             if (status >= 0) {
-              const dbManager = FTTrackInner.runtime.getDbManager(this.context);
+              const dbManager = FTDBManager.getInstance(this.context);
               if (dbManager) {
                 // Insert with custom dataType string (insertFtOperation will use getCustomDataTypeString if available)
                 result = await dbManager.insertFtOperation(recordData);
@@ -581,7 +530,7 @@ class FTTrackInner {
 
     // Use DataProcessThreadPool instead of setTimeout
     try {
-      FTTrackInner.runtime.getDataProcessThreadPool().execute(async () => {
+      DataProcessThreadPool.getInstance().execute(async () => {
         try {
           // Create sync data record
           const syncDataParams: SyncDataParams = {
@@ -608,7 +557,7 @@ class FTTrackInner {
           let result = false;
           let status = 0; // Initialize status outside if block
           if (this.context) {
-            const cachePolicy = FTTrackInner.runtime.getCachePolicy();
+            const cachePolicy = FTDBCachePolicy.getInstance();
 
             // Check cache policy for RUM data (aligned with Android)
             if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
@@ -620,7 +569,7 @@ class FTTrackInner {
             // Insert data based on cache policy result (aligned with Android)
             // -1: discard, 0: can insert, 1: delete old data and insert
             if (status >= 0) {
-              const dbManager = FTTrackInner.runtime.getDbManager(this.context);
+              const dbManager = FTDBManager.getInstance(this.context);
               // Don't call init() here - insertFtOperation handles initialization internally
               // This avoids concurrent initialization conflicts when multiple actions occur rapidly
               try {
@@ -669,69 +618,12 @@ class FTTrackInner {
   }
 
   /**
-   * Log data async processing (background)
-   */
-  private syncDataBackgroundForLog(bean: object | undefined,
-    callback: FTTrackLogCallback): void {
-    // Use DataProcessThreadPool instead of setTimeout
-    FTTrackInner.runtime.getDataProcessThreadPool().execute(async () => {
-      try {
-        if (!bean) {
-          callback.onResponse(NetCodeStatus.UNKNOWN_EXCEPTION_CODE, "Bean is undefined", "");
-          return;
-        }
-        // Create sync data from log Bean
-        const recordData = await this.createSyncDataFromObject(bean);
-
-        // Check cache policy before inserting (aligned with Android: optLogCachePolicy)
-        let result = false;
-        if (this.context) {
-          const cachePolicy = FTTrackInner.runtime.getCachePolicy();
-          const status = await cachePolicy.optLogCachePolicy(this.context, 1);
-
-          // Insert data based on cache policy result (aligned with Android)
-          // -1: discard, 0: can insert, 1: delete old data and insert
-          if (status >= 0) {
-            const dbManager = FTTrackInner.runtime.getDbManager(this.context);
-            if (dbManager) {
-              await dbManager.init();
-              result = await dbManager.insertFtOperation(recordData);
-            } else {
-              FTInnerLogger.e(TAG, `Database manager is null`);
-            }
-
-            // Update count after successful insert (aligned with Android)
-            if (result) {
-              cachePolicy.optLogCount(1);
-            }
-          } else {
-            // Discard data (status < 0)
-            FTInnerLogger.e(TAG, `syncDataBackgroundForLog: drop by Cache limit (status=${status})`);
-          }
-        }
-
-        if (result) {
-          // Trigger data sync
-          this.syncTaskManager.executeSyncPoll();
-          callback.onResponse(200, "Log data inserted successfully", "");
-        } else {
-          callback.onResponse(500, "Failed to insert log data", "INSERT_ERROR");
-        }
-
-      } catch (error) {
-        FTInnerLogger.e(TAG, `syncDataBackgroundForLog failed: ${error}`);
-        callback.onResponse(500, `Error: ${error.message}`, "EXCEPTION");
-      }
-    });
-  }
-
-  /**
    * Create sync data record from LogBean
    */
   private async createSyncDataFromLogBean(logBean: LogBean): Promise<SyncData> {
     try {
       // Generate UUID
-      const uuid = FTTrackInner.runtime.generateUUID();
+      const uuid = Utils.generateUUID();
 
       // Convert LogBean to Map format - let SyncDataHelper handle global context merging
       const tags = new Map<string, string>();
@@ -843,13 +735,13 @@ class FTTrackInner {
    * Create sync data record
    */
   private async createSyncData(
-    dataHelper: FTTrackDataHelper,
+    dataHelper: SyncDataHelper,
     dataType: DataType,
     data: SyncDataParams
   ): Promise<SyncData> {
     try {
       // Generate UUID
-      const uuid = FTTrackInner.runtime.generateUUID();
+      const uuid = Utils.generateUUID();
 
       // Get data content
       const dataString = dataHelper.getBodyContent(
@@ -877,154 +769,10 @@ class FTTrackInner {
   }
 
   /**
-   * Create sync data from object (for backward compatibility)
-   */
-  private async createSyncDataFromObject(bean: object): Promise<SyncData> {
-    try {
-      // This should parse based on actual log Bean structure
-      // Using simplified implementation for now
-      const uuid = FTTrackInner.runtime.generateUUID();
-      const dataString = JSON.stringify(bean);
-
-      const syncData = new SyncData(DataType.LOG);
-      syncData.setId(this.generateId());
-      syncData.setUuid(uuid);
-      syncData.setDataString(dataString);
-      // Aligned with Android SDK: use nanoseconds (19 digits) for Line Protocol timestamp
-      syncData.setTime(FTTrackInner.runtime.getCurrentNanoTime());
-
-      return syncData;
-
-    } catch (error) {
-      FTInnerLogger.e(TAG, `createSyncDataFromObject failed: ${error}`);
-      throw new Error(`Operation failed: ${error}`);
-    }
-  }
-
-  /**
    * Generate ID
    */
   private generateId(): number {
-    return FTTrackInner.runtime.nowMillis() + Math.floor(FTTrackInner.runtime.random() * 1000);
-  }
-
-  async createSyncDataFromLogBeanForTest(logBean: LogBean): Promise<SyncData> {
-    return await this.createSyncDataFromLogBean(logBean);
-  }
-
-  async createSyncDataForTest(
-    dataType: DataType,
-    time: number,
-    measurement: string,
-    tags: Map<string, string>,
-    fields: Map<string, string>
-  ): Promise<SyncData> {
-    return await this.createSyncData(this.dataHelper, dataType, {
-      measurement,
-      tags,
-      fields,
-      time
-    });
-  }
-
-  async createSyncDataFromObjectForTest(bean: object): Promise<SyncData> {
-    return await this.createSyncDataFromObject(bean);
-  }
-
-  generateIdForTest(): number {
-    return this.generateId();
-  }
-
-  generateLineProtocolForTest(
-    measurement: string,
-    tags: Record<string, string>,
-    fields: Record<string, string>,
-    time: number
-  ): string {
-    return this.generateLineProtocol(measurement, tags, fields, time);
-  }
-
-  async createSyncDataFromLineProtocolForTest(
-    measurement: string,
-    lineProtocol: string,
-    time: number,
-    dataType: DataType
-  ): Promise<SyncData> {
-    return await this.createSyncDataFromLineProtocol(measurement, lineProtocol, time, dataType);
-  }
-
-  async processLogBeanToDatabaseForTest(logBean: LogBean, isSilence: boolean): Promise<boolean> {
-    return await this.processLogBeanToDatabase(logBean, isSilence);
-  }
-
-  async handleBatchLogPromisesForTest(promises: Promise<boolean>[], totalCount: number, isSilence: boolean): Promise<void> {
-    await this.handleBatchLogPromises(promises, totalCount, isSilence);
-  }
-
-  syncDataBackgroundForTest(
-    dataType: DataType,
-    time: number,
-    measurement: string,
-    tags: Map<string, string>,
-    fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
-  ): void {
-    this.syncDataBackground(dataType, time, measurement, tags, fields, callBack);
-  }
-
-  syncDataBackgroundWithErrorSampledForTest(
-    dataTypeForContent: DataType,
-    dataTypeForStorage: string,
-    time: number,
-    measurement: string,
-    tags: Map<string, string>,
-    fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
-  ): void {
-    this.syncDataBackgroundWithErrorSampled(dataTypeForContent, dataTypeForStorage, time, measurement, tags, fields,
-      callBack);
-  }
-
-  syncDataBackgroundForLogForTest(
-    bean: object | undefined,
-    callback: FTTrackLogCallback
-  ): void {
-    this.syncDataBackgroundForLog(bean, callback);
-  }
-
-  /**
-   * Get sync task manager
-   */
-  getSyncTaskManager(): FTTrackSyncTaskManager {
-    return this.syncTaskManager;
-  }
-
-  /**
-   * Get log tracking manager
-   */
-  getTrackLogManager(): FTTrackLogManager {
-    return this.trackLogManager;
-  }
-
-  /**
-   * Get SDK configuration
-   */
-  getSdkConfig(): FTSDKConfig | null {
-    return this.sdkConfig;
-  }
-
-  /**
-   * Force refresh log buffer
-   */
-  forceFlushLogs(isSilence: boolean = false): void {
-    this.trackLogManager.forceFlush(isSilence);
-  }
-
-  /**
-   * Get log queue status
-   */
-  getLogQueueStatus(): QueueStatus {
-    return this.trackLogManager.getQueueStatus();
+    return Date.now() + Math.floor(Math.random() * 1000);
   }
 
   /*
@@ -1049,76 +797,6 @@ class FTTrackInner {
   //     return false;
   //   }
   // }
-
-
-  /**
-   * Generate Line Protocol string
-   */
-  private generateLineProtocol(measurement: string, tags: Record<string, string>, fields: Record<string, string>,
-    time: number): string {
-    let line = measurement;
-
-    // Add tags
-    const tagKeys = Object.keys(tags);
-    if (tagKeys.length > 0) {
-      line += ",";
-      for (let i = 0; i < tagKeys.length; i++) {
-        const key = tagKeys[i];
-        const value = tags[key];
-        line += `${key}=${value}`;
-        if (i < tagKeys.length - 1) {
-          line += ",";
-        }
-      }
-    }
-
-    // Add space separator
-    line += " ";
-
-    // Add fields
-    const fieldKeys = Object.keys(fields);
-    if (fieldKeys.length > 0) {
-      for (let i = 0; i < fieldKeys.length; i++) {
-        const key = fieldKeys[i];
-        const value = fields[key];
-        line += `${key}=${value}`;
-        if (i < fieldKeys.length - 1) {
-          line += ",";
-        }
-      }
-    }
-
-    // Add timestamp
-    line += ` ${time}`;
-
-    return line;
-  }
-
-  /**
-   * Create SyncData from Line Protocol string
-   */
-  private async createSyncDataFromLineProtocol(
-    measurement: string,
-    lineProtocol: string,
-    time: number,
-    dataType: DataType
-  ): Promise<SyncData> {
-    const syncData = new SyncData(dataType);
-    syncData.setDataString(lineProtocol);
-    syncData.setTime(time);
-    syncData.setUuid(FTTrackInner.runtime.generateUUID());
-
-    // Store in database
-    if (this.context) {
-      const dbManager = FTTrackInner.runtime.getDbManager(this.context);
-      if (dbManager) {
-        await dbManager.init();
-        await dbManager.insertFtOperation(syncData);
-      }
-    }
-
-    return syncData;
-  }
 
   /**
    * Close all managers

@@ -3,7 +3,6 @@ import { window } from '@kit.ArkUI'
 import { util } from '@kit.ArkTS';
 import { AppUtils } from './AppUtils';
 import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
-import { FTInnerLogger } from '../log/FTLogger';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 // import { LogUtils } from './LogUtils';
@@ -32,7 +31,8 @@ interface PerformanceInfo {
   message: string;
   timestamp: number;
 }
- const  TAG = "Utils";
+const TAG = "Utils";
+const LOG_DOMAIN = 0x0001;
 
 /**
  * General utility class
@@ -80,8 +80,7 @@ export class Utils {
         window.getLastWindow(getContext(), (err: BusinessError, data) => {
           const errCode: number = err.code;
           if (errCode) {
-            FTInnerLogger.e(TAG,
-              'Failed to obtain the top window. Cause: ' + JSON.stringify(err));
+            hilog.error(LOG_DOMAIN, TAG, 'Failed to obtain the top window. Cause: ' + JSON.stringify(err));
             return;
           }
           Utils.mainWindow = data;
@@ -92,7 +91,7 @@ export class Utils {
       }
     } catch (e) {
       // Use hilog instead of console.error
-      FTInnerLogger.e(TAG, `Error setting UI context: ${e}`);
+      hilog.error(LOG_DOMAIN, TAG, `Error setting UI context: ${e}`);
     }
   }
 
@@ -186,7 +185,7 @@ export class Utils {
         return normalized;
       }
     } catch (error) {
-      FTInnerLogger.w(TAG, `Failed to generate UUID with system API: ${error}`);
+      hilog.warn(LOG_DOMAIN, TAG, `Failed to generate UUID with system API: ${error}`);
     }
     return Utils.generateFallbackUUID();
   }
@@ -385,7 +384,7 @@ export class Utils {
     } catch (error) {
       // Fallback: use Date.now() * 1000000 (16 digits, microseconds)
       // This is not ideal but maintains compatibility with older APIs
-      FTInnerLogger.w(TAG, `Failed to get nanosecond time, using fallback: ${error}`);
+      hilog.warn(LOG_DOMAIN, TAG, `Failed to get nanosecond time, using fallback: ${error}`);
       return Date.now() * 1000000; // Convert to microseconds (16 digits)
     }
   }

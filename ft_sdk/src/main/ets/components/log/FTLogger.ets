@@ -311,7 +311,7 @@ export class FTLogger {
     const statusString = typeof status === 'string' ? status : status.name;
     
       // Console output
-    if (logConfig.isPrintCustomLogToConsole()) {
+    if (logConfig && logConfig.isPrintCustomLogToConsole()) {
       const propertyString = property ? "," + JSON.stringify(Array.from(property.entries())) : "";
       const message = `[${statusString.toUpperCase()}]${content}${propertyString}`;
       

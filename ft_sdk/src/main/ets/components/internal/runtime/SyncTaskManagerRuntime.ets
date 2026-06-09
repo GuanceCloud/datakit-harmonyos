@@ -1,18 +1,17 @@
 import { Context } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import preferences from '@ohos.data.preferences';
-import { Constants } from './Constants';
-import { FTSDKConfig } from './Configs';
-import { DataBaseCallBack } from './db/base/DataBaseCallBack';
-import { SyncData } from './db/bean/SyncData';
-import { FTDBCachePolicy } from './db/FTDBCachePolicy';
-import { FTDBManager } from './db/FTDBManager';
-import { DataType } from './enum/Enums';
-import { HttpBuilder } from './http/HttpBuilder';
-import { FTInnerLogger } from './log/FTLogger';
-import { DataUploadThreadPool } from './thread/DataUploadThreadPool';
-import { ThreadPoolManager } from './thread/ThreadPoolManager';
-import { Utils } from './utils/Utils';
+import { Constants } from '../../Constants';
+import { FTSDKConfig } from '../../Configs';
+import { DataBaseCallBack } from '../../db/base/DataBaseCallBack';
+import { SyncData } from '../../db/bean/SyncData';
+import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
+import { FTDBManager } from '../../db/FTDBManager';
+import { DataType } from '../../enum/Enums';
+import { HttpBuilder } from '../../http/HttpBuilder';
+import { DataUploadThreadPool } from '../../thread/DataUploadThreadPool';
+import { ThreadPoolManager } from '../../thread/ThreadPoolManager';
+import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
   isLimitWithDbSize: () => boolean;
@@ -88,10 +87,6 @@ export interface SyncTaskManagerRuntime {
   setTimer(callback: () => void, interval: number): number;
   clearTimer(timerId: number): void;
   sleep(ms: number): Promise<void>;
-  logDebug(tag: string, message: string): void;
-  logInfo(tag: string, message: string): void;
-  logWarn(tag: string, message: string): void;
-  logError(tag: string, message: string): void;
 }
 
 export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
@@ -149,21 +144,5 @@ export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
 
   sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  logDebug(tag: string, message: string): void {
-    FTInnerLogger.d(tag, message);
-  }
-
-  logInfo(tag: string, message: string): void {
-    FTInnerLogger.i(tag, message);
-  }
-
-  logWarn(tag: string, message: string): void {
-    FTInnerLogger.w(tag, message);
-  }
-
-  logError(tag: string, message: string): void {
-    FTInnerLogger.e(tag, message);
   }
 }

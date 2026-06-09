@@ -57,16 +57,12 @@ export class FTDBCachePolicy {
     return FTDBCachePolicy.instance;
   }
 
-  public static setRuntimeForTest(runtime: Object): void {
+  public static setRuntimeInternal(runtime: Object): void {
     ftDBCachePolicyRuntime = runtime;
   }
 
-  public static resetRuntimeForTest(): void {
+  public static resetRuntimeInternal(): void {
     ftDBCachePolicyRuntime = new DefaultFTDBCachePolicyRuntime();
-  }
-
-  public static getDbManagerForTest(context: Context): Object {
-    return (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
   }
 
   /**
@@ -479,6 +475,14 @@ export class FTDBCachePolicy {
   public updateLogCacheLimitCount(logCacheLimitCount: number): void {
     this.logLimitCount = logCacheLimitCount;
     FTInnerLogger.d(TAG, `Log cache limit count updated: ${this.logLimitCount}`);
+  }
+
+  /**
+   * Update log cache discard strategy from FTLoggerConfig.
+   */
+  public updateLogCacheDiscardStrategy(logCacheDiscardStrategy: LogCacheDiscard): void {
+    this.logCacheDiscardStrategy = logCacheDiscardStrategy;
+    FTInnerLogger.d(TAG, `Log cache discard strategy updated: ${this.logCacheDiscardStrategy}`);
   }
 
   /**

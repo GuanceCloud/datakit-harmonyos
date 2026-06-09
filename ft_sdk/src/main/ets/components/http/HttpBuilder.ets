@@ -91,11 +91,11 @@ export class HttpBuilder {
     return HttpBuilder.capturedRequests[HttpBuilder.capturedRequests.length - 1];
   }
 
-  static setPayloadCompressorForTest(compressor: HttpPayloadCompressor | null): void {
+  static setPayloadCompressorInternal(compressor: HttpPayloadCompressor | null): void {
     HttpBuilder.payloadCompressor = compressor;
   }
 
-  static resetPayloadCompressorForTest(): void {
+  static resetPayloadCompressorInternal(): void {
     HttpBuilder.payloadCompressor = null;
   }
 

@@ -172,18 +172,6 @@ interface TimeDuration {
 // IS_PRE_CRASH is imported from that module
 
 /**
- * RUM statistics interface
- */
-interface RUMStatsJSON {
-    sessionId: string;
-    activeView: object;
-    activeAction: object;
-    resourceCount: number;
-    viewHistory: string[];
-    lastUserActiveTime: number;
-}
-
-/**
  * RUM context for crash recovery
  */
 interface RUMContext {
@@ -287,16 +275,6 @@ export class FTRUMInnerManager {
   
   // Flag to prevent concurrent execution of generateViewSum
   private isGeneratingViewSum: boolean = false;
-  private skipCleanCloseViewData: boolean = false; // Flag to skip cleanCloseViewData() when called from triggerGenerateRumData()
-  
-  /**
-   * Check if generateViewSum is currently running
-   * This is useful for stress testing scenarios to wait for all generateViewSum() calls to complete
-   * @returns true if generateViewSum is currently running
-   */
-  public isGeneratingViewSumRunning(): boolean {
-    return this.isGeneratingViewSum;
-  }
   
   // Timer for debouncing generateRumData calls (aligned with Android: mHandler.removeCallbacks)
   private rumDataGenerateTimer: number | null = null;
@@ -372,90 +350,6 @@ export class FTRUMInnerManager {
     }
   }
 
-  /**
-   * Public method to trigger RUM data generation
-   * This is useful for stress testing scenarios where all views are generated
-   * and we need to ensure all data is processed after database writes complete
-   * 
-   * Before triggering, we clear processedViewIds and insertedViewIds to allow
-   * generateViewSum to reprocess all views from the database. This ensures that
-   * views that were marked as processed but not actually inserted to sync table
-   * can be processed again.
-   * 
-   * This method directly executes generateActionSum and generateViewSum without
-   * debounce delay, ensuring immediate processing after clearing the processed sets.
-   */
-  public async triggerGenerateRumData(): Promise<void> {
-    // CRITICAL: Cancel any pending generateRumData() debounce timer first
-    // This prevents the debounced generateRumData() from executing after we clear the processed sets
-    // If we don't cancel the timer, the debounced generateRumData() might execute after we clear
-    // processedViewIds/insertedViewIds, but before we execute generateViewSum(), causing views
-    // to be marked as processed again before we can process them
-    if (this.rumDataGenerateTimer !== null) {
-      clearTimeout(this.rumDataGenerateTimer);
-      this.rumDataGenerateTimer = null;
-    }
-    
-    // Wait for any currently executing generateRumData() to complete
-    // The debounce delay is 100ms, but we need to wait longer to ensure any currently executing
-    // generateViewSum() also completes, as it may be marking views as processed
-    // Also wait for any currently executing generateViewSum() to complete
-    // CRITICAL: We need to wait until isGeneratingViewSum becomes false
-    // Wait in a loop until generateViewSum is not running
-    let waitCount = 0;
-    const maxWaitCount = 50; // Maximum 5 seconds (50 * 100ms)
-    while (this.isGeneratingViewSum && waitCount < maxWaitCount) {
-      await new Promise<void>((resolve: () => void) => {
-        setTimeout(() => {
-          resolve();
-        }, 100); // Check every 100ms
-      });
-      waitCount++;
-      // Removed verbose debug log to reduce log output
-    }
-    
-    if (this.isGeneratingViewSum) {
-      FTInnerLogger.w(TAG, `generateViewSum() is still running after ${maxWaitCount * 100}ms, proceeding anyway`);
-    }
-    
-    // CRITICAL: Reset all views' upload_time to 0 IMMEDIATELY after clearing processed sets
-    // This must be done BEFORE waiting for async database writes, to prevent other generateViewSum()
-    // calls from deleting closed views. If we wait 500ms, other generateViewSum() calls may
-    // have already deleted the closed views, leaving only a few views in the database.
-    // By resetting upload_time immediately, we ensure that even if views are deleted later,
-    // at least we've reset the upload_time for the views that are still in the database.
-    if (this.context) {
-      try {
-        await FTDBManager.getInstance(this.context).resetViewUploadTime();
-      } catch (error) {
-        FTInnerLogger.e(TAG, `Failed to reset views' upload_time: ${error}`);
-      }
-    }
-    
-    // Add a delay to ensure all async database writes from closeView() are completed
-    // closeView() uses eventThreadPool.executeEventTask() which is asynchronous
-    // We need to wait for these writes to complete before querying the database
-    await new Promise<void>((resolve: () => void) => {
-      setTimeout(() => {
-        resolve();
-      }, 500); // Increased from 300ms to 500ms to ensure all async database writes complete
-    });
-    
-    // Directly execute generateActionSum and generateViewSum without debounce delay
-    // This ensures immediate processing after clearing the processed sets
-    // Set flag to skip cleanCloseViewData() to prevent deleting views that need to be re-processed
-    this.skipCleanCloseViewData = true;
-    try {
-      await this.generateActionSum();
-      await this.generateViewSum();
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error generating RUM data in triggerGenerateRumData: ${error}`);
-    } finally {
-      // Reset flag after execution
-      this.skipCleanCloseViewData = false;
-    }
-  }
-  
   /**
    * Process actions from actionBeanList and call FTTrackInner.rum()
    */
@@ -797,12 +691,7 @@ export class FTRUMInnerManager {
       // Clean up all closed views from database (aligned with Android: cleanCloseViewData() at the end)
       // This ensures all closed views are deleted, not just the ones we processed
       // This is important because the same view might have multiple closed versions in the database
-      // However, skip this when called from triggerGenerateRumData() to prevent deleting views
-      // that need to be re-processed after resetting upload_time
-      if (!this.skipCleanCloseViewData) {
-        await FTDBManager.getInstance(this.context).cleanCloseViewData();
-      } else {
-      }
+      await FTDBManager.getInstance(this.context).cleanCloseViewData();
       
       
     } catch (error) {
@@ -1061,14 +950,25 @@ export class FTRUMInnerManager {
     return FTRUMInnerManager.instance;
   }
 
-  public static resetStateForTest(): void {
+  public static resetStateInternal(): void {
     if (FTRUMInnerManager.instance !== null) {
-      FTRUMInnerManager.instance.resetInternalStateForTest();
+      FTRUMInnerManager.instance.resetInternalState();
     }
     FTRUMInnerManager.instance = null;
   }
 
-  private resetInternalStateForTest(): void {
+  public static shutdownInternal(): void {
+    const instance = FTRUMInnerManager.instance;
+    if (instance === null) {
+      return;
+    }
+
+    instance.shutdown().catch((error: Error) => {
+      FTInnerLogger.e(TAG, `Error shutting down RUM manager: ${error.message}`);
+    });
+  }
+
+  private resetInternalState(): void {
     if (this.actionCheckTimer !== null) {
       clearTimeout(this.actionCheckTimer);
       this.actionCheckTimer = null;
@@ -1105,7 +1005,6 @@ export class FTRUMInnerManager {
     this.rumConfig = null;
     this.isGeneratingActionSum = false;
     this.isGeneratingViewSum = false;
-    this.skipCleanCloseViewData = false;
     this.processedActionIds.clear();
     this.insertedActionIds.clear();
     this.actionInsertLock = Promise.resolve();
@@ -1113,14 +1012,6 @@ export class FTRUMInnerManager {
     this.sessionRefreshLock = Promise.resolve();
     this.preferencesStore = null;
     this.preferencesInitialized = false;
-  }
-  
-  /**
-   * Initialize RUM application ID
-   */
-  public initRumAppId(appId: string): void {
-    this.rumAppId = appId || "";
-    FTInnerLogger.i(TAG, `RUM App ID initialized: ${this.rumAppId}`);
   }
   
   /**
@@ -1331,21 +1222,6 @@ export class FTRUMInnerManager {
     return this.context;
   }
 
-  /**
-   * Get RUM app ID
-   */
-  public getAppId(): string {
-    return this.rumAppId;
-  }
-
-  /**
-   * Get session sample rate
-   */
-  private getSessionSampleRate(): number {
-    // Return the configured sampling rate, default to 1.0
-    return this.rumConfig?.getSamplingRate() || 1.0;
-  }
-  
   /**
    * Start view
    */
@@ -3352,22 +3228,7 @@ export class FTRUMInnerManager {
   public getActiveAction(): ActiveActionBean | null {
     return this.activeAction;
   }
-  
-  /**
-   * Get RUM statistics
-   */
-  public getRUMStats(): RUMStatsJSON {
-    const result: RUMStatsJSON = {
-      sessionId: this.sessionId,
-      activeView: this.activeView?.toJSON() || new Object(),
-      activeAction: this.activeAction?.toJSON() || new Object(),
-      resourceCount: this.resourceBeanMap.size,
-      viewHistory: [...this.viewList],
-      lastUserActiveTime: this.lastUserActiveTime
-    };
-    return result;
-  }
-  
+
   /**
    * Shutdown RUM manager
    */
@@ -3383,6 +3244,11 @@ export class FTRUMInnerManager {
         clearInterval(this.sessionCheckTimer);
         this.sessionCheckTimer = null;
       }
+
+      if (this.rumGenerateTimer) {
+        clearTimeout(this.rumGenerateTimer);
+        this.rumGenerateTimer = null;
+      }
       
       // Close current activities
       if (this.activeAction && !this.activeAction.isActionClose()) {
@@ -3394,6 +3260,8 @@ export class FTRUMInnerManager {
         this.activeView.close();
         await this.closeView(this.activeView);
       }
+      this.activeAction = null;
+      this.activeView = null;
       
       // Clear resources
       this.resourceBeanMap.clear();
@@ -3411,6 +3279,12 @@ export class FTRUMInnerManager {
         clearTimeout(this.rumDataGenerateTimer);
         this.rumDataGenerateTimer = null;
       }
+
+      this.context = null;
+      this.userData = null;
+      this.rumConfig = null;
+      this.preferencesStore = null;
+      this.preferencesInitialized = false;
     } catch (error) {
       FTInnerLogger.e(TAG, `Error during shutdown: ${error}`);
     }
@@ -3429,21 +3303,6 @@ export class FTRUMInnerManager {
       return false;
     }
   }
-
-
-  /**
-   * Process RUM data
-   */
-  private async processRumData(): Promise<void> {
-    try {
-      await this.generateActionSum();
-      await this.generateViewSum();
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Process RUM data failed: ${error as string}`);
-    }
-  }
-
-
 
 
   /**

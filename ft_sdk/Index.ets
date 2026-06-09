@@ -144,12 +144,6 @@ export {
   FTSDKExtensionRequestInput,
   FTSDKExtensionPreparedRequest,
   FTSDKExtensionResponseInput,
-  resolveFTSDKExtensionAutoTrackOptions,
-  prepareFTSDKHttpRequest,
-  completeFTSDKHttpResponse,
-  completeFTSDKHttpError,
-  prepareFTSDKAxiosChainRequest,
-  logFTSDKExtensionError
 } from './src/main/ets/components/integration';
 
 // ============================================================================

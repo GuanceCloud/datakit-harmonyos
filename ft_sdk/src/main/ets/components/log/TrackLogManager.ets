@@ -71,13 +71,13 @@ export class TrackLogManager {
     return TrackLogManager.instance;
   }
 
-  public static resetStateForTest(): void {
+  public static resetStateInternal(): void {
     if (TrackLogManager.instance !== null) {
-      TrackLogManager.instance.resetInternalStateForTest();
+      TrackLogManager.instance.resetInternalState();
     }
   }
 
-  private resetInternalStateForTest(): void {
+  private resetInternalState(): void {
     this.shutdown();
     this.logConfig = null;
     this.bufferLocked = false;

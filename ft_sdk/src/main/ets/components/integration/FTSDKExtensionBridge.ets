@@ -197,18 +197,52 @@ export class FTSDKExtensionBridge {
   }
 
   public static completeHttpError(response: FTSDKExtensionResponseInput): boolean {
-    const errorResponse: FTSDKExtensionResponseInput = {
-      url: response.url,
-      method: response.method,
-      uniqueId: response.uniqueId,
-      requestHeaders: response.requestHeaders,
-      responseHeaders: response.responseHeaders,
-      statusCode: response.statusCode || 0,
-      body: response.body,
-      errorMessage: response.errorMessage || 'Unknown error',
-      errorStack: response.errorStack
-    };
-    return FTSDKExtensionBridge.completeHttpResponse(errorResponse);
+    const requestHeaders = FTSDKExtensionBridge.normalizeHeaders(response.requestHeaders);
+    const uniqueId = FTSDKExtensionBridge.resolveUniqueId(response.uniqueId, requestHeaders);
+    if (!uniqueId) {
+      FTInnerLogger.w(TAG, `[HTTP-Error] Missing resource id for ${response.url}`);
+      return false;
+    }
+
+    const method = FTSDKExtensionBridge.resolveMethod(response.method, requestHeaders);
+    const fallbackResourceId = buildAutoTrackResourceId(method, response.url, uniqueId);
+    const state = HttpAutoTrackStateStore.getInstance().get(fallbackResourceId) as FTSDKExtensionHttpState | undefined;
+    if (!state) {
+      FTInnerLogger.w(TAG, `[HTTP-Error] Missing initial interceptor state for ${response.url}, uniqueId=${uniqueId}`);
+      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
+      return false;
+    }
+
+    try {
+      if (state.traceEnabled) {
+        try {
+          const responseHeaders = FTSDKExtensionBridge.normalizeHeaders(response.responseHeaders);
+          const responseBodyText = tryGetOptionalResponseBodyText(response.body);
+          FTSDKExtensionBridge.completeTrace(state, response.statusCode || 0, responseHeaders, responseBodyText);
+        } catch (traceError) {
+          FTInnerLogger.e(TAG, `[HTTP-Error] Failed to complete trace for ${state.resourceId}: ${traceError}`);
+        }
+      }
+
+      if (state.resourceEnabled) {
+        FTSDKExtensionBridge.completeResourceError(
+          state,
+          response.url,
+          response.errorMessage || 'Unknown error',
+          response.errorStack
+        );
+      }
+    } catch (error) {
+      FTInnerLogger.e(TAG, `[HTTP-Error] Failed to complete error for ${state.resourceId}: ${error}`);
+      if (state.resourceEnabled) {
+        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined);
+      }
+    } finally {
+      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
+      HttpAutoTrackStateStore.getInstance().delete(state.resourceId);
+    }
+
+    return true;
   }
 
   public static prepareAxiosChainRequest(request: FTSDKExtensionRequestInput): FTSDKExtensionPreparedRequest {
@@ -234,14 +268,6 @@ export class FTSDKExtensionBridge {
 
   public static clearAxiosMethod(uniqueId: string): void {
     AxiosChainMethodStore.getInstance().delete(uniqueId);
-  }
-
-  public static logDebug(tag: string, message: string): void {
-    FTInnerLogger.d(tag, message);
-  }
-
-  public static logWarn(tag: string, message: string): void {
-    FTInnerLogger.w(tag, message);
   }
 
   public static logError(tag: string, message: string): void {
@@ -404,11 +430,13 @@ export class FTSDKExtensionBridge {
     const resourceParams = new ResourceParams();
     resourceParams.setUrl(url);
     resourceParams.setResourceMethod(state.method);
+    resourceParams.setRequestHeaderMap(buildRequestHeaderMap(state.requestHeaders));
+    resourceParams.setRequestHeader(JSON.stringify(state.requestHeaders));
     resourceParams.setRequestErrorMsg(errorMessage);
-    if (errorStack) {
-      resourceParams.setRequestErrorStack(errorStack);
-    }
+    resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
+    const metricValue: PerformanceMetricValue = { value: Math.max(Date.now() - state.startTime, 1) * 1000000 };
+    resourceParams.addProperty('resourceLoad', metricValue);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
     FTRUMInnerManager.getInstance().stopResource(state.resourceId, state.actionId);
   }
@@ -442,53 +470,4 @@ export class FTSDKExtensionBridge {
     const normalized = method.toUpperCase();
     return normalized.length > 0 ? normalized : HTTP_METHOD_UNKNOWN;
   }
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.resolveAutoTrackOptions instead.
- */
-export function resolveFTSDKExtensionAutoTrackOptions(
-  options: FTSDKExtensionAutoTrackOptions = {}
-): FTSDKExtensionResolvedAutoTrackOptions {
-  return FTSDKExtensionBridge.resolveAutoTrackOptions(options);
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.prepareHttpRequest instead.
- */
-export function prepareFTSDKHttpRequest(
-  request: FTSDKExtensionRequestInput,
-  options: FTSDKExtensionAutoTrackOptions = {}
-): FTSDKExtensionPreparedRequest {
-  return FTSDKExtensionBridge.prepareHttpRequest(request, options);
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.completeHttpResponse instead.
- */
-export function completeFTSDKHttpResponse(response: FTSDKExtensionResponseInput): boolean {
-  return FTSDKExtensionBridge.completeHttpResponse(response);
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.completeHttpError instead.
- */
-export function completeFTSDKHttpError(response: FTSDKExtensionResponseInput): boolean {
-  return FTSDKExtensionBridge.completeHttpError(response);
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.prepareAxiosChainRequest instead.
- */
-export function prepareFTSDKAxiosChainRequest(
-  request: FTSDKExtensionRequestInput
-): FTSDKExtensionPreparedRequest {
-  return FTSDKExtensionBridge.prepareAxiosChainRequest(request);
-}
-
-/**
- * @deprecated Internal compatibility facade. Use FTSDKExtensionBridge.logError instead.
- */
-export function logFTSDKExtensionError(tag: string, message: string): void {
-  FTSDKExtensionBridge.logError(tag, message);
 }

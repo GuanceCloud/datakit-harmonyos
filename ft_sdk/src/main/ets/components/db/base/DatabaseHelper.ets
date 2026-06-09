@@ -8,18 +8,6 @@ import { FTInnerLogger } from '../../log/FTLogger';
 
 const TAG = "DatabaseHelper";
 
-export interface DatabaseHelperRuntime {
-  getRdbStore(context: Context, config: relationalStore.StoreConfig): Promise<relationalStore.RdbStore>;
-}
-
-class DefaultDatabaseHelperRuntime implements DatabaseHelperRuntime {
-  async getRdbStore(context: Context, config: relationalStore.StoreConfig): Promise<relationalStore.RdbStore> {
-    return await relationalStore.getRdbStore(context, config);
-  }
-}
-
-let databaseHelperRuntime: DatabaseHelperRuntime = new DefaultDatabaseHelperRuntime();
-
 /**
  * Database helper class
  * Responsible for database creation, upgrade and table structure management
@@ -46,57 +34,12 @@ export class DatabaseHelper {
     return DatabaseHelper.instance;
   }
 
-  public static setRuntimeForTest(runtime: DatabaseHelperRuntime): void {
-    databaseHelperRuntime = runtime;
-  }
-
-  public static resetRuntimeForTest(): void {
-    databaseHelperRuntime = new DefaultDatabaseHelperRuntime();
-  }
-
-  public static resetInstanceForTest(): void {
+  public static resetInstanceInternal(): void {
+    if (DatabaseHelper.instance) {
+      DatabaseHelper.instance.rdbStore = null;
+      DatabaseHelper.instance.initPromise = null;
+    }
     DatabaseHelper.instance = null;
-  }
-
-  public setRdbStoreForTest(rdbStore: relationalStore.RdbStore | null): void {
-    this.rdbStore = rdbStore;
-  }
-
-  public resetStateForTest(): void {
-    this.rdbStore = null;
-    this.initPromise = null;
-  }
-
-  public async checkTablesExistForTest(): Promise<boolean> {
-    return await this.checkTablesExist();
-  }
-
-  public async checkAndUpgradeDatabaseForTest(): Promise<void> {
-    await this.checkAndUpgradeDatabase();
-  }
-
-  public async hasVersionColumnsForTest(): Promise<boolean> {
-    return await this.hasVersionColumns();
-  }
-
-  public async hasTableForTest(tableName: string): Promise<boolean> {
-    return await this.hasTable(tableName);
-  }
-
-  public async createTablesForTest(): Promise<void> {
-    await this.createTables();
-  }
-
-  public async createIndexesForTest(): Promise<void> {
-    await this.createIndexes();
-  }
-
-  public createIndexesSyncForTest(rdbStore: relationalStore.RdbStore): void {
-    this.createIndexesSync(rdbStore);
-  }
-
-  public handleUpgradeSyncForTest(rdbStore: relationalStore.RdbStore, oldVersion: number, newVersion: number): void {
-    this.handleUpgradeSync(rdbStore, oldVersion, newVersion);
   }
 
   /**
@@ -135,7 +78,7 @@ export class DatabaseHelper {
       // Get RDB store (HarmonyOS getRdbStore API: getRdbStore(context, config))
       // Note: HarmonyOS doesn't support RdbHelper for automatic version management like Android
       // We need to manually check version and handle upgrades
-      this.rdbStore = await databaseHelperRuntime.getRdbStore(this.context, config);
+      this.rdbStore = await relationalStore.getRdbStore(this.context, config);
       
       // Always create tables first (CREATE TABLE IF NOT EXISTS is safe and idempotent)
       // This ensures tables exist even if checkTablesExist() has race conditions

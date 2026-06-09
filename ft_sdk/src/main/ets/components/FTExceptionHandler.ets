@@ -10,7 +10,7 @@ import {
   DefaultFTExceptionHandlerRuntime,
   FTExceptionNativeCrashHandler,
   FTExceptionHandlerRuntime
-} from './FTExceptionHandlerRuntime';
+} from './internal/runtime/FTExceptionHandlerRuntime';
 
 const TAG = "FTExceptionHandler";
 
@@ -47,12 +47,12 @@ export class FTExceptionHandler {
     return FTExceptionHandler.instance;
   }
 
-  public static setRuntimeForTest(runtime: FTExceptionHandlerRuntime): void {
+  public static setRuntimeInternal(runtime: FTExceptionHandlerRuntime): void {
     FTExceptionHandler.release();
     FTExceptionHandler.runtime = runtime;
   }
 
-  public static resetRuntimeForTest(): void {
+  public static resetRuntimeInternal(): void {
     FTExceptionHandler.release();
     FTExceptionHandler.runtime = new DefaultFTExceptionHandlerRuntime();
   }

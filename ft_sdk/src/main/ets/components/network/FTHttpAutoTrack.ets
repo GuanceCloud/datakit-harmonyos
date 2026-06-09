@@ -37,6 +37,42 @@ function createGeneratedResourceId(): string {
   return ensureHttpResourceId(headers);
 }
 
+function hasKnownTraceHeaders(headers: Record<string, string>): boolean {
+  const traceHeaderKeys: string[] = [
+    FTTraceHandler.DD_TRACE_TRACE_ID_KEY,
+    FTTraceHandler.ZIPKIN_TRACE_ID,
+    FTTraceHandler.ZIPKIN_B3_HEADER,
+    FTTraceHandler.W3C_TRACEPARENT_KEY,
+    FTTraceHandler.JAEGER_KEY,
+    FTTraceHandler.SKYWALKING_V3_SW_8
+  ];
+
+  for (let i = 0; i < traceHeaderKeys.length; i++) {
+    if (headers[traceHeaderKeys[i]] !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasKnownTraceHeaderMap(headers: Map<string, string>): boolean {
+  const traceHeaderKeys: string[] = [
+    FTTraceHandler.DD_TRACE_TRACE_ID_KEY,
+    FTTraceHandler.ZIPKIN_TRACE_ID,
+    FTTraceHandler.ZIPKIN_B3_HEADER,
+    FTTraceHandler.W3C_TRACEPARENT_KEY,
+    FTTraceHandler.JAEGER_KEY,
+    FTTraceHandler.SKYWALKING_V3_SW_8
+  ];
+
+  for (let i = 0; i < traceHeaderKeys.length; i++) {
+    if (headers.has(traceHeaderKeys[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Interface for TimeInfo structure from RCP response
  * Represents possible timing data fields
@@ -374,9 +410,13 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
       resourceParams.setResourceMethod(method);
+      resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
+      resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
       resourceParams.setRequestErrorMsg(error.message || 'Unknown error');
-      resourceParams.setRequestErrorStack(error.stack || '');
+      resourceParams.setRequestErrorStack((error.stack && error.stack.length > 0) ? error.stack : String(error));
       resourceParams.setResourceStatus(0);
+      const metricValue: PerformanceMetricValue = { value: Math.max(responseTime, 1) * 1000000 };
+      resourceParams.addProperty('resourceLoad', metricValue);
 
       FTInnerLogger.e(
         TAG,
@@ -463,8 +503,6 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       }
 
       const resourceId = `${method}_${url}_${uniqueId}`;
-      const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
-
       const headersMap = new Map<string, string>();
       if (context.request.headers) {
         const headerKeys = Object.keys(context.request.headers);
@@ -479,10 +517,20 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         }
       }
 
-      const traceHeaderKeys = Object.keys(traceHeaders);
-      for (let i = 0; i < traceHeaderKeys.length; i++) {
-        const key = traceHeaderKeys[i];
-        headersMap.set(key, traceHeaders[key]);
+      let traceHeaders: Record<string, string> = {};
+      let traceId: string | undefined = undefined;
+      let spanId: string | undefined = undefined;
+      if (!hasKnownTraceHeaderMap(headersMap)) {
+        traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
+        const traceHandler = FTTraceManager.getInstance().getHandler(resourceId);
+        traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
+        spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+
+        const traceHeaderKeys = Object.keys(traceHeaders);
+        for (let i = 0; i < traceHeaderKeys.length; i++) {
+          const key = traceHeaderKeys[i];
+          headersMap.set(key, traceHeaders[key]);
+        }
       }
 
       const requestData: HttpRequestData = {
@@ -490,7 +538,9 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         method: method,
         headers: headersMap,
         body: undefined,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        traceId: traceId,
+        spanId: spanId
       };
 
       const interceptedRequest = this.traceInterceptor.interceptRequest(requestData);
@@ -527,7 +577,9 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
           statusCode: response.statusCode || 0,
           headers: responseHeadersMap,
           body: undefined,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          traceId: traceId,
+          spanId: spanId
         };
         this.traceInterceptor.interceptResponse(responseData);
         FTInnerLogger.d(
@@ -728,7 +780,8 @@ function buildAxiosAutoTrackState(
 
   let finalHeaders = headers;
   if (traceEnabled) {
-    const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
+    let traceId: string | undefined = undefined;
+    let spanId: string | undefined = undefined;
     const headersMap = new Map<string, string>();
 
     const headerKeys = Object.keys(headers);
@@ -737,10 +790,17 @@ function buildAxiosAutoTrackState(
       headersMap.set(key, headers[key]);
     }
 
-    const traceHeaderKeys = Object.keys(traceHeaders);
-    for (let i = 0; i < traceHeaderKeys.length; i++) {
-      const key = traceHeaderKeys[i];
-      headersMap.set(key, traceHeaders[key]);
+    if (!hasKnownTraceHeaders(headers)) {
+      const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
+      const traceHandler = FTTraceManager.getInstance().getHandler(resourceId);
+      traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
+      spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+
+      const traceHeaderKeys = Object.keys(traceHeaders);
+      for (let i = 0; i < traceHeaderKeys.length; i++) {
+        const key = traceHeaderKeys[i];
+        headersMap.set(key, traceHeaders[key]);
+      }
     }
 
     const traceInterceptor = createAxiosTraceInterceptor();
@@ -750,7 +810,9 @@ function buildAxiosAutoTrackState(
         method: method,
         headers: headersMap,
         body: typeof config.data === 'string' ? config.data : undefined,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        traceId: traceId,
+        spanId: spanId
       });
 
       finalHeaders = {};

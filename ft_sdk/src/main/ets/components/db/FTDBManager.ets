@@ -17,19 +17,6 @@ import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
 
 const TAG = "FTDBManager";
-const DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS = 30 * 1000;
-
-export interface FTDBManagerRuntime {
-  getDatabaseHelper(context: Context): DatabaseHelper;
-}
-
-class DefaultFTDBManagerRuntime implements FTDBManagerRuntime {
-  getDatabaseHelper(context: Context): DatabaseHelper {
-    return DatabaseHelper.getInstance(context);
-  }
-}
-
-let ftDBManagerRuntime: FTDBManagerRuntime = new DefaultFTDBManagerRuntime();
 
 /**
  * Action counts interface
@@ -53,12 +40,9 @@ interface ActionInfo {
  */
 export class FTDBManager extends DBManager {
   private static instance: FTDBManager | null = null;
-  private static delayedActionCleanupDelayMs: number = DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS;
   private databaseHelper: DatabaseHelper | null = null;
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
-  private dbOperationErrorForTest: Error | null = null;
-  private dbOperationErrorOnceForTest: Error | null = null;
   
   // Thread-safe Set for deduplication (using Map for thread-safety in async operations)
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
@@ -72,24 +56,9 @@ export class FTDBManager extends DBManager {
     this.context = context;
   }
 
-  public static setDbRuntimeForTest(runtime: FTDBManagerRuntime): void {
-    ftDBManagerRuntime = runtime;
-  }
-
-  public static resetDbRuntimeForTest(): void {
-    ftDBManagerRuntime = new DefaultFTDBManagerRuntime();
-  }
-
-  public static resetInstanceForTest(): void {
+  public static resetInstanceInternal(): void {
     FTDBManager.instance = null;
-  }
-
-  public static setDelayedActionCleanupDelayForTest(delayMs: number): void {
-    FTDBManager.delayedActionCleanupDelayMs = delayMs;
-  }
-
-  public static resetDelayedActionCleanupDelayForTest(): void {
-    FTDBManager.delayedActionCleanupDelayMs = DEFAULT_DELAYED_ACTION_CLEANUP_DELAY_MS;
+    DatabaseHelper.resetInstanceInternal();
   }
 
   /**
@@ -101,7 +70,7 @@ export class FTDBManager extends DBManager {
     if (!FTDBManager.instance) {
       FTDBManager.instance = new FTDBManager(context);
       // Initialize database helper immediately
-      FTDBManager.instance.databaseHelper = ftDBManagerRuntime.getDatabaseHelper(context);
+      FTDBManager.instance.databaseHelper = DatabaseHelper.getInstance(context);
     }
     return FTDBManager.instance;
   }
@@ -127,7 +96,7 @@ export class FTDBManager extends DBManager {
     // Start initialization
     this.initPromise = (async () => {
       try {
-        this.databaseHelper = ftDBManagerRuntime.getDatabaseHelper(this.context);
+        this.databaseHelper = DatabaseHelper.getInstance(this.context);
         await this.databaseHelper.initDatabase();
         FTInnerLogger.i(TAG, "FTDBManager initialized successfully");
       } catch (error) {
@@ -153,66 +122,6 @@ export class FTDBManager extends DBManager {
       throw new Error("DatabaseHelper not initialized");
     }
     return await this.databaseHelper.initDatabase();
-  }
-
-  protected async getDBWithCount(write: boolean, operationCount: number, callback: DataBaseCallBack): Promise<void> {
-    if (this.dbOperationErrorOnceForTest) {
-      const error = this.dbOperationErrorOnceForTest;
-      this.dbOperationErrorOnceForTest = null;
-      throw error;
-    }
-    if (this.dbOperationErrorForTest) {
-      throw this.dbOperationErrorForTest;
-    }
-    await super.getDBWithCount(write, operationCount, callback);
-  }
-
-  public setDatabaseHelperForTest(databaseHelper: DatabaseHelper | null): void {
-    this.databaseHelper = databaseHelper;
-  }
-
-  public extractUniqueIdForTest(dataType: DataType, dataString: string): string | null {
-    return this.extractUniqueId(dataType, dataString);
-  }
-
-  public async checkDataExistsForTest(dataType: DataType, dataString: string): Promise<boolean> {
-    return await this.checkDataExists(dataType, dataString);
-  }
-
-  public async deleteDuplicateDataForTest(dataType: DataType, uniqueId: string): Promise<boolean> {
-    return await this.deleteDuplicateData(dataType, uniqueId);
-  }
-
-  public async markDataAsInsertedForTest(dataType: DataType, dataString: string): Promise<void> {
-    await this.markDataAsInserted(dataType, dataString);
-  }
-
-  public getInsertedDataIdCountForTest(): number {
-    return this.insertedDataIds.size;
-  }
-
-  public addInsertedDataIdForTest(key: string): void {
-    this.insertedDataIds.set(key, true);
-  }
-
-  public setDedupLockForTest(dedupLock: Promise<void>): void {
-    this.dedupLock = dedupLock;
-  }
-
-  public setDBOperationErrorForTest(message: string | null): void {
-    this.dbOperationErrorForTest = message ? new Error(message) : null;
-  }
-
-  public setDBOperationErrorOnceForTest(message: string): void {
-    this.dbOperationErrorOnceForTest = new Error(message);
-  }
-
-  public async cleanupOldDataForTest(rdbStore: relationalStore.RdbStore): Promise<void> {
-    await this.cleanupOldData(rdbStore);
-  }
-
-  public onDBSizeCacheChangeForTest(rdbStore: relationalStore.RdbStore, fileSize: number): void {
-    this.onDBSizeCacheChange(rdbStore, fileSize);
   }
 
   /**
@@ -1312,40 +1221,6 @@ export class FTDBManager extends DBManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to close view: ${error}`);
       return false;
-    }
-  }
-
-  /**
-   * Update View update time (increment counter), used to mark delayed Resource data
-   * Aligned with Android implementation
-   * @param viewId View ID
-   * @returns Promise<boolean>
-   */
-  /**
-   * Reset upload_time for all views to 0
-   * This is used in triggerGenerateRumData() to allow re-querying views that were already uploaded
-   * @returns Promise<number> Number of views updated
-   */
-  public async resetViewUploadTime(): Promise<number> {
-    try {
-      class ResetViewUploadTimeCallback implements DataBaseCallBack {
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-          
-          const values: relationalStore.ValuesBucket = {
-            data_upload_time: 0
-          };
-          
-          await rdbStore.update(values, predicates);
-        }
-      }
-      
-      const callback = new ResetViewUploadTimeCallback();
-      await this.getDB(true, callback);
-      return 0; // Return value not critical, just for consistency
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Reset view upload time failed: ${error as string}`);
-      return 0;
     }
   }
 
@@ -2454,7 +2329,7 @@ export class FTDBManager extends DBManager {
               FTInnerLogger.e(TAG, `Delayed action pending resource cleanup failed: ${error}`);
             }
           })();
-        }, FTDBManager.delayedActionCleanupDelayMs);
+        }, 30 * 1000);
       }
       
       return callback.getWasClosed();

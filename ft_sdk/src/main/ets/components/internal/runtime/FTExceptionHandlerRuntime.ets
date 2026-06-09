@@ -1,10 +1,10 @@
 import { errorManager } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
-import { AppState } from './rum/enum/RUMEnums';
-import { FTSDK } from './FTSDK';
-import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
-import { FTNativeCrashHandler } from './FTNativeCrashHandler';
+import { FTRUMInnerManager } from '../../rum/FTRUMInnerManager';
+import { AppState } from '../../rum/enum/RUMEnums';
+import { FTSDK } from '../../FTSDK';
+import { RunnerCompleteCallBack } from '../../rum/callback/RunnerCompleteCallBack';
+import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 
 export interface FTExceptionRumManager {
   stopView(): Promise<void>;
