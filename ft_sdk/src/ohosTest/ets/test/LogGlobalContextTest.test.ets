@@ -36,7 +36,7 @@ export default function logGlobalContextTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('logContextShouldPersistStaticAndDynamicContextIntoLineProtocol', 0, async () => {
+    it('logContextShouldPersistInPayload', 0, async () => {
       const dynamicContext: Map<string, string> = new Map();
       dynamicContext.set(DYNAMIC_KEY, DYNAMIC_VALUE);
 

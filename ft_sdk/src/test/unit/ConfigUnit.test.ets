@@ -1,11 +1,33 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { Context, common } from '@kit.AbilityKit';
+import { UIContext } from '@kit.ArkUI';
+import window from '@ohos.window';
 import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
-import { DBCacheDiscard, EnvType, LogCacheDiscard, SyncPageSize } from '../../main/ets/components/enum/Enums';
+import {
+  DataType,
+  DBCacheDiscard,
+  EnvType,
+  LogCacheDiscard,
+  RUMCacheDiscard,
+  SyncPageSize
+} from '../../main/ets/components/enum/Enums';
 import { Status as LogLevel } from '../../main/ets/components/bean/Status';
 import { DeviceMetricsMonitorType } from '../../main/ets/components/rum/enum/DeviceMetricsMonitorType';
 import { ErrorMonitorType } from '../../main/ets/components/rum/enum/ErrorMonitorType';
+import { FTDBCachePolicy } from '../../main/ets/components/db/FTDBCachePolicy';
+import { FTSDK } from '../../main/ets/components/FTSDK';
+import FTTrackInner from '../../main/ets/components/FTTrackInner';
+import { FTSDKAnrManager, FTSDKRuntime } from '../../main/ets/components/internal/runtime/FTSDKRuntime';
+import { SdkInternalTestAccess } from '../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
+import { FTLogger } from '../../main/ets/components/log/FTLogger';
+import { TrackLogManager } from '../../main/ets/components/log/TrackLogManager';
+import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
+import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
+import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
+import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
+import { HeaderHandler, TraceData } from '../../main/ets/components/trace/FTTraceInterceptor';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { TestReset } from '../helpers/TestReset';
 
@@ -13,17 +35,171 @@ const TEST_FAKE_URL = 'http://www.test.url';
 const TEST_FAKE_CLIENT_TOKEN = 'fake_client_token';
 const TEST_FAKE_RUM_ID = 'rumId';
 
+class TestConfigRecord implements ConfigRecord {
+  private config: FTSDKConfig;
+
+  constructor(config: FTSDKConfig) {
+    this.config = config;
+  }
+
+  isLimitWithDbSize(): boolean {
+    return this.config.isLimitWithDbSize();
+  }
+
+  getDbCacheLimit(): number {
+    return this.config.getDbCacheLimit();
+  }
+
+  getLogCacheLimitCount(): number {
+    return this.config.getLogCacheLimitCount();
+  }
+
+  getRumCacheLimitCount(): number {
+    return this.config.getRumCacheLimitCount();
+  }
+
+  getDBCacheDiscard(): string {
+    return this.config.getDBCacheDiscard();
+  }
+
+  getLogCacheDiscard(): string {
+    return this.config.getLogCacheDiscard();
+  }
+
+  getRumCacheDiscard(): string {
+    return this.config.getRumCacheDiscard();
+  }
+}
+
+class RecordingConfigHeaderHandler implements HeaderHandler {
+  public requestTraceId: string = '';
+  public requestSpanId: string = '';
+
+  processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
+    this.requestTraceId = traceData.traceId;
+    this.requestSpanId = traceData.spanId;
+    headers.set('x-config-handler-trace-id', traceData.traceId);
+    return headers;
+  }
+
+  processResponseHeaders(headers: Map<string, string>, _traceData: TraceData): Map<string, string> {
+    return headers;
+  }
+}
+
+class FakeAnrManager implements FTSDKAnrManager {
+  initializeCount: number = 0;
+  startMonitoringCount: number = 0;
+  shutdownCount: number = 0;
+
+  initialize(): void {
+    this.initializeCount++;
+  }
+
+  startMonitoring(): void {
+    this.startMonitoringCount++;
+  }
+
+  shutdown(): void {
+    this.shutdownCount++;
+  }
+}
+
+class FakeFTSDKRuntime implements FTSDKRuntime {
+  context: common.UIAbilityContext | null = null;
+  uiContext: UIContext | null = null;
+  anrManager: FakeAnrManager = new FakeAnrManager();
+  syncTaskInitCount: number = 0;
+  exceptionHandlerInitCount: number = 0;
+  uiBlockStartCount: number = 0;
+  lifecycleRegisterCount: number = 0;
+  actionTrackerInitCount: number = 0;
+  navigationTrackerInitCount: number = 0;
+  mainWindowSetCount: number = 0;
+
+  initUtils(context: common.UIAbilityContext): void {
+    this.context = context;
+  }
+
+  getAbilityContext(): common.UIAbilityContext | null {
+    return this.context;
+  }
+
+  initSyncTaskManager(config: FTSDKConfig, _context: Context): void {
+    this.syncTaskInitCount++;
+    FTDBCachePolicy.getInstance().initSDKParams(new TestConfigRecord(config));
+  }
+
+  getAnrDetectManager(): FTSDKAnrManager | null {
+    return this.anrManager;
+  }
+
+  initExceptionHandler(_config: FTRUMConfig): void {
+    this.exceptionHandlerInitCount++;
+  }
+
+  startUIBlockManager(_config: FTRUMConfig): void {
+    this.uiBlockStartCount++;
+  }
+
+  registerLifecycleListener(): void {
+    this.lifecycleRegisterCount++;
+  }
+
+  setMainWindow(_mainWindow?: window.Window): void {
+    this.mainWindowSetCount++;
+  }
+
+  getUIContext(): UIContext | null {
+    return this.uiContext;
+  }
+
+  initActionTracker(_uiContext: UIContext, _config: FTRUMConfig): void {
+    this.actionTrackerInitCount++;
+  }
+
+  destroyActionTracker(): void {
+  }
+
+  initNavigationTracker(_uiContext: UIContext, _config: FTRUMConfig): void {
+    this.navigationTrackerInitCount++;
+  }
+
+  destroyNavigationTracker(): void {
+  }
+}
+
+class FakeAbilityContext {
+}
+
+class FakeUIContext {
+}
+
+function createFakeContext(): common.UIAbilityContext {
+  return new FakeAbilityContext() as Object as common.UIAbilityContext;
+}
+
 export default function configUnitTest() {
   describe('ConfigUnit', () => {
     beforeEach(() => {
       TestReset.resetP0State();
+      TrackLogManager.resetStateInternal();
+      FTTrackInner.resetInstanceInternal();
+      SdkInternalTestAccess.resetState();
+      SdkInternalTestAccess.resetRuntime();
+      FTRUMConfigManager.getInstance().release();
     });
 
     afterEach(() => {
       TestReset.resetP0State();
+      TrackLogManager.resetStateInternal();
+      FTTrackInner.resetInstanceInternal();
+      SdkInternalTestAccess.resetState();
+      SdkInternalTestAccess.resetRuntime();
+      FTRUMConfigManager.getInstance().release();
     });
 
-    it('sdkConfigShouldPreserveUserFacingDefaultsAndDataTargets', 0, () => {
+    it('sdkConfigShouldKeepDefaults', 0, () => {
       const datakitConfig = FTSDKConfig.builder(TEST_FAKE_URL).setServiceName('').setEnv('');
       const datawayConfig = FTSDKConfig.builder(TEST_FAKE_URL, TEST_FAKE_CLIENT_TOKEN).setEnv(EnvType.GRAY);
 
@@ -35,7 +211,7 @@ export default function configUnitTest() {
       expect(datawayConfig.getClientToken()).assertEqual(TEST_FAKE_CLIENT_TOKEN);
     });
 
-    it('sdkConfigShouldClampSyncRetryAndCacheBoundaries', 0, () => {
+    it('sdkConfigShouldClampBounds', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .setSyncPageSize(1)
         .setSyncSleepTime(10000)
@@ -58,7 +234,24 @@ export default function configUnitTest() {
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(-1).getDataSyncRetryCount()).assertEqual(0);
     });
 
-    it('sdkConfigShouldStoreDiscardStrategiesAndIntegerCompatibleFlag', 0, () => {
+    it('rumConfigShouldExposeDocumentedDefaults', 0, () => {
+      const rumConfig = new FTRUMConfig();
+      const sdkConfig = FTSDKConfig.builder(TEST_FAKE_URL);
+
+      expect(rumConfig.getRumAppId()).assertEqual('');
+      expect(rumConfig.getSamplingRate()).assertEqual(1.0);
+      expect(rumConfig.getSessionErrorSampleRate()).assertEqual(1.0);
+      expect(rumConfig.isEnableTraceUserAction()).assertFalse();
+      expect(rumConfig.isEnableTraceUserView()).assertFalse();
+      expect(rumConfig.isEnableTraceUserResource()).assertFalse();
+      expect(rumConfig.isEnableTrackAppANR()).assertFalse();
+      expect(rumConfig.isEnableTrackAppCrash()).assertFalse();
+      expect(rumConfig.isEnableTraceWebView()).assertFalse();
+      expect(rumConfig.getBlockDurationMS()).assertEqual(1000);
+      expect(sdkConfig.getRumCacheLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
+    });
+
+    it('sdkConfigShouldStoreCacheOptions', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
         .setLogCacheDiscard('discard_oldest')
@@ -73,7 +266,54 @@ export default function configUnitTest() {
       expect(config.isDataIntegerCompatible()).assertTrue();
     });
 
-    it('samplingRatesShouldClampFiniteBoundsAndExposeNaNAsCurrentBehavior', 0, () => {
+    it('sdkOptionsShouldApplyToManagers', 0, () => {
+      const dbLimit = 67108864;
+      const logLimit = 2345;
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setDbCacheLimit(dbLimit)
+        .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
+        .setLogCacheLimitCount(logLimit)
+        .setLogCacheDiscard('discard_oldest')
+        .setRumCacheDiscard('discard_oldest')
+        .enableDataIntegerCompatible();
+      const cachePolicy = FTDBCachePolicy.getInstance();
+
+      cachePolicy.initSDKParams(new TestConfigRecord(config));
+
+      expect(config.getDbCacheLimit()).assertEqual(dbLimit);
+      expect(config.getLogCacheLimitCount()).assertEqual(logLimit);
+      expect(config.getDBCacheDiscard()).assertEqual('discard_oldest');
+      expect(config.getLogCacheDiscard()).assertEqual('discard_oldest');
+      expect(config.getRumCacheDiscard()).assertEqual('discard_oldest');
+      expect(config.isDataIntegerCompatible()).assertTrue();
+      expect(cachePolicy.isEnableLimitWithDbSize()).assertTrue();
+      expect(cachePolicy.getDbLimitSize()).assertEqual(dbLimit);
+      expect(cachePolicy.getLogLimitCount()).assertEqual(logLimit);
+      expect(cachePolicy.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.getDiscardStrategy(DataType.LOG)).assertEqual(LogCacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.getDiscardStrategy(DataType.RUM_APP)).assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
+
+      const helper = new SyncDataHelper();
+      const fields: Map<string, string> = new Map<string, string>();
+      fields.set('integer_value', '12');
+      fields.set('float_value', '3.14');
+      helper.initBaseConfig(config);
+      const lineProtocol =
+        helper.getBodyContent(
+          'df_rum_harmonyos_log',
+          new Map<string, string>(),
+          fields,
+          123456789,
+          DataType.LOG,
+          'uuid-integer'
+        );
+
+      expect(lineProtocol.includes('integer_value=12i')).assertFalse();
+      expect(lineProtocol.includes('integer_value=12')).assertTrue();
+      expect(lineProtocol.includes('float_value=3.14')).assertTrue();
+    });
+
+    it('samplingRatesShouldClampBounds', 0, () => {
       expect(new FTRUMConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTRUMConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
       expect(new FTRUMConfig().setSessionErrorSampleRate(-1).getSessionErrorSampleRate()).assertEqual(0);
@@ -85,7 +325,7 @@ export default function configUnitTest() {
       expect(Number.isNaN(new FTLoggerConfig().setSamplingRate(Number.NaN).getSamplingRate())).assertTrue();
     });
 
-    it('rumConfigShouldKeepPublicFeatureSwitchesAndMonitorSettings', 0, () => {
+    it('rumConfigShouldKeepSwitches', 0, () => {
       const config = new FTRUMConfig()
         .setRumAppId(TEST_FAKE_RUM_ID)
         .setEnableTrackAppUIBlock(true, 90)
@@ -110,7 +350,89 @@ export default function configUnitTest() {
       expect(config.getDeviceMetricsMonitorType()).assertEqual(DeviceMetricsMonitorType.MEMORY);
     });
 
-    it('loggerAndTraceConfigsShouldKeepPublicUploadAndTraceOptions', 0, () => {
+    it('rumConfigShouldRequireUiFeatures', 0, () => {
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig())).assertFalse();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTraceUserResource(true))).assertFalse();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTraceWebView(true))).assertFalse();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTraceUserAction(true))).assertTrue();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTraceUserView(true))).assertTrue();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppCrash(true))).assertTrue();
+      expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppANR(true))).assertTrue();
+    });
+
+    it('installRumShouldApplySideEffects', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      runtime.uiContext = new FakeUIContext() as Object as UIContext;
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL), createFakeContext());
+
+      const rumConfig = new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setSamplingRate(0.25)
+        .setSessionErrorSampleRate(0.5)
+        .setEnableTrackAppCrash(true)
+        .setEnableTrackAppANR(true)
+        .setEnableTrackAppUIBlock(true, 150);
+
+      FTSDK.installRUMConfig(rumConfig);
+
+      expect(FTSDK.getRumConfig()!.getRumAppId()).assertEqual(TEST_FAKE_RUM_ID);
+      expect(FTRUMConfigManager.getInstance().getConfig()!.getRumAppId()).assertEqual(TEST_FAKE_RUM_ID);
+      expect(String(rumConfig.getGlobalContext().get(Constants.KEY_RUM_APP_ID))).assertEqual(TEST_FAKE_RUM_ID);
+      expect(String(rumConfig.getGlobalContext().get(Constants.KEY_RUM_SESSION_TYPE))).assertEqual('user');
+      expect(String(rumConfig.getGlobalContext().get(Constants.KEY_SERVICE))).assertEqual(Constants.DEFAULT_SERVICE_NAME);
+      const rumLineProtocol = FTTrackInner.getInstance().getDataHelper().getBodyContent(
+        'view',
+        new Map<string, string>(),
+        new Map<string, string>(),
+        123456789,
+        DataType.RUM_APP,
+        'uuid-rum-config'
+      );
+      expect(rumLineProtocol.includes('session_sample_rate=0.25')).assertTrue();
+      expect(rumLineProtocol.includes('session_on_error_sample_rate=0.5')).assertTrue();
+      expect(runtime.exceptionHandlerInitCount).assertEqual(1);
+      expect(runtime.uiBlockStartCount).assertEqual(1);
+      expect(runtime.lifecycleRegisterCount).assertEqual(1);
+      expect(runtime.anrManager.initializeCount).assertEqual(1);
+      expect(runtime.anrManager.startMonitoringCount).assertEqual(1);
+      expect(runtime.mainWindowSetCount).assertEqual(1);
+    });
+
+    it('installShouldApplyRumCacheLimit', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setRumCacheLimitCount(12345), createFakeContext());
+
+      expect(runtime.syncTaskInitCount).assertEqual(1);
+      expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(12345);
+
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setRumCacheLimitCount(1), createFakeContext());
+      expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(Constants.MINI_DB_RUM_CACHE_NUM);
+    });
+
+    it('loggerConfigShouldStoreFilters', 0, () => {
+      const loggerConfig = new FTLoggerConfig()
+        .setLogCacheLimitCount(12345)
+        .setLogLevelFilters(['ERROR', 'WARNING', 'INFO', 'DEBUG']);
+
+      expect(loggerConfig.getLogCacheLimitCount()).assertEqual(12345);
+      expect(loggerConfig.getLogLevelFilters().length).assertEqual(4);
+      expect(loggerConfig.getLogLevelFilters()[0]).assertEqual(LogLevel.ERROR.name);
+      expect(loggerConfig.getLogLevelFilters()[1]).assertEqual(LogLevel.WARN.name);
+      expect(loggerConfig.getLogLevelFilters()[2]).assertEqual(LogLevel.INFO.name);
+      expect(loggerConfig.getLogLevelFilters()[3]).assertEqual(LogLevel.DEBUG.name);
+      expect(loggerConfig.checkLogLevel(LogLevel.ERROR.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.WARN.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.INFO.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.DEBUG.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.TRACE.name)).assertFalse();
+
+      const minConfig = new FTLoggerConfig().setLogCacheLimitCount(0);
+      expect(minConfig.getLogCacheLimitCount()).assertEqual(Constants.MINI_DB_LOG_CACHE_NUM);
+    });
+
+    it('loggerTraceShouldKeepOptions', 0, () => {
       const loggerConfig = new FTLoggerConfig()
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true, 'FT-')
@@ -142,6 +464,49 @@ export default function configUnitTest() {
       expect(traceConfig.isEnableWebTrace()).assertTrue();
       expect(traceConfig.getServiceName()).assertEqual('trace-service');
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
+    });
+
+    it('installedConfigsShouldReachManagers', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), createFakeContext());
+
+      const loggerConfig = new FTLoggerConfig()
+        .setEnableCustomLog(true)
+        .setPrintCustomLogToConsole(true)
+        .setLogLevelFilters([LogLevel.ERROR]);
+      FTSDK.installLogConfig(loggerConfig);
+
+      const installedLogConfig = TrackLogManager.getInstance().getLogConfig();
+      expect(installedLogConfig !== null).assertTrue();
+      if (installedLogConfig) {
+        expect(installedLogConfig.isPrintCustomLogToConsole()).assertTrue();
+      }
+      FTLogger.logBackground('unit-print-custom-log-to-console', LogLevel.INFO);
+      expect(TrackLogManager.getInstance().getQueueStatus().queueSize).assertEqual(0);
+
+      const headerHandler = new RecordingConfigHeaderHandler();
+      FTSDK.installTraceConfig(new FTTraceConfig()
+        .setEnableAutoTrace(true)
+        .setOkHttpTraceHeaderHandler(headerHandler));
+
+      const overrideHeaderHandler = FTTraceConfigManager.getInstance().getOverrideHeaderHandler();
+      expect(overrideHeaderHandler === headerHandler).assertTrue();
+      if (overrideHeaderHandler) {
+        const headers = overrideHeaderHandler.processRequestHeaders(new Map<string, string>(), {
+          traceId: 'trace-config-unit',
+          spanId: 'span-config-unit',
+          serviceName: 'config-service',
+          operationName: 'GET /config',
+          startTime: 1,
+          tags: new Map<string, string>(),
+          logs: []
+        });
+
+        expect(headerHandler.requestTraceId).assertEqual('trace-config-unit');
+        expect(headerHandler.requestSpanId).assertEqual('span-config-unit');
+        expect(headers.get('x-config-handler-trace-id')).assertEqual('trace-config-unit');
+      }
     });
   });
 }

@@ -36,7 +36,7 @@ export default function userDataUnitTest() {
       resetUserDataState();
     });
 
-    it('rumDynamicTagsShouldUseRandomUserForUnsignedState', 0, () => {
+    it('rumTagsShouldUseRandomUser', 0, () => {
       const tags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
 
       expect(tags[Constants.KEY_RUM_IS_SIGN_IN]).assertEqual('F');
@@ -45,7 +45,7 @@ export default function userDataUnitTest() {
       expect(tags[Constants.KEY_RUM_NETWORK_TYPE].length > 0).assertTrue();
     });
 
-    it('rumDynamicTagsShouldIncludeBoundUserDataAndExts', 0, () => {
+    it('rumTagsShouldIncludeBoundUser', 0, () => {
       UserDataManager.getInstance().bindUserData(
         new UserData('id-1', 'name-1', 'user@example.com', createFullExts())
       );
@@ -60,7 +60,7 @@ export default function userDataUnitTest() {
       expect(tags['role']).assertEqual('admin');
     });
 
-    it('rumDynamicTagsShouldFallbackToRandomIdWhenBoundUserHasNoId', 0, () => {
+    it('rumTagsShouldFallbackRandomId', 0, () => {
       UserDataManager.getInstance().bindUserData(
         new UserData('', 'name-1', 'user@example.com', createRegionExts())
       );
@@ -74,7 +74,7 @@ export default function userDataUnitTest() {
       expect(tags['region']).assertEqual('cn');
     });
 
-    it('rumDynamicTagsShouldNotAllowExtsToOverrideReservedUserKeys', 0, () => {
+    it('rumTagsShouldProtectReservedKeys', 0, () => {
       const exts: Record<string, string> = {};
       exts[Constants.KEY_RUM_USER_ID] = 'ext-id';
       exts[Constants.KEY_RUM_USER_NAME] = 'ext-name';
@@ -93,7 +93,7 @@ export default function userDataUnitTest() {
       expect(tags['plan']).assertEqual('pro');
     });
 
-    it('rumDynamicTagsShouldRecoverUnsignedStateAfterUnbind', 0, () => {
+    it('rumTagsShouldRecoverAfterUnbind', 0, () => {
       const manager = UserDataManager.getInstance();
       manager.bindUserData(new UserData('id-1', 'name-1', 'user@example.com', createRegionExts()));
 

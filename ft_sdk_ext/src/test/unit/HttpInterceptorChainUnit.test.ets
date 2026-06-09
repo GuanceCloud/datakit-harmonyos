@@ -146,7 +146,7 @@ export default function httpInterceptorChainUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('createChainShouldAddFTInterceptorsWhenTraceOrResourceEnabled', 0, () => {
+    it('createChainShouldAddFTInterceptors', 0, () => {
       const options = new TestHttpInterceptorChainOptions(true, true);
       const chain = createFTHttpInterceptorChain(options);
       const interceptors = chain.getChain();
@@ -156,7 +156,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(interceptors[1].interceptorType).assertEqual(http.InterceptorType.FINAL_RESPONSE);
     });
 
-    it('createChainShouldReturnNeutralChainWhenEverythingDisabled', 0, () => {
+    it('createChainShouldReturnNeutral', 0, () => {
       const options = new TestHttpInterceptorChainOptions(false, false, []);
       const chain = createFTHttpInterceptorChain(options);
 
@@ -164,7 +164,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(chain.getChain().length).assertEqual(0);
     });
 
-    it('createChainShouldNotShareCustomInterceptorListAcrossCalls', 0, () => {
+    it('createChainShouldIsolateCustomList', 0, () => {
       const reusableInterceptors: http.HttpInterceptor[] = [new CustomInitialInterceptor()];
       const options = new TestHttpInterceptorChainOptions(false, false, reusableInterceptors);
 
@@ -176,7 +176,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(secondChain.getChain().length).assertEqual(2);
     });
 
-    it('initialInterceptorShouldInjectTraceAndResourceHeaders', 0, async () => {
+    it('initialInterceptorShouldInjectHeaders', 0, async () => {
       const interceptor = new HttpInitialRequestInterceptor(true, true);
       const requestHeaders: Record<string, Object> = {};
       requestHeaders['Accept'] = 'application/json' as Object;
@@ -196,7 +196,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(cleanupResponse)).assertTrue();
     });
 
-    it('initialInterceptorShouldPreserveExistingTraceAndResourceHeaders', 0, async () => {
+    it('initialInterceptorShouldPreserveHeaders', 0, async () => {
       const interceptor = new HttpInitialRequestInterceptor(true, true);
       const requestHeaders: Record<string, Object> = {};
       requestHeaders['X-FT-Resource-ID'] = 'resource-id-existing' as Object;
@@ -216,7 +216,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(cleanupResponse)).assertTrue();
     });
 
-    it('finalInterceptorShouldCompletePreparedResponseAndClearState', 0, async () => {
+    it('finalInterceptorShouldClearState', 0, async () => {
       const initial = new HttpInitialRequestInterceptor(true, true);
       const finalResponse = new HttpFinalResponseInterceptor(true, true);
       const requestHeaders: Record<string, Object> = {};
@@ -237,7 +237,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(duplicateResponse)).assertFalse();
     });
 
-    it('finalInterceptorShouldStaySafeWhenInitialStateMissing', 0, async () => {
+    it('finalInterceptorShouldHandleMissingState', 0, async () => {
       const finalResponse = new HttpFinalResponseInterceptor(true, true);
       const requestHeaders: Record<string, Object> = {};
       requestHeaders['X-FT-Resource-ID'] = 'missing-resource' as Object;
@@ -254,7 +254,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(duplicateResponse)).assertFalse();
     });
 
-    it('applyFTHttpTrackToChainShouldReturnChainWhenApplyFailsOrThrows', 0, () => {
+    it('applyChainShouldSurviveFailure', 0, () => {
       const requestInput: FTSDKExtensionRequestInput = {
         url: 'https://example.com/apply'
       };
@@ -294,7 +294,7 @@ export default function httpInterceptorChainUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(cleanupThrow)).assertTrue();
     });
 
-    it('completeHttpResponseShouldFallbackStoredMethodAndClearErrorPathState', 0, () => {
+    it('completeResponseShouldClearErrorState', 0, () => {
       const fallbackRequestInput: FTSDKExtensionRequestInput = {
         url: 'https://example.com/fallback-method',
         method: 'delete'

@@ -18,7 +18,7 @@ export default function traceAutoTrackUITest() {
       await EntryDBAssert.cleanupAll();
     });
 
-    it('httpInterceptorPageShouldCreateResourceWithTraceHeaders', 0, async () => {
+    it('httpPageShouldCreateTraceResource', 0, async () => {
       await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
       const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
       expect(interceptorReady).assertTrue();

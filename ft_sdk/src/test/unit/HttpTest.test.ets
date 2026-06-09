@@ -1,6 +1,7 @@
 import { describe, beforeAll, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { http } from '@kit.NetworkKit';
 import { HttpBuilder, HttpPayloadCompressor } from '../../main/ets/components/http/HttpBuilder';
+import { HttpInternalTestAccess } from '../../main/ets/components/internal/testaccess/HttpInternalTestAccess';
 import { FTResponseData } from '../../main/ets/components/http/FTResponseData';
 import { FTSDKConfig } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
@@ -42,14 +43,14 @@ export default function httpTest() {
     beforeEach(() => {
       HttpBuilder.enableTestMode();
       HttpBuilder.resetCapturedRequests();
-      HttpBuilder.resetPayloadCompressorForTest();
+      HttpInternalTestAccess.resetPayloadCompressor();
       HttpBuilder.setMockResponse(new FTResponseData(200, 'ok'));
     });
 
     afterEach(() => {
       HttpBuilder.disableTestMode();
       HttpBuilder.resetCapturedRequests();
-      HttpBuilder.resetPayloadCompressorForTest();
+      HttpInternalTestAccess.resetPayloadCompressor();
     });
 
     it('builderShouldBuildDatakitAndDatawayUrls', 0, () => {
@@ -63,7 +64,7 @@ export default function httpTest() {
       expect(emptyModelBuilder.getUrl()).assertEqual('https://dataway.example.com');
     });
 
-    it('builderShouldCaptureDefaultAndCustomContentTypeInTestMode', 0, async () => {
+    it('builderShouldCaptureContentType', 0, async () => {
       await HttpBuilder.Builder(sdkConfig)
         .setMethod(http.RequestMethod.POST)
         .executeSync();
@@ -83,7 +84,7 @@ export default function httpTest() {
       expect(requests[0].headers['Date'].length > 0).assertTrue();
     });
 
-    it('executeSyncWithCompressionShouldFallbackWithoutCompressor', 0, async () => {
+    it('compressionShouldFallbackWithoutCodec', 0, async () => {
       await HttpBuilder.Builder(sdkConfig)
         .setMethod(http.RequestMethod.POST)
         .setBodyString('payload')
@@ -98,9 +99,9 @@ export default function httpTest() {
       }
     });
 
-    it('executeSyncWithCompressionShouldUseInjectedCompressor', 0, async () => {
+    it('compressionShouldUseInjectedCodec', 0, async () => {
       const compressor = new FakePayloadCompressor();
-      HttpBuilder.setPayloadCompressorForTest(compressor);
+      HttpInternalTestAccess.setPayloadCompressor(compressor);
 
       await HttpBuilder.Builder(sdkConfig)
         .setMethod(http.RequestMethod.POST)
@@ -117,9 +118,9 @@ export default function httpTest() {
       }
     });
 
-    it('executeSyncWithCompressionShouldFallbackWhenCompressorFailsOrEncodingExists', 0, async () => {
+    it('compressionShouldFallbackOnFailure', 0, async () => {
       const compressor = new FakePayloadCompressor(true);
-      HttpBuilder.setPayloadCompressorForTest(compressor);
+      HttpInternalTestAccess.setPayloadCompressor(compressor);
 
       await HttpBuilder.Builder(sdkConfig)
         .setMethod(http.RequestMethod.POST)
@@ -150,7 +151,7 @@ export default function httpTest() {
       }
     });
 
-    it('responseDataShouldExposeErrorBodyForBadRequest', 0, () => {
+    it('responseDataShouldExposeErrorBody', 0, () => {
       const errorBody = '{"message":"bad request","errorCode":"bad_request"}';
       const response = new FTResponseData(400, errorBody);
 

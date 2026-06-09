@@ -14,7 +14,7 @@ export default function axiosBridgeUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('axiosChainMethodShouldNormalizeMethodAndStoreResourceMapping', 0, () => {
+    it('axiosChainShouldStoreResourceMap', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosChainMethodBridge(target);
       let resourceId = '';
@@ -44,7 +44,7 @@ export default function axiosBridgeUnitTest() {
       }
     });
 
-    it('resolveAxiosFullUrlShouldPassThroughAbsoluteUrlAndJoinBaseUrlParameters', 0, () => {
+    it('resolveAxiosFullUrlVariants', 0, () => {
       expect(resolveAxiosFullUrl('/users', 'https://example.com/api')).assertEqual('https://example.com/api/users');
       expect(resolveAxiosFullUrl('users', 'https://example.com/api/')).assertEqual('https://example.com/api/users');
       expect(resolveAxiosFullUrl('https://other.example.com/users', 'https://example.com/api')).assertEqual(
@@ -53,7 +53,7 @@ export default function axiosBridgeUnitTest() {
       expect(resolveAxiosFullUrl('', 'https://example.com/api')).assertEqual('https://example.com/api');
     });
 
-    it('axiosChainMethodShouldDefaultMethodAndHandleMissingHeaders', 0, () => {
+    it('axiosChainShouldDefaultMethod', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosChainMethodBridge(target);
       let resourceId = '';
@@ -74,7 +74,7 @@ export default function axiosBridgeUnitTest() {
       }
     });
 
-    it('axiosChainMethodShouldPreserveExistingResourceIdAndCustomHeaders', 0, () => {
+    it('axiosChainShouldKeepExistingHeaders', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosChainMethodBridge(target);
       const existingResourceId = 'existing-resource-id';
@@ -97,7 +97,7 @@ export default function axiosBridgeUnitTest() {
       expect(FTSDKExtensionBridge.resolveAxiosMethod(existingResourceId) === undefined).assertTrue();
     });
 
-    it('axiosChainMethodShouldKeepRequestLifecycleIsolated', 0, () => {
+    it('axiosChainShouldIsolateRequests', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosChainMethodBridge(target);
       let firstId = '';

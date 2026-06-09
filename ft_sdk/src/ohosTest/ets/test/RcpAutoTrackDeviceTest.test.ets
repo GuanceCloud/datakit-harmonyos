@@ -1,4 +1,5 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import json from '@ohos.util.json';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig, FTTraceConfig, FTLoggerConfig } from '../../../main/ets/components/Configs';
@@ -19,55 +20,71 @@ import { WaitUtils } from './helpers/WaitUtils';
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
 
-class FakeRcpUrl {
-  href: string;
+class FakeRcpRequestContext implements rcp.RequestContext {
+  request: rcp.Request;
+  session: rcp.Session;
 
-  constructor(href: string) {
-    this.href = href;
+  constructor(url: string, method: rcp.HttpMethod) {
+    this.request = new rcp.Request(url, method, {});
+    this.session = rcp.createSession();
   }
 }
 
-class FakeRcpRequest {
-  url: FakeRcpUrl;
-  method: string;
-  headers: Record<string, Object>;
-
-  constructor(url: string, method: string) {
-    this.url = new FakeRcpUrl(url);
-    this.method = method;
-    this.headers = {};
-  }
-}
-
-class FakeRcpRequestContext {
-  request: FakeRcpRequest;
-
-  constructor(url: string, method: string) {
-    this.request = new FakeRcpRequest(url, method);
-  }
-}
-
-class FakeRcpTimeInfo {
+class FakeRcpTimeInfo implements rcp.TimeInfo {
   nameLookupTimeMs: number = 1;
   connectTimeMs: number = 2;
   tlsHandshakeTimeMs: number = 3;
+  preTransferTimeMs: number = 4;
   startTransferTimeMs: number = 5;
   totalTimeMs: number = 8;
+  redirectTimeMs: number = 0;
 }
 
-class FakeRcpResponse {
-  statusCode: number;
-  headers: Record<string, Object>;
-  body: string;
-  timeInfo: FakeRcpTimeInfo;
+class FakeRcpRawTimeInfo implements rcp.TimeInfo {
+  nameLookupTimeMs: number = 10;
+  connectTimeMs: number = 30;
+  tlsHandshakeTimeMs: number = 80;
+  preTransferTimeMs: number = 100;
+  startTransferTimeMs: number = 150;
+  totalTimeMs: number = 180;
+  redirectTimeMs: number = 0;
+  dnsTime: number = 10000000;
+  tcpTime: number = 20000000;
+  ttfbTime: number = 50000000;
+  responseTime: number = 100000000;
+  downloadTime: number = 30000000;
+  totalTime: number = 180000000;
+}
 
-  constructor(statusCode: number, body: string, contentType: string) {
+class FakeRcpResponse implements rcp.Response {
+  readonly request: rcp.Request;
+  readonly statusCode: number;
+  readonly headers: rcp.ResponseHeaders;
+  readonly timeInfo?: rcp.TimeInfo;
+  private responseBody: string;
+
+  constructor(request: rcp.Request, statusCode: number, body: string, contentType: string,
+    timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
+    contentLength?: number) {
+    this.request = request;
     this.statusCode = statusCode;
-    this.body = body;
-    this.timeInfo = new FakeRcpTimeInfo();
+    this.responseBody = body;
+    if (timeInfo !== null) {
+      this.timeInfo = timeInfo;
+    }
     this.headers = {};
-    this.headers['content-type'] = contentType as Object;
-    this.headers['content-length'] = String(body.length) as Object;
+    this.headers['content-type'] = contentType;
+    this.headers['content-length'] = String(contentLength ?? body.length);
+  }
+
+  toString(): string | null {
+    return this.responseBody;
+  }
+
+  toJSON(): object | null;
+  toJSON(_param: json.ParseOptions): object | null;
+  toJSON(_param?: json.ParseOptions): object | null {
+    return null;
   }
 }
 
@@ -75,15 +92,38 @@ class FakeRcpTerminalHandler implements rcp.RequestHandler {
   private statusCode: number;
   private body: string;
   private contentType: string;
+  private timeInfo: rcp.TimeInfo | null;
+  private contentLength?: number;
+  private delayMs: number;
 
-  constructor(statusCode: number, body: string, contentType: string) {
+  constructor(statusCode: number, body: string, contentType: string, timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
+    contentLength?: number, delayMs: number = 0) {
     this.statusCode = statusCode;
     this.body = body;
     this.contentType = contentType;
+    this.timeInfo = timeInfo;
+    this.contentLength = contentLength;
+    this.delayMs = delayMs;
   }
 
   async handle(_context: rcp.RequestContext): Promise<rcp.Response> {
-    return new FakeRcpResponse(this.statusCode, this.body, this.contentType) as Object as rcp.Response;
+    if (this.delayMs > 0) {
+      await WaitUtils.delay(this.delayMs);
+    }
+    return new FakeRcpResponse(_context.request, this.statusCode, this.body, this.contentType, this.timeInfo,
+      this.contentLength);
+  }
+}
+
+class FakeRcpErrorTerminalHandler implements rcp.RequestHandler {
+  private error: Error;
+
+  constructor(message: string) {
+    this.error = new Error(message);
+  }
+
+  async handle(_context: rcp.RequestContext): Promise<rcp.Response> {
+    throw this.error;
   }
 }
 
@@ -135,11 +175,24 @@ async function runRcpChain(
   context: FakeRcpRequestContext,
   statusCode: number,
   body: string,
-  contentType: string
+  contentType: string,
+  timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
+  contentLength?: number,
+  delayMs: number = 0
 ): Promise<rcp.Response> {
-  const terminal = new FakeRcpTerminalHandler(statusCode, body, contentType);
+  const terminal = new FakeRcpTerminalHandler(statusCode, body, contentType, timeInfo, contentLength, delayMs);
   const handler = new FakeRcpChainHandler(interceptors, 0, terminal);
-  return await handler.handle(context as Object as rcp.RequestContext);
+  return await handler.handle(context);
+}
+
+async function runRcpErrorChain(
+  interceptors: rcp.Interceptor[],
+  context: FakeRcpRequestContext,
+  message: string
+): Promise<void> {
+  const terminal = new FakeRcpErrorTerminalHandler(message);
+  const handler = new FakeRcpChainHandler(interceptors, 0, terminal);
+  await handler.handle(context);
 }
 
 async function flushAndAssertUploaded(
@@ -154,6 +207,41 @@ async function flushAndAssertUploaded(
 
   expect(uploaded.length > 0).assertTrue();
   expect(consumed).assertTrue();
+}
+
+async function flushAndAssertResourceAndErrorUploaded(
+  collector: MockCollector,
+  resourceFragments: string[],
+  resourceUuid: string,
+  errorFragments: string[],
+  errorUuid: string
+): Promise<void> {
+  collector.clearRequests();
+  FTSDK.flushSyncData();
+
+  const uploaded = await WaitUtils.waitUntil(async () => {
+    const requests = collector.getRequests();
+    let hasResource = false;
+    let hasError = false;
+    for (const request of requests) {
+      if (DBAssert.containsAll(request.bodyString, resourceFragments)) {
+        hasResource = true;
+      }
+      if (DBAssert.containsAll(request.bodyString, errorFragments)) {
+        hasError = true;
+      }
+      if (hasResource && hasError) {
+        return true;
+      }
+    }
+    return false;
+  }, 5000);
+  const resourceConsumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceUuid, 5000);
+  const errorConsumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, errorUuid, 5000);
+
+  expect(uploaded).assertTrue();
+  expect(resourceConsumed).assertTrue();
+  expect(errorConsumed).assertTrue();
 }
 
 function readHeader(headers: Object | undefined | null, key: string): string {
@@ -202,7 +290,7 @@ export default function rcpAutoTrackDeviceTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('createFTRCPTrackConfigShouldWriteUploadAndDeleteResource', 0, async () => {
+    it('rcpConfigShouldUploadResource', 0, async () => {
       const viewName = 'rcp_config_resource_view';
       const resourceUrl = 'http://device.test/rcp-config-resource';
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -236,7 +324,126 @@ export default function rcpAutoTrackDeviceTest() {
       await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
     });
 
-    it('manualRCPInterceptorsShouldInjectTraceAndWriteResource', 0, async () => {
+    it('rcpResourceShouldWritePerfFields', 0, async () => {
+      const viewName = 'rcp_performance_resource_view';
+      const resourceUrl = 'http://device.test/rcp-performance-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({
+        enableTraceInterceptor: true,
+        enableResourceInterceptor: true
+      });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      await runRcpChain(config.interceptors ?? [], context, 200, '{"ok":true}', 'application/json',
+        new FakeRcpRawTimeInfo(), 1024);
+      await WaitUtils.delay(5);
+
+      const traceIds = assertDDTraceHeaders(context.request.headers as Object);
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'resource_status=200',
+        'resource_type=network',
+        'resource_size=1024',
+        'resource_dns=10000000',
+        'resource_tcp=20000000',
+        'resource_ssl=50000000',
+        'resource_ttfb=50000000',
+        'resource_first_byte=50000000',
+        'resource_trans=100000000',
+        'resource_download_time',
+        '30000000',
+        'duration=180000000',
+        `view_name=${viewName}`,
+        `trace_id=${traceIds[0]}`,
+        `span_id=${traceIds[1]}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+    });
+
+    it('rcpNoTimeInfoShouldFallback', 0, async () => {
+      const viewName = 'rcp_fallback_resource_view';
+      const resourceUrl = 'http://device.test/rcp-fallback-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      await runRcpChain(config.interceptors ?? [], context, 204, '', 'text/plain', null, 0, 2);
+      await WaitUtils.delay(5);
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'resource_status=204',
+        'duration=',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      expect(record!.getDataString().includes('resource_dns=')).assertFalse();
+      expect(record!.getDataString().includes('resource_tcp=')).assertFalse();
+      expect(record!.getDataString().includes('resource_ttfb=')).assertFalse();
+      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+    });
+
+    it('rcpErrorShouldWriteResourceError', 0, async () => {
+      const viewName = 'rcp_error_resource_view';
+      const resourceUrl = 'http://device.test/rcp-error-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      let thrown = false;
+      try {
+        await runRcpErrorChain(config.interceptors ?? [], context, 'RCP planned failure');
+      } catch (_error) {
+        thrown = true;
+      }
+      await WaitUtils.delay(5);
+
+      expect(thrown).assertTrue();
+      const resourceFragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'duration=',
+        `view_name=${viewName}`
+      ];
+      const errorFragments = [
+        'error',
+        'error_source=network',
+        'error_type=network',
+        `resource_url=${resourceUrl}`,
+        'resource_status=0',
+        `view_name=${viewName}`
+      ];
+      const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments, 5000);
+      const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments, 5000);
+
+      expect(resourceRecord !== null).assertTrue();
+      expect(errorRecord !== null).assertTrue();
+      await flushAndAssertResourceAndErrorUploaded(
+        collector,
+        resourceFragments,
+        resourceRecord?.getUuid() ?? '',
+        errorFragments,
+        errorRecord?.getUuid() ?? ''
+      );
+    });
+
+    it('manualRcpShouldInjectTrace', 0, async () => {
       const viewName = 'rcp_manual_resource_view';
       const resourceUrl = 'http://device.test/rcp-manual-resource';
       await FTRUMGlobalManager.getInstance().startView(viewName);

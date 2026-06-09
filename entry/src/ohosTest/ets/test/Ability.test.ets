@@ -17,7 +17,7 @@ export default function abilityTest() {
       expect(homeReady).assertTrue();
     });
 
-    it('entryAbilityShouldOpenRumBusinessPageWithSdkInitialized', 0, async () => {
+    it('entryShouldOpenRumPage', 0, async () => {
       await UiTestUtils.clickText(driver, 'RUM Unified Test');
 
       const pageReady = await UiTestUtils.waitForText(driver, 'RUM Unified Test Page', 6000);

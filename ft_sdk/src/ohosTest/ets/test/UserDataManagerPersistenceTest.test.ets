@@ -6,10 +6,12 @@ import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import { UserData } from '../../../main/ets/components/rum/bean/UserData';
+import { FTRUMConfigManager } from '../../../main/ets/components/rum/FTRUMConfigManager';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
+import { WaitUtils } from './helpers/WaitUtils';
 
 const PREFERENCES_NAME = 'ft_sdk_user_data';
 const KEY_RANDOM_USER_ID = 'ft.user.session.id';
@@ -26,6 +28,12 @@ function delay(ms: number): Promise<void> {
       resolve();
     }, ms);
   });
+}
+
+async function startViewAndWaitForStore(viewName: string): Promise<void> {
+  await FTRUMGlobalManager.getInstance().startView(viewName);
+  const view = await DBAssert.waitForViewNamed(viewName, 5000);
+  expect(view !== null).assertTrue();
 }
 
 async function clearUserDataPreferences(context: Context): Promise<void> {
@@ -64,7 +72,7 @@ export default function userDataManagerPersistenceTest() {
       await clearUserDataPreferences(context);
     });
 
-    it('bindRumUserDataShouldPersistAllIdentityAndExtFieldsToPreferences', 0, async () => {
+    it('bindUserShouldPersistFields', 0, async () => {
       const exts: Record<string, string> = {};
       exts['region'] = 'cn';
       exts['role'] = 'qa';
@@ -82,20 +90,22 @@ export default function userDataManagerPersistenceTest() {
       expect(storedExt.includes('"role":"qa"')).assertTrue();
     });
 
-    it('boundUserDataShouldAppearInRumLineProtocolFromPublicApi', 0, async () => {
+    it('boundUserShouldAppearInRum', 0, async () => {
       const exts: Record<string, string> = {};
       exts['region'] = 'cn';
 
       FTSDK.bindRumUserData(new UserData('line-user-id', 'line-user-name', 'line@example.com', exts));
-      await FTRUMGlobalManager.getInstance().startView('user_data_view');
+      await startViewAndWaitForStore('user_data_view');
       FTRUMGlobalManager.getInstance().addAction('user_data_action', 'click');
 
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action,',
+        'action_name=user_data_action',
         `${Constants.KEY_RUM_USER_ID}=line-user-id`,
         `${Constants.KEY_RUM_USER_NAME}=line-user-name`,
         `${Constants.KEY_RUM_USER_EMAIL}=line@example.com`,
         'region=cn'
-      ], 5000);
+      ], 8000);
 
       expect(record !== null).assertTrue();
 
@@ -114,7 +124,67 @@ export default function userDataManagerPersistenceTest() {
       expect(consumed).assertTrue();
     });
 
-    it('unbindRumUserDataShouldClearPersistedIdentityFields', 0, async () => {
+    it('boundUserShouldSurviveReset', 0, async () => {
+      const exts: Record<string, string> = {};
+      exts['region'] = 'restart-region';
+
+      FTSDK.bindRumUserData(new UserData(
+        'restart-user-id',
+        'restart-user-name',
+        'restart@example.com',
+        exts
+      ));
+      const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+      const persisted = await WaitUtils.waitUntil(async () => {
+        const storedId = String(await store.get(KEY_USER_ID, ''));
+        const storedName = String(await store.get(KEY_USER_NAME, ''));
+        const storedEmail = String(await store.get(KEY_USER_EMAIL, ''));
+        const storedExt = String(await store.get(KEY_USER_EXT, ''));
+        return storedId === 'restart-user-id' &&
+          storedName === 'restart-user-name' &&
+          storedEmail === 'restart@example.com' &&
+          storedExt.includes('"region":"restart-region"');
+      }, 5000);
+      expect(persisted).assertTrue();
+
+      collector.clearRequests();
+      await SdkTestLifecycle.resetRuntimeState();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      const restored = await WaitUtils.waitUntil(async () => {
+        const tags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+        return tags[Constants.KEY_RUM_USER_ID] === 'restart-user-id' &&
+          tags[Constants.KEY_RUM_USER_NAME] === 'restart-user-name' &&
+          tags[Constants.KEY_RUM_USER_EMAIL] === 'restart@example.com' &&
+          tags['region'] === 'restart-region';
+      }, 5000);
+      expect(restored).assertTrue();
+
+      await startViewAndWaitForStore('restart_user_data_view');
+      FTRUMGlobalManager.getInstance().addAction('restart_user_data_action', 'click');
+
+      const fragments = [
+        'action,',
+        'action_name=restart_user_data_action',
+        `${Constants.KEY_RUM_USER_ID}=restart-user-id`,
+        `${Constants.KEY_RUM_USER_NAME}=restart-user-name`,
+        `${Constants.KEY_RUM_USER_EMAIL}=restart@example.com`,
+        'region=restart-region'
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 8000);
+      expect(record !== null).assertTrue();
+
+      FTSDK.flushSyncData();
+
+      const uploaded = await collector.waitForPayloadContaining(fragments, 5000);
+      const consumed =
+        await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
+
+      expect(uploaded.length > 0).assertTrue();
+      expect(consumed).assertTrue();
+    });
+
+    it('unbindUserShouldClearFields', 0, async () => {
       FTSDK.bindRumUserDataById('clear-id');
       await delay(200);
 
@@ -128,7 +198,54 @@ export default function userDataManagerPersistenceTest() {
       expect(await store.get(KEY_USER_EXT, '')).assertEqual('');
     });
 
-    it('randomUserIdShouldBePersistedInPreferencesAfterInstall', 0, async () => {
+    it('unbindUserShouldRemoveRumFields', 0, async () => {
+      const exts: Record<string, string> = {};
+      exts['region'] = 'unbind-region';
+
+      FTSDK.bindRumUserData(new UserData(
+        'unbind-user-id',
+        'unbind-user-name',
+        'unbind@example.com',
+        exts
+      ));
+      await delay(200);
+      FTSDK.unbindRumUserData();
+      await delay(200);
+
+      await startViewAndWaitForStore('unbind_user_data_view');
+      FTRUMGlobalManager.getInstance().addAction('unbind_user_data_action', 'click');
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action',
+        'action_name=unbind_user_data_action'
+      ], 5000);
+      const line = record?.getDataString() ?? '';
+
+      expect(record !== null).assertTrue();
+      expect(line.includes('unbind-user-id')).assertFalse();
+      expect(line.includes('unbind-user-name')).assertFalse();
+      expect(line.includes('unbind@example.com')).assertFalse();
+      expect(line.includes('unbind-region')).assertFalse();
+      expect(line.includes(`${Constants.KEY_RUM_USER_NAME}=`)).assertFalse();
+      expect(line.includes(`${Constants.KEY_RUM_USER_EMAIL}=`)).assertFalse();
+      expect(line.includes('region=')).assertFalse();
+
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+
+      const uploaded = await collector.waitForPayloadContaining(['action_name=unbind_user_data_action'], 5000);
+      const consumed =
+        await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
+
+      expect(uploaded.length > 0).assertTrue();
+      expect(uploaded.includes('unbind-user-id')).assertFalse();
+      expect(uploaded.includes('unbind-user-name')).assertFalse();
+      expect(uploaded.includes('unbind@example.com')).assertFalse();
+      expect(uploaded.includes('unbind-region')).assertFalse();
+      expect(consumed).assertTrue();
+    });
+
+    it('randomUserShouldPersistAfterInstall', 0, async () => {
       const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
       const storedRandomUserId = String(await store.get(KEY_RANDOM_USER_ID, ''));
 

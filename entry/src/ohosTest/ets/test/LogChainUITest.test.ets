@@ -19,7 +19,7 @@ export default function logChainUITest() {
       await EntryDBAssert.cleanupAll();
     });
 
-    it('logBackgroundPageShouldCreateSdkLogRecords', 0, async () => {
+    it('logPageShouldCreateSdkLogs', 0, async () => {
       await UiTestUtils.clickText(driver, 'Test Basic logBackground');
 
       const record = await EntryDBAssert.waitForSyncRecordContaining(

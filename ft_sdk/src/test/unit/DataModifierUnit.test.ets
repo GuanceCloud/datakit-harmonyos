@@ -30,7 +30,7 @@ export default function dataModifierUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('lineDataModifierShouldAffectFinalLineProtocol', 0, () => {
+    it('modifierShouldAffectLineProtocol', 0, () => {
       const helper = new SyncDataHelper();
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setLineDataModifier(new MaskingLineDataModifier());
       const tags: Map<string, string> = new Map();

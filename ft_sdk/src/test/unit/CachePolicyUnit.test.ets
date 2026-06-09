@@ -2,10 +2,10 @@ import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context } from '@kit.AbilityKit';
 import { FTSDKConfig } from '../../main/ets/components/Configs';
 import { FTDBCachePolicy } from '../../main/ets/components/db/FTDBCachePolicy';
-import { FTDBManager } from '../../main/ets/components/db/FTDBManager';
 import { DBCacheDiscard, DataType, LogCacheDiscard, RUMCacheDiscard } from '../../main/ets/components/enum/Enums';
 import { Constants } from '../../main/ets/components/Constants';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
+import { DbInternalTestAccess } from '../../main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -91,18 +91,18 @@ export default function cachePolicyUnitTest() {
   describe('CachePolicyUnit', () => {
     beforeEach(() => {
       TestReset.resetP0State();
-      FTDBCachePolicy.resetRuntimeForTest();
+      DbInternalTestAccess.resetCachePolicyRuntime();
       resetCachePolicyState();
     });
 
     afterEach(() => {
       resetCachePolicyState();
-      FTDBCachePolicy.resetRuntimeForTest();
-      FTDBManager.resetInstanceForTest();
+      DbInternalTestAccess.resetCachePolicyRuntime();
+      DbInternalTestAccess.resetDbManagerInstance();
       TestReset.resetP0State();
     });
 
-    it('cachePolicyShouldTrackCountAndDbSizeLimits', 0, () => {
+    it('cachePolicyShouldTrackLimits', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       cachePolicy.setTestLimits(10, 5);
 
@@ -119,7 +119,7 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.shouldDiscardData(DataType.LOG)).assertTrue();
     });
 
-    it('cachePolicyShouldMapDiscardStrategiesFromSdkConfig', 0, () => {
+    it('cachePolicyShouldMapDiscardStrategy', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .setDbCacheLimit(Constants.DB_OLD_CACHE_REMOVE_COUNT)
@@ -135,7 +135,7 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.getDiscardStrategy(DataType.RUM_WEBVIEW)).assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
     });
 
-    it('cachePolicyShouldResetCountsAndIgnoreCountUpdatesWhenDbSizeLimitEnabled', 0, () => {
+    it('cachePolicyShouldIgnoreCountUpdates', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       cachePolicy.setTestLimits(10, 10);
       cachePolicy.optLogCount(7);
@@ -152,10 +152,10 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.getRumCount()).assertEqual(0);
     });
 
-    it('cachePolicyAsyncCountPolicyShouldDeleteOldestOrDiscard', 0, async () => {
+    it('countPolicyShouldDeleteOrDiscard', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
       runtime.dbManager.totalCount = 3;
-      FTDBCachePolicy.setRuntimeForTest(runtime);
+      DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
 
@@ -183,10 +183,10 @@ export default function cachePolicyUnitTest() {
       expect(await cachePolicy.optRUMCachePolicy(context, 3)).assertEqual(-1);
     });
 
-    it('cachePolicyAsyncDbSizePolicyShouldDeleteOldestOrDiscard', 0, async () => {
+    it('dbSizePolicyShouldDeleteOrDiscard', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
       runtime.dbManager.totalCount = 11;
-      FTDBCachePolicy.setRuntimeForTest(runtime);
+      DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
 

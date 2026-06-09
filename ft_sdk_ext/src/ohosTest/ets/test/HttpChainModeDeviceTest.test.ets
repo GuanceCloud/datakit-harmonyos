@@ -8,12 +8,14 @@ import {
   FTRUMGlobalManager,
   FTSDK,
   FTSDKConfig,
+  FTSDKExtensionBridge,
   FTTraceConfig,
   TraceType
 } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { FTTraceHandler } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceHandler';
-import { applyFTHttpTrack } from '../../../../Index';
+import { applyFTAxiosChainMethodBridge, applyFTHttpTrack } from '../../../../Index';
+import { resolveAxiosFullUrl } from '../../../main/ets/components/network/FTHttpAutoTrackExt';
 import { ExtDBAssert } from './helpers/ExtDBAssert';
 import { ExtMockCollector } from './helpers/ExtMockCollector';
 import { WaitUtils } from './helpers/WaitUtils';
@@ -59,6 +61,50 @@ class ChainResponse implements http.HttpResponse {
     this.responseCode = responseCode;
     this.header = header;
     this.result = result;
+  }
+}
+
+interface DeviceAxiosRequestConfigTarget {
+  url?: string;
+  baseURL?: string;
+  method?: string;
+  headers?: Object;
+  data?: Object | string | ArrayBuffer;
+  context?: Object;
+}
+
+type DeviceAxiosRequestFulfilled =
+  (value: DeviceAxiosRequestConfigTarget) => DeviceAxiosRequestConfigTarget | Promise<DeviceAxiosRequestConfigTarget>;
+type DeviceAxiosRejectedHandler = (error: Object) => Object | Promise<Object>;
+
+class DeviceAxiosRequestInterceptorManager {
+  private fulfilled?: DeviceAxiosRequestFulfilled;
+
+  public use(onFulfilled?: DeviceAxiosRequestFulfilled, _onRejected?: DeviceAxiosRejectedHandler): number {
+    this.fulfilled = onFulfilled;
+    return 1;
+  }
+
+  public run(config: DeviceAxiosRequestConfigTarget): DeviceAxiosRequestConfigTarget {
+    if (!this.fulfilled) {
+      return config;
+    }
+    return this.fulfilled(config) as DeviceAxiosRequestConfigTarget;
+  }
+}
+
+interface DeviceAxiosInterceptors {
+  request: DeviceAxiosRequestInterceptorManager;
+}
+
+class DeviceAxiosTarget {
+  public readonly requestManager: DeviceAxiosRequestInterceptorManager = new DeviceAxiosRequestInterceptorManager();
+  public readonly interceptors: DeviceAxiosInterceptors;
+
+  constructor() {
+    this.interceptors = {
+      request: this.requestManager
+    };
   }
 }
 
@@ -154,7 +200,7 @@ export default function httpChainModeDeviceTest() {
       await ExtDBAssert.cleanupAll();
     });
 
-    it('httpInterceptorChainStableShouldWriteUploadAndDelete', 0, async () => {
+    it('httpChainShouldUploadAndDelete', 0, async () => {
       const viewName = 'http_chain_resource_view';
       const resourceUrl = 'http://device.test/http-chain-resource';
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -208,7 +254,7 @@ export default function httpChainModeDeviceTest() {
       }
     });
 
-    it('traceOnlyShouldInjectHeadersWithoutResourceRecord', 0, async () => {
+    it('traceOnlyShouldSkipResource', 0, async () => {
       const resourceUrl = 'http://device.test/http-chain-trace-only';
       const request = http.createHttp();
       try {
@@ -242,7 +288,7 @@ export default function httpChainModeDeviceTest() {
       }
     });
 
-    it('resourceOnlyShouldWriteUploadAndDeleteWithoutTraceIds', 0, async () => {
+    it('resourceOnlyShouldUploadNoTraceIds', 0, async () => {
       const viewName = 'http_chain_resource_only_view';
       const resourceUrl = 'http://device.test/http-chain-resource-only';
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -349,6 +395,53 @@ export default function httpChainModeDeviceTest() {
         await flushAndAssertUploaded(collector, fragments, record.getUuid());
       } finally {
         request.destroy();
+      }
+    });
+
+    it('resolveAxiosFullUrlShouldJoinBaseUrlOnDevice', 0, async () => {
+      expect(resolveAxiosFullUrl('/users', 'https://device.example.com/api'))
+        .assertEqual('https://device.example.com/api/users');
+      expect(resolveAxiosFullUrl('users', 'https://device.example.com/api/'))
+        .assertEqual('https://device.example.com/api/users');
+      expect(resolveAxiosFullUrl('https://other.example.com/users', 'https://device.example.com/api'))
+        .assertEqual('https://other.example.com/users');
+      expect(resolveAxiosFullUrl('', 'https://device.example.com/api'))
+        .assertEqual('https://device.example.com/api');
+      expect(resolveAxiosFullUrl('/users', ''))
+        .assertEqual('/users');
+    });
+
+    it('axiosBridgeShouldStoreMethod', 0, async () => {
+      const target = new DeviceAxiosTarget();
+      const interceptorId = applyFTAxiosChainMethodBridge(target);
+      let resourceId = '';
+
+      try {
+        expect(interceptorId).assertEqual(1);
+
+        const requestHeaders: Record<string, string> = {};
+        requestHeaders['Accept'] = 'application/json';
+        const config: DeviceAxiosRequestConfigTarget = {
+          url: '/device-users',
+          baseURL: 'https://device.example.com/api',
+          method: 'post',
+          headers: requestHeaders as Object,
+          data: '{"bridge":true}'
+        };
+
+        const result = target.requestManager.run(config);
+        const normalizedHeaders = FTSDKExtensionBridge.normalizeHeaders(result.headers);
+        resourceId = normalizedHeaders['X-FT-Resource-ID'];
+
+        expect(result.url).assertEqual('/device-users');
+        expect(result.baseURL).assertEqual('https://device.example.com/api');
+        expect(normalizedHeaders['Accept']).assertEqual('application/json');
+        expect(resourceId.length > 0).assertTrue();
+        expect(FTSDKExtensionBridge.resolveAxiosMethod(resourceId)).assertEqual('POST');
+      } finally {
+        if (resourceId.length > 0) {
+          FTSDKExtensionBridge.clearAxiosMethod(resourceId);
+        }
       }
     });
   });

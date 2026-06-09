@@ -59,7 +59,7 @@ export default function syncUploadChainDeviceTest() {
       await dbManager.delete();
     });
 
-    it('successfulUploadShouldConsumeQueueAndDeleteUploadedRows', 0, async () => {
+    it('successfulUploadShouldDeleteRows', 0, async () => {
       await dbManager.insertFtOperation(createLogSyncData('success-delete', TEST_NOW_NS));
       collector.setResponse(200, '');
 
@@ -74,7 +74,7 @@ export default function syncUploadChainDeviceTest() {
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('batchUploadShouldDeleteAllPagesAcrossMultipleBatches', 0, async () => {
+    it('batchUploadShouldDeleteAllPages', 0, async () => {
       const records: SyncData[] = [];
       for (let i = 0; i < 7; i++) {
         records.push(createLogSyncData(`batch-${i}`, TEST_NOW_NS + i));
@@ -94,7 +94,7 @@ export default function syncUploadChainDeviceTest() {
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('failedUploadShouldPreserveDataAndRecoverAfterNextSuccessfulUpload', 0, async () => {
+    it('failedUploadShouldRecover', 0, async () => {
       await dbManager.insertFtOperation(createLogSyncData('retry-preserve', TEST_NOW_NS + 10));
       collector.setResponse(500, 'server-error');
 

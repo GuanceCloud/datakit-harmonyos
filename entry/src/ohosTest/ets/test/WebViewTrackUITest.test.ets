@@ -18,7 +18,7 @@ export default function webViewTrackUITest() {
       await EntryDBAssert.cleanupAll();
     });
 
-    it('webViewPageShouldSetHandlerAndCreateObservableRumState', 0, async () => {
+    it('webViewPageShouldExposeRumState', 0, async () => {
       await UiTestUtils.clickText(driver, 'WebView Test');
 
       const tracked = await EntryDBAssert.waitForWebViewPayload(6000);

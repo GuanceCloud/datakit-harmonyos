@@ -13,14 +13,14 @@ export default function samplingUnitTest() {
       FTRUMInnerManager.getInstance().setSamplingRates(1, 0);
     });
 
-    it('traceSamplingRateBoundariesShouldBeDeterministic', 0, () => {
+    it('traceSamplingShouldBeDeterministic', 0, () => {
       expect(SamplingUtils.enableTraceSamplingRate(0)).assertFalse();
       expect(SamplingUtils.enableTraceSamplingRate(-1)).assertFalse();
       expect(SamplingUtils.enableTraceSamplingRate(1)).assertTrue();
       expect(SamplingUtils.enableTraceSamplingRate(2)).assertTrue();
     });
 
-    it('sessionKeepShouldUseErrorSamplingOnlyWhenNormalDrops', 0, () => {
+    it('sessionKeepShouldUseErrorSampling', 0, () => {
       const normal = SamplingUtils.checkSessionKeep('session-normal', 1, 0);
       expect(normal.sessionCollect).assertTrue();
       expect(normal.sessionErrorCollect).assertFalse();
@@ -34,7 +34,7 @@ export default function samplingUnitTest() {
       expect(dropped.sessionErrorCollect).assertFalse();
     });
 
-    it('rumManagerShouldExposeCollectTypeForSamplingBranches', 0, () => {
+    it('rumManagerShouldExposeCollectType', 0, () => {
       const manager = FTRUMInnerManager.getInstance();
       const sessionId = manager.getSessionId();
 

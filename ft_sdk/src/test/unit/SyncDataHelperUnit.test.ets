@@ -38,7 +38,7 @@ export default function syncDataHelperUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('lineProtocolShouldFormatBasicTagsFieldsAndEscapes', 0, () => {
+    it('lineProtocolShouldFormatEscapes', 0, () => {
       const tags: Map<string, string> = new Map();
       tags.set(TEST_TAG_KEY, TEST_TAG_VALUE);
       tags.set('tag with space', 'a,b=c');
@@ -62,7 +62,7 @@ export default function syncDataHelperUnitTest() {
       expect(actual.endsWith(`${TEST_TIMESTAMP}`)).assertTrue();
     });
 
-    it('integerCompatibleShouldControlIntegerSuffixAndConfigFlag', 0, () => {
+    it('integerCompatShouldControlSuffix', 0, () => {
       const fields: Map<string, string> = new Map();
       fields.set('integer_value', '1');
       fields.set('float_value', '3.14');
@@ -83,7 +83,7 @@ export default function syncDataHelperUnitTest() {
       expect(compatibleLine.includes('integer_value=1')).assertTrue();
     });
 
-    it('getBodyContentShouldMergeLogContextWithExpectedPriority', 0, () => {
+    it('bodyContentShouldMergeLogContext', 0, () => {
       const helper = new SyncDataHelper();
       const baseConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .addGlobalContext('shared', 'base' as Object)
@@ -108,7 +108,7 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('shared=base')).assertFalse();
     });
 
-    it('getBodyContentShouldLinkRumTagsIntoLogWhenEnabled', 0, () => {
+    it('bodyContentShouldLinkRumTags', 0, () => {
       const helper = new SyncDataHelper();
       const rumConfig = new FTRUMConfig()
         .setRumAppId('rum-id')
@@ -130,7 +130,7 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('message="linked log"')).assertTrue();
     });
 
-    it('getBodyContentShouldPreserveWebViewPackageInfoAndAppendWebVersion', 0, () => {
+    it('bodyContentShouldAppendWebVersion', 0, () => {
       const helper = new SyncDataHelper();
       const rumConfig = new FTRUMConfig()
         .setRumAppId('rum-id')
@@ -153,7 +153,7 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('"web":"2.0.0"')).assertTrue();
     });
 
-    it('lineDataModifierShouldAffectFinalLineProtocolOnlyThroughGetBodyContent', 0, () => {
+    it('modifierShouldAffectBodyContentOnly', 0, () => {
       const helper = new SyncDataHelper();
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setLineDataModifier(new MaskingLineDataModifier());
       const tags: Map<string, string> = new Map();

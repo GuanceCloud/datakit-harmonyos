@@ -14,6 +14,7 @@ import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
 import ftSDKExtensionBridgeUnitTest from './unit/FTSDKExtensionBridgeUnit.test';
 import httpTest from './unit/HttpTest.test';
 import httpAutoTrackAxiosUnitTest from './unit/HttpAutoTrackAxiosUnit.test';
+import httpAutoTrackRcpConfigUnitTest from './unit/HttpAutoTrackRcpConfigUnit.test';
 import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
@@ -34,6 +35,7 @@ export default function testsuite() {
   httpTest();
   ftSDKExtensionBridgeUnitTest();
   httpAutoTrackAxiosUnitTest();
+  httpAutoTrackRcpConfigUnitTest();
   httpAutoTrackSharedUnitTest();
   dataModifierUnitTest();
 

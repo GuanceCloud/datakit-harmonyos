@@ -1,7 +1,8 @@
 import { FTSDK } from '../../../../main/ets/components/FTSDK';
-import FTTrackInner from '../../../../main/ets/components/FTTrackInner';
-import { TrackLogManager } from '../../../../main/ets/components/log/TrackLogManager';
-import { FTRUMGlobalManager } from '../../../../main/ets/components/rum/FTRUMGlobalManager';
+import { DbInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/DbInternalTestAccess';
+import { SdkInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
+import { SyncInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
+import { TelemetryInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/TelemetryInternalTestAccess';
 import { SyncTaskManager } from '../../../../main/ets/components/SyncTaskManager';
 import { WaitUtils } from './WaitUtils';
 
@@ -35,10 +36,9 @@ export class SdkTestLifecycle {
     } catch (_error) {
     }
 
-    SyncTaskManager.resetStateForTest();
-    FTRUMGlobalManager.resetStateForTest();
-    TrackLogManager.resetStateForTest();
-    FTTrackInner.resetInstanceForTest();
-    FTSDK.resetStateForTest();
+    SyncInternalTestAccess.resetState();
+    TelemetryInternalTestAccess.resetState();
+    DbInternalTestAccess.resetDbManagerInstance();
+    SdkInternalTestAccess.resetState();
   }
 }

@@ -19,7 +19,7 @@ export default function uiBlockLongTaskUITest() {
       await EntryDBAssert.cleanupAll();
     });
 
-    it('uiBlockDetectionShouldCreateRumLongTaskRecord', 0, async () => {
+    it('uiBlockShouldCreateLongTask', 0, async () => {
       await UiTestUtils.clickText(driver, 'Test 2: Long Block (3000ms)');
 
       const record = await EntryDBAssert.waitForSyncRecordContaining(

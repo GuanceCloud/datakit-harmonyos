@@ -24,7 +24,7 @@ export default function httpAutoTrackSharedUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('ensureHttpResourceIdShouldGenerateAndReuseCanonicalHeader', 0, () => {
+    it('resourceIdShouldReuseHeader', 0, () => {
       const generatedHeaders: Record<string, string> = {};
       const generatedId = ensureHttpResourceId(generatedHeaders);
 
@@ -39,7 +39,7 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(existingHeaders[RESOURCE_ID_HEADER]).assertEqual('existing-resource-id');
     });
 
-    it('extractContentLengthShouldParseOnlyValidHeaderValues', 0, () => {
+    it('contentLengthShouldParseValidOnly', 0, () => {
       expect(extractContentLength({ 'content-length': '42' })).assertEqual(42);
       expect(extractContentLength({ 'Content-Length': '100' })).assertEqual(100);
       expect(extractContentLength({ 'content-length': '-1' })).assertEqual(0);
@@ -51,7 +51,7 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(extractContentLength({ 'content-length': '-12' })).assertEqual(0);
     });
 
-    it('storesShouldClearWhenResourceMapLimitIsExceeded', 0, () => {
+    it('storesShouldClearOverLimit', 0, () => {
       const stateStore = HttpAutoTrackStateStore.getInstance();
       const methodStore = AxiosChainMethodStore.getInstance();
 

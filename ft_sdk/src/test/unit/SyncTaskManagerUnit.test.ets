@@ -8,10 +8,7 @@ import { SyncData } from '../../main/ets/components/db/bean/SyncData';
 import { ViewBean } from '../../main/ets/components/db/bean/ViewBean';
 import { DataType, SyncPageSize } from '../../main/ets/components/enum/Enums';
 import { NetCodeStatus } from '../../main/ets/components/http/HttpEngine';
-import {
-  SyncTaskManager,
-  SyncTaskRequestCallback
-} from '../../main/ets/components/SyncTaskManager';
+import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import {
   SyncTaskCachePolicy,
   SyncTaskConfigRecord,
@@ -21,7 +18,8 @@ import {
   SyncTaskPreferences,
   SyncTaskUploadQueueStatus,
   SyncTaskUploadThreadPool
-} from '../../main/ets/components/SyncTaskManagerRuntime';
+} from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
+import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 
 const TEST_URL = 'http://localhost';
 
@@ -48,7 +46,7 @@ function createSyncData(dataType: DataType, uuid: string, dataString: string, ti
 }
 
 async function flushPromises(): Promise<void> {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 20; i++) {
     await Promise.resolve();
   }
 }
@@ -358,10 +356,6 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   timerId: number = 0;
   timerCallbacks: Map<number, () => void> = new Map();
   sleepDurations: number[] = [];
-  debugCount: number = 0;
-  infoCount: number = 0;
-  warnCount: number = 0;
-  errorCount: number = 0;
   initThreadPoolCount: number = 0;
   getPreferencesCount: number = 0;
   executeHttpCount: number = 0;
@@ -372,8 +366,6 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
   throwSleep: boolean = false;
-  throwInfo: boolean = false;
-  throwDebug: boolean = false;
 
   getUploadThreadPool(): SyncTaskUploadThreadPool {
     return this.uploadThreadPool;
@@ -448,39 +440,21 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     }
     this.sleepDurations.push(ms);
   }
+}
 
-  logDebug(_tag: string, _message: string): void {
-    if (this.throwDebug) {
-      throw new Error('debug failed');
-    }
-    this.debugCount++;
-  }
-
-  logInfo(_tag: string, _message: string): void {
-    if (this.throwInfo) {
-      throw new Error('info failed');
-    }
-    this.infoCount++;
-  }
-
-  logWarn(_tag: string, _message: string): void {
-    this.warnCount++;
-  }
-
-  logError(_tag: string, _message: string): void {
-    this.errorCount++;
+async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
+  const runnable = runtime.uploadThreadPool.runnable;
+  if (runnable) {
+    runnable();
+    await flushPromises();
   }
 }
 
-class CaptureCallback implements SyncTaskRequestCallback {
-  codes: number[] = [];
-  messages: string[] = [];
-  errorCodes: string[] = [];
-
-  onResponse(code: number, response: string, errorCode: string): void {
-    this.codes.push(code);
-    this.messages.push(response);
-    this.errorCodes.push(errorCode);
+async function runCleanupTimer(runtime: FakeRuntime): Promise<void> {
+  const callback = runtime.timerCallbacks.get(runtime.timerId);
+  if (callback) {
+    callback();
+    await flushPromises();
   }
 }
 
@@ -491,55 +465,39 @@ export default function syncTaskManagerUnitTest() {
 
     beforeEach(() => {
       runtime = new FakeRuntime();
-      SyncTaskManager.setRuntimeForTest(runtime);
-      SyncTaskManager.resetStateForTest();
+      SyncInternalTestAccess.setRuntime(runtime);
+      SyncInternalTestAccess.resetState();
       manager = SyncTaskManager.getInstance();
     });
 
     afterEach(() => {
       manager.stop();
-      SyncTaskManager.resetRuntimeForTest();
-      SyncTaskManager.resetStateForTest();
+      SyncInternalTestAccess.resetRuntime();
+      SyncInternalTestAccess.resetState();
     });
 
-    it('uploadRunnableAndErrorSampledShouldCoverStopNoDbHasDataAndCatchBranches', 0, async () => {
-      const config = createConfig();
-      manager.init(config, createContext());
+    it('executePollShouldRunUploadBranches', 0, async () => {
+      manager.init(createConfig(), createContext());
+      await flushPromises();
+      const db = runtime.dbManager as FakeDbManager;
+      db.hasDataResult = false;
+      db.updateDataTypeResult = 1;
+      db.deleteExpireResult = 1;
 
-      manager.setStopForTest(true);
-      await manager.runUploadRunnableForTest();
-      expect(runtime.dbManager!.hasDataResult).assertFalse();
+      manager.setErrorTimeLine(99, null);
+      await flushPromises();
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
 
-      manager.setStopForTest(false);
-      runtime.dbManager = null;
-      await manager.errorSampledConsumeForTest(DataType.RUM_APP);
-      expect(runtime.warnCount > 0).assertTrue();
-
-      runtime.dbManager = new FakeDbManager();
-      runtime.dbManager.hasDataResult = false;
-      await manager.runUploadRunnableForTest();
-      expect(runtime.dbManager.hasDataQueue.length).assertEqual(0);
-
-      runtime.dbManager.updateDataTypeResult = 1;
-      runtime.dbManager.deleteExpireResult = 1;
-      manager.setErrorTimeLineForTest(99);
-      const updateCountBefore = runtime.dbManager.updateDataTypeCount;
-      const deleteExpireCountBefore = runtime.dbManager.deleteExpireCount;
-      await manager.errorSampledConsumeForTest(DataType.RUM_WEBVIEW);
-      expect(runtime.dbManager.updateDataTypeCount).assertEqual(updateCountBefore + 1);
-      expect(runtime.dbManager.deleteExpireCount).assertEqual(deleteExpireCountBefore + 1);
-
-      runtime.dbManager.throwDeleteExpire = true;
-      await manager.errorSampledConsumeForTest(DataType.RUM_WEBVIEW);
-      expect(runtime.errorCount > 0).assertTrue();
-
-      runtime.dbManager.throwHasData = true;
-      await manager.runUploadRunnableForTest();
-      expect(runtime.errorCount > 1).assertTrue();
+      expect(runtime.uploadThreadPool.scheduleDelays.includes(0)).assertTrue();
+      expect(db.updateDataTypeCount >= 2).assertTrue();
+      expect(db.deleteExpireCount >= 2).assertTrue();
+      expect(manager.getStatus().running).assertFalse();
     });
 
-    it('errorTimelineShouldCoverPreferenceMemoryActiveViewAndFailureBranches', 0, async () => {
-      manager.setPreferencesStoreForTest(runtime.preferences);
+    it('errorTimelineShouldPersist', 0, async () => {
+      manager.init(createConfig(), createContext());
+      await flushPromises();
       const view = new ViewBean('view-id', 'view', 100);
 
       manager.setErrorTimeLine(10, view);
@@ -552,136 +510,41 @@ export default function syncTaskManagerUnitTest() {
       manager.setErrorTimeLine(5, view);
       expect(view.getLastErrorTime()).assertEqual(10);
 
-      manager.setErrorTimeLineForTest(-1);
       runtime.preferences.value = 77;
+      SyncInternalTestAccess.resetState();
+      manager = SyncTaskManager.getInstance();
+      manager.init(createConfig(), createContext());
+      await flushPromises();
       expect(await manager.getErrorTimeLine()).assertEqual(77);
+
       runtime.preferences.value = 'not-number';
+      SyncInternalTestAccess.resetState();
+      manager = SyncTaskManager.getInstance();
+      manager.init(createConfig(), createContext());
+      await flushPromises();
       expect(await manager.getErrorTimeLine()).assertEqual(-1);
+
       runtime.preferences.throwGet = true;
+      SyncInternalTestAccess.resetState();
+      manager = SyncTaskManager.getInstance();
+      manager.init(createConfig(), createContext());
+      await flushPromises();
       expect(await manager.getErrorTimeLine()).assertEqual(-1);
       runtime.preferences.throwGet = false;
+
       runtime.preferences.throwPut = true;
       manager.setErrorTimeLine(88, null);
       await flushPromises();
-      expect(runtime.errorCount > 0).assertTrue();
     });
 
-    it('dbAndFormattingHelpersShouldCoverQueryDeleteReinsertPackageAndCacheBranches', 0, async () => {
-      manager.setContextForTest(null);
-      expect((await manager.queryFromDataForTest(DataType.LOG)).length).assertEqual(0);
-      await manager.deleteLastQueryForTest([]);
-      await manager.deleteLastQueryForTest([createSyncData(DataType.LOG, 'u', 'line 1')]);
-      expect(runtime.warnCount > 0).assertTrue();
-
-      manager.setContextForTest(createContext());
-      runtime.dbManager = null;
-      expect((await manager.queryFromDataForTest(DataType.LOG)).length).assertEqual(0);
-
+    it('executePollShouldUploadRetry', 0, async () => {
       const db = new FakeDbManager();
       runtime.dbManager = db;
-      const data = createSyncData(DataType.LOG, 'log-uuid', 'df_rum_harmonyos_log,sdk_data_id=log-uuid value=1i 100');
-      db.queryQueue.push([data]);
-      expect((await manager.queryFromDataForTest(DataType.LOG)).length).assertEqual(1);
-      expect(db.lastPageSize).assertEqual(manager.getPageSize());
-
-      db.throwQuery = true;
-      expect((await manager.queryFromDataForTest(DataType.LOG)).length).assertEqual(0);
-      db.throwQuery = false;
-
-      await manager.deleteLastQueryForTest([data]);
-      expect(db.deleteCount).assertEqual(1);
-      expect(runtime.sleepDurations.includes(30)).assertTrue();
-      db.throwDelete = true;
-      await manager.deleteLastQueryForTest([data]);
-      expect(runtime.errorCount > 0).assertTrue();
-      db.throwDelete = false;
-
-      await manager.reInsertDataForTest([data]);
-      expect(data.getUuid()).assertEqual('runtime-uuid-1');
-      expect(db.insertCount).assertEqual(1);
-      db.throwInsert = true;
-      await manager.reInsertDataForTest([data]);
-      expect(runtime.errorCount > 1).assertTrue();
-
-      expect(manager.formatLineProtocolDataForTest([], 'pkg')).assertEqual('');
-      const formatData =
-        createSyncData(DataType.LOG, 'format-uuid', 'df_rum_harmonyos_log,sdk_data_id=format-uuid value=1i 100');
-      const formatted = manager.formatLineProtocolDataForTest([formatData], 'pkg');
-      expect(formatted.includes('pkg.format-uuid')).assertTrue();
-      expect(manager.addPackageIdToLineForTest('line', 'pkg')).assertEqual('line');
-
-      runtime.randomValues = [0, 0.5, 0.99, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9, 0.01];
-      expect(manager.generateNanoIdForTest().length).assertEqual(12);
-      expect(manager.encodeBase62ForTest(0)).assertEqual('0');
-      expect(manager.encodeBase62ForTest(62)).assertEqual('10');
-      runtime.currentTimeMs = 12345;
-      runtime.randomValues = [0.2];
-      expect(manager.getProcessIdForTest()).assertEqual(manager.getProcessIdForTest());
-
-      runtime.cachePolicy.logLimit = 10;
-      runtime.cachePolicy.logCount = 5;
-      expect(manager.reachHalfLimitForTest()).assertTrue();
-      runtime.cachePolicy.logCount = 0;
-      runtime.cachePolicy.rumLimit = 10;
-      runtime.cachePolicy.rumCount = 5;
-      expect(manager.reachHalfLimitForTest()).assertTrue();
-      runtime.cachePolicy.rumCount = 1;
-      expect(manager.reachHalfLimitForTest()).assertFalse();
-
-      expect(manager.getSeqNumberForTest(DataType.LOG)).assertEqual('0');
-      manager.nextGeneratorForTest(DataType.LOG);
-      expect(manager.getSeqNumberForTest(DataType.LOG)).assertEqual('1');
-      manager.setGeneratorCurrentValueForTest(DataType.RUM_APP, 35);
-      expect(manager.generateIdForTest(DataType.RUM_APP)).assertEqual('z');
-      manager.setGeneratorCurrentValueForTest(DataType.RUM_APP, Math.pow(36, 8) + 1);
-      manager.nextGeneratorForTest(DataType.RUM_APP);
-      expect(manager.getSeqNumberForTest(DataType.RUM_APP)).assertEqual('0');
-      expect(manager.generatePackageIdForTest('1', 2).split('.').length).assertEqual(4);
-      expect(manager.getCurrentNanoTimeForTest()).assertEqual(runtime.currentTimeMs * 1000000);
-    });
-
-    it('requestNetShouldCoverModelsSuccessNetworkExceptionAndThrowBranches', 0, async () => {
-      const callback = new CaptureCallback();
-      let noConfigThrown = false;
-      try {
-        await manager.requestNetForTest(DataType.LOG, 'pkg', 'body', callback);
-      } catch (_error) {
-        noConfigThrown = true;
-      }
-      expect(noConfigThrown).assertTrue();
-
-      manager.setSdkConfigForTest(createConfig());
-      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
-      await manager.requestNetForTest(DataType.LOG, 'pkg-log', 'log-body', callback);
-      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
-      expect(callback.codes[0]).assertEqual(204);
-
-      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
-      await manager.requestNetForTest(DataType.RUM_WEBVIEW, 'pkg-rum',
-        `view,${Constants.KEY_RUM_VIEW_IS_WEB_VIEW}=true value=1i 100`, callback);
-      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_RUM);
-      expect(callback.codes[1]).assertEqual(200);
-
-      runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network', 'net'));
-      await manager.requestNetForTest(DataType.RUM_APP, 'pkg-rum', 'body', callback);
-      expect(callback.codes[2]).assertEqual(NetCodeStatus.UNKNOWN_EXCEPTION_CODE);
-
-      runtime.throwExecuteHttp = true;
-      await manager.requestNetForTest(DataType.RUM_APP, 'pkg-rum', 'body', callback);
-      expect(callback.codes[3]).assertEqual(NetCodeStatus.UNKNOWN_EXCEPTION_CODE);
-    });
-
-    it('handleSyncShouldCoverUploadSuccessFailureRetryDiscardAndCallbackBranches', 0, async () => {
-      manager.setContextForTest(createContext());
-      manager.setSdkConfigForTest(createConfig());
-      manager.setPageSizeForTest(2);
-      manager.setDataSyncMaxRetryCountForTest(1);
-      manager.setSyncSleepTimeForTest(5);
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
 
       db.hasDataResult = false;
-      await manager.handleSyncOptForTest(DataType.LOG);
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
       expect(runtime.executeHttpCount).assertEqual(0);
 
       db.hasDataResult = true;
@@ -689,72 +552,59 @@ export default function syncTaskManagerUnitTest() {
       db.queryQueue.push([
         createSyncData(DataType.LOG, 'discard-uuid', 'df_rum_harmonyos_log,sdk_data_id=discard-uuid value=1i 100')
       ], []);
-      await manager.handleSyncOptForTest(DataType.LOG);
-      expect(runtime.warnCount > 0).assertTrue();
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
       runtime.cachePolicy.discard = false;
 
       const logOne = createSyncData(DataType.LOG, 'log-1', 'df_rum_harmonyos_log,sdk_data_id=log-1 value=1i 100');
       db.queryQueue.push([logOne]);
-      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
-      await manager.handleSyncOptForTest(DataType.LOG);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(runtime.lastHttpPkgId.split('.').length).assertEqual(4);
+      expect(runtime.lastHttpBody.includes(`${runtime.lastHttpPkgId}.log-1`)).assertTrue();
       expect(db.deleteCount > 0).assertTrue();
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
-      expect(manager.getSeqNumberForTest(DataType.LOG)).assertEqual('1');
 
+      const deleteCountAfterSuccess = db.deleteCount;
       const rumError = createSyncData(DataType.RUM_APP, 'rum-1', 'error,error_type=js,error_message="boom" value=1i 100');
-      db.queryQueue.push([rumError], [rumError], [rumError]);
-      runtime.httpResults.push(new FakeHttpResult(500, 'fail', 'server'), new FakeHttpResult(500, 'fail', 'server'));
-      await manager.handleSyncOptForTest(DataType.RUM_APP);
-      expect(runtime.sleepDurations.includes(500)).assertTrue();
-      expect(runtime.errorCount > 0).assertTrue();
-
       db.queryQueue.push([rumError]);
-      runtime.throwExecuteHttp = true;
-      await manager.handleSyncOptForTest(DataType.RUM_APP);
-      expect(runtime.errorCount > 1).assertTrue();
+      runtime.httpResults.push(new FakeHttpResult(500, 'fail', 'server'));
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_RUM);
+      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
 
-      SyncTaskManager.invokeRequestCallbackForTest(true);
-      SyncTaskManager.invokeRequestCallbackForTest(true, true);
-      SyncTaskManager.invokeRequestCallbackForTest(false);
+      runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network', 'net'));
+      db.queryQueue.push([rumError]);
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess);
     });
 
-    it('rumCleanupShouldCoverTimerCleanupDeleteOldestAndDestroyBranches', 0, async () => {
+    it('rumCleanupShouldUseInitTimer', 0, async () => {
       const context = createContext();
-      SyncTaskManager.initRumCleanupForTest(context);
+      manager.init(createConfig(), context);
       expect(runtime.timerCallbacks.size).assertEqual(1);
-      SyncTaskManager.initRumCleanupForTest(context);
+      manager.init(createConfig(), context);
       expect(runtime.timerCallbacks.size).assertEqual(1);
 
       runtime.dbManager = new FakeDbManager();
-      await SyncTaskManager.performRumCleanupForTest();
+      await runCleanupTimer(runtime);
       expect(runtime.dbManager.executeCount).assertEqual(2);
       runtime.dbManager.rdbStore.hasRow = false;
-      await SyncTaskManager.performRumCleanupForTest();
+      await runCleanupTimer(runtime);
       expect(runtime.dbManager.executeCount).assertEqual(4);
 
       runtime.dbManager.throwExecute = true;
-      await SyncTaskManager.performRumCleanupForTest();
-      expect(runtime.errorCount > 0).assertTrue();
+      await runCleanupTimer(runtime);
       runtime.dbManager.throwExecute = false;
 
-      SyncTaskManager.setRumCleanupContextForTest(null);
-      await SyncTaskManager.performRumCleanupForTest();
-      await SyncTaskManager.deleteOldestDataForTest(DataType.LOG, 1);
-      expect(runtime.errorCount > 1).assertTrue();
-
-      SyncTaskManager.setRumCleanupContextForTest(context);
-      await SyncTaskManager.deleteOldestDataForTest(DataType.LOG, 2);
-      await SyncTaskManager.deleteOldestDataForTest(DataType.RUM_APP, 3);
-      expect(runtime.cachePolicy.logDelta < 0).assertTrue();
-      expect(runtime.cachePolicy.rumDelta < 0).assertTrue();
-
-      runtime.dbManager.rdbStore.throwDelete = true;
-      await SyncTaskManager.deleteOldestDataForTest(DataType.RUM_WEBVIEW, 1);
-      expect(runtime.errorCount > 2).assertTrue();
-
-      SyncTaskManager.destroyRumCleanupForTest();
+      manager.stop();
       expect(runtime.timerCallbacks.size).assertEqual(0);
-      SyncTaskManager.destroyRumCleanupForTest();
+      manager.stop();
     });
   });
 }

@@ -184,7 +184,7 @@ export default function realBackendSmokeTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('realBackendRumViewShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadRumView', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }
@@ -207,7 +207,7 @@ export default function realBackendSmokeTest() {
       await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `view_name=${viewName}`);
     });
 
-    it('realBackendLogShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadLog', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }
@@ -229,7 +229,7 @@ export default function realBackendSmokeTest() {
       await flushAndAssertRealBackendConsumed(DataType.LOG, fragments, record.getUuid(), `message=${logContent}`);
     });
 
-    it('realBackendRumActionShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadAction', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }
@@ -255,7 +255,7 @@ export default function realBackendSmokeTest() {
       await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `action_name=${actionName}`);
     });
 
-    it('realBackendRumErrorShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadError', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }
@@ -284,7 +284,7 @@ export default function realBackendSmokeTest() {
       await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `error_message=${errorMessage}`);
     });
 
-    it('realBackendRumResourceShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadResource', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }
@@ -326,7 +326,7 @@ export default function realBackendSmokeTest() {
       await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `resource_url=${resourceUrl}`);
     });
 
-    it('realBackendRumTraceResourceShouldUploadAndDeleteLocalRecord', 0, async () => {
+    it('realBackendShouldUploadTraceResource', 0, async () => {
       if (skipIfRealBackendDisabled()) {
         return;
       }

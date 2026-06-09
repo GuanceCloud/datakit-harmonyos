@@ -11,17 +11,26 @@ import { HeaderHandler, TraceData } from '../../main/ets/components/trace/FTTrac
 import { TestReset } from '../helpers/TestReset';
 
 class RecordingTraceHeaderHandler implements HeaderHandler {
+  public requestCount: number = 0;
   public requestTraceId: string = '';
   public requestSpanId: string = '';
+  public responseCount: number = 0;
+  public responseTraceId: string = '';
+  public responseSpanId: string = '';
 
   public processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
+    this.requestCount++;
     this.requestTraceId = traceData.traceId;
     this.requestSpanId = traceData.spanId;
     headers.set('X-Test-Trace-Id', traceData.traceId);
     return headers;
   }
 
-  public processResponseHeaders(headers: Map<string, string>, _traceData: TraceData): Map<string, string> {
+  public processResponseHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
+    this.responseCount++;
+    this.responseTraceId = traceData.traceId;
+    this.responseSpanId = traceData.spanId;
+    headers.set('X-Test-Response-Trace-Id', traceData.traceId);
     return headers;
   }
 }
@@ -36,7 +45,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('prepareAxiosChainRequestShouldStoreUppercaseMethod', 0, () => {
+    it('axiosPrepareShouldStoreMethod', 0, () => {
       const headers: Record<string, Object> = {};
       const request: FTSDKExtensionRequestInput = {
         url: 'http://example.com/path',
@@ -53,7 +62,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       expect(FTSDKExtensionBridge.resolveAxiosMethod(preparedRequest.uniqueId) === undefined).assertTrue();
     });
 
-    it('prepareHttpRequestShouldReturnStableHeadersWhenDisabled', 0, () => {
+    it('httpPrepareShouldKeepHeadersDisabled', 0, () => {
       const requestHeaders: Record<string, Object> = {};
       requestHeaders['Accept'] = 'application/json' as Object;
       const request: FTSDKExtensionRequestInput = {
@@ -83,7 +92,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       expect(completed).assertTrue();
     });
 
-    it('prepareHttpRequestShouldPassTraceIdsToCustomHeaderHandler', 0, () => {
+    it('httpPrepareShouldPassTraceIds', 0, () => {
       const headerHandler = new RecordingTraceHeaderHandler();
       const traceConfig = new FTTraceConfig()
         .setEnableAutoTrace(true)
@@ -102,6 +111,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       };
       const preparedRequest = FTSDKExtensionBridge.prepareHttpRequest(request, options);
 
+      expect(headerHandler.requestCount).assertEqual(1);
       expect(headerHandler.requestTraceId.length > 0).assertTrue();
       expect(headerHandler.requestSpanId.length > 0).assertTrue();
       expect(preparedRequest.headers['X-Test-Trace-Id']).assertEqual(headerHandler.requestTraceId);
@@ -116,6 +126,9 @@ export default function ftSDKExtensionBridgeUnitTest() {
         body: ''
       };
       expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
+      expect(headerHandler.responseCount).assertEqual(1);
+      expect(headerHandler.responseTraceId).assertEqual(headerHandler.requestTraceId);
+      expect(headerHandler.responseSpanId).assertEqual(headerHandler.requestSpanId);
     });
 
   });

@@ -100,7 +100,7 @@ export default function httpAutoTrackAxiosUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('axiosAutoTrackShouldClearStateAfterSuccessfulResponse', 0, () => {
+    it('axiosSuccessShouldClearState', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosTrack(target as Object, {
         enableTraceInterceptor: false,
@@ -119,7 +119,7 @@ export default function httpAutoTrackAxiosUnitTest() {
       expect(contextAfterResponse['existing']).assertEqual('keep-me');
     });
 
-    it('axiosAutoTrackShouldClearStateAfterFailedResponse', 0, () => {
+    it('axiosFailureShouldClearState', 0, () => {
       const target = new FakeAxiosTarget();
       applyFTAxiosTrack(target as Object, {
         enableTraceInterceptor: false,

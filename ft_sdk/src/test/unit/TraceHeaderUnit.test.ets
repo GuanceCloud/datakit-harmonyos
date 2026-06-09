@@ -6,7 +6,7 @@ import { FTTraceHeaderHandler } from '../../main/ets/components/trace/FTTraceCon
 import { FTTraceHandler } from '../../main/ets/components/trace/FTTraceHandler';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
-import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { TraceType, TraceTypeUtils } from '../../main/ets/components/trace/TraceType';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_URL = 'https://example.com/path';
@@ -146,7 +146,32 @@ export default function traceHeaderUnitTest() {
       expect(sw8.includes('-http-request-')).assertTrue();
     });
 
-    it('when trace headers already exist for each TraceType should keep existing trace_id/parent_id and not duplicate', 0, () => {
+    it('traceTypesShouldMapAndClassify', 0, () => {
+      expect(TraceTypeUtils.toString(TraceType.DDTRACE)).assertEqual('ddtrace');
+      expect(TraceTypeUtils.toString(TraceType.ZIPKIN_MULTI_HEADER)).assertEqual('zipkin');
+      expect(TraceTypeUtils.toString(TraceType.ZIPKIN_SINGLE_HEADER)).assertEqual('zipkin');
+      expect(TraceTypeUtils.toString(TraceType.TRACEPARENT)).assertEqual('traceparent');
+      expect(TraceTypeUtils.toString(TraceType.SKYWALKING)).assertEqual('skywalking');
+      expect(TraceTypeUtils.toString(TraceType.JAEGER)).assertEqual('jaeger');
+
+      expect(TraceTypeUtils.value(TraceType.ZIPKIN_MULTI_HEADER)).assertEqual('zipkin_multi_header');
+      expect(TraceTypeUtils.value(TraceType.ZIPKIN_SINGLE_HEADER)).assertEqual('zipkin_single_header');
+      expect(TraceTypeUtils.value(TraceType.TRACEPARENT)).assertEqual('traceparent');
+
+      expect(TraceTypeUtils.isZipkin(TraceType.ZIPKIN_MULTI_HEADER)).assertTrue();
+      expect(TraceTypeUtils.isZipkin(TraceType.ZIPKIN_SINGLE_HEADER)).assertTrue();
+      expect(TraceTypeUtils.isZipkin(TraceType.DDTRACE)).assertFalse();
+      expect(TraceTypeUtils.isDataDog(TraceType.DDTRACE)).assertTrue();
+      expect(TraceTypeUtils.isDataDog(TraceType.JAEGER)).assertFalse();
+      expect(TraceTypeUtils.isW3C(TraceType.TRACEPARENT)).assertTrue();
+      expect(TraceTypeUtils.isW3C(TraceType.DDTRACE)).assertFalse();
+      expect(TraceTypeUtils.isSkyWalking(TraceType.SKYWALKING)).assertTrue();
+      expect(TraceTypeUtils.isSkyWalking(TraceType.TRACEPARENT)).assertFalse();
+      expect(TraceTypeUtils.isJaeger(TraceType.JAEGER)).assertTrue();
+      expect(TraceTypeUtils.isJaeger(TraceType.SKYWALKING)).assertFalse();
+    });
+
+    it('existingTraceHeadersShouldBeKept', 0, () => {
       const ddExisting: Record<string, string> = {};
       ddExisting[FTTraceHandler.DD_TRACE_TRACE_ID_KEY] = 'trace-visible-1';
       ddExisting[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY] = 'parent\u200B-1';
@@ -184,7 +209,7 @@ export default function traceHeaderUnitTest() {
       expect(skyWalkingHeaders.get(FTTraceHandler.SKYWALKING_V3_SW_8)).assertEqual('1-visible-sky');
     });
 
-    it('when sampling=0 and sampling=1 should keep header format exact for each type', 0, () => {
+    it('samplingShouldKeepHeaderFormat', 0, () => {
       const zipkinMulti0 = buildHeaders(TraceType.ZIPKIN_MULTI_HEADER, 0);
       expect(zipkinMulti0[FTTraceHandler.ZIPKIN_TRACE_ID]).assertEqual(zipkinMulti0[FTTraceHandler.ZIPKIN_TRACE_ID]);
       expect(zipkinMulti0[FTTraceHandler.ZIPKIN_SAMPLED]).assertEqual('0');
@@ -208,14 +233,14 @@ export default function traceHeaderUnitTest() {
       expect(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(traceparent1[FTTraceHandler.W3C_TRACEPARENT_KEY])).assertTrue();
     });
 
-    it('samplingRateZeroShouldStillEmitUnsampledHeaders', 0, () => {
+    it('samplingZeroShouldEmitUnsampled', 0, () => {
       const headers = buildHeaders(TraceType.DDTRACE, 0);
 
       expect(isDecimal(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY])).assertTrue();
       expect(headers[FTTraceHandler.DD_TRACE_SAMPLING_PRIORITY_KEY]).assertEqual('-1');
     });
 
-    it('samplingRateZeroShouldEmitUnsampledHeadersForAllSupportedTypes', 0, () => {
+    it('samplingZeroShouldCoverAllTypes', 0, () => {
       const zipkinMulti = buildHeaders(TraceType.ZIPKIN_MULTI_HEADER, 0);
       expect(zipkinMulti[FTTraceHandler.ZIPKIN_SAMPLED]).assertEqual('0');
 
@@ -232,7 +257,7 @@ export default function traceHeaderUnitTest() {
       expect(skyWalking[FTTraceHandler.SKYWALKING_V3_SW_8].startsWith('1-')).assertTrue();
     });
 
-    it('traceManagerShouldEvictOldestHandlerWhenOverLimit', 0, () => {
+    it('traceManagerShouldEvictOldest', 0, () => {
       const manager = FTTraceManager.getInstance();
 
       for (let i = 0; i < 1001; i++) {
@@ -244,7 +269,7 @@ export default function traceHeaderUnitTest() {
       expect(manager.hasHandler('resource-1000')).assertTrue();
     });
 
-    it('customHeaderHandlerShouldProcessRequestAndResponseHeaders', 0, () => {
+    it('customHandlerShouldProcessHeaders', 0, () => {
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig().setTraceType(TraceType.DDTRACE));
       const interceptor = new DefaultFTTraceInterceptor(TraceType.DDTRACE, new CustomHeaderHandler());
       const requestHeaders: Map<string, string> = new Map();

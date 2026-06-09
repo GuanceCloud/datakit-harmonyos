@@ -60,7 +60,7 @@ export default function dbTest() {
       await dbManager.delete();
     });
 
-    it('sdkDatabaseShouldInsertQueryAndDeleteSingleSyncRecord', 0, async () => {
+    it('dbShouldCrudSingleRecord', 0, async () => {
       const syncData = createLogSyncData('entry-single-insert');
 
       const inserted = await dbManager.insertFtOperation(syncData);
@@ -76,7 +76,7 @@ export default function dbTest() {
       expect(countAfterDelete).assertEqual(0);
     });
 
-    it('sdkDatabaseShouldBatchInsertAndDeleteQueriedRecords', 0, async () => {
+    it('dbShouldBatchDeleteRecords', 0, async () => {
       const first = createLogSyncData('entry-batch-1', TEST_NOW_NS + 1);
       const second = createLogSyncData('entry-batch-2', TEST_NOW_NS + 2);
       const third = createRumSyncData('entry-rum-1', TEST_NOW_NS + 3);
@@ -105,7 +105,7 @@ export default function dbTest() {
       expect(remaining[0].getDataString().includes('entry-newest')).assertTrue();
     });
 
-    it('sdkDatabaseSchemaShouldExistAfterInitialization', 0, async () => {
+    it('dbSchemaShouldExist', 0, async () => {
       const callback = new SchemaProbeCallback();
 
       await dbManager.executeWithDB(false, callback);

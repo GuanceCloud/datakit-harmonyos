@@ -8,6 +8,7 @@ import { UiTestUtils } from './helpers/UiTestUtils';
 export default function rumDataChainUITest() {
   describe('RumDataChainUITest', () => {
     let driver: Driver;
+    let previousAutoSync: boolean = false;
 
     beforeEach(async () => {
       driver = await UiTestUtils.createDriver();
@@ -16,12 +17,13 @@ export default function rumDataChainUITest() {
       await UiTestUtils.clickText(driver, 'RUM Unified Test');
       const sdkReady = await UiTestUtils.waitForText(driver, 'SDK Status: Initialized', 5000);
       expect(sdkReady).assertTrue();
-      SyncTaskManager.getInstance().setAutoSync(false);
-      SyncTaskManager.getInstance().setStopForTest(true);
+      const syncTaskManager = SyncTaskManager.getInstance();
+      previousAutoSync = syncTaskManager.getStatus().autoSync;
+      syncTaskManager.setAutoSync(false);
     });
 
     afterEach(async () => {
-      SyncTaskManager.getInstance().setStopForTest(false);
+      SyncTaskManager.getInstance().setAutoSync(previousAutoSync);
       await UiTestUtils.pressBack(driver);
     });
 

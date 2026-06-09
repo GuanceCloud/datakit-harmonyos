@@ -54,7 +54,7 @@ export default function dataModifierTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('logDataModifierShouldChangeFinalLineProtocolFromPublicLogApi', 0, async () => {
+    it('logModifierShouldChangeLineProtocol', 0, async () => {
       FTLogger.logBackground(ORIGINAL_LOG_MESSAGE, Status.INFO);
 
       const record = await DBAssert.waitForSyncRecordContaining(DataType.LOG, ['message="xxx"', 'status=info'], 5000);
@@ -75,7 +75,7 @@ export default function dataModifierTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('rumDataModifierShouldChangeFinalLineProtocolFromPublicRumApi', 0, async () => {
+    it('rumModifierShouldChangeLineProtocol', 0, async () => {
       await FTRUMGlobalManager.getInstance().startView('modifier_view');
       FTRUMGlobalManager.getInstance().addAction(ORIGINAL_ACTION_NAME, 'click');
 

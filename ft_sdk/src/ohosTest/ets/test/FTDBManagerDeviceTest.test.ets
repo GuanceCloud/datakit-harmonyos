@@ -80,7 +80,7 @@ export default function ftDBManagerDeviceTest() {
       await dbManager.delete();
     });
 
-    it('realDatabaseShouldInsertQueryAndDeleteSingleSyncRecord', 0, async () => {
+    it('dbShouldCrudSingleRecord', 0, async () => {
       const syncData = createLogSyncData('single-insert');
 
       const inserted = await dbManager.insertFtOperation(syncData);
@@ -96,7 +96,7 @@ export default function ftDBManagerDeviceTest() {
       expect(countAfterDelete).assertEqual(0);
     });
 
-    it('realDatabaseShouldBatchInsertAndDeleteQueriedRecords', 0, async () => {
+    it('dbShouldBatchDeleteRecords', 0, async () => {
       const first = createLogSyncData('batch-1', TEST_NOW_NS + 1);
       const second = createLogSyncData('batch-2', TEST_NOW_NS + 2);
       const third = createLogSyncData('batch-3', TEST_NOW_NS + 3);
@@ -125,7 +125,7 @@ export default function ftDBManagerDeviceTest() {
       expect(remaining[0].getDataString().includes('newest')).assertTrue();
     });
 
-    it('migrationSchemaShouldExistAfterRealDatabaseInitialization', 0, async () => {
+    it('migrationSchemaShouldExist', 0, async () => {
       const callback = new SchemaProbeCallback();
 
       await dbManager.executeWithDB(false, callback);
@@ -134,7 +134,7 @@ export default function ftDBManagerDeviceTest() {
       expect(callback.hasSyncDataFlatTable).assertTrue();
     });
 
-    it('errorSampledRecordsShouldMigrateAndExpireThroughRealDatabase', 0, async () => {
+    it('errorSampledShouldMigrateExpire', 0, async () => {
       const oldSampled = createRumSyncData('old-sampled', TEST_NOW_NS - 120000000000);
       oldSampled.setCustomDataTypeString('rum_app_error_sampled');
       const expiredSampled = createRumSyncData('expired-sampled', TEST_NOW_NS - 90000000000);
@@ -155,7 +155,7 @@ export default function ftDBManagerDeviceTest() {
       expect(callback.count).assertEqual(1);
     });
 
-    it('deleteShouldCleanAllSyncRowsAndResetDatabaseShouldKeepTablesUsable', 0, async () => {
+    it('resetDbShouldKeepTablesUsable', 0, async () => {
       await dbManager.insertFtOptList([
         createLogSyncData('cleanup-log', TEST_NOW_NS + 1),
         createRumSyncData('cleanup-rum', TEST_NOW_NS + 2)
