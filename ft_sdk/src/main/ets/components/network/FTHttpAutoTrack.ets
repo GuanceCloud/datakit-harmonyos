@@ -5,6 +5,7 @@
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { FTTraceInterceptor, DefaultFTTraceInterceptor, HttpRequestData, HttpResponseData } from '../trace/FTTraceInterceptor';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
+import { FTTraceContext, FTTraceRequestContext } from '../trace/FTTraceHeaderHandler';
 import { TraceType } from '../trace/TraceType';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { ResourceParams } from '../rum/bean/ResourceParams';
@@ -169,36 +170,17 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     }
 
     const traceManager = FTTraceManager.getInstance();
-    const handler = traceManager.getHandler(resourceId);
-    if (handler && handler.getTraceID && handler.getSpanID) {
+    const traceContext = traceManager.getTraceContext(resourceId);
+    if (traceContext) {
       try {
-        const traceId = handler.getTraceID();
-        const spanId = handler.getSpanID();
-        if (traceId && spanId) {
-          const traceConfigManager = FTTraceConfigManager.getInstance();
-          const traceType = traceConfigManager.getTraceType();
-
-          if (traceType === 'ddtrace') {
-            savedRequestHeaders[FTTraceHandler.DD_TRACE_TRACE_ID_KEY] = traceId;
-            savedRequestHeaders[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY] = spanId;
-            savedRequestHeaders[FTTraceHandler.DD_TRACE_ORIGIN_KEY] = "rum";
-            savedRequestHeaders[FTTraceHandler.DD_TRACE_SAMPLING_PRIORITY_KEY] = "2";
-          } else if (traceType === 'zipkin_single_header') {
-            savedRequestHeaders[FTTraceHandler.ZIPKIN_B3_HEADER] = `${traceId}-${spanId}-1`;
-          } else if (traceType === 'zipkin' || traceType === 'zipkin_multi_header') {
-            savedRequestHeaders[FTTraceHandler.ZIPKIN_TRACE_ID] = traceId;
-            savedRequestHeaders[FTTraceHandler.ZIPKIN_SPAN_ID] = spanId;
-            savedRequestHeaders[FTTraceHandler.ZIPKIN_SAMPLED] = "1";
-          } else if (traceType === 'traceparent') {
-            savedRequestHeaders[FTTraceHandler.W3C_TRACEPARENT_KEY] = `00-${traceId}-${spanId}-01`;
-          } else if (traceType === 'jaeger') {
-            savedRequestHeaders[FTTraceHandler.JAEGER_KEY] = `${traceId}:${spanId}:0:1`;
-          }
-        } else {
-          FTInnerLogger.w(TAG, `[RCP-Resource] Trace handler is missing trace identifiers, resourceId=${resourceId}`);
+        const contextHeaders = traceContext.headers;
+        const contextHeaderKeys = Object.keys(contextHeaders);
+        for (let i = 0; i < contextHeaderKeys.length; i++) {
+          const key = contextHeaderKeys[i];
+          savedRequestHeaders[key] = contextHeaders[key];
         }
       } catch (error) {
-        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to get trace headers from handler: ${error}`);
+        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to get trace headers from TraceContext: ${error}`);
       }
     }
 
@@ -451,8 +433,8 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       const traceConfigManager = FTTraceConfigManager.getInstance();
       if (traceConfigManager.isAutoTraceEnabled()) {
         const enumTraceType: TraceType = traceConfigManager.getTraceTypeEnum();
-        const headerHandler = traceConfigManager.getOverrideHeaderHandler();
-        this.traceInterceptor = new DefaultFTTraceInterceptor(enumTraceType, headerHandler);
+        const traceHeaderHandler = traceConfigManager.getTraceHeaderHandler();
+        this.traceInterceptor = new DefaultFTTraceInterceptor(enumTraceType, traceHeaderHandler);
         this.isEnabled = true;
         FTInnerLogger.d(TAG, `RCP Trace Interceptor initialized: traceType=${enumTraceType.toString()}`);
       } else {
@@ -520,11 +502,26 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       let traceHeaders: Record<string, string> = {};
       let traceId: string | undefined = undefined;
       let spanId: string | undefined = undefined;
+      let finalTraceId: string | undefined = undefined;
+      let finalSpanId: string | undefined = undefined;
+      let traceHeadersInjected = false;
       if (!hasKnownTraceHeaderMap(headersMap)) {
-        traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
-        const traceHandler = FTTraceManager.getInstance().getHandler(resourceId);
-        traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
-        spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+        const requestContextHeaders: Record<string, string> = {};
+        const requestHeaderEntries = Array.from(headersMap.entries());
+        for (let i = 0; i < requestHeaderEntries.length; i++) {
+          const entry = requestHeaderEntries[i];
+          requestContextHeaders[entry[0]] = entry[1];
+        }
+        const requestContext: FTTraceRequestContext = {
+          url: url,
+          method: method,
+          headers: requestContextHeaders
+        };
+        traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url, method, requestContext);
+        const traceContext = FTTraceManager.getInstance().getTraceContext(resourceId);
+        traceId = traceContext ? traceContext.traceId : undefined;
+        spanId = traceContext ? traceContext.spanId : undefined;
+        traceHeadersInjected = true;
 
         const traceHeaderKeys = Object.keys(traceHeaders);
         for (let i = 0; i < traceHeaderKeys.length; i++) {
@@ -540,7 +537,8 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         body: undefined,
         timestamp: Date.now(),
         traceId: traceId,
-        spanId: spanId
+        spanId: spanId,
+        traceHeadersInjected: traceHeadersInjected
       };
 
       const interceptedRequest = this.traceInterceptor.interceptRequest(requestData);
@@ -549,10 +547,20 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         context.request.headers = {};
       }
       const interceptedHeaders = Array.from(interceptedRequest.headers.entries());
+      const finalHeaders: Record<string, string> = {};
       for (let i = 0; i < interceptedHeaders.length; i++) {
         const entry = interceptedHeaders[i];
         context.request.headers[entry[0]] = entry[1];
+        finalHeaders[entry[0]] = entry[1];
       }
+      const finalTraceContext: FTTraceContext = FTTraceHandler.createTraceContextFromHeaders(
+        finalHeaders,
+        interceptedRequest.traceId || '',
+        interceptedRequest.spanId || ''
+      );
+      FTTraceManager.getInstance().putTraceContext(resourceId, finalTraceContext);
+      finalTraceId = finalTraceContext.traceId || traceId;
+      finalSpanId = finalTraceContext.spanId || spanId;
 
       FTInnerLogger.d(TAG, `[RCP-Trace] Added trace headers for ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(traceHeaders)}`);
 
@@ -578,8 +586,8 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
           headers: responseHeadersMap,
           body: undefined,
           timestamp: Date.now(),
-          traceId: traceId,
-          spanId: spanId
+          traceId: finalTraceId,
+          spanId: finalSpanId
         };
         this.traceInterceptor.interceptResponse(responseData);
         FTInnerLogger.d(
@@ -762,7 +770,7 @@ function createAxiosTraceInterceptor(): FTTraceInterceptor | null {
   const traceConfigManager = FTTraceConfigManager.getInstance();
   return new DefaultFTTraceInterceptor(
     traceConfigManager.getTraceTypeEnum(),
-    traceConfigManager.getOverrideHeaderHandler()
+    traceConfigManager.getTraceHeaderHandler()
   );
 }
 
@@ -782,6 +790,7 @@ function buildAxiosAutoTrackState(
   if (traceEnabled) {
     let traceId: string | undefined = undefined;
     let spanId: string | undefined = undefined;
+    let traceHeadersInjected = false;
     const headersMap = new Map<string, string>();
 
     const headerKeys = Object.keys(headers);
@@ -791,10 +800,17 @@ function buildAxiosAutoTrackState(
     }
 
     if (!hasKnownTraceHeaders(headers)) {
-      const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url);
-      const traceHandler = FTTraceManager.getInstance().getHandler(resourceId);
-      traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
-      spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+      const requestContext: FTTraceRequestContext = {
+        url: url,
+        method: method,
+        headers: headers,
+        body: config.data
+      };
+      const traceHeaders = FTTraceManager.getInstance().getTraceHeader(resourceId, url, method, requestContext);
+      const traceContext = FTTraceManager.getInstance().getTraceContext(resourceId);
+      traceId = traceContext ? traceContext.traceId : undefined;
+      spanId = traceContext ? traceContext.spanId : undefined;
+      traceHeadersInjected = true;
 
       const traceHeaderKeys = Object.keys(traceHeaders);
       for (let i = 0; i < traceHeaderKeys.length; i++) {
@@ -809,10 +825,11 @@ function buildAxiosAutoTrackState(
         url: url,
         method: method,
         headers: headersMap,
-        body: typeof config.data === 'string' ? config.data : undefined,
+        body: config.data,
         timestamp: Date.now(),
         traceId: traceId,
-        spanId: spanId
+        spanId: spanId,
+        traceHeadersInjected: traceHeadersInjected
       });
 
       finalHeaders = {};
@@ -821,6 +838,12 @@ function buildAxiosAutoTrackState(
         const entry = interceptedHeaders[i];
         finalHeaders[entry[0]] = entry[1];
       }
+      const finalTraceContext: FTTraceContext = FTTraceHandler.createTraceContextFromHeaders(
+        finalHeaders,
+        interceptedRequest.traceId || '',
+        interceptedRequest.spanId || ''
+      );
+      FTTraceManager.getInstance().putTraceContext(resourceId, finalTraceContext);
     }
   }
 
@@ -854,9 +877,9 @@ function completeAxiosTrace(state: FTAxiosAutoTrackState, status: number, header
     responseHeaderMap.set(key, headers[key]);
   }
 
-  const traceHandler = FTTraceManager.getInstance().getHandler(state.resourceId);
-  const traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
-  const spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+  const traceContext = FTTraceManager.getInstance().getTraceContext(state.resourceId);
+  const traceId = traceContext ? traceContext.traceId : undefined;
+  const spanId = traceContext ? traceContext.spanId : undefined;
 
   traceInterceptor.interceptResponse({
     url: state.url,

@@ -44,24 +44,12 @@ class ConfigRecordImpl implements ConfigRecord {
     return this.config.getDbCacheLimit();
   }
 
-  getLogCacheLimitCount(): number {
-    return this.config.getLogCacheLimitCount();
-  }
-
-  getRumCacheLimitCount(): number {
-    return this.config.getRumCacheLimitCount();
-  }
-
   getDBCacheDiscard(): string {
     return this.config.getDBCacheDiscard();
   }
 
   getLogCacheDiscard(): string {
     return this.config.getLogCacheDiscard();
-  }
-
-  getRumCacheDiscard(): string {
-    return this.config.getRumCacheDiscard();
   }
 }
 

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.14-alpha06] - 2026-05-14
+- Added `FTTraceConfig.setTraceHeaderHandler(...)` for custom Trace context generation after the SDK generates default Trace Headers.
+- Moved RUM cache count configuration to `FTRUMConfig.setRumCacheLimitCount(...)`; Log cache count remains on `FTLoggerConfig.setLogCacheLimitCount(...)`.
 - Added root `Index.ets` exports for WebView integration, advanced RCP interceptor assembly, and low-level trace interceptor types so public examples can avoid deep imports.
 - Added the versioned `FTSDKExtensionBridge` integration contract for extension modules.
 - Added a versioned extension contract export so `ft_sdk_ext` can avoid depending on internal `ft_sdk/src/main` paths.

@@ -397,7 +397,7 @@ export class FTRUMGlobalManager {
    * @param statusCode Status code
    * @param contentLength Content length
    */
-  public stopResource(resourceId: string, statusCode: number, contentLength: number): void {
+  public stopResource(resourceId: string, statusCode?: number, contentLength?: number): void {
     if (this.innerManager) {
       this.innerManager.stopResource(resourceId);
     }

@@ -129,7 +129,8 @@ export class FTDBManager extends DBManager {
    * @returns boolean
    */
   protected enableDBSizeLimit(): boolean {
-    return FTDBCachePolicy.getInstance().isEnableLimitWithDbSize();
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    return cachePolicy.isEnableLimitWithDbSize();
   }
 
   /**
@@ -143,11 +144,10 @@ export class FTDBManager extends DBManager {
     // Update cache policy with current size (aligned with Android: setCurrentDBSize)
     FTDBCachePolicy.getInstance().setCurrentDbSize(fileSize);
     
-    // Check if database size exceeds limit
-    if (FTDBCachePolicy.getInstance().isReachDbLimit()) {
-      const cachePolicy = FTDBCachePolicy.getInstance();
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    if (cachePolicy.isReachDbLimit()) {
       if (cachePolicy.getDBCacheDiscard() === DBCacheDiscard.DISCARD_OLDEST) {
-        FTInnerLogger.w(TAG, `DB size limit reached, cleaning oldest data`);
+        FTInnerLogger.w(TAG, `DB cache size limit reached, cleaning oldest data`);
         this.cleanupOldData(rdbStore);
       }
     }

@@ -15,18 +15,6 @@ export enum SyncPageSize {
   LARGE = 50,
 }
 
-export enum LogCacheDiscard {
-  /**
-   * Drop the oldest entries, default behavior
-   */
-  DISCARD,
-
-  /**
-   * Drop the newest entries
-   */
-  DISCARD_OLDEST
-}
-
 export enum DetectFrequency {
   /**
    * Default sampling frequency: once every 500 ms
@@ -73,6 +61,14 @@ export enum RUMCacheDiscard {
   DISCARD_OLDEST = "discard_oldest"
 }
 
+export enum LogCacheDiscard {
+  /**
+   * Drop appended log entries.
+   */
+  DISCARD = "discard",
 
-
-
+  /**
+   * Delete the oldest log entries before appending.
+   */
+  DISCARD_OLDEST = "discard_oldest"
+}

@@ -42,6 +42,17 @@ export interface FTHttpTrackConfigTarget {
   interceptorChain?: http.HttpInterceptorChain;
 }
 
+interface FTHttpRequestContextTarget {
+  method?: string;
+  body?: string | Object | ArrayBuffer;
+  extraData?: string | Object | ArrayBuffer;
+  options?: FTHttpRequestContextOptionsTarget;
+}
+
+interface FTHttpRequestContextOptionsTarget {
+  extraData?: string | Object | ArrayBuffer;
+}
+
 function applyNormalizedHeadersToHttpContext(context: http.HttpRequestContext, headers: Record<string, string>): void {
   const mutableHeaders: Record<string, string> = {};
   const keys = Object.keys(headers);
@@ -98,10 +109,20 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
     try {
+      const requestTarget = reqContext as Object as FTHttpRequestContextTarget;
+      let requestBody = requestTarget.body;
+      if (requestBody === undefined && requestTarget.extraData !== undefined) {
+        requestBody = requestTarget.extraData;
+      }
+      if (requestBody === undefined && requestTarget.options) {
+        requestBody = requestTarget.options.extraData;
+      }
       const preparedRequest = FTSDKExtensionBridge.prepareHttpRequest(
         {
           url: reqContext.url,
-          headers: reqContext.header
+          method: requestTarget.method,
+          headers: reqContext.header,
+          body: requestBody
         },
         {
           enableTraceInterceptor: this.traceEnabled,

@@ -189,6 +189,14 @@ export class Constants {
    */
   static readonly DEFAULT_SERVICE_NAME = "df_rum_harmonyos";
   /**
+   * Default database cache size limit, 100MB.
+   */
+  static readonly DEFAULT_CACHE_LIMIT_SIZE = 100 * 1024 * 1024;
+  /**
+   * Minimum database cache size limit, 30MB.
+   */
+  static readonly MINI_CACHE_LIMIT_SIZE = 30 * 1024 * 1024;
+  /**
    * Maximum log cache limit
    */
   static readonly DEFAULT_DB_LOG_CACHE_NUM = 5000;

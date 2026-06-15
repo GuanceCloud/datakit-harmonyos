@@ -1,4 +1,4 @@
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig } from './Configs';
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextDictionary, LogGlobalContextValue } from './Configs';
 import { DataType } from './enum/Enums';
 import { CollectType } from './rum/enum/RUMEnums';
 import { FTInnerLogger } from './log/FTLogger';
@@ -166,14 +166,14 @@ class FTTrackInner {
   /**
    * Add log global context
    */
-  appendLogGlobalContext(globalContext: Map<string, string>): void {
+  appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
     this.dataHelper.appendLogGlobalContext(globalContext);
   }
 
   /**
    * Add log global context key-value pair
    */
-  appendLogGlobalContextKeyValue(key: string, value: string): void {
+  appendLogGlobalContextKeyValue(key: string, value: LogGlobalContextValue): void {
     this.dataHelper.appendLogGlobalContextByKeyValue(key, value);
   }
 

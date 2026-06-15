@@ -31,7 +31,9 @@ export {
   FTSDKConfig,
   FTRUMConfig,
   FTLoggerConfig,
-  FTTraceConfig
+  FTTraceConfig,
+  LogGlobalContextDictionary,
+  LogGlobalContextValue
 } from './src/main/ets/components/Configs';
 
 // ============================================================================
@@ -52,14 +54,18 @@ export { FTLogger } from './src/main/ets/components/log/FTLogger';
 
 export { FTTraceManager } from './src/main/ets/components/trace/FTTraceManager';
 export { FTTraceConfigManager } from './src/main/ets/components/trace/FTTraceConfigManager';
+export {
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceRequestContext
+} from './src/main/ets/components/trace/FTTraceHeaderHandler';
 export { TraceType } from './src/main/ets/components/trace/TraceType';
 export {
   FTTraceInterceptor,
   DefaultFTTraceInterceptor,
   HeaderHandler,
   HttpRequestData,
-  HttpResponseData,
-  TraceData
+  HttpResponseData
 } from './src/main/ets/components/trace/FTTraceInterceptor';
 
 // ============================================================================
@@ -70,6 +76,7 @@ export {
   EnvType,
   SyncPageSize,
   LogCacheDiscard,
+  RUMCacheDiscard,
   DBCacheDiscard,
   DetectFrequency
 } from './src/main/ets/components/enum/Enums';

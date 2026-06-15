@@ -41,6 +41,10 @@ import {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceManager,
+  FTTraceRequestContext,
   EnvType,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
@@ -59,15 +63,19 @@ import {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceManager,
+  FTTraceRequestContext,
   EnvType,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want): void {
-    const sdkConfig = new FTSDKConfig('YOUR_DATAKIT_OR_DATAWAY_URL')
-    sdkConfig.setEnv(EnvType.PROD)
-    sdkConfig.setServiceName('your_service_name')
+    const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+      .setEnv(EnvType.PROD)
+      .setServiceName('your_service_name')
 
     FTSDK.install(sdkConfig, this.context)
 
@@ -95,6 +103,9 @@ export default class EntryAbility extends UIAbility {
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration
+- `FTTraceContext`: generated Trace Header and RUM linking ID context
+- `FTTraceHeaderHandler`: custom Trace Header context handler interface
+- `FTTraceRequestContext`: current request context passed to custom Trace Header handlers
 - `FTRUMGlobalManager`: RUM reporting API
 - `FTLogger`: custom log API
 - `FTTraceManager`: trace helper API

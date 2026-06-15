@@ -1,4 +1,4 @@
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from "./Configs";
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig, LogGlobalContextDictionary, LogGlobalContextValue } from "./Configs";
 import { Constants } from "./Constants";
 import { UserData } from "./rum/bean/UserData";
 import { Context, common } from '@kit.AbilityKit';
@@ -243,6 +243,8 @@ export class FTSDK {
 
     FTSDK.initRUMGlobalContext(rumConfig);
     FTRUMConfigManager.getInstance().initWithConfig(rumConfig);
+    FTDBCachePolicy.getInstance().updateRumCacheLimitCount(rumConfig.getRumCacheLimitCount());
+    FTDBCachePolicy.getInstance().updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
     // Initialize RUM Inner Manager with config (aligned with Android: FTRUMInnerManager.initParams)
     FTRUMInnerManager.getInstance().initParams(rumConfig);
 
@@ -444,7 +446,7 @@ export class FTSDK {
    * Dynamically set log global tag
    * @param globalContext Log global context map
    */
-  static appendLogGlobalContext(globalContext: Map<string, string>): void {
+  static appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
     // Ensure trackInner exists, even if called before install completes
     // Aligned with Android: FTSdk.appendLogGlobalContext() behavior
     if (FTSDK.ftSdk) {
@@ -457,7 +459,7 @@ export class FTSDK {
    * @param key Tag key
    * @param value Tag value
    */
-  static appendLogGlobalContextKeyValue(key: string, value: string): void {
+  static appendLogGlobalContextKeyValue(key: string, value: LogGlobalContextValue): void {
     // Ensure trackInner exists, even if called before install completes
     // Aligned with Android: FTSdk.appendLogGlobalContextKeyValue() behavior
     if (FTSDK.ftSdk) {

@@ -2080,19 +2080,18 @@ export class FTRUMInnerManager {
         this.setNetState(resourceId, netStatusBean);
       }
 
-      // Get trace_id and span_id from Trace handler (aligned with Android)
-      // Android: FTRUMInnerManager.setTransformContent -> FTTraceManager.get().getHandler(resourceId)
-      // Android logic: Get handler first, then check enableLinkRUMData before setting to bean
+      // Get trace_id and span_id from the generated Trace context.
+      // Android logic: get trace IDs first, then check enableLinkRUMData before setting to bean.
       const traceManager = FTTraceManager.getInstance();
       const traceConfigManager = FTTraceConfigManager.getInstance();
       
-      // Get handler and traceId/spanId first (aligned with Android: line 996-1002)
+      // Get trace context and traceId/spanId first (aligned with Android: line 996-1002)
       let spanId: string = "";
       let traceId: string = "";
-      const handler = traceManager.getHandler(resourceId);
-      if (handler && handler.getTraceID && handler.getSpanID) {
-        spanId = handler.getSpanID() || "";
-        traceId = handler.getTraceID() || "";
+      const traceContext = traceManager.getTraceContext(resourceId);
+      if (traceContext) {
+        spanId = traceContext.spanId || "";
+        traceId = traceContext.traceId || "";
       }
       
       // Only set trace_id and span_id to bean if enableLinkRUMData is true (aligned with Android: line 1049-1052)

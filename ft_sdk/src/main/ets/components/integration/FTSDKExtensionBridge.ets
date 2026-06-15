@@ -4,6 +4,7 @@ import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { ResourceParams } from '../rum/bean/ResourceParams';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
 import { DefaultFTTraceInterceptor, FTTraceInterceptor } from '../trace/FTTraceInterceptor';
+import { FTTraceContext, FTTraceRequestContext } from '../trace/FTTraceHeaderHandler';
 import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import {
@@ -285,6 +286,7 @@ export class FTSDKExtensionBridge {
     const traceManager = FTTraceManager.getInstance();
     let traceId: string | undefined = undefined;
     let spanId: string | undefined = undefined;
+    let traceHeadersInjected = false;
 
     const headersMap = new Map<string, string>();
     const initialHeaderKeys = Object.keys(headers);
@@ -294,10 +296,17 @@ export class FTSDKExtensionBridge {
     }
 
     if (!FTSDKExtensionBridge.hasTraceHeaders(headers)) {
-      const traceHeaders = traceManager.getTraceHeader(resourceId, request.url);
-      const traceHandler = traceManager.getHandler(resourceId);
-      traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
-      spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+      const requestContext: FTTraceRequestContext = {
+        url: request.url,
+        method: method,
+        headers: headers,
+        body: request.body
+      };
+      const traceHeaders = traceManager.getTraceHeader(resourceId, request.url, method, requestContext);
+      const traceContext = traceManager.getTraceContext(resourceId);
+      traceId = traceContext ? traceContext.traceId : undefined;
+      spanId = traceContext ? traceContext.spanId : undefined;
+      traceHeadersInjected = true;
       const traceHeaderKeys = Object.keys(traceHeaders);
       for (let i = 0; i < traceHeaderKeys.length; i++) {
         const key = traceHeaderKeys[i];
@@ -309,10 +318,11 @@ export class FTSDKExtensionBridge {
       url: request.url,
       method: method,
       headers: headersMap,
-      body: typeof request.body === 'string' ? request.body : undefined,
+      body: request.body,
       timestamp: Date.now(),
       traceId: traceId,
-      spanId: spanId
+      spanId: spanId,
+      traceHeadersInjected: traceHeadersInjected
     });
 
     const finalHeaders: Record<string, string> = {};
@@ -322,6 +332,12 @@ export class FTSDKExtensionBridge {
       finalHeaders[entry[0]] = entry[1];
     }
     finalHeaders[FT_RESOURCE_ID_HEADER] = uniqueId;
+    const finalTraceContext: FTTraceContext = FTTraceHandler.createTraceContextFromHeaders(
+      finalHeaders,
+      interceptedRequest.traceId || '',
+      interceptedRequest.spanId || ''
+    );
+    traceManager.putTraceContext(resourceId, finalTraceContext);
     return finalHeaders;
   }
 
@@ -356,9 +372,9 @@ export class FTSDKExtensionBridge {
       responseHeaderMap.set(key, responseHeaders[key]);
     }
 
-    const traceHandler = FTTraceManager.getInstance().getHandler(state.resourceId);
-    const traceId = traceHandler && traceHandler.getTraceID ? traceHandler.getTraceID() : undefined;
-    const spanId = traceHandler && traceHandler.getSpanID ? traceHandler.getSpanID() : undefined;
+    const traceContext = FTTraceManager.getInstance().getTraceContext(state.resourceId);
+    const traceId = traceContext ? traceContext.traceId : undefined;
+    const spanId = traceContext ? traceContext.spanId : undefined;
 
     FTSDKExtensionBridge.createTraceInterceptor().interceptResponse({
       url: state.url,
@@ -445,7 +461,7 @@ export class FTSDKExtensionBridge {
     const traceConfigManager = FTTraceConfigManager.getInstance();
     return new DefaultFTTraceInterceptor(
       traceConfigManager.getTraceTypeEnum(),
-      traceConfigManager.getOverrideHeaderHandler()
+      traceConfigManager.getTraceHeaderHandler()
     );
   }
 

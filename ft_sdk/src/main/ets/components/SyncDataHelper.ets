@@ -1,4 +1,4 @@
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig } from './Configs';
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextDictionary, LogGlobalContextValue } from './Configs';
 import { DataType } from './enum/Enums';
 import { StringUtils } from './utils/StringUtils';
 import { Constants } from './Constants';
@@ -52,17 +52,8 @@ export class SyncDataHelper {
     const globalContext = config.getGlobalContext();
 
     // Iterate through global context directly
-    globalContext.forEach((value: object, key: string) => {
-      // Use string value directly for tags (no JSON.stringify for simple strings)
-      let stringValue: string;
-      if (typeof value === 'string') {
-        stringValue = value as string;
-      } else if (typeof value === 'object' && value !== null) {
-        stringValue = JSON.stringify(value);
-      } else {
-        stringValue = String(value);
-      }
-      this.logTags.set(key, this.dataModifier.modify(key, stringValue));
+    globalContext.forEach((value: LogGlobalContextValue, key: string) => {
+      this.putLogContextTag(this.logTags, key, value);
     });
   }
 
@@ -180,11 +171,23 @@ export class SyncDataHelper {
    * Dynamically set log global tag
    * @param globalContext Log global context map
    */
-  appendLogGlobalContext(globalContext: Map<string, string>): void {
-    if (globalContext) {
-      globalContext.forEach((value, key) => {
-        this.dynamicLogTags.set(key, this.dataModifier.modify(key, value));
+  appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
+    if (!globalContext) {
+      return;
+    }
+
+    if (globalContext instanceof Map) {
+      globalContext.forEach((value: LogGlobalContextValue, key: string) => {
+        this.putLogContextTag(this.dynamicLogTags, key, value);
       });
+      return;
+    }
+
+    const contextRecord = globalContext as Record<string, LogGlobalContextValue>;
+    const keys = Object.keys(contextRecord);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      this.putLogContextTag(this.dynamicLogTags, key, contextRecord[key]);
     }
   }
 
@@ -193,10 +196,41 @@ export class SyncDataHelper {
    * @param key Tag key
    * @param value Tag value
    */
-  appendLogGlobalContextByKeyValue(key: string, value: string): void {
-    if (key && value) {
-      this.dynamicLogTags.set(key, this.dataModifier.modify(key, value));
+  appendLogGlobalContextByKeyValue(key: string, value: LogGlobalContextValue): void {
+    this.putLogContextTag(this.dynamicLogTags, key, value);
+  }
+
+  private putLogContextTag(targetTags: Map<string, string>, key: string, value: LogGlobalContextValue): void {
+    if (!key) {
+      return;
     }
+    const stringValue = SyncDataHelper.contextValueToString(value);
+    if (stringValue === null || StringUtils.isEmpty(stringValue)) {
+      return;
+    }
+    targetTags.set(key, this.dataModifier.modify(key, stringValue));
+  }
+
+  private static contextValueToString(value: LogGlobalContextValue): string | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+
+    if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+      return String(value);
+    }
+
+    const valueRecord = value as Record<string, object>;
+    if (valueRecord && valueRecord['value'] !== undefined) {
+      return String(valueRecord['value']);
+    }
+
+    const jsonValue = JSON.stringify(value);
+    return jsonValue !== undefined ? jsonValue : String(value);
   }
 
 
@@ -342,8 +376,8 @@ export class SyncDataHelper {
           //   `[RUM-WEBVIEW] ⚠️ Web SDK version "${webSDKVersion}" doesn't look like a version number (expected format: X.Y.Z). This might be SDK name instead of version.`);
         }
 
-        // Aligned with Android: iterate through rumTags and replace all except KEY_SERVICE
-        // Android logic: Iterator<String> keys = rumTags.keySet().iterator(); while (keys.hasNext()) { String key = keys.next(); if (!key.equals(Constants.KEY_SERVICE)) { ... } }
+        // Aligned with Android: iterate through rumTags and preserve WebView-owned values.
+        // service=browser and the Web SDK version must not be overwritten by native RUM tags.
         // Debug: Log app_id in rumTags and mergeTags before replacement
         // const rumTagsAppId = this.rumTags.get(Constants.KEY_RUM_APP_ID);
         // const mergeTagsAppIdBefore = mergeTags.get(Constants.KEY_RUM_APP_ID);
@@ -351,7 +385,7 @@ export class SyncDataHelper {
         //   `[RUM-WEBVIEW] app_id in rumTags: "${rumTagsAppId}", in mergeTags before replacement: "${mergeTagsAppIdBefore}"`);
 
         this.rumTags.forEach((value, key) => {
-          if (key !== Constants.KEY_SERVICE) {
+          if (key !== Constants.KEY_SERVICE && key !== Constants.KEY_SDK_VERSION) {
             if (key === Constants.KEY_SDK_PACKAGE_INFO) {
               // Append Web SDK version to sdk_pkg_info (aligned with Android appendPackageVersion behavior)
               // Android SDK always calls appendPackageVersion even if webSDKVersion is null (converts to empty string)
@@ -387,7 +421,7 @@ export class SyncDataHelper {
               mergeTags.set(key, value);
             }
           }
-          // Aligned with Android: KEY_SERVICE is skipped, so webview's service=browser is preserved
+          // WebView-owned service/sdk_version are preserved.
         });
 
         // Apply line data modifier
@@ -403,6 +437,13 @@ export class SyncDataHelper {
             fields.set(key, value);
           }
         });
+
+        if (webviewService && webviewService.length > 0) {
+          mergeTags.set(Constants.KEY_SERVICE, webviewService);
+        }
+        if (webviewSDKVersion && webviewSDKVersion.length > 0) {
+          mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
+        }
 
         // After line data modifier, ensure sdk_pkg_info has web SDK version
         // The line data modifier might have modified sdk_pkg_info, so we need to check again
