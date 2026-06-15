@@ -1,5 +1,5 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig } from '../../main/ets/components/Configs';
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextValue } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
 import { LineDataModifier } from '../../main/ets/components/DataModifier';
 import { DataType } from '../../main/ets/components/enum/Enums';
@@ -106,6 +106,44 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('log_only=log-value')).assertTrue();
       expect(lineProtocol.includes('shared=log-static')).assertFalse();
       expect(lineProtocol.includes('shared=base')).assertFalse();
+    });
+
+    it('bodyContentShouldMergeLogContextDictionary', 0, () => {
+      const helper = new SyncDataHelper();
+      const staticContext: Record<string, LogGlobalContextValue> = {
+        dict_string: 'value',
+        dict_number: 42,
+        dict_boolean: true,
+        dict_string_object: new String('wrapped-value')
+      };
+      const dynamicContext: Map<string, LogGlobalContextValue> = new Map();
+      dynamicContext.set('dynamic_number', 7);
+      dynamicContext.set('dynamic_false', false);
+      dynamicContext.set('dynamic_empty', '');
+      const logConfig = new FTLoggerConfig()
+        .addGlobalContext(staticContext)
+        .addGlobalContext('legacy_key', 'legacy-value')
+        .addGlobalContext('', 'ignored-value');
+      const fields: Map<string, string> = new Map();
+      fields.set('message', 'dictionary log');
+
+      helper.initBaseConfig(FTSDKConfig.builder(TEST_FAKE_URL));
+      helper.initLogConfig(logConfig);
+      helper.appendLogGlobalContext(dynamicContext);
+      helper.appendLogGlobalContextByKeyValue('dynamic_zero', 0);
+
+      const lineProtocol = helper.getBodyContent(TEST_MEASUREMENT, new Map(), fields, TEST_TIMESTAMP, DataType.LOG, 'uuid-log-dict');
+
+      expect(lineProtocol.includes('dict_string=value')).assertTrue();
+      expect(lineProtocol.includes('dict_number=42')).assertTrue();
+      expect(lineProtocol.includes('dict_boolean=true')).assertTrue();
+      expect(lineProtocol.includes('dict_string_object=wrapped-value')).assertTrue();
+      expect(lineProtocol.includes('legacy_key=legacy-value')).assertTrue();
+      expect(lineProtocol.includes('dynamic_number=7')).assertTrue();
+      expect(lineProtocol.includes('dynamic_false=false')).assertTrue();
+      expect(lineProtocol.includes('dynamic_zero=0')).assertTrue();
+      expect(lineProtocol.includes('dynamic_empty=')).assertFalse();
+      expect(lineProtocol.includes('ignored-value')).assertFalse();
     });
 
     it('bodyContentShouldLinkRumTags', 0, () => {

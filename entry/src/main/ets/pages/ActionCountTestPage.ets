@@ -197,7 +197,7 @@ export struct ActionCountTestPage {
         // Simulate resource loading (async - action will wait for resource completion via pending_resource_count mechanism)
         setTimeout(() => {
           // Stop resource
-          rumGlobalManager.stopResource(resourceId, 200, 1024);
+          rumGlobalManager.stopResource(resourceId);
           
           // Add resource data
           const params = new ResourceParams();

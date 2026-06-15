@@ -6,7 +6,14 @@ import {
   applyFTAxiosTrack,
   createFTRCPTrackConfig,
   FTRUMGlobalManager,
-  FTTraceConfigManager
+  FTSDK,
+  FTTraceConfig,
+  FTTraceConfigManager,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceManager,
+  FTTraceRequestContext,
+  TraceType
 } from '@guancecloud/ft_sdk/Index';
 import {
   applyFTAxiosChainMethodBridge,
@@ -406,6 +413,12 @@ export struct HttpAutoTrackTestPage {
    */
   async testRCPTraceHeaders() {
     try {
+      const testUrl = this.getTraceTestUrl();
+      if (testUrl.length === 0) {
+        this.addTestResult("⚠️ traceUrl not configured, skipping trace header test");
+        return;
+      }
+
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -422,7 +435,7 @@ export struct HttpAutoTrackTestPage {
       const session = this.createRCPSession();
 
       // Send GET request (trace headers should be added automatically)
-      const request = new rcp.Request('https://httpbin.org/headers', 'GET');
+      const request = new rcp.Request(testUrl, 'GET');
       const response = await session.fetch(request);
 
       this.requestCount++;
@@ -449,6 +462,11 @@ export struct HttpAutoTrackTestPage {
   async testRCPTraceWithRequest() {
     try {
       const testUrl = this.getTraceTestUrl();
+      if (testUrl.length === 0) {
+        this.addTestResult("⚠️ traceUrl not configured, skipping trace id test");
+        return;
+      }
+
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
         return;
@@ -566,23 +584,123 @@ export struct HttpAutoTrackTestPage {
    * Test POST request with NetworkKit http interceptor chain
    */
   async testHttpPostRequestWithInterceptorChain() {
+    const previousTraceConfig = FTTraceConfigManager.getInstance().getConfig();
+    let temporaryTraceConfigInstalled = false;
+    const headerTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const headerSpanId = 'bbbbbbbbbbbbbbbb';
+
+    class PostHeaderTraceHeaderHandler implements FTTraceHeaderHandler {
+      public called: boolean = false;
+      public requestMethod: string = "";
+      public requestContentType: string = "";
+      public parsedTraceId: string = "";
+      public parsedSpanId: string = "";
+      public finalTraceId: string = "";
+      public finalSpanId: string = "";
+
+      getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+        this.called = true;
+        this.requestMethod = request.method;
+        this.requestContentType = request.headers['Content-Type'] || request.headers['content-type'] || '';
+
+        const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+        this.parsedTraceId = this.getHeaderValue(request.headers, 'x-existing-trace-id');
+        this.parsedSpanId = this.getHeaderValue(request.headers, 'x-existing-span-id');
+        if (this.isValidTraceId(this.parsedTraceId) && this.isValidSpanId(this.parsedSpanId)) {
+          traceContext.traceId = this.parsedTraceId;
+          traceContext.spanId = this.parsedSpanId;
+          traceContext.headers['traceparent'] = `00-${this.parsedTraceId}-${this.parsedSpanId}-01`;
+          traceContext.headers['x-header-trace-source'] = 'http-post-header';
+        }
+
+        this.finalTraceId = traceContext.traceId;
+        this.finalSpanId = traceContext.spanId;
+        return traceContext;
+      }
+
+      private getHeaderValue(headers: Record<string, string>, key: string): string {
+        const directValue = headers[key];
+        if (directValue !== undefined) {
+          return directValue;
+        }
+
+        const normalizedKey = key.toLowerCase();
+        const headerKeys = Object.keys(headers);
+        for (let i = 0; i < headerKeys.length; i++) {
+          const headerKey = headerKeys[i];
+          if (headerKey.toLowerCase() === normalizedKey) {
+            return headers[headerKey];
+          }
+        }
+        return '';
+      }
+
+      private isValidTraceId(traceId: string): boolean {
+        return traceId.length === 32 && this.isLowercaseHex(traceId);
+      }
+
+      private isValidSpanId(spanId: string): boolean {
+        return spanId.length === 16 && this.isLowercaseHex(spanId);
+      }
+
+      private isLowercaseHex(value: string): boolean {
+        for (let i = 0; i < value.length; i++) {
+          const code = value.charCodeAt(i);
+          const isDigit = code >= 48 && code <= 57;
+          const isLowercaseHexLetter = code >= 97 && code <= 102;
+          if (!isDigit && !isLowercaseHexLetter) {
+            return false;
+          }
+        }
+        return true;
+      }
+    }
+
+    const traceHeaderHandler = new PostHeaderTraceHeaderHandler();
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping http POST test");
         return;
       }
 
+      const traceConfig = new FTTraceConfig()
+        .setSamplingRate(1.0)
+        .setEnableAutoTrace(true)
+        .setEnableLinkRUMData(true)
+        .setTraceType(TraceType.TRACEPARENT)
+        .setTraceHeaderHandler(traceHeaderHandler);
+      FTSDK.installTraceConfig(traceConfig);
+      temporaryTraceConfigInstalled = true;
+      this.addTestResult("✅ Installed TraceConfig with POST header Trace Header handler");
+
+      const postBody = JSON.stringify({
+        name: 'HarmonyOS HTTP Interceptor Test',
+        message: 'Testing FT http interceptor chain',
+        timestamp: Date.now()
+      });
       const response = await this.executeHttpRequest('https://httpbin.org/post', {
         method: http.RequestMethod.POST,
         header: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'x-existing-trace-id': headerTraceId,
+          'x-existing-span-id': headerSpanId
         },
-        extraData: JSON.stringify({
-          name: 'HarmonyOS HTTP Interceptor Test',
-          message: 'Testing FT http interceptor chain',
-          timestamp: Date.now()
-        })
+        extraData: postBody
       });
+
+      if (traceHeaderHandler.called &&
+        traceHeaderHandler.parsedTraceId === headerTraceId &&
+        traceHeaderHandler.parsedSpanId === headerSpanId &&
+        traceHeaderHandler.finalTraceId === headerTraceId &&
+        traceHeaderHandler.finalSpanId === headerSpanId) {
+        this.addTestResult(`✅ Handler parsed trace_id/span_id from request.headers: traceId=${traceHeaderHandler.finalTraceId}, spanId=${traceHeaderHandler.finalSpanId}`);
+        this.addTestResult("✅ Request header uses existing header trace context: traceparent + x-header-trace-source");
+      } else if (traceHeaderHandler.called &&
+        (traceHeaderHandler.parsedTraceId.length === 0 || traceHeaderHandler.parsedSpanId.length === 0)) {
+        this.addTestResult("⚠️ Handler called, but x-existing-trace-id/x-existing-span-id headers are missing.");
+      } else {
+        this.addTestResult(`❌ Handler did not parse header trace context: parsedTraceId=${traceHeaderHandler.parsedTraceId}, parsedSpanId=${traceHeaderHandler.parsedSpanId}`);
+      }
 
       this.requestCount++;
       if (response.responseCode >= 200 && response.responseCode < 300) {
@@ -598,6 +716,19 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP POST request failed: ${errorMsg}`);
+      if (traceHeaderHandler.called) {
+        this.addTestResult(`⚠️ Handler already ran before POST failed: parsedTraceId=${traceHeaderHandler.parsedTraceId}, parsedSpanId=${traceHeaderHandler.parsedSpanId}`);
+      }
+    } finally {
+      if (temporaryTraceConfigInstalled) {
+        if (previousTraceConfig) {
+          FTSDK.installTraceConfig(previousTraceConfig);
+          this.addTestResult("✅ Restored previous TraceConfig after HTTP POST test");
+        } else {
+          FTTraceConfigManager.getInstance().reset();
+          this.addTestResult("✅ Cleared temporary TraceConfig after HTTP POST test");
+        }
+      }
     }
   }
 
@@ -605,11 +736,48 @@ export struct HttpAutoTrackTestPage {
    * Test trace headers with NetworkKit http interceptor chain
    */
   async testHttpTraceHeaders() {
+    const previousTraceConfig = FTTraceConfigManager.getInstance().getConfig();
+    let temporaryTraceConfigInstalled = false;
     try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping http trace test");
+      const testUrl = this.getTraceTestUrl();
+      if (testUrl.length === 0) {
+        this.addTestResult("⚠️ traceUrl not configured, skipping http trace header test");
         return;
       }
+
+      class HttpTraceHeaderHandler implements FTTraceHeaderHandler {
+        public called: boolean = false;
+        public traceUrl: string = "";
+        public traceId: string = "";
+        public spanId: string = "";
+        public requestMethod: string = "";
+        public requestAccept: string = "";
+
+        getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+          this.called = true;
+          this.traceUrl = request.url;
+          this.requestMethod = request.method;
+          this.requestAccept = request.headers['Accept'] || '';
+          const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+          this.traceId = traceContext.traceId;
+          this.spanId = traceContext.spanId;
+          traceContext.headers['x-handler-trace-id'] = traceContext.traceId;
+          traceContext.headers['x-handler-span-id'] = traceContext.spanId;
+          traceContext.headers['x-handler-source'] = 'http-api22';
+          return traceContext;
+        }
+      }
+
+      const traceHeaderHandler = new HttpTraceHeaderHandler();
+      const traceConfig = new FTTraceConfig()
+        .setSamplingRate(1.0)
+        .setEnableAutoTrace(true)
+        .setEnableLinkRUMData(true)
+        .setTraceType(TraceType.TRACEPARENT)
+        .setTraceHeaderHandler(traceHeaderHandler);
+      FTSDK.installTraceConfig(traceConfig);
+      temporaryTraceConfigInstalled = true;
+      this.addTestResult("✅ Installed TraceConfig with custom setTraceHeaderHandler for HTTP trace test");
 
       const traceConfigManager = FTTraceConfigManager.getInstance();
       if (!traceConfigManager.isAutoTraceEnabled()) {
@@ -617,12 +785,23 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const response = await this.executeHttpRequest('https://httpbin.org/headers', {
+      const response = await this.executeHttpRequest(testUrl, {
         method: http.RequestMethod.GET,
         header: {
           'Accept': 'application/json'
         }
       });
+
+      if (traceHeaderHandler.called &&
+        traceHeaderHandler.traceId.length > 0 &&
+        traceHeaderHandler.spanId.length > 0 &&
+        traceHeaderHandler.traceUrl === testUrl) {
+        this.addTestResult(`✅ setTraceHeaderHandler called: traceId=${traceHeaderHandler.traceId}, spanId=${traceHeaderHandler.spanId}`);
+        this.addTestResult(`✅ Request context received: method=${traceHeaderHandler.requestMethod}, accept=${traceHeaderHandler.requestAccept}`);
+        this.addTestResult("✅ Custom headers appended: x-handler-trace-id, x-handler-span-id, x-handler-source");
+      } else {
+        this.addTestResult("❌ setTraceHeaderHandler was not called by HTTP interceptor chain");
+      }
 
       this.requestCount++;
       if (response.responseCode >= 200 && response.responseCode < 300) {
@@ -638,6 +817,16 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP trace headers test failed: ${errorMsg}`);
+    } finally {
+      if (temporaryTraceConfigInstalled) {
+        if (previousTraceConfig) {
+          FTSDK.installTraceConfig(previousTraceConfig);
+          this.addTestResult("✅ Restored previous TraceConfig after HTTP trace test");
+        } else {
+          FTTraceConfigManager.getInstance().reset();
+          this.addTestResult("✅ Cleared temporary TraceConfig after HTTP trace test");
+        }
+      }
     }
   }
 
@@ -908,6 +1097,41 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testMultipleRequests())
             .customProperty('test-multiple-requests-btn', 'Test Multiple Requests')
 
+          Column() {
+            Row() {
+              Text('Test Results')
+                .fontSize(16)
+                .fontWeight(FontWeight.Medium)
+                .layoutWeight(1)
+
+              Button('Clear Results')
+                .height(36)
+                .onClick(() => this.clearResults())
+            }
+            .width('100%')
+            .margin({ top: 12, bottom: 10 })
+
+            if (this.testResults.length === 0) {
+              Text('No test results yet.')
+                .fontSize(13)
+                .fontColor('#666666')
+                .width('100%')
+            } else {
+              ForEach(this.testResults, (result: string, index: number) => {
+                Text(result)
+                  .fontSize(12)
+                  .fontColor('#222222')
+                  .width('100%')
+                  .padding({ top: 6, bottom: 6, left: 8, right: 8 })
+                  .backgroundColor(index % 2 === 0 ? '#F7F8FA' : '#FFFFFF')
+                  .borderRadius(4)
+                  .margin({ bottom: 4 })
+              }, (result: string, index: number) => `${index}-${result}`)
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .margin({ top: 12, bottom: 24 })
 
         }
         .width('100%')

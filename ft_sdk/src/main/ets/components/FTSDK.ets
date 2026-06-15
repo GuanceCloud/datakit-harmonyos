@@ -683,6 +683,7 @@ export class FTSDK {
       }
 
       await FTDBManager.getInstance(context).delete();
+      FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {
       FTInnerLogger.e(TAG, `clearAllData failed: ${error}`);

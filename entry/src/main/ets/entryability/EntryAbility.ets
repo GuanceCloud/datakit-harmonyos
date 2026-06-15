@@ -4,7 +4,6 @@ import Want from '@ohos.app.ability.Want';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import {
-  DBCacheDiscard,
   DeviceMetricsMonitorType,
   EnvType,
   ErrorMonitorType,
@@ -295,9 +294,6 @@ export default class EntryAbility extends UIAbility {
         .setServiceName('HarmonyOS-Test-App')
         .setAutoSync(this.resolveAutoSyncEnabled())
         .setSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
-        // Set small dbCacheLimit for testing (1MB)
-        .setDbCacheLimit(1 * 1024 * 1024) // 1MB
-        .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
       DemoLogger.i(LOG_TAG, "SDK install completed");
@@ -307,7 +303,7 @@ export default class EntryAbility extends UIAbility {
         .setSamplingRate(1.0)  // 100% sampling rate
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true)
-        .setLogCacheLimitCount(30000)
+        // .setLogCacheLimitCount(30000)
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
         .setEnableLinkRumData(true);
@@ -335,6 +331,7 @@ export default class EntryAbility extends UIAbility {
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL)
+        // .setRumCacheLimitCount(12345)
 
       FTSDK.installRUMConfig(rumConfig);
 

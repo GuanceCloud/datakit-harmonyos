@@ -1,8 +1,12 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Constants } from '../../main/ets/components/Constants';
 import { FTTraceConfig } from '../../main/ets/components/Configs';
-import { DefaultFTTraceInterceptor, HeaderHandler, TraceData } from '../../main/ets/components/trace/FTTraceInterceptor';
-import { FTTraceHeaderHandler } from '../../main/ets/components/trace/FTTraceConfig';
+import { DefaultFTTraceInterceptor } from '../../main/ets/components/trace/FTTraceInterceptor';
+import {
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceRequestContext
+} from '../../main/ets/components/trace/FTTraceHeaderHandler';
 import { FTTraceHandler } from '../../main/ets/components/trace/FTTraceHandler';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
@@ -53,37 +57,39 @@ function interceptTraceHeadersWithExisting(type: TraceType, existing: Record<str
 class FakeTraceHeaderHandler implements FTTraceHeaderHandler {
   private traceId: string;
   private spanId: string;
+  public callCount: number = 0;
 
   constructor(traceId: string, spanId: string) {
     this.traceId = traceId;
     this.spanId = spanId;
   }
 
-  getTraceHeader(_url: string): Record<string, string> {
+  getTraceContext(_request: FTTraceRequestContext): FTTraceContext {
+    this.callCount++;
     const headers: Record<string, string> = {};
     headers['x-test-trace-id'] = this.traceId;
-    return headers;
-  }
-
-  getTraceID(): string {
-    return this.traceId;
-  }
-
-  getSpanID(): string {
-    return this.spanId;
+    return {
+      headers: headers,
+      traceId: this.traceId,
+      spanId: this.spanId
+    };
   }
 }
 
-class CustomHeaderHandler implements HeaderHandler {
-  processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-    headers.set('x-custom-operation', traceData.operationName);
-    headers.set('x-custom-trace-id', traceData.traceId);
-    return headers;
+class CustomHeaderHandler implements FTTraceHeaderHandler {
+  getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+    const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+    traceContext.headers['x-custom-trace-id'] = traceContext.traceId;
+    return traceContext;
   }
+}
 
-  processResponseHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-    headers.set('x-custom-response-trace-id', traceData.traceId);
-    return headers;
+class OverrideW3CHeaderHandler implements FTTraceHeaderHandler {
+  getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+    const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+    traceContext.headers[FTTraceHandler.W3C_TRACEPARENT_KEY] =
+      '00-11111111111111111111111111111111-2222222222222222-01';
+    return traceContext;
   }
 }
 
@@ -269,6 +275,64 @@ export default function traceHeaderUnitTest() {
       expect(manager.hasHandler('resource-1000')).assertTrue();
     });
 
+    it('directTraceContextShouldBypassConfiguredHeaderHandler', 0, () => {
+      const traceHeaderHandler = new FakeTraceHeaderHandler('custom-trace', 'custom-span');
+      FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
+        .setTraceType(TraceType.DDTRACE)
+        .setTraceHeaderHandler(traceHeaderHandler));
+
+      const traceContext = FTTraceManager.getInstance().getTraceContextDirect(TEST_URL);
+      const headers = FTTraceManager.getInstance().getTraceHeaderDirect(TEST_URL);
+
+      expect(traceHeaderHandler.callCount).assertEqual(0);
+      expect(traceContext.headers['x-test-trace-id'] === undefined).assertTrue();
+      expect(headers['x-test-trace-id'] === undefined).assertTrue();
+      expect(traceContext.traceId.length > 0).assertTrue();
+      expect(traceContext.spanId.length > 0).assertTrue();
+      expect(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY].length > 0).assertTrue();
+      expect(headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY].length > 0).assertTrue();
+    });
+
+    it('traceHeaderHandlerShouldProcessDefaultHeaders', 0, () => {
+      const traceHeaderHandler = new CustomHeaderHandler();
+      FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
+        .setTraceType(TraceType.DDTRACE)
+        .setTraceHeaderHandler(traceHeaderHandler));
+
+      const headers = FTTraceManager.getInstance().getTraceHeader('custom-resource', TEST_URL);
+      const traceContext = FTTraceManager.getInstance().getTraceContext('custom-resource');
+
+      expect(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY].length > 0).assertTrue();
+      expect(headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY].length > 0).assertTrue();
+      expect(headers['x-custom-trace-id']).assertEqual(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY]);
+      expect(traceContext !== null).assertTrue();
+      expect(traceContext!.headers['x-custom-trace-id']).assertEqual(traceContext!.traceId);
+      expect(traceContext!.traceId).assertEqual(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY]);
+      expect(traceContext!.spanId).assertEqual(headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY]);
+    });
+
+    it('traceHeaderHandlerShouldUpdateContextFromProcessedHeaders', 0, () => {
+      const traceHeaderHandler = new OverrideW3CHeaderHandler();
+      FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
+        .setTraceType(TraceType.TRACEPARENT)
+        .setTraceHeaderHandler(traceHeaderHandler));
+
+      const interceptor = new DefaultFTTraceInterceptor(
+        TraceType.TRACEPARENT,
+        FTTraceConfigManager.getInstance().getTraceHeaderHandler()
+      );
+      const request = interceptor.interceptRequest({
+        url: TEST_URL,
+        method: 'GET',
+        headers: new Map<string, string>(),
+        timestamp: 1000
+      });
+
+      expect(request.headers.get(FTTraceHandler.W3C_TRACEPARENT_KEY)).assertEqual('00-11111111111111111111111111111111-2222222222222222-01');
+      expect(request.traceId).assertEqual('11111111111111111111111111111111');
+      expect(request.spanId).assertEqual('2222222222222222');
+    });
+
     it('customHandlerShouldProcessHeaders', 0, () => {
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig().setTraceType(TraceType.DDTRACE));
       const interceptor = new DefaultFTTraceInterceptor(TraceType.DDTRACE, new CustomHeaderHandler());
@@ -283,7 +347,6 @@ export default function traceHeaderUnitTest() {
       });
 
       expect(request.headers.get('Accept')).assertEqual('application/json');
-      expect(request.headers.get('x-custom-operation')).assertEqual('GET /path');
       expect(request.headers.get('x-custom-trace-id')!.length > 0).assertTrue();
 
       const response = interceptor.interceptResponse({
@@ -296,7 +359,7 @@ export default function traceHeaderUnitTest() {
         duration: 100
       });
 
-      expect(response.headers.get('x-custom-response-trace-id')).assertEqual(request.traceId);
+      expect(response.headers.get('x-custom-response-trace-id') === undefined).assertTrue();
     });
 
   });

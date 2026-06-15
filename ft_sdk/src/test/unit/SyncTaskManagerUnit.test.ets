@@ -32,9 +32,7 @@ function createConfig(): FTSDKConfig {
     .setAutoSync(true)
     .setSyncPageSize(SyncPageSize.MINI)
     .setDataSyncRetryCount(2)
-    .setSyncSleepTime(1)
-    .setLogCacheLimitCount(1000)
-    .setRumCacheLimitCount(1000);
+    .setSyncSleepTime(1);
 }
 
 function createSyncData(dataType: DataType, uuid: string, dataString: string, time: number = 100): SyncData {

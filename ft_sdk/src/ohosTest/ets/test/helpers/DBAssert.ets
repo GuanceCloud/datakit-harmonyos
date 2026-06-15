@@ -11,21 +11,24 @@ import * as FTSQL from '../../../../main/ets/components/db/FTSQL';
 import { WaitUtils } from './WaitUtils';
 
 export class DBAssert {
+  private static validContext: Context | null = null;
+
   private static async getAppContextCandidates(): Promise<Context[]> {
     const contexts: Context[] = [];
     const delegator = AbilityDelegatorRegistry.getAbilityDelegator();
-    try {
-      const ability = await delegator.getCurrentTopAbility();
-      if (ability?.context) {
-        contexts.push(ability.context as Context);
-      }
-    } catch (_error) {
-    }
 
     try {
       const context = delegator.getAppContext() as Context;
       if (context) {
         contexts.push(context);
+      }
+    } catch (_error) {
+    }
+
+    try {
+      const ability = await delegator.getCurrentTopAbility();
+      if (ability?.context) {
+        contexts.push(ability.context as Context);
       }
     } catch (_error) {
     }
@@ -42,27 +45,44 @@ export class DBAssert {
   }
 
   static async getAppContext(): Promise<Context> {
+    if (DBAssert.validContext) {
+      try {
+        const dbManager = FTDBManager.getInstance(DBAssert.validContext);
+        await dbManager.init();
+        return DBAssert.validContext;
+      } catch (error) {
+        DBAssert.validContext = null;
+        FTDBManager.resetInstanceInternal();
+      }
+    }
+
     const contexts = await DBAssert.getAppContextCandidates();
     if (contexts.length === 0) {
       throw new Error('No available test context');
     }
-    return contexts[0];
-  }
 
-  static async getManager(): Promise<FTDBManager> {
-    const contexts = await DBAssert.getAppContextCandidates();
     let lastError = '';
     for (const context of contexts) {
       try {
+        FTDBManager.resetInstanceInternal();
         const dbManager = FTDBManager.getInstance(context);
         await dbManager.init();
-        return dbManager;
+        DBAssert.validContext = context;
+        return context;
       } catch (error) {
         lastError = String(error);
         FTDBManager.resetInstanceInternal();
       }
     }
-    throw new Error(`FTDBManager initialization failed for all test contexts: ${lastError}`);
+
+    throw new Error(`No valid test context for FTDBManager: ${lastError}`);
+  }
+
+  static async getManager(): Promise<FTDBManager> {
+    const context = await DBAssert.getAppContext();
+    const dbManager = FTDBManager.getInstance(context);
+    await dbManager.init();
+    return dbManager;
   }
 
   static async resetAll(): Promise<void> {

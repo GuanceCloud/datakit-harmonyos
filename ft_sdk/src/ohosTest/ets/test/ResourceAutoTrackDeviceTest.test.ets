@@ -23,10 +23,16 @@ import {
   RCPResourceInterceptor,
   RCPTraceInterceptor
 } from '../../../main/ets/components/network/FTHttpAutoTrack';
-import { HeaderHandler, TraceData } from '../../../main/ets/components/trace/FTTraceInterceptor';
+import {
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceRequestContext
+} from '../../../main/ets/components/trace/FTTraceHeaderHandler';
 import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandler';
+import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManager';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
+import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
 const TEST_FAKE_RUM_ID = 'rumId';
@@ -35,28 +41,18 @@ const TEST_HOST = 'http://127.0.0.1:9529';
 class EmptyObject {
 }
 
-class RecordingDeviceTraceHeaderHandler implements HeaderHandler {
+class RecordingDeviceTraceHeaderHandler implements FTTraceHeaderHandler {
   requestTraceId: string = '';
   requestSpanId: string = '';
-  responseTraceId: string = '';
-  responseSpanId: string = '';
   requestCount: number = 0;
-  responseCount: number = 0;
 
-  processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
+  getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+    const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
     this.requestCount++;
-    this.requestTraceId = traceData.traceId;
-    this.requestSpanId = traceData.spanId;
-    headers.set('x-device-handler-trace-id', traceData.traceId);
-    return headers;
-  }
-
-  processResponseHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-    this.responseCount++;
-    this.responseTraceId = traceData.traceId;
-    this.responseSpanId = traceData.spanId;
-    headers.set('x-device-handler-response-trace-id', traceData.traceId);
-    return headers;
+    this.requestTraceId = traceContext.traceId;
+    this.requestSpanId = traceContext.spanId;
+    traceContext.headers['x-device-handler-trace-id'] = traceContext.traceId;
+    return traceContext;
   }
 }
 
@@ -490,6 +486,7 @@ export default function resourceAutoTrackDeviceTest() {
     let collector: MockCollector;
 
     beforeEach(async () => {
+      await SdkTestLifecycle.resetRuntimeState();
       collector = new MockCollector(200, '');
       collector.start();
       await installResourceSdk();
@@ -501,6 +498,7 @@ export default function resourceAutoTrackDeviceTest() {
       collector.stop();
       FTSDK.shutDown();
       await DBAssert.cleanupAll();
+      await SdkTestLifecycle.resetRuntimeState();
     });
 
     it('httpBridgeShouldUploadAndDelete', 0, async () => {
@@ -546,7 +544,7 @@ export default function resourceAutoTrackDeviceTest() {
         .setEnableAutoTrace(true)
         .setEnableLinkRUMData(true)
         .setTraceType(TraceType.DDTRACE)
-        .setOkHttpTraceHeaderHandler(headerHandler));
+        .setTraceHeaderHandler(headerHandler));
 
       const requestHeaders: Record<string, Object> = {};
       const request: FTSDKExtensionRequestInput =
@@ -566,9 +564,6 @@ export default function resourceAutoTrackDeviceTest() {
         new ExtensionResponse(prepared, responseHeaders, 200, '{"ok":true}');
 
       expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
-      expect(headerHandler.responseCount).assertEqual(1);
-      expect(headerHandler.responseTraceId).assertEqual(headerHandler.requestTraceId);
-      expect(headerHandler.responseSpanId).assertEqual(headerHandler.requestSpanId);
     });
 
     it('httpErrorShouldUseResourceFallback', 0, async () => {
@@ -622,10 +617,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
       expect(errorRecord !== null).assertTrue();
 
+      collector.clearRequests();
       FTSDK.flushSyncData();
 
-      const resourceUploaded = await collector.waitForPayloadContaining(resourceFragments, 5000);
-      const errorUploaded = await collector.waitForPayloadContaining(errorFragments, 5000);
+      const resourceUploaded =
+        await collector.waitForPayloadContaining(resourceFragments, 5000);
+      const errorUploaded =
+        await collector.waitForPayloadContaining(errorFragments, 5000);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =
@@ -686,10 +684,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect(resourceRecord !== null).assertTrue();
       expect(errorRecord !== null).assertTrue();
 
+      collector.clearRequests();
       FTSDK.flushSyncData();
 
-      const resourceUploaded = await collector.waitForPayloadContaining(resourceFragments, 5000);
-      const errorUploaded = await collector.waitForPayloadContaining(errorFragments, 5000);
+      const resourceUploaded =
+        await collector.waitForPayloadContaining(resourceFragments, 5000);
+      const errorUploaded =
+        await collector.waitForPayloadContaining(errorFragments, 5000);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =
@@ -1018,10 +1019,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect(resourceRecord !== null).assertTrue();
       expect(errorRecord !== null).assertTrue();
 
+      collector.clearRequests();
       FTSDK.flushSyncData();
 
-      const resourceUploaded = await collector.waitForPayloadContaining(resourceFragments, 5000);
-      const errorUploaded = await collector.waitForPayloadContaining(errorFragments, 5000);
+      const resourceUploaded =
+        await collector.waitForPayloadContaining(resourceFragments, 5000);
+      const errorUploaded =
+        await collector.waitForPayloadContaining(errorFragments, 5000);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =

@@ -27,7 +27,12 @@ import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
 import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
-import { HeaderHandler, TraceData } from '../../main/ets/components/trace/FTTraceInterceptor';
+import {
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceRequestContext
+} from '../../main/ets/components/trace/FTTraceHeaderHandler';
+import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { TestReset } from '../helpers/TestReset';
 
@@ -50,14 +55,6 @@ class TestConfigRecord implements ConfigRecord {
     return this.config.getDbCacheLimit();
   }
 
-  getLogCacheLimitCount(): number {
-    return this.config.getLogCacheLimitCount();
-  }
-
-  getRumCacheLimitCount(): number {
-    return this.config.getRumCacheLimitCount();
-  }
-
   getDBCacheDiscard(): string {
     return this.config.getDBCacheDiscard();
   }
@@ -65,25 +62,18 @@ class TestConfigRecord implements ConfigRecord {
   getLogCacheDiscard(): string {
     return this.config.getLogCacheDiscard();
   }
-
-  getRumCacheDiscard(): string {
-    return this.config.getRumCacheDiscard();
-  }
 }
 
-class RecordingConfigHeaderHandler implements HeaderHandler {
+class RecordingConfigHeaderHandler implements FTTraceHeaderHandler {
   public requestTraceId: string = '';
   public requestSpanId: string = '';
 
-  processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-    this.requestTraceId = traceData.traceId;
-    this.requestSpanId = traceData.spanId;
-    headers.set('x-config-handler-trace-id', traceData.traceId);
-    return headers;
-  }
-
-  processResponseHeaders(headers: Map<string, string>, _traceData: TraceData): Map<string, string> {
-    return headers;
+  getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+    const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+    this.requestTraceId = traceContext.traceId;
+    this.requestSpanId = traceContext.spanId;
+    traceContext.headers['x-config-handler-trace-id'] = traceContext.traceId;
+    return traceContext;
   }
 }
 
@@ -216,17 +206,15 @@ export default function configUnitTest() {
         .setSyncPageSize(1)
         .setSyncSleepTime(10000)
         .setDataSyncRetryCount(100)
-        .setDbCacheLimit(1)
-        .setLogCacheLimitCount(0)
-        .setRumCacheLimitCount(0)
+        .enableLimitWithDbSize(1)
         .setAutoSync(false);
 
       expect(config.getPageSize()).assertEqual(SyncPageSize.MINI);
       expect(config.getSyncSleepTime()).assertEqual(SyncTaskManager.SYNC_SLEEP_MAX_TIME_MS);
       expect(config.getDataSyncRetryCount()).assertEqual(SyncTaskManager.MAX_ERROR_COUNT);
-      expect(config.getDbCacheLimit()).assertEqual(31457280);
-      expect(config.getLogCacheLimitCount()).assertEqual(Constants.MINI_DB_LOG_CACHE_NUM);
-      expect(config.getRumCacheLimitCount()).assertEqual(Constants.MINI_DB_RUM_CACHE_NUM);
+      expect(config.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(new FTLoggerConfig().setLogCacheLimitCount(0).getLogCacheLimitCount()).assertEqual(Constants.MINI_DB_LOG_CACHE_NUM);
+      expect(new FTRUMConfig().setRumCacheLimitCount(0).getRumCacheLimitCount()).assertEqual(Constants.MINI_DB_RUM_CACHE_NUM);
       expect(config.isAutoSyncEnabled()).assertFalse();
 
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncSleepTime(-1).getSyncSleepTime())
@@ -236,7 +224,6 @@ export default function configUnitTest() {
 
     it('rumConfigShouldExposeDocumentedDefaults', 0, () => {
       const rumConfig = new FTRUMConfig();
-      const sdkConfig = FTSDKConfig.builder(TEST_FAKE_URL);
 
       expect(rumConfig.getRumAppId()).assertEqual('');
       expect(rumConfig.getSamplingRate()).assertEqual(1.0);
@@ -248,50 +235,56 @@ export default function configUnitTest() {
       expect(rumConfig.isEnableTrackAppCrash()).assertFalse();
       expect(rumConfig.isEnableTraceWebView()).assertFalse();
       expect(rumConfig.getBlockDurationMS()).assertEqual(1000);
-      expect(sdkConfig.getRumCacheLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
+      expect(rumConfig.getRumCacheLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
+      expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);
     });
 
     it('sdkConfigShouldStoreCacheOptions', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
         .setLogCacheDiscard('discard_oldest')
-        .setRumCacheDiscard('discard_oldest')
         .enableLimitWithDbSize()
         .enableDataIntegerCompatible();
 
-      expect(config.getDBCacheDiscard()).assertEqual('discard_oldest');
       expect(config.getLogCacheDiscard()).assertEqual('discard_oldest');
-      expect(config.getRumCacheDiscard()).assertEqual('discard_oldest');
       expect(config.isLimitWithDbSize()).assertTrue();
+      expect(config.getDbCacheLimit()).assertEqual(Constants.DEFAULT_CACHE_LIMIT_SIZE);
       expect(config.isDataIntegerCompatible()).assertTrue();
+
+      const legacyConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setDbCacheDiscard(DBCacheDiscard.DISCARD_OLDEST);
+      expect(legacyConfig.getDBCacheDiscard()).assertEqual('discard_oldest');
+
+      const legacyLimitConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setDbCacheLimit(1);
+      expect(legacyLimitConfig.isLimitWithDbSize()).assertTrue();
+      expect(legacyLimitConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
     });
 
     it('sdkOptionsShouldApplyToManagers', 0, () => {
       const dbLimit = 67108864;
       const logLimit = 2345;
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setDbCacheLimit(dbLimit)
-        .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
-        .setLogCacheLimitCount(logLimit)
+        .enableLimitWithDbSize(dbLimit)
+        .setDbCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
         .setLogCacheDiscard('discard_oldest')
-        .setRumCacheDiscard('discard_oldest')
         .enableDataIntegerCompatible();
       const cachePolicy = FTDBCachePolicy.getInstance();
 
       cachePolicy.initSDKParams(new TestConfigRecord(config));
 
       expect(config.getDbCacheLimit()).assertEqual(dbLimit);
-      expect(config.getLogCacheLimitCount()).assertEqual(logLimit);
       expect(config.getDBCacheDiscard()).assertEqual('discard_oldest');
       expect(config.getLogCacheDiscard()).assertEqual('discard_oldest');
-      expect(config.getRumCacheDiscard()).assertEqual('discard_oldest');
       expect(config.isDataIntegerCompatible()).assertTrue();
       expect(cachePolicy.isEnableLimitWithDbSize()).assertTrue();
       expect(cachePolicy.getDbLimitSize()).assertEqual(dbLimit);
-      expect(cachePolicy.getLogLimitCount()).assertEqual(logLimit);
+      cachePolicy.updateLogCacheLimitCount(logLimit);
+      cachePolicy.updateRumCacheLimitCount(34567);
+      expect(cachePolicy.getLogLimitCount()).assertEqual(Constants.DEFAULT_DB_LOG_CACHE_NUM);
+      expect(cachePolicy.getRumLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
       expect(cachePolicy.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
       expect(cachePolicy.getDiscardStrategy(DataType.LOG)).assertEqual(LogCacheDiscard.DISCARD_OLDEST);
-      expect(cachePolicy.getDiscardStrategy(DataType.RUM_APP)).assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.getDiscardStrategy(DataType.RUM_APP)).assertEqual(RUMCacheDiscard.DISCARD);
 
       const helper = new SyncDataHelper();
       const fields: Map<string, string> = new Map<string, string>();
@@ -399,16 +392,47 @@ export default function configUnitTest() {
       expect(runtime.mainWindowSetCount).assertEqual(1);
     });
 
-    it('installShouldApplyRumCacheLimit', 0, () => {
+    it('rumConfigShouldApplyRumCacheLimit', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);
-      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setRumCacheLimitCount(12345), createFakeContext());
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL), createFakeContext());
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumCacheLimitCount(12345)
+        .setRumCacheDiscardStrategy(RUMCacheDiscard.DISCARD_OLDEST));
 
       expect(runtime.syncTaskInitCount).assertEqual(1);
       expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(12345);
+      expect(FTDBCachePolicy.getInstance().getDiscardStrategy(DataType.RUM_APP))
+        .assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
+      expect(FTDBCachePolicy.getInstance().getDiscardStrategy(DataType.RUM_WEBVIEW))
+        .assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
 
-      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setRumCacheLimitCount(1), createFakeContext());
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumCacheLimitCount(1)
+        .setRumCacheDiscardStrategy('discard'));
       expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(Constants.MINI_DB_RUM_CACHE_NUM);
+      expect(FTDBCachePolicy.getInstance().getDiscardStrategy(DataType.RUM_APP)).assertEqual(RUMCacheDiscard.DISCARD);
+
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).enableLimitWithDbSize(), createFakeContext());
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumCacheLimitCount(12345));
+      expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
+    });
+
+    it('logConfigShouldApplyLogCacheLimit', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL), createFakeContext());
+      FTSDK.installLogConfig(new FTLoggerConfig().setLogCacheLimitCount(12345));
+
+      expect(runtime.syncTaskInitCount).assertEqual(1);
+      expect(FTDBCachePolicy.getInstance().getLogLimitCount()).assertEqual(12345);
+
+      FTSDK.installLogConfig(new FTLoggerConfig().setLogCacheLimitCount(1));
+      expect(FTDBCachePolicy.getInstance().getLogLimitCount()).assertEqual(Constants.MINI_DB_LOG_CACHE_NUM);
+
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).enableLimitWithDbSize(), createFakeContext());
+      FTSDK.installLogConfig(new FTLoggerConfig().setLogCacheLimitCount(12345));
+      expect(FTDBCachePolicy.getInstance().getLogLimitCount()).assertEqual(Constants.DEFAULT_DB_LOG_CACHE_NUM);
     });
 
     it('loggerConfigShouldStoreFilters', 0, () => {
@@ -430,6 +454,24 @@ export default function configUnitTest() {
 
       const minConfig = new FTLoggerConfig().setLogCacheLimitCount(0);
       expect(minConfig.getLogCacheLimitCount()).assertEqual(Constants.MINI_DB_LOG_CACHE_NUM);
+    });
+
+    it('loggerConfigShouldStoreObjectFilters', 0, () => {
+      const loggerConfig = new FTLoggerConfig()
+        .setLogLevelFilters([
+          { name: LogLevel.ERROR.name },
+          { name: LogLevel.WARN.name },
+          { name: 'custom_level' }
+        ]);
+
+      expect(loggerConfig.getLogLevelFilters().length).assertEqual(3);
+      expect(loggerConfig.getLogLevelFilters()[0]).assertEqual(LogLevel.ERROR.name);
+      expect(loggerConfig.getLogLevelFilters()[1]).assertEqual(LogLevel.WARN.name);
+      expect(loggerConfig.getLogLevelFilters()[2]).assertEqual('custom_level');
+      expect(loggerConfig.checkLogLevel(LogLevel.ERROR.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.WARN.name)).assertTrue();
+      expect(loggerConfig.checkLogLevel('custom_level')).assertTrue();
+      expect(loggerConfig.checkLogLevel(LogLevel.INFO.name)).assertFalse();
     });
 
     it('loggerTraceShouldKeepOptions', 0, () => {
@@ -457,6 +499,8 @@ export default function configUnitTest() {
       expect(loggerConfig.checkLogLevel(LogLevel.ERROR.name)).assertTrue();
       expect(loggerConfig.checkLogLevel('warn')).assertTrue();
       expect(loggerConfig.getLogCacheDiscardStrategy()).assertEqual(LogCacheDiscard.DISCARD_OLDEST);
+      expect(new FTLoggerConfig().setLogCacheDiscardStrategy('discard_oldest').getLogCacheDiscardStrategy())
+        .assertEqual(LogCacheDiscard.DISCARD_OLDEST);
       expect(loggerConfig.isPrintCustomLogToConsole()).assertTrue();
       expect(traceConfig.getTraceType()).assertEqual(TraceType.TRACEPARENT);
       expect(traceConfig.isEnableAutoTrace()).assertTrue();
@@ -488,24 +532,22 @@ export default function configUnitTest() {
       const headerHandler = new RecordingConfigHeaderHandler();
       FTSDK.installTraceConfig(new FTTraceConfig()
         .setEnableAutoTrace(true)
-        .setOkHttpTraceHeaderHandler(headerHandler));
+        .setTraceHeaderHandler(headerHandler));
 
-      const overrideHeaderHandler = FTTraceConfigManager.getInstance().getOverrideHeaderHandler();
-      expect(overrideHeaderHandler === headerHandler).assertTrue();
-      if (overrideHeaderHandler) {
-        const headers = overrideHeaderHandler.processRequestHeaders(new Map<string, string>(), {
-          traceId: 'trace-config-unit',
-          spanId: 'span-config-unit',
-          serviceName: 'config-service',
-          operationName: 'GET /config',
-          startTime: 1,
-          tags: new Map<string, string>(),
-          logs: []
+      const traceHeaderHandler = FTTraceConfigManager.getInstance().getTraceHeaderHandler();
+      expect(traceHeaderHandler === headerHandler).assertTrue();
+      if (traceHeaderHandler) {
+        const traceContext = traceHeaderHandler.getTraceContext({
+          url: 'http://example.com/config',
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json'
+          }
         });
 
-        expect(headerHandler.requestTraceId).assertEqual('trace-config-unit');
-        expect(headerHandler.requestSpanId).assertEqual('span-config-unit');
-        expect(headers.get('x-config-handler-trace-id')).assertEqual('trace-config-unit');
+        expect(headerHandler.requestTraceId.length > 0).assertTrue();
+        expect(headerHandler.requestSpanId.length > 0).assertTrue();
+        expect(traceContext.headers['x-config-handler-trace-id']).assertEqual(headerHandler.requestTraceId);
       }
     });
   });
