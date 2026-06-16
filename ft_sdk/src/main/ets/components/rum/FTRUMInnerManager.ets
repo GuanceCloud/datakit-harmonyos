@@ -15,6 +15,12 @@ import {
 import FTTrackInner from '../FTTrackInner';
 import { FTDBManager } from '../db/FTDBManager';
 import { FTInnerLogger } from "../log/FTLogger";
+import {
+  SDKTaskPriority,
+  SDKTaskRunner,
+  SDKTaskScheduler,
+  SDKTaskType
+} from '../thread/SDKTaskScheduler';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
@@ -22,7 +28,6 @@ import { DeviceMetricsMonitorType } from './enum/DeviceMetricsMonitorType';
 import { Context } from '@kit.AbilityKit';
 import { RunnerCompleteCallBack } from './callback/RunnerCompleteCallBack';
 import { SamplingUtils } from '../utils/SamplingUtils';
-import { EventConsumerThreadPool } from '../thread/EventConsumerThreadPool';
 import { FTRUMConfig } from '../Configs';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
@@ -206,9 +211,8 @@ export class FTRUMInnerManager {
   // Action management constants
   private static readonly ACTION_FREQUENCY_LIMIT = 100000; // 100ms frequency limit (microseconds)
   private static readonly ACTION_TIMEOUT = 5000000; // 5 seconds timeout (microseconds)
-  
-  // Memory management and thread pool
-  private eventThreadPool: EventConsumerThreadPool;
+  private static readonly RUM_EVENT_SERIAL_KEY = "rum-event-state";
+  private static rumEventTraceSequence: number = 0;
 
   /**
    * Get all keys of an object (alternative to for...in loop)
@@ -312,13 +316,37 @@ export class FTRUMInnerManager {
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
   
   private constructor() {
-    // Initialize memory manager and thread pool
-    this.eventThreadPool = EventConsumerThreadPool.getInstance();
-    
     this.initSessionTimer();
     // Note: Session ID is created in field initialization, but checkSessionKeep will be called
     // in initParams() after sampling rates are set from FTRUMConfig
     // Do NOT call checkSessionKeep here because sampleRate may not be set yet
+  }
+
+  private submitRumEventTask(name: string, task: SDKTaskRunner): void {
+    const traceName = this.nextRumEventTaskName(name);
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.EVENT,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
+      costHint: 'light',
+      run: async () => {
+        await this.runRumEventTaskSafely(traceName, task);
+      }
+    });
+  }
+
+  private async runRumEventTaskSafely(traceName: string, task: SDKTaskRunner): Promise<void> {
+    try {
+      await Promise.resolve(task());
+    } catch (error) {
+      FTInnerLogger.e(TAG, `<FT-EVENT-LANE> RUM event task failed: name=${traceName}, error=${error}`);
+    }
+  }
+
+  private nextRumEventTaskName(name: string): string {
+    FTRUMInnerManager.rumEventTraceSequence++;
+    return `${name}#${FTRUMInnerManager.rumEventTraceSequence}`;
   }
   
   /**
@@ -402,7 +430,7 @@ export class FTRUMInnerManager {
           }
           
           // Wait a short time to ensure all pending database updates (errors, long tasks, resources) complete
-          // This is necessary because increaseError/increaseLongTask use async eventThreadPool.executeEventTask
+          // This is necessary because increaseError/increaseLongTask use async RUM event lane tasks
           // and the database updates may not complete immediately when action is closed
           // Android SDK uses 100ms delay in generateRumData(), but we need additional delay here because
           // errors/long tasks may be added asynchronously after action is closed (e.g., via setTimeout in test code)
@@ -1176,7 +1204,7 @@ export class FTRUMInnerManager {
     // Close all existing actions and views (aligned with Android)
     // This is done asynchronously to avoid blocking initialization
     if (this.context) {
-      this.eventThreadPool.executeEventTask(async () => {
+      this.submitRumEventTask('rum.init:closeAllActionAndView', async () => {
         try {
           await FTDBManager.getInstance(this.context!).closeAllActionAndView();
           FTInnerLogger.d(TAG, "Closed all existing actions and views");
@@ -1539,8 +1567,8 @@ export class FTRUMInnerManager {
       
       // Convert to ActionBean and send directly 
       const actionBean = completedAction.convertToActionBean();
-      // Send directly using EventConsumerThreadPool
-      this.eventThreadPool.executeEventTask(() => {
+      // Send directly through the RUM event lane
+      this.submitRumEventTask(`rum.addAction:${actionName}`, () => {
         try {
           this.insertAction(actionBean);
         } catch (error) {
@@ -1767,11 +1795,11 @@ export class FTRUMInnerManager {
         }
       }
 
-      // Use RUM thread pool instead of setTimeout (aligned with Android: EventConsumerThreadPool.get().execute)
-      this.eventThreadPool.executeEventTask(() => {
+      // Use the RUM event lane instead of setTimeout (aligned with Android's event consumer ordering)
+      this.submitRumEventTask(`rum.addError:${errorType}`, () => {
         try {
           // Collect device information based on extraMonitorTypeWithError configuration
-          // Aligned with Android: FTRUMInnerManager.addError() collects device info in EventConsumerThreadPool
+          // Aligned with Android: FTRUMInnerManager.addError() collects device info in the event consumer path
           const self = this;
           (async () => {
             try {
@@ -2478,7 +2506,7 @@ export class FTRUMInnerManager {
     const viewBean = activeViewBean.convertToViewBean();
     
     // Use event thread pool instead of setTimeout
-    this.eventThreadPool.executeEventTask(() => {
+    this.submitRumEventTask(`rum.initView:${activeViewBean.getViewName()}`, () => {
       try {
         if (this.context) {
           // Use async/await in thread pool
@@ -2590,7 +2618,7 @@ export class FTRUMInnerManager {
 
     if (isAddAction) {
       // addAction: Directly enters FT_SYNC_DATA_FLAT_TABLE_NAME
-      this.eventThreadPool.executeEventTask(() => {
+      this.submitRumEventTask(`rum.addAction:${actionName}`, () => {
         try {
           this.insertAction(actionBean);
         } catch (error) {
@@ -2599,7 +2627,7 @@ export class FTRUMInnerManager {
       });
     } else {
       // startAction: First stores to FT_TABLE_ACTION, then enters FT_SYNC_DATA_FLAT_TABLE_NAME after closing
-      this.eventThreadPool.executeEventTask(() => {
+      this.submitRumEventTask(`rum.startAction:${actionName}`, () => {
         try {
           if (this.context) {
             // Use async/await in thread pool
@@ -2636,7 +2664,7 @@ export class FTRUMInnerManager {
       // This ensures the action is written to database before querying
       // Aligned with Android: if timeout, force=true; otherwise, force=false (will check pending_resource in database)
       if (this.context) {
-        this.eventThreadPool.executeEventTask(() => {
+        this.submitRumEventTask(`rum.closeAction:${activeActionBean.getActionName()}`, () => {
           (async () => {
             try {
               await FTDBManager.getInstance(this.context!).closeAction(actionBean.getId(), actionBean.getDuration(), isTimeout);
@@ -2954,11 +2982,11 @@ export class FTRUMInnerManager {
       // Pending count is already decreased in stopResource (see stopResource method)
       // This prevents double-decrement of pending_resource_count
       
-      // Remove resourceBean from map asynchronously (aligned with Android SDK: EventConsumerThreadPool.execute)
-      // Android SDK: putRUMResourcePerformance deletes ResourceBean in EventConsumerThreadPool (async)
+      // Remove resourceBean from map asynchronously (aligned with Android SDK event consumer ordering)
+      // Android SDK: putRUMResourcePerformance deletes ResourceBean in the event consumer path (async)
       // This ensures stopResource can still find ResourceBean and call increaseResourceCount
-      // HarmonyOS: Use eventThreadPool to delete ResourceBean asynchronously
-      this.eventThreadPool.executeEventTask(() => {
+      // HarmonyOS: Use the RUM event lane to delete ResourceBean asynchronously
+      this.submitRumEventTask(`rum.resourceCleanup:${resourceId}`, () => {
         this.resourceBeanMap.delete(resourceId);
         FTInnerLogger.d(TAG, `<FT-RESOURCE-UPLOAD> ResourceBean removed from map: ${resourceId}`);
       });
@@ -2985,7 +3013,7 @@ export class FTRUMInnerManager {
     // Update database (aligned with Android: FTDBManager.get().increaseViewAction(viewId))
     // This ensures database is updated when action occurs, preventing duplicate view uploads
     if (this.context && viewId) {
-      this.eventThreadPool.executeEventTask(() => {
+      this.submitRumEventTask(`rum.increaseViewAction:${viewId}`, () => {
         FTDBManager.getInstance(this.context!).increaseViewAction(viewId).then(() => {
         }).catch((error: Error) => {
           FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INCREASE-ERROR] Failed to update database action count: ${error}`);
@@ -3023,7 +3051,7 @@ export class FTRUMInnerManager {
     // IMPORTANT: Use await to ensure database update completes before returning
     // This prevents generateActionSum() from querying stale counts
     if (this.context) {
-      this.eventThreadPool.executeEventTask(async () => {
+      this.submitRumEventTask(`rum.increaseError:${actionId || viewId || 'unknown'}`, async () => {
         try {
           // Always update database using actionId from tags (atomic SQL update)
           // This ensures correct count even when multiple errors occur for the same action
@@ -3055,7 +3083,7 @@ export class FTRUMInnerManager {
         // Update database count (aligned with Android SDK)
       }
       if (this.context) {
-        this.eventThreadPool.executeEventTask(() => {
+        this.submitRumEventTask(`rum.increaseResource:${viewId || actionId || 'unknown'}`, () => {
           (async () => {
             try {
               await FTDBManager.getInstance(this.context!).increaseViewResource(viewId);
@@ -3088,7 +3116,7 @@ export class FTRUMInnerManager {
     
     // Update database counts (aligned with Android: increaseViewPendingResource and increaseActionPendingResource)
     if (this.context) {
-      this.eventThreadPool.executeEventTask(() => {
+      this.submitRumEventTask(`rum.increasePendingResource:${viewId || actionId || 'unknown'}`, () => {
         (async () => {
           try {
             if (viewId && viewId.length > 0) {
@@ -3121,7 +3149,7 @@ export class FTRUMInnerManager {
     
     // Update database counts (aligned with Android: reduceViewPendingResource and reduceActionPendingResource)
     if (this.context) {
-      this.eventThreadPool.executeEventTask(() => {
+      this.submitRumEventTask(`rum.decreasePendingResource:${viewId || actionId || 'unknown'}`, () => {
         (async () => {
           try {
             if (viewId && viewId.length > 0) {
@@ -3395,7 +3423,7 @@ export class FTRUMInnerManager {
       const viewId = allTags[Constants.KEY_RUM_VIEW_ID];
       
       if (this.context && (actionId || viewId)) {
-        this.eventThreadPool.executeEventTask(() => {
+        this.submitRumEventTask(`rum.increaseLongTaskFromTags:${actionId || viewId || 'unknown'}`, () => {
           (async () => {
             try {
               // Only update if action/view is not in memory (closed)
@@ -3437,7 +3465,7 @@ export class FTRUMInnerManager {
         this.activeView.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          this.eventThreadPool.executeEventTask(() => {
+          this.submitRumEventTask(`rum.increaseViewLongTask:${viewName}`, () => {
             (async () => {
               try {
                 await FTDBManager.getInstance(this.context!).increaseViewLongTask(viewId, viewName);
@@ -3455,7 +3483,7 @@ export class FTRUMInnerManager {
         this.activeAction.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          this.eventThreadPool.executeEventTask(() => {
+          this.submitRumEventTask(`rum.increaseActionLongTask:${actionName}`, () => {
             (async () => {
               try {
                 await FTDBManager.getInstance(this.context!).increaseActionLongTask(actionId, actionName);
@@ -3508,7 +3536,7 @@ export class FTRUMInnerManager {
         
         // Aligned with Android SDK: putRUMResourcePerformance does NOT call increaseResourceCount
         // increaseResourceCount is called in stopResource (see Android SDK: FTRUMInnerManager.java:374)
-        // Android SDK: putRUMResourcePerformance deletes ResourceBean asynchronously in EventConsumerThreadPool
+        // Android SDK: putRUMResourcePerformance deletes ResourceBean asynchronously in the event consumer path
         // So stopResource can still find ResourceBean and call increaseResourceCount
         // HarmonyOS: We also delete ResourceBean asynchronously, so stopResource can find it
         this.putRUMResourcePerformance(resourceId);
