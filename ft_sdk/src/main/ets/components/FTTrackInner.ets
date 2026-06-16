@@ -13,7 +13,12 @@ import { SyncDataHelper } from './SyncDataHelper';
 import { SyncTaskManager } from './SyncTaskManager';
 import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
-import { DataProcessThreadPool } from './thread/DataProcessThreadPool';
+import {
+  SDKTaskPriority,
+  SDKTaskRunner,
+  SDKTaskScheduler,
+  SDKTaskType
+} from './thread/SDKTaskScheduler';
 import { Utils } from './utils/Utils';
 import { FTDBCachePolicy } from './db/FTDBCachePolicy';
 import { FTDBManager } from './db/FTDBManager';
@@ -42,6 +47,7 @@ interface FTTrackValueAccessor {
  */
 class FTTrackInner {
   private static instance: FTTrackInner | null = null;
+  private static dataProcessTaskSequence: number = 0;
   private dataHelper: SyncDataHelper;
   private syncTaskManager: SyncTaskManager;
   private trackLogManager: TrackLogManager;
@@ -85,6 +91,41 @@ class FTTrackInner {
 
   public static resetInstanceInternal(): void {
     FTTrackInner.instance = null;
+  }
+
+  private submitDataProcessTask(name: string, task: SDKTaskRunner): void {
+    const traceName = this.nextDataProcessTaskName(name);
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.DATA_PROCESS,
+      name: traceName,
+      priority: SDKTaskPriority.LOW,
+      costHint: 'normal',
+      run: async () => {
+        const startTime = Date.now();
+        let result = 'success';
+        let errorMessage = '';
+        try {
+          await Promise.resolve(task());
+        } catch (error) {
+          result = 'failed';
+          errorMessage = String(error);
+          throw new Error(errorMessage);
+        } finally {
+          const costTime = Math.max(0, Date.now() - startTime);
+          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+          this.traceDataLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms`);
+        }
+      }
+    });
+  }
+
+  private nextDataProcessTaskName(name: string): string {
+    FTTrackInner.dataProcessTaskSequence++;
+    return `${name}#${FTTrackInner.dataProcessTaskSequence}`;
+  }
+
+  private traceDataLane(message: string): void {
+    FTInnerLogger.i(TAG, `<FT-DATA-LANE> ${message}`);
   }
 
   /**
@@ -319,19 +360,19 @@ class FTTrackInner {
     }
 
     try {
-      // Convert LogBean to database format and batch process
-      const promises: Promise<boolean>[] = [];
+      this.submitDataProcessTask(`data.prepare.logBatch:${batchData.length}`, async () => {
+        // Convert LogBean to database format and batch process
+        const promises: Promise<boolean>[] = [];
 
-      for (const logBean of batchData) {
-        if (logBean instanceof LogBean) {
-
-          const promise = this.processLogBeanToDatabase(logBean, isSilence);
-          promises.push(promise);
+        for (const logBean of batchData) {
+          if (logBean instanceof LogBean) {
+            const promise = this.processLogBeanToDatabase(logBean, isSilence);
+            promises.push(promise);
+          }
         }
-      }
 
-
-      this.handleBatchLogPromises(promises, batchData.length, isSilence);
+        await this.handleBatchLogPromises(promises, batchData.length, isSilence);
+      });
 
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in batchLogBeanSync: ${error}`);
@@ -427,9 +468,8 @@ class FTTrackInner {
   ): void {
     // Use the same logic as syncDataBackground, but with custom dataTypeForStorage
 
-    // Use DataProcessThreadPool instead of setTimeout
     try {
-      DataProcessThreadPool.getInstance().execute(async () => {
+      this.submitDataProcessTask('data.prepare.errorSampled', async () => {
         try {
           // Create sync data record using dataTypeForContent for getBodyContent
           const syncDataParams: SyncDataParams = {
@@ -528,9 +568,8 @@ class FTTrackInner {
   ): void {
     // Reduced logging - only log key information
 
-    // Use DataProcessThreadPool instead of setTimeout
     try {
-      DataProcessThreadPool.getInstance().execute(async () => {
+      this.submitDataProcessTask('data.prepare', async () => {
         try {
           // Create sync data record
           const syncDataParams: SyncDataParams = {

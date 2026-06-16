@@ -160,5 +160,53 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('event-start,log,event-end');
     });
 
+    it('dataProcessLaneShouldAllowParallelTasks', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      let releaseSecond: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'first-data-process',
+        priority: SDKTaskPriority.LOW,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'second-data-process',
+        priority: SDKTaskPriority.LOW,
+        run: async () => {
+          order.push('second-start');
+          await secondGate;
+          order.push('second-end');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start,second-start');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      if (releaseSecond) {
+        releaseSecond();
+      }
+
+      await first;
+      await second;
+      expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+    });
+
   });
 }

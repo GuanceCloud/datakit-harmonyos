@@ -5,7 +5,11 @@
 import relationalStore from '@ohos.data.relationalStore';
 import { DataBaseCallBack } from './DataBaseCallBack';
 import { FTInnerLogger } from '../../log/FTLogger';
-import { DataProcessThreadPool } from '../../thread/DataProcessThreadPool';
+import {
+  SDKTaskPriority,
+  SDKTaskScheduler,
+  SDKTaskType
+} from '../../thread/SDKTaskScheduler';
 
 const TAG = "DBManager";
 
@@ -16,6 +20,8 @@ const TAG = "DBManager";
 export abstract class DBManager {
   private static readonly TAG: string = TAG;
   private static readonly TRANSACTION_LIMIT_COUNT: number = 10;
+  private static readonly DB_SCHEDULE_SERIAL_KEY: string = "db-schedule";
+  private static closeTaskSequence: number = 0;
 
   private rdbStore: relationalStore.RdbStore | null = null;
   private readonly lock: object = new Object();
@@ -43,7 +49,6 @@ export abstract class DBManager {
   protected async getDataBaseHelper(): Promise<relationalStore.RdbStore> {
     if (this.rdbStore === null) {
       try {
-        // Removed test debug logs to reduce log output
         this.rdbStore = await this.initDataBaseHelper();
       } catch (error) {
         throw new Error(`Failed to initialize database helper: ${error as string}`);
@@ -59,7 +64,6 @@ export abstract class DBManager {
    * @param callback Database operation callback
    */
   protected async getDB(write: boolean, callback: DataBaseCallBack): Promise<void> {
-      // Removed test debug logs to reduce log output
     try {
       await this.getDBWithCount(write, 1, callback);
       // FTInnerLogger.d(TAG, ` getDBWithCount completed successfully`);
@@ -81,16 +85,9 @@ export abstract class DBManager {
       // Get fresh database connection for each operation (HarmonyOS best practice)
       // This avoids connection reuse issues and "Already closed" errors
       const rdbStore = await this.getDataBaseHelper();
-      // Removed test debug logs to reduce log output
-      // FTInnerLogger.d(TAG, ` getDataBaseHelper result: ${rdbStore ? 'success' : 'null'}`);
-      
       if (rdbStore) {
         // Auto-determine: use transaction for write operations with count exceeding threshold
         const useTransaction = write && operationCount > DBManager.TRANSACTION_LIMIT_COUNT;
-        
-        // Removed test debug logs to reduce log output
-        // FTInnerLogger.d(TAG, ` getDBWithCount: write=${write}, operationCount=${operationCount}, useTransaction=${useTransaction}`);
-        
         if (useTransaction) {
           // Use transaction
           // FTInnerLogger.d(TAG, ` Using transaction for write operation`);
@@ -229,9 +226,6 @@ export abstract class DBManager {
       if (this.openCounter > 10) {
         FTInnerLogger.w(TAG, `High connection count: ${this.openCounter}, Thread: main`);
       }
-      
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` acquire: openCounter=${this.openCounter}`);
     });
   }
 
@@ -256,9 +250,6 @@ export abstract class DBManager {
       // Only schedule close if no active connections
       if (newCount === 0) {
         this.scheduleCloseIfIdle();
-      } else {
-        // Removed test debug log to reduce log output
-        // FTInnerLogger.d(TAG, ` Not closing database yet, openCounter=${newCount}`);
       }
     });
   }
@@ -269,15 +260,32 @@ export abstract class DBManager {
   private scheduleCloseIfIdle(): void {
     this.cancelPendingClose();
     if (this.openCounter === 0) {
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` Scheduling database close in ${DBManager.IDLE_TIMEOUT}ms`);
-      // Use DataProcessThreadPool instead of setTimeout
-      DataProcessThreadPool.getInstance().execute(() => {
-        if (this.openCounter === 0 && (Date.now() - this.lastUsedTime) >= DBManager.IDLE_TIMEOUT) {
-          this.closeDatabase();
+      this.pendingCloseTask = setTimeout(() => {
+        this.pendingCloseTask = null;
+        const taskName = this.nextCloseTaskName();
+        try {
+          SDKTaskScheduler.getInstance().submitTask({
+            type: SDKTaskType.DB_SCHEDULE,
+            name: taskName,
+            priority: SDKTaskPriority.HIGH,
+            serialKey: DBManager.DB_SCHEDULE_SERIAL_KEY,
+            costHint: 'light',
+            run: () => {
+              if (this.openCounter === 0 && (Date.now() - this.lastUsedTime) >= DBManager.IDLE_TIMEOUT) {
+                this.closeDatabase();
+              }
+            }
+          });
+        } catch (error) {
+          FTInnerLogger.e(TAG, `<FT-DB-SCHEDULE-LANE> Failed to submit ${taskName}: ${error}`);
         }
-      });
+      }, DBManager.IDLE_TIMEOUT);
     }
+  }
+
+  private nextCloseTaskName(): string {
+    DBManager.closeTaskSequence++;
+    return `db.closeIfIdle#${DBManager.closeTaskSequence}`;
   }
 
   /**
@@ -287,8 +295,6 @@ export abstract class DBManager {
     if (this.pendingCloseTask !== null) {
       clearTimeout(this.pendingCloseTask);
       this.pendingCloseTask = null;
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` Cancelled previous close task`);
     }
   }
 
@@ -297,19 +303,12 @@ export abstract class DBManager {
    */
   private closeDatabase(): void {
     synchronized(this.dbLock, async () => {
-      // Removed test debug logs to reduce log output
-      // FTInnerLogger.d(TAG, ` closeDatabase called: rdbStore=${this.rdbStore ? 'exists' : 'null'}, openCounter=${this.openCounter}`);
-      
       if (this.rdbStore && this.openCounter <= 0) {
         try {
-          // FTInnerLogger.d(TAG, ` Closing database connection`);
-
           // Attempt to close the database
           await this.rdbStore.close();
           this.rdbStore = null;
           this.pendingCloseTask = null;
-          // Removed test debug log to reduce log output
-          // FTInnerLogger.d(TAG, ` Database connection closed successfully`);
         } catch (error) {
           // If it's an "Already closed" error, treat it as success
           if (error && error.toString().includes("Already closed")) {
@@ -384,9 +383,6 @@ export abstract class DBManager {
 function synchronized(lock: object, fn: (() => void) | (() => Promise<void>)): void | Promise<void> {
   // In HarmonyOS, due to the single-threaded model, this is mainly for maintaining interface consistency
   // Actual multi-threaded safety needs to be handled at the application level
-  // Removed test debug logs to reduce log output
-  // FTInnerLogger.d(TAG, ` synchronized function called`);
-  
   const result = fn();
   
   // Check if the function returns a Promise
