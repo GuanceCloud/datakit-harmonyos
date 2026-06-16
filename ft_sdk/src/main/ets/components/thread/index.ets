@@ -40,12 +40,6 @@ export {
     ThreadPoolManagerStatus 
 } from './ThreadPoolManager';
 
-// Independent log consumer thread pool
-export {
-    LogConsumerThreadPool,
-    LogQueueStatus
-} from './LogConsumerThreadPool';
-
 export {
     DataUploadThreadPool,
     UploadQueueStatus

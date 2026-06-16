@@ -82,5 +82,83 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
+    it('logLaneShouldRunTasksSequentially', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'first-log',
+        priority: SDKTaskPriority.NORMAL,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'second-log',
+        priority: SDKTaskPriority.NORMAL,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      await first;
+      await second;
+
+      expect(order.join(',')).assertEqual('first-start,first-end,second');
+    });
+
+    it('logLaneShouldNotWaitForRunningEventLane', 0, async () => {
+      const order: string[] = [];
+      let releaseEvent: (() => void) | null = null;
+      const eventGate = new Promise<void>((resolve) => {
+        releaseEvent = resolve;
+      });
+
+      const eventTask = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'long-event',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('event-start');
+          await eventGate;
+          order.push('event-end');
+        }
+      });
+
+      const logTask = scheduler.submitTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'independent-log',
+        priority: SDKTaskPriority.NORMAL,
+        run: () => {
+          order.push('log');
+        }
+      });
+
+      await flushPromises();
+      await logTask;
+      expect(order.join(',')).assertEqual('event-start,log');
+
+      if (releaseEvent) {
+        releaseEvent();
+      }
+      await eventTask;
+
+      expect(order.join(',')).assertEqual('event-start,log,event-end');
+    });
+
   });
 }
