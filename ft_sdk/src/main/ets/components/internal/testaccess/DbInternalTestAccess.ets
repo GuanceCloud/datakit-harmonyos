@@ -13,4 +13,12 @@ export class DbInternalTestAccess {
   public static resetDbManagerInstance(): void {
     FTDBManager.resetInstanceInternal();
   }
+
+  public static async simulateNoLockDbShutdown(context: Context): Promise<void> {
+    await FTDBManager.getInstance(context).simulateNoLockShutdownForTest();
+  }
+
+  public static clearNoLockDbShutdownSimulation(context: Context): void {
+    FTDBManager.getInstance(context).clearNoLockShutdownSimulationForTest();
+  }
 }

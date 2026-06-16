@@ -124,6 +124,14 @@ export class FTDBManager extends DBManager {
     return await this.databaseHelper.initDatabase();
   }
 
+  protected resetDatabaseConnection(): void {
+    super.resetDatabaseConnection();
+    if (!this.isNoLockShutdownSimulationForTest()) {
+      this.databaseHelper?.resetConnection();
+    }
+    this.initPromise = null;
+  }
+
   /**
    * Whether database size limit is enabled
    * @returns boolean

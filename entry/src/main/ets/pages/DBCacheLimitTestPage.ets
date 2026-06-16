@@ -1,6 +1,7 @@
 import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
+import { DbInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { Context } from '@kit.AbilityKit';
@@ -15,7 +16,23 @@ const PAGE_RUM_CACHE_LIMIT_COUNT = 12345;
 const DB_METRICS_REFRESH_INTERVAL_MS = 3000;
 const AUTO_LOG_STATUS_INTERVAL = 10;
 const AUTO_RUM_STATUS_INTERVAL = 5;
-const MAX_RESULT_LINES = 60;
+const MAX_RESULT_LINES = 30000;
+const DATA_LOSS_VERIFY_TIMEOUT_MS = 10000;
+const NO_LOCK_DB_RACE_BASELINE_COUNT = 20;
+const NO_LOCK_DB_RACE_LOG_COUNT = 200;
+const NO_LOCK_DB_RACE_BEFORE_SHUTDOWN_COUNT = 60;
+const DB_SHUTDOWN_RACE_BASELINE_COUNT = 50;
+const DB_SHUTDOWN_RACE_LOG_COUNT = 200;
+const DB_SHUTDOWN_RACE_RECOVERY_COUNT = 50;
+const DB_SHUTDOWN_RACE_BATCH_SIZE = 10;
+const DB_SHUTDOWN_RACE_ATTEMPTS = 3;
+const DB_SHUTDOWN_RACE_INTERVAL_MS = 150;
+const DB_SHUTDOWN_RACE_RECOVERY_DELAY_MS = 800;
+const LOG_QUEUE_LOSS_BASELINE_COUNT = 50;
+const LOG_QUEUE_LOSS_LOG_COUNT = 1500;
+const LOG_QUEUE_LOSS_EXPECTED_QUEUE_CAPACITY = 1000;
+const LOG_QUEUE_LOSS_RECOVERY_COUNT = 50;
+const LOG_QUEUE_LOSS_TIMEOUT_MS = 20000;
 
 @Entry
 @Component
@@ -185,6 +202,33 @@ export struct DBCacheLimitTestPage {
             .enabled(!this.autoWriteEnabled && !this.isRunning)
             .onClick(() => {
               this.writeLogsBatch(100);
+            })
+
+          Button('Verify No-Lock DB Race')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#FF9800')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.verifyNoLockDbRace();
+            })
+
+          Button('Verify DB Shutdown Race (Logs)')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#E65100')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.verifyLogDataLossWithDbShutdown();
+            })
+
+          Button('Verify Log Queue Overflow Loss')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#B00020')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.verifyLogQueueOverflowLoss();
             })
 
           Button('Write 100 RUM Data Once')
@@ -781,6 +825,11 @@ export struct DBCacheLimitTestPage {
     return await dbManager.queryFtOperation([DataType.RUM_APP, DataType.RUM_WEBVIEW], limit, newestFirst);
   }
 
+  private async queryLogDbSamples(limit: number, newestFirst: boolean): Promise<SyncData[]> {
+    const dbManager = FTDBManager.getInstance(this.context);
+    return await dbManager.queryFtOperation([DataType.LOG], limit, newestFirst);
+  }
+
   private containsMarker(dataList: SyncData[], marker: string): boolean {
     for (const data of dataList) {
       if (data.getDataString().indexOf(marker) >= 0) {
@@ -805,6 +854,304 @@ export struct DBCacheLimitTestPage {
         resolve();
       }, delayMs);
     });
+  }
+
+  private findMissingMarkers(dataList: SyncData[], markers: string[]): string[] {
+    const missing: string[] = [];
+    for (const marker of markers) {
+      if (!this.containsMarker(dataList, marker)) {
+        missing.push(marker);
+      }
+    }
+    return missing;
+  }
+
+  private async waitForLogMarkers(markers: string[], timeoutMs: number): Promise<string[]> {
+    const startTime = Date.now();
+    let missing = markers;
+    const queryLimit = markers.length + 200;
+
+    while (Date.now() - startTime < timeoutMs) {
+      const samples = await this.queryLogDbSamples(queryLimit, true);
+      missing = this.findMissingMarkers(samples, markers);
+      if (missing.length === 0) {
+        return missing;
+      }
+      await this.waitForWriteSettled(500);
+    }
+
+    const samples = await this.queryLogDbSamples(queryLimit, true);
+    return this.findMissingMarkers(samples, markers);
+  }
+
+  private buildLogMarkers(prefix: string, count: number): string[] {
+    const markers: string[] = [];
+    for (let i = 0; i < count; i++) {
+      markers.push(`${prefix}_${i}`);
+    }
+    return markers;
+  }
+
+  private appendMarkerCheckResult(label: string, producedCount: number, missing: string[]): void {
+    const foundCount = producedCount - missing.length;
+    this.appendResult(`${label} Produced: ${producedCount}\n`);
+    this.appendResult(`${label} Found In DB: ${foundCount}\n`);
+    this.appendResult(`${label} Missing: ${missing.length}\n`);
+    if (missing.length > 0) {
+      const preview = missing.slice(0, 20).join(', ');
+      this.appendResult(`${label} Missing Preview: ${preview}${missing.length > 20 ? ', ...' : ''}\n`);
+    }
+  }
+
+  private createDirectLogData(marker: string): SyncData {
+    const data = new SyncData(DataType.LOG);
+    data.setUuid(marker);
+    data.setTime(Date.now());
+    data.setDataString(`no_lock_db_race,source=demo,sdk_data_id=${marker} message="${marker}"`);
+    return data;
+  }
+
+  private async insertDirectLogMarkers(markers: string[]): Promise<number> {
+    const dbManager = FTDBManager.getInstance(this.context);
+    let successCount = 0;
+    for (const marker of markers) {
+      const success = await dbManager.insertFtOperation(this.createDirectLogData(marker), true);
+      if (success) {
+        successCount++;
+      }
+    }
+    this.writeCount += successCount;
+    return successCount;
+  }
+
+  private async findDirectLogMissing(markers: string[]): Promise<string[]> {
+    const samples = await this.queryLogDbSamples(markers.length + 200, true);
+    return this.findMissingMarkers(samples, markers);
+  }
+
+  private async verifyNoLockDbRace(): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+
+      const runId = `NoLockRace_${Date.now()}`;
+      const baselineMarkers = this.buildLogMarkers(`${runId}_baseline`, NO_LOCK_DB_RACE_BASELINE_COUNT);
+      const raceMarkers = this.buildLogMarkers(`${runId}_race`, NO_LOCK_DB_RACE_LOG_COUNT);
+      const beforeShutdownMarkers = raceMarkers.slice(0, NO_LOCK_DB_RACE_BEFORE_SHUTDOWN_COUNT);
+      const afterShutdownMarkers = raceMarkers.slice(NO_LOCK_DB_RACE_BEFORE_SHUTDOWN_COUNT);
+
+      this.appendResult(`\n=== Verify No-Lock DB Race ===\n`);
+      this.appendResult(`Run ID: ${runId}\n`);
+      this.appendResult('This simulates the old no-lock DB shutdown path: close the DB without the write lock and keep the stale helper connection.\n');
+      this.appendResult(`Baseline: direct-writing ${NO_LOCK_DB_RACE_BASELINE_COUNT} markers before unsafe shutdown...\n`);
+
+      await FTSDK.clearAllData();
+      DbInternalTestAccess.resetDbManagerInstance();
+      await this.waitForWriteSettled();
+      const baselineSuccess = await this.insertDirectLogMarkers(baselineMarkers);
+      const baselineMissing = await this.findDirectLogMissing(baselineMarkers);
+      this.appendResult(`Baseline Insert Success: ${baselineSuccess}/${NO_LOCK_DB_RACE_BASELINE_COUNT}\n`);
+      this.appendMarkerCheckResult('Baseline', NO_LOCK_DB_RACE_BASELINE_COUNT, baselineMissing);
+      if (baselineMissing.length > 0) {
+        await this.refreshActualDbCounts(true);
+        this.updatePolicyInfo();
+        this.appendResult('Result: FAIL. Baseline direct insert already missed data, so no-lock race verification is not reliable.\n');
+        return;
+      }
+
+      this.appendResult(`Race: writing ${beforeShutdownMarkers.length} markers, then simulating unsafe no-lock shutdown, then writing ${afterShutdownMarkers.length} more markers...\n`);
+      await FTSDK.clearAllData();
+      DbInternalTestAccess.resetDbManagerInstance();
+      await this.waitForWriteSettled();
+      const beforeSuccess = await this.insertDirectLogMarkers(beforeShutdownMarkers);
+      await DbInternalTestAccess.simulateNoLockDbShutdown(this.context);
+      const afterSuccess = await this.insertDirectLogMarkers(afterShutdownMarkers);
+
+      DbInternalTestAccess.clearNoLockDbShutdownSimulation(this.context);
+      DbInternalTestAccess.resetDbManagerInstance();
+      await this.waitForWriteSettled();
+      const raceMissing = await this.findDirectLogMissing(raceMarkers);
+      const raceFoundCount = NO_LOCK_DB_RACE_LOG_COUNT - raceMissing.length;
+
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+      this.appendResult(`Before Unsafe Shutdown Insert Success: ${beforeSuccess}/${beforeShutdownMarkers.length}\n`);
+      this.appendResult(`After Unsafe Shutdown Insert Success: ${afterSuccess}/${afterShutdownMarkers.length}\n`);
+      this.appendResult(`Produced: ${NO_LOCK_DB_RACE_LOG_COUNT}\n`);
+      this.appendResult(`Found In DB: ${raceFoundCount}\n`);
+      this.appendResult(`Missing: ${raceMissing.length}\n`);
+      if (raceMissing.length > 0) {
+        const preview = raceMissing.slice(0, 20).join(', ');
+        this.appendResult(`Missing Preview: ${preview}${raceMissing.length > 20 ? ', ...' : ''}\n`);
+      }
+      if (raceFoundCount > 0 && raceMissing.length > 0) {
+        this.appendResult('Result: PASS. Reproduced the old partial-loss shape: some records persisted before unsafe shutdown, later records were lost by stale closed DB connection.\n');
+      } else if (raceMissing.length === 0) {
+        this.appendResult('Result: CHECK. No missing records were reproduced; retry or increase marker count.\n');
+      } else {
+        this.appendResult('Result: CHECK. All race markers are missing, which is not the expected partial-loss shape.\n');
+      }
+    } catch (error) {
+      this.appendResult(`Verify No-Lock DB Race failed: ${error}\n`);
+    } finally {
+      DbInternalTestAccess.clearNoLockDbShutdownSimulation(this.context);
+      DbInternalTestAccess.resetDbManagerInstance();
+      this.isRunning = false;
+    }
+  }
+
+  private async writeLogMarkersInBatches(markers: string[], batchSize: number, delayMs: number): Promise<void> {
+    for (let start = 0; start < markers.length; start += batchSize) {
+      const end = Math.min(markers.length, start + batchSize);
+      for (let i = start; i < end; i++) {
+        FTLogger.logBackground(markers[i], Status.INFO, undefined, true);
+      }
+      FTLogger.flush();
+      await this.waitForWriteSettled(delayMs);
+    }
+  }
+
+  private async runDbShutdownRace(attempts: number, intervalMs: number): Promise<number> {
+    const dbManager = FTDBManager.getInstance(this.context);
+    let completedCount = 0;
+    for (let i = 0; i < attempts; i++) {
+      await this.waitForWriteSettled(intervalMs);
+      try {
+        await dbManager.shutDown();
+        completedCount++;
+      } catch (error) {
+        this.appendResult(`DB shutdown attempt ${i + 1} failed: ${error}\n`);
+      }
+    }
+    return completedCount;
+  }
+
+  private async verifyLogDataLossWithDbShutdown(): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+
+      const runId = `ShutdownRace_${Date.now()}`;
+      const baselineMarkers = this.buildLogMarkers(`${runId}_baseline`, DB_SHUTDOWN_RACE_BASELINE_COUNT);
+      const raceMarkers = this.buildLogMarkers(`${runId}_race`, DB_SHUTDOWN_RACE_LOG_COUNT);
+      const recoveryMarkers = this.buildLogMarkers(`${runId}_recovery`, DB_SHUTDOWN_RACE_RECOVERY_COUNT);
+
+      this.appendResult(`\n=== Verify DB Shutdown Race (Logs) ===\n`);
+      this.appendResult(`Run ID: ${runId}\n`);
+      this.appendResult(`Baseline: writing ${DB_SHUTDOWN_RACE_BASELINE_COUNT} markers without DB shutdown...\n`);
+
+      await this.writeLogMarkersInBatches(baselineMarkers, DB_SHUTDOWN_RACE_BATCH_SIZE, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      this.writeCount += DB_SHUTDOWN_RACE_BASELINE_COUNT;
+      FTLogger.flush();
+      const baselineMissing = await this.waitForLogMarkers(baselineMarkers, DATA_LOSS_VERIFY_TIMEOUT_MS);
+      this.appendMarkerCheckResult('Baseline', DB_SHUTDOWN_RACE_BASELINE_COUNT, baselineMissing);
+      if (baselineMissing.length > 0) {
+        await this.refreshActualDbCounts(true);
+        this.updatePolicyInfo();
+        this.appendResult('Result: FAIL. Baseline write already missed data, so shutdown race verification is not reliable.\n');
+        return;
+      }
+
+      this.appendResult(`Race: writing ${DB_SHUTDOWN_RACE_LOG_COUNT} markers while calling DB shutDown ${DB_SHUTDOWN_RACE_ATTEMPTS} times...\n`);
+      const shutdownTask = this.runDbShutdownRace(DB_SHUTDOWN_RACE_ATTEMPTS, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      await this.writeLogMarkersInBatches(raceMarkers, DB_SHUTDOWN_RACE_BATCH_SIZE, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      const shutdownCompleted = await shutdownTask;
+      this.writeCount += DB_SHUTDOWN_RACE_LOG_COUNT;
+      FTLogger.flush();
+      const raceMissing = await this.waitForLogMarkers(raceMarkers, DATA_LOSS_VERIFY_TIMEOUT_MS);
+
+      this.appendResult(`Recovery: waiting ${DB_SHUTDOWN_RACE_RECOVERY_DELAY_MS}ms, then writing ${DB_SHUTDOWN_RACE_RECOVERY_COUNT} markers after shutdown race...\n`);
+      await this.waitForWriteSettled(DB_SHUTDOWN_RACE_RECOVERY_DELAY_MS);
+      await this.writeLogMarkersInBatches(recoveryMarkers, DB_SHUTDOWN_RACE_BATCH_SIZE, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      this.writeCount += DB_SHUTDOWN_RACE_RECOVERY_COUNT;
+      FTLogger.flush();
+      const recoveryMissing = await this.waitForLogMarkers(recoveryMarkers, DATA_LOSS_VERIFY_TIMEOUT_MS);
+
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+      this.appendResult(`DB Shutdown Completed: ${shutdownCompleted}/${DB_SHUTDOWN_RACE_ATTEMPTS}\n`);
+      this.appendMarkerCheckResult('Race', DB_SHUTDOWN_RACE_LOG_COUNT, raceMissing);
+      this.appendMarkerCheckResult('Recovery', DB_SHUTDOWN_RACE_RECOVERY_COUNT, recoveryMissing);
+      if (raceMissing.length === 0 && recoveryMissing.length === 0) {
+        this.appendResult('Result: PASS. Race and recovery markers were found in DB.\n');
+      } else if (raceMissing.length > 0 && recoveryMissing.length === 0) {
+        this.appendResult('Result: FAIL. Concurrent DB shutdown reproduced missing race markers, and later writes recovered.\n');
+      } else {
+        this.appendResult('Result: CHECK. DB did not fully recover after shutdown race; review Recovery Missing output.\n');
+      }
+    } catch (error) {
+      this.appendResult(`Verify DB Shutdown Race failed: ${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async verifyLogQueueOverflowLoss(): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+
+      const runId = `QueueOverflowLoss_${Date.now()}`;
+      const baselineMarkers = this.buildLogMarkers(`${runId}_baseline`, LOG_QUEUE_LOSS_BASELINE_COUNT);
+      const lossMarkers = this.buildLogMarkers(`${runId}_loss`, LOG_QUEUE_LOSS_LOG_COUNT);
+      const recoveryMarkers = this.buildLogMarkers(`${runId}_recovery`, LOG_QUEUE_LOSS_RECOVERY_COUNT);
+
+      this.appendResult(`\n=== Verify Log Queue Overflow Loss ===\n`);
+      this.appendResult(`Run ID: ${runId}\n`);
+      this.appendResult(`Baseline: writing ${LOG_QUEUE_LOSS_BASELINE_COUNT} markers before loss scenario...\n`);
+      await this.writeLogMarkersInBatches(baselineMarkers, DB_SHUTDOWN_RACE_BATCH_SIZE, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      this.writeCount += LOG_QUEUE_LOSS_BASELINE_COUNT;
+      FTLogger.flush();
+
+      const baselineMissing = await this.waitForLogMarkers(baselineMarkers, DATA_LOSS_VERIFY_TIMEOUT_MS);
+      this.appendMarkerCheckResult('Baseline', LOG_QUEUE_LOSS_BASELINE_COUNT, baselineMissing);
+      if (baselineMissing.length > 0) {
+        await this.refreshActualDbCounts(true);
+        this.updatePolicyInfo();
+        this.appendResult('Result: FAIL. Baseline write already missed data, so loss scenario verification is not reliable.\n');
+        return;
+      }
+
+      this.appendResult(`Overflow Scenario: writing ${LOG_QUEUE_LOSS_LOG_COUNT} markers without waiting.\n`);
+      this.appendResult(`Expected queue capacity is about ${LOG_QUEUE_LOSS_EXPECTED_QUEUE_CAPACITY}, so this should reproduce partial loss instead of all loss.\n`);
+      for (const marker of lossMarkers) {
+        FTLogger.logBackground(marker, Status.INFO, undefined, true);
+      }
+      this.writeCount += LOG_QUEUE_LOSS_LOG_COUNT;
+      FTLogger.flush();
+
+      const lossMissing = await this.waitForLogMarkers(lossMarkers, LOG_QUEUE_LOSS_TIMEOUT_MS);
+      this.appendMarkerCheckResult('Overflow Scenario', LOG_QUEUE_LOSS_LOG_COUNT, lossMissing);
+
+      this.appendResult(`Recovery: writing ${LOG_QUEUE_LOSS_RECOVERY_COUNT} markers after overflow scenario...\n`);
+      await this.writeLogMarkersInBatches(recoveryMarkers, DB_SHUTDOWN_RACE_BATCH_SIZE, DB_SHUTDOWN_RACE_INTERVAL_MS);
+      this.writeCount += LOG_QUEUE_LOSS_RECOVERY_COUNT;
+      FTLogger.flush();
+      const recoveryMissing = await this.waitForLogMarkers(recoveryMarkers, DATA_LOSS_VERIFY_TIMEOUT_MS);
+
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+      this.appendMarkerCheckResult('Recovery', LOG_QUEUE_LOSS_RECOVERY_COUNT, recoveryMissing);
+      if (lossMissing.length > 0 && lossMissing.length < LOG_QUEUE_LOSS_LOG_COUNT && recoveryMissing.length === 0) {
+        this.appendResult('Result: PASS. Expected partial queue overflow loss was reproduced, and later writes recovered.\n');
+      } else if (lossMissing.length === 0 && recoveryMissing.length === 0) {
+        this.appendResult('Result: CHECK. Queue overflow loss was not reproduced; increase produced count or reduce queue capacity.\n');
+      } else if (lossMissing.length === LOG_QUEUE_LOSS_LOG_COUNT) {
+        this.appendResult('Result: FAIL. All overflow markers are missing, which is not the expected partial-loss shape.\n');
+      } else {
+        this.appendResult('Result: FAIL. Recovery markers are missing after overflow scenario.\n');
+      }
+    } catch (error) {
+      this.appendResult(`Verify Log Queue Overflow Loss failed: ${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
   }
 
   private writeRumMarker(marker: string): void {

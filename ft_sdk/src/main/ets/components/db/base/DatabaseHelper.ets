@@ -36,8 +36,7 @@ export class DatabaseHelper {
 
   public static resetInstanceInternal(): void {
     if (DatabaseHelper.instance) {
-      DatabaseHelper.instance.rdbStore = null;
-      DatabaseHelper.instance.initPromise = null;
+      DatabaseHelper.instance.resetConnection();
     }
     DatabaseHelper.instance = null;
   }
@@ -423,6 +422,14 @@ export class DatabaseHelper {
   }
 
   /**
+   * Clear cached database connection so the next operation opens a fresh store.
+   */
+  public resetConnection(): void {
+    this.rdbStore = null;
+    this.initPromise = null;
+  }
+
+  /**
    * Check whether the database has been initialized
    * @returns boolean
    */
@@ -434,14 +441,19 @@ export class DatabaseHelper {
    * Close the database
    */
   public async closeDatabase(): Promise<void> {
-    if (this.rdbStore) {
-      try {
-        await this.rdbStore.close();
-        this.rdbStore = null;
-        FTInnerLogger.i(TAG, "Database closed successfully");
-      } catch (error) {
-        FTInnerLogger.e(TAG, `Failed to close database: ${error}`);
-      }
+    const rdbStore = this.rdbStore;
+    if (!rdbStore) {
+      this.resetConnection();
+      return;
+    }
+
+    try {
+      await rdbStore.close();
+      FTInnerLogger.i(TAG, "Database closed successfully");
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to close database: ${error}`);
+    } finally {
+      this.resetConnection();
     }
   }
 
