@@ -15,11 +15,10 @@ import {
   SyncTaskDbManager,
   SyncTaskHttpResult,
   SyncTaskManagerRuntime,
-  SyncTaskPreferences,
-  SyncTaskUploadQueueStatus,
-  SyncTaskUploadThreadPool
+  SyncTaskPreferences
 } from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
+import { SDKTaskScheduler } from '../../main/ets/components/thread/SDKTaskScheduler';
 
 const TEST_URL = 'http://localhost';
 
@@ -76,42 +75,6 @@ class FakePreferences implements SyncTaskPreferences {
       return defaultValue;
     }
     return this.value;
-  }
-}
-
-class FakeUploadThreadPool implements SyncTaskUploadThreadPool {
-  runnable: (() => void) | null = null;
-  scheduleDelays: number[] = [];
-  shutdownCount: number = 0;
-  setRunningValues: boolean[] = [];
-  status: SyncTaskUploadQueueStatus = {
-    queueSize: 0,
-    isProcessing: false,
-    isRunning: false,
-    isScheduled: false,
-    needReschedule: false,
-    maxQueueSize: 1
-  };
-
-  initRunnable(runnable: () => void): void {
-    this.runnable = runnable;
-  }
-
-  schedule(delay: number): void {
-    this.scheduleDelays.push(delay);
-  }
-
-  shutdown(): void {
-    this.shutdownCount++;
-  }
-
-  setRunning(running: boolean): void {
-    this.setRunningValues.push(running);
-    this.status.isRunning = running;
-  }
-
-  getUploadQueueStatus(): SyncTaskUploadQueueStatus {
-    return this.status;
   }
 }
 
@@ -343,7 +306,6 @@ class FakeHttpResult implements SyncTaskHttpResult {
 }
 
 class FakeRuntime implements SyncTaskManagerRuntime {
-  uploadThreadPool: FakeUploadThreadPool = new FakeUploadThreadPool();
   cachePolicy: FakeCachePolicy = new FakeCachePolicy();
   dbManager: FakeDbManager | null = new FakeDbManager();
   preferences: FakePreferences = new FakePreferences();
@@ -354,27 +316,16 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   timerId: number = 0;
   timerCallbacks: Map<number, () => void> = new Map();
   sleepDurations: number[] = [];
-  initThreadPoolCount: number = 0;
   getPreferencesCount: number = 0;
   executeHttpCount: number = 0;
+  httpModels: string[] = [];
+  httpBodies: string[] = [];
   lastHttpModel: string = '';
   lastHttpBody: string = '';
   lastHttpPkgId: string = '';
-  throwThreadPoolInit: boolean = false;
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
   throwSleep: boolean = false;
-
-  getUploadThreadPool(): SyncTaskUploadThreadPool {
-    return this.uploadThreadPool;
-  }
-
-  initializeThreadPoolManager(): void {
-    this.initThreadPoolCount++;
-    if (this.throwThreadPoolInit) {
-      throw new Error('thread pool failed');
-    }
-  }
 
   getDbManager(_context: Context): SyncTaskDbManager | null {
     return this.dbManager;
@@ -394,6 +345,8 @@ class FakeRuntime implements SyncTaskManagerRuntime {
 
   async executeHttp(_config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult> {
     this.executeHttpCount++;
+    this.httpModels.push(model);
+    this.httpBodies.push(body);
     this.lastHttpModel = model;
     this.lastHttpBody = body;
     this.lastHttpPkgId = pkgId;
@@ -440,12 +393,8 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   }
 }
 
-async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
-  const runnable = runtime.uploadThreadPool.runnable;
-  if (runnable) {
-    runnable();
-    await flushPromises();
-  }
+async function runScheduledUpload(_runtime: FakeRuntime): Promise<void> {
+  await flushPromises();
 }
 
 async function runCleanupTimer(runtime: FakeRuntime): Promise<void> {
@@ -463,6 +412,7 @@ export default function syncTaskManagerUnitTest() {
 
     beforeEach(() => {
       runtime = new FakeRuntime();
+      SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.setRuntime(runtime);
       SyncInternalTestAccess.resetState();
       manager = SyncTaskManager.getInstance();
@@ -470,6 +420,7 @@ export default function syncTaskManagerUnitTest() {
 
     afterEach(() => {
       manager.stop();
+      SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.resetRuntime();
       SyncInternalTestAccess.resetState();
     });
@@ -487,7 +438,7 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
-      expect(runtime.uploadThreadPool.scheduleDelays.includes(0)).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.isRunning).assertFalse();
       expect(db.updateDataTypeCount >= 2).assertTrue();
       expect(db.deleteExpireCount >= 2).assertTrue();
       expect(manager.getStatus().running).assertFalse();
@@ -535,6 +486,71 @@ export default function syncTaskManagerUnitTest() {
       await flushPromises();
     });
 
+    it('uploadLaneShouldSyncRumWebviewBeforeLog', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      db.hasDataResult = false;
+      db.hasDataQueue.push(true, true, true);
+      db.queryQueue.push(
+        [createSyncData(DataType.RUM_APP, 'rum-app-1', 'view,view_id=app value=1i 100')],
+        [createSyncData(DataType.RUM_WEBVIEW, 'rum-web-1', 'view,view_id=web,is_webview=true value=1i 101')],
+        [createSyncData(DataType.LOG, 'log-1', 'df_rum_harmonyos_log,sdk_data_id=log-1 value=1i 102')]
+      );
+      runtime.httpResults.push(
+        new FakeHttpResult(204, 'ok', ''),
+        new FakeHttpResult(204, 'ok', ''),
+        new FakeHttpResult(204, 'ok', '')
+      );
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.httpModels.length).assertEqual(3);
+      expect(runtime.httpModels[0]).assertEqual(Constants.URL_MODEL_RUM);
+      expect(runtime.httpModels[1]).assertEqual(Constants.URL_MODEL_RUM);
+      expect(runtime.httpModels[2]).assertEqual(Constants.URL_MODEL_LOG);
+      expect(runtime.cachePolicy.rumDelta).assertEqual(-2);
+      expect(runtime.cachePolicy.logDelta).assertEqual(-1);
+    });
+
+    it('uploadLaneShouldDeleteAndBackoffForIgnoredClientErrors', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-403', 'df_rum_harmonyos_log,sdk_data_id=log-403 value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(403, 'forbidden', '403'));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(db.deleteCount).assertEqual(1);
+      expect(db.insertCount).assertEqual(0);
+      expect(runtime.cachePolicy.logDelta).assertEqual(-1);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
+
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-429', 'df_rum_harmonyos_log,sdk_data_id=log-429 value=1i 101')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(429, 'rate limit', '429'));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(db.deleteCount).assertEqual(2);
+      expect(db.insertCount).assertEqual(0);
+      expect(runtime.cachePolicy.logDelta).assertEqual(-2);
+      expect(runtime.sleepDurations.includes(1000)).assertTrue();
+    });
+
     it('executePollShouldUploadRetry', 0, async () => {
       const db = new FakeDbManager();
       runtime.dbManager = db;
@@ -547,6 +563,7 @@ export default function syncTaskManagerUnitTest() {
 
       db.hasDataResult = true;
       runtime.cachePolicy.discard = true;
+      db.hasDataQueue.push(true);
       db.queryQueue.push([
         createSyncData(DataType.LOG, 'discard-uuid', 'df_rum_harmonyos_log,sdk_data_id=discard-uuid value=1i 100')
       ], []);
@@ -555,6 +572,8 @@ export default function syncTaskManagerUnitTest() {
       runtime.cachePolicy.discard = false;
 
       const logOne = createSyncData(DataType.LOG, 'log-1', 'df_rum_harmonyos_log,sdk_data_id=log-1 value=1i 100');
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
       db.queryQueue.push([logOne]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
       manager.executePoll(false);
@@ -566,20 +585,26 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
 
       const deleteCountAfterSuccess = db.deleteCount;
+      const insertCountAfterSuccess = db.insertCount;
       const rumError = createSyncData(DataType.RUM_APP, 'rum-1', 'error,error_type=js,error_message="boom" value=1i 100');
+      db.hasDataResult = false;
+      db.hasDataQueue.push(true, false, false);
       db.queryQueue.push([rumError]);
       runtime.httpResults.push(new FakeHttpResult(500, 'fail', 'server'));
       manager.executePoll(false);
       await runScheduledUpload(runtime);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_RUM);
-      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess);
+      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess + 1);
+      expect(db.insertCount).assertEqual(insertCountAfterSuccess + 1);
       expect(runtime.sleepDurations.includes(500)).assertTrue();
 
+      db.hasDataResult = false;
+      db.hasDataQueue.push(true, false, false);
       runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network', 'net'));
       db.queryQueue.push([rumError]);
       manager.executePoll(false);
       await runScheduledUpload(runtime);
-      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess);
+      expect(db.insertCount).assertEqual(insertCountAfterSuccess + 2);
     });
 
     it('rumCleanupShouldUseInitTimer', 0, async () => {

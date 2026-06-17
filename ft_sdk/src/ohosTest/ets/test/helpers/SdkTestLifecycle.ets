@@ -11,12 +11,11 @@ export class SdkTestLifecycle {
     try {
       return await WaitUtils.waitUntil(async () => {
         const status = SyncTaskManager.getInstance().getStatus();
-        const queueStatus = status.dataUploadThreadPoolStatus;
+        const uploadStatus = status.uploadLaneStatus;
         return !status.running &&
-          !queueStatus.isRunning &&
-          !queueStatus.isScheduled &&
-          !queueStatus.isProcessing &&
-          queueStatus.queueSize === 0;
+          !uploadStatus.isRunning &&
+          !uploadStatus.isScheduled &&
+          !uploadStatus.needReschedule;
       }, timeoutMs);
     } catch (_error) {
       return true;

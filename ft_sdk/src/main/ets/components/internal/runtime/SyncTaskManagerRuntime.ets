@@ -9,8 +9,6 @@ import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
 import { FTDBManager } from '../../db/FTDBManager';
 import { DataType } from '../../enum/Enums';
 import { HttpBuilder } from '../../http/HttpBuilder';
-import { DataUploadThreadPool } from '../../thread/DataUploadThreadPool';
-import { ThreadPoolManager } from '../../thread/ThreadPoolManager';
 import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
@@ -18,23 +16,6 @@ export interface SyncTaskConfigRecord {
   getDbCacheLimit: () => number;
   getDBCacheDiscard: () => string;
   getLogCacheDiscard: () => string;
-}
-
-export interface SyncTaskUploadQueueStatus {
-  queueSize: number;
-  isProcessing: boolean;
-  isRunning: boolean;
-  isScheduled: boolean;
-  needReschedule: boolean;
-  maxQueueSize: number;
-}
-
-export interface SyncTaskUploadThreadPool {
-  initRunnable(runnable: () => void): void;
-  schedule(delay: number): void;
-  shutdown(): void;
-  setRunning(running: boolean): void;
-  getUploadQueueStatus(): SyncTaskUploadQueueStatus;
 }
 
 export interface SyncTaskPreferences {
@@ -72,8 +53,6 @@ export interface SyncTaskHttpResult {
 }
 
 export interface SyncTaskManagerRuntime {
-  getUploadThreadPool(): SyncTaskUploadThreadPool;
-  initializeThreadPoolManager(): void;
   getDbManager(context: Context): SyncTaskDbManager | null;
   getCachePolicy(): SyncTaskCachePolicy;
   getPreferences(context: Context, name: string): SyncTaskPreferences;
@@ -87,14 +66,6 @@ export interface SyncTaskManagerRuntime {
 }
 
 export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
-  getUploadThreadPool(): SyncTaskUploadThreadPool {
-    return DataUploadThreadPool.getInstance();
-  }
-
-  initializeThreadPoolManager(): void {
-    ThreadPoolManager.getInstance().initialize();
-  }
-
   getDbManager(context: Context): SyncTaskDbManager | null {
     return FTDBManager.getInstance(context);
   }

@@ -5,7 +5,6 @@ import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType, SyncPageSize } from '../../../main/ets/components/enum/Enums';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
-import { ThreadPoolManager } from '../../../main/ets/components/thread/ThreadPoolManager';
 import { WaitUtils } from './helpers/WaitUtils';
 import { MockCollector } from './helpers/MockCollector';
 import { DBAssert } from './helpers/DBAssert';
@@ -38,7 +37,6 @@ export default function syncUploadChainDeviceTest() {
       dbManager = FTDBManager.getInstance(context);
       await dbManager.init();
       await dbManager.resetDatabase();
-      await ThreadPoolManager.getInstance().initialize();
 
       const config = FTSDKConfig.builder(TEST_HOST)
         .setAutoSync(false)

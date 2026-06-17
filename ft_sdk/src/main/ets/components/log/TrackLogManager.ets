@@ -101,8 +101,7 @@ export class TrackLogManager {
     this.logConfig = config;
     FTInnerLogger.d(TAG, `Log config updated: samplingRate=${config.getSamplingRate()}, enableCustomLog=${config.isEnableCustomLog()}`);
 
-    // If there are logs in queue and processing is not active, trigger processing
-    // This handles the case where logs were queued before ThreadPoolManager was initialized
+    // If there are logs in queue and processing is not active, submit the LOG lane consumer.
     const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
     if (totalQueueSize > 0 && !this.isProcessing) {
       FTInnerLogger.d(TAG, `Log config updated, triggering processing for ${totalQueueSize} queued logs`);

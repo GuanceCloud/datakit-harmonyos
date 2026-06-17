@@ -1,7 +1,5 @@
 import { FTLogger, FTSDK, FTRUMGlobalManager, Status, SyncPageSize } from '@guancecloud/ft_sdk/Index';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
-import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
-import { CommonConstants } from '../constants/CommonConstants';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -15,13 +13,12 @@ export struct BatchUploadTestPage {
   @State logCount: number = 0;
   @State actionCount: number = 0;
   @State viewCount: number = 0;
-  @State errorCount: number = 0;
 
   aboutToAppear(): void {
     this.testResults = [];
     this.addTestResult("=== Batch Upload Test Page ===");
-    this.addTestResult("This page tests the batch upload functionality");
-    this.addTestResult("Check logs with: grep 'RUM-UPLOAD' or 'SyncTaskManager'");
+    this.addTestResult("This page tests upload lane batching and single-flight behavior");
+    this.addTestResult("Check HiLog with: <FT-UPLOAD-LANE> or lane=upload");
   }
 
   private addTestResult(message: string): void {
@@ -132,7 +129,7 @@ export struct BatchUploadTestPage {
       this.addTestResult("✅ Calling FTSDK.flushSyncData() - immediate upload");
       FTSDK.flushSyncData();
       this.addTestResult("✅ Upload triggered, check logs for upload details");
-      this.addTestResult("💡 Filter logs: grep 'RUM-UPLOAD' | grep 'Response Code'");
+      this.addTestResult("Filter logs: <FT-UPLOAD-LANE> [BATCH] and <FT-SDK-SCHEDULER> [LANE] lane=upload");
     } catch (error) {
       this.addTestResult(`❌ Error triggering upload: ${error}`);
     }
@@ -181,6 +178,11 @@ export struct BatchUploadTestPage {
       this.addTestResult(`✅ Page Size: ${status.pageSize}`);
       this.addTestResult(`✅ Max Retry Count: ${status.dataSyncMaxRetryCount}`);
       this.addTestResult(`✅ Sync Sleep Time: ${status.syncSleepTime}ms`);
+      this.addTestResult(`✅ Upload Lane Running: ${status.uploadLaneStatus.isRunning}`);
+      this.addTestResult(`✅ Upload Lane Scheduled: ${status.uploadLaneStatus.isScheduled}`);
+      this.addTestResult(`✅ Upload Lane Need Reschedule: ${status.uploadLaneStatus.needReschedule}`);
+      this.addTestResult(`✅ Upload Lane Scheduled Delay: ${status.uploadLaneStatus.scheduledDelay}ms`);
+      this.addTestResult(`✅ Upload Lane Reschedule Delay: ${status.uploadLaneStatus.rescheduleDelay}ms`);
     } catch (error) {
       this.addTestResult(`❌ Error checking status: ${error}`);
     }
@@ -209,10 +211,10 @@ export struct BatchUploadTestPage {
       setTimeout(() => {
         this.addTestResult("=== Test Complete ===");
         this.addTestResult("📋 Check logs for upload details:");
-        this.addTestResult("   - grep 'RUM-UPLOAD'");
-        this.addTestResult("   - grep 'Response Code'");
-        this.addTestResult("   - grep 'Package ID'");
-        this.addTestResult("   - grep 'Body  ---->'");
+        this.addTestResult("   - <FT-SDK-SCHEDULER> [LANE] lane=upload");
+        this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=rum_app");
+        this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=log");
+        this.addTestResult("   - <FT-UPLOAD-LANE> [CONSUMED]");
       }, 2000);
     } catch (error) {
       this.addTestResult(`❌ Batch upload test failed: ${error}`);
@@ -293,33 +295,24 @@ export struct BatchUploadTestPage {
       this.addTestResult("🚀 Triggering immediate upload...");
       FTSDK.flushSyncData();
 
-      // Calculate expected batch counts
-      const expectedFullBatches = Math.floor(testLogCount / currentPageSize);
-      const remainder = testLogCount % currentPageSize;
-      const expectedTotalBatches = remainder > 0 ? expectedFullBatches + 1 : expectedFullBatches;
+      const firstPollRows = Math.min(testLogCount, currentPageSize);
+      const remainingRows = Math.max(0, testLogCount - firstPollRows);
+      const expectedPolls = Math.ceil(testLogCount / currentPageSize);
 
-      this.addTestResult("📋 Expected Upload Pattern:");
-      if (currentPageSize >= testLogCount) {
-        this.addTestResult(`   - 1 batch with ${testLogCount} records (all data)`);
-      } else {
-        for (let i = 0; i < expectedFullBatches; i++) {
-          this.addTestResult(`   - Batch ${i + 1}: ${currentPageSize} records`);
-        }
-        if (remainder > 0) {
-          this.addTestResult(`   - Batch ${expectedTotalBatches}: ${remainder} records (last batch)`);
-        }
+      this.addTestResult("📋 Expected Upload Lane Pattern:");
+      this.addTestResult(`   - LOG lane prepares ${testLogCount} records`);
+      this.addTestResult(`   - One upload poll uploads at most 1 LOG page (${firstPollRows} records here)`);
+      if (remainingRows > 0) {
+        this.addTestResult(`   - Remaining ${remainingRows} records should upload in later poll(s)`);
       }
-      this.addTestResult(`   - Total: ${expectedTotalBatches} batch(es)`);
+      this.addTestResult(`   - Expected upload poll count for LOG: ${expectedPolls}`);
 
       this.addTestResult("📝 Check logs for verification:");
-      this.addTestResult("   grep 'Query result.*records for log' log.txt");
-      this.addTestResult("   grep 'Record Count:' log.txt");
-      this.addTestResult("   grep 'Data Count:' log.txt");
+      this.addTestResult("   - <FT-SDK-SCHEDULER> [LANE] lane=upload");
+      this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=log");
+      this.addTestResult("   - <FT-UPLOAD-LANE> [CONSUMED] needReschedule=...");
       this.addTestResult("");
-      this.addTestResult("✅ Expected: Each batch should have exactly:");
-      this.addTestResult(`   - ${currentPageSize} records (except last batch if remainder exists)`);
-      this.addTestResult("");
-      this.addTestResult("⚠️ If batch sizes are inconsistent, the fix may not be working correctly.");
+      this.addTestResult("✅ Expected: upload does not drain unlimited LOG pages in one poll.");
 
     } catch (error) {
       this.addTestResult(`❌ Error testing batch upload size: ${error}`);
@@ -400,6 +393,32 @@ export struct BatchUploadTestPage {
 
           Divider().margin({ top: 10, bottom: 10 })
 
+          Text('Result Output')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .margin({ bottom: 8 })
+
+          Button('Clear Result Output')
+            .width('100%')
+            .height(40)
+            .margin({ bottom: 8 })
+            .onClick(() => {
+              this.clearTestResults();
+            })
+
+          Column() {
+            Text(this.testResults.length > 0 ? this.testResults.join('\n') : 'No output yet')
+              .fontSize(11)
+              .fontColor('#333333')
+              .width('100%')
+              .textAlign(TextAlign.Start)
+          }
+          .width('100%')
+          .padding(12)
+          .backgroundColor('#F5F5F5')
+          .borderRadius(8)
+          .margin({ bottom: 16 })
+
           // Instructions
           Divider().margin({ top: 20, bottom: 10 })
 
@@ -418,24 +437,28 @@ export struct BatchUploadTestPage {
             .fontSize(12)
             .margin({ bottom: 10 })
 
-          Text('📊 Log Filter Commands:')
+          Text('📊 HiLog Filter Keywords:')
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
             .margin({ top: 10, bottom: 10 })
 
-          Text('grep "RUM-UPLOAD" log.txt')
+          Text('<FT-UPLOAD-LANE> [SCHEDULE]')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('grep "Response Code" log.txt')
+          Text('<FT-SDK-SCHEDULER> [LANE] lane=upload')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('grep "Package ID" log.txt')
+          Text('<FT-UPLOAD-LANE> [BATCH] type=rum_app')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('grep "Body  ---->" log.txt')
+          Text('<FT-UPLOAD-LANE> [BATCH] type=log')
+            .fontSize(11)
+            .fontColor(Color.Blue)
+            .margin({ bottom: 3 })
+          Text('<FT-UPLOAD-LANE> [CONSUMED]')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
@@ -450,5 +473,9 @@ export struct BatchUploadTestPage {
     .width('100%')
     .height('100%')
     .backgroundColor(TestPageTheme.PAGE_BACKGROUND)
+  }
+
+  private clearTestResults(): void {
+    this.testResults = [];
   }
 }
