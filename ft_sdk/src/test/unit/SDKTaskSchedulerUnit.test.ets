@@ -208,5 +208,193 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
     });
 
+    it('crashFileLaneShouldRunTasksSequentially', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CRASH_FILE,
+        name: 'first-crash-file',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CRASH_FILE,
+        name: 'second-crash-file',
+        priority: SDKTaskPriority.HIGH,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      await first;
+      await second;
+
+      const status = scheduler.getStatus();
+      expect(order.join(',')).assertEqual('first-start,first-end,second');
+      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(2);
+    });
+
+    it('anrLaneShouldRunTasksSequentiallyAndStayIndependentFromCrashFile', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.ANR,
+        name: 'first-anr',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.ANR,
+        name: 'second-anr',
+        priority: SDKTaskPriority.HIGH,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      await first;
+      await second;
+
+      const status = scheduler.getStatus();
+      expect(order.join(',')).assertEqual('first-start,first-end,second');
+      expect(status.lanes[SDKTaskType.ANR].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.ANR].completedTasks).assertEqual(2);
+      expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(0);
+    });
+
+    it('customLaneShouldRunMaintenanceTasksSequentially', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CUSTOM,
+        name: 'first-custom-maintenance',
+        priority: SDKTaskPriority.BACKGROUND,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CUSTOM,
+        name: 'second-custom-maintenance',
+        priority: SDKTaskPriority.BACKGROUND,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      await first;
+      await second;
+
+      const status = scheduler.getStatus();
+      expect(order.join(',')).assertEqual('first-start,first-end,second');
+      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.CUSTOM].completedTasks).assertEqual(2);
+      expect(status.lanes['remote'] === undefined).assertTrue();
+    });
+
+    it('customLaneSingleFlightShouldKeepLatestRescheduledTask', 0, async () => {
+      const order: string[] = [];
+      let releaseFirst: (() => void) | null = null;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CUSTOM,
+        name: 'trace-cleanup-first',
+        priority: SDKTaskPriority.BACKGROUND,
+        singleFlightKey: 'trace-handler-cleanup',
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const replaced = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CUSTOM,
+        name: 'trace-cleanup-replaced',
+        priority: SDKTaskPriority.BACKGROUND,
+        singleFlightKey: 'trace-handler-cleanup',
+        run: () => {
+          order.push('replaced');
+        }
+      }).then(() => {
+        order.push('replaced-resolved');
+      }).catch(() => {
+        order.push('replaced-rejected');
+      });
+
+      const latest = scheduler.submitTaskAndWait({
+        type: SDKTaskType.CUSTOM,
+        name: 'trace-cleanup-latest',
+        priority: SDKTaskPriority.BACKGROUND,
+        singleFlightKey: 'trace-handler-cleanup',
+        run: () => {
+          order.push('latest');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start,replaced-rejected');
+
+      if (releaseFirst) {
+        releaseFirst();
+      }
+      await first;
+      await replaced;
+      await latest;
+
+      const status = scheduler.getStatus();
+      expect(order.join(',')).assertEqual('first-start,replaced-rejected,first-end,latest');
+      expect(status.lanes[SDKTaskType.CUSTOM].completedTasks).assertEqual(2);
+      expect(status.rescheduledSingleFlightTasks).assertEqual(0);
+      expect(status.activeSingleFlightTasks).assertEqual(0);
+    });
+
   });
 }

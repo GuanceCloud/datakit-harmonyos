@@ -3,8 +3,13 @@ import { FTTraceContext, FTTraceHeaderHandler, FTTraceRequestContext } from './F
 import { FTTraceConfigManager } from './FTTraceConfigManager';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
+import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
 
 const TAG = Constants.LOG_TAG_PREFIX + "FTTraceManager";
+const CUSTOM_LANE_TRACE_PREFIX = "<FT-CUSTOM-LANE>";
+const TRACE_CLEANUP_SERIAL_KEY = "trace-handler-cleanup";
+const TRACE_CLEANUP_SINGLE_FLIGHT_KEY = "trace-handler-cleanup";
+const TRACE_CLEANUP_INTERVAL_MS = 300000;
 
 interface TraceContextGenerationResult {
   handler: FTTraceHeaderHandler;
@@ -103,6 +108,8 @@ class SizeLimitedConcurrentMap<K, V> {
  */
 export class FTTraceManager {
   private static instance: FTTraceManager | null = null;
+  private static customTaskSequence: number = 0;
+  private cleanupTimer: number | null = null;
   
   /**
    * Trace handler mapping table, limited to 1000 entries
@@ -358,10 +365,56 @@ export class FTTraceManager {
    * Start cleanup timer
    */
   private startCleanupTimer(): void {
-    // Clean up expired handlers every 5 minutes
-    setInterval(() => {
-      this.cleanupExpiredHandlers();
-    }, 300000);
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+    }
+
+    this.cleanupTimer = setInterval(() => {
+      this.submitCustomTask('trace.cleanupExpiredHandlers', () => {
+        this.cleanupExpiredHandlers();
+      });
+    }, TRACE_CLEANUP_INTERVAL_MS);
+  }
+
+  private submitCustomTask(name: string, task: SDKTaskRunner): void {
+    const traceName = this.nextCustomTaskName(name);
+    const pendingBefore = this.getHandlerCount();
+    this.traceCustomLane(`[ENQUEUE] name=${traceName} handlers=${pendingBefore}`);
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.CUSTOM,
+      name: traceName,
+      priority: SDKTaskPriority.BACKGROUND,
+      serialKey: TRACE_CLEANUP_SERIAL_KEY,
+      singleFlightKey: TRACE_CLEANUP_SINGLE_FLIGHT_KEY,
+      costHint: 'light',
+      run: async () => {
+        const startTime = Date.now();
+        let result = 'success';
+        let errorMessage = '';
+        try {
+          await Promise.resolve(task());
+        } catch (error) {
+          result = 'failed';
+          errorMessage = String(error);
+          throw new Error(errorMessage);
+        } finally {
+          const costTime = Math.max(0, Date.now() - startTime);
+          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+          this.traceCustomLane(
+            `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms handlers=${this.getHandlerCount()}`
+          );
+        }
+      }
+    });
+  }
+
+  private nextCustomTaskName(name: string): string {
+    FTTraceManager.customTaskSequence++;
+    return `${name}#${FTTraceManager.customTaskSequence}`;
+  }
+
+  private traceCustomLane(message: string): void {
+    FTInnerLogger.i(TAG, `${CUSTOM_LANE_TRACE_PREFIX} ${message}`);
   }
   
   /**
@@ -380,6 +433,10 @@ export class FTTraceManager {
    * Destroy manager
    */
   public destroy(): void {
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
     this.clearAllHandlers();
     FTTraceManager.instance = null;
     FTInnerLogger.i(TAG, "FTTraceManager destroyed");

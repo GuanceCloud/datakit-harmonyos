@@ -15,7 +15,6 @@ export enum SDKTaskType {
   DATA_PROCESS = 'data-process',
   CRASH_FILE = 'crash-file',
   UPLOAD = 'upload',
-  REMOTE = 'remote',
   ANR = 'anr',
   CUSTOM = 'custom'
 }
@@ -210,7 +209,6 @@ export class SDKTaskScheduler {
       SDKTaskType.DATA_PROCESS,
       SDKTaskType.CRASH_FILE,
       SDKTaskType.UPLOAD,
-      SDKTaskType.REMOTE,
       SDKTaskType.ANR,
       SDKTaskType.CUSTOM
     ];
@@ -253,7 +251,6 @@ export class SDKTaskScheduler {
       case SDKTaskType.EVENT:
       case SDKTaskType.LOG:
       case SDKTaskType.UPLOAD:
-      case SDKTaskType.REMOTE:
       case SDKTaskType.ANR:
       case SDKTaskType.CUSTOM:
       default:
@@ -271,7 +268,6 @@ export class SDKTaskScheduler {
       case SDKTaskType.UPLOAD:
       case SDKTaskType.DATA_PROCESS:
       case SDKTaskType.CRASH_FILE:
-      case SDKTaskType.REMOTE:
       case SDKTaskType.CUSTOM:
       default:
         return SDKTaskPriority.LOW;

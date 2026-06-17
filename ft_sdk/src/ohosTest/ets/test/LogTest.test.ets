@@ -7,11 +7,11 @@ import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTLoggerConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
 import { FTLogger, LogEntry } from '../../../main/ets/components/log/FTLogger';
-import { FTNativeCrashHandler } from '../../../main/ets/components/FTNativeCrashHandler';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { Status } from '../../../main/ets/components/bean/Status';
 import { LogCacheDiscard, DataType } from '../../../main/ets/components/enum/Enums';
 import { FTDBCachePolicy } from '../../../main/ets/components/db/FTDBCachePolicy';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -203,8 +203,7 @@ export default function logTest() {
     });
 
     it('printCustomLogShouldWriteOutput', 0, async () => {
-      const nativeCrashHandler = new FTNativeCrashHandler();
-      const canObserveInternalLogs = nativeCrashHandler.clearLogs();
+      const canObserveInternalLogs = SdkInternalTestAccess.clearNativeCrashLogsForTest();
       FTSDK.installLogConfig(new FTLoggerConfig()
         .setEnableCustomLog(true)
         .setPrintCustomLogToConsole(true));
@@ -220,7 +219,7 @@ export default function logTest() {
 
       expect(record !== null).assertTrue();
       if (canObserveInternalLogs) {
-        const collectedLogs = nativeCrashHandler.getCollectedLogs(20);
+        const collectedLogs = SdkInternalTestAccess.getCollectedNativeCrashLogsForTest(20);
         expect(collectedLogs.includes(`[INFO]${logContent}`)).assertTrue();
       }
     });

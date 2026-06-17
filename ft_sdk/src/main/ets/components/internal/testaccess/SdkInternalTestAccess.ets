@@ -2,6 +2,7 @@ import { FTRUMConfig } from '../../Configs';
 import { FTExceptionHandler } from '../../FTExceptionHandler';
 import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 import { FTSDK } from '../../FTSDK';
+import ftnativecrash from 'libftnativecrash.so';
 import { FTExceptionHandlerRuntime } from '../runtime/FTExceptionHandlerRuntime';
 import { FTNativeCrashHandlerRuntime } from '../runtime/FTNativeCrashHandlerRuntime';
 import {
@@ -41,5 +42,21 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static resetNativeCrashHandlerRuntime(): void {
     FTNativeCrashHandler.resetRuntimeInternal();
+  }
+
+  public static clearNativeCrashLogsForTest(): boolean {
+    try {
+      return ftnativecrash.clearLogs();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  public static getCollectedNativeCrashLogsForTest(maxLines?: number): string {
+    try {
+      return ftnativecrash.getCollectedLogs(maxLines || 0);
+    } catch (_) {
+      return '';
+    }
   }
 }

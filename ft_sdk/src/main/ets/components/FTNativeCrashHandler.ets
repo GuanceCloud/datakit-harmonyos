@@ -7,8 +7,11 @@ import {
   FTNativeCrashData,
   FTNativeCrashHandlerRuntime
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
+import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
 
 const TAG = "FTNativeCrashHandler";
+const CRASH_FILE_TRACE_PREFIX = "<FT-CRASH-FILE-LANE>";
+const NATIVE_CRASH_FILE_SERIAL_KEY = "native-crash-file";
 
 export interface NativeCrashData extends FTNativeCrashData {
 }
@@ -56,6 +59,7 @@ interface PrimitiveWrapper {
 
 export class FTNativeCrashHandler {
   private static runtime: FTNativeCrashHandlerRuntime = new DefaultFTNativeCrashHandlerRuntime();
+  private static crashFileTaskSequence: number = 0;
   private isInitialized: boolean = false;
   private isWatching: boolean = false;
 
@@ -84,7 +88,9 @@ export class FTNativeCrashHandler {
       }
 
       const callback: NativeCrashCallback = (crashData: FTNativeCrashData): Promise<void> => {
-        return this.handleNativeCrash(crashData as NativeCrashData);
+        return this.handleNativeCrash(crashData as NativeCrashData).catch((error: Error) => {
+          FTInnerLogger.e(TAG, `<FT-ARKTS-CALLBACK> Failed to schedule native crash: ${error.message}`);
+        });
       };
       const callbackResult: boolean = nativeModule.setCrashCallback(callback);
       FTInnerLogger.i(TAG, `setCrashCallback result: ${callbackResult}`);
@@ -177,7 +183,13 @@ export class FTNativeCrashHandler {
   private async handleNativeCrash(crashData: NativeCrashData): Promise<void> {
     FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** ARKTS CALLBACK CALLED ***");
     FTInnerLogger.i(TAG, `<FT-ARKTS-CALLBACK> Crash data received: type=${crashData.crashType}`);
+    const crashSnapshot = this.snapshotCrashData(crashData);
+    await this.submitCrashFileTask(`crash.native:${crashSnapshot.crashType || 'unknown'}`, async () => {
+      await this.processNativeCrash(crashSnapshot);
+    }, crashSnapshot);
+  }
 
+  private async processNativeCrash(crashData: NativeCrashData): Promise<void> {
     const rumManager = FTNativeCrashHandler.runtime.getRumManager();
     try {
       const crashReport = this.formatCrashReport(crashData);
@@ -235,6 +247,72 @@ export class FTNativeCrashHandler {
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ARKTS-CALLBACK> *** CALLBACK ERROR ***: ${error}`);
     }
+  }
+
+  private async submitCrashFileTask(name: string, task: SDKTaskRunner, crashData: NativeCrashData): Promise<void> {
+    const traceName = this.nextCrashFileTaskName(name);
+    this.traceCrashFileLane(
+      `[ENQUEUE] name=${traceName} type=${crashData.crashType || 'unknown'} memory=${this.getTextSize(crashData.memoryNearRegisters)} maps=${this.getTextSize(crashData.maps)} hilog=${this.getTextSize(crashData.hilog)} external=${this.getTextSize(crashData.externalLog)}`
+    );
+
+    await SDKTaskScheduler.getInstance().submitTaskAndWait({
+      type: SDKTaskType.CRASH_FILE,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: NATIVE_CRASH_FILE_SERIAL_KEY,
+      costHint: 'heavy',
+      run: async () => {
+        const startTime = Date.now();
+        let result = 'success';
+        let errorMessage = '';
+        try {
+          await Promise.resolve(task());
+        } catch (error) {
+          result = 'failed';
+          errorMessage = String(error);
+          throw new Error(errorMessage);
+        } finally {
+          const costTime = Math.max(0, Date.now() - startTime);
+          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+          this.traceCrashFileLane(
+            `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-rum-error`
+          );
+        }
+      }
+    });
+  }
+
+  private nextCrashFileTaskName(name: string): string {
+    FTNativeCrashHandler.crashFileTaskSequence++;
+    return `${name}#${FTNativeCrashHandler.crashFileTaskSequence}`;
+  }
+
+  private traceCrashFileLane(message: string): void {
+    FTInnerLogger.i(TAG, `${CRASH_FILE_TRACE_PREFIX} ${message}`);
+  }
+
+  private getTextSize(value: string | null | undefined): number {
+    return value ? value.length : 0;
+  }
+
+  private snapshotCrashData(crashData: NativeCrashData): NativeCrashData {
+    return {
+      timestamp: crashData.timestamp || Date.now(),
+      crashType: crashData.crashType || 'Unknown',
+      foreground: !!crashData.foreground,
+      bundleVersion: crashData.bundleVersion || '',
+      bundleName: crashData.bundleName || '',
+      pid: crashData.pid || 0,
+      uid: crashData.uid || 0,
+      uuid: crashData.uuid || '',
+      exception: crashData.exception || '',
+      hilogSize: crashData.hilogSize || 0,
+      externalLog: crashData.externalLog || '',
+      logOverLimit: !!crashData.logOverLimit,
+      memoryNearRegisters: crashData.memoryNearRegisters || '',
+      maps: crashData.maps || '',
+      hilog: crashData.hilog || ''
+    };
   }
 
   private formatCrashReport(crashData: NativeCrashData): string {
@@ -377,33 +455,6 @@ export class FTNativeCrashHandler {
       return FTNativeCrashHandler.runtime.getNativeCrashModule().addLog(level, tag, message);
     } catch (error) {
       FTInnerLogger.e(TAG, `Error adding log: ${error}`);
-      return false;
-    }
-  }
-
-  public getCollectedLogs(maxLines?: number): string {
-    try {
-      return FTNativeCrashHandler.runtime.getNativeCrashModule().getCollectedLogs(maxLines || 0);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error getting collected logs: ${error}`);
-      return "";
-    }
-  }
-
-  public clearLogs(): boolean {
-    try {
-      return FTNativeCrashHandler.runtime.getNativeCrashModule().clearLogs();
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error clearing logs: ${error}`);
-      return false;
-    }
-  }
-
-  public setMaxLogSize(maxSize: number): boolean {
-    try {
-      return FTNativeCrashHandler.runtime.getNativeCrashModule().setMaxLogSize(maxSize);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error setting max log size: ${error}`);
       return false;
     }
   }
