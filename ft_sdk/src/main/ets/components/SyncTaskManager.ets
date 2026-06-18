@@ -121,6 +121,7 @@ export class SyncTaskManager {
   private uploadCurrentPollRows = 0;
   private uploadCurrentTaskName = "";
   private uploadStartTraced = false;
+  private uploadRescheduleTraceEnabled = false;
   private isStop = false;
   private autoSync = false;
   private syncSleepTime = 0;
@@ -244,7 +245,7 @@ export class SyncTaskManager {
         if (hasMoreData && !this.isStop) {
           this.scheduleUpload(0);
         } else if (this.autoSync && !this.isStop) {
-          this.scheduleUpload(SyncTaskManager.SLEEP_TIME);
+          this.scheduleUpload(SyncTaskManager.SLEEP_TIME, false);
         }
       } catch (e) {
         FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${e as string}`);
@@ -257,7 +258,7 @@ export class SyncTaskManager {
     };
   }
 
-  private scheduleUpload(delay: number = 0): void {
+  private scheduleUpload(delay: number = 0, traceSchedule: boolean = true): void {
     if (!this.uploadRunnable) {
       FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] runnable=none`);
       return;
@@ -275,8 +276,10 @@ export class SyncTaskManager {
         this.uploadScheduled = false;
         this.uploadScheduledAt = 0;
         this.uploadScheduledDelay = 0;
-        this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
-        this.scheduleUpload(normalizedDelay);
+        if (traceSchedule) {
+          this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
+        }
+        this.scheduleUpload(normalizedDelay, traceSchedule);
       }
       return;
     }
@@ -288,16 +291,21 @@ export class SyncTaskManager {
         this.uploadRescheduleDelay = normalizedDelay;
       }
       this.uploadNeedReschedule = true;
-      this.traceUploadLaneDebug(
-        `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
-      );
+      this.uploadRescheduleTraceEnabled = this.uploadRescheduleTraceEnabled || traceSchedule;
+      if (traceSchedule) {
+        this.traceUploadLaneDebug(
+          `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
+        );
+      }
       return;
     }
 
     this.uploadScheduled = true;
     this.uploadScheduledDelay = normalizedDelay;
     this.uploadScheduledAt = syncTaskRuntime.getCurrentTimeMs();
-    this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
+    if (traceSchedule) {
+      this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
+    }
 
     if (normalizedDelay > 0) {
       this.clearUploadScheduleTimer();
@@ -333,6 +341,7 @@ export class SyncTaskManager {
     this.uploadCurrentPollRows = 0;
     this.uploadCurrentTaskName = taskName;
     this.uploadStartTraced = false;
+    this.uploadRescheduleTraceEnabled = false;
 
     try {
       SDKTaskScheduler.getInstance().submitTask({
@@ -355,22 +364,24 @@ export class SyncTaskManager {
             const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
             const shouldReschedule = this.uploadNeedReschedule;
             const nextDelay = this.uploadRescheduleDelay;
+            const traceReschedule = this.uploadRescheduleTraceEnabled;
             this.uploadRunning = false;
             this.running = false;
             this.uploadNeedReschedule = false;
             this.uploadRescheduleDelay = 0;
+            this.uploadRescheduleTraceEnabled = false;
             const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
             const uploadedRows = this.uploadCurrentPollRows;
             this.uploadCurrentPollRows = 0;
             this.uploadCurrentTaskName = "";
             this.uploadStartTraced = false;
-            if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
+            if (result !== 'success' || uploadedRows > 0 || (shouldReschedule && traceReschedule)) {
               this.traceUploadLaneDebug(
                 `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
               );
             }
             if (shouldReschedule && !this.isStop) {
-              this.scheduleUpload(nextDelay);
+              this.scheduleUpload(nextDelay, traceReschedule);
             }
           }
         }
@@ -382,6 +393,7 @@ export class SyncTaskManager {
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
+      this.uploadRescheduleTraceEnabled = false;
       FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] schedule name=${taskName} error=${error as string}`);
     }
   }
