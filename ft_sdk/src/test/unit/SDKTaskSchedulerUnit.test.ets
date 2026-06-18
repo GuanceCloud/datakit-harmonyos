@@ -11,6 +11,23 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+interface ReleaseGate {
+  promise: Promise<void>;
+  release: () => void;
+}
+
+function createGate(): ReleaseGate {
+  let release = (): void => {
+    // placeholder before promise executor assigns the actual resolver
+  };
+
+  const promise = new Promise<void>((resolve: (value?: void | PromiseLike<void>) => void) => {
+    release = () => resolve();
+  });
+
+  return { promise, release };
+}
+
 export default function sdkTaskSchedulerUnitTest() {
   describe('SDKTaskSchedulerUnit', () => {
     let scheduler: SDKTaskScheduler;
@@ -45,10 +62,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('eventLaneShouldRunTasksSequentially', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.EVENT,
@@ -73,9 +89,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await second;
 
@@ -84,10 +98,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('logLaneShouldRunTasksSequentially', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.LOG,
@@ -112,9 +125,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await second;
 
@@ -123,10 +134,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('logLaneShouldNotWaitForRunningEventLane', 0, async () => {
       const order: string[] = [];
-      let releaseEvent: (() => void) | null = null;
-      const eventGate = new Promise<void>((resolve) => {
-        releaseEvent = resolve;
-      });
+      const eventGateObject = createGate();
+      const eventGate = eventGateObject.promise;
+      const releaseEvent = eventGateObject.release;
 
       const eventTask = scheduler.submitTaskAndWait({
         type: SDKTaskType.EVENT,
@@ -152,9 +162,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await logTask;
       expect(order.join(',')).assertEqual('event-start,log');
 
-      if (releaseEvent) {
-        releaseEvent();
-      }
+      releaseEvent();
       await eventTask;
 
       expect(order.join(',')).assertEqual('event-start,log,event-end');
@@ -162,14 +170,12 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('dataProcessLaneShouldAllowParallelTasks', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      let releaseSecond: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
-      const secondGate = new Promise<void>((resolve) => {
-        releaseSecond = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+      const secondGateObject = createGate();
+      const secondGate = secondGateObject.promise;
+      const releaseSecond = secondGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
@@ -196,12 +202,8 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start,second-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
-      if (releaseSecond) {
-        releaseSecond();
-      }
+      releaseFirst();
+      releaseSecond();
 
       await first;
       await second;
@@ -210,10 +212,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('crashFileLaneShouldRunTasksSequentially', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.CRASH_FILE,
@@ -238,9 +239,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await second;
 
@@ -252,10 +251,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('anrLaneShouldRunTasksSequentiallyAndStayIndependentFromCrashFile', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.ANR,
@@ -280,9 +278,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await second;
 
@@ -295,10 +291,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('customLaneShouldRunMaintenanceTasksSequentially', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.CUSTOM,
@@ -323,9 +318,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await second;
 
@@ -338,10 +331,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
     it('customLaneSingleFlightShouldKeepLatestRescheduledTask', 0, async () => {
       const order: string[] = [];
-      let releaseFirst: (() => void) | null = null;
-      const firstGate = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
 
       const first = scheduler.submitTaskAndWait({
         type: SDKTaskType.CUSTOM,
@@ -382,9 +374,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await flushPromises();
       expect(order.join(',')).assertEqual('first-start,replaced-rejected');
 
-      if (releaseFirst) {
-        releaseFirst();
-      }
+      releaseFirst();
       await first;
       await replaced;
       await latest;

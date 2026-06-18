@@ -20,8 +20,7 @@ import {
   SDKTaskType
 } from './thread/SDKTaskScheduler';
 import { Utils } from './utils/Utils';
-import { FTDBCachePolicy } from './db/FTDBCachePolicy';
-import { FTDBManager } from './db/FTDBManager';
+import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
@@ -361,17 +360,35 @@ class FTTrackInner {
 
     try {
       this.submitDataProcessTask(`data.prepare.logBatch:${batchData.length}`, async () => {
-        // Convert LogBean to database format and batch process
-        const promises: Promise<boolean>[] = [];
+        const createTasks: Promise<SyncData | null>[] = [];
 
         for (const logBean of batchData) {
           if (logBean instanceof LogBean) {
-            const promise = this.processLogBeanToDatabase(logBean, isSilence);
-            promises.push(promise);
+            createTasks.push(this.createSyncDataFromLogBean(logBean).catch((error: Error) => {
+              FTInnerLogger.e(TAG, `Error creating SyncData from LogBean: ${error}`);
+              return null;
+            }));
           }
         }
 
-        await this.handleBatchLogPromises(promises, batchData.length, isSilence);
+        const createdRecords = await Promise.all(createTasks);
+        const records: SyncData[] = [];
+        for (const record of createdRecords) {
+          if (record !== null) {
+            records.push(record);
+          }
+        }
+
+        const writeResult = await this.writePreparedSyncData('data.prepare.logBatch', records);
+        const successCount = writeResult ? writeResult.inserted : 0;
+        const droppedCount = writeResult ? writeResult.dropped : 0;
+        const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
+        FTInnerLogger.d(TAG,
+          `Batch log processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+
+        if (successCount > 0 && !isSilence) {
+          this.syncTaskManager.executeSyncPoll();
+        }
       });
 
     } catch (error) {
@@ -379,76 +396,20 @@ class FTTrackInner {
     }
   }
 
-  private async handleBatchLogPromises(promises: Promise<boolean>[], totalCount: number, isSilence: boolean): Promise<void> {
-    try {
-      const results = await Promise.all(promises);
-      let successCount = 0;
-      for (let i = 0; i < results.length; i++) {
-        if (results[i]) {
-          successCount++;
-        }
-      }
-      FTInnerLogger.d(TAG, `Batch log processing completed: ${successCount}/${totalCount} successful`);
-
-      if (successCount > 0 && !isSilence) {
-        this.syncTaskManager.executeSyncPoll();
-      }
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Batch log processing failed: ${error}`);
+  private async writePreparedSyncData(source: string, records: SyncData[]): Promise<SyncDataWriteResult | null> {
+    if (!records || records.length === 0) {
+      return null;
     }
-  }
-
-  /**
-   * Process single LogBean to database
-   */
-  private async processLogBeanToDatabase(logBean: LogBean, isSilence: boolean): Promise<boolean> {
-    try {
-      // Create SyncData
-      const recordData = await this.createSyncDataFromLogBean(logBean);
-
-      // Check cache policy before inserting (aligned with Android: optLogCachePolicy)
-      let result = false;
-
-      if (this.context) {
-        const cachePolicy = FTDBCachePolicy.getInstance();
-        const status = await cachePolicy.optLogCachePolicy(this.context, 1);
-
-        // Insert data based on cache policy result (aligned with Android)
-        // -1: discard, 0: can insert, 1: delete old data and insert
-        if (status >= 0) {
-          const dbManager = FTDBManager.getInstance(this.context);
-          if (dbManager) {
-            // Ensure database manager is initialized
-
-            await dbManager.init();
-
-            result = await dbManager.insertFtOperation(recordData, false);
-
-            // Update count after successful insert (aligned with Android)
-            if (result) {
-              cachePolicy.optLogCount(1);
-            }
-          } else {
-            FTInnerLogger.e(TAG, `Database manager is null`);
-          }
-        } else {
-          // Discard data (status < 0)
-          FTInnerLogger.e(TAG, `processLogBeanToDatabase: drop by Cache limit (status=${status})`);
-        }
-      } else {
-        FTInnerLogger.e(TAG, `Context is null`);
-      }
-
-      if (result) {
-      } else {
-        FTInnerLogger.w(TAG, `Failed to process LogBean: ${logBean.getDescription()}`);
-      }
-
-      return result;
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error processing LogBean to database: ${error}`);
-      return false;
+    if (!this.context) {
+      FTInnerLogger.e(TAG, `Context is null`);
+      return null;
     }
+
+    const dbManager = FTDBManager.getInstance(this.context);
+    return await dbManager.writeSyncDataAtomically(source, records, {
+      applyCachePolicy: true,
+      reInsert: false
+    });
   }
 
   /**
@@ -488,47 +449,15 @@ class FTTrackInner {
           // Set custom dataType string for error_sampled type
           recordData.setCustomDataTypeString(dataTypeForStorage);
 
-          // Check cache policy before inserting
-          let result = false;
-          let status = 0;
-          if (this.context) {
-            const cachePolicy = FTDBCachePolicy.getInstance();
+          const writeResult = await this.writePreparedSyncData('data.prepare.errorSampled', [recordData]);
+          const result = writeResult !== null && writeResult.inserted > 0;
 
-            // Check cache policy for RUM data (use dataTypeForContent for policy check)
-            if (dataTypeForContent === DataType.RUM_APP || dataTypeForContent === DataType.RUM_WEBVIEW) {
-              status = await cachePolicy.optRUMCachePolicy(this.context, 1);
-            } else if (dataTypeForContent === DataType.LOG) {
-              status = await cachePolicy.optLogCachePolicy(this.context, 1);
-            }
-
-            // Insert data based on cache policy result
-            if (status >= 0) {
-              const dbManager = FTDBManager.getInstance(this.context);
-              if (dbManager) {
-                // Insert with custom dataType string (insertFtOperation will use getCustomDataTypeString if available)
-                result = await dbManager.insertFtOperation(recordData);
-              } else {
-                FTInnerLogger.e(TAG, `Database manager is null`);
-              }
-
-              // Update count after successful insert
-              if (result) {
-                // Log successful insertion of error sampled data
-                FTInnerLogger.d(TAG,
-                  `[FT-ERROR-SAMPLING] Successfully stored data as ${dataTypeForStorage}: uuid=${recordData.getUuid()}, measurement=${measurement}, time=${time}`);
-
-                if (dataTypeForContent === DataType.RUM_APP || dataTypeForContent === DataType.RUM_WEBVIEW) {
-                  cachePolicy.optRumCount(1);
-                } else if (dataTypeForContent === DataType.LOG) {
-                  cachePolicy.optLogCount(1);
-                }
-              }
-            } else {
-              FTInnerLogger.e(TAG,
-                `syncDataBackgroundWithErrorSampled: ${measurement} ${dataTypeForStorage}, uuid: ${recordData.getUuid()}, drop by Cache limit (status=${status})`);
-            }
-          } else {
-            FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Context not available for cache policy check`);
+          if (result) {
+            FTInnerLogger.d(TAG,
+              `[FT-ERROR-SAMPLING] Successfully stored data as ${dataTypeForStorage}: uuid=${recordData.getUuid()}, measurement=${measurement}, time=${time}`);
+          } else if (writeResult !== null && writeResult.dropped > 0) {
+            FTInnerLogger.e(TAG,
+              `syncDataBackgroundWithErrorSampled: ${measurement} ${dataTypeForStorage}, uuid: ${recordData.getUuid()}, drop by Cache limit`);
           }
 
           // Trigger sync if needed
@@ -592,51 +521,11 @@ class FTTrackInner {
           //   FTInnerLogger.d(TAG, `[FT-LOG-DEBUG] SyncData DataString: ${dataString}`);
           // }
 
-          // Check cache policy before inserting (aligned with Android: optRUMCachePolicy)
-          let result = false;
-          let status = 0; // Initialize status outside if block
-          if (this.context) {
-            const cachePolicy = FTDBCachePolicy.getInstance();
-
-            // Check cache policy for RUM data (aligned with Android)
-            if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
-              status = await cachePolicy.optRUMCachePolicy(this.context, 1);
-            } else if (dataType === DataType.LOG) {
-              status = await cachePolicy.optLogCachePolicy(this.context, 1);
-            }
-
-            // Insert data based on cache policy result (aligned with Android)
-            // -1: discard, 0: can insert, 1: delete old data and insert
-            if (status >= 0) {
-              const dbManager = FTDBManager.getInstance(this.context);
-              // Don't call init() here - insertFtOperation handles initialization internally
-              // This avoids concurrent initialization conflicts when multiple actions occur rapidly
-              try {
-                if (dbManager) {
-                  result = await dbManager.insertFtOperation(recordData);
-                } else {
-                  FTInnerLogger.e(TAG, `Database manager is null`);
-                }
-
-                // Update count after successful insert (aligned with Android)
-                if (result) {
-                  if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
-                    cachePolicy.optRumCount(1);
-                  } else if (dataType === DataType.LOG) {
-                    cachePolicy.optLogCount(1);
-                  }
-                }
-              } catch (error) {
-                FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Database insert failed with error: ${error}`);
-                result = false;
-              }
-            } else {
-              // Discard data (status < 0)
-              FTInnerLogger.e(TAG,
-                `syncDataBackground: ${measurement} ${dataType}, uuid: ${recordData.getUuid()}, drop by Cache limit (status=${status})`);
-            }
-          } else {
-            FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Context not available for cache policy check`);
+          const writeResult = await this.writePreparedSyncData('data.prepare', [recordData]);
+          const result = writeResult !== null && writeResult.inserted > 0;
+          if (!result && writeResult !== null && writeResult.dropped > 0) {
+            FTInnerLogger.e(TAG,
+              `syncDataBackground: ${measurement} ${dataType}, uuid: ${recordData.getUuid()}, drop by Cache limit`);
           }
 
           if (result && callBack) {

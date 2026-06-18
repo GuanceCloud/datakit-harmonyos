@@ -308,9 +308,13 @@ export class SDKTaskScheduler {
     const lane = this.getLane(task.type);
     lane.queue.push(task);
     lane.submittedTasks++;
-    this.traceSchedulerLane(
-      `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`
-    );
+    const laneTrace =
+      `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`;
+    if (task.type === SDKTaskType.UPLOAD) {
+      this.traceSchedulerLaneDebug(laneTrace);
+    } else {
+      this.traceSchedulerLane(laneTrace);
+    }
     this.processLane(task.type);
   }
 
@@ -494,9 +498,14 @@ export class SDKTaskScheduler {
     FTInnerLogger.i(TAG, `${SCHEDULER_TRACE_PREFIX} ${message}`);
   }
 
+  private traceSchedulerLaneDebug(message: string): void {
+    FTInnerLogger.d(TAG, `${SCHEDULER_TRACE_PREFIX} ${message}`);
+  }
+
   private checkNotShutdown(): void {
     if (this.isShutdown) {
       throw new Error('SDKTaskScheduler has been shut down');
     }
   }
+
 }

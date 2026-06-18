@@ -18,7 +18,7 @@ import {
   SyncTaskPreferences
 } from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
-import { SDKTaskScheduler } from '../../main/ets/components/thread/SDKTaskScheduler';
+import { SDKTaskScheduler, SDKTaskType } from '../../main/ets/components/thread/SDKTaskScheduler';
 
 const TEST_URL = 'http://localhost';
 
@@ -394,7 +394,21 @@ class FakeRuntime implements SyncTaskManagerRuntime {
 }
 
 async function runScheduledUpload(_runtime: FakeRuntime): Promise<void> {
-  await flushPromises();
+  for (let i = 0; i < 200; i++) {
+    await Promise.resolve();
+    const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+    const uploadLane = schedulerStatus.lanes[SDKTaskType.UPLOAD];
+    if (uploadLane && uploadLane.pending === 0 && uploadLane.running === 0 &&
+      schedulerStatus.activeSingleFlightTasks === 0 && schedulerStatus.rescheduledSingleFlightTasks === 0) {
+      await flushPromises();
+      const latestStatus = SDKTaskScheduler.getInstance().getStatus();
+      const latestUploadLane = latestStatus.lanes[SDKTaskType.UPLOAD];
+      if (latestUploadLane && latestUploadLane.pending === 0 && latestUploadLane.running === 0 &&
+        latestStatus.activeSingleFlightTasks === 0 && latestStatus.rescheduledSingleFlightTasks === 0) {
+        return;
+      }
+    }
+  }
 }
 
 async function runCleanupTimer(runtime: FakeRuntime): Promise<void> {

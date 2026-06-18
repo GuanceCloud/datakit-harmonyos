@@ -271,6 +271,23 @@ export class FTDBCachePolicy {
   }
 
   /**
+   * Sync in-memory count cache from DB while the DB write lock is held.
+   * This keeps write-side cache policy decisions atomic without exposing the
+   * count fields as mutable public state.
+   */
+  public syncCountsFromDbInternal(logCount?: number, rumCount?: number): void {
+    if (logCount !== undefined) {
+      this.logCount = Math.max(0, logCount);
+    }
+    if (rumCount !== undefined) {
+      this.rumCount = Math.max(0, rumCount);
+    }
+    if (logCount !== undefined && rumCount !== undefined) {
+      this.countsInitialized = true;
+    }
+  }
+
+  /**
    * Get RUM lock for thread safety
    */
   public getRumLock(): object {
