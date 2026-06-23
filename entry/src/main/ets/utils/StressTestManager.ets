@@ -7,11 +7,13 @@ import {
   Status,
   StringWrapper
 } from '@guancecloud/ft_sdk/Index';
+import { LogEntry } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
 
 const TAG = "StressTestManager";
+const IO_CACHE_STRESS_TAG = "io_cache_stress";
 
 /**
  * Stress Test Manager - Singleton class for managing stress test threads
@@ -80,7 +82,7 @@ export class StressTestManager {
 
   /**
    * Start stress test - creates 6 threads:
-   * - Log: 2 threads, each sends log every 50ms (changed from 20ms for better reliability)
+   * - Log: 4 threads, each sends log batch every 20ms (target: 20+ logs per 100ms)
    * - Action: 2 threads, each sends action every 20ms
    * - Resource: 2 threads, each sends resource every 200ms
    * @param durationSeconds Total duration in seconds (0 means run indefinitely until stop() is called)
@@ -113,10 +115,9 @@ export class StressTestManager {
       : 'indefinite';
     DemoLogger.i(TAG, `Starting stress test with 6 threads... Duration: ${durationStr}, UseRealData: ${useRealData}`);
 
-    // Start 2 Log threads
-    // Note: Using 50ms interval instead of 20ms to avoid setInterval throttling in HarmonyOS
-    // 20ms interval (50 calls/sec) may be too frequent and cause missed executions
-    for (let i = 0; i < 2; i++) {
+    // Start 4 Log threads, each sends one log every 20ms
+    // This produces roughly 20 logs per 100ms in normal conditions, matching I/O batch window expectation.
+    for (let i = 0; i < 4; i++) {
       const threadIndex = i;
       const intervalId = setInterval((): void => {
         if (!this.isRunning) {
@@ -124,7 +125,7 @@ export class StressTestManager {
           return;
         }
         this.sendLog(threadIndex);
-      }, 50); // Changed from 20ms to 50ms for better reliability
+      }, 20);
       this.logIntervalIds.push(intervalId);
       DemoLogger.i(TAG, `Log thread ${threadIndex} started`);
     }
@@ -177,6 +178,96 @@ export class StressTestManager {
     } else {
       DemoLogger.i(TAG, "No duration specified, test will run indefinitely until stop() is called");
     }
+  }
+
+  /**
+   * Start a focused log I/O cache stress test.
+   *
+   * This uses FTLogger.batchLog() in short peaks so TrackLogManager can verify
+   * scheduler coalescing and FTDBManager can exercise cache writes.
+   */
+  public runLogIoCacheStress(totalLogs: number = 200, peakSize: number = 2, intervalMs: number = 50): void {
+    if (this.isRunning) {
+      DemoLogger.w(TAG, "Stress test is already running");
+      return;
+    }
+
+    const normalizedTotalLogs = Math.max(1, Math.floor(totalLogs));
+    const normalizedPeakSize = Math.max(1, Math.floor(peakSize));
+    const normalizedIntervalMs = Math.max(16, Math.floor(intervalMs));
+
+    this.isRunning = true;
+    this.startTime = Date.now();
+    this.durationSeconds = 0;
+    this.useRealData = false;
+    this.logCounter = 0;
+    this.actionCounter = 0;
+    this.resourceCounter = 0;
+    this.logIntervalIds = [];
+    this.actionIntervalIds = [];
+    this.resourceIntervalIds = [];
+
+    DemoLogger.i(TAG,
+      `Starting I/O cache peak stress test: totalLogs=${normalizedTotalLogs}, peakSize=${normalizedPeakSize}, intervalMs=${normalizedIntervalMs}`);
+
+    const emitPeak = (): void => {
+      if (!this.isRunning) {
+        return;
+      }
+
+      const remaining = normalizedTotalLogs - this.logCounter;
+      if (remaining <= 0) {
+        this.finishLogIoCacheStress(normalizedTotalLogs);
+        return;
+      }
+
+      const count = Math.min(normalizedPeakSize, remaining);
+      this.sendLogBatch(count, IO_CACHE_STRESS_TAG);
+
+      if (this.logCounter >= normalizedTotalLogs) {
+        this.finishLogIoCacheStress(normalizedTotalLogs);
+      }
+    };
+
+    const intervalId = setInterval(emitPeak, normalizedIntervalMs);
+    this.logIntervalIds.push(intervalId);
+    emitPeak();
+  }
+
+  /**
+   * Send a single batch of custom logs through FTLogger.batchLog().
+   */
+  public sendLogBatch(batchSize: number = 2, tag: string = IO_CACHE_STRESS_TAG): void {
+    const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
+    const batchLogs: LogEntry[] = [];
+
+    for (let i = 0; i < normalizedBatchSize; i++) {
+      const logIndex = this.logCounter++;
+      batchLogs.push({
+        tag,
+        message: `I/O cache stress log ${logIndex}`,
+        level: 'i'
+      });
+    }
+
+    FTLogger.batchLog(batchLogs);
+    DemoLogger.i(TAG, `Submitted log peak: tag=${tag}, size=${batchLogs.length}, totalGenerated=${this.logCounter}`);
+  }
+
+  private finishLogIoCacheStress(totalLogs: number): void {
+    if (!this.isRunning) {
+      return;
+    }
+
+    const elapsedSeconds = this.getElapsedSeconds();
+    this.isRunning = false;
+
+    for (let i = 0; i < this.logIntervalIds.length; i++) {
+      clearInterval(this.logIntervalIds[i]);
+    }
+    this.logIntervalIds = [];
+
+    DemoLogger.i(TAG, `I/O cache stress test finished: totalLogs=${totalLogs}, elapsed=${elapsedSeconds}s`);
   }
 
   /**

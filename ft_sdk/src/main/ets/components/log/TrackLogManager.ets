@@ -51,6 +51,7 @@ export class TrackLogManager {
   
   // Configuration constants
   private static readonly DEFAULT_BATCH_SIZE = 20; // Match Android's value
+  private static readonly LOG_PROCESS_COALESCE_DELAY_MS = 100;
   private static readonly LOG_SERIAL_KEY = "log-consumer-state";
   private static logTaskSequence: number = 0;
   
@@ -63,6 +64,9 @@ export class TrackLogManager {
   private processingQueue: LogBean[] = [];
   private logBatchBuffer: BaseContentBean[] = [];
   private isProcessing: boolean = false;
+  private processScheduleTimer: number = -1;
+  private scheduledIsSilence: boolean = true;
+  private hasScheduledIsSilence: boolean = false;
   private bufferLocked: boolean = false;
   
   // Log configuration
@@ -160,12 +164,30 @@ export class TrackLogManager {
     if (!logBeans || logBeans.length === 0) {
       return;
     }
-    
+
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    const maxSize = Math.min(cachePolicy.getLogLimitCount(), Constants.MAX_QUEUE_SIZE_LOG);
+
+    let acceptedCount = 0;
     for (const logBean of logBeans) {
-      this.trackLog(logBean, isSilence);
+      if (!this.shouldProcessLog(logBean)) {
+        continue;
+      }
+
+      if (this.inputQueue.length >= maxSize) {
+        this.inputQueue.shift();
+        FTInnerLogger.w(TAG, 'Input queue full, discarding oldest log');
+      }
+
+      this.inputQueue.push(logBean);
+      acceptedCount++;
     }
-    
-    FTInnerLogger.d(TAG, `Batch logged: ${logBeans.length} logs`);
+
+    if (acceptedCount > 0) {
+      this.triggerProcessing(isSilence);
+    }
+
+    FTInnerLogger.d(TAG, `Batch logged: accepted=${acceptedCount}, requested=${logBeans.length}`);
   }
   
   /**
@@ -185,6 +207,14 @@ export class TrackLogManager {
    */
   public forceFlush(isSilence: boolean = false): void {
     FTInnerLogger.d(TAG, "Force flushing log buffer");
+    const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
+    if (totalQueueSize > 0 && !this.isProcessing) {
+      this.mergeScheduledSilence(isSilence);
+      this.startProcessingNow(isSilence);
+      return;
+    }
+
+    this.clearProcessingSchedule();
     this.submitLogTask('log.forceFlush', (traceName: string) => {
       const flushedCount = this.flushBatch(isSilence);
       this.traceLogLane(
@@ -269,17 +299,84 @@ export class TrackLogManager {
    * Trigger processing
    */
   private triggerProcessing(isSilence: boolean): void {
-    // Removed verbose debug log to reduce log output
-    
+    this.mergeScheduledSilence(isSilence);
+
     if (this.isProcessing) {
-      // If already processing, don't trigger again
-      // The processing will continue and handle remaining queue items
-      // Removed verbose debug log to reduce log output
       return;
     }
-    
+
+    if (this.shouldProcessImmediately()) {
+      this.startProcessingNow(isSilence);
+      return;
+    }
+
+    this.scheduleProcessing();
+  }
+
+  private shouldProcessImmediately(): boolean {
+    return this.inputQueue.length + this.processingQueue.length >= TrackLogManager.DEFAULT_BATCH_SIZE;
+  }
+
+  private scheduleProcessing(): void {
+    if (this.processScheduleTimer >= 0) {
+      return;
+    }
+
+    this.processScheduleTimer = setTimeout(() => {
+      this.processScheduleTimer = -1;
+      if (this.isProcessing) {
+        return;
+      }
+
+      const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
+      if (totalQueueSize <= 0) {
+        this.resetScheduledSilence();
+        return;
+      }
+
+      const scheduledIsSilence = this.consumeScheduledSilence(false);
+      this.isProcessing = true;
+      this.process(scheduledIsSilence);
+    }, TrackLogManager.LOG_PROCESS_COALESCE_DELAY_MS);
+  }
+
+  private startProcessingNow(fallbackIsSilence: boolean): void {
+    this.clearProcessingSchedule();
+    if (this.isProcessing) {
+      return;
+    }
+
+    const scheduledIsSilence = this.consumeScheduledSilence(fallbackIsSilence);
     this.isProcessing = true;
-    this.process(isSilence);
+    this.process(scheduledIsSilence);
+  }
+
+  private clearProcessingSchedule(): void {
+    if (this.processScheduleTimer >= 0) {
+      clearTimeout(this.processScheduleTimer);
+      this.processScheduleTimer = -1;
+    }
+  }
+
+  private mergeScheduledSilence(isSilence: boolean): void {
+    if (!this.hasScheduledIsSilence) {
+      this.scheduledIsSilence = isSilence;
+      this.hasScheduledIsSilence = true;
+      return;
+    }
+
+    this.scheduledIsSilence = this.scheduledIsSilence && isSilence;
+  }
+
+  private consumeScheduledSilence(fallbackIsSilence: boolean): boolean {
+    const isSilence = this.hasScheduledIsSilence ? this.scheduledIsSilence : fallbackIsSilence;
+    this.resetScheduledSilence();
+    return isSilence;
+  }
+
+  private resetScheduledSilence(): void {
+    this.scheduledIsSilence = true;
+    this.hasScheduledIsSilence = false;
   }
 
   private submitLogTask(name: string, task: (traceName: string) => void | Promise<void>): boolean {
@@ -522,6 +619,8 @@ export class TrackLogManager {
     FTInnerLogger.i(TAG, "Shutting down TrackLogManager");
     
     try {
+      this.clearProcessingSchedule();
+      this.resetScheduledSilence();
       this.isProcessing = false;
       
       // Clear queues and buffer

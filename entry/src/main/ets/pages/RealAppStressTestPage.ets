@@ -11,6 +11,9 @@ const TAG = "RealAppStressTestPage";
 const PREFERENCES_NAME = 'real_app_stress_test_settings';
 const KEY_TEST_MINUTES = 'test_minutes';
 const KEY_TEST_SECONDS = 'test_seconds';
+const IO_CACHE_STRESS_TOTAL_LOGS = 200;
+const IO_CACHE_STRESS_PEAK_SIZE = 2;
+const IO_CACHE_STRESS_PEAK_INTERVAL_MS = 50;
 
 /**
  * Real App Stress Test Page
@@ -126,6 +129,44 @@ export struct RealAppStressTestPage {
       });
     } catch (error) {
       DemoLogger.e(TAG, `Failed to start stress test: ${error}`);
+      promptAction.showToast({
+        message: `Failed to start: ${error}`,
+        duration: 3000
+      });
+      this.isTestRunning = false;
+    }
+  }
+
+  /**
+   * Start focused I/O cache peak stress test.
+   */
+  startIoCacheStressTest(): void {
+    if (this.isTestRunning) {
+      promptAction.showToast({
+        message: "Test is already running",
+        duration: 2000
+      });
+      return;
+    }
+
+    try {
+      DemoLogger.i(TAG,
+        `Starting I/O cache peak stress test: totalLogs=${IO_CACHE_STRESS_TOTAL_LOGS}, peakSize=${IO_CACHE_STRESS_PEAK_SIZE}, peakIntervalMs=${IO_CACHE_STRESS_PEAK_INTERVAL_MS}`);
+      this.stressTestManager.runLogIoCacheStress(
+        IO_CACHE_STRESS_TOTAL_LOGS,
+        IO_CACHE_STRESS_PEAK_SIZE,
+        IO_CACHE_STRESS_PEAK_INTERVAL_MS
+      );
+      this.isTestRunning = true;
+      this.elapsedSeconds = 0;
+      this.startUpdateTimer();
+
+      promptAction.showToast({
+        message: `I/O peak stress started (${IO_CACHE_STRESS_PEAK_SIZE} logs / ${IO_CACHE_STRESS_PEAK_INTERVAL_MS}ms)`,
+        duration: 2000
+      });
+    } catch (error) {
+      DemoLogger.e(TAG, `Failed to start I/O cache stress test: ${error}`);
       promptAction.showToast({
         message: `Failed to start: ${error}`,
         duration: 3000
@@ -403,6 +444,16 @@ export struct RealAppStressTestPage {
           .backgroundColor('#4CAF50')
           .fontColor(Color.White)
           .margin({ top: 20 })
+
+        Button('Start I/O Cache Peak')
+          .onClick(() => this.startIoCacheStressTest())
+          .width('100%')
+          .height(60)
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .backgroundColor('#7B61FF')
+          .fontColor(Color.White)
+          .margin({ top: 12 })
       }
 
           // Navigation to StressTestAPage
