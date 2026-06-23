@@ -3,6 +3,7 @@ import router from '@ohos.router';
 import { promptAction } from '@kit.ArkUI';
 import {
   createEmptyStressTestStats,
+  DEFAULT_REAL_TRAFFIC_URL,
   StressTestConfig,
   StressTestManager,
   StressTestReport,
@@ -25,10 +26,13 @@ const KEY_ENABLE_NAVIGATION = 'enable_navigation';
 const KEY_ENABLE_ERRORS = 'enable_errors';
 const KEY_ENABLE_LONG_TASKS = 'enable_long_tasks';
 const KEY_ENABLE_BACKGROUND_SERVICE = 'enable_background_service';
+const KEY_REAL_RESOURCE_URL = 'real_resource_url';
 const KEY_STRESS_LOG_BATCH_SIZE = 'stress_log_batch_size';
 const KEY_STRESS_LOG_INTERVAL_MS = 'stress_log_interval_ms';
 const KEY_STRESS_ACTION_TIMER_COUNT = 'stress_action_timer_count';
 const KEY_STRESS_ACTION_INTERVAL_MS = 'stress_action_interval_ms';
+const KEY_STRESS_RESOURCE_TIMER_COUNT = 'stress_resource_timer_count';
+const KEY_STRESS_RESOURCE_INTERVAL_MS = 'stress_resource_interval_ms';
 const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
 const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
 const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
@@ -36,6 +40,10 @@ const DEFAULT_STRESS_LOG_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LOG_INTERVAL_MS = 20;
 const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
 const DEFAULT_STRESS_ACTION_INTERVAL_MS = 20;
+const DEFAULT_STRESS_RESOURCE_TIMER_COUNT = 2;
+const DEFAULT_STRESS_RESOURCE_INTERVAL_MS = 200;
+const DEFAULT_REAL_RESOURCE_URL = '';
+const MAX_REAL_RESOURCE_URL_COUNT = 10;
 const DEFAULT_IO_CACHE_TOTAL_LOGS = 200;
 const DEFAULT_IO_CACHE_PEAK_SIZE = 2;
 const DEFAULT_IO_CACHE_PEAK_INTERVAL_MS = 50;
@@ -47,6 +55,10 @@ const MIN_STRESS_ACTION_TIMER_COUNT = 1;
 const MAX_STRESS_ACTION_TIMER_COUNT = 20;
 const MIN_STRESS_ACTION_INTERVAL_MS = 16;
 const MAX_STRESS_ACTION_INTERVAL_MS = 10000;
+const MIN_STRESS_RESOURCE_TIMER_COUNT = 1;
+const MAX_STRESS_RESOURCE_TIMER_COUNT = 20;
+const MIN_STRESS_RESOURCE_INTERVAL_MS = 50;
+const MAX_STRESS_RESOURCE_INTERVAL_MS = 10000;
 const MIN_IO_CACHE_TOTAL_LOGS = 1;
 const MAX_IO_CACHE_TOTAL_LOGS = 100000;
 const MIN_IO_CACHE_PEAK_SIZE = 1;
@@ -77,10 +89,13 @@ export struct RealAppStressTestPage {
   @State enableErrors: boolean = false;
   @State enableLongTasks: boolean = false;
   @State enableBackgroundService: boolean = false;
+  @State realResourceUrls: string[] = [DEFAULT_REAL_RESOURCE_URL];
   @State stressLogBatchSize: number = DEFAULT_STRESS_LOG_BATCH_SIZE;
   @State stressLogIntervalMs: number = DEFAULT_STRESS_LOG_INTERVAL_MS;
   @State stressActionTimerCount: number = DEFAULT_STRESS_ACTION_TIMER_COUNT;
   @State stressActionIntervalMs: number = DEFAULT_STRESS_ACTION_INTERVAL_MS;
+  @State stressResourceTimerCount: number = DEFAULT_STRESS_RESOURCE_TIMER_COUNT;
+  @State stressResourceIntervalMs: number = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
   @State ioCacheTotalLogs: number = DEFAULT_IO_CACHE_TOTAL_LOGS;
   @State ioCachePeakSize: number = DEFAULT_IO_CACHE_PEAK_SIZE;
   @State ioCachePeakIntervalMs: number = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
@@ -162,6 +177,7 @@ export struct RealAppStressTestPage {
       this.updateTestDuration();
       this.normalizeStressLogSettings();
       this.normalizeStressActionSettings();
+      this.normalizeStressResourceSettings();
       const config = this.buildStressConfig();
       if (!this.hasRunnableScenario(config)) {
         promptAction.showToast({
@@ -175,7 +191,7 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, background=${this.enableBackgroundService}`);
+        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
       if (this.enableBackgroundService) {
@@ -301,6 +317,9 @@ export struct RealAppStressTestPage {
     config.logIntervalMs = this.stressLogIntervalMs;
     config.actionThreadCount = this.stressActionTimerCount;
     config.actionIntervalMs = this.stressActionIntervalMs;
+    config.resourceThreadCount = this.stressResourceTimerCount;
+    config.resourceIntervalMs = this.stressResourceIntervalMs;
+    config.realResourceUrl = this.serializeRealResourceUrls();
     return config;
   }
 
@@ -364,10 +383,16 @@ export struct RealAppStressTestPage {
         this.enableLogs = await this.preferencesStore.get(KEY_ENABLE_LOGS, true) as boolean;
         this.enableActions = await this.preferencesStore.get(KEY_ENABLE_ACTIONS, true) as boolean;
         this.enableResources = await this.preferencesStore.get(KEY_ENABLE_RESOURCES, true) as boolean;
+        if (!this.enableResources) {
+          this.useRealTraffic = false;
+        }
         this.enableNavigation = await this.preferencesStore.get(KEY_ENABLE_NAVIGATION, true) as boolean;
         this.enableErrors = await this.preferencesStore.get(KEY_ENABLE_ERRORS, false) as boolean;
         this.enableLongTasks = await this.preferencesStore.get(KEY_ENABLE_LONG_TASKS, false) as boolean;
         this.enableBackgroundService = await this.preferencesStore.get(KEY_ENABLE_BACKGROUND_SERVICE, false) as boolean;
+        const savedRealResourceUrl =
+          await this.preferencesStore.get(KEY_REAL_RESOURCE_URL, DEFAULT_REAL_RESOURCE_URL) as string;
+        this.realResourceUrls = this.normalizeRealResourceUrlInputs(this.parseRealResourceUrls(savedRealResourceUrl));
         this.stressLogBatchSize =
           await this.preferencesStore.get(KEY_STRESS_LOG_BATCH_SIZE, DEFAULT_STRESS_LOG_BATCH_SIZE) as number;
         this.stressLogIntervalMs =
@@ -376,6 +401,10 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_ACTION_TIMER_COUNT, DEFAULT_STRESS_ACTION_TIMER_COUNT) as number;
         this.stressActionIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_ACTION_INTERVAL_MS, DEFAULT_STRESS_ACTION_INTERVAL_MS) as number;
+        this.stressResourceTimerCount =
+          await this.preferencesStore.get(KEY_STRESS_RESOURCE_TIMER_COUNT, DEFAULT_STRESS_RESOURCE_TIMER_COUNT) as number;
+        this.stressResourceIntervalMs =
+          await this.preferencesStore.get(KEY_STRESS_RESOURCE_INTERVAL_MS, DEFAULT_STRESS_RESOURCE_INTERVAL_MS) as number;
         this.ioCacheTotalLogs =
           await this.preferencesStore.get(KEY_IO_CACHE_TOTAL_LOGS, DEFAULT_IO_CACHE_TOTAL_LOGS) as number;
         this.ioCachePeakSize =
@@ -384,6 +413,7 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_IO_CACHE_PEAK_INTERVAL_MS, DEFAULT_IO_CACHE_PEAK_INTERVAL_MS) as number;
         this.normalizeStressLogSettings();
         this.normalizeStressActionSettings();
+        this.normalizeStressResourceSettings();
         this.normalizeIoCacheSettings();
       }
     } catch (error) {
@@ -407,10 +437,13 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_ENABLE_ERRORS, this.enableErrors);
         await this.preferencesStore.put(KEY_ENABLE_LONG_TASKS, this.enableLongTasks);
         await this.preferencesStore.put(KEY_ENABLE_BACKGROUND_SERVICE, this.enableBackgroundService);
+        await this.preferencesStore.put(KEY_REAL_RESOURCE_URL, this.serializeRealResourceUrls());
         await this.preferencesStore.put(KEY_STRESS_LOG_BATCH_SIZE, this.stressLogBatchSize);
         await this.preferencesStore.put(KEY_STRESS_LOG_INTERVAL_MS, this.stressLogIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_ACTION_TIMER_COUNT, this.stressActionTimerCount);
         await this.preferencesStore.put(KEY_STRESS_ACTION_INTERVAL_MS, this.stressActionIntervalMs);
+        await this.preferencesStore.put(KEY_STRESS_RESOURCE_TIMER_COUNT, this.stressResourceTimerCount);
+        await this.preferencesStore.put(KEY_STRESS_RESOURCE_INTERVAL_MS, this.stressResourceIntervalMs);
         await this.preferencesStore.put(KEY_IO_CACHE_TOTAL_LOGS, this.ioCacheTotalLogs);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_SIZE, this.ioCachePeakSize);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_INTERVAL_MS, this.ioCachePeakIntervalMs);
@@ -484,6 +517,60 @@ export struct RealAppStressTestPage {
     );
   }
 
+  private normalizeStressResourceSettings(): void {
+    this.stressResourceTimerCount = this.clampNumber(
+      Math.floor(this.stressResourceTimerCount),
+      MIN_STRESS_RESOURCE_TIMER_COUNT,
+      MAX_STRESS_RESOURCE_TIMER_COUNT
+    );
+    this.stressResourceIntervalMs = this.clampNumber(
+      Math.floor(this.stressResourceIntervalMs),
+      MIN_STRESS_RESOURCE_INTERVAL_MS,
+      MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+  }
+
+  private parseRealResourceUrls(rawUrls: string): string[] {
+    const urls: string[] = [];
+    let url = "";
+    for (let i = 0; i < rawUrls.length; i++) {
+      const char = rawUrls.charAt(i);
+      if (char === '\n' || char === '\r' || char === ',' || char === ';') {
+        this.appendRealResourceUrl(urls, url);
+        url = "";
+      } else {
+        url += char;
+      }
+    }
+    this.appendRealResourceUrl(urls, url);
+    return urls;
+  }
+
+  private appendRealResourceUrl(urls: string[], rawUrl: string): void {
+    const trimmedUrl = rawUrl.trim();
+    if (trimmedUrl.length > 0) {
+      urls.push(trimmedUrl);
+    }
+  }
+
+  private normalizeRealResourceUrlInputs(urls: string[]): string[] {
+    const normalizedUrls = urls.slice(0, MAX_REAL_RESOURCE_URL_COUNT);
+    return normalizedUrls.length > 0 ? normalizedUrls : [DEFAULT_REAL_RESOURCE_URL];
+  }
+
+  private serializeRealResourceUrls(): string {
+    const urls: string[] = [];
+    for (let i = 0; i < this.realResourceUrls.length; i++) {
+      this.appendRealResourceUrl(urls, this.realResourceUrls[i]);
+    }
+    return urls.join('\n');
+  }
+
+  private formatRealResourceUrlSummary(rawUrls: string): string {
+    const urlCount = this.parseRealResourceUrls(rawUrls).length;
+    return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
+  }
+
   private normalizeIoCacheSettings(): void {
     this.ioCacheTotalLogs = this.clampNumber(
       Math.floor(this.ioCacheTotalLogs),
@@ -548,6 +635,54 @@ export struct RealAppStressTestPage {
       MIN_STRESS_ACTION_INTERVAL_MS,
       MAX_STRESS_ACTION_INTERVAL_MS
     );
+    this.saveSettings();
+  }
+
+  adjustStressResourceTimerCount(delta: number): void {
+    this.stressResourceTimerCount = this.clampNumber(
+      this.stressResourceTimerCount + delta,
+      MIN_STRESS_RESOURCE_TIMER_COUNT,
+      MAX_STRESS_RESOURCE_TIMER_COUNT
+    );
+    this.saveSettings();
+  }
+
+  adjustStressResourceInterval(delta: number): void {
+    this.stressResourceIntervalMs = this.clampNumber(
+      this.stressResourceIntervalMs + delta,
+      MIN_STRESS_RESOURCE_INTERVAL_MS,
+      MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateRealResourceUrl(index: number, value: string): void {
+    const urls = this.realResourceUrls.slice();
+    if (index < 0 || index >= urls.length) {
+      return;
+    }
+    urls[index] = value;
+    this.realResourceUrls = urls;
+    this.saveSettings();
+  }
+
+  addRealResourceUrl(): void {
+    if (this.realResourceUrls.length >= MAX_REAL_RESOURCE_URL_COUNT) {
+      return;
+    }
+    const urls = this.realResourceUrls.slice();
+    urls.push(DEFAULT_REAL_RESOURCE_URL);
+    this.realResourceUrls = urls;
+    this.saveSettings();
+  }
+
+  removeRealResourceUrl(index: number): void {
+    const urls = this.realResourceUrls.slice();
+    if (index < 0 || index >= urls.length) {
+      return;
+    }
+    urls.splice(index, 1);
+    this.realResourceUrls = urls.length > 0 ? urls : [DEFAULT_REAL_RESOURCE_URL];
     this.saveSettings();
   }
 
@@ -703,24 +838,29 @@ export struct RealAppStressTestPage {
           .borderRadius(8)
 
           Column({ space: 12 }) {
-            Text('Traffic Mode')
+            Text('Resource Traffic Mode')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
 
             Row() {
-                Toggle({ type: 0, isOn: this.useRealTraffic })
+                Toggle({ type: 0, isOn: this.enableResources && this.useRealTraffic })
                   .onChange((isOn: boolean) => {
+                    if (!this.enableResources) {
+                      this.useRealTraffic = false;
+                      this.saveSettings();
+                      return;
+                    }
                     this.useRealTraffic = isOn;
                     this.saveSettings();
                   })
-                  // .enabled(!this.isTestRunning && this.enableResources)
+                  .enabled(!this.isTestRunning && this.enableResources)
                 Column({ space: 4 }) {
-                  Text(!this.enableResources ? 'Resource Scenario Disabled' :
-                    (this.useRealTraffic ? 'Real RCP Traffic' : 'Synthetic Resource Data'))
+                  Text(!this.enableResources ? 'Enable Resources First' :
+                    (this.useRealTraffic ? 'Real RCP Resource Traffic' : 'Synthetic Resource Traffic'))
                     .fontSize(16)
                     .fontWeight(FontWeight.Medium)
-                  Text(false ? 'Traffic mode applies only when Resources is enabled' :
-                    (this.useRealTraffic ? 'Uses traceUrl/httpbin through FT RCP interceptors' : 'Generates resource timing data locally'))
+                  Text(!this.enableResources ? 'Turn on Resources in Scenario Switches to choose traffic mode' :
+                    (this.useRealTraffic ? 'Sends real RCP requests through the configured URL' : 'Generates local resource timing data'))
                     .fontSize(12)
                     .fontColor(Color.Gray)
                 }
@@ -728,6 +868,56 @@ export struct RealAppStressTestPage {
               .layoutWeight(1)
             }
             .width('100%')
+
+            if (this.enableResources && this.useRealTraffic) {
+              Column({ space: 6 }) {
+                Text('Real Resource URLs')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+
+                ForEach(this.realResourceUrls, (url: string, index: number) => {
+                  Row({ space: 8 }) {
+                    TextInput({
+                      placeholder: index === 0 ? DEFAULT_REAL_TRAFFIC_URL : 'https://example.com/resource',
+                      text: url
+                    })
+                      .height(44)
+                      .layoutWeight(1)
+                      .fontSize(13)
+                      .backgroundColor('#F5F5F5')
+                      .borderRadius(6)
+                      .enabled(!this.isTestRunning)
+                      .onChange((value: string) => {
+                        this.updateRealResourceUrl(index, value);
+                      })
+
+                    Button('-')
+                      .width(44)
+                      .height(44)
+                      .enabled(!this.isTestRunning && this.realResourceUrls.length > 1)
+                      .onClick(() => {
+                        this.removeRealResourceUrl(index);
+                      })
+                  }
+                  .width('100%')
+                }, (url: string, index: number) => `${index}`)
+
+                Button('Add URL')
+                  .height(40)
+                  .width('100%')
+                  .enabled(!this.isTestRunning && this.realResourceUrls.length < MAX_REAL_RESOURCE_URL_COUNT)
+                  .onClick(() => {
+                    this.addRealResourceUrl();
+                  })
+
+                Text(this.serializeRealResourceUrls().length > 0 ?
+                  'Round-robin by resource index: urls[N % urls.length]' :
+                  'Empty uses launch traceUrl first, then default httpbin')
+                  .fontSize(12)
+                  .fontColor(Color.Gray)
+              }
+              .width('100%')
+            }
           }
           .width('100%')
           .padding(18)
@@ -769,6 +959,9 @@ export struct RealAppStressTestPage {
               Toggle({ type: 0, isOn: this.enableResources })
                 .onChange((isOn: boolean) => {
                   this.enableResources = isOn;
+                  if (!isOn) {
+                    this.useRealTraffic = false;
+                  }
                   this.saveSettings();
                 })
                 .enabled(!this.isTestRunning)
@@ -969,6 +1162,78 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Text(`Current: ${this.stressActionTimerCount} timers, action every ${this.stressActionIntervalMs}ms`)
+              .fontSize(13)
+              .fontColor('#007DFF')
+              .width('100%')
+              .textAlign(TextAlign.Center)
+          }
+          .width('100%')
+          .padding(18)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(8)
+
+          Column({ space: 10 }) {
+            Text('Resource Params')
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+
+            Column({ space: 5 }) {
+              Text('Timer Count')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-1')
+                  .onClick(() => this.adjustStressResourceTimerCount(-1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressResourceTimerCount > MIN_STRESS_RESOURCE_TIMER_COUNT)
+
+                Text(`${this.stressResourceTimerCount}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+1')
+                  .onClick(() => this.adjustStressResourceTimerCount(1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressResourceTimerCount < MAX_STRESS_RESOURCE_TIMER_COUNT)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Column({ space: 5 }) {
+              Text('Event Interval (ms)')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-50')
+                  .onClick(() => this.adjustStressResourceInterval(-50))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressResourceIntervalMs > MIN_STRESS_RESOURCE_INTERVAL_MS)
+
+                Text(`${this.stressResourceIntervalMs}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+50')
+                  .onClick(() => this.adjustStressResourceInterval(50))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressResourceIntervalMs < MAX_STRESS_RESOURCE_INTERVAL_MS)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Text(`Current: ${this.stressResourceTimerCount} timers, resource every ${this.stressResourceIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')

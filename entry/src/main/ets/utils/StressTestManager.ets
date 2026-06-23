@@ -15,7 +15,7 @@ import { DemoLogger } from './DemoLogger';
 const TAG = "StressTestManager";
 const STRESS_TEST_LOG_TAG = "stress_test";
 const IO_CACHE_STRESS_TAG = "io_cache_stress";
-const DEFAULT_REAL_TRAFFIC_URL = "https://httpbin.org/get?from=real-app-stress";
+export const DEFAULT_REAL_TRAFFIC_URL = "https://httpbin.org/get?from=real-app-stress";
 const MS_TO_NS = 1000000;
 
 export type StressStopReason = 'manual' | 'duration' | 'completed' | 'service-stop' | 'service-destroyed' | 'error';
@@ -40,6 +40,7 @@ export interface StressTestConfig {
   actionIntervalMs: number;
   resourceThreadCount: number;
   resourceIntervalMs: number;
+  realResourceUrl: string;
   errorIntervalMs: number;
   longTaskIntervalMs: number;
 }
@@ -102,6 +103,7 @@ export function createDefaultStressTestConfig(
     actionIntervalMs: 20,
     resourceThreadCount: 2,
     resourceIntervalMs: 200,
+    realResourceUrl: "",
     errorIntervalMs: 1000,
     longTaskIntervalMs: 1500
   };
@@ -172,9 +174,52 @@ export class StressTestManager {
     return StressTestManager.instance;
   }
 
-  private getTraceTestUrl(): string {
+  private getTraceTestUrl(resourceIndex: number): string {
+    const stressUrls = this.parseResourceUrls(this.currentConfig.realResourceUrl);
+    if (stressUrls.length > 0) {
+      return this.selectRoundRobinUrl(stressUrls, resourceIndex);
+    }
+
     const configuredUrl = ((AppStorage.get(KEY_TRACE_URL) as string | undefined) ?? "").trim();
-    return configuredUrl.length > 0 ? configuredUrl : DEFAULT_REAL_TRAFFIC_URL;
+    const configuredUrls = this.parseResourceUrls(configuredUrl);
+    if (configuredUrls.length > 0) {
+      return this.selectRoundRobinUrl(configuredUrls, resourceIndex);
+    }
+
+    return DEFAULT_REAL_TRAFFIC_URL;
+  }
+
+  private parseResourceUrls(rawUrls: string): string[] {
+    const urls: string[] = [];
+    let url = "";
+    for (let i = 0; i < rawUrls.length; i++) {
+      const char = rawUrls.charAt(i);
+      if (char === '\n' || char === '\r') {
+        this.appendResourceUrl(urls, url);
+        url = "";
+      } else {
+        url += char;
+      }
+    }
+    this.appendResourceUrl(urls, url);
+    return urls;
+  }
+
+  private appendResourceUrl(urls: string[], rawUrl: string): void {
+    const trimmedUrl = rawUrl.trim();
+    if (trimmedUrl.length > 0) {
+      urls.push(trimmedUrl);
+    }
+  }
+
+  private selectRoundRobinUrl(urls: string[], resourceIndex: number): string {
+    const safeIndex = Math.max(0, Math.floor(resourceIndex));
+    return urls[safeIndex % urls.length];
+  }
+
+  private formatResourceUrlSummary(rawUrls: string): string {
+    const urlCount = this.parseResourceUrls(rawUrls).length;
+    return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
   }
 
   private initRUM(): void {
@@ -248,7 +293,7 @@ export class StressTestManager {
     this.currentStats = this.createStatsForStart(normalizedConfig, this.startTime);
 
     DemoLogger.i(TAG,
-      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, longTasks=${normalizedConfig.enableLongTasks}`);
+      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, longTasks=${normalizedConfig.enableLongTasks}`);
 
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
@@ -390,6 +435,7 @@ export class StressTestManager {
       actionIntervalMs: Math.max(16, Math.floor(config.actionIntervalMs)),
       resourceThreadCount: Math.max(0, Math.floor(config.resourceThreadCount)),
       resourceIntervalMs: Math.max(50, Math.floor(config.resourceIntervalMs)),
+      realResourceUrl: (config.realResourceUrl ?? "").trim(),
       errorIntervalMs: Math.max(250, Math.floor(config.errorIntervalMs)),
       longTaskIntervalMs: Math.max(250, Math.floor(config.longTaskIntervalMs))
     };
@@ -617,7 +663,7 @@ export class StressTestManager {
   }
 
   private async sendRealResource(threadIndex: number, resourceIndex: number): Promise<void> {
-    const realApiUrl = this.getTraceTestUrl();
+    const realApiUrl = this.getTraceTestUrl(resourceIndex);
     const separator = realApiUrl.indexOf('?') >= 0 ? '&' : '?';
     const url = `${realApiUrl}${separator}stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
     const session = rcp.createSession(createFTRCPTrackConfig());
