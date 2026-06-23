@@ -57,15 +57,15 @@ export struct StressTestBPage {
   }
 
   private startAutoNavigate(): void {
-    // Only auto navigate if stress test is running
-    if (!this.stressTestManager.isStressTestRunning()) {
-      DemoLogger.i(TAG, "Stress test not running, skipping auto navigation");
+    // Only auto navigate if stress test is running and navigation scenario is enabled
+    if (!this.stressTestManager.isNavigationScenarioEnabled()) {
+      DemoLogger.i(TAG, "Stress navigation scenario disabled, skipping auto navigation");
       return;
     }
     // Auto navigate to StressTestAPage after delay
     this.autoNavigateTimerId = setTimeout((): void => {
       // Check again before navigating (stress test might have stopped)
-      if (this.stressTestManager.isStressTestRunning()) {
+      if (this.stressTestManager.isNavigationScenarioEnabled()) {
         DemoLogger.i(TAG, "Auto navigating to StressTestAPage");
         this.navigateToPageA();
       } else {

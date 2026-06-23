@@ -13,6 +13,7 @@ export interface LogEntry {
   tag: string;
   message: string;
   level: string;
+  timestampMs?: number;
 }
 
 /**
@@ -194,7 +195,8 @@ export class FTLogger {
       const logBeans: LogBean[] = [];
       
       for (const log of logs) {
-        const logBean = new LogBean(log.message, Utils.getCurrentTimestamp());
+        const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
+        const logBean = new LogBean(log.message, timestampMs);
         
         switch (log.level.toLowerCase()) {
           case 'd':
