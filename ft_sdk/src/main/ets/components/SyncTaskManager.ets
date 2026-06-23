@@ -108,6 +108,7 @@ export class SyncTaskManager {
   private static readonly ONE_MINUTE_DURATION_NS = 60_000_000_000; // 60 seconds in nanoseconds
   private static readonly PREFERENCES_NAME = 'ft_sdk_sync_task';
   private static readonly KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
+  private static readonly ERROR_SAMPLED_SUFFIX = "_error_sampled";
   private errorCount = 0;
   private running = false;
   private uploadRunning = false;
@@ -121,7 +122,6 @@ export class SyncTaskManager {
   private uploadCurrentPollRows = 0;
   private uploadCurrentTaskName = "";
   private uploadStartTraced = false;
-  private uploadRescheduleTraceEnabled = false;
   private isStop = false;
   private autoSync = false;
   private syncSleepTime = 0;
@@ -244,21 +244,16 @@ export class SyncTaskManager {
 
         if (hasMoreData && !this.isStop) {
           this.scheduleUpload(0);
-        } else if (this.autoSync && !this.isStop) {
-          this.scheduleUpload(SyncTaskManager.SLEEP_TIME, false);
         }
       } catch (e) {
         FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${e as string}`);
-        if (this.autoSync && !this.isStop) {
-          this.scheduleUpload(SyncTaskManager.SLEEP_TIME);
-        }
       } finally {
         this.running = false;
       }
     };
   }
 
-  private scheduleUpload(delay: number = 0, traceSchedule: boolean = true): void {
+  private scheduleUpload(delay: number = 0): void {
     if (!this.uploadRunnable) {
       FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] runnable=none`);
       return;
@@ -276,10 +271,8 @@ export class SyncTaskManager {
         this.uploadScheduled = false;
         this.uploadScheduledAt = 0;
         this.uploadScheduledDelay = 0;
-        if (traceSchedule) {
-          this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
-        }
-        this.scheduleUpload(normalizedDelay, traceSchedule);
+        this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
+        this.scheduleUpload(normalizedDelay);
       }
       return;
     }
@@ -291,21 +284,16 @@ export class SyncTaskManager {
         this.uploadRescheduleDelay = normalizedDelay;
       }
       this.uploadNeedReschedule = true;
-      this.uploadRescheduleTraceEnabled = this.uploadRescheduleTraceEnabled || traceSchedule;
-      if (traceSchedule) {
-        this.traceUploadLaneDebug(
-          `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
-        );
-      }
+      this.traceUploadLaneDebug(
+        `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
+      );
       return;
     }
 
     this.uploadScheduled = true;
     this.uploadScheduledDelay = normalizedDelay;
     this.uploadScheduledAt = syncTaskRuntime.getCurrentTimeMs();
-    if (traceSchedule) {
-      this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
-    }
+    this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
 
     if (normalizedDelay > 0) {
       this.clearUploadScheduleTimer();
@@ -341,7 +329,6 @@ export class SyncTaskManager {
     this.uploadCurrentPollRows = 0;
     this.uploadCurrentTaskName = taskName;
     this.uploadStartTraced = false;
-    this.uploadRescheduleTraceEnabled = false;
 
     try {
       SDKTaskScheduler.getInstance().submitTask({
@@ -364,24 +351,22 @@ export class SyncTaskManager {
             const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
             const shouldReschedule = this.uploadNeedReschedule;
             const nextDelay = this.uploadRescheduleDelay;
-            const traceReschedule = this.uploadRescheduleTraceEnabled;
             this.uploadRunning = false;
             this.running = false;
             this.uploadNeedReschedule = false;
             this.uploadRescheduleDelay = 0;
-            this.uploadRescheduleTraceEnabled = false;
             const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
             const uploadedRows = this.uploadCurrentPollRows;
             this.uploadCurrentPollRows = 0;
             this.uploadCurrentTaskName = "";
             this.uploadStartTraced = false;
-            if (result !== 'success' || uploadedRows > 0 || (shouldReschedule && traceReschedule)) {
+            if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
               this.traceUploadLaneDebug(
                 `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
               );
             }
             if (shouldReschedule && !this.isStop) {
-              this.scheduleUpload(nextDelay, traceReschedule);
+              this.scheduleUpload(nextDelay);
             }
           }
         }
@@ -393,7 +378,6 @@ export class SyncTaskManager {
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
-      this.uploadRescheduleTraceEnabled = false;
       FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] schedule name=${taskName} error=${error as string}`);
     }
   }
@@ -412,15 +396,75 @@ export class SyncTaskManager {
 
   /**
    * Trigger polling synchronization
-   * When data is available, execute immediately (no delay)
-   * Delay is only used when no data is available (handled by adaptive mechanism)
+   * Auto sync only submits upload work when stored data is available.
    */
   public executeSyncPoll(): void {
 
-    if (this.autoSync) {
-      // Execute immediately when data is available - delay is handled by adaptive mechanism
-      this.executePoll(false);
+    if (this.autoSync && !this.isStop) {
+      this.executePollIfDataAvailable();
     }
+  }
+
+  private executePollIfDataAvailable(): void {
+    this.hasUploadTriggerData().then((hasData: boolean) => {
+      if (this.isStop || !this.autoSync) {
+        return;
+      }
+      if (hasData) {
+        this.executePoll(false);
+      } else {
+        this.traceUploadLaneDebug(`[SKIP] reason=no-data`);
+      }
+    }).catch((error: Error) => {
+      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [SKIP] check data failed: ${error}`);
+    });
+  }
+
+  private async hasUploadTriggerData(): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+
+    const dbManager = syncTaskRuntime.getDbManager(this.context);
+    if (!dbManager) {
+      return false;
+    }
+
+    const dataTypes = this.getUploadTriggerDataTypes();
+    class HasUploadDataCallback implements DataBaseCallBack {
+      hasData: boolean = false;
+      private dataTypes: string[];
+
+      constructor(dataTypes: string[]) {
+        this.dataTypes = dataTypes;
+      }
+
+      async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+        predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, this.dataTypes);
+        const resultSet = await rdbStore.query(predicates);
+        try {
+          this.hasData = resultSet.goToNextRow();
+        } finally {
+          resultSet.close();
+        }
+      }
+    }
+
+    const callback = new HasUploadDataCallback(dataTypes);
+    await dbManager.executeWithDB(false, callback);
+    return callback.hasData;
+  }
+
+  private getUploadTriggerDataTypes(): string[] {
+    const dataTypes: string[] = [];
+    for (const dataType of this.SYNC_MAP) {
+      dataTypes.push(dataType.toString());
+    }
+    for (const dataType of this.ERROR_SAMPLED_SYNC_MAP) {
+      dataTypes.push(dataType.toString() + SyncTaskManager.ERROR_SAMPLED_SUFFIX);
+    }
+    return dataTypes;
   }
 
   /**
@@ -442,8 +486,7 @@ export class SyncTaskManager {
 
       // Create error sampled data type string (e.g., "rum_app_error_sampled")
       // This matches Android's behavior where error sampled data is stored with _error_sampled suffix
-      const ERROR_SAMPLED_SUFFIX = "_error_sampled";
-      const errorSampledType = dataType.toString() + ERROR_SAMPLED_SUFFIX;
+      const errorSampledType = dataType.toString() + SyncTaskManager.ERROR_SAMPLED_SUFFIX;
 
       // Update data type if errorTimeLine is set
       if (this.errorTimeLine > 0) {
@@ -1215,7 +1258,7 @@ export class SyncTaskManager {
       if (this.context) {
         const dbManager = syncTaskRuntime.getDbManager(this.context);
         if (dbManager) {
-          await dbManager.insertFtOptList(list);
+          await dbManager.insertFtOptList(list, true);
         }
         // Removed verbose debug log to reduce log output
       }

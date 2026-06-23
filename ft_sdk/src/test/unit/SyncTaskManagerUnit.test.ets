@@ -147,6 +147,10 @@ class FakeResultSet {
     return this.hasRow;
   }
 
+  goToNextRow(): boolean {
+    return this.hasRow;
+  }
+
   getLong(_columnIndex: number): number {
     return this.count;
   }
@@ -207,6 +211,7 @@ class FakeDbManager implements SyncTaskDbManager {
   lastPageSize: number = 0;
   lastDeleted: SyncData[] = [];
   lastInserted: SyncData[] = [];
+  insertReInsertFlags: boolean[] = [];
 
   async hasData(dataTypes: DataType[]): Promise<boolean> {
     this.lastQueryTypes = dataTypes;
@@ -263,9 +268,10 @@ class FakeDbManager implements SyncTaskDbManager {
     }
   }
 
-  async insertFtOptList(list: SyncData[]): Promise<boolean> {
+  async insertFtOptList(list: SyncData[], reInsert?: boolean): Promise<boolean> {
     this.insertCount++;
     this.lastInserted = list;
+    this.insertReInsertFlags.push(reInsert === true);
     if (this.throwInsert) {
       throw new Error('insert failed');
     }
@@ -419,6 +425,54 @@ async function runCleanupTimer(runtime: FakeRuntime): Promise<void> {
   }
 }
 
+function createLineProtocolForType(dataType: DataType, uuid: string, time: number): string {
+  if (dataType === DataType.LOG) {
+    return `df_rum_harmonyos_log,sdk_data_id=${uuid} message="${uuid}",value=1i ${time}`;
+  }
+  if (dataType === DataType.RUM_WEBVIEW) {
+    return `view,view_id=${uuid},view_update_time=${time},is_webview=true value=1i ${time}`;
+  }
+  return `view,view_id=${uuid},view_update_time=${time} value=1i ${time}`;
+}
+
+function createBatchSyncData(dataType: DataType, prefix: string, count: number, startTime: number = 100): SyncData[] {
+  const list: SyncData[] = [];
+  for (let i = 0; i < count; i++) {
+    const uuid = `${prefix}-${i}`;
+    list.push(createSyncData(dataType, uuid, createLineProtocolForType(dataType, uuid, startTime + i), startTime + i));
+  }
+  return list;
+}
+
+function queueHasDataForOnly(db: FakeDbManager, dataType: DataType): void {
+  db.hasDataResult = false;
+  db.hasDataQueue.push(dataType === DataType.RUM_APP);
+  db.hasDataQueue.push(dataType === DataType.RUM_WEBVIEW);
+  db.hasDataQueue.push(dataType === DataType.LOG);
+}
+
+async function runSingleBatchUpload(
+  manager: SyncTaskManager,
+  runtime: FakeRuntime,
+  db: FakeDbManager,
+  dataType: DataType,
+  uuid: string,
+  code: number
+): Promise<void> {
+  queueHasDataForOnly(db, dataType);
+  db.queryQueue.push([
+    createSyncData(dataType, uuid, createLineProtocolForType(dataType, uuid, 100))
+  ]);
+  runtime.httpResults.push(new FakeHttpResult(code, `response-${code}`, `error-${code}`));
+
+  manager.executePoll(false);
+  await runScheduledUpload(runtime);
+}
+
+function getBackoffDurations(runtime: FakeRuntime): number[] {
+  return runtime.sleepDurations.filter((duration: number) => duration >= 500);
+}
+
 export default function syncTaskManagerUnitTest() {
   describe('SyncTaskManagerUnit', () => {
     let runtime: FakeRuntime;
@@ -456,6 +510,45 @@ export default function syncTaskManagerUnitTest() {
       expect(db.updateDataTypeCount >= 2).assertTrue();
       expect(db.deleteExpireCount >= 2).assertTrue();
       expect(manager.getStatus().running).assertFalse();
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('executeSyncPollShouldSkipUploadLaneWhenDbIsEmpty', 0, async () => {
+      manager.init(createConfig(), createContext());
+      await flushPromises();
+      const db = runtime.dbManager as FakeDbManager;
+      db.rdbStore.hasRow = false;
+
+      manager.executeSyncPoll();
+      await flushPromises();
+
+      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+      const uploadLane = schedulerStatus.lanes[SDKTaskType.UPLOAD];
+      expect(uploadLane.pending).assertEqual(0);
+      expect(uploadLane.running).assertEqual(0);
+      expect(uploadLane.submittedTasks).assertEqual(0);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('executeSyncPollShouldRunUploadLaneWhenDbHasData', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      db.rdbStore.hasRow = true;
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-auto', 'df_rum_harmonyos_log,sdk_data_id=log-auto value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executeSyncPoll();
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
     it('errorTimelineShouldPersist', 0, async () => {
@@ -529,6 +622,61 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
     });
 
+    it('uploadLaneShouldRespectPerRoundPageBudget', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      const pageSize = manager.getPageSize();
+      db.hasDataResult = false;
+      db.hasDataQueue.push(
+        true, false,
+        true, false,
+        true, false
+      );
+      db.queryQueue.push(
+        createBatchSyncData(DataType.RUM_APP, 'rum-app-budget-a', pageSize, 100),
+        createBatchSyncData(DataType.RUM_APP, 'rum-app-budget-b', pageSize, 200),
+        createBatchSyncData(DataType.RUM_WEBVIEW, 'rum-web-budget', pageSize, 300),
+        createBatchSyncData(DataType.LOG, 'log-budget', pageSize, 400)
+      );
+      runtime.httpResults.push(
+        new FakeHttpResult(204, 'ok', ''),
+        new FakeHttpResult(204, 'ok', ''),
+        new FakeHttpResult(204, 'ok', ''),
+        new FakeHttpResult(204, 'ok', '')
+      );
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.httpBodies.length).assertEqual(4);
+      expect(runtime.httpBodies[0].includes('rum-app-budget-a')).assertTrue();
+      expect(runtime.httpBodies[1].includes('rum-app-budget-b')).assertTrue();
+      expect(runtime.httpBodies[2].includes('rum-web-budget')).assertTrue();
+      expect(runtime.httpBodies[3].includes('log-budget')).assertTrue();
+      expect(db.queryCount).assertEqual(4);
+      expect(runtime.cachePolicy.rumDelta).assertEqual(-(pageSize * 3));
+      expect(runtime.cachePolicy.logDelta).assertEqual(-pageSize);
+    });
+
+    it('uploadLaneShouldDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-200', 200);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-204', 204);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-400', 400);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-404', 404);
+
+      expect(db.deleteCount).assertEqual(4);
+      expect(db.insertCount).assertEqual(0);
+      expect(runtime.cachePolicy.logDelta).assertEqual(-4);
+      expect(getBackoffDurations(runtime).length).assertEqual(0);
+      expect(manager.getStatus().errorCount).assertEqual(0);
+    });
+
     it('uploadLaneShouldDeleteAndBackoffForIgnoredClientErrors', 0, async () => {
       const db = new FakeDbManager();
       runtime.dbManager = db;
@@ -563,6 +711,81 @@ export default function syncTaskManagerUnitTest() {
       expect(db.insertCount).assertEqual(0);
       expect(runtime.cachePolicy.logDelta).assertEqual(-2);
       expect(runtime.sleepDurations.includes(1000)).assertTrue();
+    });
+
+    it('uploadLaneShouldIsolateIgnoredClientBackoffByDataTypeAndCapDelay', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-1', 403);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-2', 429);
+      await runSingleBatchUpload(manager, runtime, db, DataType.RUM_APP, 'ignored-rum-app-1', 429);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-3', 403);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-4', 403);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-5', 403);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-6', 403);
+
+      const backoffs = getBackoffDurations(runtime);
+      expect(backoffs[0]).assertEqual(500);
+      expect(backoffs[1]).assertEqual(1000);
+      expect(backoffs[2]).assertEqual(500);
+      expect(backoffs[3]).assertEqual(2000);
+      expect(backoffs[4]).assertEqual(4000);
+      expect(backoffs[5]).assertEqual(8000);
+      expect(backoffs[6]).assertEqual(8000);
+      expect(db.deleteCount).assertEqual(7);
+      expect(db.insertCount).assertEqual(0);
+    });
+
+    it('uploadLaneShouldIsolateRetryBackoffByDataType', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      await runSingleBatchUpload(manager, runtime, db, DataType.RUM_APP, 'retry-rum-1', 500);
+      await runSingleBatchUpload(manager, runtime, db, DataType.RUM_APP, 'retry-rum-2', 500);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-1', 500);
+      await runSingleBatchUpload(manager, runtime, db, DataType.RUM_APP, 'retry-rum-success', 204);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-2', 500);
+
+      const backoffs = getBackoffDurations(runtime);
+      expect(backoffs[0]).assertEqual(500);
+      expect(backoffs[1]).assertEqual(1000);
+      expect(backoffs[2]).assertEqual(500);
+      expect(backoffs[3]).assertEqual(1000);
+      expect(db.insertCount).assertEqual(4);
+      expect(db.insertReInsertFlags[0]).assertTrue();
+      expect(db.insertReInsertFlags[1]).assertTrue();
+      expect(db.insertReInsertFlags[2]).assertTrue();
+      expect(db.insertReInsertFlags[3]).assertTrue();
+      expect(manager.getStatus().errorCount).assertEqual(2);
+    });
+
+    it('uploadLaneShouldReinsert5xxAndNetworkErrorsWithRetryBackoff', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-500', 500);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-502', 502);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-network',
+        NetCodeStatus.NETWORK_EXCEPTION_CODE);
+      await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-unknown',
+        NetCodeStatus.UNKNOWN_EXCEPTION_CODE);
+
+      const backoffs = getBackoffDurations(runtime);
+      expect(backoffs[0]).assertEqual(500);
+      expect(backoffs[1]).assertEqual(1000);
+      expect(backoffs[2]).assertEqual(2000);
+      expect(backoffs[3]).assertEqual(4000);
+      expect(db.deleteCount).assertEqual(4);
+      expect(db.insertCount).assertEqual(4);
+      expect(db.insertReInsertFlags[0]).assertTrue();
+      expect(db.insertReInsertFlags[1]).assertTrue();
+      expect(db.insertReInsertFlags[2]).assertTrue();
+      expect(db.insertReInsertFlags[3]).assertTrue();
+      expect(runtime.cachePolicy.logDelta).assertEqual(0);
     });
 
     it('executePollShouldUploadRetry', 0, async () => {
@@ -619,6 +842,8 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
       expect(db.insertCount).assertEqual(insertCountAfterSuccess + 2);
+      expect(db.insertReInsertFlags[0]).assertTrue();
+      expect(db.insertReInsertFlags[1]).assertTrue();
     });
 
     it('rumCleanupShouldUseInitTimer', 0, async () => {

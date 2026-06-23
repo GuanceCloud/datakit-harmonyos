@@ -150,6 +150,26 @@ async function assertRumRecordUploaded(
   expect(consumed).assertTrue();
 }
 
+async function assertLogRecordDroppedAfterUpload(
+  collector: MockCollector,
+  logContent: string
+): Promise<void> {
+  FTLogger.logBackground(logContent, Status.ERROR);
+
+  const record = await DBAssert.waitForSyncRecordContaining(DataType.LOG, [logContent, 'status=error'], 5000);
+  expect(record !== null).assertTrue();
+
+  collector.clearRequests();
+  FTSDK.flushSyncData();
+
+  const uploaded = await collector.waitForPayloadContaining([logContent, 'status=error'], 5000);
+  const consumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.LOG, record?.getUuid() ?? '', 5000);
+  await SdkTestLifecycle.waitForUploadIdle(4000);
+
+  expect(uploaded.length > 0).assertTrue();
+  expect(consumed).assertTrue();
+}
+
 async function waitForRumAggregation(): Promise<void> {
   await WaitUtils.delay(1200);
 }
@@ -304,6 +324,60 @@ export default function dataSyncTest() {
       expect(uploaded.length > 0).assertTrue();
       expect(consumed).assertTrue();
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('clientErrorUploadShouldDropRows', 0, async () => {
+      collector.setResponse(400, 'bad-request');
+
+      await assertLogRecordDroppedAfterUpload(collector, 'real_client_error_drop_log');
+
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('ignoredClientErrorUploadShouldDropRowsAndAllowLaterSuccess', 0, async () => {
+      collector.setResponse(403, 'forbidden');
+      await assertLogRecordDroppedAfterUpload(collector, 'real_ignored_403_drop_log');
+
+      collector.setResponse(429, 'rate-limit');
+      await assertLogRecordDroppedAfterUpload(collector, 'real_ignored_429_drop_log');
+
+      collector.setResponse(200, '');
+      await assertLogRecordDroppedAfterUpload(collector, 'real_after_ignored_success_log');
+
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('uploadShouldSendRumBeforeLogWhenBothExist', 0, async () => {
+      const viewName = 'real_order_rum_first_view';
+      const logContent = 'real_order_log_after_rum';
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+      FTLogger.logBackground(logContent, Status.INFO);
+
+      const rumRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view',
+        `view_name=${viewName}`
+      ], 5000);
+      const logRecord = await DBAssert.waitForSyncRecordContaining(DataType.LOG, [logContent], 5000);
+      expect(rumRecord !== null).assertTrue();
+      expect(logRecord !== null).assertTrue();
+
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+
+      const rumUploaded = await collector.waitForPayloadContaining([`view_name=${viewName}`], 5000);
+      const logUploaded = await collector.waitForPayloadContaining([logContent], 5000);
+      const requests = collector.getRequests()
+        .filter(request => request.url.includes('/v1/write/rum') || request.url.includes('/v1/write/logging'));
+
+      expect(rumUploaded.length > 0).assertTrue();
+      expect(logUploaded.length > 0).assertTrue();
+      expect(requests.length >= 2).assertTrue();
+      expect(requests[0].url.includes('/v1/write/rum')).assertTrue();
+      expect(requests[0].url.includes('/v1/write/logging')).assertFalse();
+      expect(await DBAssert.waitForSyncCount([DataType.RUM_APP, DataType.LOG], 0, 5000)).assertTrue();
     });
 
     it('rumActionShouldUpload', 0, async () => {

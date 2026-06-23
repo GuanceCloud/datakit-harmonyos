@@ -308,23 +308,14 @@ export class SDKTaskScheduler {
     const lane = this.getLane(task.type);
     lane.queue.push(task);
     lane.submittedTasks++;
-    if (this.shouldTraceSchedulerLane(task)) {
-      const laneTrace =
-        `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`;
-      if (task.type === SDKTaskType.UPLOAD) {
-        this.traceSchedulerLaneDebug(laneTrace);
-      } else {
-        this.traceSchedulerLane(laneTrace);
-      }
+    const laneTrace =
+      `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`;
+    if (task.type === SDKTaskType.UPLOAD) {
+      this.traceSchedulerLaneDebug(laneTrace);
+    } else {
+      this.traceSchedulerLane(laneTrace);
     }
     this.processLane(task.type);
-  }
-
-  private shouldTraceSchedulerLane(task: ScheduledSDKTask): boolean {
-    if (task.type === SDKTaskType.UPLOAD && task.name.indexOf('upload.poll#') === 0) {
-      return false;
-    }
-    return true;
   }
 
   private processLane(type: SDKTaskType): void {
