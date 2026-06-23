@@ -27,11 +27,15 @@ const KEY_ENABLE_LONG_TASKS = 'enable_long_tasks';
 const KEY_ENABLE_BACKGROUND_SERVICE = 'enable_background_service';
 const KEY_STRESS_LOG_BATCH_SIZE = 'stress_log_batch_size';
 const KEY_STRESS_LOG_INTERVAL_MS = 'stress_log_interval_ms';
+const KEY_STRESS_ACTION_TIMER_COUNT = 'stress_action_timer_count';
+const KEY_STRESS_ACTION_INTERVAL_MS = 'stress_action_interval_ms';
 const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
 const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
 const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
 const DEFAULT_STRESS_LOG_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LOG_INTERVAL_MS = 20;
+const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
+const DEFAULT_STRESS_ACTION_INTERVAL_MS = 20;
 const DEFAULT_IO_CACHE_TOTAL_LOGS = 200;
 const DEFAULT_IO_CACHE_PEAK_SIZE = 2;
 const DEFAULT_IO_CACHE_PEAK_INTERVAL_MS = 50;
@@ -39,6 +43,10 @@ const MIN_STRESS_LOG_BATCH_SIZE = 1;
 const MAX_STRESS_LOG_BATCH_SIZE = 1000;
 const MIN_STRESS_LOG_INTERVAL_MS = 16;
 const MAX_STRESS_LOG_INTERVAL_MS = 10000;
+const MIN_STRESS_ACTION_TIMER_COUNT = 1;
+const MAX_STRESS_ACTION_TIMER_COUNT = 20;
+const MIN_STRESS_ACTION_INTERVAL_MS = 16;
+const MAX_STRESS_ACTION_INTERVAL_MS = 10000;
 const MIN_IO_CACHE_TOTAL_LOGS = 1;
 const MAX_IO_CACHE_TOTAL_LOGS = 100000;
 const MIN_IO_CACHE_PEAK_SIZE = 1;
@@ -71,6 +79,8 @@ export struct RealAppStressTestPage {
   @State enableBackgroundService: boolean = false;
   @State stressLogBatchSize: number = DEFAULT_STRESS_LOG_BATCH_SIZE;
   @State stressLogIntervalMs: number = DEFAULT_STRESS_LOG_INTERVAL_MS;
+  @State stressActionTimerCount: number = DEFAULT_STRESS_ACTION_TIMER_COUNT;
+  @State stressActionIntervalMs: number = DEFAULT_STRESS_ACTION_INTERVAL_MS;
   @State ioCacheTotalLogs: number = DEFAULT_IO_CACHE_TOTAL_LOGS;
   @State ioCachePeakSize: number = DEFAULT_IO_CACHE_PEAK_SIZE;
   @State ioCachePeakIntervalMs: number = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
@@ -151,6 +161,7 @@ export struct RealAppStressTestPage {
     try {
       this.updateTestDuration();
       this.normalizeStressLogSettings();
+      this.normalizeStressActionSettings();
       const config = this.buildStressConfig();
       if (!this.hasRunnableScenario(config)) {
         promptAction.showToast({
@@ -164,7 +175,7 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, background=${this.enableBackgroundService}`);
+        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
       if (this.enableBackgroundService) {
@@ -275,7 +286,7 @@ export struct RealAppStressTestPage {
     const useRealResourceTraffic = this.enableResources && this.useRealTraffic;
     const config = this.stressTestManager.createConfig(
       this.testDuration,
-      this.useRealTraffic,
+      useRealResourceTraffic,
       this.enableLogs,
       this.enableActions,
       this.enableResources,
@@ -288,6 +299,8 @@ export struct RealAppStressTestPage {
     config.logTotalCount = 0;
     config.logBatchSize = this.stressLogBatchSize;
     config.logIntervalMs = this.stressLogIntervalMs;
+    config.actionThreadCount = this.stressActionTimerCount;
+    config.actionIntervalMs = this.stressActionIntervalMs;
     return config;
   }
 
@@ -359,6 +372,10 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_LOG_BATCH_SIZE, DEFAULT_STRESS_LOG_BATCH_SIZE) as number;
         this.stressLogIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_LOG_INTERVAL_MS, DEFAULT_STRESS_LOG_INTERVAL_MS) as number;
+        this.stressActionTimerCount =
+          await this.preferencesStore.get(KEY_STRESS_ACTION_TIMER_COUNT, DEFAULT_STRESS_ACTION_TIMER_COUNT) as number;
+        this.stressActionIntervalMs =
+          await this.preferencesStore.get(KEY_STRESS_ACTION_INTERVAL_MS, DEFAULT_STRESS_ACTION_INTERVAL_MS) as number;
         this.ioCacheTotalLogs =
           await this.preferencesStore.get(KEY_IO_CACHE_TOTAL_LOGS, DEFAULT_IO_CACHE_TOTAL_LOGS) as number;
         this.ioCachePeakSize =
@@ -366,6 +383,7 @@ export struct RealAppStressTestPage {
         this.ioCachePeakIntervalMs =
           await this.preferencesStore.get(KEY_IO_CACHE_PEAK_INTERVAL_MS, DEFAULT_IO_CACHE_PEAK_INTERVAL_MS) as number;
         this.normalizeStressLogSettings();
+        this.normalizeStressActionSettings();
         this.normalizeIoCacheSettings();
       }
     } catch (error) {
@@ -391,6 +409,8 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_ENABLE_BACKGROUND_SERVICE, this.enableBackgroundService);
         await this.preferencesStore.put(KEY_STRESS_LOG_BATCH_SIZE, this.stressLogBatchSize);
         await this.preferencesStore.put(KEY_STRESS_LOG_INTERVAL_MS, this.stressLogIntervalMs);
+        await this.preferencesStore.put(KEY_STRESS_ACTION_TIMER_COUNT, this.stressActionTimerCount);
+        await this.preferencesStore.put(KEY_STRESS_ACTION_INTERVAL_MS, this.stressActionIntervalMs);
         await this.preferencesStore.put(KEY_IO_CACHE_TOTAL_LOGS, this.ioCacheTotalLogs);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_SIZE, this.ioCachePeakSize);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_INTERVAL_MS, this.ioCachePeakIntervalMs);
@@ -451,6 +471,19 @@ export struct RealAppStressTestPage {
     );
   }
 
+  private normalizeStressActionSettings(): void {
+    this.stressActionTimerCount = this.clampNumber(
+      Math.floor(this.stressActionTimerCount),
+      MIN_STRESS_ACTION_TIMER_COUNT,
+      MAX_STRESS_ACTION_TIMER_COUNT
+    );
+    this.stressActionIntervalMs = this.clampNumber(
+      Math.floor(this.stressActionIntervalMs),
+      MIN_STRESS_ACTION_INTERVAL_MS,
+      MAX_STRESS_ACTION_INTERVAL_MS
+    );
+  }
+
   private normalizeIoCacheSettings(): void {
     this.ioCacheTotalLogs = this.clampNumber(
       Math.floor(this.ioCacheTotalLogs),
@@ -496,6 +529,24 @@ export struct RealAppStressTestPage {
       this.stressLogIntervalMs + delta,
       MIN_STRESS_LOG_INTERVAL_MS,
       MAX_STRESS_LOG_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  adjustStressActionTimerCount(delta: number): void {
+    this.stressActionTimerCount = this.clampNumber(
+      this.stressActionTimerCount + delta,
+      MIN_STRESS_ACTION_TIMER_COUNT,
+      MAX_STRESS_ACTION_TIMER_COUNT
+    );
+    this.saveSettings();
+  }
+
+  adjustStressActionInterval(delta: number): void {
+    this.stressActionIntervalMs = this.clampNumber(
+      this.stressActionIntervalMs + delta,
+      MIN_STRESS_ACTION_INTERVAL_MS,
+      MAX_STRESS_ACTION_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -846,6 +897,78 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Text(`Current: ${this.stressLogBatchSize} logs per ${this.stressLogIntervalMs}ms, duration ${this.formatElapsedTime(this.testDuration)}`)
+              .fontSize(13)
+              .fontColor('#007DFF')
+              .width('100%')
+              .textAlign(TextAlign.Center)
+          }
+          .width('100%')
+          .padding(18)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(8)
+
+          Column({ space: 10 }) {
+            Text('Action Params')
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+
+            Column({ space: 5 }) {
+              Text('Timer Count')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-1')
+                  .onClick(() => this.adjustStressActionTimerCount(-1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressActionTimerCount > MIN_STRESS_ACTION_TIMER_COUNT)
+
+                Text(`${this.stressActionTimerCount}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+1')
+                  .onClick(() => this.adjustStressActionTimerCount(1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressActionTimerCount < MAX_STRESS_ACTION_TIMER_COUNT)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Column({ space: 5 }) {
+              Text('Event Interval (ms)')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-10')
+                  .onClick(() => this.adjustStressActionInterval(-10))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressActionIntervalMs > MIN_STRESS_ACTION_INTERVAL_MS)
+
+                Text(`${this.stressActionIntervalMs}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+10')
+                  .onClick(() => this.adjustStressActionInterval(10))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressActionIntervalMs < MAX_STRESS_ACTION_INTERVAL_MS)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Text(`Current: ${this.stressActionTimerCount} timers, action every ${this.stressActionIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')

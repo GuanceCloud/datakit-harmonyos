@@ -250,14 +250,6 @@ export class StressTestManager {
     DemoLogger.i(TAG,
       `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, longTasks=${normalizedConfig.enableLongTasks}`);
 
-    if (normalizedConfig.durationSeconds > 0) {
-      this.autoStopTimerId = setTimeout((): void => {
-        const actualElapsed = this.getElapsedSeconds();
-        DemoLogger.i(TAG, `Stress test duration reached, auto-stopping. elapsed=${actualElapsed}s`);
-        this.stop('duration');
-      }, normalizedConfig.durationSeconds * 1000);
-    }
-
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
     }
@@ -272,6 +264,9 @@ export class StressTestManager {
     }
     if (normalizedConfig.enableLongTasks) {
       this.startLongTaskTimer(normalizedConfig);
+    }
+    if (normalizedConfig.durationSeconds > 0) {
+      this.startAutoStopTimer(normalizedConfig);
     }
   }
 
@@ -435,10 +430,41 @@ export class StressTestManager {
     }
   }
 
-  private emitConfiguredLogs(threadIndex: number, config: StressTestConfig): boolean {
-    if (config.durationSeconds > 0 && Date.now() - this.startTime >= config.durationSeconds * 1000) {
-      return false;
+  private startAutoStopTimer(config: StressTestConfig): void {
+    const stopDelayMs = config.durationSeconds * 1000 + this.getAutoStopGraceMs(config);
+    this.autoStopTimerId = setTimeout((): void => {
+      const actualElapsed = this.getElapsedSeconds();
+      DemoLogger.i(TAG, `Stress test duration reached, auto-stopping. elapsed=${actualElapsed}s`);
+      this.autoStopTimerId = setTimeout((): void => {
+        this.stop('duration');
+      }, 0);
+    }, stopDelayMs);
+  }
+
+  private getAutoStopGraceMs(config: StressTestConfig): number {
+    let minIntervalMs = Number.MAX_SAFE_INTEGER;
+    if (config.enableLogs && config.logThreadCount > 0) {
+      minIntervalMs = Math.min(minIntervalMs, config.logIntervalMs);
     }
+    if (config.enableActions && config.actionThreadCount > 0) {
+      minIntervalMs = Math.min(minIntervalMs, config.actionIntervalMs);
+    }
+    if (config.enableResources && config.resourceThreadCount > 0) {
+      minIntervalMs = Math.min(minIntervalMs, config.resourceIntervalMs);
+    }
+    if (config.enableErrors) {
+      minIntervalMs = Math.min(minIntervalMs, config.errorIntervalMs);
+    }
+    if (config.enableLongTasks) {
+      minIntervalMs = Math.min(minIntervalMs, config.longTaskIntervalMs);
+    }
+    if (minIntervalMs === Number.MAX_SAFE_INTEGER || minIntervalMs <= 1) {
+      return 0;
+    }
+    return Math.min(100, minIntervalMs - 1);
+  }
+
+  private emitConfiguredLogs(threadIndex: number, config: StressTestConfig): boolean {
     if (config.logTotalCount > 0 && this.currentStats.logsGenerated >= config.logTotalCount) {
       return false;
     }
@@ -715,6 +741,9 @@ export class StressTestManager {
     const elapsedSeconds = this.getElapsedSeconds();
     this.isRunning = false;
     this.clearAllTimers();
+    if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
+      FTLogger.flush();
+    }
 
     this.currentStats.isRunning = false;
     this.currentStats.endedAtMs = Date.now();
