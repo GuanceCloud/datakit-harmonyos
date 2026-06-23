@@ -26,9 +26,9 @@ function createContext(): Context {
   return new Object() as Context;
 }
 
-function createConfig(): FTSDKConfig {
+function createConfig(autoSync: boolean = true): FTSDKConfig {
   return FTSDKConfig.builder(TEST_URL)
-    .setAutoSync(true)
+    .setAutoSync(autoSync)
     .setSyncPageSize(SyncPageSize.MINI)
     .setDataSyncRetryCount(2)
     .setSyncSleepTime(1);
@@ -163,7 +163,7 @@ class FakeResultSet {
 class FakeRdbStore {
   queryCount: number = 0;
   deleteCount: number = 0;
-  hasRow: boolean = true;
+  hasRow: boolean = false;
   count: number = 2;
   throwQuery: boolean = false;
   throwDelete: boolean = false;
@@ -544,6 +544,48 @@ export default function syncTaskManagerUnitTest() {
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
       manager.executeSyncPoll();
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('initShouldTriggerUploadWhenCachedDataExists', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      db.rdbStore.hasRow = true;
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-init', 'df_rum_harmonyos_log,sdk_data_id=log-init value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.init(createConfig(), createContext());
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('setAutoSyncTrueShouldTriggerCachedUpload', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(false), createContext());
+      await flushPromises();
+      expect(runtime.executeHttpCount).assertEqual(0);
+
+      db.rdbStore.hasRow = true;
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-autosync', 'df_rum_harmonyos_log,sdk_data_id=log-autosync value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.setAutoSync(true);
       await runScheduledUpload(runtime);
 
       expect(runtime.executeHttpCount).assertEqual(1);

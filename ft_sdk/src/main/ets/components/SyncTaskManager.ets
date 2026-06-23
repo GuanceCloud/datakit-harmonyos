@@ -124,6 +124,7 @@ export class SyncTaskManager {
   private uploadStartTraced = false;
   private isStop = false;
   private autoSync = false;
+  private initialSyncPollTriggered = false;
   private syncSleepTime = 0;
   private pageSize = 100; // Default page size (increased from 50 to improve upload throughput)
   private dataSyncMaxRetryCount = 3; // Maximum retry count
@@ -219,6 +220,17 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
+
+    this.triggerInitialSyncPollIfNeeded();
+  }
+
+  private triggerInitialSyncPollIfNeeded(): void {
+    if (this.initialSyncPollTriggered || !this.autoSync || this.isStop || !this.context) {
+      return;
+    }
+
+    this.initialSyncPollTriggered = true;
+    this.executeSyncPoll();
   }
 
   /**
@@ -1560,8 +1572,13 @@ export class SyncTaskManager {
    * Aligned with Android: SyncTaskManager.setAutoSync()
    */
   public setAutoSync(enabled: boolean): void {
+    const wasAutoSync = this.autoSync;
     this.autoSync = enabled;
     FTInnerLogger.i(TAG, `Auto sync ${enabled ? 'enabled' : 'disabled'}`);
+
+    if (!wasAutoSync && enabled) {
+      this.executeSyncPoll();
+    }
   }
 
   /**

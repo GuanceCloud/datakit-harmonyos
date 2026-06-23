@@ -110,12 +110,11 @@ export default function syncDataHelperUnitTest() {
 
     it('bodyContentShouldMergeLogContextDictionary', 0, () => {
       const helper = new SyncDataHelper();
-      const staticContext: Record<string, LogGlobalContextValue> = {
-        dict_string: 'value',
-        dict_number: 42,
-        dict_boolean: true,
-        dict_string_object: new String('wrapped-value')
-      };
+      const staticContext: Map<string, LogGlobalContextValue> = new Map();
+      staticContext.set('dict_string', 'value');
+      staticContext.set('dict_number', 42);
+      staticContext.set('dict_boolean', true);
+      staticContext.set('dict_string_object', new String('wrapped-value'));
       const dynamicContext: Map<string, LogGlobalContextValue> = new Map();
       dynamicContext.set('dynamic_number', 7);
       dynamicContext.set('dynamic_false', false);
