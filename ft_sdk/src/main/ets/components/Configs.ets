@@ -88,7 +88,8 @@ export class FTRUMConfig {
 
   /**
    * Set maximum RUM entry count, minimum not less than 10000.
-   * When FTSDKConfig.enableLimitWithDbSize() is enabled, this count limit is ignored.
+   * Moved from FTSDKConfig to FTRUMConfig.
+   * When FTRUMConfig.setRumCacheLimitCount() is enabled, this count limit is ignored.
    */
   public setRumCacheLimitCount(limitCount: number): FTRUMConfig {
     this.rumCacheLimitCount = Math.max(Constants.MINI_DB_RUM_CACHE_NUM, limitCount);
@@ -521,7 +522,8 @@ export class FTLoggerConfig {
 
   /**
    * Set maximum log entry count, minimum not less than 1000.
-   * When FTSDKConfig.enableLimitWithDbSize() is enabled, this count limit is ignored.
+   * Moved from FTSDKConfig to FTLoggerConfig.
+   * When FTLoggerConfig.setLogCacheLimitCount() is enabled, this count limit is ignored.
    */
   setLogCacheLimitCount(count: number): FTLoggerConfig {
     this.logCacheLimitCount = Math.max(Constants.MINI_DB_LOG_CACHE_NUM, count);
@@ -886,7 +888,8 @@ export class FTSDKConfig {
   /**
    * Enable database size limit.
    * Default limit is 100MB. When dbSize is provided, the minimum is 30MB.
-   * @deprecated Kept for old DB cache compatibility.
+   * When enabled, the database size policy takes priority over the log/RUM count limits
+   * configured by FTLoggerConfig.setLogCacheLimitCount(...) and FTRUMConfig.setRumCacheLimitCount(...).
    */
   enableLimitWithDbSize(dbSize?: number): FTSDKConfig {
     if (dbSize !== undefined) {
@@ -898,7 +901,6 @@ export class FTSDKConfig {
 
   /**
    * Set database cache limit with custom size.
-   * @deprecated Use enableLimitWithDbSize(dbSize).
    */
   setDbCacheLimit(dbSize: number): FTSDKConfig {
     return this.enableLimitWithDbSize(dbSize);
