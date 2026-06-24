@@ -43,6 +43,7 @@ export interface StressTestConfig {
   realResourceUrl: string;
   errorBatchSize: number;
   errorIntervalMs: number;
+  longTaskBatchSize: number;
   longTaskIntervalMs: number;
 }
 
@@ -107,6 +108,7 @@ export function createDefaultStressTestConfig(
     realResourceUrl: "",
     errorBatchSize: 1,
     errorIntervalMs: 1000,
+    longTaskBatchSize: 1,
     longTaskIntervalMs: 1500
   };
 }
@@ -295,7 +297,7 @@ export class StressTestManager {
     this.currentStats = this.createStatsForStart(normalizedConfig, this.startTime);
 
     DemoLogger.i(TAG,
-      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}`);
+      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}, longTaskBatchSize=${normalizedConfig.longTaskBatchSize}, longTaskInterval=${normalizedConfig.longTaskIntervalMs}`);
 
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
@@ -440,6 +442,7 @@ export class StressTestManager {
       realResourceUrl: (config.realResourceUrl ?? "").trim(),
       errorBatchSize: Math.max(1, Math.floor(config.errorBatchSize)),
       errorIntervalMs: Math.max(250, Math.floor(config.errorIntervalMs)),
+      longTaskBatchSize: Math.max(1, Math.floor(config.longTaskBatchSize)),
       longTaskIntervalMs: Math.max(250, Math.floor(config.longTaskIntervalMs))
     };
   }
@@ -584,10 +587,10 @@ export class StressTestManager {
         clearInterval(intervalId);
         return;
       }
-      this.sendLongTask();
+      this.sendLongTaskBatch(config.longTaskBatchSize);
     }, config.longTaskIntervalMs);
     this.exceptionIntervalIds.push(intervalId);
-    this.sendLongTask();
+    this.sendLongTaskBatch(config.longTaskBatchSize);
   }
 
   private finishLogIoCacheStress(totalLogs: number): void {
@@ -778,6 +781,13 @@ export class StressTestManager {
     } catch (error) {
       this.recordErrorMessage(`long task failed: ${error}`);
       DemoLogger.e(TAG, `Failed to add long task: ${error}`);
+    }
+  }
+
+  private sendLongTaskBatch(batchSize: number): void {
+    const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
+    for (let i = 0; i < normalizedBatchSize; i++) {
+      this.sendLongTask();
     }
   }
 

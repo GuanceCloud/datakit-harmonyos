@@ -35,6 +35,8 @@ const KEY_STRESS_RESOURCE_TIMER_COUNT = 'stress_resource_timer_count';
 const KEY_STRESS_RESOURCE_INTERVAL_MS = 'stress_resource_interval_ms';
 const KEY_STRESS_ERROR_BATCH_SIZE = 'stress_error_batch_size';
 const KEY_STRESS_ERROR_INTERVAL_MS = 'stress_error_interval_ms';
+const KEY_STRESS_LONG_TASK_BATCH_SIZE = 'stress_long_task_batch_size';
+const KEY_STRESS_LONG_TASK_INTERVAL_MS = 'stress_long_task_interval_ms';
 const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
 const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
 const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
@@ -46,6 +48,8 @@ const DEFAULT_STRESS_RESOURCE_TIMER_COUNT = 2;
 const DEFAULT_STRESS_RESOURCE_INTERVAL_MS = 200;
 const DEFAULT_STRESS_ERROR_BATCH_SIZE = 1;
 const DEFAULT_STRESS_ERROR_INTERVAL_MS = 1000;
+const DEFAULT_STRESS_LONG_TASK_BATCH_SIZE = 1;
+const DEFAULT_STRESS_LONG_TASK_INTERVAL_MS = 1500;
 const DEFAULT_REAL_RESOURCE_URL = '';
 const MAX_REAL_RESOURCE_URL_COUNT = 10;
 const DEFAULT_IO_CACHE_TOTAL_LOGS = 200;
@@ -67,6 +71,10 @@ const MIN_STRESS_ERROR_BATCH_SIZE = 1;
 const MAX_STRESS_ERROR_BATCH_SIZE = 1000;
 const MIN_STRESS_ERROR_INTERVAL_MS = 250;
 const MAX_STRESS_ERROR_INTERVAL_MS = 10000;
+const MIN_STRESS_LONG_TASK_BATCH_SIZE = 1;
+const MAX_STRESS_LONG_TASK_BATCH_SIZE = 1000;
+const MIN_STRESS_LONG_TASK_INTERVAL_MS = 250;
+const MAX_STRESS_LONG_TASK_INTERVAL_MS = 10000;
 const MIN_IO_CACHE_TOTAL_LOGS = 1;
 const MAX_IO_CACHE_TOTAL_LOGS = 100000;
 const MIN_IO_CACHE_PEAK_SIZE = 1;
@@ -106,6 +114,8 @@ export struct RealAppStressTestPage {
   @State stressResourceIntervalMs: number = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
   @State stressErrorBatchSize: number = DEFAULT_STRESS_ERROR_BATCH_SIZE;
   @State stressErrorIntervalMs: number = DEFAULT_STRESS_ERROR_INTERVAL_MS;
+  @State stressLongTaskBatchSize: number = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
+  @State stressLongTaskIntervalMs: number = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
   @State ioCacheTotalLogs: number = DEFAULT_IO_CACHE_TOTAL_LOGS;
   @State ioCachePeakSize: number = DEFAULT_IO_CACHE_PEAK_SIZE;
   @State ioCachePeakIntervalMs: number = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
@@ -189,6 +199,7 @@ export struct RealAppStressTestPage {
       this.normalizeStressActionSettings();
       this.normalizeStressResourceSettings();
       this.normalizeStressErrorSettings();
+      this.normalizeStressLongTaskSettings();
       const config = this.buildStressConfig();
       if (!this.hasRunnableScenario(config)) {
         promptAction.showToast({
@@ -202,7 +213,7 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, background=${this.enableBackgroundService}`);
+        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
       if (this.enableBackgroundService) {
@@ -333,6 +344,8 @@ export struct RealAppStressTestPage {
     config.realResourceUrl = this.serializeRealResourceUrls();
     config.errorBatchSize = this.stressErrorBatchSize;
     config.errorIntervalMs = this.stressErrorIntervalMs;
+    config.longTaskBatchSize = this.stressLongTaskBatchSize;
+    config.longTaskIntervalMs = this.stressLongTaskIntervalMs;
     return config;
   }
 
@@ -422,6 +435,10 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_ERROR_BATCH_SIZE, DEFAULT_STRESS_ERROR_BATCH_SIZE) as number;
         this.stressErrorIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_ERROR_INTERVAL_MS, DEFAULT_STRESS_ERROR_INTERVAL_MS) as number;
+        this.stressLongTaskBatchSize =
+          await this.preferencesStore.get(KEY_STRESS_LONG_TASK_BATCH_SIZE, DEFAULT_STRESS_LONG_TASK_BATCH_SIZE) as number;
+        this.stressLongTaskIntervalMs =
+          await this.preferencesStore.get(KEY_STRESS_LONG_TASK_INTERVAL_MS, DEFAULT_STRESS_LONG_TASK_INTERVAL_MS) as number;
         this.ioCacheTotalLogs =
           await this.preferencesStore.get(KEY_IO_CACHE_TOTAL_LOGS, DEFAULT_IO_CACHE_TOTAL_LOGS) as number;
         this.ioCachePeakSize =
@@ -432,6 +449,7 @@ export struct RealAppStressTestPage {
         this.normalizeStressActionSettings();
         this.normalizeStressResourceSettings();
         this.normalizeStressErrorSettings();
+        this.normalizeStressLongTaskSettings();
         this.normalizeIoCacheSettings();
       }
     } catch (error) {
@@ -464,6 +482,8 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_RESOURCE_INTERVAL_MS, this.stressResourceIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_ERROR_BATCH_SIZE, this.stressErrorBatchSize);
         await this.preferencesStore.put(KEY_STRESS_ERROR_INTERVAL_MS, this.stressErrorIntervalMs);
+        await this.preferencesStore.put(KEY_STRESS_LONG_TASK_BATCH_SIZE, this.stressLongTaskBatchSize);
+        await this.preferencesStore.put(KEY_STRESS_LONG_TASK_INTERVAL_MS, this.stressLongTaskIntervalMs);
         await this.preferencesStore.put(KEY_IO_CACHE_TOTAL_LOGS, this.ioCacheTotalLogs);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_SIZE, this.ioCachePeakSize);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_INTERVAL_MS, this.ioCachePeakIntervalMs);
@@ -560,6 +580,19 @@ export struct RealAppStressTestPage {
       Math.floor(this.stressErrorIntervalMs),
       MIN_STRESS_ERROR_INTERVAL_MS,
       MAX_STRESS_ERROR_INTERVAL_MS
+    );
+  }
+
+  private normalizeStressLongTaskSettings(): void {
+    this.stressLongTaskBatchSize = this.clampNumber(
+      Math.floor(this.stressLongTaskBatchSize),
+      MIN_STRESS_LONG_TASK_BATCH_SIZE,
+      MAX_STRESS_LONG_TASK_BATCH_SIZE
+    );
+    this.stressLongTaskIntervalMs = this.clampNumber(
+      Math.floor(this.stressLongTaskIntervalMs),
+      MIN_STRESS_LONG_TASK_INTERVAL_MS,
+      MAX_STRESS_LONG_TASK_INTERVAL_MS
     );
   }
 
@@ -703,6 +736,24 @@ export struct RealAppStressTestPage {
       this.stressErrorIntervalMs + delta,
       MIN_STRESS_ERROR_INTERVAL_MS,
       MAX_STRESS_ERROR_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  adjustStressLongTaskBatchSize(delta: number): void {
+    this.stressLongTaskBatchSize = this.clampNumber(
+      this.stressLongTaskBatchSize + delta,
+      MIN_STRESS_LONG_TASK_BATCH_SIZE,
+      MAX_STRESS_LONG_TASK_BATCH_SIZE
+    );
+    this.saveSettings();
+  }
+
+  adjustStressLongTaskInterval(delta: number): void {
+    this.stressLongTaskIntervalMs = this.clampNumber(
+      this.stressLongTaskIntervalMs + delta,
+      MIN_STRESS_LONG_TASK_INTERVAL_MS,
+      MAX_STRESS_LONG_TASK_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -1357,6 +1408,78 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Text(`Current: ${this.stressErrorBatchSize} custom errors every ${this.stressErrorIntervalMs}ms`)
+              .fontSize(13)
+              .fontColor('#007DFF')
+              .width('100%')
+              .textAlign(TextAlign.Center)
+          }
+          .width('100%')
+          .padding(18)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(8)
+
+          Column({ space: 10 }) {
+            Text('Long Task Params')
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+
+            Column({ space: 5 }) {
+              Text('Batch Size')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-1')
+                  .onClick(() => this.adjustStressLongTaskBatchSize(-1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressLongTaskBatchSize > MIN_STRESS_LONG_TASK_BATCH_SIZE)
+
+                Text(`${this.stressLongTaskBatchSize}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+1')
+                  .onClick(() => this.adjustStressLongTaskBatchSize(1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressLongTaskBatchSize < MAX_STRESS_LONG_TASK_BATCH_SIZE)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Column({ space: 5 }) {
+              Text('Event Interval (ms)')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-250')
+                  .onClick(() => this.adjustStressLongTaskInterval(-250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressLongTaskIntervalMs > MIN_STRESS_LONG_TASK_INTERVAL_MS)
+
+                Text(`${this.stressLongTaskIntervalMs}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+250')
+                  .onClick(() => this.adjustStressLongTaskInterval(250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressLongTaskIntervalMs < MAX_STRESS_LONG_TASK_INTERVAL_MS)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Text(`Current: ${this.stressLongTaskBatchSize} long tasks every ${this.stressLongTaskIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')

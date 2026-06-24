@@ -114,6 +114,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     config.realResourceUrl = this.readString(want, 'realResourceUrl', config.realResourceUrl).trim();
     config.errorBatchSize = this.readNumber(want, 'errorBatchSize', config.errorBatchSize);
     config.errorIntervalMs = this.readNumber(want, 'errorIntervalMs', config.errorIntervalMs);
+    config.longTaskBatchSize = this.readNumber(want, 'longTaskBatchSize', config.longTaskBatchSize);
     config.longTaskIntervalMs = this.readNumber(want, 'longTaskIntervalMs', config.longTaskIntervalMs);
     return config;
   }
