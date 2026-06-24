@@ -33,6 +33,7 @@ const KEY_STRESS_ACTION_TIMER_COUNT = 'stress_action_timer_count';
 const KEY_STRESS_ACTION_INTERVAL_MS = 'stress_action_interval_ms';
 const KEY_STRESS_RESOURCE_TIMER_COUNT = 'stress_resource_timer_count';
 const KEY_STRESS_RESOURCE_INTERVAL_MS = 'stress_resource_interval_ms';
+const KEY_STRESS_NAVIGATION_INTERVAL_MS = 'stress_navigation_interval_ms';
 const KEY_STRESS_ERROR_BATCH_SIZE = 'stress_error_batch_size';
 const KEY_STRESS_ERROR_INTERVAL_MS = 'stress_error_interval_ms';
 const KEY_STRESS_LONG_TASK_BATCH_SIZE = 'stress_long_task_batch_size';
@@ -46,6 +47,7 @@ const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
 const DEFAULT_STRESS_ACTION_INTERVAL_MS = 20;
 const DEFAULT_STRESS_RESOURCE_TIMER_COUNT = 2;
 const DEFAULT_STRESS_RESOURCE_INTERVAL_MS = 200;
+const DEFAULT_STRESS_NAVIGATION_INTERVAL_MS = 1000;
 const DEFAULT_STRESS_ERROR_BATCH_SIZE = 1;
 const DEFAULT_STRESS_ERROR_INTERVAL_MS = 1000;
 const DEFAULT_STRESS_LONG_TASK_BATCH_SIZE = 1;
@@ -67,6 +69,8 @@ const MIN_STRESS_RESOURCE_TIMER_COUNT = 1;
 const MAX_STRESS_RESOURCE_TIMER_COUNT = 20;
 const MIN_STRESS_RESOURCE_INTERVAL_MS = 50;
 const MAX_STRESS_RESOURCE_INTERVAL_MS = 10000;
+const MIN_STRESS_NAVIGATION_INTERVAL_MS = 250;
+const MAX_STRESS_NAVIGATION_INTERVAL_MS = 10000;
 const MIN_STRESS_ERROR_BATCH_SIZE = 1;
 const MAX_STRESS_ERROR_BATCH_SIZE = 1000;
 const MIN_STRESS_ERROR_INTERVAL_MS = 250;
@@ -112,6 +116,7 @@ export struct RealAppStressTestPage {
   @State stressActionIntervalMs: number = DEFAULT_STRESS_ACTION_INTERVAL_MS;
   @State stressResourceTimerCount: number = DEFAULT_STRESS_RESOURCE_TIMER_COUNT;
   @State stressResourceIntervalMs: number = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
+  @State stressNavigationIntervalMs: number = DEFAULT_STRESS_NAVIGATION_INTERVAL_MS;
   @State stressErrorBatchSize: number = DEFAULT_STRESS_ERROR_BATCH_SIZE;
   @State stressErrorIntervalMs: number = DEFAULT_STRESS_ERROR_INTERVAL_MS;
   @State stressLongTaskBatchSize: number = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
@@ -198,6 +203,7 @@ export struct RealAppStressTestPage {
       this.normalizeStressLogSettings();
       this.normalizeStressActionSettings();
       this.normalizeStressResourceSettings();
+      this.normalizeStressNavigationSettings();
       this.normalizeStressErrorSettings();
       this.normalizeStressLongTaskSettings();
       const config = this.buildStressConfig();
@@ -213,7 +219,7 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
+        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, navigationInterval=${config.navigationIntervalMs}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
       if (this.enableBackgroundService) {
@@ -227,6 +233,10 @@ export struct RealAppStressTestPage {
         message: `Stress test started (${this.testDuration}s)`,
         duration: 2000
       });
+
+      if (config.enableNavigation) {
+        this.navigateToStressTestPageA();
+      }
     } catch (error) {
       DemoLogger.e(TAG, `Failed to start stress test: ${error}`);
       promptAction.showToast({
@@ -235,6 +245,31 @@ export struct RealAppStressTestPage {
       });
       this.isTestRunning = false;
     }
+  }
+
+  private navigateToStressTestPageA(): void {
+    try {
+      router.replaceUrl({ url: 'pages/StressTestAPage' });
+      DemoLogger.i(TAG, "Auto navigation started at StressTestAPage (replaced)");
+    } catch (error) {
+      DemoLogger.e(TAG, `Failed to navigate to StressTestAPage: ${error}`);
+      promptAction.showToast({
+        message: `Navigation failed: ${error}`,
+        duration: 2000
+      });
+    }
+  }
+
+  triggerCrash(): void {
+    DemoLogger.i(TAG, "Triggering crash...");
+    promptAction.showToast({
+      message: "Crash triggered - app will crash",
+      duration: 1000
+    });
+    // Throw asynchronously so HarmonyOS errorManager can catch it as an unhandled exception.
+    setTimeout((): void => {
+      throw new Error('Intentional crash for stress testing');
+    }, 100);
   }
 
   startIoCacheStressTest(): void {
@@ -342,6 +377,7 @@ export struct RealAppStressTestPage {
     config.resourceThreadCount = this.stressResourceTimerCount;
     config.resourceIntervalMs = this.stressResourceIntervalMs;
     config.realResourceUrl = this.serializeRealResourceUrls();
+    config.navigationIntervalMs = this.stressNavigationIntervalMs;
     config.errorBatchSize = this.stressErrorBatchSize;
     config.errorIntervalMs = this.stressErrorIntervalMs;
     config.longTaskBatchSize = this.stressLongTaskBatchSize;
@@ -431,6 +467,8 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_RESOURCE_TIMER_COUNT, DEFAULT_STRESS_RESOURCE_TIMER_COUNT) as number;
         this.stressResourceIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_RESOURCE_INTERVAL_MS, DEFAULT_STRESS_RESOURCE_INTERVAL_MS) as number;
+        this.stressNavigationIntervalMs =
+          await this.preferencesStore.get(KEY_STRESS_NAVIGATION_INTERVAL_MS, DEFAULT_STRESS_NAVIGATION_INTERVAL_MS) as number;
         this.stressErrorBatchSize =
           await this.preferencesStore.get(KEY_STRESS_ERROR_BATCH_SIZE, DEFAULT_STRESS_ERROR_BATCH_SIZE) as number;
         this.stressErrorIntervalMs =
@@ -448,6 +486,7 @@ export struct RealAppStressTestPage {
         this.normalizeStressLogSettings();
         this.normalizeStressActionSettings();
         this.normalizeStressResourceSettings();
+        this.normalizeStressNavigationSettings();
         this.normalizeStressErrorSettings();
         this.normalizeStressLongTaskSettings();
         this.normalizeIoCacheSettings();
@@ -480,6 +519,7 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_ACTION_INTERVAL_MS, this.stressActionIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_RESOURCE_TIMER_COUNT, this.stressResourceTimerCount);
         await this.preferencesStore.put(KEY_STRESS_RESOURCE_INTERVAL_MS, this.stressResourceIntervalMs);
+        await this.preferencesStore.put(KEY_STRESS_NAVIGATION_INTERVAL_MS, this.stressNavigationIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_ERROR_BATCH_SIZE, this.stressErrorBatchSize);
         await this.preferencesStore.put(KEY_STRESS_ERROR_INTERVAL_MS, this.stressErrorIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_LONG_TASK_BATCH_SIZE, this.stressLongTaskBatchSize);
@@ -567,6 +607,14 @@ export struct RealAppStressTestPage {
       Math.floor(this.stressResourceIntervalMs),
       MIN_STRESS_RESOURCE_INTERVAL_MS,
       MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+  }
+
+  private normalizeStressNavigationSettings(): void {
+    this.stressNavigationIntervalMs = this.clampNumber(
+      Math.floor(this.stressNavigationIntervalMs),
+      MIN_STRESS_NAVIGATION_INTERVAL_MS,
+      MAX_STRESS_NAVIGATION_INTERVAL_MS
     );
   }
 
@@ -718,6 +766,15 @@ export struct RealAppStressTestPage {
       this.stressResourceIntervalMs + delta,
       MIN_STRESS_RESOURCE_INTERVAL_MS,
       MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  adjustStressNavigationInterval(delta: number): void {
+    this.stressNavigationIntervalMs = this.clampNumber(
+      this.stressNavigationIntervalMs + delta,
+      MIN_STRESS_NAVIGATION_INTERVAL_MS,
+      MAX_STRESS_NAVIGATION_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -1074,13 +1131,13 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Row() {
-              Toggle({ type: 0, isOn: this.enableNavigation })
+              Toggle({ type: 0, isOn: this.enableLongTasks })
                 .onChange((isOn: boolean) => {
-                  this.enableNavigation = isOn;
+                  this.enableLongTasks = isOn;
                   this.saveSettings();
                 })
                 .enabled(!this.isTestRunning)
-              Text('Auto Navigation')
+              Text('Long Tasks')
                 .fontSize(16)
                 .margin({ left: 12 })
             }
@@ -1100,13 +1157,13 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Row() {
-              Toggle({ type: 0, isOn: this.enableLongTasks })
+              Toggle({ type: 0, isOn: this.enableNavigation })
                 .onChange((isOn: boolean) => {
-                  this.enableLongTasks = isOn;
+                  this.enableNavigation = isOn;
                   this.saveSettings();
                 })
                 .enabled(!this.isTestRunning)
-              Text('Long Tasks')
+              Text('Auto Navigation')
                 .fontSize(16)
                 .margin({ left: 12 })
             }
@@ -1124,6 +1181,50 @@ export struct RealAppStressTestPage {
                 .margin({ left: 12 })
             }
             .width('100%')
+          }
+          .width('100%')
+          .padding(18)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(8)
+
+          Column({ space: 10 }) {
+            Text('Auto Navigation Params')
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+
+            Column({ space: 5 }) {
+              Text('Switch Interval (ms)')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-250')
+                  .onClick(() => this.adjustStressNavigationInterval(-250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressNavigationIntervalMs > MIN_STRESS_NAVIGATION_INTERVAL_MS)
+
+                Text(`${this.stressNavigationIntervalMs}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+250')
+                  .onClick(() => this.adjustStressNavigationInterval(250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressNavigationIntervalMs < MAX_STRESS_NAVIGATION_INTERVAL_MS)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Text(`Current: switch page every ${this.stressNavigationIntervalMs}ms`)
+              .fontSize(13)
+              .fontColor('#007DFF')
+              .width('100%')
+              .textAlign(TextAlign.Center)
           }
           .width('100%')
           .padding(18)
@@ -1611,6 +1712,10 @@ export struct RealAppStressTestPage {
               .fontWeight(FontWeight.Medium)
               .width('100%')
 
+            Text(`Navigation: ${this.stats.navigationSwitches} switches | Interval ${this.stats.navigationIntervalMs}ms`)
+              .fontSize(14)
+              .width('100%')
+
             Text(`Logs: ${this.stats.logsGenerated} (${this.stats.logBatchesGenerated} batches)`)
               .fontSize(14)
               .width('100%')
@@ -1674,6 +1779,15 @@ export struct RealAppStressTestPage {
               .fontColor(Color.White)
           }
 
+          Button('Crash')
+            .onClick(() => this.triggerCrash())
+            .width('100%')
+            .height(58)
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .backgroundColor('#FF5252')
+            .fontColor(Color.White)
+
           if (this.reportText.length > 0) {
             Column({ space: 8 }) {
               Text('Last Report')
@@ -1690,27 +1804,6 @@ export struct RealAppStressTestPage {
             .borderRadius(8)
           }
 
-          Button('Go to Stress Test Page A')
-            .onClick(async () => {
-              try {
-                await this.saveSettings();
-                router.pushUrl({ url: 'pages/StressTestAPage' });
-                DemoLogger.i(TAG, "Navigated to StressTestAPage");
-              } catch (error) {
-                DemoLogger.e(TAG, `Failed to navigate to StressTestAPage: ${error}`);
-                promptAction.showToast({
-                  message: `Navigation failed: ${error}`,
-                  duration: 2000
-                });
-              }
-            })
-            .width('100%')
-            .height(58)
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .backgroundColor('#007DFF')
-            .fontColor(Color.White)
-            .margin({ bottom: 20 })
         }
         .width('100%')
         .padding(20)

@@ -75,7 +75,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
     const config = this.readConfig(want);
     DemoLogger.i(TAG,
-      `Starting background stress test: duration=${config.durationSeconds}s, traffic=${config.trafficMode}, logs=${config.enableLogs}, actions=${config.enableActions}, resources=${config.enableResources}, navigation=${config.enableNavigation}, errors=${config.enableErrors}, longTasks=${config.enableLongTasks}`);
+      `Starting background stress test: duration=${config.durationSeconds}s, traffic=${config.trafficMode}, logs=${config.enableLogs}, actions=${config.enableActions}, resources=${config.enableResources}, navigation=${config.enableNavigation}, navigationInterval=${config.navigationIntervalMs}, errors=${config.enableErrors}, longTasks=${config.enableLongTasks}`);
     this.stressTestManager.runWithConfig(config);
   }
 
@@ -112,6 +112,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     config.resourceThreadCount = this.readNumber(want, 'resourceThreadCount', config.resourceThreadCount);
     config.resourceIntervalMs = this.readNumber(want, 'resourceIntervalMs', config.resourceIntervalMs);
     config.realResourceUrl = this.readString(want, 'realResourceUrl', config.realResourceUrl).trim();
+    config.navigationIntervalMs = this.readNumber(want, 'navigationIntervalMs', config.navigationIntervalMs);
     config.errorBatchSize = this.readNumber(want, 'errorBatchSize', config.errorBatchSize);
     config.errorIntervalMs = this.readNumber(want, 'errorIntervalMs', config.errorIntervalMs);
     config.longTaskBatchSize = this.readNumber(want, 'longTaskBatchSize', config.longTaskBatchSize);

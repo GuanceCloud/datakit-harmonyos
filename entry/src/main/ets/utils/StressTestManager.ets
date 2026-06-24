@@ -41,6 +41,7 @@ export interface StressTestConfig {
   resourceThreadCount: number;
   resourceIntervalMs: number;
   realResourceUrl: string;
+  navigationIntervalMs: number;
   errorBatchSize: number;
   errorIntervalMs: number;
   longTaskBatchSize: number;
@@ -68,6 +69,8 @@ export interface StressTestStats {
   resourcesGenerated: number;
   resourcesSucceeded: number;
   resourcesFailed: number;
+  navigationSwitches: number;
+  navigationIntervalMs: number;
   errorsGenerated: number;
   longTasksGenerated: number;
   lastErrorMessage: string;
@@ -106,6 +109,7 @@ export function createDefaultStressTestConfig(
     resourceThreadCount: 2,
     resourceIntervalMs: 200,
     realResourceUrl: "",
+    navigationIntervalMs: 1000,
     errorBatchSize: 1,
     errorIntervalMs: 1000,
     longTaskBatchSize: 1,
@@ -135,6 +139,8 @@ export function createEmptyStressTestStats(): StressTestStats {
     resourcesGenerated: 0,
     resourcesSucceeded: 0,
     resourcesFailed: 0,
+    navigationSwitches: 0,
+    navigationIntervalMs: 1000,
     errorsGenerated: 0,
     longTasksGenerated: 0,
     lastErrorMessage: ""
@@ -297,7 +303,7 @@ export class StressTestManager {
     this.currentStats = this.createStatsForStart(normalizedConfig, this.startTime);
 
     DemoLogger.i(TAG,
-      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}, longTaskBatchSize=${normalizedConfig.longTaskBatchSize}, longTaskInterval=${normalizedConfig.longTaskIntervalMs}`);
+      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, navigationInterval=${normalizedConfig.navigationIntervalMs}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}, longTaskBatchSize=${normalizedConfig.longTaskBatchSize}, longTaskInterval=${normalizedConfig.longTaskIntervalMs}`);
 
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
@@ -440,6 +446,7 @@ export class StressTestManager {
       resourceThreadCount: Math.max(0, Math.floor(config.resourceThreadCount)),
       resourceIntervalMs: Math.max(50, Math.floor(config.resourceIntervalMs)),
       realResourceUrl: (config.realResourceUrl ?? "").trim(),
+      navigationIntervalMs: Math.max(250, Math.floor(config.navigationIntervalMs)),
       errorBatchSize: Math.max(1, Math.floor(config.errorBatchSize)),
       errorIntervalMs: Math.max(250, Math.floor(config.errorIntervalMs)),
       longTaskBatchSize: Math.max(1, Math.floor(config.longTaskBatchSize)),
@@ -459,6 +466,7 @@ export class StressTestManager {
     stats.enableActions = config.enableActions;
     stats.enableResources = config.enableResources;
     stats.enableNavigation = config.enableNavigation;
+    stats.navigationIntervalMs = config.navigationIntervalMs;
     stats.enableErrors = config.enableErrors;
     stats.enableLongTasks = config.enableLongTasks;
     return stats;
@@ -503,6 +511,9 @@ export class StressTestManager {
     }
     if (config.enableResources && config.resourceThreadCount > 0) {
       minIntervalMs = Math.min(minIntervalMs, config.resourceIntervalMs);
+    }
+    if (config.enableNavigation) {
+      minIntervalMs = Math.min(minIntervalMs, config.navigationIntervalMs);
     }
     if (config.enableErrors) {
       minIntervalMs = Math.min(minIntervalMs, config.errorIntervalMs);
@@ -875,6 +886,17 @@ export class StressTestManager {
     return this.isRunning && this.currentConfig.enableNavigation;
   }
 
+  public getNavigationIntervalMs(): number {
+    return this.currentConfig.navigationIntervalMs;
+  }
+
+  public recordNavigationSwitch(): void {
+    if (!this.isRunning || !this.currentConfig.enableNavigation) {
+      return;
+    }
+    this.currentStats.navigationSwitches += 1;
+  }
+
   public getStatsSnapshot(): StressTestStats {
     const stats = this.copyStats(this.currentStats);
     stats.isRunning = this.isRunning;
@@ -905,6 +927,7 @@ export class StressTestManager {
       `Logs: ${stats.logsGenerated} (${stats.logBatchesGenerated} batches)`,
       `Actions: ${stats.actionsGenerated}`,
       `Resources: ${stats.resourcesGenerated}, OK: ${stats.resourcesSucceeded}, Failed: ${stats.resourcesFailed}, Success: ${successRate}%`,
+      `Navigation Switches: ${stats.navigationSwitches}, Interval: ${stats.navigationIntervalMs}ms`,
       `Errors: ${stats.errorsGenerated}, LongTasks: ${stats.longTasksGenerated}`,
       stats.lastErrorMessage.length > 0 ? `Last Error: ${stats.lastErrorMessage}` : "Last Error: none"
     ].join('\n');
@@ -932,6 +955,8 @@ export class StressTestManager {
       resourcesGenerated: stats.resourcesGenerated,
       resourcesSucceeded: stats.resourcesSucceeded,
       resourcesFailed: stats.resourcesFailed,
+      navigationSwitches: stats.navigationSwitches,
+      navigationIntervalMs: stats.navigationIntervalMs,
       errorsGenerated: stats.errorsGenerated,
       longTasksGenerated: stats.longTasksGenerated,
       lastErrorMessage: stats.lastErrorMessage
