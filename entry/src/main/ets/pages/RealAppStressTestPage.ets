@@ -41,6 +41,8 @@ const KEY_STRESS_LONG_TASK_INTERVAL_MS = 'stress_long_task_interval_ms';
 const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
 const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
 const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
+const DEFAULT_TEST_MINUTES = 1;
+const DEFAULT_TEST_SECONDS = 0;
 const DEFAULT_STRESS_LOG_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LOG_INTERVAL_MS = 20;
 const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
@@ -95,8 +97,8 @@ const MAX_IO_CACHE_PEAK_INTERVAL_MS = 10000;
 export struct RealAppStressTestPage {
   @State abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
   @State testDuration: number = 60;
-  @State testMinutes: number = 1;
-  @State testSeconds: number = 0;
+  @State testMinutes: number = DEFAULT_TEST_MINUTES;
+  @State testSeconds: number = DEFAULT_TEST_SECONDS;
   @State isTestRunning: boolean = false;
   @State elapsedSeconds: number = 0;
   @State stats: StressTestStats = createEmptyStressTestStats();
@@ -716,6 +718,62 @@ export struct RealAppStressTestPage {
     return value;
   }
 
+  resetTestDurationSettings(): void {
+    this.testMinutes = DEFAULT_TEST_MINUTES;
+    this.testSeconds = DEFAULT_TEST_SECONDS;
+    this.updateTestDuration();
+    this.saveSettings();
+  }
+
+  resetStressLogSettings(): void {
+    this.stressLogBatchSize = DEFAULT_STRESS_LOG_BATCH_SIZE;
+    this.stressLogIntervalMs = DEFAULT_STRESS_LOG_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetStressActionSettings(): void {
+    this.stressActionTimerCount = DEFAULT_STRESS_ACTION_TIMER_COUNT;
+    this.stressActionIntervalMs = DEFAULT_STRESS_ACTION_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetStressResourceSettings(): void {
+    this.useRealTraffic = false;
+    this.realResourceUrls = [DEFAULT_REAL_RESOURCE_URL];
+    this.stressResourceTimerCount = DEFAULT_STRESS_RESOURCE_TIMER_COUNT;
+    this.stressResourceIntervalMs = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetStressNavigationSettings(): void {
+    this.stressNavigationIntervalMs = DEFAULT_STRESS_NAVIGATION_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetStressErrorSettings(): void {
+    this.stressErrorBatchSize = DEFAULT_STRESS_ERROR_BATCH_SIZE;
+    this.stressErrorIntervalMs = DEFAULT_STRESS_ERROR_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetStressLongTaskSettings(): void {
+    this.stressLongTaskBatchSize = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
+    this.stressLongTaskIntervalMs = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetIoCacheSettings(): void {
+    this.ioCacheTotalLogs = DEFAULT_IO_CACHE_TOTAL_LOGS;
+    this.ioCachePeakSize = DEFAULT_IO_CACHE_PEAK_SIZE;
+    this.ioCachePeakIntervalMs = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
+    this.saveSettings();
+  }
+
+  resetBackgroundServiceSettings(): void {
+    this.enableBackgroundService = false;
+    this.saveSettings();
+  }
+
   adjustStressLogBatchSize(delta: number): void {
     this.stressLogBatchSize = this.clampNumber(
       this.stressLogBatchSize + delta,
@@ -915,6 +973,244 @@ export struct RealAppStressTestPage {
     return scenarios.length > 0 ? scenarios.join(", ") : "None";
   }
 
+  private formatConfiguredScenarioSummary(): string {
+    const scenarios: string[] = [];
+    if (this.enableLogs) {
+      scenarios.push("Logs");
+    }
+    if (this.enableActions) {
+      scenarios.push("Actions");
+    }
+    if (this.enableResources) {
+      scenarios.push("Resources");
+    }
+    if (this.enableNavigation) {
+      scenarios.push("Navigation");
+    }
+    if (this.enableErrors) {
+      scenarios.push("Errors");
+    }
+    if (this.enableLongTasks) {
+      scenarios.push("LongTasks");
+    }
+    return scenarios.length > 0 ? scenarios.join(", ") : "None";
+  }
+
+  private formatRealtimeScenarioSummary(): string {
+    return this.hasStatsRun() ? this.formatScenarioSummary(this.stats) : this.formatConfiguredScenarioSummary();
+  }
+
+  private formatRealtimeSource(): string {
+    if (this.hasStatsRun()) {
+      return this.stats.source;
+    }
+    return this.enableBackgroundService ? 'background-service' : 'foreground';
+  }
+
+  private formatRealtimeTrafficMode(): string {
+    if (this.hasStatsRun()) {
+      return this.stats.trafficMode;
+    }
+    return this.enableResources && this.useRealTraffic ? 'real' : 'fake';
+  }
+
+  private hasStatsRun(): boolean {
+    return this.stats.isRunning || this.stats.startedAtMs > 0 || this.stats.endedAtMs > 0;
+  }
+
+  private shouldShowLogStats(): boolean {
+    if (this.isIoCacheStats()) {
+      return false;
+    }
+    return this.hasStatsRun() ? this.stats.enableLogs : this.enableLogs;
+  }
+
+  private shouldShowPeakLogStats(): boolean {
+    return this.enableLogs || this.isIoCacheStats();
+  }
+
+  private shouldShowActionStats(): boolean {
+    return this.hasStatsRun() ? this.stats.enableActions : this.enableActions;
+  }
+
+  private shouldShowResourceStats(): boolean {
+    return this.hasStatsRun() ? this.stats.enableResources : this.enableResources;
+  }
+
+  private shouldShowNavigationStats(): boolean {
+    return this.hasStatsRun() ? this.stats.enableNavigation : this.enableNavigation;
+  }
+
+  private shouldShowErrorStats(): boolean {
+    return this.hasStatsRun() ? this.stats.enableErrors : this.enableErrors;
+  }
+
+  private shouldShowLongTaskStats(): boolean {
+    return this.hasStatsRun() ? this.stats.enableLongTasks : this.enableLongTasks;
+  }
+
+  private getExpectedDurationSeconds(): number {
+    return this.stats.durationSeconds > 0 ? this.stats.durationSeconds : this.testDuration;
+  }
+
+  private isIoCacheStats(): boolean {
+    return this.hasStatsRun() &&
+      this.stats.enableLogs &&
+      !this.stats.enableActions &&
+      !this.stats.enableResources &&
+      !this.stats.enableNavigation &&
+      !this.stats.enableErrors &&
+      !this.stats.enableLongTasks &&
+      this.stats.durationSeconds === 0;
+  }
+
+  private formatExpectedTimedResult(
+    unit: string,
+    perInterval: number,
+    intervalMs: number,
+    startsImmediately: boolean = false
+  ): string {
+    const safePerInterval = Math.max(1, Math.floor(perInterval));
+    const safeIntervalMs = Math.max(1, Math.floor(intervalMs));
+    const durationSeconds = this.getExpectedDurationSeconds();
+    if (durationSeconds <= 0) {
+      return `${safePerInterval}/${safeIntervalMs}ms until stopped`;
+    }
+
+    const intervalCount = Math.floor((durationSeconds * 1000) / safeIntervalMs);
+    const expectedCount = (startsImmediately ? intervalCount + 1 : intervalCount) * safePerInterval;
+    return `~${expectedCount} ${unit}`;
+  }
+
+  private formatRateValue(rate: number): string {
+    if (rate >= 100) {
+      return Math.round(rate).toString();
+    }
+    if (rate >= 10) {
+      return (Math.round(rate * 10) / 10).toString();
+    }
+    return (Math.round(rate * 100) / 100).toString();
+  }
+
+  private formatExpectedRate(perInterval: number, intervalMs: number, unit: string): string {
+    const safePerInterval = Math.max(1, Math.floor(perInterval));
+    const safeIntervalMs = Math.max(1, Math.floor(intervalMs));
+    return `~${this.formatRateValue((safePerInterval * 1000) / safeIntervalMs)} ${unit}/s`;
+  }
+
+  private formatTheoreticalMaxPeak(perInterval: number, intervalMs: number, unit: string): string {
+    return `${perInterval}/${intervalMs}ms (${this.formatExpectedRate(perInterval, intervalMs, unit)})`;
+  }
+
+  private formatActualRate(count: number, unit: string): string {
+    const elapsedSeconds = this.stats.elapsedSeconds > 0 ? this.stats.elapsedSeconds : 1;
+    return `${this.formatRateValue(count / elapsedSeconds)} ${unit}/s`;
+  }
+
+  private formatRealtimeRate(count: number, unit: string, expectedRate: string): string {
+    return this.hasStatsRun() ? this.formatActualRate(count, unit) : expectedRate;
+  }
+
+  private formatExpectedLogResult(): string {
+    return this.formatExpectedTimedResult('logs', this.stressLogBatchSize, this.stressLogIntervalMs);
+  }
+
+  private formatExpectedLogRate(): string {
+    return this.formatExpectedRate(this.stressLogBatchSize, this.stressLogIntervalMs, 'log');
+  }
+
+  private formatMaxLogPeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_STRESS_LOG_BATCH_SIZE, MIN_STRESS_LOG_INTERVAL_MS, 'log');
+  }
+
+  private formatExpectedActionResult(): string {
+    return this.formatExpectedTimedResult('actions', this.stressActionTimerCount, this.stressActionIntervalMs);
+  }
+
+  private formatExpectedActionRate(): string {
+    return this.formatExpectedRate(this.stressActionTimerCount, this.stressActionIntervalMs, 'action');
+  }
+
+  private formatMaxActionPeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_STRESS_ACTION_TIMER_COUNT, MIN_STRESS_ACTION_INTERVAL_MS, 'action');
+  }
+
+  private formatExpectedResourceResult(): string {
+    return this.formatExpectedTimedResult('resources', this.stressResourceTimerCount, this.stressResourceIntervalMs);
+  }
+
+  private formatExpectedResourceRate(): string {
+    return this.formatExpectedRate(this.stressResourceTimerCount, this.stressResourceIntervalMs, 'resource');
+  }
+
+  private formatMaxResourcePeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_STRESS_RESOURCE_TIMER_COUNT, MIN_STRESS_RESOURCE_INTERVAL_MS, 'resource');
+  }
+
+  private formatExpectedNavigationResult(): string {
+    return this.formatExpectedTimedResult('switches', 1, this.stressNavigationIntervalMs);
+  }
+
+  private formatExpectedNavigationRate(): string {
+    return this.formatExpectedRate(1, this.stressNavigationIntervalMs, 'switch');
+  }
+
+  private formatMaxNavigationPeak(): string {
+    return this.formatTheoreticalMaxPeak(1, MIN_STRESS_NAVIGATION_INTERVAL_MS, 'switch');
+  }
+
+  private formatExpectedErrorResult(): string {
+    return this.formatExpectedTimedResult('errors', this.stressErrorBatchSize, this.stressErrorIntervalMs, true);
+  }
+
+  private formatExpectedErrorRate(): string {
+    return this.formatExpectedRate(this.stressErrorBatchSize, this.stressErrorIntervalMs, 'error');
+  }
+
+  private formatMaxErrorPeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_STRESS_ERROR_BATCH_SIZE, MIN_STRESS_ERROR_INTERVAL_MS, 'error');
+  }
+
+  private formatExpectedLongTaskResult(): string {
+    return this.formatExpectedTimedResult('long tasks', this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs, true);
+  }
+
+  private formatExpectedLongTaskRate(): string {
+    return this.formatExpectedRate(this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs, 'long task');
+  }
+
+  private formatMaxLongTaskPeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_STRESS_LONG_TASK_BATCH_SIZE, MIN_STRESS_LONG_TASK_INTERVAL_MS, 'long task');
+  }
+
+  private formatActualLogResult(): string {
+    return `${this.stats.logsGenerated} logs / ${this.stats.logBatchesGenerated} batches`;
+  }
+
+  private formatActualResourceResult(): string {
+    return `${this.stats.resourcesGenerated} total / ${this.stats.resourcesSucceeded} OK / ${this.stats.resourcesFailed} fail`;
+  }
+
+  private formatExpectedPeakLogResult(): string {
+    return `${this.ioCacheTotalLogs} logs, ${this.ioCachePeakSize}/${this.ioCachePeakIntervalMs}ms`;
+  }
+
+  private formatExpectedPeakLogRate(): string {
+    return this.formatExpectedRate(this.ioCachePeakSize, this.ioCachePeakIntervalMs, 'log');
+  }
+
+  private formatMaxIoCachePeak(): string {
+    return this.formatTheoreticalMaxPeak(MAX_IO_CACHE_PEAK_SIZE, MIN_IO_CACHE_PEAK_INTERVAL_MS, 'log');
+  }
+
+  private formatActualPeakLogResult(): string {
+    return this.isIoCacheStats() ? this.formatActualLogResult() : 'ready';
+  }
+
+  private formatActualPeakLogRate(): string {
+    return this.isIoCacheStats() ? this.formatActualRate(this.stats.logsGenerated, 'log') : this.formatExpectedPeakLogRate();
+  }
+
   build() {
     Column() {
       TestPageHeader({
@@ -944,7 +1240,7 @@ export struct RealAppStressTestPage {
                   .fontSize(24)
                   .fontWeight(FontWeight.Bold)
                   .width(80)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+')
                   .onClick(() => this.adjustMinutes(1))
@@ -972,7 +1268,7 @@ export struct RealAppStressTestPage {
                   .fontSize(24)
                   .fontWeight(FontWeight.Bold)
                   .width(80)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+')
                   .onClick(() => this.adjustSeconds(1))
@@ -990,97 +1286,19 @@ export struct RealAppStressTestPage {
               .fontWeight(FontWeight.Medium)
               .fontColor('#007DFF')
               .margin({ top: 6 })
+
+            Button('Reset')
+              .onClick(() => this.resetTestDurationSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
           }
           .width('100%')
           .padding(18)
           .backgroundColor('#F5F5F5')
-          .borderRadius(8)
-
-          Column({ space: 12 }) {
-            Text('Resource Traffic Mode')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-
-            Row() {
-                Toggle({ type: 0, isOn: this.enableResources && this.useRealTraffic })
-                  .onChange((isOn: boolean) => {
-                    if (!this.enableResources) {
-                      this.useRealTraffic = false;
-                      this.saveSettings();
-                      return;
-                    }
-                    this.useRealTraffic = isOn;
-                    this.saveSettings();
-                  })
-                  .enabled(!this.isTestRunning && this.enableResources)
-                Column({ space: 4 }) {
-                  Text(!this.enableResources ? 'Enable Resources First' :
-                    (this.useRealTraffic ? 'Real RCP Resource Traffic' : 'Synthetic Resource Traffic'))
-                    .fontSize(16)
-                    .fontWeight(FontWeight.Medium)
-                  Text(!this.enableResources ? 'Turn on Resources in Scenario Switches to choose traffic mode' :
-                    (this.useRealTraffic ? 'Sends real RCP requests through the configured URL' : 'Generates local resource timing data'))
-                    .fontSize(12)
-                    .fontColor(Color.Gray)
-                }
-              .margin({ left: 12 })
-              .layoutWeight(1)
-            }
-            .width('100%')
-
-            if (this.enableResources && this.useRealTraffic) {
-              Column({ space: 6 }) {
-                Text('Real Resource URLs')
-                  .fontSize(14)
-                  .fontColor(Color.Gray)
-
-                ForEach(this.realResourceUrls, (url: string, index: number) => {
-                  Row({ space: 8 }) {
-                    TextInput({
-                      placeholder: index === 0 ? DEFAULT_REAL_TRAFFIC_URL : 'https://example.com/resource',
-                      text: url
-                    })
-                      .height(44)
-                      .layoutWeight(1)
-                      .fontSize(13)
-                      .backgroundColor('#F5F5F5')
-                      .borderRadius(6)
-                      .enabled(!this.isTestRunning)
-                      .onChange((value: string) => {
-                        this.updateRealResourceUrl(index, value);
-                      })
-
-                    Button('-')
-                      .width(44)
-                      .height(44)
-                      .enabled(!this.isTestRunning && this.realResourceUrls.length > 1)
-                      .onClick(() => {
-                        this.removeRealResourceUrl(index);
-                      })
-                  }
-                  .width('100%')
-                }, (url: string, index: number) => `${index}`)
-
-                Button('Add URL')
-                  .height(40)
-                  .width('100%')
-                  .enabled(!this.isTestRunning && this.realResourceUrls.length < MAX_REAL_RESOURCE_URL_COUNT)
-                  .onClick(() => {
-                    this.addRealResourceUrl();
-                  })
-
-                Text(this.serializeRealResourceUrls().length > 0 ?
-                  'Round-robin by resource index: urls[N % urls.length]' :
-                  'Empty uses launch traceUrl first, then default httpbin')
-                  .fontSize(12)
-                  .fontColor(Color.Gray)
-              }
-              .width('100%')
-            }
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
           .borderRadius(8)
 
           Column({ space: 10 }) {
@@ -1187,10 +1405,11 @@ export struct RealAppStressTestPage {
           .backgroundColor('#FFFFFF')
           .borderRadius(8)
 
-          Column({ space: 10 }) {
-            Text('Auto Navigation Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+          if (this.enableNavigation) {
+            Column({ space: 10 }) {
+              Text('Auto Navigation Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Switch Interval (ms)')
@@ -1207,7 +1426,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+250')
                   .onClick(() => this.adjustStressNavigationInterval(250))
@@ -1224,17 +1443,28 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('Start Stress Test Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressNavigationSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableLogs) {
+            Column({ space: 10 }) {
+              Text('Log Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Batch Size')
@@ -1251,7 +1481,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustStressLogBatchSize(1))
@@ -1279,7 +1509,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+10')
                   .onClick(() => this.adjustStressLogInterval(10))
@@ -1296,17 +1526,28 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('Action Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressLogSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableActions) {
+            Column({ space: 10 }) {
+              Text('RUM Action Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Timer Count')
@@ -1323,7 +1564,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustStressActionTimerCount(1))
@@ -1351,7 +1592,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+10')
                   .onClick(() => this.adjustStressActionInterval(10))
@@ -1368,17 +1609,105 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('Resource Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressActionSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableResources) {
+            Column({ space: 10 }) {
+              Text('Resource Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
+
+            Column({ space: 8 }) {
+              Text('Resource Traffic Mode')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+
+              Row() {
+                Toggle({ type: 0, isOn: this.useRealTraffic })
+                  .onChange((isOn: boolean) => {
+                    this.useRealTraffic = isOn;
+                    this.saveSettings();
+                  })
+                  .enabled(!this.isTestRunning)
+                Column({ space: 4 }) {
+                  Text(this.useRealTraffic ? 'Real RCP Resource Traffic' : 'Synthetic Resource Traffic')
+                    .fontSize(16)
+                    .fontWeight(FontWeight.Medium)
+                  Text(this.useRealTraffic ? 'RCP GET requests from Resource URLs' : 'Local Resource timing data')
+                    .fontSize(12)
+                    .fontColor(Color.Gray)
+                }
+                .margin({ left: 12 })
+                .layoutWeight(1)
+              }
+              .width('100%')
+            }
+            .width('100%')
+
+            if (this.useRealTraffic) {
+              Column({ space: 6 }) {
+                Text('Resource Real Traffic URLs')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+
+                ForEach(this.realResourceUrls, (url: string, index: number) => {
+                  Row({ space: 8 }) {
+                    TextInput({
+                      placeholder: index === 0 ? DEFAULT_REAL_TRAFFIC_URL : 'https://example.com/resource',
+                      text: url
+                    })
+                      .height(44)
+                      .layoutWeight(1)
+                      .fontSize(13)
+                      .backgroundColor('#F5F5F5')
+                      .borderRadius(6)
+                      .enabled(!this.isTestRunning)
+                      .onChange((value: string) => {
+                        this.updateRealResourceUrl(index, value);
+                      })
+
+                    Button('-')
+                      .width(44)
+                      .height(44)
+                      .enabled(!this.isTestRunning && this.realResourceUrls.length > 1)
+                      .onClick(() => {
+                        this.removeRealResourceUrl(index);
+                      })
+                  }
+                  .width('100%')
+                }, (url: string, index: number) => `${index}`)
+
+                Button('Add Resource URL')
+                  .height(40)
+                  .width('100%')
+                  .enabled(!this.isTestRunning && this.realResourceUrls.length < MAX_REAL_RESOURCE_URL_COUNT)
+                  .onClick(() => {
+                    this.addRealResourceUrl();
+                  })
+
+                Text(this.serializeRealResourceUrls().length > 0 ?
+                  'Resource URL mapping: urls[N % urls.length]' :
+                  'Resource URL fallback: launch traceUrl/default')
+                  .fontSize(12)
+                  .fontColor(Color.Gray)
+              }
+              .width('100%')
+            }
 
             Column({ space: 5 }) {
               Text('Timer Count')
@@ -1395,7 +1724,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustStressResourceTimerCount(1))
@@ -1423,7 +1752,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+50')
                   .onClick(() => this.adjustStressResourceInterval(50))
@@ -1440,17 +1769,28 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('Custom Error Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressResourceSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableErrors) {
+            Column({ space: 10 }) {
+              Text('Custom Error Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Batch Size')
@@ -1467,7 +1807,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustStressErrorBatchSize(1))
@@ -1495,7 +1835,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+250')
                   .onClick(() => this.adjustStressErrorInterval(250))
@@ -1512,17 +1852,28 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('Long Task Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressErrorSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableLongTasks) {
+            Column({ space: 10 }) {
+              Text('Long Task Stress Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Batch Size')
@@ -1539,7 +1890,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustStressLongTaskBatchSize(1))
@@ -1567,7 +1918,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+250')
                   .onClick(() => this.adjustStressLongTaskInterval(250))
@@ -1584,17 +1935,28 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
-          }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+                    .textAlign(TextAlign.Center)
 
-          Column({ space: 10 }) {
-            Text('I/O Cache Peak Params')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
+            Button('Reset')
+              .onClick(() => this.resetStressLongTaskSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
+          }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableLogs) {
+            Column({ space: 10 }) {
+              Text('Log I/O Cache Peak Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
 
             Column({ space: 5 }) {
               Text('Total Logs')
@@ -1611,7 +1973,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+100')
                   .onClick(() => this.adjustIoCacheTotalLogs(100))
@@ -1639,7 +2001,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+1')
                   .onClick(() => this.adjustIoCachePeakSize(1))
@@ -1668,7 +2030,7 @@ export struct RealAppStressTestPage {
                   .fontSize(20)
                   .fontWeight(FontWeight.Bold)
                   .width(100)
-                  .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
 
                 Button('+10')
                   .onClick(() => this.adjustIoCachePeakInterval(10))
@@ -1685,24 +2047,87 @@ export struct RealAppStressTestPage {
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
-              .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
+
+            Button('Start Log I/O Cache Peak')
+              .onClick(() => this.startIoCacheStressTest())
+              .width('100%')
+              .height(52)
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .backgroundColor('#7B61FF')
+              .fontColor(Color.White)
+              .enabled(!this.isTestRunning)
+
+            Button('Reset')
+              .onClick(() => this.resetIoCacheSettings())
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .backgroundColor('#EAF3FF')
+              .fontColor('#007DFF')
+              .enabled(!this.isTestRunning)
           }
-          .width('100%')
-          .padding(18)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(8)
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
+
+          if (this.enableBackgroundService) {
+            Column({ space: 10 }) {
+              Text('Background Service Run Params')
+                .fontSize(18)
+                .fontWeight(FontWeight.Medium)
+
+              Row() {
+                Text('Run Source')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text('background-service')
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Service Ability')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text('StressServiceAbility')
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Button('Reset')
+                .onClick(() => this.resetBackgroundServiceSettings())
+                .width('100%')
+                .height(42)
+                .fontSize(14)
+                .backgroundColor('#EAF3FF')
+                .fontColor('#007DFF')
+                .enabled(!this.isTestRunning)
+            }
+            .width('100%')
+            .padding(18)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(8)
+          }
 
           Column({ space: 8 }) {
             Text('Realtime Stats')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
 
-            Text(`Status: ${this.isTestRunning ? 'Running' : 'Idle'} | Source: ${this.stats.source} | Traffic: ${this.stats.trafficMode}`)
+            Text(`Status: ${this.isTestRunning ? 'Running' : 'Idle'} | Source: ${this.formatRealtimeSource()} | Traffic: ${this.formatRealtimeTrafficMode()}`)
               .fontSize(13)
               .fontColor(Color.Gray)
               .width('100%')
 
-            Text(`Scenarios: ${this.formatScenarioSummary(this.stats)}`)
+            Text(`Scenarios: ${this.formatRealtimeScenarioSummary()}`)
               .fontSize(13)
               .fontColor(Color.Gray)
               .width('100%')
@@ -1712,21 +2137,272 @@ export struct RealAppStressTestPage {
               .fontWeight(FontWeight.Medium)
               .width('100%')
 
-            Text(`Navigation: ${this.stats.navigationSwitches} switches | Interval ${this.stats.navigationIntervalMs}ms`)
-              .fontSize(14)
+            Column({ space: 4 }) {
+              Row() {
+                Text('Feature')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#2F5C8F')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                Text('Expected')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#2F5C8F')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                Text('Max Peak')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#2F5C8F')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                Text('Actual')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#2F5C8F')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                Text('Rate')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#2F5C8F')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+              }
               .width('100%')
+              .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+              .backgroundColor('#EAF3FF')
+              .borderRadius(6)
 
-            Text(`Logs: ${this.stats.logsGenerated} (${this.stats.logBatchesGenerated} batches)`)
-              .fontSize(14)
-              .width('100%')
+              if (this.shouldShowLogStats()) {
+                Row() {
+                  Text('Logs')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedLogResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxLogPeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatActualLogResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.logsGenerated, 'log', this.formatExpectedLogRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
 
-            Text(`Actions: ${this.stats.actionsGenerated} | Resources: ${this.stats.resourcesGenerated} / OK ${this.stats.resourcesSucceeded} / Fail ${this.stats.resourcesFailed}`)
-              .fontSize(14)
-              .width('100%')
+              if (this.shouldShowPeakLogStats()) {
+                Row() {
+                  Text('Log Peak')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedPeakLogResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxIoCachePeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatActualPeakLogResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatActualPeakLogRate())
+                    .fontSize(12)
+                    .fontColor('#7B61FF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#F7F4FF')
+                .borderRadius(6)
+              }
 
-            Text(`Errors: ${this.stats.errorsGenerated} | LongTasks: ${this.stats.longTasksGenerated}`)
-              .fontSize(14)
-              .width('100%')
+              if (this.shouldShowActionStats()) {
+                Row() {
+                  Text('Actions')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedActionResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxActionPeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(`${this.stats.actionsGenerated} actions`)
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.actionsGenerated, 'action', this.formatExpectedActionRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
+
+              if (this.shouldShowResourceStats()) {
+                Row() {
+                  Text('Resources')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedResourceResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxResourcePeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatActualResourceResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.resourcesGenerated, 'resource', this.formatExpectedResourceRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
+
+              if (this.shouldShowNavigationStats()) {
+                Row() {
+                  Text('Navigation')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedNavigationResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxNavigationPeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(`${this.stats.navigationSwitches} switches`)
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.navigationSwitches, 'switch', this.formatExpectedNavigationRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
+
+              if (this.shouldShowErrorStats()) {
+                Row() {
+                  Text('Errors')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedErrorResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxErrorPeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(`${this.stats.errorsGenerated} errors`)
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.errorsGenerated, 'error', this.formatExpectedErrorRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
+
+              if (this.shouldShowLongTaskStats()) {
+                Row() {
+                  Text('LongTasks')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatExpectedLongTaskResult())
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatMaxLongTaskPeak())
+                    .fontSize(12)
+                    .fontColor('#6A4BC3')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(`${this.stats.longTasksGenerated} long tasks`)
+                    .fontSize(12)
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                  Text(this.formatRealtimeRate(this.stats.longTasksGenerated, 'long task', this.formatExpectedLongTaskRate()))
+                    .fontSize(12)
+                    .fontColor('#007DFF')
+                    .width('20%')
+                    .textAlign(TextAlign.Center)
+                }
+                .width('100%')
+                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
+                .backgroundColor('#FFFFFF')
+                .borderRadius(6)
+              }
+            }
+            .width('100%')
+            .padding(6)
+            .backgroundColor('#DDEBFA')
+            .borderRadius(8)
 
             if (this.stats.lastErrorMessage.length > 0) {
               Text(`Last Error: ${this.stats.lastErrorMessage}`)
@@ -1755,7 +2431,7 @@ export struct RealAppStressTestPage {
             Text(`Test running: ${this.formatElapsedTime(this.elapsedSeconds)}`)
               .fontSize(14)
               .fontColor(Color.Gray)
-              .textAlign(TextAlign.Center)
+                    .textAlign(TextAlign.Center)
               .width('100%')
           } else {
             Button('Start Stress Test')
@@ -1767,15 +2443,6 @@ export struct RealAppStressTestPage {
               .fontSize(18)
               .fontWeight(FontWeight.Bold)
               .backgroundColor('#4CAF50')
-              .fontColor(Color.White)
-
-            Button('Start I/O Cache Peak')
-              .onClick(() => this.startIoCacheStressTest())
-              .width('100%')
-              .height(58)
-              .fontSize(18)
-              .fontWeight(FontWeight.Bold)
-              .backgroundColor('#7B61FF')
               .fontColor(Color.White)
           }
 

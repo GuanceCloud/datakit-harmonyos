@@ -900,8 +900,13 @@ export class StressTestManager {
   public getStatsSnapshot(): StressTestStats {
     const stats = this.copyStats(this.currentStats);
     stats.isRunning = this.isRunning;
-    stats.elapsedSeconds = this.getElapsedSeconds();
-    stats.remainingSeconds = this.getRemainingSeconds();
+    if (this.isRunning) {
+      stats.elapsedSeconds = this.getElapsedSeconds();
+      stats.remainingSeconds = this.getRemainingSeconds();
+    } else if (this.lastReport !== null) {
+      stats.elapsedSeconds = this.lastReport.elapsedSeconds;
+      stats.remainingSeconds = 0;
+    }
     if (!this.isRunning && stats.endedAtMs === 0 && this.lastReport !== null) {
       stats.endedAtMs = this.lastReport.endedAtMs;
     }
