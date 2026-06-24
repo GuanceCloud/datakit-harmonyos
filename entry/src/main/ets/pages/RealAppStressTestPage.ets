@@ -7,8 +7,10 @@ import {
   StressTestConfig,
   StressTestManager,
   StressTestReport,
+  StressRunMode,
   StressTestStats
 } from '../utils/StressTestManager';
+import { SDKTaskScheduler } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
 import preferences from '@ohos.data.preferences';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -18,6 +20,8 @@ const TAG = "RealAppStressTestPage";
 const PREFERENCES_NAME = 'real_app_stress_test_settings';
 const KEY_TEST_MINUTES = 'test_minutes';
 const KEY_TEST_SECONDS = 'test_seconds';
+const KEY_STRESS_RUN_MODE = 'stress_run_mode';
+const KEY_STRESS_TOTAL_COUNT = 'stress_total_count';
 const KEY_USE_REAL_TRAFFIC = 'use_real_traffic';
 const KEY_ENABLE_LOGS = 'enable_logs';
 const KEY_ENABLE_ACTIONS = 'enable_actions';
@@ -38,11 +42,10 @@ const KEY_STRESS_ERROR_BATCH_SIZE = 'stress_error_batch_size';
 const KEY_STRESS_ERROR_INTERVAL_MS = 'stress_error_interval_ms';
 const KEY_STRESS_LONG_TASK_BATCH_SIZE = 'stress_long_task_batch_size';
 const KEY_STRESS_LONG_TASK_INTERVAL_MS = 'stress_long_task_interval_ms';
-const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
-const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
-const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
 const DEFAULT_TEST_MINUTES = 1;
 const DEFAULT_TEST_SECONDS = 0;
+const DEFAULT_STRESS_RUN_MODE: StressRunMode = 'duration';
+const DEFAULT_STRESS_TOTAL_COUNT = 200;
 const DEFAULT_STRESS_LOG_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LOG_INTERVAL_MS = 20;
 const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
@@ -56,9 +59,6 @@ const DEFAULT_STRESS_LONG_TASK_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LONG_TASK_INTERVAL_MS = 1500;
 const DEFAULT_REAL_RESOURCE_URL = '';
 const MAX_REAL_RESOURCE_URL_COUNT = 10;
-const DEFAULT_IO_CACHE_TOTAL_LOGS = 200;
-const DEFAULT_IO_CACHE_PEAK_SIZE = 2;
-const DEFAULT_IO_CACHE_PEAK_INTERVAL_MS = 50;
 const MIN_STRESS_LOG_BATCH_SIZE = 1;
 const MAX_STRESS_LOG_BATCH_SIZE = 1000;
 const MIN_STRESS_LOG_INTERVAL_MS = 16;
@@ -81,12 +81,16 @@ const MIN_STRESS_LONG_TASK_BATCH_SIZE = 1;
 const MAX_STRESS_LONG_TASK_BATCH_SIZE = 1000;
 const MIN_STRESS_LONG_TASK_INTERVAL_MS = 250;
 const MAX_STRESS_LONG_TASK_INTERVAL_MS = 10000;
-const MIN_IO_CACHE_TOTAL_LOGS = 1;
-const MAX_IO_CACHE_TOTAL_LOGS = 100000;
-const MIN_IO_CACHE_PEAK_SIZE = 1;
-const MAX_IO_CACHE_PEAK_SIZE = 1000;
-const MIN_IO_CACHE_PEAK_INTERVAL_MS = 16;
-const MAX_IO_CACHE_PEAK_INTERVAL_MS = 10000;
+const MIN_STRESS_TOTAL_COUNT = 1;
+const MAX_STRESS_TOTAL_COUNT = 100000;
+const SDK_LOG_LANE = 'log';
+const SDK_EVENT_LANE = 'event';
+const SDK_DATA_PROCESS_LANE = 'data-process';
+const SDK_LOG_FLUSH_BATCH_SIZE = 20;
+const SDK_LOG_PROCESS_COALESCE_MS = 100;
+const SDK_SYNC_PAGE_SIZE = 100;
+const DEFAULT_SDK_EVENT_COST_MS = 50;
+const DEFAULT_SDK_DATA_PROCESS_COST_MS = 50;
 
 /**
  * Real App Stress Test Page
@@ -99,6 +103,9 @@ export struct RealAppStressTestPage {
   @State testDuration: number = 60;
   @State testMinutes: number = DEFAULT_TEST_MINUTES;
   @State testSeconds: number = DEFAULT_TEST_SECONDS;
+  @State stressRunMode: StressRunMode = DEFAULT_STRESS_RUN_MODE;
+  @State stressTotalCount: number = DEFAULT_STRESS_TOTAL_COUNT;
+  @State stressTotalCountInput: string = `${DEFAULT_STRESS_TOTAL_COUNT}`;
   @State isTestRunning: boolean = false;
   @State elapsedSeconds: number = 0;
   @State stats: StressTestStats = createEmptyStressTestStats();
@@ -123,9 +130,6 @@ export struct RealAppStressTestPage {
   @State stressErrorIntervalMs: number = DEFAULT_STRESS_ERROR_INTERVAL_MS;
   @State stressLongTaskBatchSize: number = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
   @State stressLongTaskIntervalMs: number = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
-  @State ioCacheTotalLogs: number = DEFAULT_IO_CACHE_TOTAL_LOGS;
-  @State ioCachePeakSize: number = DEFAULT_IO_CACHE_PEAK_SIZE;
-  @State ioCachePeakIntervalMs: number = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
 
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
   private updateTimer: number | null = null;
@@ -202,6 +206,7 @@ export struct RealAppStressTestPage {
 
     try {
       this.updateTestDuration();
+      this.normalizeRunTargetSettings();
       this.normalizeStressLogSettings();
       this.normalizeStressActionSettings();
       this.normalizeStressResourceSettings();
@@ -221,9 +226,19 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, navigationInterval=${config.navigationIntervalMs}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
+        `Starting stress test: mode=${config.runMode}, duration=${config.durationSeconds}s, totalTarget=${config.totalTargetCount}, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, navigationInterval=${config.navigationIntervalMs}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
+      this.refreshStats();
+      if (!this.isTestRunning) {
+        this.refreshReportFromManager(false);
+        promptAction.showToast({
+          message: this.stats.lastErrorMessage.length > 0 ? this.stats.lastErrorMessage : "Stress test failed to start",
+          duration: 3000
+        });
+        return;
+      }
+
       if (this.enableBackgroundService) {
         await this.startBackgroundStressService();
       }
@@ -232,7 +247,7 @@ export struct RealAppStressTestPage {
       this.startUpdateTimer();
 
       promptAction.showToast({
-        message: `Stress test started (${this.testDuration}s)`,
+        message: `Stress test started (${this.formatRunTargetForToast()})`,
         duration: 2000
       });
 
@@ -272,44 +287,6 @@ export struct RealAppStressTestPage {
     setTimeout((): void => {
       throw new Error('Intentional crash for stress testing');
     }, 100);
-  }
-
-  startIoCacheStressTest(): void {
-    if (this.isTestRunning) {
-      promptAction.showToast({
-        message: "Test is already running",
-        duration: 2000
-      });
-      return;
-    }
-
-    try {
-      this.normalizeIoCacheSettings();
-      DemoLogger.i(TAG,
-        `Starting I/O cache peak stress test: totalLogs=${this.ioCacheTotalLogs}, peakSize=${this.ioCachePeakSize}, peakIntervalMs=${this.ioCachePeakIntervalMs}`);
-      this.reportText = "";
-      this.lastReportEndedAtMs = 0;
-      this.saveSettings();
-      this.stressTestManager.runLogIoCacheStress(
-        this.ioCacheTotalLogs,
-        this.ioCachePeakSize,
-        this.ioCachePeakIntervalMs
-      );
-      this.refreshStats();
-      this.startUpdateTimer();
-
-      promptAction.showToast({
-        message: `I/O peak started (${this.ioCachePeakSize} / ${this.ioCachePeakIntervalMs}ms)`,
-        duration: 2000
-      });
-    } catch (error) {
-      DemoLogger.e(TAG, `Failed to start I/O cache stress test: ${error}`);
-      promptAction.showToast({
-        message: `Failed to start: ${error}`,
-        duration: 3000
-      });
-      this.isTestRunning = false;
-    }
   }
 
   async stopStressTest(): Promise<void> {
@@ -359,8 +336,10 @@ export struct RealAppStressTestPage {
 
   private buildStressConfig(): StressTestConfig {
     const useRealResourceTraffic = this.enableResources && this.useRealTraffic;
+    const durationSeconds = this.stressRunMode === 'duration' ? this.testDuration : 0;
+    const totalTargetCount = this.stressRunMode === 'total' ? this.stressTotalCount : 0;
     const config = this.stressTestManager.createConfig(
-      this.testDuration,
+      durationSeconds,
       useRealResourceTraffic,
       this.enableLogs,
       this.enableActions,
@@ -370,8 +349,10 @@ export struct RealAppStressTestPage {
       this.enableLongTasks,
       this.enableBackgroundService ? 'background-service' : 'foreground'
     );
+    config.runMode = this.stressRunMode;
+    config.totalTargetCount = totalTargetCount;
     config.logThreadCount = 1;
-    config.logTotalCount = 0;
+    config.logTotalCount = totalTargetCount;
     config.logBatchSize = this.stressLogBatchSize;
     config.logIntervalMs = this.stressLogIntervalMs;
     config.actionThreadCount = this.stressActionTimerCount;
@@ -443,6 +424,10 @@ export struct RealAppStressTestPage {
           DemoLogger.w(TAG, `Invalid saved time settings, using defaults: ${savedMinutes} minutes, ${savedSeconds} seconds`);
         }
 
+        const savedRunMode = await this.preferencesStore.get(KEY_STRESS_RUN_MODE, DEFAULT_STRESS_RUN_MODE) as string;
+        this.stressRunMode = savedRunMode === 'total' ? 'total' : 'duration';
+        this.stressTotalCount =
+          await this.preferencesStore.get(KEY_STRESS_TOTAL_COUNT, DEFAULT_STRESS_TOTAL_COUNT) as number;
         this.useRealTraffic = await this.preferencesStore.get(KEY_USE_REAL_TRAFFIC, false) as boolean;
         this.enableLogs = await this.preferencesStore.get(KEY_ENABLE_LOGS, true) as boolean;
         this.enableActions = await this.preferencesStore.get(KEY_ENABLE_ACTIONS, true) as boolean;
@@ -479,19 +464,13 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_LONG_TASK_BATCH_SIZE, DEFAULT_STRESS_LONG_TASK_BATCH_SIZE) as number;
         this.stressLongTaskIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_LONG_TASK_INTERVAL_MS, DEFAULT_STRESS_LONG_TASK_INTERVAL_MS) as number;
-        this.ioCacheTotalLogs =
-          await this.preferencesStore.get(KEY_IO_CACHE_TOTAL_LOGS, DEFAULT_IO_CACHE_TOTAL_LOGS) as number;
-        this.ioCachePeakSize =
-          await this.preferencesStore.get(KEY_IO_CACHE_PEAK_SIZE, DEFAULT_IO_CACHE_PEAK_SIZE) as number;
-        this.ioCachePeakIntervalMs =
-          await this.preferencesStore.get(KEY_IO_CACHE_PEAK_INTERVAL_MS, DEFAULT_IO_CACHE_PEAK_INTERVAL_MS) as number;
         this.normalizeStressLogSettings();
         this.normalizeStressActionSettings();
         this.normalizeStressResourceSettings();
         this.normalizeStressNavigationSettings();
         this.normalizeStressErrorSettings();
         this.normalizeStressLongTaskSettings();
-        this.normalizeIoCacheSettings();
+        this.normalizeRunTargetSettings();
       }
     } catch (error) {
       DemoLogger.e(TAG, `Failed to load settings: ${error}`);
@@ -506,6 +485,8 @@ export struct RealAppStressTestPage {
       if (this.preferencesStore) {
         await this.preferencesStore.put(KEY_TEST_MINUTES, this.testMinutes);
         await this.preferencesStore.put(KEY_TEST_SECONDS, this.testSeconds);
+        await this.preferencesStore.put(KEY_STRESS_RUN_MODE, this.stressRunMode);
+        await this.preferencesStore.put(KEY_STRESS_TOTAL_COUNT, this.stressTotalCount);
         await this.preferencesStore.put(KEY_USE_REAL_TRAFFIC, this.useRealTraffic);
         await this.preferencesStore.put(KEY_ENABLE_LOGS, this.enableLogs);
         await this.preferencesStore.put(KEY_ENABLE_ACTIONS, this.enableActions);
@@ -526,9 +507,6 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_ERROR_INTERVAL_MS, this.stressErrorIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_LONG_TASK_BATCH_SIZE, this.stressLongTaskBatchSize);
         await this.preferencesStore.put(KEY_STRESS_LONG_TASK_INTERVAL_MS, this.stressLongTaskIntervalMs);
-        await this.preferencesStore.put(KEY_IO_CACHE_TOTAL_LOGS, this.ioCacheTotalLogs);
-        await this.preferencesStore.put(KEY_IO_CACHE_PEAK_SIZE, this.ioCachePeakSize);
-        await this.preferencesStore.put(KEY_IO_CACHE_PEAK_INTERVAL_MS, this.ioCachePeakIntervalMs);
         await this.preferencesStore.flush();
         DemoLogger.i(TAG, `Saved stress settings: ${this.testMinutes}m ${this.testSeconds}s`);
       }
@@ -543,6 +521,64 @@ export struct RealAppStressTestPage {
       DemoLogger.i(TAG, `Test duration updated: ${this.testDuration}s -> ${newDuration}s`);
       this.testDuration = newDuration;
     }
+  }
+
+  private normalizeRunTargetSettings(): void {
+    if (this.stressRunMode !== 'total') {
+      this.stressRunMode = 'duration';
+    }
+    this.stressTotalCount = this.clampNumber(
+      Math.floor(this.stressTotalCount),
+      MIN_STRESS_TOTAL_COUNT,
+      MAX_STRESS_TOTAL_COUNT
+    );
+    this.syncStressTotalCountInput();
+  }
+
+  setStressRunMode(mode: StressRunMode): void {
+    if (this.isTestRunning || this.stressRunMode === mode) {
+      return;
+    }
+    this.stressRunMode = mode;
+    this.saveSettings();
+  }
+
+  private syncStressTotalCountInput(): void {
+    this.stressTotalCountInput = `${this.stressTotalCount}`;
+  }
+
+  private extractDigits(value: string): string {
+    let digits = "";
+    for (let i = 0; i < value.length; i++) {
+      const char = value.charAt(i);
+      if (char >= '0' && char <= '9') {
+        digits += char;
+      }
+    }
+    return digits;
+  }
+
+  updateStressTotalCountInput(value: string): void {
+    const digits = this.extractDigits(value);
+    this.stressTotalCountInput = digits;
+    if (digits.length === 0) {
+      return;
+    }
+
+    const parsedValue = Number(digits);
+    if (isNaN(parsedValue)) {
+      return;
+    }
+
+    this.stressTotalCount = this.clampNumber(
+      Math.floor(parsedValue),
+      MIN_STRESS_TOTAL_COUNT,
+      MAX_STRESS_TOTAL_COUNT
+    );
+    if (digits !== `${this.stressTotalCount}`) {
+      this.syncStressTotalCountInput();
+    }
+    this.saveSettings();
   }
 
   adjustMinutes(delta: number): void {
@@ -571,6 +607,16 @@ export struct RealAppStressTestPage {
       this.updateTestDuration();
       this.saveSettings();
     }
+  }
+
+  adjustStressTotalCount(delta: number): void {
+    this.stressTotalCount = this.clampNumber(
+      this.stressTotalCount + delta,
+      MIN_STRESS_TOTAL_COUNT,
+      MAX_STRESS_TOTAL_COUNT
+    );
+    this.syncStressTotalCountInput();
+    this.saveSettings();
   }
 
   private normalizeStressLogSettings(): void {
@@ -687,27 +733,6 @@ export struct RealAppStressTestPage {
     return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
   }
 
-  private normalizeIoCacheSettings(): void {
-    this.ioCacheTotalLogs = this.clampNumber(
-      Math.floor(this.ioCacheTotalLogs),
-      MIN_IO_CACHE_TOTAL_LOGS,
-      MAX_IO_CACHE_TOTAL_LOGS
-    );
-    this.ioCachePeakSize = this.clampNumber(
-      Math.floor(this.ioCachePeakSize),
-      MIN_IO_CACHE_PEAK_SIZE,
-      MAX_IO_CACHE_PEAK_SIZE
-    );
-    this.ioCachePeakIntervalMs = this.clampNumber(
-      Math.floor(this.ioCachePeakIntervalMs),
-      MIN_IO_CACHE_PEAK_INTERVAL_MS,
-      MAX_IO_CACHE_PEAK_INTERVAL_MS
-    );
-    if (this.ioCachePeakSize > this.ioCacheTotalLogs) {
-      this.ioCachePeakSize = this.ioCacheTotalLogs;
-    }
-  }
-
   private clampNumber(value: number, minValue: number, maxValue: number): number {
     if (value < minValue) {
       return minValue;
@@ -718,7 +743,10 @@ export struct RealAppStressTestPage {
     return value;
   }
 
-  resetTestDurationSettings(): void {
+  resetRunTargetSettings(): void {
+    this.stressRunMode = DEFAULT_STRESS_RUN_MODE;
+    this.stressTotalCount = DEFAULT_STRESS_TOTAL_COUNT;
+    this.syncStressTotalCountInput();
     this.testMinutes = DEFAULT_TEST_MINUTES;
     this.testSeconds = DEFAULT_TEST_SECONDS;
     this.updateTestDuration();
@@ -759,13 +787,6 @@ export struct RealAppStressTestPage {
   resetStressLongTaskSettings(): void {
     this.stressLongTaskBatchSize = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
     this.stressLongTaskIntervalMs = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
-    this.saveSettings();
-  }
-
-  resetIoCacheSettings(): void {
-    this.ioCacheTotalLogs = DEFAULT_IO_CACHE_TOTAL_LOGS;
-    this.ioCachePeakSize = DEFAULT_IO_CACHE_PEAK_SIZE;
-    this.ioCachePeakIntervalMs = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
     this.saveSettings();
   }
 
@@ -903,37 +924,6 @@ export struct RealAppStressTestPage {
     this.saveSettings();
   }
 
-  adjustIoCacheTotalLogs(delta: number): void {
-    this.ioCacheTotalLogs = this.clampNumber(
-      this.ioCacheTotalLogs + delta,
-      MIN_IO_CACHE_TOTAL_LOGS,
-      MAX_IO_CACHE_TOTAL_LOGS
-    );
-    if (this.ioCachePeakSize > this.ioCacheTotalLogs) {
-      this.ioCachePeakSize = this.ioCacheTotalLogs;
-    }
-    this.saveSettings();
-  }
-
-  adjustIoCachePeakSize(delta: number): void {
-    const maxPeakSize = this.ioCacheTotalLogs < MAX_IO_CACHE_PEAK_SIZE ? this.ioCacheTotalLogs : MAX_IO_CACHE_PEAK_SIZE;
-    this.ioCachePeakSize = this.clampNumber(
-      this.ioCachePeakSize + delta,
-      MIN_IO_CACHE_PEAK_SIZE,
-      maxPeakSize
-    );
-    this.saveSettings();
-  }
-
-  adjustIoCachePeakInterval(delta: number): void {
-    this.ioCachePeakIntervalMs = this.clampNumber(
-      this.ioCachePeakIntervalMs + delta,
-      MIN_IO_CACHE_PEAK_INTERVAL_MS,
-      MAX_IO_CACHE_PEAK_INTERVAL_MS
-    );
-    this.saveSettings();
-  }
-
   formatElapsedTime(seconds: number): string {
     if (seconds <= 0) {
       return "0s";
@@ -1014,19 +1004,49 @@ export struct RealAppStressTestPage {
     return this.enableResources && this.useRealTraffic ? 'real' : 'fake';
   }
 
+  private formatRealtimeRunMode(): string {
+    const mode = this.getRealtimeRunMode();
+    return mode === 'total' ? 'Total Count' : 'Duration';
+  }
+
+  private getRealtimeRunMode(): StressRunMode {
+    if (this.hasStatsRun()) {
+      return this.stats.runMode;
+    }
+    return this.stressRunMode;
+  }
+
+  private isRealtimeTotalMode(): boolean {
+    return this.getRealtimeRunMode() === 'total';
+  }
+
+  private getRealtimeTotalTargetCount(): number {
+    if (this.hasStatsRun() && this.stats.totalTargetCount > 0) {
+      return this.stats.totalTargetCount;
+    }
+    return this.stressTotalCount;
+  }
+
+  private formatRunTargetForToast(): string {
+    if (this.stressRunMode === 'total') {
+      return `${this.stressTotalCount} per enabled feature`;
+    }
+    return this.formatElapsedTime(this.testDuration);
+  }
+
+  private formatRunTargetSummary(): string {
+    if (this.stressRunMode === 'total') {
+      return `target ${this.stressTotalCount} per enabled feature`;
+    }
+    return `duration ${this.formatElapsedTime(this.testDuration)}`;
+  }
+
   private hasStatsRun(): boolean {
     return this.stats.isRunning || this.stats.startedAtMs > 0 || this.stats.endedAtMs > 0;
   }
 
   private shouldShowLogStats(): boolean {
-    if (this.isIoCacheStats()) {
-      return false;
-    }
     return this.hasStatsRun() ? this.stats.enableLogs : this.enableLogs;
-  }
-
-  private shouldShowPeakLogStats(): boolean {
-    return this.enableLogs || this.isIoCacheStats();
   }
 
   private shouldShowActionStats(): boolean {
@@ -1053,32 +1073,23 @@ export struct RealAppStressTestPage {
     return this.stats.durationSeconds > 0 ? this.stats.durationSeconds : this.testDuration;
   }
 
-  private isIoCacheStats(): boolean {
-    return this.hasStatsRun() &&
-      this.stats.enableLogs &&
-      !this.stats.enableActions &&
-      !this.stats.enableResources &&
-      !this.stats.enableNavigation &&
-      !this.stats.enableErrors &&
-      !this.stats.enableLongTasks &&
-      this.stats.durationSeconds === 0;
-  }
-
   private formatExpectedTimedResult(
     unit: string,
     perInterval: number,
-    intervalMs: number,
-    startsImmediately: boolean = false
+    intervalMs: number
   ): string {
     const safePerInterval = Math.max(1, Math.floor(perInterval));
     const safeIntervalMs = Math.max(1, Math.floor(intervalMs));
     const durationSeconds = this.getExpectedDurationSeconds();
+    if (this.isRealtimeTotalMode()) {
+      return `${this.getRealtimeTotalTargetCount()} ${unit}`;
+    }
     if (durationSeconds <= 0) {
       return `${safePerInterval}/${safeIntervalMs}ms until stopped`;
     }
 
     const intervalCount = Math.floor((durationSeconds * 1000) / safeIntervalMs);
-    const expectedCount = (startsImmediately ? intervalCount + 1 : intervalCount) * safePerInterval;
+    const expectedCount = intervalCount * safePerInterval;
     return `~${expectedCount} ${unit}`;
   }
 
@@ -1098,8 +1109,70 @@ export struct RealAppStressTestPage {
     return `~${this.formatRateValue((safePerInterval * 1000) / safeIntervalMs)} ${unit}/s`;
   }
 
-  private formatTheoreticalMaxPeak(perInterval: number, intervalMs: number, unit: string): string {
-    return `${perInterval}/${intervalMs}ms (${this.formatExpectedRate(perInterval, intervalMs, unit)})`;
+  private getSdkLaneConcurrency(laneName: string, fallback: number): number {
+    try {
+      const status = SDKTaskScheduler.getInstance().getStatus();
+      const lane = status.lanes[laneName];
+      if (lane !== undefined && lane.maxConcurrency > 0) {
+        return lane.maxConcurrency;
+      }
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to read SDK lane status for ${laneName}: ${error}`);
+    }
+    return fallback;
+  }
+
+  private getSdkLaneAverageCostMs(laneName: string, fallback: number): number {
+    try {
+      const status = SDKTaskScheduler.getInstance().getStatus();
+      const lane = status.lanes[laneName];
+      if (lane !== undefined && lane.averageCostTime > 0) {
+        return lane.averageCostTime;
+      }
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to read SDK lane cost for ${laneName}: ${error}`);
+    }
+    return fallback;
+  }
+
+  private estimateSdkLaneRate(laneName: string, fallbackConcurrency: number, fallbackCostMs: number): number {
+    const concurrency = this.getSdkLaneConcurrency(laneName, fallbackConcurrency);
+    const costMs = Math.max(1, this.getSdkLaneAverageCostMs(laneName, fallbackCostMs));
+    return (concurrency * 1000) / costMs;
+  }
+
+  private estimateRumSdkRate(): number {
+    const eventRate = this.estimateSdkLaneRate(SDK_EVENT_LANE, 1, DEFAULT_SDK_EVENT_COST_MS);
+    const dataRate = this.estimateSdkLaneRate(SDK_DATA_PROCESS_LANE, 2, DEFAULT_SDK_DATA_PROCESS_COST_MS);
+    return Math.min(eventRate, dataRate);
+  }
+
+  private formatLaneCostMs(laneName: string, fallback: number): string {
+    return this.formatRateValue(this.getSdkLaneAverageCostMs(laneName, fallback));
+  }
+
+  private formatSdkCapacityPeak(capacitySummary: string, capacityDetail: string): string {
+    return `${capacitySummary}\n${capacityDetail}`;
+  }
+
+  private formatLogSdkCapacityPeak(): string {
+    const logLaneConcurrency = this.getSdkLaneConcurrency(SDK_LOG_LANE, 1);
+    const dataLaneConcurrency = this.getSdkLaneConcurrency(SDK_DATA_PROCESS_LANE, 2);
+    const estimatedRate =
+      (SDK_LOG_FLUSH_BATCH_SIZE * logLaneConcurrency * 1000) / SDK_LOG_PROCESS_COALESCE_MS;
+    return this.formatSdkCapacityPeak(
+      `~${this.formatRateValue(estimatedRate)} log/s`,
+      `LOG x${logLaneConcurrency} / DATA x${dataLaneConcurrency}\nbatch ${SDK_LOG_FLUSH_BATCH_SIZE}/${SDK_LOG_PROCESS_COALESCE_MS}ms, upload ${SDK_SYNC_PAGE_SIZE}`
+    );
+  }
+
+  private formatRumSdkCapacityPeak(unit: string, prefix: string = 'EVENT'): string {
+    const eventLaneConcurrency = this.getSdkLaneConcurrency(SDK_EVENT_LANE, 1);
+    const dataLaneConcurrency = this.getSdkLaneConcurrency(SDK_DATA_PROCESS_LANE, 2);
+    return this.formatSdkCapacityPeak(
+      `~${this.formatRateValue(this.estimateRumSdkRate())} ${unit}/s`,
+      `${prefix} x${eventLaneConcurrency} avg~${this.formatLaneCostMs(SDK_EVENT_LANE, DEFAULT_SDK_EVENT_COST_MS)}ms\nDATA x${dataLaneConcurrency} avg~${this.formatLaneCostMs(SDK_DATA_PROCESS_LANE, DEFAULT_SDK_DATA_PROCESS_COST_MS)}ms, upload ${SDK_SYNC_PAGE_SIZE}`
+    );
   }
 
   private formatActualRate(count: number, unit: string): string {
@@ -1120,7 +1193,7 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxLogPeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_STRESS_LOG_BATCH_SIZE, MIN_STRESS_LOG_INTERVAL_MS, 'log');
+    return this.formatLogSdkCapacityPeak();
   }
 
   private formatExpectedActionResult(): string {
@@ -1132,7 +1205,7 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxActionPeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_STRESS_ACTION_TIMER_COUNT, MIN_STRESS_ACTION_INTERVAL_MS, 'action');
+    return this.formatRumSdkCapacityPeak('action');
   }
 
   private formatExpectedResourceResult(): string {
@@ -1144,7 +1217,10 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxResourcePeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_STRESS_RESOURCE_TIMER_COUNT, MIN_STRESS_RESOURCE_INTERVAL_MS, 'resource');
+    return this.formatRumSdkCapacityPeak(
+      'resource',
+      this.formatRealtimeTrafficMode() === 'real' ? 'network + EVENT' : 'EVENT'
+    );
   }
 
   private formatExpectedNavigationResult(): string {
@@ -1156,11 +1232,14 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxNavigationPeak(): string {
-    return this.formatTheoreticalMaxPeak(1, MIN_STRESS_NAVIGATION_INTERVAL_MS, 'switch');
+    return this.formatSdkCapacityPeak(
+      `~${this.formatRateValue(1000 / MIN_STRESS_NAVIGATION_INTERVAL_MS)} switch/s`,
+      `router timer min ${MIN_STRESS_NAVIGATION_INTERVAL_MS}ms\nforeground only`
+    );
   }
 
   private formatExpectedErrorResult(): string {
-    return this.formatExpectedTimedResult('errors', this.stressErrorBatchSize, this.stressErrorIntervalMs, true);
+    return this.formatExpectedTimedResult('errors', this.stressErrorBatchSize, this.stressErrorIntervalMs);
   }
 
   private formatExpectedErrorRate(): string {
@@ -1168,11 +1247,11 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxErrorPeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_STRESS_ERROR_BATCH_SIZE, MIN_STRESS_ERROR_INTERVAL_MS, 'error');
+    return this.formatRumSdkCapacityPeak('error');
   }
 
   private formatExpectedLongTaskResult(): string {
-    return this.formatExpectedTimedResult('long tasks', this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs, true);
+    return this.formatExpectedTimedResult('long tasks', this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs);
   }
 
   private formatExpectedLongTaskRate(): string {
@@ -1180,7 +1259,7 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxLongTaskPeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_STRESS_LONG_TASK_BATCH_SIZE, MIN_STRESS_LONG_TASK_INTERVAL_MS, 'long task');
+    return this.formatRumSdkCapacityPeak('long task');
   }
 
   private formatActualLogResult(): string {
@@ -1189,26 +1268,6 @@ export struct RealAppStressTestPage {
 
   private formatActualResourceResult(): string {
     return `${this.stats.resourcesGenerated} total / ${this.stats.resourcesSucceeded} OK / ${this.stats.resourcesFailed} fail`;
-  }
-
-  private formatExpectedPeakLogResult(): string {
-    return `${this.ioCacheTotalLogs} logs, ${this.ioCachePeakSize}/${this.ioCachePeakIntervalMs}ms`;
-  }
-
-  private formatExpectedPeakLogRate(): string {
-    return this.formatExpectedRate(this.ioCachePeakSize, this.ioCachePeakIntervalMs, 'log');
-  }
-
-  private formatMaxIoCachePeak(): string {
-    return this.formatTheoreticalMaxPeak(MAX_IO_CACHE_PEAK_SIZE, MIN_IO_CACHE_PEAK_INTERVAL_MS, 'log');
-  }
-
-  private formatActualPeakLogResult(): string {
-    return this.isIoCacheStats() ? this.formatActualLogResult() : 'ready';
-  }
-
-  private formatActualPeakLogRate(): string {
-    return this.isIoCacheStats() ? this.formatActualRate(this.stats.logsGenerated, 'log') : this.formatExpectedPeakLogRate();
   }
 
   build() {
@@ -1220,75 +1279,142 @@ export struct RealAppStressTestPage {
       Scroll() {
         Column({ space: 16 }) {
           Column({ space: 10 }) {
-            Text('Test Duration')
+            Text('Stress Run Target')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
               .margin({ bottom: 8 })
 
-            Column({ space: 5 }) {
-              Text('Minutes')
+            Row({ space: 10 }) {
+              Button('By Duration')
+                .onClick(() => this.setStressRunMode('duration'))
+                .height(44)
                 .fontSize(14)
-                .fontColor(Color.Gray)
-              Row({ space: 20 }) {
-                Button('-')
-                  .onClick(() => this.adjustMinutes(-1))
-                  .width(60)
-                  .height(50)
-                  .enabled(!this.isTestRunning && this.testMinutes > 0)
+                .backgroundColor(this.stressRunMode === 'duration' ? '#007DFF' : '#EAF3FF')
+                .fontColor(this.stressRunMode === 'duration' ? Color.White : '#007DFF')
+                .enabled(!this.isTestRunning)
+                .layoutWeight(1)
 
-                Text(`${this.testMinutes}`)
-                  .fontSize(24)
-                  .fontWeight(FontWeight.Bold)
-                  .width(80)
-                    .textAlign(TextAlign.Center)
-
-                Button('+')
-                  .onClick(() => this.adjustMinutes(1))
-                  .width(60)
-                  .height(50)
-                  .enabled(!this.isTestRunning && this.testMinutes < 30)
-              }
-              .justifyContent(FlexAlign.Center)
-              .width('100%')
+              Button('By Total Count')
+                .onClick(() => this.setStressRunMode('total'))
+                .height(44)
+                .fontSize(14)
+                .backgroundColor(this.stressRunMode === 'total' ? '#007DFF' : '#EAF3FF')
+                .fontColor(this.stressRunMode === 'total' ? Color.White : '#007DFF')
+                .enabled(!this.isTestRunning)
+                .layoutWeight(1)
             }
             .width('100%')
 
-            Column({ space: 5 }) {
-              Text('Seconds')
-                .fontSize(14)
-                .fontColor(Color.Gray)
-              Row({ space: 20 }) {
-                Button('-')
-                  .onClick(() => this.adjustSeconds(-1))
-                  .width(60)
-                  .height(50)
-                  .enabled(!this.isTestRunning && (this.testSeconds > 0 || this.testMinutes > 0))
+            if (this.stressRunMode === 'duration') {
+              Column({ space: 5 }) {
+                Text('Duration Minutes')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Row({ space: 20 }) {
+                  Button('-')
+                    .onClick(() => this.adjustMinutes(-1))
+                    .width(60)
+                    .height(50)
+                    .enabled(!this.isTestRunning && this.testMinutes > 0)
 
-                Text(`${this.testSeconds}`)
-                  .fontSize(24)
-                  .fontWeight(FontWeight.Bold)
-                  .width(80)
+                  Text(`${this.testMinutes}`)
+                    .fontSize(24)
+                    .fontWeight(FontWeight.Bold)
+                    .width(80)
                     .textAlign(TextAlign.Center)
 
-                Button('+')
-                  .onClick(() => this.adjustSeconds(1))
-                  .width(60)
-                  .height(50)
-                  .enabled(!this.isTestRunning && (this.testSeconds < 59 || this.testMinutes < 30))
+                  Button('+')
+                    .onClick(() => this.adjustMinutes(1))
+                    .width(60)
+                    .height(50)
+                    .enabled(!this.isTestRunning && this.testMinutes < 30)
+                }
+                .justifyContent(FlexAlign.Center)
+                .width('100%')
               }
-              .justifyContent(FlexAlign.Center)
               .width('100%')
             }
-            .width('100%')
 
-            Text(`Total: ${this.formatElapsedTime(this.testDuration)}`)
+            if (this.stressRunMode === 'duration') {
+              Column({ space: 5 }) {
+                Text('Duration Seconds')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Row({ space: 20 }) {
+                  Button('-')
+                    .onClick(() => this.adjustSeconds(-1))
+                    .width(60)
+                    .height(50)
+                    .enabled(!this.isTestRunning && (this.testSeconds > 0 || this.testMinutes > 0))
+
+                  Text(`${this.testSeconds}`)
+                    .fontSize(24)
+                    .fontWeight(FontWeight.Bold)
+                    .width(80)
+                    .textAlign(TextAlign.Center)
+
+                  Button('+')
+                    .onClick(() => this.adjustSeconds(1))
+                    .width(60)
+                    .height(50)
+                    .enabled(!this.isTestRunning && (this.testSeconds < 59 || this.testMinutes < 30))
+                }
+                .justifyContent(FlexAlign.Center)
+                .width('100%')
+              }
+              .width('100%')
+            }
+
+            if (this.stressRunMode === 'total') {
+              Column({ space: 5 }) {
+                Text('Total Count Per Enabled Feature')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Row({ space: 14 }) {
+                  Button('-100')
+                    .onClick(() => this.adjustStressTotalCount(-100))
+                    .width(76)
+                    .height(44)
+                    .enabled(!this.isTestRunning && this.stressTotalCount > MIN_STRESS_TOTAL_COUNT)
+
+                  TextInput({
+                    placeholder: `${DEFAULT_STRESS_TOTAL_COUNT}`,
+                    text: this.stressTotalCountInput
+                  })
+                    .fontSize(18)
+                    .fontWeight(FontWeight.Bold)
+                    .width(132)
+                    .height(44)
+                    .textAlign(TextAlign.Center)
+                    .backgroundColor('#FFFFFF')
+                    .borderRadius(6)
+                    .enabled(!this.isTestRunning)
+                    .onChange((value: string) => {
+                      this.updateStressTotalCountInput(value);
+                    })
+
+                  Button('+100')
+                    .onClick(() => this.adjustStressTotalCount(100))
+                    .width(76)
+                    .height(44)
+                    .enabled(!this.isTestRunning && this.stressTotalCount < MAX_STRESS_TOTAL_COUNT)
+                }
+                .justifyContent(FlexAlign.Center)
+                .width('100%')
+              }
+              .width('100%')
+            }
+
+            Text(this.stressRunMode === 'total' ?
+              `Total mode: ${this.stressTotalCount} per enabled feature` :
+              `Duration mode: ${this.formatElapsedTime(this.testDuration)}`)
               .fontSize(16)
               .fontWeight(FontWeight.Medium)
               .fontColor('#007DFF')
               .margin({ top: 6 })
 
             Button('Reset')
-              .onClick(() => this.resetTestDurationSettings())
+              .onClick(() => this.resetRunTargetSettings())
               .width('100%')
               .height(42)
               .fontSize(14)
@@ -1298,7 +1424,7 @@ export struct RealAppStressTestPage {
           }
           .width('100%')
           .padding(18)
-          .backgroundColor('#F5F5F5')
+          .backgroundColor('#FFFFFF')
           .borderRadius(8)
 
           Column({ space: 10 }) {
@@ -1522,7 +1648,7 @@ export struct RealAppStressTestPage {
             }
             .width('100%')
 
-            Text(`Current: ${this.stressLogBatchSize} logs per ${this.stressLogIntervalMs}ms, duration ${this.formatElapsedTime(this.testDuration)}`)
+            Text(`Current: ${this.stressLogBatchSize} logs per ${this.stressLogIntervalMs}ms, ${this.formatRunTargetSummary()}`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
@@ -1952,128 +2078,6 @@ export struct RealAppStressTestPage {
             .borderRadius(8)
           }
 
-          if (this.enableLogs) {
-            Column({ space: 10 }) {
-              Text('Log I/O Cache Peak Params')
-                .fontSize(18)
-                .fontWeight(FontWeight.Medium)
-
-            Column({ space: 5 }) {
-              Text('Total Logs')
-                .fontSize(14)
-                .fontColor(Color.Gray)
-              Row({ space: 14 }) {
-                Button('-100')
-                  .onClick(() => this.adjustIoCacheTotalLogs(-100))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCacheTotalLogs > MIN_IO_CACHE_TOTAL_LOGS)
-
-                Text(`${this.ioCacheTotalLogs}`)
-                  .fontSize(20)
-                  .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
-
-                Button('+100')
-                  .onClick(() => this.adjustIoCacheTotalLogs(100))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCacheTotalLogs < MAX_IO_CACHE_TOTAL_LOGS)
-              }
-              .justifyContent(FlexAlign.Center)
-              .width('100%')
-            }
-            .width('100%')
-
-            Column({ space: 5 }) {
-              Text('Batch Size')
-                .fontSize(14)
-                .fontColor(Color.Gray)
-              Row({ space: 14 }) {
-                Button('-1')
-                  .onClick(() => this.adjustIoCachePeakSize(-1))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCachePeakSize > MIN_IO_CACHE_PEAK_SIZE)
-
-                Text(`${this.ioCachePeakSize}`)
-                  .fontSize(20)
-                  .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
-
-                Button('+1')
-                  .onClick(() => this.adjustIoCachePeakSize(1))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCachePeakSize < this.ioCacheTotalLogs &&
-                    this.ioCachePeakSize < MAX_IO_CACHE_PEAK_SIZE)
-              }
-              .justifyContent(FlexAlign.Center)
-              .width('100%')
-            }
-            .width('100%')
-
-            Column({ space: 5 }) {
-              Text('Event Interval (ms)')
-                .fontSize(14)
-                .fontColor(Color.Gray)
-              Row({ space: 14 }) {
-                Button('-10')
-                  .onClick(() => this.adjustIoCachePeakInterval(-10))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCachePeakIntervalMs > MIN_IO_CACHE_PEAK_INTERVAL_MS)
-
-                Text(`${this.ioCachePeakIntervalMs}`)
-                  .fontSize(20)
-                  .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
-
-                Button('+10')
-                  .onClick(() => this.adjustIoCachePeakInterval(10))
-                  .width(76)
-                  .height(44)
-                  .enabled(!this.isTestRunning && this.ioCachePeakIntervalMs < MAX_IO_CACHE_PEAK_INTERVAL_MS)
-              }
-              .justifyContent(FlexAlign.Center)
-              .width('100%')
-            }
-            .width('100%')
-
-            Text(`Current: ${this.ioCacheTotalLogs} logs, ${this.ioCachePeakSize} per ${this.ioCachePeakIntervalMs}ms`)
-              .fontSize(13)
-              .fontColor('#007DFF')
-              .width('100%')
-                    .textAlign(TextAlign.Center)
-
-            Button('Start Log I/O Cache Peak')
-              .onClick(() => this.startIoCacheStressTest())
-              .width('100%')
-              .height(52)
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .backgroundColor('#7B61FF')
-              .fontColor(Color.White)
-              .enabled(!this.isTestRunning)
-
-            Button('Reset')
-              .onClick(() => this.resetIoCacheSettings())
-              .width('100%')
-              .height(42)
-              .fontSize(14)
-              .backgroundColor('#EAF3FF')
-              .fontColor('#007DFF')
-              .enabled(!this.isTestRunning)
-          }
-            .width('100%')
-            .padding(18)
-            .backgroundColor('#FFFFFF')
-            .borderRadius(8)
-          }
-
           if (this.enableBackgroundService) {
             Column({ space: 10 }) {
               Text('Background Service Run Params')
@@ -2122,7 +2126,7 @@ export struct RealAppStressTestPage {
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
 
-            Text(`Status: ${this.isTestRunning ? 'Running' : 'Idle'} | Source: ${this.formatRealtimeSource()} | Traffic: ${this.formatRealtimeTrafficMode()}`)
+            Text(`Status: ${this.isTestRunning ? 'Running' : 'Idle'} | Mode: ${this.formatRealtimeRunMode()} | Source: ${this.formatRealtimeSource()} | Traffic: ${this.formatRealtimeTrafficMode()}`)
               .fontSize(13)
               .fontColor(Color.Gray)
               .width('100%')
@@ -2132,7 +2136,9 @@ export struct RealAppStressTestPage {
               .fontColor(Color.Gray)
               .width('100%')
 
-            Text(`Elapsed: ${this.formatElapsedTime(this.stats.elapsedSeconds)} | Remaining: ${this.stats.remainingSeconds >= 0 ? this.formatElapsedTime(this.stats.remainingSeconds) : '∞'}`)
+            Text(this.isRealtimeTotalMode() ?
+              `Elapsed: ${this.formatElapsedTime(this.stats.elapsedSeconds)} | Target: ${this.getRealtimeTotalTargetCount()} per enabled feature` :
+              `Elapsed: ${this.formatElapsedTime(this.stats.elapsedSeconds)} | Remaining: ${this.stats.remainingSeconds >= 0 ? this.formatElapsedTime(this.stats.remainingSeconds) : '∞'}`)
               .fontSize(14)
               .fontWeight(FontWeight.Medium)
               .width('100%')
@@ -2204,38 +2210,6 @@ export struct RealAppStressTestPage {
                 .width('100%')
                 .padding({ left: 4, right: 4, top: 10, bottom: 10 })
                 .backgroundColor('#FFFFFF')
-                .borderRadius(6)
-              }
-
-              if (this.shouldShowPeakLogStats()) {
-                Row() {
-                  Text('Log Peak')
-                    .fontSize(13)
-                    .fontWeight(FontWeight.Medium)
-                    .width('20%')
-                    .textAlign(TextAlign.Center)
-                  Text(this.formatExpectedPeakLogResult())
-                    .fontSize(12)
-                    .width('20%')
-                    .textAlign(TextAlign.Center)
-                  Text(this.formatMaxIoCachePeak())
-                    .fontSize(12)
-                    .fontColor('#6A4BC3')
-                    .width('20%')
-                    .textAlign(TextAlign.Center)
-                  Text(this.formatActualPeakLogResult())
-                    .fontSize(12)
-                    .width('20%')
-                    .textAlign(TextAlign.Center)
-                  Text(this.formatActualPeakLogRate())
-                    .fontSize(12)
-                    .fontColor('#7B61FF')
-                    .width('20%')
-                    .textAlign(TextAlign.Center)
-                }
-                .width('100%')
-                .padding({ left: 4, right: 4, top: 10, bottom: 10 })
-                .backgroundColor('#F7F4FF')
                 .borderRadius(6)
               }
 

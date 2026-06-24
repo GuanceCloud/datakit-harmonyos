@@ -1,3 +1,4 @@
+import { common, Want } from '@kit.AbilityKit';
 import router from '@ohos.router';
 import { promptAction } from '@kit.ArkUI';
 import {
@@ -17,6 +18,7 @@ const TAG = "StressTestAPage";
 @Entry
 @Component
 export struct StressTestAPage {
+  private abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
   @State elapsedSeconds: number = 0;
   @State remainingSeconds: number = -1;
   @State stats: StressTestStats = createEmptyStressTestStats();
@@ -144,6 +146,60 @@ export struct StressTestAPage {
     }
   }
 
+  private createStressServiceWant(action: string): Want {
+    return {
+      bundleName: this.abilityContext.abilityInfo.bundleName,
+      moduleName: this.abilityContext.abilityInfo.moduleName,
+      abilityName: 'StressServiceAbility',
+      action
+    };
+  }
+
+  private async stopBackgroundStressServiceIfNeeded(): Promise<void> {
+    const snapshot = this.stressTestManager.getStatsSnapshot();
+    if (snapshot.source !== 'background-service') {
+      return;
+    }
+
+    const want = this.createStressServiceWant('stop');
+    try {
+      await this.abilityContext.startAppServiceExtensionAbility(want);
+    } catch (error) {
+      DemoLogger.w(TAG, `Background stress service stop command failed: ${error}`);
+    }
+
+    try {
+      await this.abilityContext.stopAppServiceExtensionAbility(want);
+      DemoLogger.i(TAG, "Background stress service stop requested from StressTestAPage");
+    } catch (error) {
+      DemoLogger.w(TAG, `Background stress service stop failed from StressTestAPage: ${error}`);
+    }
+  }
+
+  async stopStressTestAndReturn(): Promise<void> {
+    this.stopUpdateTimer();
+    this.stopAutoNavigate();
+
+    try {
+      if (this.stressTestManager.isStressTestRunning()) {
+        this.stressTestManager.stop('manual');
+      }
+      await this.stopBackgroundStressServiceIfNeeded();
+      promptAction.showToast({
+        message: "Stress test stopped",
+        duration: 2000
+      });
+    } catch (error) {
+      DemoLogger.e(TAG, `Failed to stop stress test from StressTestAPage: ${error}`);
+      promptAction.showToast({
+        message: `Stop failed: ${error}`,
+        duration: 2000
+      });
+    } finally {
+      this.navigateBack();
+    }
+  }
+
   build() {
     Column({ space: 20 }) {
       TestPageHeader({
@@ -248,6 +304,19 @@ export struct StressTestAPage {
           .backgroundColor('#4CAF50')
           .fontColor(Color.White)
           .margin({ top: 40 })
+
+        Button('Stop Stress Test')
+          .onClick(() => {
+            this.stopStressTestAndReturn();
+          })
+          .width('80%')
+          .height(54)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .backgroundColor('#F53F3F')
+          .fontColor(Color.White)
+          .enabled(this.stressTestManager.isStressTestRunning())
+          .margin({ top: 8 })
       }
       .width('100%')
       .justifyContent(FlexAlign.Start)

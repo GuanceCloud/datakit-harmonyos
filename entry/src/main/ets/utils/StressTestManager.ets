@@ -14,16 +14,18 @@ import { DemoLogger } from './DemoLogger';
 
 const TAG = "StressTestManager";
 const STRESS_TEST_LOG_TAG = "stress_test";
-const IO_CACHE_STRESS_TAG = "io_cache_stress";
 export const DEFAULT_REAL_TRAFFIC_URL = "https://httpbin.org/get?from=real-app-stress";
 const MS_TO_NS = 1000000;
 
 export type StressStopReason = 'manual' | 'duration' | 'completed' | 'service-stop' | 'service-destroyed' | 'error';
 export type StressTrafficMode = 'fake' | 'real';
 export type StressRunSource = 'foreground' | 'background-service';
+export type StressRunMode = 'duration' | 'total';
 
 export interface StressTestConfig {
   durationSeconds: number;
+  runMode: StressRunMode;
+  totalTargetCount: number;
   trafficMode: StressTrafficMode;
   source: StressRunSource;
   enableLogs: boolean;
@@ -53,6 +55,8 @@ export interface StressTestStats {
   startedAtMs: number;
   endedAtMs: number;
   durationSeconds: number;
+  runMode: StressRunMode;
+  totalTargetCount: number;
   elapsedSeconds: number;
   remainingSeconds: number;
   trafficMode: StressTrafficMode;
@@ -92,6 +96,8 @@ export function createDefaultStressTestConfig(
 ): StressTestConfig {
   return {
     durationSeconds,
+    runMode: 'duration',
+    totalTargetCount: 0,
     trafficMode: useRealData ? 'real' : 'fake',
     source,
     enableLogs: true,
@@ -123,6 +129,8 @@ export function createEmptyStressTestStats(): StressTestStats {
     startedAtMs: 0,
     endedAtMs: 0,
     durationSeconds: 0,
+    runMode: 'duration',
+    totalTargetCount: 0,
     elapsedSeconds: 0,
     remainingSeconds: -1,
     trafficMode: 'fake',
@@ -302,8 +310,16 @@ export class StressTestManager {
     this.exceptionIntervalIds = [];
     this.currentStats = this.createStatsForStart(normalizedConfig, this.startTime);
 
+    if (this.shouldFailTotalCountStartForRum(normalizedConfig)) {
+      const message = "RUM is not initialized; total-count mode cannot run RUM-dependent scenarios";
+      this.recordErrorMessage(message);
+      DemoLogger.e(TAG, message);
+      this.stop('error');
+      return;
+    }
+
     DemoLogger.i(TAG,
-      `Starting stress test: duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, navigationInterval=${normalizedConfig.navigationIntervalMs}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}, longTaskBatchSize=${normalizedConfig.longTaskBatchSize}, longTaskInterval=${normalizedConfig.longTaskIntervalMs}`);
+      `Starting stress test: mode=${normalizedConfig.runMode}, duration=${this.formatDurationForLog(normalizedConfig.durationSeconds)}, totalTarget=${normalizedConfig.totalTargetCount > 0 ? normalizedConfig.totalTargetCount : 'none'}, traffic=${normalizedConfig.trafficMode}, source=${normalizedConfig.source}, logs=${normalizedConfig.enableLogs}, logTotal=${normalizedConfig.logTotalCount}, logBatchSize=${normalizedConfig.logBatchSize}, logInterval=${normalizedConfig.logIntervalMs}, actions=${normalizedConfig.enableActions}, resources=${normalizedConfig.enableResources}, resourceUrls=${this.formatResourceUrlSummary(normalizedConfig.realResourceUrl)}, navigation=${normalizedConfig.enableNavigation}, navigationInterval=${normalizedConfig.navigationIntervalMs}, errors=${normalizedConfig.enableErrors}, errorBatchSize=${normalizedConfig.errorBatchSize}, errorInterval=${normalizedConfig.errorIntervalMs}, longTasks=${normalizedConfig.enableLongTasks}, longTaskBatchSize=${normalizedConfig.longTaskBatchSize}, longTaskInterval=${normalizedConfig.longTaskIntervalMs}`);
 
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
@@ -320,79 +336,29 @@ export class StressTestManager {
     if (normalizedConfig.enableLongTasks) {
       this.startLongTaskTimer(normalizedConfig);
     }
-    if (normalizedConfig.durationSeconds > 0) {
+    if (normalizedConfig.runMode === 'duration' && normalizedConfig.durationSeconds > 0) {
       this.startAutoStopTimer(normalizedConfig);
     }
   }
 
-  /**
-   * Start a focused log I/O cache stress test.
-   */
-  public runLogIoCacheStress(totalLogs: number = 200, peakSize: number = 2, intervalMs: number = 50): void {
-    if (this.isRunning) {
-      DemoLogger.w(TAG, "Stress test is already running");
-      return;
+  private shouldFailTotalCountStartForRum(config: StressTestConfig): boolean {
+    if (!this.isTotalCountMode(config)) {
+      return false;
     }
-
-    const normalizedTotalLogs = Math.max(1, Math.floor(totalLogs));
-    const normalizedPeakSize = Math.max(1, Math.floor(peakSize));
-    const normalizedIntervalMs = Math.max(16, Math.floor(intervalMs));
-
-    const config = createDefaultStressTestConfig(0, false);
-    config.enableActions = false;
-    config.enableResources = false;
-    config.enableNavigation = false;
-    config.enableErrors = false;
-    config.enableLongTasks = false;
-    config.logThreadCount = 1;
-    config.logTotalCount = normalizedTotalLogs;
-    config.logBatchSize = normalizedPeakSize;
-    config.logIntervalMs = normalizedIntervalMs;
-
-    this.isRunning = true;
-    this.startTime = Date.now();
-    this.durationSeconds = 0;
-    this.currentConfig = this.normalizeConfig(config);
-    this.lastReport = null;
-    this.logCounter = 0;
-    this.actionCounter = 0;
-    this.resourceCounter = 0;
-    this.errorCounter = 0;
-    this.longTaskCounter = 0;
-    this.logIntervalIds = [];
-    this.actionIntervalIds = [];
-    this.resourceIntervalIds = [];
-    this.exceptionIntervalIds = [];
-    this.currentStats = this.createStatsForStart(this.currentConfig, this.startTime);
-
-    DemoLogger.i(TAG,
-      `Starting I/O cache peak stress test: totalLogs=${normalizedTotalLogs}, peakSize=${normalizedPeakSize}, intervalMs=${normalizedIntervalMs}`);
-
-    const emitPeak = (): void => {
-      if (!this.isRunning) {
-        return;
-      }
-
-      const remaining = normalizedTotalLogs - this.logCounter;
-      if (remaining <= 0) {
-        this.finishLogIoCacheStress(normalizedTotalLogs);
-        return;
-      }
-
-      const count = Math.min(normalizedPeakSize, remaining);
-      this.sendLogBatch(count, IO_CACHE_STRESS_TAG);
-
-      if (this.logCounter >= normalizedTotalLogs) {
-        this.finishLogIoCacheStress(normalizedTotalLogs);
-      }
-    };
-
-    const intervalId = setInterval(emitPeak, normalizedIntervalMs);
-    this.logIntervalIds.push(intervalId);
-    emitPeak();
+    if (!this.hasRumDependentScenario(config)) {
+      return false;
+    }
+    return this.rumManager === null || !this.rumManager.isInitialized();
   }
 
-  public sendLogBatch(batchSize: number = 2, tag: string = IO_CACHE_STRESS_TAG): void {
+  private hasRumDependentScenario(config: StressTestConfig): boolean {
+    return config.enableActions ||
+      config.enableResources ||
+      config.enableErrors ||
+      config.enableLongTasks;
+  }
+
+  private sendLogBatch(batchSize: number = 2, tag: string = STRESS_TEST_LOG_TAG): void {
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
     const batchLogs: LogEntry[] = [];
     const batchTimestampMs = Date.now();
@@ -401,7 +367,7 @@ export class StressTestManager {
       const logIndex = this.logCounter++;
       batchLogs.push({
         tag,
-        message: this.createBatchLogMessage(tag, logIndex),
+        message: this.createBatchLogMessage(logIndex),
         level: 'i',
         timestampMs: batchTimestampMs + i
       });
@@ -411,24 +377,25 @@ export class StressTestManager {
       FTLogger.batchLog(batchLogs);
       this.currentStats.logsGenerated += batchLogs.length;
       this.currentStats.logBatchesGenerated += 1;
-      DemoLogger.i(TAG, `Submitted log peak: tag=${tag}, size=${batchLogs.length}, totalGenerated=${this.logCounter}`);
+      DemoLogger.i(TAG, `Submitted log batch: tag=${tag}, size=${batchLogs.length}, totalGenerated=${this.logCounter}`);
     } catch (error) {
       this.recordErrorMessage(`batchLog failed: ${error}`);
-      DemoLogger.e(TAG, `Failed to submit log peak: ${error}`);
+      DemoLogger.e(TAG, `Failed to submit log batch: ${error}`);
     }
   }
 
-  private createBatchLogMessage(tag: string, logIndex: number): string {
+  private createBatchLogMessage(logIndex: number): string {
     const displayIndex = logIndex + 1;
-    if (tag === IO_CACHE_STRESS_TAG) {
-      return `I/O cache stress log ${displayIndex}`;
-    }
     return `Stress test log ${displayIndex}`;
   }
 
   private normalizeConfig(config: StressTestConfig): StressTestConfig {
+    const runMode: StressRunMode = config.runMode === 'total' ? 'total' : 'duration';
+    const normalizedTotalTarget = Math.max(0, Math.floor(config.totalTargetCount));
     return {
-      durationSeconds: Math.max(0, Math.floor(config.durationSeconds)),
+      durationSeconds: runMode === 'duration' ? Math.max(0, Math.floor(config.durationSeconds)) : 0,
+      runMode,
+      totalTargetCount: runMode === 'total' ? Math.max(1, normalizedTotalTarget) : normalizedTotalTarget,
       trafficMode: config.trafficMode === 'real' ? 'real' : 'fake',
       source: config.source === 'background-service' ? 'background-service' : 'foreground',
       enableLogs: config.enableLogs,
@@ -459,6 +426,8 @@ export class StressTestManager {
     stats.isRunning = true;
     stats.startedAtMs = startedAtMs;
     stats.durationSeconds = config.durationSeconds;
+    stats.runMode = config.runMode;
+    stats.totalTargetCount = config.totalTargetCount;
     stats.remainingSeconds = config.durationSeconds > 0 ? config.durationSeconds : -1;
     stats.trafficMode = config.trafficMode;
     stats.source = config.source;
@@ -527,14 +496,72 @@ export class StressTestManager {
     return Math.min(100, minIntervalMs - 1);
   }
 
+  private isTotalCountMode(config: StressTestConfig): boolean {
+    return config.runMode === 'total' && config.totalTargetCount > 0;
+  }
+
+  private getLogTargetCount(config: StressTestConfig): number {
+    if (config.logTotalCount > 0) {
+      return config.logTotalCount;
+    }
+    return this.isTotalCountMode(config) ? config.totalTargetCount : 0;
+  }
+
+  private isScenarioTargetReached(generatedCount: number, config: StressTestConfig): boolean {
+    return this.isTotalCountMode(config) && generatedCount >= config.totalTargetCount;
+  }
+
+  private getRemainingScenarioTarget(generatedCount: number, config: StressTestConfig): number {
+    if (!this.isTotalCountMode(config)) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    return Math.max(0, config.totalTargetCount - generatedCount);
+  }
+
+  private getCompletedResourceCount(): number {
+    return this.currentStats.resourcesSucceeded + this.currentStats.resourcesFailed;
+  }
+
+  private finishTotalCountStressIfComplete(): void {
+    if (!this.isRunning || !this.isTotalCountMode(this.currentConfig)) {
+      return;
+    }
+
+    const targetCount = this.currentConfig.totalTargetCount;
+    if (this.currentConfig.enableLogs && this.currentStats.logsGenerated < targetCount) {
+      return;
+    }
+    if (this.currentConfig.enableActions && this.currentStats.actionsGenerated < targetCount) {
+      return;
+    }
+    if (this.currentConfig.enableResources && this.getCompletedResourceCount() < targetCount) {
+      return;
+    }
+    if (this.currentConfig.enableNavigation && this.currentStats.navigationSwitches < targetCount) {
+      return;
+    }
+    if (this.currentConfig.enableErrors && this.currentStats.errorsGenerated < targetCount) {
+      return;
+    }
+    if (this.currentConfig.enableLongTasks && this.currentStats.longTasksGenerated < targetCount) {
+      return;
+    }
+
+    DemoLogger.i(TAG, `Total-count stress test completed: target=${targetCount}`);
+    this.stop('completed');
+  }
+
   private emitConfiguredLogs(threadIndex: number, config: StressTestConfig): boolean {
-    if (config.logTotalCount > 0 && this.currentStats.logsGenerated >= config.logTotalCount) {
+    const targetCount = this.getLogTargetCount(config);
+    if (targetCount > 0 && this.currentStats.logsGenerated >= targetCount) {
+      this.finishTotalCountStressIfComplete();
       return false;
     }
 
-    const remaining = config.logTotalCount > 0 ? config.logTotalCount - this.currentStats.logsGenerated : config.logBatchSize;
+    const remaining = targetCount > 0 ? targetCount - this.currentStats.logsGenerated : config.logBatchSize;
     const emitCount = Math.min(config.logBatchSize, remaining);
     if (emitCount <= 0) {
+      this.finishTotalCountStressIfComplete();
       return false;
     }
 
@@ -543,7 +570,8 @@ export class StressTestManager {
     } else {
       this.sendLogBatch(emitCount, STRESS_TEST_LOG_TAG);
     }
-    return !(config.logTotalCount > 0 && this.currentStats.logsGenerated >= config.logTotalCount);
+    this.finishTotalCountStressIfComplete();
+    return !(targetCount > 0 && this.currentStats.logsGenerated >= targetCount);
   }
 
   private startActionTimers(config: StressTestConfig): void {
@@ -554,11 +582,24 @@ export class StressTestManager {
           clearInterval(intervalId);
           return;
         }
-        this.sendAction(threadIndex);
+        if (!this.emitConfiguredAction(threadIndex, config)) {
+          clearInterval(intervalId);
+        }
       }, config.actionIntervalMs);
       this.actionIntervalIds.push(intervalId);
       DemoLogger.i(TAG, `Action timer ${threadIndex} started: interval=${config.actionIntervalMs}ms`);
     }
+  }
+
+  private emitConfiguredAction(threadIndex: number, config: StressTestConfig): boolean {
+    if (this.isScenarioTargetReached(this.currentStats.actionsGenerated, config)) {
+      this.finishTotalCountStressIfComplete();
+      return false;
+    }
+
+    this.sendAction(threadIndex);
+    this.finishTotalCountStressIfComplete();
+    return !this.isScenarioTargetReached(this.currentStats.actionsGenerated, config);
   }
 
   private startResourceTimers(config: StressTestConfig): void {
@@ -569,10 +610,17 @@ export class StressTestManager {
           clearInterval(intervalId);
           return;
         }
+        if (this.isScenarioTargetReached(this.currentStats.resourcesGenerated, config)) {
+          this.finishTotalCountStressIfComplete();
+          clearInterval(intervalId);
+          return;
+        }
         this.sendResource(threadIndex).catch((error: Error) => {
           this.currentStats.resourcesFailed += 1;
           this.recordErrorMessage(`sendResource failed: ${error.message}`);
           DemoLogger.e(TAG, `Error in sendResource for timer ${threadIndex}: ${error}`);
+        }).then((): void => {
+          this.finishTotalCountStressIfComplete();
         });
       }, config.resourceIntervalMs);
       this.resourceIntervalIds.push(intervalId);
@@ -586,10 +634,11 @@ export class StressTestManager {
         clearInterval(intervalId);
         return;
       }
-      this.sendCustomErrorBatch(config.errorBatchSize);
+      if (!this.sendCustomErrorBatch(config.errorBatchSize)) {
+        clearInterval(intervalId);
+      }
     }, config.errorIntervalMs);
     this.exceptionIntervalIds.push(intervalId);
-    this.sendCustomErrorBatch(config.errorBatchSize);
   }
 
   private startLongTaskTimer(config: StressTestConfig): void {
@@ -598,18 +647,11 @@ export class StressTestManager {
         clearInterval(intervalId);
         return;
       }
-      this.sendLongTaskBatch(config.longTaskBatchSize);
+      if (!this.sendLongTaskBatch(config.longTaskBatchSize)) {
+        clearInterval(intervalId);
+      }
     }, config.longTaskIntervalMs);
     this.exceptionIntervalIds.push(intervalId);
-    this.sendLongTaskBatch(config.longTaskBatchSize);
-  }
-
-  private finishLogIoCacheStress(totalLogs: number): void {
-    if (!this.isRunning) {
-      return;
-    }
-    DemoLogger.i(TAG, `I/O cache stress test finished: totalLogs=${totalLogs}, elapsed=${this.getElapsedSeconds()}s`);
-    this.stop('completed');
   }
 
   private sendLog(threadIndex: number): void {
@@ -769,11 +811,20 @@ export class StressTestManager {
     }
   }
 
-  private sendCustomErrorBatch(batchSize: number): void {
+  private sendCustomErrorBatch(batchSize: number): boolean {
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
-    for (let i = 0; i < normalizedBatchSize; i++) {
+    const remaining = this.getRemainingScenarioTarget(this.currentStats.errorsGenerated, this.currentConfig);
+    const emitCount = Math.min(normalizedBatchSize, remaining);
+    if (emitCount <= 0) {
+      this.finishTotalCountStressIfComplete();
+      return false;
+    }
+
+    for (let i = 0; i < emitCount; i++) {
       this.sendCustomError();
     }
+    this.finishTotalCountStressIfComplete();
+    return !this.isScenarioTargetReached(this.currentStats.errorsGenerated, this.currentConfig);
   }
 
   private sendLongTask(): void {
@@ -795,11 +846,20 @@ export class StressTestManager {
     }
   }
 
-  private sendLongTaskBatch(batchSize: number): void {
+  private sendLongTaskBatch(batchSize: number): boolean {
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
-    for (let i = 0; i < normalizedBatchSize; i++) {
+    const remaining = this.getRemainingScenarioTarget(this.currentStats.longTasksGenerated, this.currentConfig);
+    const emitCount = Math.min(normalizedBatchSize, remaining);
+    if (emitCount <= 0) {
+      this.finishTotalCountStressIfComplete();
+      return false;
+    }
+
+    for (let i = 0; i < emitCount; i++) {
       this.sendLongTask();
     }
+    this.finishTotalCountStressIfComplete();
+    return !this.isScenarioTargetReached(this.currentStats.longTasksGenerated, this.currentConfig);
   }
 
   public stop(stopReason: StressStopReason = 'manual'): StressTestReport | null {
@@ -883,7 +943,9 @@ export class StressTestManager {
   }
 
   public isNavigationScenarioEnabled(): boolean {
-    return this.isRunning && this.currentConfig.enableNavigation;
+    return this.isRunning &&
+      this.currentConfig.enableNavigation &&
+      !this.isScenarioTargetReached(this.currentStats.navigationSwitches, this.currentConfig);
   }
 
   public getNavigationIntervalMs(): number {
@@ -894,7 +956,12 @@ export class StressTestManager {
     if (!this.isRunning || !this.currentConfig.enableNavigation) {
       return;
     }
+    if (this.isScenarioTargetReached(this.currentStats.navigationSwitches, this.currentConfig)) {
+      this.finishTotalCountStressIfComplete();
+      return;
+    }
     this.currentStats.navigationSwitches += 1;
+    this.finishTotalCountStressIfComplete();
   }
 
   public getStatsSnapshot(): StressTestStats {
@@ -927,6 +994,7 @@ export class StressTestManager {
     const successRate = resourceTotal > 0 ? Math.round((stats.resourcesSucceeded * 10000) / resourceTotal) / 100 : 0;
     return [
       `Reason: ${report.stopReason}`,
+      `Mode: ${stats.runMode}${stats.runMode === 'total' ? `, Target: ${stats.totalTargetCount}` : ''}`,
       `Elapsed: ${report.elapsedSeconds}s / ${report.durationSeconds > 0 ? `${report.durationSeconds}s` : 'indefinite'}`,
       `Traffic: ${stats.trafficMode}, Source: ${stats.source}`,
       `Logs: ${stats.logsGenerated} (${stats.logBatchesGenerated} batches)`,
@@ -944,6 +1012,8 @@ export class StressTestManager {
       startedAtMs: stats.startedAtMs,
       endedAtMs: stats.endedAtMs,
       durationSeconds: stats.durationSeconds,
+      runMode: stats.runMode,
+      totalTargetCount: stats.totalTargetCount,
       elapsedSeconds: stats.elapsedSeconds,
       remainingSeconds: stats.remainingSeconds,
       trafficMode: stats.trafficMode,
