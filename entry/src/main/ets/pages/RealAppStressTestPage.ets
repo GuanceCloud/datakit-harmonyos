@@ -33,6 +33,8 @@ const KEY_STRESS_ACTION_TIMER_COUNT = 'stress_action_timer_count';
 const KEY_STRESS_ACTION_INTERVAL_MS = 'stress_action_interval_ms';
 const KEY_STRESS_RESOURCE_TIMER_COUNT = 'stress_resource_timer_count';
 const KEY_STRESS_RESOURCE_INTERVAL_MS = 'stress_resource_interval_ms';
+const KEY_STRESS_ERROR_BATCH_SIZE = 'stress_error_batch_size';
+const KEY_STRESS_ERROR_INTERVAL_MS = 'stress_error_interval_ms';
 const KEY_IO_CACHE_TOTAL_LOGS = 'io_cache_total_logs';
 const KEY_IO_CACHE_PEAK_SIZE = 'io_cache_peak_size';
 const KEY_IO_CACHE_PEAK_INTERVAL_MS = 'io_cache_peak_interval_ms';
@@ -42,6 +44,8 @@ const DEFAULT_STRESS_ACTION_TIMER_COUNT = 2;
 const DEFAULT_STRESS_ACTION_INTERVAL_MS = 20;
 const DEFAULT_STRESS_RESOURCE_TIMER_COUNT = 2;
 const DEFAULT_STRESS_RESOURCE_INTERVAL_MS = 200;
+const DEFAULT_STRESS_ERROR_BATCH_SIZE = 1;
+const DEFAULT_STRESS_ERROR_INTERVAL_MS = 1000;
 const DEFAULT_REAL_RESOURCE_URL = '';
 const MAX_REAL_RESOURCE_URL_COUNT = 10;
 const DEFAULT_IO_CACHE_TOTAL_LOGS = 200;
@@ -59,6 +63,10 @@ const MIN_STRESS_RESOURCE_TIMER_COUNT = 1;
 const MAX_STRESS_RESOURCE_TIMER_COUNT = 20;
 const MIN_STRESS_RESOURCE_INTERVAL_MS = 50;
 const MAX_STRESS_RESOURCE_INTERVAL_MS = 10000;
+const MIN_STRESS_ERROR_BATCH_SIZE = 1;
+const MAX_STRESS_ERROR_BATCH_SIZE = 1000;
+const MIN_STRESS_ERROR_INTERVAL_MS = 250;
+const MAX_STRESS_ERROR_INTERVAL_MS = 10000;
 const MIN_IO_CACHE_TOTAL_LOGS = 1;
 const MAX_IO_CACHE_TOTAL_LOGS = 100000;
 const MIN_IO_CACHE_PEAK_SIZE = 1;
@@ -96,6 +104,8 @@ export struct RealAppStressTestPage {
   @State stressActionIntervalMs: number = DEFAULT_STRESS_ACTION_INTERVAL_MS;
   @State stressResourceTimerCount: number = DEFAULT_STRESS_RESOURCE_TIMER_COUNT;
   @State stressResourceIntervalMs: number = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
+  @State stressErrorBatchSize: number = DEFAULT_STRESS_ERROR_BATCH_SIZE;
+  @State stressErrorIntervalMs: number = DEFAULT_STRESS_ERROR_INTERVAL_MS;
   @State ioCacheTotalLogs: number = DEFAULT_IO_CACHE_TOTAL_LOGS;
   @State ioCachePeakSize: number = DEFAULT_IO_CACHE_PEAK_SIZE;
   @State ioCachePeakIntervalMs: number = DEFAULT_IO_CACHE_PEAK_INTERVAL_MS;
@@ -178,6 +188,7 @@ export struct RealAppStressTestPage {
       this.normalizeStressLogSettings();
       this.normalizeStressActionSettings();
       this.normalizeStressResourceSettings();
+      this.normalizeStressErrorSettings();
       const config = this.buildStressConfig();
       if (!this.hasRunnableScenario(config)) {
         promptAction.showToast({
@@ -191,7 +202,7 @@ export struct RealAppStressTestPage {
       this.lastReportEndedAtMs = 0;
       await this.saveSettings();
       DemoLogger.i(TAG,
-        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, background=${this.enableBackgroundService}`);
+        `Starting stress test: duration=${this.testDuration}s, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
       if (this.enableBackgroundService) {
@@ -320,6 +331,8 @@ export struct RealAppStressTestPage {
     config.resourceThreadCount = this.stressResourceTimerCount;
     config.resourceIntervalMs = this.stressResourceIntervalMs;
     config.realResourceUrl = this.serializeRealResourceUrls();
+    config.errorBatchSize = this.stressErrorBatchSize;
+    config.errorIntervalMs = this.stressErrorIntervalMs;
     return config;
   }
 
@@ -405,6 +418,10 @@ export struct RealAppStressTestPage {
           await this.preferencesStore.get(KEY_STRESS_RESOURCE_TIMER_COUNT, DEFAULT_STRESS_RESOURCE_TIMER_COUNT) as number;
         this.stressResourceIntervalMs =
           await this.preferencesStore.get(KEY_STRESS_RESOURCE_INTERVAL_MS, DEFAULT_STRESS_RESOURCE_INTERVAL_MS) as number;
+        this.stressErrorBatchSize =
+          await this.preferencesStore.get(KEY_STRESS_ERROR_BATCH_SIZE, DEFAULT_STRESS_ERROR_BATCH_SIZE) as number;
+        this.stressErrorIntervalMs =
+          await this.preferencesStore.get(KEY_STRESS_ERROR_INTERVAL_MS, DEFAULT_STRESS_ERROR_INTERVAL_MS) as number;
         this.ioCacheTotalLogs =
           await this.preferencesStore.get(KEY_IO_CACHE_TOTAL_LOGS, DEFAULT_IO_CACHE_TOTAL_LOGS) as number;
         this.ioCachePeakSize =
@@ -414,6 +431,7 @@ export struct RealAppStressTestPage {
         this.normalizeStressLogSettings();
         this.normalizeStressActionSettings();
         this.normalizeStressResourceSettings();
+        this.normalizeStressErrorSettings();
         this.normalizeIoCacheSettings();
       }
     } catch (error) {
@@ -444,6 +462,8 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_ACTION_INTERVAL_MS, this.stressActionIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_RESOURCE_TIMER_COUNT, this.stressResourceTimerCount);
         await this.preferencesStore.put(KEY_STRESS_RESOURCE_INTERVAL_MS, this.stressResourceIntervalMs);
+        await this.preferencesStore.put(KEY_STRESS_ERROR_BATCH_SIZE, this.stressErrorBatchSize);
+        await this.preferencesStore.put(KEY_STRESS_ERROR_INTERVAL_MS, this.stressErrorIntervalMs);
         await this.preferencesStore.put(KEY_IO_CACHE_TOTAL_LOGS, this.ioCacheTotalLogs);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_SIZE, this.ioCachePeakSize);
         await this.preferencesStore.put(KEY_IO_CACHE_PEAK_INTERVAL_MS, this.ioCachePeakIntervalMs);
@@ -527,6 +547,19 @@ export struct RealAppStressTestPage {
       Math.floor(this.stressResourceIntervalMs),
       MIN_STRESS_RESOURCE_INTERVAL_MS,
       MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+  }
+
+  private normalizeStressErrorSettings(): void {
+    this.stressErrorBatchSize = this.clampNumber(
+      Math.floor(this.stressErrorBatchSize),
+      MIN_STRESS_ERROR_BATCH_SIZE,
+      MAX_STRESS_ERROR_BATCH_SIZE
+    );
+    this.stressErrorIntervalMs = this.clampNumber(
+      Math.floor(this.stressErrorIntervalMs),
+      MIN_STRESS_ERROR_INTERVAL_MS,
+      MAX_STRESS_ERROR_INTERVAL_MS
     );
   }
 
@@ -652,6 +685,24 @@ export struct RealAppStressTestPage {
       this.stressResourceIntervalMs + delta,
       MIN_STRESS_RESOURCE_INTERVAL_MS,
       MAX_STRESS_RESOURCE_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  adjustStressErrorBatchSize(delta: number): void {
+    this.stressErrorBatchSize = this.clampNumber(
+      this.stressErrorBatchSize + delta,
+      MIN_STRESS_ERROR_BATCH_SIZE,
+      MAX_STRESS_ERROR_BATCH_SIZE
+    );
+    this.saveSettings();
+  }
+
+  adjustStressErrorInterval(delta: number): void {
+    this.stressErrorIntervalMs = this.clampNumber(
+      this.stressErrorIntervalMs + delta,
+      MIN_STRESS_ERROR_INTERVAL_MS,
+      MAX_STRESS_ERROR_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -1234,6 +1285,78 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             Text(`Current: ${this.stressResourceTimerCount} timers, resource every ${this.stressResourceIntervalMs}ms`)
+              .fontSize(13)
+              .fontColor('#007DFF')
+              .width('100%')
+              .textAlign(TextAlign.Center)
+          }
+          .width('100%')
+          .padding(18)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(8)
+
+          Column({ space: 10 }) {
+            Text('Custom Error Params')
+              .fontSize(18)
+              .fontWeight(FontWeight.Medium)
+
+            Column({ space: 5 }) {
+              Text('Batch Size')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-1')
+                  .onClick(() => this.adjustStressErrorBatchSize(-1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressErrorBatchSize > MIN_STRESS_ERROR_BATCH_SIZE)
+
+                Text(`${this.stressErrorBatchSize}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+1')
+                  .onClick(() => this.adjustStressErrorBatchSize(1))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressErrorBatchSize < MAX_STRESS_ERROR_BATCH_SIZE)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Column({ space: 5 }) {
+              Text('Event Interval (ms)')
+                .fontSize(14)
+                .fontColor(Color.Gray)
+              Row({ space: 14 }) {
+                Button('-250')
+                  .onClick(() => this.adjustStressErrorInterval(-250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressErrorIntervalMs > MIN_STRESS_ERROR_INTERVAL_MS)
+
+                Text(`${this.stressErrorIntervalMs}`)
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .width(100)
+                  .textAlign(TextAlign.Center)
+
+                Button('+250')
+                  .onClick(() => this.adjustStressErrorInterval(250))
+                  .width(76)
+                  .height(44)
+                  .enabled(!this.isTestRunning && this.stressErrorIntervalMs < MAX_STRESS_ERROR_INTERVAL_MS)
+              }
+              .justifyContent(FlexAlign.Center)
+              .width('100%')
+            }
+            .width('100%')
+
+            Text(`Current: ${this.stressErrorBatchSize} custom errors every ${this.stressErrorIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')

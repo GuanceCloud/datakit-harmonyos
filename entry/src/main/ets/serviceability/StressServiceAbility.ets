@@ -112,6 +112,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     config.resourceThreadCount = this.readNumber(want, 'resourceThreadCount', config.resourceThreadCount);
     config.resourceIntervalMs = this.readNumber(want, 'resourceIntervalMs', config.resourceIntervalMs);
     config.realResourceUrl = this.readString(want, 'realResourceUrl', config.realResourceUrl).trim();
+    config.errorBatchSize = this.readNumber(want, 'errorBatchSize', config.errorBatchSize);
     config.errorIntervalMs = this.readNumber(want, 'errorIntervalMs', config.errorIntervalMs);
     config.longTaskIntervalMs = this.readNumber(want, 'longTaskIntervalMs', config.longTaskIntervalMs);
     return config;
