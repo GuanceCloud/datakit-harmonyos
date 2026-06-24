@@ -122,6 +122,8 @@ export class SyncTaskManager {
   private uploadCurrentPollRows = 0;
   private uploadCurrentTaskName = "";
   private uploadStartTraced = false;
+  private syncPollPrecheckRunning = false;
+  private syncPollPrecheckPending = false;
   private isStop = false;
   private autoSync = false;
   private initialSyncPollTriggered = false;
@@ -290,15 +292,19 @@ export class SyncTaskManager {
     }
 
     if (this.uploadRunning || this.uploadScheduled) {
+      const previousNeedReschedule = this.uploadNeedReschedule;
+      const previousRescheduleDelay = this.uploadRescheduleDelay;
       if (this.uploadNeedReschedule) {
         this.uploadRescheduleDelay = Math.min(this.uploadRescheduleDelay, normalizedDelay);
       } else {
         this.uploadRescheduleDelay = normalizedDelay;
       }
       this.uploadNeedReschedule = true;
-      this.traceUploadLaneDebug(
-        `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
-      );
+      if (!previousNeedReschedule || previousRescheduleDelay !== this.uploadRescheduleDelay) {
+        this.traceUploadLaneDebug(
+          `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
+        );
+      }
       return;
     }
 
@@ -412,23 +418,45 @@ export class SyncTaskManager {
    */
   public executeSyncPoll(): void {
 
-    if (this.autoSync && !this.isStop) {
-      this.executePollIfDataAvailable();
+    if (!this.autoSync || this.isStop) {
+      return;
     }
+
+    if (this.uploadRunning || this.uploadScheduled) {
+      this.scheduleUpload(0);
+      return;
+    }
+
+    if (this.syncPollPrecheckRunning) {
+      this.syncPollPrecheckPending = true;
+      return;
+    }
+
+    this.executePollIfDataAvailable();
   }
 
   private executePollIfDataAvailable(): void {
+    this.syncPollPrecheckRunning = true;
+    let scheduledUpload = false;
     this.hasUploadTriggerData().then((hasData: boolean) => {
       if (this.isStop || !this.autoSync) {
         return;
       }
       if (hasData) {
+        scheduledUpload = true;
         this.executePoll(false);
       } else {
         this.traceUploadLaneDebug(`[SKIP] reason=no-data`);
       }
     }).catch((error: Error) => {
       FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [SKIP] check data failed: ${error}`);
+    }).finally(() => {
+      this.syncPollPrecheckRunning = false;
+      const shouldReplayPendingCheck = this.syncPollPrecheckPending && !scheduledUpload && !this.isStop && this.autoSync;
+      this.syncPollPrecheckPending = false;
+      if (shouldReplayPendingCheck) {
+        this.executeSyncPoll();
+      }
     });
   }
 

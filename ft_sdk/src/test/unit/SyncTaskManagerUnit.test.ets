@@ -48,6 +48,15 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+async function waitUntil(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    await Promise.resolve();
+    if (condition()) {
+      return;
+    }
+  }
+}
+
 class FakePreferences implements SyncTaskPreferences {
   value: number | string | boolean = -1;
   putCount: number = 0;
@@ -329,6 +338,7 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   lastHttpModel: string = '';
   lastHttpBody: string = '';
   lastHttpPkgId: string = '';
+  httpBarrier: Promise<void> | null = null;
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
   throwSleep: boolean = false;
@@ -358,6 +368,9 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     this.lastHttpPkgId = pkgId;
     if (this.throwExecuteHttp) {
       throw new Error('http failed');
+    }
+    if (this.httpBarrier) {
+      await this.httpBarrier;
     }
     if (this.httpResults.length > 0) {
       return this.httpResults.shift() as FakeHttpResult;
@@ -548,6 +561,47 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('executeSyncPollShouldCoalesceWhileUploadLaneIsRunning', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+      await flushPromises();
+
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-running', 'df_rum_harmonyos_log,sdk_data_id=log-running value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      let releaseHttp: (() => void) | null = null;
+      runtime.httpBarrier = new Promise<void>((resolve: () => void) => {
+        releaseHttp = resolve;
+      });
+
+      manager.executePoll(false);
+      await waitUntil(() => runtime.executeHttpCount === 1);
+      expect(manager.getStatus().uploadLaneStatus.isRunning).assertTrue();
+
+      const executeCountBefore = db.executeCount;
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+      await flushPromises();
+
+      expect(db.executeCount).assertEqual(executeCountBefore);
+      expect(manager.getStatus().uploadLaneStatus.needReschedule).assertTrue();
+
+      if (releaseHttp) {
+        releaseHttp();
+      }
+      runtime.httpBarrier = null;
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
