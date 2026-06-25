@@ -15,6 +15,29 @@ import preferences from '@ohos.data.preferences';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
+import {
+  KEY_STRESS_SERVICE_LAST_ERROR,
+  KEY_STRESS_SERVICE_LAST_EVENT,
+  KEY_STRESS_SERVICE_LAST_EVENT_TIME_MS,
+  KEY_STRESS_SERVICE_REQUEST_COUNT,
+  KEY_STRESS_SERVICE_START_ID,
+  KEY_STRESS_SERVICE_STATE,
+  KEY_STRESS_SERVICE_STOP_REASON,
+  markStressServiceError,
+  markStressServiceEvent,
+  markStressServiceStarting,
+  markStressServiceUnsupported,
+  resetStressServiceStatus,
+  STRESS_SERVICE_STATE_DESTROYED,
+  STRESS_SERVICE_STATE_ERROR,
+  STRESS_SERVICE_STATE_IDLE,
+  STRESS_SERVICE_STATE_KEEPALIVE,
+  STRESS_SERVICE_STATE_STARTED,
+  STRESS_SERVICE_STATE_STARTING,
+  STRESS_SERVICE_STATE_STOPPED,
+  STRESS_SERVICE_STATE_STOPPING,
+  STRESS_SERVICE_STATE_UNSUPPORTED
+} from '../utils/StressServiceStatusStore';
 
 const TAG = "RealAppStressTestPage";
 const PREFERENCES_NAME = 'real_app_stress_test_settings';
@@ -130,6 +153,13 @@ export struct RealAppStressTestPage {
   @State stressErrorIntervalMs: number = DEFAULT_STRESS_ERROR_INTERVAL_MS;
   @State stressLongTaskBatchSize: number = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
   @State stressLongTaskIntervalMs: number = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
+  @StorageLink(KEY_STRESS_SERVICE_STATE) backgroundServiceState: string = STRESS_SERVICE_STATE_IDLE;
+  @StorageLink(KEY_STRESS_SERVICE_LAST_EVENT) backgroundServiceLastEvent: string = 'none';
+  @StorageLink(KEY_STRESS_SERVICE_LAST_EVENT_TIME_MS) backgroundServiceLastEventTimeMs: number = 0;
+  @StorageLink(KEY_STRESS_SERVICE_START_ID) backgroundServiceStartId: number = -1;
+  @StorageLink(KEY_STRESS_SERVICE_REQUEST_COUNT) backgroundServiceRequestCount: number = 0;
+  @StorageLink(KEY_STRESS_SERVICE_STOP_REASON) backgroundServiceStopReason: string = 'none';
+  @StorageLink(KEY_STRESS_SERVICE_LAST_ERROR) backgroundServiceLastError: string = '';
 
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
   private updateTimer: number | null = null;
@@ -224,6 +254,9 @@ export struct RealAppStressTestPage {
 
       this.reportText = "";
       this.lastReportEndedAtMs = 0;
+      if (this.enableBackgroundService) {
+        resetStressServiceStatus();
+      }
       await this.saveSettings();
       DemoLogger.i(TAG,
         `Starting stress test: mode=${config.runMode}, duration=${config.durationSeconds}s, totalTarget=${config.totalTargetCount}, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, navigationInterval=${config.navigationIntervalMs}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
@@ -255,9 +288,15 @@ export struct RealAppStressTestPage {
         this.navigateToStressTestPageA();
       }
     } catch (error) {
-      DemoLogger.e(TAG, `Failed to start stress test: ${error}`);
+      const startErrorMessage = this.formatThrowableMessage(error);
+      DemoLogger.e(TAG, `Failed to start stress test: ${startErrorMessage}`);
+      if (this.stressTestManager.isStressTestRunning()) {
+        this.stressTestManager.stop('error');
+      }
+      this.refreshStats();
+      this.refreshReportFromManager(false);
       promptAction.showToast({
-        message: `Failed to start: ${error}`,
+        message: `Failed to start: ${startErrorMessage}`,
         duration: 3000
       });
       this.isTestRunning = false;
@@ -379,22 +418,59 @@ export struct RealAppStressTestPage {
 
   private async startBackgroundStressService(): Promise<void> {
     const want = this.createStressServiceWant('keepalive');
-    await this.abilityContext.startAppServiceExtensionAbility(want);
-    DemoLogger.i(TAG, "Background stress service start requested");
+    markStressServiceStarting();
+    try {
+      await this.abilityContext.startAppServiceExtensionAbility(want);
+      DemoLogger.i(TAG, "Background stress service start requested");
+    } catch (error) {
+      const errorMessage = this.formatBackgroundServiceStartError(error);
+      if (this.isBackgroundServiceCapabilityUnsupported(errorMessage)) {
+        markStressServiceUnsupported('start unsupported', errorMessage);
+      } else {
+        markStressServiceError('start failed', errorMessage);
+      }
+      throw new Error(errorMessage);
+    }
+  }
+
+  private formatBackgroundServiceStartError(error: Object): string {
+    const rawMessage = `${error}`;
+    if (this.isBackgroundServiceCapabilityUnsupported(rawMessage)) {
+      return 'Background Service is not supported by this device or HarmonyOS runtime. Disable Background Service and run foreground stress test, or use a runtime that supports AppServiceExtensionAbility.';
+    }
+    return rawMessage;
+  }
+
+  private isBackgroundServiceCapabilityUnsupported(message: string): boolean {
+    return message.indexOf('Capability not support') >= 0 ||
+      message.indexOf('Capability not supported') >= 0;
+  }
+
+  private formatThrowableMessage(error: Object): string {
+    const message = `${error}`;
+    const errorPrefix = 'Error: ';
+    if (message.indexOf(errorPrefix) === 0) {
+      return message.substring(errorPrefix.length);
+    }
+    return message;
   }
 
   private async stopBackgroundStressService(): Promise<void> {
     const want = this.createStressServiceWant('stop');
+    markStressServiceEvent(STRESS_SERVICE_STATE_STOPPING, 'stop requested', -1, 'manual');
     try {
       await this.abilityContext.startAppServiceExtensionAbility(want);
     } catch (error) {
+      markStressServiceError('stop command failed', `${error}`);
       DemoLogger.w(TAG, `Background stress service stop command failed: ${error}`);
     }
 
     try {
       await this.abilityContext.stopAppServiceExtensionAbility(want);
+      markStressServiceEvent(STRESS_SERVICE_STATE_STOPPING, 'stopAppServiceExtensionAbility', -1, 'manual');
       DemoLogger.i(TAG, "Background stress service stop requested");
     } catch (error) {
+      markStressServiceError('stop ability failed', `${error}`);
       DemoLogger.w(TAG, `Background stress service stop failed: ${error}`);
     }
   }
@@ -792,6 +868,7 @@ export struct RealAppStressTestPage {
 
   resetBackgroundServiceSettings(): void {
     this.enableBackgroundService = false;
+    resetStressServiceStatus();
     this.saveSettings();
   }
 
@@ -995,6 +1072,73 @@ export struct RealAppStressTestPage {
       return this.stats.source;
     }
     return this.enableBackgroundService ? 'background-service' : 'foreground';
+  }
+
+  private shouldShowBackgroundServiceDetails(): boolean {
+    return this.enableBackgroundService ||
+      this.backgroundServiceState !== STRESS_SERVICE_STATE_IDLE ||
+      this.stats.source === 'background-service';
+  }
+
+  private formatBackgroundServiceState(): string {
+    switch (this.backgroundServiceState) {
+      case STRESS_SERVICE_STATE_STARTING:
+        return 'Starting';
+      case STRESS_SERVICE_STATE_STARTED:
+        return 'Started';
+      case STRESS_SERVICE_STATE_KEEPALIVE:
+        return 'Keepalive';
+      case STRESS_SERVICE_STATE_STOPPING:
+        return 'Stopping';
+      case STRESS_SERVICE_STATE_STOPPED:
+        return 'Stopped';
+      case STRESS_SERVICE_STATE_DESTROYED:
+        return 'Destroyed';
+      case STRESS_SERVICE_STATE_UNSUPPORTED:
+        return 'Unsupported';
+      case STRESS_SERVICE_STATE_ERROR:
+        return 'Error';
+      default:
+        return 'Idle';
+    }
+  }
+
+  private getBackgroundServiceStateColor(): string {
+    switch (this.backgroundServiceState) {
+      case STRESS_SERVICE_STATE_STARTED:
+      case STRESS_SERVICE_STATE_KEEPALIVE:
+        return '#00A870';
+      case STRESS_SERVICE_STATE_STARTING:
+      case STRESS_SERVICE_STATE_STOPPING:
+        return '#D46B08';
+      case STRESS_SERVICE_STATE_STOPPED:
+      case STRESS_SERVICE_STATE_DESTROYED:
+        return '#576B95';
+      case STRESS_SERVICE_STATE_UNSUPPORTED:
+      case STRESS_SERVICE_STATE_ERROR:
+        return '#F53F3F';
+      default:
+        return '#86909C';
+    }
+  }
+
+  private formatBackgroundServiceEventTime(): string {
+    if (this.backgroundServiceLastEventTimeMs <= 0) {
+      return 'Never';
+    }
+    return new Date(this.backgroundServiceLastEventTimeMs).toLocaleTimeString();
+  }
+
+  private formatBackgroundServiceStartId(): string {
+    return this.backgroundServiceStartId >= 0 ? `${this.backgroundServiceStartId}` : 'N/A';
+  }
+
+  private formatBackgroundServiceStopReason(): string {
+    return this.backgroundServiceStopReason.length > 0 ? this.backgroundServiceStopReason : 'none';
+  }
+
+  private formatBackgroundServiceLastError(): string {
+    return this.backgroundServiceLastError.length > 0 ? this.backgroundServiceLastError : 'none';
   }
 
   private formatRealtimeTrafficMode(): string {
@@ -1517,6 +1661,9 @@ export struct RealAppStressTestPage {
               Toggle({ type: 0, isOn: this.enableBackgroundService })
                 .onChange((isOn: boolean) => {
                   this.enableBackgroundService = isOn;
+                  if (!isOn) {
+                    resetStressServiceStatus();
+                  }
                   this.saveSettings();
                 })
                 .enabled(!this.isTestRunning)
@@ -2078,11 +2225,91 @@ export struct RealAppStressTestPage {
             .borderRadius(8)
           }
 
-          if (this.enableBackgroundService) {
+          if (this.shouldShowBackgroundServiceDetails()) {
             Column({ space: 10 }) {
               Text('Background Service Run Params')
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
+
+              Row() {
+                Text('Service State')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.formatBackgroundServiceState())
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.getBackgroundServiceStateColor())
+              }
+              .width('100%')
+
+              Row() {
+                Text('Last Event')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.backgroundServiceLastEvent)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Last Event Time')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.formatBackgroundServiceEventTime())
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Start ID')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.formatBackgroundServiceStartId())
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Request Count')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(`${this.backgroundServiceRequestCount}`)
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Stop Reason')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.formatBackgroundServiceStopReason())
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width('100%')
+
+              Row() {
+                Text('Last Error')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                  .layoutWeight(1)
+                Text(this.formatBackgroundServiceLastError())
+                  .fontSize(14)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.backgroundServiceLastError.length > 0 ? '#F53F3F' : '#1D2129')
+                  .maxLines(2)
+              }
+              .width('100%')
 
               Row() {
                 Text('Run Source')

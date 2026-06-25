@@ -7,6 +7,15 @@ import {
   StressTrafficMode
 } from '../utils/StressTestManager';
 import { DemoLogger } from '../utils/DemoLogger';
+import {
+  markStressServiceError,
+  markStressServiceEvent,
+  STRESS_SERVICE_STATE_DESTROYED,
+  STRESS_SERVICE_STATE_KEEPALIVE,
+  STRESS_SERVICE_STATE_STARTED,
+  STRESS_SERVICE_STATE_STOPPED,
+  STRESS_SERVICE_STATE_STOPPING
+} from '../utils/StressServiceStatusStore';
 
 const TAG = "StressServiceAbility";
 
@@ -28,48 +37,58 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
   onCreate(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onCreate");
+    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onCreate');
     this.handleRequest(want, 0);
   }
 
   onDestroy(): void {
     DemoLogger.i(TAG, "StressServiceAbility onDestroy");
+    markStressServiceEvent(STRESS_SERVICE_STATE_DESTROYED, 'onDestroy', -1, 'service-destroyed');
     this.stressTestManager.stop('service-destroyed');
   }
 
   onRequest(want: Want, startId: number): void {
     DemoLogger.i(TAG, `StressServiceAbility onRequest, startId: ${startId}`);
+    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onRequest', startId);
     this.handleRequest(want, startId);
   }
 
   onConnect(want: Want): rpc.RemoteObject {
     DemoLogger.i(TAG, "StressServiceAbility onConnect");
+    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onConnect');
     return new StressServiceAbilityStub('stress-service');
   }
 
   onDisconnect(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onDisconnect");
+    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onDisconnect');
   }
 
   private handleRequest(want: Want, startId: number): void {
     const action = this.resolveAction(want);
     if (action === 'stop') {
       DemoLogger.i(TAG, "Received stop command");
+      markStressServiceEvent(STRESS_SERVICE_STATE_STOPPING, 'stop command', startId, 'service-stop');
       this.stressTestManager.stop('service-stop');
+      markStressServiceEvent(STRESS_SERVICE_STATE_STOPPED, 'service-stop', startId, 'service-stop');
       return;
     }
 
     if (action === 'keepalive') {
       DemoLogger.i(TAG, "Received keepalive command");
+      markStressServiceEvent(STRESS_SERVICE_STATE_KEEPALIVE, 'keepalive', startId);
       return;
     }
 
     if (action !== 'start') {
       DemoLogger.w(TAG, `Unknown service action=${action}, startId=${startId}`);
+      markStressServiceError('unknown action', `Unknown service action=${action}`, startId);
       return;
     }
 
     if (this.stressTestManager.isStressTestRunning()) {
       DemoLogger.w(TAG, "Stress test already running, ignoring service start command");
+      markStressServiceEvent(STRESS_SERVICE_STATE_KEEPALIVE, 'start ignored: already running', startId);
       return;
     }
 
@@ -77,6 +96,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     DemoLogger.i(TAG,
       `Starting background stress test: duration=${config.durationSeconds}s, traffic=${config.trafficMode}, logs=${config.enableLogs}, actions=${config.enableActions}, resources=${config.enableResources}, navigation=${config.enableNavigation}, navigationInterval=${config.navigationIntervalMs}, errors=${config.enableErrors}, longTasks=${config.enableLongTasks}`);
     this.stressTestManager.runWithConfig(config);
+    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'start command', startId);
   }
 
   private resolveAction(want: Want): string {
