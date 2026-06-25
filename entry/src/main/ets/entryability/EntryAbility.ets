@@ -3,15 +3,20 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
-import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
-import { UserData } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/UserData';
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
-import { ErrorMonitorType } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/ErrorMonitorType';
-import { DeviceMetricsMonitorType } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/DeviceMetricsMonitorType';
-import { EnvType, SyncPageSize } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
-import { DBCacheDiscard } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
-import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
-import { TraceType } from '@guancecloud/ft_sdk/src/main/ets/components/trace/TraceType';
+import {
+  DeviceMetricsMonitorType,
+  EnvType,
+  ErrorMonitorType,
+  FTLoggerConfig,
+  FTRUMConfig,
+  FTSDK,
+  FTSDKConfig,
+  FTTraceConfig,
+  Status,
+  SyncPageSize,
+  TraceType,
+  UserData
+} from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
   runPreInitAxiosSmokeTestsWithMode,
@@ -32,6 +37,7 @@ export const KEY_TRACE_URL = "traceUrl";
 export const KEY_DATAKIT_URL = "datakitUrl";
 export const KEY_DATAWAY_URL = "datawayUrl";
 export const KEY_CLIENT_TOKEN = "clientToken";
+export const KEY_AUTO_SYNC = "autoSync";
 
 export const KEY_APP_ID = "appId";
 
@@ -41,6 +47,7 @@ interface RuntimeConfig {
   webViewUrl: string;
   traceUrl: string;
   clientToken: string;
+  autoSync: string;
   appId: string;
 }
 
@@ -78,6 +85,7 @@ export default class EntryAbility extends UIAbility {
     webViewUrl: "",
     traceUrl: "",
     clientToken: "",
+    autoSync: "",
     appId: ""
   };
 
@@ -100,12 +108,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   private async loadRuntimeConfig(want: Want): Promise<RuntimeConfig> {
+    const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const runtimeConfig: RuntimeConfig = {
       datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
       datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
       webViewUrl: (want.parameters?.[KEY_WEB_VIEW_URL] as string | null | undefined) ?? "",
       traceUrl: (want.parameters?.[KEY_TRACE_URL] as string | null | undefined) ?? "",
       clientToken: (want.parameters?.[KEY_CLIENT_TOKEN] as string | null | undefined) ?? "",
+      autoSync: autoSyncParam === undefined || autoSyncParam === null ? "" : String(autoSyncParam),
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
@@ -186,6 +196,11 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
+  }
+
+  private resolveAutoSyncEnabled(): boolean {
+    const value = this.runtimeConfig.autoSync.trim().toLowerCase();
+    return value !== 'false' && value !== '0' && value !== 'off';
   }
 
   /**
@@ -277,11 +292,8 @@ export default class EntryAbility extends UIAbility {
         .setDebug(true)
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
-        .setAutoSync(true)
+        .setAutoSync(this.resolveAutoSyncEnabled())
         .setSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
-        // Set small dbCacheLimit for testing (1MB)
-        .setDbCacheLimit(1 * 1024 * 1024) // 1MB
-        .setDBCacheDiscard(DBCacheDiscard.DISCARD_OLDEST)
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
       DemoLogger.i(LOG_TAG, "SDK install completed");
@@ -291,7 +303,7 @@ export default class EntryAbility extends UIAbility {
         .setSamplingRate(1.0)  // 100% sampling rate
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true)
-        .setLogCacheLimitCount(30000)
+        // .setLogCacheLimitCount(30000)
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
         .setEnableLinkRumData(true);
@@ -307,7 +319,7 @@ export default class EntryAbility extends UIAbility {
       }
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
-        .setEnableTrackAppCrash(true)  // JS crash monitoring (must be true for native crash monitoring to take effect)
+        .setEnableTrackAppCrash(true)  // JS and native crash monitoring
         .setSamplingRate(1.0)          // Set the sampling rate to 100%
         .setSessionErrorSampleRate(1.0) // Set the error sampling rate to 100%
         .setEnableTraceUserAction(true)
@@ -319,6 +331,7 @@ export default class EntryAbility extends UIAbility {
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL)
+        // .setRumCacheLimitCount(12345)
 
       FTSDK.installRUMConfig(rumConfig);
 

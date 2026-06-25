@@ -14,6 +14,7 @@
  */
 
 import preferences from '@ohos.data.preferences';
+import { Context } from '@kit.AbilityKit';
 import { FTInnerLogger } from '../log/FTLogger';
 import { UserData } from './bean/UserData';
 import { Utils } from '../utils/Utils';
@@ -32,9 +33,11 @@ export class UserDataManager {
   private static readonly KEY_USER_NAME = 'ft.user.username';
   private static readonly KEY_USER_EMAIL = 'ft.user.email';
   private static readonly KEY_USER_EXT = 'ft.user.extdata';
+  private static readonly RANDOM_USER_ID_PREFIX = 'ft.rd_';
   private preferencesStore: preferences.Preferences | null = null;
   private randomUserId: string = '';
   private userData: UserData | null = null;
+  private userDataExplicitlyUnbound: boolean = false;
 
   private constructor() {
   }
@@ -47,6 +50,10 @@ export class UserDataManager {
       UserDataManager.instance = new UserDataManager();
     }
     return UserDataManager.instance;
+  }
+
+  public static resetStateInternal(): void {
+    UserDataManager.instance = null;
   }
 
   /**
@@ -67,9 +74,16 @@ export class UserDataManager {
    * Generate and save random user ID
    */
   private createNewRandomUserId(): void {
-    this.randomUserId = "ft.rd_" + Utils.generateUUID();
+    const uuid = Utils.generateUUID();
+    this.randomUserId = UserDataManager.RANDOM_USER_ID_PREFIX +
+      (uuid.length > 0 ? uuid : Utils.generateRandomId(32));
 
     this.saveRandomUserId();
+  }
+
+  private static isValidRandomUserId(randomUserId: string): boolean {
+    return randomUserId.startsWith(UserDataManager.RANDOM_USER_ID_PREFIX) &&
+      randomUserId.length > UserDataManager.RANDOM_USER_ID_PREFIX.length;
   }
 
   private saveRandomUserId(): void {
@@ -100,9 +114,9 @@ export class UserDataManager {
 
     try {
       const storedRandomUserId = this.preferencesStore.getSync(UserDataManager.KEY_RANDOM_USER_ID, '') as string;
-      if (storedRandomUserId) {
+      if (UserDataManager.isValidRandomUserId(storedRandomUserId)) {
         this.randomUserId = storedRandomUserId;
-      } else if (!this.randomUserId) {
+      } else if (!UserDataManager.isValidRandomUserId(this.randomUserId)) {
         this.createNewRandomUserId();
       } else {
         this.saveRandomUserId();
@@ -116,7 +130,7 @@ export class UserDataManager {
    * Get random user ID
    */
   public getRandomUserId(): string {
-    if (!this.randomUserId) {
+    if (!UserDataManager.isValidRandomUserId(this.randomUserId)) {
       this.createNewRandomUserId();
     }
     return this.randomUserId;
@@ -133,11 +147,11 @@ export class UserDataManager {
 
     try {
       const id = this.preferencesStore.getSync(UserDataManager.KEY_USER_ID, '') as string;
-      if (id) {
-        const name = this.preferencesStore.getSync(UserDataManager.KEY_USER_NAME, '') as string;
-        const email = this.preferencesStore.getSync(UserDataManager.KEY_USER_EMAIL, '') as string;
-        const extJson = this.preferencesStore.getSync(UserDataManager.KEY_USER_EXT, '') as string;
+      const name = this.preferencesStore.getSync(UserDataManager.KEY_USER_NAME, '') as string;
+      const email = this.preferencesStore.getSync(UserDataManager.KEY_USER_EMAIL, '') as string;
+      const extJson = this.preferencesStore.getSync(UserDataManager.KEY_USER_EXT, '') as string;
 
+      if (id || name || email || extJson) {
         this.userData = new UserData();
         this.userData.setId(id);
         this.userData.setName(name);
@@ -146,6 +160,9 @@ export class UserDataManager {
         if (extJson) {
           this.userData.setExtsWithJsonString(extJson);
         }
+        this.userDataExplicitlyUnbound = false;
+      } else {
+        this.userData = null;
       }
     } catch (error) {
       FTInnerLogger.e(TAG, ` Failed to load user data: ${error}`);
@@ -156,6 +173,9 @@ export class UserDataManager {
    * Get user data
    */
   public getUserData(): UserData | null {
+    if (!this.userData && this.preferencesStore && !this.userDataExplicitlyUnbound) {
+      this.loadUserData();
+    }
     return this.userData;
   }
 
@@ -164,6 +184,7 @@ export class UserDataManager {
    */
   public bindUserData(userData: UserData): void {
     this.userData = userData;
+    this.userDataExplicitlyUnbound = false;
     if (!this.preferencesStore) {
       FTInnerLogger.e(TAG, " Preferences store not initialized");
       return;
@@ -193,6 +214,7 @@ export class UserDataManager {
    */
   public unbindUserData(): void {
     this.userData = null;
+    this.userDataExplicitlyUnbound = true;
     if (!this.preferencesStore) {
       FTInnerLogger.e(TAG, " Preferences store not initialized");
       return;
@@ -221,7 +243,7 @@ export class UserDataManager {
    * Check if user data is bound
    */
   public isUserDataBound(): boolean {
-    const isBound = this.userData !== null && this.userData.getId() !== '';
+    const isBound = this.getUserData() !== null;
     return isBound;
   }
 }

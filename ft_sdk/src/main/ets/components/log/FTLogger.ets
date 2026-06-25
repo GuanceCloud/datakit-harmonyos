@@ -13,6 +13,7 @@ export interface LogEntry {
   tag: string;
   message: string;
   level: string;
+  timestampMs?: number;
 }
 
 /**
@@ -194,7 +195,8 @@ export class FTLogger {
       const logBeans: LogBean[] = [];
       
       for (const log of logs) {
-        const logBean = new LogBean(log.message, Utils.getCurrentTimestamp());
+        const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
+        const logBean = new LogBean(log.message, timestampMs);
         
         switch (log.level.toLowerCase()) {
           case 'd':
@@ -297,12 +299,12 @@ export class FTLogger {
     // Get log configuration
     const logConfig = FTLogger.trackLogManager?.getLogConfig();
     if (!logConfig) {
-      FTInnerLogger.w(TAG, "Log config not available, using default settings");
-    } else {
+      FTInnerLogger.w(TAG, "Log config not available, discarding custom log");
+      return;
     }
     
     // Check if custom log is enabled
-    if (logConfig && !logConfig.isEnableCustomLog()) {
+    if (!logConfig.isEnableCustomLog()) {
       return;
     }
     
@@ -347,9 +349,7 @@ export class FTLogger {
       logBean.setStatus(statusString);
       
       // Set service name
-      if (logConfig) {
-        logBean.setServiceName(logConfig.getServiceName());
-      }
+      logBean.setServiceName(logConfig.getServiceName());
       
       // Add additional properties - optimized to use direct merge
       if (property) {
@@ -362,7 +362,7 @@ export class FTLogger {
       }
       
       // Check log level before sending
-      if (!logConfig || logConfig.checkLogLevel(statusString)) {
+      if (logConfig.checkLogLevel(statusString)) {
         FTLogger.trackLogManager?.trackLog(logBean, isSilence || false);
         
       } else {

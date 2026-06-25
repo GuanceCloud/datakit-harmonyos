@@ -1,7 +1,6 @@
 import { LogBean } from '../bean/LogBean';
 import { BaseContentBean } from '../bean/BaseContentBean';
 import { FTDBCachePolicy } from '../db/FTDBCachePolicy';
-import { LogConsumerThreadPool } from '../thread/LogConsumerThreadPool';
 import FTTrackInner from '../FTTrackInner';
 import { FTInnerLogger } from "../log/FTLogger";
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
@@ -9,6 +8,11 @@ import { StringWrapper } from '../utils/StringWrapper';
 import { FTLoggerConfig } from '../Configs';
 import { Constants } from '../Constants';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
+import {
+  SDKTaskPriority,
+  SDKTaskScheduler,
+  SDKTaskType
+} from '../thread/SDKTaskScheduler';
 
 const TAG = "TrackLogManager";
 
@@ -30,6 +34,14 @@ interface WorkerMessage {
   isSilence?: boolean;
 }
 
+interface LogProcessSummary {
+  drainedCount: number;
+  flushedCount: number;
+  batchSizes: string[];
+  newInputCount: number;
+  needNext: boolean;
+}
+
 /**
  * Log tracking manager - HarmonyOS implementation
  * Responsible for managing log queues, batch processing and async processing
@@ -39,7 +51,9 @@ export class TrackLogManager {
   
   // Configuration constants
   private static readonly DEFAULT_BATCH_SIZE = 20; // Match Android's value
-  private static readonly POLL_TIMEOUT_MS = 200;
+  private static readonly LOG_PROCESS_COALESCE_DELAY_MS = 100;
+  private static readonly LOG_SERIAL_KEY = "log-consumer-state";
+  private static logTaskSequence: number = 0;
   
   // Core components - Dual Queue Design
   // inputQueue: Receives new logs from producers (trackLog calls)
@@ -50,13 +64,13 @@ export class TrackLogManager {
   private processingQueue: LogBean[] = [];
   private logBatchBuffer: BaseContentBean[] = [];
   private isProcessing: boolean = false;
+  private processScheduleTimer: number = -1;
+  private scheduledIsSilence: boolean = true;
+  private hasScheduledIsSilence: boolean = false;
   private bufferLocked: boolean = false;
   
   // Log configuration
   private logConfig: FTLoggerConfig | null = null;
-  
-  // Worker thread processing
-  private processingTimer: number | null = null;
   
   private constructor() {
   }
@@ -70,6 +84,18 @@ export class TrackLogManager {
     }
     return TrackLogManager.instance;
   }
+
+  public static resetStateInternal(): void {
+    if (TrackLogManager.instance !== null) {
+      TrackLogManager.instance.resetInternalState();
+    }
+  }
+
+  private resetInternalState(): void {
+    this.shutdown();
+    this.logConfig = null;
+    this.bufferLocked = false;
+  }
   
   /**
    * Set log configuration
@@ -79,8 +105,7 @@ export class TrackLogManager {
     this.logConfig = config;
     FTInnerLogger.d(TAG, `Log config updated: samplingRate=${config.getSamplingRate()}, enableCustomLog=${config.isEnableCustomLog()}`);
 
-    // If there are logs in queue and processing is not active, trigger processing
-    // This handles the case where logs were queued before ThreadPoolManager was initialized
+    // If there are logs in queue and processing is not active, submit the LOG lane consumer.
     const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
     if (totalQueueSize > 0 && !this.isProcessing) {
       FTInnerLogger.d(TAG, `Log config updated, triggering processing for ${totalQueueSize} queued logs`);
@@ -139,12 +164,30 @@ export class TrackLogManager {
     if (!logBeans || logBeans.length === 0) {
       return;
     }
-    
+
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    const maxSize = Math.min(cachePolicy.getLogLimitCount(), Constants.MAX_QUEUE_SIZE_LOG);
+
+    let acceptedCount = 0;
     for (const logBean of logBeans) {
-      this.trackLog(logBean, isSilence);
+      if (!this.shouldProcessLog(logBean)) {
+        continue;
+      }
+
+      if (this.inputQueue.length >= maxSize) {
+        this.inputQueue.shift();
+        FTInnerLogger.w(TAG, 'Input queue full, discarding oldest log');
+      }
+
+      this.inputQueue.push(logBean);
+      acceptedCount++;
     }
-    
-    FTInnerLogger.d(TAG, `Batch logged: ${logBeans.length} logs`);
+
+    if (acceptedCount > 0) {
+      this.triggerProcessing(isSilence);
+    }
+
+    FTInnerLogger.d(TAG, `Batch logged: accepted=${acceptedCount}, requested=${logBeans.length}`);
   }
   
   /**
@@ -164,7 +207,20 @@ export class TrackLogManager {
    */
   public forceFlush(isSilence: boolean = false): void {
     FTInnerLogger.d(TAG, "Force flushing log buffer");
-    this.flushBatch(isSilence);
+    const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
+    if (totalQueueSize > 0 && !this.isProcessing) {
+      this.mergeScheduledSilence(isSilence);
+      this.startProcessingNow(isSilence);
+      return;
+    }
+
+    this.clearProcessingSchedule();
+    this.submitLogTask('log.forceFlush', (traceName: string) => {
+      const flushedCount = this.flushBatch(isSilence);
+      this.traceLogLane(
+        `[CONSUMED] name=${traceName} flushed=${flushedCount} batches=${flushedCount > 0 ? String(flushedCount) : '0'} newInput=${this.inputQueue.length} next=false`
+      );
+    });
   }
   
   /**
@@ -173,8 +229,8 @@ export class TrackLogManager {
   private shouldProcessLog(logBean: LogBean): boolean {
     // Check log configuration
     if (!this.logConfig) {
-      FTInnerLogger.w(TAG, "Log config not set, using default sampling rate 1.0");
-      return true;
+      FTInnerLogger.w(TAG, "Log config not set, discarding log");
+      return false;
     }
     
     // Check if custom log is enabled
@@ -243,40 +299,149 @@ export class TrackLogManager {
    * Trigger processing
    */
   private triggerProcessing(isSilence: boolean): void {
-    // Removed verbose debug log to reduce log output
-    
+    this.mergeScheduledSilence(isSilence);
+
     if (this.isProcessing) {
-      // If already processing, don't trigger again
-      // The processing will continue and handle remaining queue items
-      // Removed verbose debug log to reduce log output
       return;
     }
-    
+
+    if (this.shouldProcessImmediately()) {
+      this.startProcessingNow(isSilence);
+      return;
+    }
+
+    this.scheduleProcessing();
+  }
+
+  private shouldProcessImmediately(): boolean {
+    return this.inputQueue.length + this.processingQueue.length >= TrackLogManager.DEFAULT_BATCH_SIZE;
+  }
+
+  private scheduleProcessing(): void {
+    if (this.processScheduleTimer >= 0) {
+      return;
+    }
+
+    this.processScheduleTimer = setTimeout(() => {
+      this.processScheduleTimer = -1;
+      if (this.isProcessing) {
+        return;
+      }
+
+      const totalQueueSize = this.inputQueue.length + this.processingQueue.length;
+      if (totalQueueSize <= 0) {
+        this.resetScheduledSilence();
+        return;
+      }
+
+      const scheduledIsSilence = this.consumeScheduledSilence(false);
+      this.isProcessing = true;
+      this.process(scheduledIsSilence);
+    }, TrackLogManager.LOG_PROCESS_COALESCE_DELAY_MS);
+  }
+
+  private startProcessingNow(fallbackIsSilence: boolean): void {
+    this.clearProcessingSchedule();
+    if (this.isProcessing) {
+      return;
+    }
+
+    const scheduledIsSilence = this.consumeScheduledSilence(fallbackIsSilence);
     this.isProcessing = true;
-    this.process(isSilence);
+    this.process(scheduledIsSilence);
+  }
+
+  private clearProcessingSchedule(): void {
+    if (this.processScheduleTimer >= 0) {
+      clearTimeout(this.processScheduleTimer);
+      this.processScheduleTimer = -1;
+    }
+  }
+
+  private mergeScheduledSilence(isSilence: boolean): void {
+    if (!this.hasScheduledIsSilence) {
+      this.scheduledIsSilence = isSilence;
+      this.hasScheduledIsSilence = true;
+      return;
+    }
+
+    this.scheduledIsSilence = this.scheduledIsSilence && isSilence;
+  }
+
+  private consumeScheduledSilence(fallbackIsSilence: boolean): boolean {
+    const isSilence = this.hasScheduledIsSilence ? this.scheduledIsSilence : fallbackIsSilence;
+    this.resetScheduledSilence();
+    return isSilence;
+  }
+
+  private resetScheduledSilence(): void {
+    this.scheduledIsSilence = true;
+    this.hasScheduledIsSilence = false;
+  }
+
+  private submitLogTask(name: string, task: (traceName: string) => void | Promise<void>): boolean {
+    const traceName = this.nextLogTaskName(name);
+    try {
+      this.traceLogLane(`[ENQUEUE] name=${traceName} input=${this.inputQueue.length} processing=${this.processingQueue.length} buffer=${this.logBatchBuffer.length}`);
+      SDKTaskScheduler.getInstance().submitTask({
+        type: SDKTaskType.LOG,
+        name: traceName,
+        priority: SDKTaskPriority.NORMAL,
+        serialKey: TrackLogManager.LOG_SERIAL_KEY,
+        costHint: 'normal',
+        run: async () => {
+          await this.runLogTaskSafely(traceName, task);
+        }
+      });
+      return true;
+    } catch (error) {
+      FTInnerLogger.e(TAG, `<FT-LOG-LANE> Failed to submit log task: name=${traceName}, error=${error}`);
+      return false;
+    }
+  }
+
+  private async runLogTaskSafely(traceName: string, task: (traceName: string) => void | Promise<void>): Promise<void> {
+    try {
+      await Promise.resolve(task(traceName));
+    } catch (error) {
+      FTInnerLogger.e(TAG, `<FT-LOG-LANE> Log task failed: name=${traceName}, error=${error}`);
+    }
+  }
+
+  private nextLogTaskName(name: string): string {
+    TrackLogManager.logTaskSequence++;
+    return `${name}#${TrackLogManager.logTaskSequence}`;
+  }
+
+  private traceLogLane(message: string): void {
+    FTInnerLogger.i(TAG, `<FT-LOG-LANE> ${message}`);
   }
   
 
   /**
-   * Process with main thread
+   * Process through SDKTaskScheduler LOG lane.
    */
   private process(isSilence: boolean): void {
 
     try {
-      
-      LogConsumerThreadPool.getInstance().executeLogTask(() => {
-        
-        try {
-          
-          this.processQueue(isSilence);
-          
-        } catch (error) {
-          FTInnerLogger.e(TAG, `Error in processQueue call: ${error}`);
+      const submitted = this.submitLogTask('log.processQueue', async (traceName: string) => {
+        const startTime = Date.now();
+        const summary = await this.processQueue(isSilence);
+        const costTime = Math.max(0, Date.now() - startTime);
+        this.traceLogLane(
+          `[CONSUMED] name=${traceName} drained=${summary.drainedCount} flushed=${summary.flushedCount} batches=${this.formatBatchSizes(summary.batchSizes)} newInput=${summary.newInputCount} next=${summary.needNext} cost=${costTime}ms`
+        );
+        if (summary.needNext) {
+          this.triggerProcessing(isSilence);
         }
       });
+      if (!submitted) {
+        this.isProcessing = false;
+      }
       
     } catch (error) {
-      FTInnerLogger.e(TAG, `Error calling LogConsumerThreadPool.execute: ${error}`);
+      FTInnerLogger.e(TAG, `Error submitting log lane task: ${error}`);
+      this.isProcessing = false;
     }
   }
   
@@ -303,23 +468,26 @@ export class TrackLogManager {
    * 4. Flush when buffer reaches DEFAULT_BATCH_SIZE or queue is empty
    * 5. Exit when processingQueue is empty (natural exit, no timeout needed)
    */
-  private async processQueue(isSilence: boolean): Promise<void> {
+  private async processQueue(isSilence: boolean): Promise<LogProcessSummary> {
     // Switch queues atomically at the start of processing
     // This creates a snapshot of logs to process, allowing us to fully drain processingQueue
     // while new logs continue to be added to inputQueue without interference
     this.switchQueues();
     
-    const initialQueueSize = this.processingQueue.length;
-    // Removed verbose debug log to reduce log output
+    const summary: LogProcessSummary = {
+      drainedCount: 0,
+      flushedCount: 0,
+      batchSizes: [],
+      newInputCount: 0,
+      needNext: false
+    };
     
     try {
-      const startTime = Date.now();
       let processedCount = 0;
       
       // Process all logs from processingQueue (snapshot)
       // Since processingQueue is a snapshot, we can fully drain it without worrying about new logs
       while (this.processingQueue.length > 0) {
-        const queueSizeBeforePoll = this.processingQueue.length;
         const logBean = this.processingQueue.shift();
         
         if (logBean) {
@@ -332,30 +500,42 @@ export class TrackLogManager {
         // Flush if: buffer >= DEFAULT_BATCH_SIZE OR (queue empty && buffer not empty)
         const shouldFlush = this.shouldFlushBatch(this.processingQueue.length === 0 ? undefined : logBean);
         if (shouldFlush) {
-          this.flushBatch(isSilence);
+          this.recordFlushSummary(summary, this.flushBatch(isSilence));
         }
       }
       
       // Flush any remaining buffer when processingQueue is empty
       const shouldFlushRemaining = this.shouldFlushBatch(undefined);
       if (shouldFlushRemaining) {
-        this.flushBatch(isSilence);
+        this.recordFlushSummary(summary, this.flushBatch(isSilence));
       }
       
-      // Removed verbose debug log to reduce log output
+      summary.drainedCount = processedCount;
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error processing log queue: ${error}`);
     } finally {
       this.isProcessing = false;
+      summary.newInputCount = this.inputQueue.length;
+      summary.needNext = summary.newInputCount > 0;
       
-      // Check if there are new logs in inputQueue (added during processing)
-      // If so, trigger processing again to handle them
-      if (this.inputQueue.length > 0) {
-        FTInnerLogger.d(TAG, `New logs arrived during processing (${this.inputQueue.length} in inputQueue), triggering next processing`);
-        this.triggerProcessing(isSilence);
-      }
+      return summary;
     }
+  }
+
+  private recordFlushSummary(summary: LogProcessSummary, flushedCount: number): void {
+    if (flushedCount <= 0) {
+      return;
+    }
+    summary.flushedCount += flushedCount;
+    summary.batchSizes.push(String(flushedCount));
+  }
+
+  private formatBatchSizes(batchSizes: string[]): string {
+    if (batchSizes.length === 0) {
+      return '0';
+    }
+    return batchSizes.join('+');
   }
   
   /**
@@ -377,20 +557,6 @@ export class TrackLogManager {
   }
   
   /**
-   * Schedule next processing
-   */
-  private scheduleNextProcessing(isSilence: boolean): void {
-    if (this.processingTimer !== null) {
-      clearTimeout(this.processingTimer);
-    }
-
-    // Use LogConsumerThreadPool.executeLogTask for single-thread execution
-    LogConsumerThreadPool.getInstance().executeLogTask(() => {
-      this.triggerProcessing(isSilence);
-    });
-  }
-  
-  /**
    * Add to batch buffer
    */
   private addToBatchBuffer(logBean: LogBean): void {
@@ -403,7 +569,7 @@ export class TrackLogManager {
   /**
    * Flush batch
    */
-  private flushBatch(isSilence: boolean): void {
+  private flushBatch(isSilence: boolean): number {
     FTInnerLogger.d(TAG, `flushBatch: isSilence=${isSilence}, bufferSize=${this.logBatchBuffer.length}`);
     
     const batchToSend = this.lockBuffer(() => {
@@ -415,7 +581,7 @@ export class TrackLogManager {
     
     
     if (batchToSend.length === 0) {
-      return;
+      return 0;
     }
     
     FTInnerLogger.d(TAG, `Sending log batch, size: ${batchToSend.length}`);
@@ -425,6 +591,7 @@ export class TrackLogManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to send log batch: ${error}`);
     }
+    return batchToSend.length;
   }
   
   /**
@@ -452,11 +619,8 @@ export class TrackLogManager {
     FTInnerLogger.i(TAG, "Shutting down TrackLogManager");
     
     try {
-      if (this.processingTimer !== null) {
-        clearTimeout(this.processingTimer);
-        this.processingTimer = null;
-      }
-      
+      this.clearProcessingSchedule();
+      this.resetScheduledSilence();
       this.isProcessing = false;
       
       // Clear queues and buffer

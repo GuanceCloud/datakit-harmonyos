@@ -38,13 +38,17 @@ Add `@guancecloud/ft_native` together with `@guancecloud/ft_sdk`, then enable cr
 import { FTRUMConfig } from '@guancecloud/ft_sdk/Index'
 
 const rumConfig = new FTRUMConfig()
-rumConfig.setEnableTrackAppCrash(true)
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTrackAppCrash(true)
 ```
+
+The native module contributes `libftnativecrash.so`; `ft_sdk` detects and initializes it internally when crash tracking is enabled.
 
 ## Dependency
 
 - Recommended: use together with `@guancecloud/ft_sdk`
 - Native crash events complement the core SDK monitoring pipeline
+- Use a compatible `@guancecloud/ft_sdk` version in the application so native crash events can be reported into the RUM pipeline.
 
 ## Requirements
 

@@ -57,26 +57,6 @@ class ErrorProperty {
     this.properties.set(key, value);
   }
 
-  get(key: string): PropertyValue | undefined {
-    return this.properties.get(key);
-  }
-
-  has(key: string): boolean {
-    return this.properties.has(key);
-  }
-
-  delete(key: string): boolean {
-    return this.properties.delete(key);
-  }
-
-  clear(): void {
-    this.properties.clear();
-  }
-
-  size(): number {
-    return this.properties.size;
-  }
-
   // Convert to object for compatibility with existing code
   toObject(): Record<string, object> {
     const result: Record<string, object> = {};
@@ -88,22 +68,6 @@ class ErrorProperty {
     return result;
   }
 
-  // Create from object
-  static fromObject(obj: Record<string, object>): ErrorProperty {
-    const prop = new ErrorProperty();
-    const keys = Object.keys(obj);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = obj[key];
-      try {
-        const wrapper = value as PropertyWrapper;
-        prop.set(key, wrapper.value);
-      } catch {
-        prop.set(key, value as PropertyValue);
-      }
-    }
-    return prop;
-  }
 }
 
 /**
@@ -127,6 +91,14 @@ export class FTRUMGlobalManager {
       FTRUMGlobalManager.instance = new FTRUMGlobalManager();
     }
     return FTRUMGlobalManager.instance;
+  }
+
+  public static resetStateInternal(): void {
+    if (FTRUMGlobalManager.instance) {
+      FTRUMGlobalManager.instance.innerManager = null;
+    }
+    FTRUMGlobalManager.instance = null;
+    FTRUMInnerManager.resetStateInternal();
   }
 
   /**
@@ -153,17 +125,6 @@ export class FTRUMGlobalManager {
   private isRumEnable(config: FTRUMConfig): boolean {
     const rumAppId = config.getRumAppId();
     return rumAppId != null && rumAppId !== "";
-  }
-
-  /**
-   * Initialize RUM manager (legacy method, kept for backward compatibility)
-   * @deprecated Use initConfig() instead
-   * @param context Application context
-   * @param rumAppId RUM application ID
-   */
-  public init(context: Context, rumAppId: string): void {
-    this.innerManager = FTRUMInnerManager.getInstance();
-    this.innerManager.initRumAppId(rumAppId);
   }
 
   /**
@@ -376,16 +337,6 @@ export class FTRUMGlobalManager {
     }
   }
 
-
-  /**
-   * Add custom error - convenience method
-   * 
-   * @param errorMessage Error message
-   * @param errorStack Error stack trace
-   * @param property Additional properties
-   */
-  public addCustomError(errorMessage: string, errorStack?: string, property?: Record<string, object>): void;
-
   /**
    * Add custom error implementation
    * 
@@ -446,7 +397,7 @@ export class FTRUMGlobalManager {
    * @param statusCode Status code
    * @param contentLength Content length
    */
-  public stopResource(resourceId: string, statusCode: number, contentLength: number): void {
+  public stopResource(resourceId: string, statusCode?: number, contentLength?: number): void {
     if (this.innerManager) {
       this.innerManager.stopResource(resourceId);
     }
@@ -540,47 +491,10 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Get current session ID
-   * @returns Session ID
-   */
-  public getSessionId(): string {
-    if (this.innerManager) {
-      return this.innerManager.getSessionId();
-    }
-    return "";
-  }
-
-  /**
    * Check if initialized
    * @returns Whether initialized
    */
   public isInitialized(): boolean {
     return this.innerManager !== null;
-  }
-  
-  /**
-   * Check if generateViewSum is currently running
-   * This is useful for stress testing scenarios to wait for all generateViewSum() calls to complete
-   * @returns true if generateViewSum is currently running
-   */
-  public isGeneratingViewSumRunning(): boolean {
-    if (this.innerManager) {
-      return this.innerManager.isGeneratingViewSumRunning();
-    }
-    return false;
-  }
-
-  /**
-   * Trigger RUM data generation
-   * This is useful for stress testing scenarios where all views are generated
-   * and we need to ensure all data is processed after database writes complete
-   */
-  public async triggerGenerateRumData(): Promise<void> {
-    FTInnerLogger.i(TAG, `[FT-RUM-DATA] triggerGenerateRumData() called in FTRUMGlobalManager`);
-    if (this.innerManager) {
-      await this.innerManager.triggerGenerateRumData();
-    } else {
-      FTInnerLogger.e(TAG, `[FT-RUM-DATA] innerManager is null, cannot trigger generateRumData`);
-    }
   }
 }

@@ -10,7 +10,7 @@ import * as FTSQL from './FTSQL';
 import { SyncData } from './bean/SyncData';
 import { ViewBean } from './bean/ViewBean';
 import { ActionBean } from './bean/ActionBean';
-import { DataType } from '../enum/Enums';
+import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
 import { Constants } from '../Constants';
@@ -34,6 +34,28 @@ interface ActionInfo {
   startTime: number;
 }
 
+export interface SyncDataWriteOptions {
+  applyCachePolicy?: boolean;
+  reInsert?: boolean;
+}
+
+export interface SyncDataWriteResult {
+  success: boolean;
+  source: string;
+  requested: number;
+  inserted: number;
+  dropped: number;
+  duplicateSkipped: number;
+  deletedOld: number;
+  errorMessage: string;
+}
+
+enum SyncDataCacheCategory {
+  LOG = 'log',
+  RUM = 'rum',
+  NONE = 'none'
+}
+
 /**
  * HarmonyOS SDK Database Manager
  * Inherits from DBManager, implements specific business logic
@@ -44,16 +66,20 @@ export class FTDBManager extends DBManager {
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
   
-  // Thread-safe Set for deduplication (using Map for thread-safety in async operations)
+  // Deduplication cache, updated only from the DB write section.
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
   private insertedDataIds: Map<string, boolean> = new Map();
-  private dedupLock: Promise<void> = Promise.resolve(); // Promise-based lock for async operations
   
   // Maximum size for Map collections to prevent memory leak (using Constants.MAX_MAP_SIZE_DB)
 
   private constructor(context: Context) {
     super();
     this.context = context;
+  }
+
+  public static resetInstanceInternal(): void {
+    FTDBManager.instance = null;
+    DatabaseHelper.resetInstanceInternal();
   }
 
   /**
@@ -119,12 +145,21 @@ export class FTDBManager extends DBManager {
     return await this.databaseHelper.initDatabase();
   }
 
+  protected resetDatabaseConnection(): void {
+    super.resetDatabaseConnection();
+    if (!this.isNoLockShutdownSimulationForTest()) {
+      this.databaseHelper?.resetConnection();
+    }
+    this.initPromise = null;
+  }
+
   /**
    * Whether database size limit is enabled
    * @returns boolean
    */
   protected enableDBSizeLimit(): boolean {
-    return FTDBCachePolicy.getInstance().isEnableLimitWithDbSize();
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    return cachePolicy.isEnableLimitWithDbSize();
   }
 
   /**
@@ -138,11 +173,10 @@ export class FTDBManager extends DBManager {
     // Update cache policy with current size (aligned with Android: setCurrentDBSize)
     FTDBCachePolicy.getInstance().setCurrentDbSize(fileSize);
     
-    // Check if database size exceeds limit
-    if (FTDBCachePolicy.getInstance().isReachDbLimit()) {
-      const cachePolicy = FTDBCachePolicy.getInstance();
-      if (cachePolicy.getDBCacheDiscard() === 'DISCARD_OLDEST') {
-        FTInnerLogger.w(TAG, `DB size limit reached, cleaning oldest data`);
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    if (cachePolicy.isReachDbLimit()) {
+      if (cachePolicy.getDBCacheDiscard() === DBCacheDiscard.DISCARD_OLDEST) {
+        FTInnerLogger.w(TAG, `DB cache size limit reached, cleaning oldest data`);
         this.cleanupOldData(rdbStore);
       }
     }
@@ -269,181 +303,493 @@ export class FTDBManager extends DBManager {
     }
   }
 
-  /**
-   * Check if data already exists using in-memory Set (thread-safe)
-   * @param dataType Data type
-   * @param dataString Line protocol data string
-   * @returns Promise<boolean> True if data exists, false otherwise
-   */
-  private async checkDataExists(dataType: DataType, dataString: string): Promise<boolean> {
+  private createSyncDataWriteResult(source: string, requested: number): SyncDataWriteResult {
+    return {
+      success: true,
+      source,
+      requested,
+      inserted: 0,
+      dropped: 0,
+      duplicateSkipped: 0,
+      deletedOld: 0,
+      errorMessage: ''
+    };
+  }
+
+  private getCacheCategory(dataType: DataType): SyncDataCacheCategory {
+    if (dataType === DataType.LOG) {
+      return SyncDataCacheCategory.LOG;
+    }
+    if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
+      return SyncDataCacheCategory.RUM;
+    }
+    return SyncDataCacheCategory.NONE;
+  }
+
+  private getStoredDataTypeString(data: SyncData): string {
+    const customDataType = data.getCustomDataTypeString();
+    return customDataType || data.getDataType().toString();
+  }
+
+  private getDedupKey(dataType: DataType, dataString: string): string | null {
+    const uniqueId = this.extractUniqueId(dataType, dataString);
+    if (!uniqueId) {
+      return null;
+    }
+    return `${dataType.toString()}:${uniqueId}`;
+  }
+
+  private getDuplicateSearchPattern(uniqueId: string): string {
+    if (uniqueId.startsWith('action_id=')) {
+      return `action_id=${uniqueId.substring(10)}`;
+    }
+    if (uniqueId.startsWith('view_id=')) {
+      return `view_id=${uniqueId.substring(8)}`;
+    }
+    if (uniqueId.startsWith('uuid=')) {
+      return uniqueId.substring(5);
+    }
+    if (uniqueId.startsWith('error_type=')) {
+      return `error_type=${uniqueId.split(':')[0].substring(11)}`;
+    }
+    if (uniqueId.startsWith('long_task_name=')) {
+      return `long_task_name=${uniqueId.split(':')[0].substring(15)}`;
+    }
+    return uniqueId;
+  }
+
+  private toSyncDataValuesBucket(data: SyncData): relationalStore.ValuesBucket {
+    const values: relationalStore.ValuesBucket = {} as relationalStore.ValuesBucket;
+    values[FTSQL.RECORD_COLUMN_TM] = data.getTime();
+    values[FTSQL.RECORD_COLUMN_DATA_UUID] = data.getUuid();
+    values[FTSQL.RECORD_COLUMN_DATA] = data.getDataString();
+    values[FTSQL.RECORD_COLUMN_DATA_TYPE] = this.getStoredDataTypeString(data);
+    return values;
+  }
+
+  private async queryTotalCountLocked(rdbStore: relationalStore.RdbStore, types: DataType[]): Promise<number> {
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+    if (types && types.length > 0) {
+      const typeValues = types.map(type => type.toString());
+      predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, typeValues);
+    }
+
+    const resultSet = await rdbStore.query(predicates, ['count(*) as count']);
     try {
-      const uniqueId = this.extractUniqueId(dataType, dataString);
-      if (!uniqueId) {
-        // Cannot extract unique ID, skip deduplication check
-        return false;
+      if (resultSet.goToFirstRow()) {
+        return resultSet.getLong(0);
       }
-
-      // Build key: "dataType:uniqueId"
-      const key = `${dataType.toString()}:${uniqueId}`;
-      
-      // Use Promise-based lock to ensure thread-safety in async operations
-      return await new Promise<boolean>((resolve) => {
-        this.dedupLock = this.dedupLock.then(async () => {
-          // Check in-memory Set first (fast path)
-          if (this.insertedDataIds.has(key)) {
-            resolve(true);
-            return;
-          }
-          
-          // Also check database (in case data was inserted before app restart)
-          try {
-            const rdbStore = await this.getDataBaseHelper();
-            if (rdbStore) {
-              const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-              predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
-              
-              // Build search pattern based on unique identifier
-              let searchPattern: string = '';
-              if (uniqueId.startsWith('action_id=')) {
-                const actionId = uniqueId.substring(10);
-                searchPattern = `action_id=${actionId}`;
-              } else if (uniqueId.startsWith('view_id=')) {
-                const viewId = uniqueId.substring(8);
-                searchPattern = `view_id=${viewId}`;
-              } else if (uniqueId.startsWith('uuid=')) {
-                const uuid = uniqueId.substring(5);
-                searchPattern = uuid;
-              } else if (uniqueId.startsWith('error_type=')) {
-                const parts = uniqueId.split(':');
-                if (parts.length >= 2) {
-                  const errorType = parts[0].substring(11);
-                  searchPattern = `error_type=${errorType}`;
-                } else {
-                  searchPattern = uniqueId;
-                }
-              } else if (uniqueId.startsWith('long_task_name=')) {
-                const parts = uniqueId.split(':');
-                if (parts.length >= 1) {
-                  const longTaskName = parts[0].substring(15);
-                  searchPattern = `long_task_name=${longTaskName}`;
-                } else {
-                  searchPattern = uniqueId;
-                }
-              } else {
-                searchPattern = uniqueId;
-              }
-
-              const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
-              predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
-
-              const resultSet = await rdbStore.query(predicates, ['_id']);
-              const exists = resultSet.goToFirstRow();
-              resultSet.close();
-              
-              if (exists) {
-                // Add to memory Set for future checks
-                this.insertedDataIds.set(key, true);
-                resolve(true);
-                return;
-              }
-            }
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Error checking database for duplicate: ${error as string}`);
-          }
-          
-          resolve(false);
-        }).catch(() => {
-          FTInnerLogger.e(TAG, `Error in dedup lock`);
-          resolve(false); // On error, allow insert (fail-safe)
-        });
-      });
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error checking data existence: ${error as string}`);
-      // On error, allow insert (fail-safe)
-      return false;
+      return 0;
+    } finally {
+      resultSet.close();
     }
   }
 
-  /**
-   * Delete duplicate data from database based on unique identifier
-   * Used to ensure only one record exists per action_id/view_id
-   * @param dataType Data type
-   * @param uniqueId Unique identifier (e.g., "action_id=xxx", "view_id=xxx")
-   * @returns Promise<boolean> True if deletion was successful or no record found, false on error
-   */
-  private async deleteDuplicateData(dataType: DataType, uniqueId: string): Promise<boolean> {
+  private async getCurrentDatabaseSizeLocked(rdbStore: relationalStore.RdbStore): Promise<number> {
+    const resultSet = await rdbStore.querySql("PRAGMA page_count");
     try {
-      const rdbStore = await this.getDataBaseHelper();
-      if (!rdbStore) {
-        FTInnerLogger.e(TAG, `Duplicate cleanup failed: database unavailable`);
-        return false;
+      if (resultSet && resultSet.goToFirstRow()) {
+        const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
+        const pageSize = 4096;
+        return pageCount * pageSize;
       }
+      return 0;
+    } finally {
+      resultSet?.close();
+    }
+  }
 
-      // Build search pattern based on unique identifier
-      let searchPattern: string = '';
-      if (uniqueId.startsWith('action_id=')) {
-        const actionId = uniqueId.substring(10);
-        searchPattern = `action_id=${actionId}`;
-      } else if (uniqueId.startsWith('view_id=')) {
-        const viewId = uniqueId.substring(8);
-        searchPattern = `view_id=${viewId}`;
-      } else {
-        FTInnerLogger.w(TAG, `Duplicate cleanup skipped: unsupported uniqueId ${uniqueId}`);
-        return false;
+  private buildDataTypeWhereClause(types: DataType[]): string {
+    if (!types || types.length === 0) {
+      return '';
+    }
+    const typeValues = types.map(type => `'${type.toString()}'`).join(',');
+    return `${FTSQL.RECORD_COLUMN_DATA_TYPE} IN (${typeValues})`;
+  }
+
+  private async deleteOldestDataLocked(
+    rdbStore: relationalStore.RdbStore,
+    types: DataType | DataType[],
+    limit: number
+  ): Promise<number> {
+    if (limit <= 0) {
+      return 0;
+    }
+    const typeArray = Array.isArray(types) ? types : [types];
+    const whereClause = this.buildDataTypeWhereClause(typeArray);
+    const wherePart = whereClause ? ` WHERE ${whereClause}` : '';
+    const countSql = `SELECT COUNT(*) as count FROM (
+      SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}${wherePart}
+      ORDER BY ${FTSQL.RECORD_COLUMN_TM} ASC LIMIT ${limit}
+    )`;
+
+    let deleteCount = 0;
+    const resultSet = await rdbStore.querySql(countSql);
+    try {
+      if (resultSet.goToFirstRow()) {
+        deleteCount = resultSet.getLong(0);
       }
+    } finally {
+      resultSet.close();
+    }
 
-      const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      
-      // Delete records matching the pattern
-      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-      predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
-      predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
+    if (deleteCount <= 0) {
+      return 0;
+    }
 
-      const deletedRows = await rdbStore.delete(predicates);
-      
-      // Remove from memory Set as well
-      const key = `${dataType.toString()}:${uniqueId}`;
-      this.insertedDataIds.delete(key);
-      
+    const deleteSql = `DELETE FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} WHERE _id IN (
+      SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}${wherePart}
+      ORDER BY ${FTSQL.RECORD_COLUMN_TM} ASC LIMIT ${limit}
+    )`;
+    await rdbStore.executeSql(deleteSql);
+    return deleteCount;
+  }
+
+  private async checkDataExistsLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataType: DataType,
+    dataString: string
+  ): Promise<boolean> {
+    const uniqueId = this.extractUniqueId(dataType, dataString);
+    if (!uniqueId) {
+      return false;
+    }
+
+    const key = `${dataType.toString()}:${uniqueId}`;
+    if (this.insertedDataIds.has(key)) {
       return true;
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Duplicate cleanup failed: ${error as string}`);
-      return false;
+    }
+
+    const searchPattern = this.getDuplicateSearchPattern(uniqueId);
+    const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
+    predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
+
+    const resultSet = await rdbStore.query(predicates, ['_id']);
+    try {
+      const exists = resultSet.goToFirstRow();
+      if (exists) {
+        this.insertedDataIds.set(key, true);
+      }
+      return exists;
+    } finally {
+      resultSet.close();
     }
   }
 
-  /**
-   * Mark data as inserted (add to in-memory Set)
-   * Thread-safe: uses Promise-based lock for async operations
-   * @param dataType Data type
-   * @param dataString Line protocol data string
-   */
-  private async markDataAsInserted(dataType: DataType, dataString: string): Promise<void> {
-    try {
+  private async deleteDuplicateDataLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataType: DataType,
+    uniqueId: string
+  ): Promise<number> {
+    if (!uniqueId.startsWith('action_id=') && !uniqueId.startsWith('view_id=')) {
+      return 0;
+    }
+
+    const searchPattern = this.getDuplicateSearchPattern(uniqueId);
+    const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
+    predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
+
+    const deletedRows = await rdbStore.delete(predicates);
+    const key = `${dataType.toString()}:${uniqueId}`;
+    this.insertedDataIds.delete(key);
+    return deletedRows;
+  }
+
+  private markDataAsInsertedLocked(dataType: DataType, dataString: string): void {
+    const key = this.getDedupKey(dataType, dataString);
+    if (!key) {
+      return;
+    }
+    if (this.insertedDataIds.size > Constants.MAX_MAP_SIZE_DB) {
+      FTInnerLogger.w(TAG, `Dedup cache exceeded limit, clearing memory cache`);
+      this.insertedDataIds.clear();
+    }
+    this.insertedDataIds.set(key, true);
+  }
+
+  private async syncCacheCountsLocked(
+    rdbStore: relationalStore.RdbStore,
+    updateLogCount: boolean,
+    updateRumCount: boolean
+  ): Promise<void> {
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    const logCount = updateLogCount ? await this.queryTotalCountLocked(rdbStore, [DataType.LOG]) : undefined;
+    const rumCount = updateRumCount ?
+      await this.queryTotalCountLocked(rdbStore, [DataType.RUM_APP, DataType.RUM_WEBVIEW]) : undefined;
+    cachePolicy.syncCountsFromDbInternal(logCount, rumCount);
+  }
+
+  private async resolveAllowedInsertCountLocked(
+    rdbStore: relationalStore.RdbStore,
+    category: SyncDataCacheCategory,
+    requested: number,
+    result: SyncDataWriteResult
+  ): Promise<number> {
+    if (requested <= 0 || category === SyncDataCacheCategory.NONE) {
+      return requested;
+    }
+
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    const types = category === SyncDataCacheCategory.LOG ? [DataType.LOG] : [DataType.RUM_APP, DataType.RUM_WEBVIEW];
+
+    if (cachePolicy.isEnableLimitWithDbSize()) {
+      const currentDbSize = await this.getCurrentDatabaseSizeLocked(rdbStore);
+      cachePolicy.setCurrentDbSize(currentDbSize);
+      if (!cachePolicy.isReachDbLimit()) {
+        return requested;
+      }
+
+      if (String(cachePolicy.getDBCacheDiscard()) === DBCacheDiscard.DISCARD_OLDEST) {
+        const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT);
+        result.deletedOld += deleted;
+        return requested;
+      }
+      return 0;
+    }
+
+    const currentCount = await this.queryTotalCountLocked(rdbStore, types);
+    if (category === SyncDataCacheCategory.LOG) {
+      cachePolicy.syncCountsFromDbInternal(currentCount, undefined);
+      const limit = cachePolicy.getLogLimitCount();
+      if (limit <= 0 || currentCount + requested <= limit) {
+        return requested;
+      }
+
+      const overflow = currentCount + requested - limit;
+      if (String(cachePolicy.getDiscardStrategy(DataType.LOG)) === DBCacheDiscard.DISCARD_OLDEST) {
+        const deleted = await this.deleteOldestDataLocked(rdbStore, DataType.LOG, overflow);
+        result.deletedOld += deleted;
+        return requested;
+      }
+      return Math.max(0, limit - currentCount);
+    }
+
+    cachePolicy.syncCountsFromDbInternal(undefined, currentCount);
+    const limit = cachePolicy.getRumLimitCount();
+    if (limit <= 0 || currentCount + requested <= limit) {
+      return requested;
+    }
+
+    const overflow = currentCount + requested - limit;
+    if (String(cachePolicy.getDiscardStrategy(DataType.RUM_APP)) === DBCacheDiscard.DISCARD_OLDEST) {
+      const deleted = await this.deleteOldestDataLocked(rdbStore, types, overflow);
+      result.deletedOld += deleted;
+      return requested;
+    }
+    return Math.max(0, limit - currentCount);
+  }
+
+  private async applyCachePolicyLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataList: SyncData[],
+    result: SyncDataWriteResult
+  ): Promise<SyncData[]> {
+    let logRequested = 0;
+    let rumRequested = 0;
+    for (const data of dataList) {
+      const category = this.getCacheCategory(data.getDataType());
+      if (category === SyncDataCacheCategory.LOG) {
+        logRequested++;
+      } else if (category === SyncDataCacheCategory.RUM) {
+        rumRequested++;
+      }
+    }
+
+    let allowedLogs = await this.resolveAllowedInsertCountLocked(
+      rdbStore,
+      SyncDataCacheCategory.LOG,
+      logRequested,
+      result
+    );
+    let allowedRum = await this.resolveAllowedInsertCountLocked(
+      rdbStore,
+      SyncDataCacheCategory.RUM,
+      rumRequested,
+      result
+    );
+
+    const allowedData: SyncData[] = [];
+    for (const data of dataList) {
+      const category = this.getCacheCategory(data.getDataType());
+      if (category === SyncDataCacheCategory.LOG) {
+        if (allowedLogs > 0) {
+          allowedLogs--;
+          allowedData.push(data);
+        } else {
+          result.dropped++;
+        }
+      } else if (category === SyncDataCacheCategory.RUM) {
+        if (allowedRum > 0) {
+          allowedRum--;
+          allowedData.push(data);
+        } else {
+          result.dropped++;
+        }
+      } else {
+        allowedData.push(data);
+      }
+    }
+
+    return allowedData;
+  }
+
+  private async filterDuplicatesLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataList: SyncData[],
+    reInsert: boolean,
+    result: SyncDataWriteResult
+  ): Promise<SyncData[]> {
+    if (reInsert) {
+      return dataList;
+    }
+
+    const filteredDataList: SyncData[] = [];
+    const seenInBatch: Map<string, boolean> = new Map();
+
+    for (const data of dataList) {
+      const dataString = data.getDataString();
+      const dataType = data.getDataType();
       const uniqueId = this.extractUniqueId(dataType, dataString);
       if (!uniqueId) {
-        return;
+        filteredDataList.push(data);
+        continue;
       }
 
       const key = `${dataType.toString()}:${uniqueId}`;
-      
-      // Use Promise-based lock to ensure thread-safety in async operations
-      this.dedupLock = this.dedupLock.then(async () => {
-        // Limit the size of insertedDataIds to prevent memory leak
-        if (this.insertedDataIds.size > Constants.MAX_MAP_SIZE_DB) {
-          FTInnerLogger.w(TAG, `Dedup cache exceeded limit, clearing memory cache`);
-          this.insertedDataIds.clear();
-        }
-        this.insertedDataIds.set(key, true);
-      }).catch(() => {
-        FTInnerLogger.e(TAG, `Error marking data as inserted`);
-      });
-      
-      // Wait for the lock to complete
-      await this.dedupLock;
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error marking data as inserted: ${error as string}`);
+      if (seenInBatch.has(key)) {
+        result.duplicateSkipped++;
+        continue;
+      }
+
+      const exists = await this.checkDataExistsLocked(rdbStore, dataType, dataString);
+      if (!exists) {
+        seenInBatch.set(key, true);
+        filteredDataList.push(data);
+        continue;
+      }
+
+      if (uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id=')) {
+        const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId);
+        result.deletedOld += deleted;
+        seenInBatch.set(key, true);
+        filteredDataList.push(data);
+      } else {
+        result.duplicateSkipped++;
+      }
     }
+
+    return filteredDataList;
+  }
+
+  private async insertPreparedDataLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataList: SyncData[],
+    reInsert: boolean,
+    result: SyncDataWriteResult
+  ): Promise<void> {
+    if (!dataList || dataList.length === 0) {
+      return;
+    }
+
+    if (dataList.length === 1) {
+      const data = dataList[0];
+      const rowId = await rdbStore.insert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, this.toSyncDataValuesBucket(data));
+      const numericId = Number(rowId);
+      if (numericId > 0) {
+        data.setId(numericId);
+        result.inserted++;
+        if (!reInsert) {
+          this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
+        }
+      } else {
+        result.errorMessage = `Invalid rowId returned: ${rowId}`;
+      }
+      return;
+    }
+
+    const valuesArray: relationalStore.ValuesBucket[] = [];
+    for (const data of dataList) {
+      valuesArray.push(this.toSyncDataValuesBucket(data));
+    }
+
+    const insertedCount = await rdbStore.batchInsert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, valuesArray);
+    result.inserted += Math.max(0, insertedCount);
+    if (!reInsert && insertedCount > 0) {
+      for (const data of dataList) {
+        this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
+      }
+    }
+  }
+
+  private async writeSyncDataLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataList: SyncData[],
+    options: SyncDataWriteOptions,
+    result: SyncDataWriteResult
+  ): Promise<void> {
+    const applyCachePolicy = options.applyCachePolicy === true;
+    const reInsert = options.reInsert === true;
+    let dataToWrite = dataList;
+    const updateLogCount = applyCachePolicy && dataList.some((data) => this.getCacheCategory(data.getDataType()) === SyncDataCacheCategory.LOG);
+    const updateRumCount = applyCachePolicy && dataList.some((data) => this.getCacheCategory(data.getDataType()) === SyncDataCacheCategory.RUM);
+
+    if (applyCachePolicy) {
+      dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result);
+    }
+
+    dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result);
+    await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result);
+
+    if (applyCachePolicy && (updateLogCount || updateRumCount)) {
+      await this.syncCacheCountsLocked(rdbStore, updateLogCount, updateRumCount);
+    }
+  }
+
+  public async writeSyncDataAtomically(
+    source: string,
+    dataList: SyncData[],
+    options: SyncDataWriteOptions = {}
+  ): Promise<SyncDataWriteResult> {
+    const requested = dataList ? dataList.length : 0;
+    const result = this.createSyncDataWriteResult(source, requested);
+    if (!dataList || dataList.length === 0) {
+      return result;
+    }
+
+    const manager = this;
+    const startTime = Date.now();
+    class WriteSyncDataCallback implements DataBaseCallBack {
+      async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+        try {
+          await manager.writeSyncDataLocked(rdbStore, dataList, options, result);
+        } catch (error) {
+          result.success = false;
+          result.errorMessage = String(error);
+          throw new Error(result.errorMessage);
+        }
+      }
+    }
+
+    try {
+      if (this.isDatabaseClosed()) {
+        await this.init();
+      }
+      await this.getDB(true, new WriteSyncDataCallback());
+    } catch (error) {
+      result.success = false;
+      result.errorMessage = String(error);
+    } finally {
+      const costTime = Math.max(0, Date.now() - startTime);
+      const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';
+      FTInnerLogger.i(TAG,
+        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} cost=${costTime}ms${errorPart}`);
+    }
+
+    return result;
   }
 
   /**
@@ -453,227 +799,11 @@ export class FTDBManager extends DBManager {
    * @returns boolean
    */
   public async insertFtOperation(data: SyncData, reInsert: boolean = false): Promise<boolean> {
-    try {
-      // Note: Database size limit check is done in FTTrackInner before calling insertFtOperation
-      // (aligned with Android: optRUMCachePolicy/optLogCachePolicy are called in FTTrackInner)
-      
-      // Check for duplicate data before insert
-      if (!reInsert) {
-        const dataString = data.getDataString();
-        const dataType = data.getDataType();
-        const exists = await this.checkDataExists(dataType, dataString);
-        if (exists) {
-          // For action and view data, delete old record and insert new one to ensure only one record per action_id/view_id
-          const uniqueId = this.extractUniqueId(dataType, dataString);
-          if (uniqueId && (uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id='))) {
-            const deleted = await this.deleteDuplicateData(dataType, uniqueId);
-            if (deleted) {
-            } else {
-              // Keep warning log for failed delete operation
-              FTInnerLogger.w(TAG, `Duplicate data skipped: uuid=${data.getUuid()}, type=${dataType}`);
-              return false; // Failed to delete old record, skip insert
-            }
-          } else {
-            return false; // Data already exists, skip insert
-          }
-        } else {
-        }
-      }
-      
-      class InsertCallback implements DataBaseCallBack {
-        private insertSuccess: boolean = false;
-        private rowId: number = -1;
-        private errorMessage: string = "";
-        
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          // Use ValuesBucket type
-          const values: relationalStore.ValuesBucket = {} as relationalStore.ValuesBucket;
-          values[FTSQL.RECORD_COLUMN_TM] = data.getTime();
-          values[FTSQL.RECORD_COLUMN_DATA_UUID] = data.getUuid();
-          values[FTSQL.RECORD_COLUMN_DATA] = data.getDataString();
-          // Use custom dataType string if available (for error_sampled types), otherwise use enum toString
-          const customDataType = data.getCustomDataTypeString();
-          values[FTSQL.RECORD_COLUMN_DATA_TYPE] = customDataType || data.getDataType().toString();
-
-          // Log the actual stored type (customDataTypeString if available, otherwise enum toString)
-          //const actualStoredType = customDataType || data.getDataType().toString();
-          //FTInnerLogger.d(TAG, `Inserting data: uuid=${data.getUuid()}, type=${actualStoredType}, time=${data.getTime()}`);
-          
-          try {
-            const rowId = rdbStore.insert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, values);
-            if (rowId instanceof Promise) {
-              const id = await rowId;
-              const numericId = Number(id);
-              if (numericId > 0) {
-                data.setId(numericId);
-                this.insertSuccess = true;
-                this.rowId = numericId;
-                // FTInnerLogger.d(TAG, `Insert completed with rowId: ${id}`);
-              } else {
-                this.insertSuccess = false;
-                this.errorMessage = `Invalid rowId returned: ${id}`;
-                // FTInnerLogger.e(TAG, `Insert failed: invalid rowId ${id}`);
-              }
-            } else {
-              const numericId = Number(rowId);
-              if (numericId > 0) {
-                data.setId(numericId);
-                this.insertSuccess = true;
-                this.rowId = numericId;
-              } else {
-                this.insertSuccess = false;
-                this.errorMessage = `Invalid rowId returned: ${rowId}`;
-                FTInnerLogger.e(TAG, `Insert failed: invalid rowId ${rowId}`);
-              }
-            }
-          } catch (error) {
-            this.insertSuccess = false;
-            this.errorMessage = error?.toString() || "Unknown error";
-            FTInnerLogger.e(TAG, `Insert failed: ${error}`);
-            
-            // Re-throw "Already closed" errors to trigger reconnection logic
-            if (error && error.toString().includes("Already closed")) {
-              throw new Error(`Database already closed: ${error}`);
-            }
-          }
-        }
-        
-        getInsertSuccess(): boolean {
-          return this.insertSuccess;
-        }
-        
-        getRowId(): number {
-          return this.rowId;
-        }
-        
-        getErrorMessage(): string {
-          return this.errorMessage;
-        }
-      }
-      
-      const callback: InsertCallback = new InsertCallback();
-      
-      // Removed test debug logs to reduce log output
-      // FTInnerLogger.d(TAG, ` About to call getDBAsync for insert: uuid=${data.getUuid()}`);
-      
-      // Check if database is closed and reinitialize if needed
-      const isClosed = this.isDatabaseClosed();
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` Database closed check: ${isClosed}, rdbStore=${this.getDatabaseStoreStatus()}`);
-      
-      if (isClosed) {
-        FTInnerLogger.w(TAG, `DB closed during insert, reinitializing`);
-        await this.init();
-        // Removed test debug log to reduce log output
-        // FTInnerLogger.d(TAG, ` Database reinitialized, rdbStore=${this.getDatabaseStoreStatus()}`);
-      }
-      
-      try {
-        await this.getDB(true, callback);
-        // Removed test debug log to reduce log output
-        // FTInnerLogger.d(TAG, ` getDBAsync call completed: uuid=${data.getUuid()}`);
-        
-        const insertSuccess = callback.getInsertSuccess();
-        const rowId = callback.getRowId();
-        const errorMessage = callback.getErrorMessage();
-        
-        // FTInnerLogger.d(TAG, `Insert result: success=${insertSuccess}, rowId=${rowId}, uuid=${data.getUuid()}`);
-        
-        if (insertSuccess && rowId > 0) {
-          data.setId(rowId);
-          FTInnerLogger.d(TAG, `Sync data generated: type=${data.getDataType()}, uuid=${data.getUuid()}`);
-          
-          // Mark data as inserted in memory Set (for future deduplication)
-          if (!reInsert) {
-            const dataString = data.getDataString();
-            const dataType = data.getDataType();
-            await this.markDataAsInserted(dataType, dataString);
-          }
-          
-          return true;
-        } else {
-          // Check if it's an "Already closed" error and retry once
-          if (errorMessage && errorMessage.includes("Already closed")) {
-            // Keep warning log for important case
-            FTInnerLogger.w(TAG, `DB closed during insert, retrying once`);
-            
-            // Force reinitialize database
-            this.resetDatabaseConnection();
-            await this.init();
-            
-            // Retry the insert operation with a fresh callback
-            const retryCallback: InsertCallback = new InsertCallback();
-            
-            // Use getDBAsync for retry operation but with a fresh callback
-            // This will trigger the retry logic in getDBAsync
-            try {
-              await this.getDB(true, retryCallback);
-              
-              const retrySuccess = retryCallback.getInsertSuccess();
-              const retryRowId = retryCallback.getRowId();
-              const retryErrorMessage = retryCallback.getErrorMessage();
-              
-              if (retrySuccess && retryRowId > 0) {
-                data.setId(retryRowId);
-                FTInnerLogger.d(TAG, `Sync data generated after retry: type=${data.getDataType()}, uuid=${data.getUuid()}`);
-                return true;
-              } else {
-                FTInnerLogger.e(TAG, `Retry insert failed: uuid=${data.getUuid()}, error=${retryErrorMessage}`);
-                return false;
-              }
-            } catch (retryError) {
-              // Keep error log for important case
-              FTInnerLogger.e(TAG, `Retry insert failed: ${retryError}`);
-              return false;
-            }
-          } else {
-            FTInnerLogger.e(TAG, `Insert failed: uuid=${data.getUuid()}, error=${errorMessage}`);
-            return false;
-          }
-        }
-      } catch (dbError) {
-        // Check if it's an "Already closed" error and retry once
-        if (dbError && dbError.toString().includes("Already closed")) {
-          // Keep warning log for important case
-          FTInnerLogger.w(TAG, `DB closed during insert, retrying once`);
-          
-          // Force reinitialize database
-          this.resetDatabaseConnection();
-          await this.init();
-          
-          // Retry the insert operation with a fresh callback
-          const retryCallback: InsertCallback = new InsertCallback();
-          
-          // Use getDBAsync for retry operation but with a fresh callback
-          // This will trigger the retry logic in getDBAsync
-          try {
-            await this.getDB(true, retryCallback);
-            
-            const retrySuccess = retryCallback.getInsertSuccess();
-            const retryRowId = retryCallback.getRowId();
-            const retryErrorMessage = retryCallback.getErrorMessage();
-            
-            if (retrySuccess && retryRowId > 0) {
-              data.setId(retryRowId);
-              FTInnerLogger.d(TAG, `Sync data generated after retry: type=${data.getDataType()}, uuid=${data.getUuid()}`);
-              return true;
-            } else {
-              FTInnerLogger.e(TAG, `Retry insert failed: uuid=${data.getUuid()}, error=${retryErrorMessage}`);
-              return false;
-            }
-          } catch (retryError) {
-            FTInnerLogger.e(TAG, `Retry insert failed: ${retryError}`);
-            return false;
-          }
-        } else {
-          // Re-throw other errors
-          throw new Error(`Database insert failed: ${dbError}`);
-        }
-      }
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Insert sync data failed: ${error as string}`);
-      return false;
-    }
+    const result = await this.writeSyncDataAtomically('insertFtOperation', [data], {
+      applyCachePolicy: false,
+      reInsert
+    });
+    return result.inserted > 0;
   }
 
   /**
@@ -683,108 +813,11 @@ export class FTDBManager extends DBManager {
    * @returns boolean
    */
   public async insertFtOptList(dataList: SyncData[], reInsert: boolean = false): Promise<boolean> {
-    if (!dataList || dataList.length === 0) {
-      return true;
-    }
-
-    try {
-      // Filter out duplicate data before insert (using in-memory Set for fast lookup)
-      const filteredDataList: SyncData[] = [];
-      const seenInBatch: Map<string, boolean> = new Map(); // For batch-internal deduplication
-      
-      if (!reInsert) {
-        for (const data of dataList) {
-          const dataString = data.getDataString();
-          const dataType = data.getDataType();
-          const uniqueId = this.extractUniqueId(dataType, dataString);
-          
-          if (!uniqueId) {
-            // Cannot extract unique ID, allow insert
-            filteredDataList.push(data);
-            continue;
-          }
-          
-          const key = `${dataType.toString()}:${uniqueId}`;
-          
-          // Check batch-internal duplicates first (fast path)
-          if (seenInBatch.has(key)) {
-            continue;
-          }
-          
-          // Check memory Set and database
-          const exists = await this.checkDataExists(dataType, dataString);
-          if (!exists) {
-            seenInBatch.set(key, true);
-            filteredDataList.push(data);
-          } else {
-          }
-        }
-        
-        if (filteredDataList.length === 0) {
-          // Keep info log for important case (all duplicates)
-          FTInnerLogger.i(TAG, `Batch insert skipped: all ${dataList.length} items are duplicates`);
-          return true; // All data are duplicates, nothing to insert
-        }
-        
-      } else {
-        // For reInsert, don't filter
-        filteredDataList.push(...dataList);
-      }
-
-      // Use batchInsert for better performance (HarmonyOS RdbStore supports true batch insert)
-      let insertedCount: number = 0;
-      class BatchInsertCallback implements DataBaseCallBack {
-        public insertedCount: number = 0;
-        
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          // Prepare ValuesBucket array for batch insert
-          const valuesArray: relationalStore.ValuesBucket[] = [];
-          for (const data of filteredDataList) {
-            const values: relationalStore.ValuesBucket = {} as relationalStore.ValuesBucket;
-            values[FTSQL.RECORD_COLUMN_TM] = data.getTime();
-            values[FTSQL.RECORD_COLUMN_DATA_UUID] = data.getUuid();
-            values[FTSQL.RECORD_COLUMN_DATA] = data.getDataString();
-            // Use custom dataType string if available (for error_sampled types), otherwise use enum toString
-            const customDataType = data.getCustomDataTypeString();
-            values[FTSQL.RECORD_COLUMN_DATA_TYPE] = customDataType || data.getDataType().toString();
-            valuesArray.push(values);
-          }
-          
-          // Execute batch insert (batchInsert uses transaction internally for better performance)
-          this.insertedCount = await rdbStore.batchInsert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, valuesArray);
-          
-          // batchInsert returns the number of inserted rows
-          if (this.insertedCount > 0) {
-            FTInnerLogger.d(TAG, `Batch data generated: ${this.insertedCount} items`);
-            // Note: batchInsert doesn't return individual rowIds, so we can't set IDs for each data item
-            // This is acceptable as IDs are mainly used for deletion, which can be done by UUID
-          } else {
-            FTInnerLogger.e(TAG, `Batch insert failed: inserted ${this.insertedCount}, expected ${filteredDataList.length}`);
-          }
-        }
-      }
-      
-      const callback = new BatchInsertCallback();
-      
-      await this.getDB(true, callback);
-      
-      insertedCount = callback.insertedCount;
-
-      // Mark all successfully inserted data in memory Set (after insert completes)
-      // Since batchInsert doesn't return individual rowIds, we mark all data as inserted if count matches
-      if (!reInsert && insertedCount > 0) {
-        // Mark all data as inserted (batchInsert succeeded)
-        for (const data of filteredDataList) {
-          const dataString = data.getDataString();
-          const dataType = data.getDataType();
-          await this.markDataAsInserted(dataType, dataString);
-        }
-      }
-      return true;
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to insert sync data list: ${error as string}`);
-      return false;
-    }
+    const result = await this.writeSyncDataAtomically('insertFtOptList', dataList, {
+      applyCachePolicy: false,
+      reInsert
+    });
+    return result.success;
   }
 
   /**
@@ -793,7 +826,7 @@ export class FTDBManager extends DBManager {
    * @param limit Limit count
    * @returns Promise<SyncData[]>
    */
-  public async queryFtOperation(types: DataType[], limit: number = 100): Promise<SyncData[]> {
+  public async queryFtOperation(types: DataType[], limit: number = 100, newestFirst: boolean = false): Promise<SyncData[]> {
     const result: SyncData[] = [];
 
     try {
@@ -816,8 +849,13 @@ export class FTDBManager extends DBManager {
             // FTInnerLogger.d(TAG, ` Query predicate: table=${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}, all types`);
           }
           
-          // Order by timestamp ascending (aligned with Android: ORDER by tm ASC)
-          predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
+          // Order by timestamp ascending by default (aligned with Android: ORDER by tm ASC).
+          // Tests that assert the most recent crash/ANR data can opt into newest-first queries.
+          if (newestFirst) {
+            predicates.orderByDesc(FTSQL.RECORD_COLUMN_TM);
+          } else {
+            predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
+          }
           
           // Apply limit using limitAs (aligned with Android: LIMIT pageSize)
           // Note: limit <= 0 means no limit (query all), but we use a reasonable default
@@ -992,34 +1030,20 @@ export class FTDBManager extends DBManager {
    * @param limit Number of records to delete
    */
   public async deleteOldestData(types: DataType | DataType[], limit: number): Promise<void> {
-    // Convert single type to array if needed
-    const typeArray = Array.isArray(types) ? types : [types];
     try {
-      const rdbStore = await this.getDataBaseHelper();
-      if (!rdbStore) {
-        FTInnerLogger.e(TAG, "Failed to get database store for deleteOldestData");
-        return;
+      const manager = this;
+      const typeArray = Array.isArray(types) ? types : [types];
+      class DeleteOldestCallback implements DataBaseCallBack {
+        deletedCount: number = 0;
+
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          this.deletedCount = await manager.deleteOldestDataLocked(rdbStore, typeArray, limit);
+        }
       }
 
-      // Build WHERE clause for data types
-      let whereClause = "";
-      if (typeArray && typeArray.length > 0) {
-        const typeValues = typeArray.map(type => `'${type.toString()}'`).join(',');
-        whereClause = `${FTSQL.RECORD_COLUMN_DATA_TYPE} IN (${typeValues})`;
-      }
-
-      // Build SQL: DELETE FROM table WHERE _id IN (SELECT _id FROM table WHERE ... ORDER BY tm ASC LIMIT limit)
-      let sql = `DELETE FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} WHERE _id IN (
-        SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}`;
-      
-      if (whereClause) {
-        sql += ` WHERE ${whereClause}`;
-      }
-      
-      sql += ` ORDER BY ${FTSQL.RECORD_COLUMN_TM} ASC LIMIT ${limit})`;
-
-      await rdbStore.executeSql(sql);
-      FTInnerLogger.i(TAG, `Oldest data deleted: types=${typeArray}, limit=${limit}`);
+      const callback = new DeleteOldestCallback();
+      await this.getDB(true, callback);
+      FTInnerLogger.i(TAG, `Oldest data deleted: types=${typeArray}, limit=${limit}, deleted=${callback.deletedCount}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to delete oldest data: ${error}`);
     }
@@ -1260,40 +1284,6 @@ export class FTDBManager extends DBManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to close view: ${error}`);
       return false;
-    }
-  }
-
-  /**
-   * Update View update time (increment counter), used to mark delayed Resource data
-   * Aligned with Android implementation
-   * @param viewId View ID
-   * @returns Promise<boolean>
-   */
-  /**
-   * Reset upload_time for all views to 0
-   * This is used in triggerGenerateRumData() to allow re-querying views that were already uploaded
-   * @returns Promise<number> Number of views updated
-   */
-  public async resetViewUploadTime(): Promise<number> {
-    try {
-      class ResetViewUploadTimeCallback implements DataBaseCallBack {
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-          
-          const values: relationalStore.ValuesBucket = {
-            data_upload_time: 0
-          };
-          
-          await rdbStore.update(values, predicates);
-        }
-      }
-      
-      const callback = new ResetViewUploadTimeCallback();
-      await this.getDB(true, callback);
-      return 0; // Return value not critical, just for consistency
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Reset view upload time failed: ${error as string}`);
-      return 0;
     }
   }
 
@@ -2402,7 +2392,7 @@ export class FTDBManager extends DBManager {
               FTInnerLogger.e(TAG, `Delayed action pending resource cleanup failed: ${error}`);
             }
           })();
-        }, 30 * 1000); // 30 seconds delay
+        }, 30 * 1000);
       }
       
       return callback.getWasClosed();
@@ -3034,13 +3024,7 @@ export class FTDBManager extends DBManager {
     const expireTimeline = now - expireDuration;
     let deleteCount = 0;
     
-    // Convert to string if DataType enum
-    let dataTypeStr: string;
-    if (typeof dataType === 'string') {
-      dataTypeStr = dataType;
-    } else {
-      dataTypeStr = String(dataType);
-    }
+    const dataTypeStr: string = String(dataType);
     
     try {
       class DeleteExpireCallback implements DataBaseCallBack {

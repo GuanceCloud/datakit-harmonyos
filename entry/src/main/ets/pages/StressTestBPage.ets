@@ -1,6 +1,11 @@
+import { common, Want } from '@kit.AbilityKit';
 import router from '@ohos.router';
 import { promptAction } from '@kit.ArkUI';
-import { StressTestManager } from '../utils/StressTestManager';
+import {
+  createEmptyStressTestStats,
+  StressTestManager,
+  StressTestStats
+} from '../utils/StressTestManager';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -13,15 +18,18 @@ const TAG = "StressTestBPage";
 @Entry
 @Component
 export struct StressTestBPage {
+  private abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
   @State elapsedSeconds: number = 0;
   @State remainingSeconds: number = -1;
+  @State stats: StressTestStats = createEmptyStressTestStats();
   private updateTimerId: number | null = null;
   private autoNavigateTimerId: number | null = null;
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
-  private static readonly AUTO_NAVIGATE_DELAY: number = 1000; // 1 second delay before auto navigation
+  private enteredStressRun: boolean = false;
 
   aboutToAppear() {
     DemoLogger.i(TAG, "StressTestBPage initialized");
+    this.refreshNavigationStats();
     this.startUpdateTimer();
     this.startAutoNavigate();
   }
@@ -33,14 +41,10 @@ export struct StressTestBPage {
 
   private startUpdateTimer(): void {
     this.updateTimerId = setInterval((): void => {
-      if (this.stressTestManager.isStressTestRunning()) {
-        this.elapsedSeconds = this.stressTestManager.getElapsedSeconds();
-        this.remainingSeconds = this.stressTestManager.getRemainingSeconds();
-      } else {
-        this.elapsedSeconds = 0;
-        this.remainingSeconds = -1;
+      const snapshot = this.refreshNavigationStats();
+      if (!snapshot.isRunning) {
         // If stress test stopped, stop auto navigation and return to RealAppStressTestPage
-        if (this.autoNavigateTimerId !== null) {
+        if (this.enteredStressRun || this.autoNavigateTimerId !== null) {
           DemoLogger.i(TAG, "Stress test stopped, stopping auto navigation and returning to RealAppStressTestPage");
           this.stopAutoNavigate();
           this.navigateBack();
@@ -57,22 +61,23 @@ export struct StressTestBPage {
   }
 
   private startAutoNavigate(): void {
-    // Only auto navigate if stress test is running
-    if (!this.stressTestManager.isStressTestRunning()) {
-      DemoLogger.i(TAG, "Stress test not running, skipping auto navigation");
+    // Only auto navigate if stress test is running and navigation scenario is enabled
+    if (!this.stressTestManager.isNavigationScenarioEnabled()) {
+      DemoLogger.i(TAG, "Stress navigation scenario disabled, skipping auto navigation");
       return;
     }
+    const navigationIntervalMs = this.stressTestManager.getNavigationIntervalMs();
     // Auto navigate to StressTestAPage after delay
     this.autoNavigateTimerId = setTimeout((): void => {
       // Check again before navigating (stress test might have stopped)
-      if (this.stressTestManager.isStressTestRunning()) {
+      if (this.stressTestManager.isNavigationScenarioEnabled()) {
         DemoLogger.i(TAG, "Auto navigating to StressTestAPage");
         this.navigateToPageA();
       } else {
         DemoLogger.i(TAG, "Stress test stopped before auto navigation, returning to RealAppStressTestPage");
         this.navigateBack();
       }
-    }, StressTestBPage.AUTO_NAVIGATE_DELAY);
+    }, navigationIntervalMs);
   }
 
   private stopAutoNavigate(): void {
@@ -80,6 +85,17 @@ export struct StressTestBPage {
       clearTimeout(this.autoNavigateTimerId);
       this.autoNavigateTimerId = null;
     }
+  }
+
+  private refreshNavigationStats(): StressTestStats {
+    const snapshot = this.stressTestManager.getStatsSnapshot();
+    this.stats = snapshot;
+    this.elapsedSeconds = snapshot.elapsedSeconds;
+    this.remainingSeconds = snapshot.remainingSeconds;
+    if (snapshot.isRunning && snapshot.enableNavigation) {
+      this.enteredStressRun = true;
+    }
+    return snapshot;
   }
 
   private formatTime(seconds: number): string {
@@ -100,6 +116,7 @@ export struct StressTestBPage {
       return;
     }
     try {
+      this.stressTestManager.recordNavigationSwitch();
       // Use replaceUrl to replace current page instead of pushing to stack
       // This prevents page stack overflow when repeatedly navigating between pages
       router.replaceUrl({ url: 'pages/StressTestAPage' });
@@ -118,8 +135,8 @@ export struct StressTestBPage {
     this.stopAutoNavigate();
     DemoLogger.i(TAG, "Auto navigation stopped, navigating back to RealAppStressTestPage");
     try {
-      router.pushUrl({ url: 'pages/RealAppStressTestPage' });
-      DemoLogger.i(TAG, "Navigated to RealAppStressTestPage");
+      router.replaceUrl({ url: 'pages/RealAppStressTestPage' });
+      DemoLogger.i(TAG, "Navigated to RealAppStressTestPage (replaced)");
     } catch (error) {
       DemoLogger.e(TAG, `Failed to navigate to RealAppStressTestPage: ${error}`);
       promptAction.showToast({
@@ -129,17 +146,58 @@ export struct StressTestBPage {
     }
   }
 
-  triggerCrash(): void {
-    DemoLogger.i(TAG, "Triggering crash...");
-    promptAction.showToast({
-      message: "Crash triggered - app will crash",
-      duration: 1000
-    });
-    // Use setTimeout to throw exception asynchronously
-    // This allows errorManager to catch it as an unhandled exception
-    setTimeout((): void => {
-      throw new Error('Intentional crash for stress testing');
-    }, 100);
+  private createStressServiceWant(action: string): Want {
+    return {
+      bundleName: this.abilityContext.abilityInfo.bundleName,
+      moduleName: this.abilityContext.abilityInfo.moduleName,
+      abilityName: 'StressServiceAbility',
+      action
+    };
+  }
+
+  private async stopBackgroundStressServiceIfNeeded(): Promise<void> {
+    const snapshot = this.stressTestManager.getStatsSnapshot();
+    if (snapshot.source !== 'background-service') {
+      return;
+    }
+
+    const want = this.createStressServiceWant('stop');
+    try {
+      await this.abilityContext.startAppServiceExtensionAbility(want);
+    } catch (error) {
+      DemoLogger.w(TAG, `Background stress service stop command failed: ${error}`);
+    }
+
+    try {
+      await this.abilityContext.stopAppServiceExtensionAbility(want);
+      DemoLogger.i(TAG, "Background stress service stop requested from StressTestBPage");
+    } catch (error) {
+      DemoLogger.w(TAG, `Background stress service stop failed from StressTestBPage: ${error}`);
+    }
+  }
+
+  async stopStressTestAndReturn(): Promise<void> {
+    this.stopUpdateTimer();
+    this.stopAutoNavigate();
+
+    try {
+      if (this.stressTestManager.isStressTestRunning()) {
+        this.stressTestManager.stop('manual');
+      }
+      await this.stopBackgroundStressServiceIfNeeded();
+      promptAction.showToast({
+        message: "Stress test stopped",
+        duration: 2000
+      });
+    } catch (error) {
+      DemoLogger.e(TAG, `Failed to stop stress test from StressTestBPage: ${error}`);
+      promptAction.showToast({
+        message: `Stop failed: ${error}`,
+        duration: 2000
+      });
+    } finally {
+      this.navigateBack();
+    }
   }
 
   build() {
@@ -185,10 +243,50 @@ export struct StressTestBPage {
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.remainingSeconds > 10 ? '#FF9800' : '#FF5252')
               }
+
+              Column({ space: 5 }) {
+                Text('Switches')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Text(`${this.stats.navigationSwitches}`)
+                  .fontSize(24)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#4CAF50')
+              }
             }
             .margin({ top: 10 })
             .justifyContent(FlexAlign.SpaceEvenly)
             .width('100%')
+
+            Text(`Traffic: ${this.stats.trafficMode} | Source: ${this.stats.source}`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`Navigation interval: ${this.stats.navigationIntervalMs}ms`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`Logs: ${this.stats.logsGenerated} (${this.stats.logBatchesGenerated} batches)`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`Actions: ${this.stats.actionsGenerated} | Resources: ${this.stats.resourcesGenerated} / OK ${this.stats.resourcesSucceeded} / Fail ${this.stats.resourcesFailed}`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`Errors: ${this.stats.errorsGenerated} | LongTasks: ${this.stats.longTasksGenerated}`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
           }
           .width('100%')
           .padding(15)
@@ -207,15 +305,18 @@ export struct StressTestBPage {
           .fontColor(Color.White)
           .margin({ top: 40 })
 
-        Button('Crash')
-          .onClick(() => this.triggerCrash())
+        Button('Stop Stress Test')
+          .onClick(() => {
+            this.stopStressTestAndReturn();
+          })
           .width('80%')
-          .height(60)
-          .fontSize(18)
+          .height(54)
+          .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .backgroundColor('#FF5252')
+          .backgroundColor('#F53F3F')
           .fontColor(Color.White)
-          .margin({ top: 20 })
+          .enabled(this.stressTestManager.isStressTestRunning())
+          .margin({ top: 8 })
       }
       .width('100%')
       .justifyContent(FlexAlign.Start)

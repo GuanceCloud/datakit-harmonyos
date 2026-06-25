@@ -1,7 +1,10 @@
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
-import { ResourceParams } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/ResourceParams';
-import { NetStatusBean } from '@guancecloud/ft_sdk/src/main/ets/components/rum/bean/NetStatusBean';
-import { ErrorType, AppState } from '@guancecloud/ft_sdk/src/main/ets/components/rum/enum/RUMEnums';
+import {
+  AppState,
+  ErrorType,
+  FTRUMGlobalManager,
+  NetStatusBean,
+  ResourceParams
+} from '@guancecloud/ft_sdk/Index';
 import { promptAction } from '@kit.ArkUI';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -194,7 +197,7 @@ export struct ActionCountTestPage {
         // Simulate resource loading (async - action will wait for resource completion via pending_resource_count mechanism)
         setTimeout(() => {
           // Stop resource
-          rumGlobalManager.stopResource(resourceId, 200, 1024);
+          rumGlobalManager.stopResource(resourceId);
           
           // Add resource data
           const params = new ResourceParams();

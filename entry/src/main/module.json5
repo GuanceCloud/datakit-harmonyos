@@ -32,19 +32,18 @@
             ]
           }
         ]
-      },
-      {
-        "name": "StressServiceAbility",
-        "srcEntry": "./ets/serviceability/StressServiceAbility.ets",
-        "exported": true,
-        "description": "Stress test service",
-        "startWindowIcon": "$media:startIcon",
-        "startWindowBackground": "$color:start_window_background"
       }
-
     ],
 
     "extensionAbilities": [
+      {
+        "name": "StressServiceAbility",
+        "srcEntry": "./ets/serviceability/StressServiceAbility.ets",
+        "type": "appService",
+        "exported": true,
+        "visible": true,
+        "description": "Stress test service"
+      },
       {
         "name": "EntryBackupAbility",
         "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",

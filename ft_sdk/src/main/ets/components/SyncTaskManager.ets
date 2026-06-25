@@ -1,34 +1,28 @@
-import { FTInnerLogger, FTLogger } from "./log/FTLogger";
-import { FTDBManager } from "./db/FTDBManager";
-import { HttpBuilder } from "./http/HttpBuilder";
-import { http } from '@kit.NetworkKit';
 import { FTSDKConfig } from './Configs';
 import { DataType } from './enum/Enums';
 import { SyncData } from './db/bean/SyncData';
 import { NetCodeStatus } from './http/HttpEngine';
-import { DataUploadThreadPool, UploadQueueStatus } from './thread/DataUploadThreadPool';
-import { ThreadPoolManager } from './thread/ThreadPoolManager';
 import { Context } from '@kit.AbilityKit';
 import { DataBaseCallBack } from './db/base/DataBaseCallBack';
 import relationalStore from '@ohos.data.relationalStore';
-import { FTDBCachePolicy } from './db/FTDBCachePolicy';
 import { FTSQL } from './db/FTSQL';
 import { Constants } from './Constants';
-import preferences from '@ohos.data.preferences';
-import { Utils } from './utils/Utils';
 import { ViewBean } from './db/bean/ViewBean';
+import { FTInnerLogger } from './log/FTLogger';
+import {
+  DefaultSyncTaskManagerRuntime,
+  SyncTaskCachePolicy,
+  SyncTaskConfigRecord,
+  SyncTaskDbManager,
+  SyncTaskManagerRuntime,
+  SyncTaskPreferences
+} from './internal/runtime/SyncTaskManagerRuntime';
+import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
 
 /**
  * Configuration record interface for FTDBCachePolicy
  */
-export interface ConfigRecord {
-  isLimitWithDbSize: () => boolean;
-  getDbCacheLimit: () => number;
-  getLogCacheLimitCount: () => number;
-  getRumCacheLimitCount: () => number;
-  getDBCacheDiscard: () => string;
-  getLogCacheDiscard: () => string;
-  getRumCacheDiscard: () => string;
+export interface ConfigRecord extends SyncTaskConfigRecord {
 }
 
 /**
@@ -49,14 +43,6 @@ class ConfigRecordImpl implements ConfigRecord {
     return this.config.getDbCacheLimit();
   }
 
-  getLogCacheLimitCount(): number {
-    return this.config.getLogCacheLimitCount();
-  }
-
-  getRumCacheLimitCount(): number {
-    return this.config.getRumCacheLimitCount();
-  }
-
   getDBCacheDiscard(): string {
     return this.config.getDBCacheDiscard();
   }
@@ -64,25 +50,22 @@ class ConfigRecordImpl implements ConfigRecord {
   getLogCacheDiscard(): string {
     return this.config.getLogCacheDiscard();
   }
-
-  getRumCacheDiscard(): string {
-    return this.config.getRumCacheDiscard();
-  }
 }
 
 const TAG = "SyncTaskManager";
+let syncTaskRuntime: SyncTaskManagerRuntime = new DefaultSyncTaskManagerRuntime();
 
 /**
  * Request callback interface
  */
-interface RequestCallback {
+export interface SyncTaskRequestCallback {
   onResponse(code: number, response: string, errorCode: string): void;
 }
 
 /**
  * Request callback implementation class
  */
-class RequestCallbackImpl implements RequestCallback {
+class RequestCallbackImpl implements SyncTaskRequestCallback {
   private callback: (code: number, response: string, errorCode: string) => void | Promise<void>;
 
   constructor(callback: (code: number, response: string, errorCode: string) => void | Promise<void>) {
@@ -100,6 +83,12 @@ class RequestCallbackImpl implements RequestCallback {
   }
 }
 
+enum UploadBatchResult {
+  DELETE_NO_BACKOFF = 'delete-no-backoff',
+  DELETE_WITH_IGNORED_BACKOFF = 'delete-with-ignored-backoff',
+  RETRY_BACKOFF = 'retry-backoff'
+}
+
 /**
  * Data synchronization manager
  * Responsible for querying data from database and uploading to server
@@ -108,32 +97,53 @@ export class SyncTaskManager {
   public static readonly SYNC_SLEEP_MAX_TIME_MS = 5000;
   public static readonly SYNC_SLEEP_MINI_TIME_MS = 0;
   public static readonly MAX_ERROR_COUNT = 5;
-  private static instance: SyncTaskManager;
+  private static instance: SyncTaskManager | null = null;
   private static SLEEP_TIME = 2000; // 2 seconds - upload interval (reduced from 3s to further improve upload speed)
-  private static INTERVAL = 100; // 100ms interval
   private static RETRY_DELAY_SLEEP_TIME = 500; // 500ms retry delay
+  private static readonly IGNORED_CLIENT_ERROR_BACKOFF_MAX_MS = 8000;
+  private static readonly UPLOAD_SINGLE_FLIGHT_KEY = 'upload-poll';
+  private static readonly UPLOAD_MAX_PAGES_RUM_APP = 2;
+  private static readonly UPLOAD_MAX_PAGES_RUM_WEBVIEW = 1;
+  private static readonly UPLOAD_MAX_PAGES_LOG = 1;
   private static readonly ONE_MINUTE_DURATION_NS = 60_000_000_000; // 60 seconds in nanoseconds
   private static readonly PREFERENCES_NAME = 'ft_sdk_sync_task';
   private static readonly KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
+  private static readonly ERROR_SAMPLED_SUFFIX = "_error_sampled";
   private errorCount = 0;
   private running = false;
+  private uploadRunning = false;
+  private uploadScheduled = false;
+  private uploadNeedReschedule = false;
+  private uploadRescheduleDelay = 0;
+  private uploadScheduledDelay = 0;
+  private uploadScheduledAt = 0;
+  private uploadScheduleTimer = -1;
+  private uploadTaskSequence = 0;
+  private uploadCurrentPollRows = 0;
+  private uploadCurrentTaskName = "";
+  private uploadStartTraced = false;
+  private syncPollPrecheckRunning = false;
+  private syncPollPrecheckPending = false;
   private isStop = false;
   private autoSync = false;
+  private initialSyncPollTriggered = false;
   private syncSleepTime = 0;
   private pageSize = 100; // Default page size (increased from 50 to improve upload throughput)
   private dataSyncMaxRetryCount = 3; // Maximum retry count
   private sdkConfig: FTSDKConfig | null = null;
   private context: Context | null = null;
-  private lastSyncTime = 0; // Record last sync time
   private errorTimeLine: number = -1; // Error time line in nanoseconds
-  private preferencesStore: preferences.Preferences | null = null;
+  private preferencesStore: SyncTaskPreferences | null = null;
+  private uploadRunnable: (() => Promise<void>) | null = null;
+  private errorCountByType: Map<DataType, number> = new Map();
+  private ignoredClientErrorCountByType: Map<DataType, number> = new Map();
   // Package ID generators
   private rumGenerator = new IDGenerator();
   private logGenerator = new IDGenerator();
   // Static process ID cache (process lifetime)
   private static cachedProcessId: number | undefined = undefined;
   // Synchronization data type mapping
-  private readonly SYNC_MAP = [DataType.LOG, DataType.RUM_APP, DataType.RUM_WEBVIEW];
+  private readonly SYNC_MAP = [DataType.RUM_APP, DataType.RUM_WEBVIEW, DataType.LOG];
   private readonly ERROR_SAMPLED_SYNC_MAP = [DataType.RUM_APP, DataType.RUM_WEBVIEW];
   // Set to track uploaded data unique identifiers to prevent duplicate uploads
   // Key format: "dataType:uniqueId" (e.g., "RUM_APP:action_id=xxx", "RUM_APP:view_id=xxx", "LOG:uuid=xxx")
@@ -144,6 +154,20 @@ export class SyncTaskManager {
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_UPLOAD)
 
   private constructor() {
+  }
+
+  public static setRuntimeInternal(runtime: SyncTaskManagerRuntime): void {
+    syncTaskRuntime = runtime;
+  }
+
+  public static resetRuntimeInternal(): void {
+    syncTaskRuntime = new DefaultSyncTaskManagerRuntime();
+  }
+
+  public static resetStateInternal(): void {
+    SyncTaskManager.instance = null;
+    SyncTaskManager.cachedProcessId = undefined;
+    RUMDataCleanupManagerInternal.resetInternal();
   }
 
   public static getInstance(): SyncTaskManager {
@@ -169,10 +193,10 @@ export class SyncTaskManager {
 
     // Initialize database cache policy (does not require context)
     const configRecord = new ConfigRecordImpl(config);
-    FTDBCachePolicy.getInstance().initSDKParams(configRecord);
+    syncTaskRuntime.getCachePolicy().initSDKParams(configRecord);
 
-    // Initialize data upload thread pool (does not require context)
-    this.initDataUploadThreadPool();
+    // Initialize upload lane (does not require context)
+    this.initUploadLane();
 
     // Initialize components that require context
     if (context) {
@@ -180,7 +204,7 @@ export class SyncTaskManager {
 
       // Initialize preferences for errorTimeLine storage
       try {
-        this.preferencesStore = preferences.getPreferencesSync(context, { name: SyncTaskManager.PREFERENCES_NAME });
+        this.preferencesStore = syncTaskRuntime.getPreferences(context, SyncTaskManager.PREFERENCES_NAME);
         this.getErrorTimeLineFromFileCache().then((number) => {
           this.errorTimeLine = number;
         });
@@ -198,24 +222,24 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
+
+    this.triggerInitialSyncPollIfNeeded();
+  }
+
+  private triggerInitialSyncPollIfNeeded(): void {
+    if (this.initialSyncPollTriggered || !this.autoSync || this.isStop || !this.context) {
+      return;
+    }
+
+    this.initialSyncPollTriggered = true;
+    this.executeSyncPoll();
   }
 
   /**
-   * Initialize data upload thread pool
+   * Initialize upload lane runnable.
    */
-  private initDataUploadThreadPool(): void {
-    const dataUploadThreadPool = DataUploadThreadPool.getInstance();
-
-    // Ensure ThreadPoolManager is initialized
-    try {
-      ThreadPoolManager.getInstance().initialize();
-      FTInnerLogger.d(TAG, "ThreadPoolManager initialized successfully");
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to initialize ThreadPoolManager: ${error}`);
-    }
-
-    dataUploadThreadPool.initRunnable(async () => {
-
+  private initUploadLane(): void {
+    this.uploadRunnable = async () => {
       if (this.isStop) {
         return;
       }
@@ -229,37 +253,151 @@ export class SyncTaskManager {
         // Process normal sync data
         let hasMoreData = false;
         for (const dataType of this.SYNC_MAP) {
-          // Removed verbose debug logs to reduce log output
-          await this.handleSyncOpt(dataType);
+          hasMoreData = (await this.handleSyncOpt(dataType)) || hasMoreData;
+        }
 
-          // Check if there's more data for this type
-          if (this.context) {
-            const dbManager = FTDBManager.getInstance(this.context);
-            if (dbManager) {
-              const hasData = await dbManager.hasData([dataType]);
-              if (hasData) {
-                hasMoreData = true;
-              }
+        if (hasMoreData && !this.isStop) {
+          this.scheduleUpload(0);
+        }
+      } catch (e) {
+        FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${e as string}`);
+      } finally {
+        this.running = false;
+      }
+    };
+  }
+
+  private scheduleUpload(delay: number = 0): void {
+    if (!this.uploadRunnable) {
+      FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] runnable=none`);
+      return;
+    }
+    if (this.isStop) {
+      return;
+    }
+
+    const normalizedDelay = Math.max(0, delay);
+    if (this.uploadScheduled && !this.uploadRunning) {
+      const elapsed = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - this.uploadScheduledAt);
+      const remainingDelay = Math.max(0, this.uploadScheduledDelay - elapsed);
+      if (normalizedDelay < remainingDelay) {
+        this.clearUploadScheduleTimer();
+        this.uploadScheduled = false;
+        this.uploadScheduledAt = 0;
+        this.uploadScheduledDelay = 0;
+        this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
+        this.scheduleUpload(normalizedDelay);
+      }
+      return;
+    }
+
+    if (this.uploadRunning || this.uploadScheduled) {
+      const previousNeedReschedule = this.uploadNeedReschedule;
+      const previousRescheduleDelay = this.uploadRescheduleDelay;
+      if (this.uploadNeedReschedule) {
+        this.uploadRescheduleDelay = Math.min(this.uploadRescheduleDelay, normalizedDelay);
+      } else {
+        this.uploadRescheduleDelay = normalizedDelay;
+      }
+      this.uploadNeedReschedule = true;
+      if (!previousNeedReschedule || previousRescheduleDelay !== this.uploadRescheduleDelay) {
+        this.traceUploadLaneDebug(
+          `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
+        );
+      }
+      return;
+    }
+
+    this.uploadScheduled = true;
+    this.uploadScheduledDelay = normalizedDelay;
+    this.uploadScheduledAt = syncTaskRuntime.getCurrentTimeMs();
+    this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
+
+    if (normalizedDelay > 0) {
+      this.clearUploadScheduleTimer();
+      this.uploadScheduleTimer = setTimeout(() => {
+        this.uploadScheduleTimer = -1;
+        this.executeScheduledUpload();
+      }, normalizedDelay);
+    } else {
+      this.executeScheduledUpload();
+    }
+  }
+
+  private executeScheduledUpload(): void {
+    if (!this.uploadRunnable || this.isStop) {
+      this.uploadScheduled = false;
+      this.uploadScheduledAt = 0;
+      this.uploadScheduledDelay = 0;
+      return;
+    }
+
+    if (this.uploadRunning) {
+      this.scheduleUpload(0);
+      return;
+    }
+
+    this.uploadScheduled = false;
+    this.uploadScheduledAt = 0;
+    this.uploadScheduledDelay = 0;
+    this.uploadRunning = true;
+    this.running = true;
+
+    const taskName = this.nextUploadTaskName();
+    this.uploadCurrentPollRows = 0;
+    this.uploadCurrentTaskName = taskName;
+    this.uploadStartTraced = false;
+
+    try {
+      SDKTaskScheduler.getInstance().submitTask({
+        type: SDKTaskType.UPLOAD,
+        name: taskName,
+        priority: SDKTaskPriority.LOW,
+        singleFlightKey: SyncTaskManager.UPLOAD_SINGLE_FLIGHT_KEY,
+        costHint: 'normal',
+        run: async () => {
+          const startTime = syncTaskRuntime.getCurrentTimeMs();
+          let result = 'success';
+          let errorMessage = '';
+          try {
+            await Promise.resolve(this.uploadRunnable!());
+          } catch (error) {
+            result = 'failed';
+            errorMessage = String(error);
+            throw new Error(errorMessage);
+          } finally {
+            const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
+            const shouldReschedule = this.uploadNeedReschedule;
+            const nextDelay = this.uploadRescheduleDelay;
+            this.uploadRunning = false;
+            this.running = false;
+            this.uploadNeedReschedule = false;
+            this.uploadRescheduleDelay = 0;
+            const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+            const uploadedRows = this.uploadCurrentPollRows;
+            this.uploadCurrentPollRows = 0;
+            this.uploadCurrentTaskName = "";
+            this.uploadStartTraced = false;
+            if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
+              this.traceUploadLaneDebug(
+                `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
+              );
+            }
+            if (shouldReschedule && !this.isStop) {
+              this.scheduleUpload(nextDelay);
             }
           }
         }
-
-        // Schedule next upload with fixed interval (aligned with Android SDK)
-        if (this.autoSync && !this.isStop) {
-          dataUploadThreadPool.schedule(SyncTaskManager.SLEEP_TIME);
-        }
-
-      } catch (e) {
-        FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${e as string}`);
-        // On error, still schedule next check with normal interval
-        if (this.autoSync && !this.isStop) {
-          dataUploadThreadPool.schedule(SyncTaskManager.SLEEP_TIME);
-        }
-      } finally {
-        // Reset running status
-        this.running = false;
-      }
-    });
+      });
+    } catch (error) {
+      this.uploadRunning = false;
+      this.running = false;
+      this.uploadScheduled = false;
+      this.uploadCurrentPollRows = 0;
+      this.uploadCurrentTaskName = "";
+      this.uploadStartTraced = false;
+      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] schedule name=${taskName} error=${error as string}`);
+    }
   }
 
   /**
@@ -267,53 +405,106 @@ export class SyncTaskManager {
    * Ensures only one upload task runs at a time to prevent concurrent duplicate uploads
    */
   public executePoll(withSleep: boolean = false): void {
-
-    // Check if already running - use DataUploadThreadPool's internal lock to prevent race conditions
-    const dataUploadThreadPool = DataUploadThreadPool.getInstance();
-    const queueStatus = dataUploadThreadPool.getUploadQueueStatus();
-
-    if (queueStatus.isRunning || queueStatus.isScheduled) {
-      // If already running or scheduled, skip this call to prevent concurrent execution
-      return;
-    }
-
     if (this.isStop) {
       return;
     }
 
-    // Temporary solution: if running status persists too long, force reset
-    if (this.running && this.lastSyncTime && Date.now() - this.lastSyncTime > 10000) { // 10 second timeout
-      FTInnerLogger.w(TAG, `Running timeout, forcing reset`);
-      this.running = false;
-      this.lastSyncTime = 0;
-    }
-
-    // Removed verbose debug logs to reduce log output
-    this.running = true;
-    this.errorCount = 0;
-    this.lastSyncTime = Date.now(); // Record sync start time
-
-    // Use data upload thread pool to execute
-    // The DataUploadThreadPool's schedule() method has internal locking to prevent concurrent execution
-
-    if (withSleep) {
-      dataUploadThreadPool.schedule(SyncTaskManager.SLEEP_TIME);
-    } else {
-      dataUploadThreadPool.schedule(0);
-    }
+    this.scheduleUpload(withSleep ? SyncTaskManager.SLEEP_TIME : 0);
   }
 
   /**
    * Trigger polling synchronization
-   * When data is available, execute immediately (no delay)
-   * Delay is only used when no data is available (handled by adaptive mechanism)
+   * Auto sync only submits upload work when stored data is available.
    */
   public executeSyncPoll(): void {
 
-    if (this.autoSync) {
-      // Execute immediately when data is available - delay is handled by adaptive mechanism
-      this.executePoll(false);
+    if (!this.autoSync || this.isStop) {
+      return;
     }
+
+    if (this.uploadRunning || this.uploadScheduled) {
+      this.scheduleUpload(0);
+      return;
+    }
+
+    if (this.syncPollPrecheckRunning) {
+      this.syncPollPrecheckPending = true;
+      return;
+    }
+
+    this.executePollIfDataAvailable();
+  }
+
+  private executePollIfDataAvailable(): void {
+    this.syncPollPrecheckRunning = true;
+    let scheduledUpload = false;
+    this.hasUploadTriggerData().then((hasData: boolean) => {
+      if (this.isStop || !this.autoSync) {
+        return;
+      }
+      if (hasData) {
+        scheduledUpload = true;
+        this.executePoll(false);
+      } else {
+        this.traceUploadLaneDebug(`[SKIP] reason=no-data`);
+      }
+    }).catch((error: Error) => {
+      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [SKIP] check data failed: ${error}`);
+    }).finally(() => {
+      this.syncPollPrecheckRunning = false;
+      const shouldReplayPendingCheck = this.syncPollPrecheckPending && !scheduledUpload && !this.isStop && this.autoSync;
+      this.syncPollPrecheckPending = false;
+      if (shouldReplayPendingCheck) {
+        this.executeSyncPoll();
+      }
+    });
+  }
+
+  private async hasUploadTriggerData(): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+
+    const dbManager = syncTaskRuntime.getDbManager(this.context);
+    if (!dbManager) {
+      return false;
+    }
+
+    const dataTypes = this.getUploadTriggerDataTypes();
+    class HasUploadDataCallback implements DataBaseCallBack {
+      hasData: boolean = false;
+      private dataTypes: string[];
+
+      constructor(dataTypes: string[]) {
+        this.dataTypes = dataTypes;
+      }
+
+      async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+        predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, this.dataTypes);
+        const resultSet = await rdbStore.query(predicates);
+        try {
+          this.hasData = resultSet.goToNextRow();
+        } finally {
+          resultSet.close();
+        }
+      }
+    }
+
+    const callback = new HasUploadDataCallback(dataTypes);
+    await dbManager.executeWithDB(false, callback);
+    return callback.hasData;
+  }
+
+  private getUploadTriggerDataTypes(): string[] {
+    const dataTypes: string[] = [];
+    for (const dataType of this.SYNC_MAP) {
+      dataTypes.push(dataType.toString());
+    }
+    for (const dataType of this.ERROR_SAMPLED_SYNC_MAP) {
+      dataTypes.push(dataType.toString() + SyncTaskManager.ERROR_SAMPLED_SUFFIX);
+    }
+    return dataTypes;
   }
 
   /**
@@ -327,7 +518,7 @@ export class SyncTaskManager {
         return;
       }
 
-      const dbManager = FTDBManager.getInstance(this.context);
+      const dbManager = syncTaskRuntime.getDbManager(this.context);
       if (!dbManager) {
         FTInnerLogger.w(TAG, `<FT-BATCH-UPLOAD> errorSampledConsume: database manager not available, skipping`);
         return;
@@ -335,8 +526,7 @@ export class SyncTaskManager {
 
       // Create error sampled data type string (e.g., "rum_app_error_sampled")
       // This matches Android's behavior where error sampled data is stored with _error_sampled suffix
-      const ERROR_SAMPLED_SUFFIX = "_error_sampled";
-      const errorSampledType = dataType.toString() + ERROR_SAMPLED_SUFFIX;
+      const errorSampledType = dataType.toString() + SyncTaskManager.ERROR_SAMPLED_SUFFIX;
 
       // Update data type if errorTimeLine is set
       if (this.errorTimeLine > 0) {
@@ -432,34 +622,34 @@ export class SyncTaskManager {
     // Use Date.now() which returns milliseconds since epoch
     // Convert to nanoseconds (multiply by 1,000,000)
     // Note: HarmonyOS ArkTS may not have performance.now(), so use Date.now() instead
-    return Date.now() * 1_000_000;
+    return syncTaskRuntime.getCurrentTimeMs() * 1_000_000;
   }
 
   /**
    * Process data synchronization operations
    */
-  private async handleSyncOpt(dataType: DataType): Promise<void> {
-    // Removed verbose debug log to reduce log output
-
-    // Quick check: if no data exists, return early to avoid unnecessary processing
+  private async handleSyncOpt(dataType: DataType): Promise<boolean> {
     if (!this.context) {
-      return;
+      return false;
     }
-    const dbManager = FTDBManager.getInstance(this.context);
+    const dbManager = syncTaskRuntime.getDbManager(this.context);
     if (!dbManager) {
-      return;
+      return false;
     }
     const hasData = await dbManager.hasData([dataType]);
     if (!hasData) {
-      // No data to sync, return immediately
-      return;
+      return false;
     }
 
-    // Continuous upload loop (aligned with Android SDK)
-    while (true) {
-      const cacheDataList = await this.queryFromData(dataType);
+    const maxPages = this.getUploadMaxPages(dataType);
+    let processedPages = 0;
+    let lastQueryWasFull = false;
+    let shouldReschedule = false;
 
-      // Deduplicate data before processing to prevent duplicate uploads
+    while (processedPages < maxPages) {
+      const cacheDataList = await this.queryFromData(dataType);
+      lastQueryWasFull = cacheDataList.length >= this.pageSize;
+
       const deduplicatedDataList = this.deduplicateData(dataType, cacheDataList);
       if (deduplicatedDataList.length === 0) {
         break;
@@ -470,172 +660,232 @@ export class SyncTaskManager {
         deduplicatedDataList.length} duplicate record(s) for ${dataType}`);
       }
 
-      // Removed verbose [RUM-UPLOAD-DEBUG] logs to reduce log output
-
-      if (deduplicatedDataList.length === 0) {
+      const cachePolicy = syncTaskRuntime.getCachePolicy();
+      if (cachePolicy.shouldDiscardData(dataType)) {
+        FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] type=${dataType} reason=cache-limit`);
         break;
       }
 
-      // Check cache limits before processing
-      const cachePolicy = FTDBCachePolicy.getInstance();
-      if (cachePolicy.shouldDiscardData(dataType)) {
-        FTInnerLogger.w(TAG, `<FT-BATCH-UPLOAD> Cache limit reached for ${dataType}, discarding data`);
+      const seqNumber = this.getSeqNumber(dataType);
+      const pkgId = this.generatePackageId(seqNumber, deduplicatedDataList.length);
+      const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
+      if (body.trim().length === 0) {
+        await this.deleteLastQuery(deduplicatedDataList);
+        this.reduceCacheCount(dataType, deduplicatedDataList.length);
+        processedPages++;
+        this.traceUploadLaneDebug(`[SKIP] type=${dataType} rows=${deduplicatedDataList.length} reason=empty-body`);
+        if (cacheDataList.length < this.pageSize) {
+          break;
+        }
         continue;
       }
 
-      // Generate package ID
-      const seqNumber = this.getSeqNumber(dataType);
-      const pkgId = this.generatePackageId(seqNumber, deduplicatedDataList.length);
-
-      // Format as Line Protocol
-      const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
-
-      // Mark data as "uploading" before sending HTTP request to prevent concurrent duplicate uploads
+      this.traceUploadStartIfNeeded(dataType, deduplicatedDataList.length);
+      this.uploadCurrentPollRows += deduplicatedDataList.length;
       this.markDataAsUploading(dataType, deduplicatedDataList);
 
       try {
-        // Print upload data details
         this.printUploadData(body);
+        const result = await this.uploadBatch(dataType, pkgId, body, deduplicatedDataList);
+        processedPages++;
 
-        // Use Promise wrapper to ensure waiting for HTTP request completion
-
-        await new Promise<void>((resolve, reject) => {
-          this.requestNet(dataType, pkgId, body,
-            new RequestCallbackImpl(async (code: number, response: string, errorCode: string) => {
-              // Removed verbose HTTP response logs to reduce log output
-              // Only log errors or important status codes
-              if (code !== 200 && code !== 204) {
-                FTInnerLogger.w(TAG,
-                  `<FT-BATCH-UPLOAD> Upload failed: code=${code}, error=${errorCode},response=${response}}`);
-              }
-              try {
-                // Only delete data on successful upload (HTTP 200-299)
-                // HTTP 300-399: Redirection (should not delete, may need to retry)
-                // HTTP 400-499: Client errors (should not delete, may need to retry)
-                // HTTP 500+: Server errors (should not delete, will retry)
-                if (code >= 200 && code < 300) {
-                  // Success: delete uploaded data only on HTTP 200-299
-
-                  // Generate content summary for Upload SUCCESS log
-                  let contentSummary = '';
-                  if (dataType === DataType.RUM_APP) {
-                    // Count different measurement types in RUM_APP
-                    const measurementCounts = new Map<string, number>();
-                    for (const data of deduplicatedDataList) {
-                      const dataString = data.getDataString();
-                      // Extract measurement type (first part before comma)
-                      const measurementMatch = dataString.match(/^([^,]+),/);
-                      if (measurementMatch && measurementMatch.length > 1) {
-                        const measurement = measurementMatch[1];
-                        const count = measurementCounts.get(measurement) || 0;
-                        measurementCounts.set(measurement, count + 1);
-                      }
-                    }
-                    // Build summary string
-                    const summaryParts: string[] = [];
-                    measurementCounts.forEach((count, measurement) => {
-                      summaryParts.push(`${measurement}=${count}`);
-                    });
-                    contentSummary = summaryParts.length > 0 ? ` (${summaryParts.join(', ')})` : '';
-                  } else {
-                    // For log type, just show record count
-                    contentSummary = ` (${deduplicatedDataList.length} records)`;
-                  }
-
-                  // Log upload success (re-enabled for debugging upload issues)
-                  FTInnerLogger.i(TAG,
-                    `<FT-BATCH-UPLOAD> ✅ Upload SUCCESS: ${dataType}, HTTP Code: ${code}, Records: ${deduplicatedDataList.length}${contentSummary}`);
-
-                  // Also remove from uploadingDataIds and add to uploadedDataIds
-                  this.markDataAsUploaded(dataType, deduplicatedDataList);
-
-                  // Delete data from database ONLY after successful upload
-                  // Wait for deletion to complete before continuing to next batch
-                  await this.deleteLastQuery(deduplicatedDataList);
-                  this.errorCount = 0;
-
-                  // Update cache counts
-                  if (dataType === DataType.LOG) {
-                    FTDBCachePolicy.getInstance().optLogCount(-deduplicatedDataList.length);
-                  } else if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
-                    FTDBCachePolicy.getInstance().optRumCount(-deduplicatedDataList.length);
-                  }
-
-                  // Update package ID generator (only on HTTP 200)
-                  if (code === 200) {
-                    if (dataType === DataType.LOG) {
-                      this.logGenerator.next();
-                    } else {
-                      this.rumGenerator.next();
-                    }
-                  }
-                  resolve();
-                } else {
-                  // Failure or non-success status: do NOT delete data, will retry
-                  this.errorCount++;
-                  FTInnerLogger.e(TAG,
-                    `<FT-BATCH-UPLOAD> ❌ Upload FAILED: ${dataType}, HTTP Code: ${code}, Error: ${errorCode}`);
-
-                  // If RUM data, add error-related special logs
-                  if (dataType === DataType.RUM_APP) {
-                    const errorDataCount =
-                      deduplicatedDataList.filter(data => data.getDataString().includes('error')).length;
-                    if (errorDataCount > 0) {
-                      FTInnerLogger.e(TAG,
-                        `<FT-BATCH-UPLOAD> Error data upload failed: ${errorDataCount} error records, pkgId: ${pkgId}, code: ${code}, errorCode: ${errorCode}`);
-                    }
-                  }
-
-                  if (this.errorCount > 0) {
-                    try {
-                      // Re-insert data for retry
-                      // Note: Do NOT remove from uploadedDataIds, so it can be retried
-                      // But remove from uploadingDataIds so it can be retried
-                      this.unmarkDataAsUploading(dataType, deduplicatedDataList);
-                      this.reInsertData(deduplicatedDataList);
-                      // Exponential backoff retry
-                      const delayTime = (1 << (this.errorCount - 1)) * SyncTaskManager.RETRY_DELAY_SLEEP_TIME;
-                      // Removed verbose debug log to reduce log output
-                      this.sleep(delayTime);
-                    } catch (error) {
-                      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Reinsert data failed: ${error as string}`);
-                    }
-                  }
-                  resolve(); // Resolve even on failure to continue the loop
-                }
-              } catch (error) {
-                FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Callback error: ${error as string}`);
-                reject(error);
-              }
-            }));
-        });
-
-        if (this.errorCount === 0) {
-          // Current cached data has been retrieved, wait for next data trigger
-          // If query result is less than pageSize, no more data available, break loop (aligned with Android SDK)
-          if (cacheDataList.length < this.pageSize) {
-            // Removed verbose debug log to reduce log output
-            break;
-          }
-          // If syncSleepTime > 0, sleep between batches (default is 0, so no sleep)
-          if (this.syncSleepTime > 0) {
-            await this.sleep(this.syncSleepTime);
-          }
-        } else if (this.errorCount > 0) {
-          if (this.errorCount > this.dataSyncMaxRetryCount) {
-            FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Max retry count reached: ${this.dataSyncMaxRetryCount}`);
-            break;
-          }
-        }
-      } catch (error) {
-        this.errorCount++;
-        FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${dataType}, error: ${error as string}`);
-
-        if (this.errorCount >= SyncTaskManager.MAX_ERROR_COUNT) {
-          FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Max retry count reached. Stopping.`);
+        if (result === UploadBatchResult.RETRY_BACKOFF ||
+          result === UploadBatchResult.DELETE_WITH_IGNORED_BACKOFF) {
+          shouldReschedule = result === UploadBatchResult.RETRY_BACKOFF;
           break;
         }
+
+        if (cacheDataList.length < this.pageSize) {
+          break;
+        }
+        if (this.syncSleepTime > 0 && processedPages < maxPages) {
+          await this.sleep(this.syncSleepTime);
+        }
+      } catch (error) {
+        this.unmarkDataAsUploading(dataType, deduplicatedDataList);
+        const retryCount = this.incrementErrorCount(dataType);
+        FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${dataType}, error: ${error as string}`);
+
+        const delayTime = this.getNormalBackoffMs(retryCount);
+        await this.sleep(delayTime);
+        break;
       }
+    }
+
+    if (processedPages >= maxPages && lastQueryWasFull) {
+      return await dbManager.hasData([dataType]);
+    }
+    return shouldReschedule;
+  }
+
+  private async uploadBatch(
+    dataType: DataType,
+    pkgId: string,
+    body: string,
+    dataList: SyncData[]
+  ): Promise<UploadBatchResult> {
+    let batchResult = UploadBatchResult.RETRY_BACKOFF;
+    await new Promise<void>((resolve, reject) => {
+      this.requestNet(dataType, pkgId, body,
+        new RequestCallbackImpl(async (code: number, response: string, errorCode: string) => {
+          try {
+            batchResult = await this.handleUploadResponse(dataType, pkgId, code, response, errorCode, dataList);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }));
+    });
+    return batchResult;
+  }
+
+  private async handleUploadResponse(
+    dataType: DataType,
+    pkgId: string,
+    code: number,
+    response: string,
+    errorCode: string,
+    dataList: SyncData[]
+  ): Promise<UploadBatchResult> {
+    if (this.isIgnoredClientError(code)) {
+      this.markDataAsUploaded(dataType, dataList);
+      await this.deleteLastQuery(dataList);
+      this.reduceCacheCount(dataType, dataList.length);
+      this.resetErrorCount(dataType);
+      const ignoredCount = this.incrementIgnoredClientErrorCount(dataType);
+      const delayTime = this.getIgnoredClientBackoffMs(ignoredCount);
+      this.traceUploadLane(
+        `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete ignoredBackoff=${delayTime}ms ignoredCount=${ignoredCount} pkg=${pkgId}`
+      );
+      await this.sleep(delayTime);
+      return UploadBatchResult.DELETE_WITH_IGNORED_BACKOFF;
+    }
+
+    if (this.shouldDeleteWithoutBackoff(code)) {
+      this.markDataAsUploaded(dataType, dataList);
+      await this.deleteLastQuery(dataList);
+      this.reduceCacheCount(dataType, dataList.length);
+      this.resetErrorCount(dataType);
+      this.resetIgnoredClientErrorCount(dataType);
+      this.advancePackageGenerator(dataType, code);
+      this.traceUploadLane(
+        `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete backoff=0ms pkg=${pkgId}`
+      );
+      return UploadBatchResult.DELETE_NO_BACKOFF;
+    }
+
+    if (this.isRetryableUploadError(code)) {
+      this.unmarkDataAsUploading(dataType, dataList);
+      await this.reInsertData(dataList);
+      this.resetIgnoredClientErrorCount(dataType);
+      const retryCount = this.incrementErrorCount(dataType);
+      const delayTime = this.getNormalBackoffMs(retryCount);
+      FTInnerLogger.w(TAG,
+        `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=reinsert retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
+      await this.sleep(delayTime);
+      return UploadBatchResult.RETRY_BACKOFF;
+    }
+
+    this.unmarkDataAsUploading(dataType, dataList);
+    const retryCount = this.incrementErrorCount(dataType);
+    const delayTime = this.getNormalBackoffMs(retryCount);
+    FTInnerLogger.w(TAG,
+      `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=retry retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
+    await this.sleep(delayTime);
+    return UploadBatchResult.RETRY_BACKOFF;
+  }
+
+  private getUploadMaxPages(dataType: DataType): number {
+    switch (dataType) {
+      case DataType.RUM_APP:
+        return SyncTaskManager.UPLOAD_MAX_PAGES_RUM_APP;
+      case DataType.RUM_WEBVIEW:
+        return SyncTaskManager.UPLOAD_MAX_PAGES_RUM_WEBVIEW;
+      case DataType.LOG:
+      default:
+        return SyncTaskManager.UPLOAD_MAX_PAGES_LOG;
+    }
+  }
+
+  private isIgnoredClientError(code: number): boolean {
+    return code === 403 || code === 429;
+  }
+
+  private shouldDeleteWithoutBackoff(code: number): boolean {
+    return code >= 200 && code < 500 && !this.isIgnoredClientError(code);
+  }
+
+  private isRetryableUploadError(code: number): boolean {
+    return code >= 500 ||
+      code === NetCodeStatus.NETWORK_EXCEPTION_CODE ||
+      code === NetCodeStatus.UNKNOWN_EXCEPTION_CODE;
+  }
+
+  private getNormalBackoffMs(errorCount: number): number {
+    return Math.max(1, Math.pow(2, Math.max(0, errorCount - 1))) * SyncTaskManager.RETRY_DELAY_SLEEP_TIME;
+  }
+
+  private getIgnoredClientBackoffMs(errorCount: number): number {
+    return Math.min(
+      SyncTaskManager.IGNORED_CLIENT_ERROR_BACKOFF_MAX_MS,
+      this.getNormalBackoffMs(errorCount)
+    );
+  }
+
+  private getTypeErrorCount(dataType: DataType): number {
+    return this.errorCountByType.get(dataType) || 0;
+  }
+
+  private getTypeIgnoredClientErrorCount(dataType: DataType): number {
+    return this.ignoredClientErrorCountByType.get(dataType) || 0;
+  }
+
+  private incrementErrorCount(dataType: DataType): number {
+    const count = this.getTypeErrorCount(dataType) + 1;
+    this.errorCountByType.set(dataType, count);
+    this.refreshAggregateErrorCount();
+    return count;
+  }
+
+  private resetErrorCount(dataType: DataType): void {
+    this.errorCountByType.set(dataType, 0);
+    this.refreshAggregateErrorCount();
+  }
+
+  private incrementIgnoredClientErrorCount(dataType: DataType): number {
+    const count = this.getTypeIgnoredClientErrorCount(dataType) + 1;
+    this.ignoredClientErrorCountByType.set(dataType, count);
+    return count;
+  }
+
+  private resetIgnoredClientErrorCount(dataType: DataType): void {
+    this.ignoredClientErrorCountByType.set(dataType, 0);
+  }
+
+  private refreshAggregateErrorCount(): void {
+    let maxErrorCount = 0;
+    this.errorCountByType.forEach((count) => {
+      maxErrorCount = Math.max(maxErrorCount, count);
+    });
+    this.errorCount = maxErrorCount;
+  }
+
+  private reduceCacheCount(dataType: DataType, count: number): void {
+    if (dataType === DataType.LOG) {
+      syncTaskRuntime.getCachePolicy().optLogCount(-count);
+    } else if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
+      syncTaskRuntime.getCachePolicy().optRumCount(-count);
+    }
+  }
+
+  private advancePackageGenerator(dataType: DataType, code: number): void {
+    if (code !== 200) {
+      return;
+    }
+    if (dataType === DataType.LOG) {
+      this.logGenerator.next();
+    } else {
+      this.rumGenerator.next();
     }
   }
 
@@ -966,7 +1216,7 @@ export class SyncTaskManager {
       }
 
       // Query data from database
-      const dbManager = FTDBManager.getInstance(this.context);
+      const dbManager = syncTaskRuntime.getDbManager(this.context);
       if (!dbManager) {
         FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Database manager is null`);
         return [];
@@ -994,9 +1244,9 @@ export class SyncTaskManager {
    * Print upload data details
    */
   private printUploadData(body: string): void {
-    FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> ========== UPLOAD BODY PREVIEW ==========`);
-    FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD>\n${body}`);
-    FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> ========================================`);
+    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========== UPLOAD BODY PREVIEW ==========`);
+    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD>\n${body}`);
+    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========================================`);
   }
 
   /**
@@ -1009,7 +1259,10 @@ export class SyncTaskManager {
       }
 
       if (this.context) {
-        await FTDBManager.getInstance(this.context).deleteFtOperation(list);
+        const dbManager = syncTaskRuntime.getDbManager(this.context);
+        if (dbManager) {
+          await dbManager.deleteFtOperation(list);
+        }
         // FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> [DELETE] Successfully deleted ${list.length} records`);
         // Small delay to ensure database deletion is fully committed before next query
         // This helps reduce duplicate filtering in the next batch
@@ -1035,7 +1288,7 @@ export class SyncTaskManager {
       const newUuids: string[] = [];
       for (const data of list) {
         oldUuids.push(data.getUuid());
-        const newUuid = Utils.generateUUID();
+        const newUuid = syncTaskRuntime.generateUUID();
         data.setUuid(newUuid);
         newUuids.push(newUuid);
       }
@@ -1043,7 +1296,10 @@ export class SyncTaskManager {
       // Removed verbose debug log to reduce log output
 
       if (this.context) {
-        await FTDBManager.getInstance(this.context).insertFtOptList(list);
+        const dbManager = syncTaskRuntime.getDbManager(this.context);
+        if (dbManager) {
+          await dbManager.insertFtOptList(list, true);
+        }
         // Removed verbose debug log to reduce log output
       }
     } catch (error) {
@@ -1054,7 +1310,7 @@ export class SyncTaskManager {
   /**
    * Send network request
    */
-  private async requestNet(dataType: DataType, pkgId: string, body: string, callback: RequestCallback): Promise<void> {
+  private async requestNet(dataType: DataType, pkgId: string, body: string, callback: SyncTaskRequestCallback): Promise<void> {
     if (!this.sdkConfig) {
       throw new Error("SDK config not initialized");
     }
@@ -1087,17 +1343,7 @@ export class SyncTaskManager {
         }
       }
 
-      // Build and execute HTTP request with Android-compatible headers
-      const xPkgIdValue = Constants.SYNC_DATA_TRACE_HEADER_FORMAT.replace('%s', pkgId);
-
-      const result = await HttpBuilder.Builder(this.sdkConfig)
-        .addHeadParam(Constants.SYNC_DATA_CONTENT_TYPE_HEADER, "text/plain")
-        .addHeadParam(Constants.SYNC_DATA_TRACE_HEADER, xPkgIdValue)
-        .addHeadParam(Constants.SYNC_DATA_DEVICE_TIME, Date.now().toString())
-        .setModel(model)
-        .setMethod(http.RequestMethod.POST)
-        .setBodyString(body)
-        .executeSync();
+      const result = await syncTaskRuntime.executeHttp(this.sdkConfig, model, body, pkgId);
 
       // Handle response
       if (result.getCode() === NetCodeStatus.NETWORK_EXCEPTION_CODE) {
@@ -1163,7 +1409,7 @@ export class SyncTaskManager {
     let result = "";
 
     for (let i = 0; i < NANO_DIGIT; i++) {
-      const randomIndex = Math.floor(Math.random() * BASE62.length);
+      const randomIndex = Math.floor(syncTaskRuntime.getRandom() * BASE62.length);
       result += BASE62.charAt(randomIndex);
     }
 
@@ -1198,7 +1444,7 @@ export class SyncTaskManager {
     // Derive a pseudo PID once per process lifetime based on time and random seed
     // This is only used for pkgId encoding and does not affect data semantics
     if (SyncTaskManager.cachedProcessId === undefined) {
-      const seed = Date.now() ^ Math.floor(Math.random() * 1e6);
+      const seed = syncTaskRuntime.getCurrentTimeMs() ^ Math.floor(syncTaskRuntime.getRandom() * 1e6);
       SyncTaskManager.cachedProcessId = Math.abs(seed % 65535) + 1;
     }
     return SyncTaskManager.cachedProcessId;
@@ -1208,7 +1454,7 @@ export class SyncTaskManager {
    * Check if half of cache limit is reached
    */
   private reachHalfLimit(): boolean {
-    const policy = FTDBCachePolicy.getInstance();
+    const policy = syncTaskRuntime.getCachePolicy();
     const logLimit = policy.getLogLimitCount();
     const rumLimit = policy.getRumLimitCount();
     const logCount = policy.getLogCount();
@@ -1222,7 +1468,47 @@ export class SyncTaskManager {
    * Sleep and wait
    */
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return syncTaskRuntime.sleep(ms);
+  }
+
+  private nextUploadTaskName(): string {
+    this.uploadTaskSequence++;
+    return `upload.poll#${this.uploadTaskSequence}`;
+  }
+
+  private clearUploadScheduleTimer(): void {
+    if (this.uploadScheduleTimer >= 0) {
+      clearTimeout(this.uploadScheduleTimer);
+      this.uploadScheduleTimer = -1;
+    }
+  }
+
+  private getUploadLaneStatus(): UploadLaneStatus {
+    return {
+      isRunning: this.uploadRunning,
+      isScheduled: this.uploadScheduled,
+      needReschedule: this.uploadNeedReschedule,
+      scheduledDelay: this.uploadScheduledDelay,
+      scheduledAt: this.uploadScheduledAt,
+      rescheduleDelay: this.uploadRescheduleDelay
+    };
+  }
+
+  private traceUploadLane(message: string): void {
+    FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> ${message}`);
+  }
+
+  private traceUploadLaneDebug(message: string): void {
+    FTInnerLogger.d(TAG, `<FT-UPLOAD-LANE> ${message}`);
+  }
+
+  private traceUploadStartIfNeeded(dataType: DataType, rows: number): void {
+    if (this.uploadStartTraced) {
+      return;
+    }
+    this.uploadStartTraced = true;
+    const taskName = this.uploadCurrentTaskName.length > 0 ? this.uploadCurrentTaskName : this.nextUploadTaskName();
+    this.traceUploadLane(`[START] name=${taskName} firstType=${dataType} rows=${rows}`);
   }
 
   /**
@@ -1231,9 +1517,13 @@ export class SyncTaskManager {
   public stop(): void {
     this.isStop = true;
     this.running = false;
-
-    // Stop data upload thread pool
-    DataUploadThreadPool.getInstance().shutdown();
+    this.uploadRunning = false;
+    this.uploadScheduled = false;
+    this.uploadNeedReschedule = false;
+    this.uploadRescheduleDelay = 0;
+    this.uploadScheduledDelay = 0;
+    this.uploadScheduledAt = 0;
+    this.clearUploadScheduleTimer();
 
     // Stop RUM cleanup timer
     RUMDataCleanupManagerInternal.getInstance().destroy();
@@ -1253,7 +1543,8 @@ export class SyncTaskManager {
    * Set running status
    */
   public setRunning(running: boolean): void {
-    DataUploadThreadPool.getInstance().setRunning(running);
+    this.running = running;
+    this.uploadRunning = running;
   }
 
   /**
@@ -1309,8 +1600,13 @@ export class SyncTaskManager {
    * Aligned with Android: SyncTaskManager.setAutoSync()
    */
   public setAutoSync(enabled: boolean): void {
+    const wasAutoSync = this.autoSync;
     this.autoSync = enabled;
     FTInnerLogger.i(TAG, `Auto sync ${enabled ? 'enabled' : 'disabled'}`);
+
+    if (!wasAutoSync && enabled) {
+      this.executeSyncPoll();
+    }
   }
 
   /**
@@ -1352,23 +1648,16 @@ export class SyncTaskManager {
       pageSize: this.pageSize,
       dataSyncMaxRetryCount: this.dataSyncMaxRetryCount,
       syncSleepTime: this.syncSleepTime,
-      dataUploadThreadPoolStatus: DataUploadThreadPool.getInstance().getUploadQueueStatus()
+      uploadLaneStatus: this.getUploadLaneStatus()
     };
   }
 
-  /**
-   * Trigger immediate upload without delay
-   * This is a convenience method for testing purposes
-   */
-  public triggerImmediateUpload(): void {
-    this.executePoll(false);
-  }
 }
 
 /**
  * Sync task manager status interface
  */
-interface SyncTaskManagerStatus {
+export interface SyncTaskManagerStatus {
   isStop: boolean;
   running: boolean;
   autoSync: boolean;
@@ -1376,7 +1665,16 @@ interface SyncTaskManagerStatus {
   pageSize: number;
   dataSyncMaxRetryCount: number;
   syncSleepTime: number;
-  dataUploadThreadPoolStatus: UploadQueueStatus;
+  uploadLaneStatus: UploadLaneStatus;
+}
+
+export interface UploadLaneStatus {
+  isRunning: boolean;
+  isScheduled: boolean;
+  needReschedule: boolean;
+  scheduledDelay: number;
+  scheduledAt: number;
+  rescheduleDelay: number;
 }
 
 /**
@@ -1436,6 +1734,7 @@ class IDGenerator {
     this.next();
     return result;
   }
+
 }
 
 /**
@@ -1449,6 +1748,13 @@ class RUMDataCleanupManagerInternal {
   private readonly RETENTION_DAYS = 7; // Retain data for 7 days
 
   private constructor() {
+  }
+
+  public static resetInternal(): void {
+    if (RUMDataCleanupManagerInternal.instance) {
+      RUMDataCleanupManagerInternal.instance.destroy();
+    }
+    RUMDataCleanupManagerInternal.instance = null;
   }
 
   public static getInstance(): RUMDataCleanupManagerInternal {
@@ -1466,10 +1772,10 @@ class RUMDataCleanupManagerInternal {
 
   private startCleanupTimer(): void {
     if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
+      syncTaskRuntime.clearTimer(this.cleanupTimer);
     }
 
-    this.cleanupTimer = setInterval(() => {
+    this.cleanupTimer = syncTaskRuntime.setTimer(() => {
       this.performCleanup();
     }, this.CLEANUP_INTERVAL);
 
@@ -1484,7 +1790,7 @@ class RUMDataCleanupManagerInternal {
     try {
       FTInnerLogger.d(TAG, `Starting RUM data cleanup`);
 
-      const cutoffTime = Date.now() - (this.RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      const cutoffTime = syncTaskRuntime.getCurrentTimeMs() - (this.RETENTION_DAYS * 24 * 60 * 60 * 1000);
 
       // Clean up expired rum_view data
       await this.cleanupExpiredRumView(cutoffTime);
@@ -1521,7 +1827,10 @@ class RUMDataCleanupManagerInternal {
       }
 
       const callback = new CleanupViewCallback();
-      await FTDBManager.getInstance(this.context!).executeWithDB(true, callback);
+      const dbManager = syncTaskRuntime.getDbManager(this.context!);
+      if (dbManager) {
+        await dbManager.executeWithDB(true, callback);
+      }
       FTInnerLogger.d(TAG, `Cleaned up expired rum_view data: ${callback.deletedCount} records deleted`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Cleanup expired rum_view failed: ${error as string}`);
@@ -1551,7 +1860,10 @@ class RUMDataCleanupManagerInternal {
       }
 
       const callback = new CleanupActionCallback();
-      await FTDBManager.getInstance(this.context!).executeWithDB(true, callback);
+      const dbManager = syncTaskRuntime.getDbManager(this.context!);
+      if (dbManager) {
+        await dbManager.executeWithDB(true, callback);
+      }
       FTInnerLogger.d(TAG, `Cleaned up expired rum_action data: ${callback.deletedCount} records deleted`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Cleanup expired rum_action failed: ${error as string}`);
@@ -1560,52 +1872,11 @@ class RUMDataCleanupManagerInternal {
 
   public destroy(): void {
     if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
+      syncTaskRuntime.clearTimer(this.cleanupTimer);
       this.cleanupTimer = null;
     }
     this.context = null;
     FTInnerLogger.d(TAG, `RUM data cleanup manager destroyed`);
   }
 
-  /**
-   * Delete oldest data when cache limit is reached
-   * @param dataType Type of data to delete
-   * @param count Number of records to delete
-   */
-  private async deleteOldestData(dataType: DataType, count: number): Promise<void> {
-    try {
-      if (!this.context) {
-        FTInnerLogger.e(TAG, "Context is null, cannot delete oldest data");
-        return;
-      }
-
-      class DeleteOldestCallback implements DataBaseCallBack {
-        deletedCount: number = 0;
-
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          const deletePredicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-          deletePredicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
-          deletePredicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
-          deletePredicates.limitAs(count);
-
-          await rdbStore.delete(deletePredicates);
-          this.deletedCount = count;
-        }
-      }
-
-      const callback = new DeleteOldestCallback();
-      await FTDBManager.getInstance(this.context).executeWithDB(true, callback);
-
-      // Update cache counts
-      if (dataType === DataType.LOG) {
-        FTDBCachePolicy.getInstance().optLogCount(-callback.deletedCount);
-      } else if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
-        FTDBCachePolicy.getInstance().optRumCount(-callback.deletedCount);
-      }
-
-      FTInnerLogger.d(TAG, `Deleted ${callback.deletedCount} oldest ${dataType} records due to cache limit`);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to delete oldest data: ${error as string}`);
-    }
-  }
 }

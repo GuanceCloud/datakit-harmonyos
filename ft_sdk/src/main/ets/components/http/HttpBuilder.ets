@@ -8,14 +8,19 @@ import BuildProfile from '../../../../../BuildProfile';
 import { StringUtils } from '../utils/StringUtils';
 import { DateUtils } from '../utils/DateUtils';
 import { FTInnerLogger } from '../log/FTLogger';
-// Note: HarmonyOS @ohos.zlib only provides file compression (compressFile), not memory data compression
-// For memory data compression, we need to use a third-party library like pako or implement native compression
-// Temporarily disabled compression until a proper solution is implemented
-// import zlib from '@ohos.zlib';
 
-interface FileParam {
-  name: string;
-  data: ArrayBuffer;
+export interface HttpBuilderTestRequest {
+  url: string;
+  model: string;
+  method: http.RequestMethod | null;
+  bodyString: string;
+  headers: Record<string, string>;
+  extraData?: string | ArrayBuffer;
+}
+
+export interface HttpPayloadCompressor {
+  contentEncoding: string;
+  compress(data: string): Promise<ArrayBuffer>;
 }
 
 const CHARSET = "UTF-8";
@@ -35,6 +40,8 @@ export class HttpBuilder {
   // Test mode support
   private static testMode: boolean = false;
   private static mockResponse: FTResponseData | null = null;
+  private static capturedRequests: HttpBuilderTestRequest[] = [];
+  private static payloadCompressor: HttpPayloadCompressor | null = null;
 
   /**
    * Enable test mode for unit testing
@@ -50,6 +57,7 @@ export class HttpBuilder {
   static disableTestMode(): void {
     HttpBuilder.testMode = false;
     HttpBuilder.mockResponse = null;
+    HttpBuilder.capturedRequests = [];
   }
 
   /**
@@ -66,6 +74,40 @@ export class HttpBuilder {
    */
   static isTestMode(): boolean {
     return HttpBuilder.testMode;
+  }
+
+  static resetCapturedRequests(): void {
+    HttpBuilder.capturedRequests = [];
+  }
+
+  static getCapturedRequests(): HttpBuilderTestRequest[] {
+    return HttpBuilder.capturedRequests.slice();
+  }
+
+  static getLastCapturedRequest(): HttpBuilderTestRequest | null {
+    if (HttpBuilder.capturedRequests.length === 0) {
+      return null;
+    }
+    return HttpBuilder.capturedRequests[HttpBuilder.capturedRequests.length - 1];
+  }
+
+  static setPayloadCompressorInternal(compressor: HttpPayloadCompressor | null): void {
+    HttpBuilder.payloadCompressor = compressor;
+  }
+
+  static resetPayloadCompressorInternal(): void {
+    HttpBuilder.payloadCompressor = null;
+  }
+
+  private captureTestRequest(header: Record<string, string>, extraData?: string | ArrayBuffer): void {
+    HttpBuilder.capturedRequests.push({
+      url: this.getUrl(),
+      model: this.model ?? "",
+      method: this.method,
+      bodyString: this.bodyString ?? "",
+      headers: header,
+      extraData: extraData
+    });
   }
 
   static Builder(sdkConfig: FTSDKConfig): HttpBuilder {
@@ -178,61 +220,6 @@ export class HttpBuilder {
   }
 
   /**
-   * Compress string data using deflate algorithm
-   * Note: HarmonyOS @ohos.zlib only provides file compression (compressFile), not memory data compression
-   * This method currently returns uncompressed data as a placeholder
-   * TODO: Implement proper compression using pako library or native compression
-   * @param data String data to compress
-   * @returns Data as ArrayBuffer (uncompressed for now)
-   */
-  private async compressData(data: string): Promise<ArrayBuffer> {
-    try {
-      // Convert string to Uint8Array using UTF-8 encoding
-      // Manual UTF-8 encoding (TextEncoder not available in ArkTS)
-      const utf8Bytes: number[] = [];
-      for (let i = 0; i < data.length; i++) {
-        const charCode = data.charCodeAt(i);
-        if (charCode < 0x80) {
-          utf8Bytes.push(charCode);
-        } else if (charCode < 0x800) {
-          utf8Bytes.push(0xC0 | (charCode >> 6));
-          utf8Bytes.push(0x80 | (charCode & 0x3F));
-        } else if (charCode < 0xD800 || charCode >= 0xE000) {
-          utf8Bytes.push(0xE0 | (charCode >> 12));
-          utf8Bytes.push(0x80 | ((charCode >> 6) & 0x3F));
-          utf8Bytes.push(0x80 | (charCode & 0x3F));
-        } else {
-          // Surrogate pair
-          i++;
-          const highSurrogate = charCode;
-          const lowSurrogate = data.charCodeAt(i);
-          const codePoint = 0x10000 + (((highSurrogate & 0x3FF) << 10) | (lowSurrogate & 0x3FF));
-          utf8Bytes.push(0xF0 | (codePoint >> 18));
-          utf8Bytes.push(0x80 | ((codePoint >> 12) & 0x3F));
-          utf8Bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
-          utf8Bytes.push(0x80 | (codePoint & 0x3F));
-        }
-      }
-      
-      const inputData = new Uint8Array(utf8Bytes);
-      
-      // TODO: Implement proper compression
-      // HarmonyOS @ohos.zlib only provides compressFile for file compression, not memory data compression
-      // Options:
-      // 1. Use pako library: ohpm install pako, then import pako from 'pako' and use pako.deflate()
-      // 2. Implement native compression via Native API
-      // For now, return uncompressed data
-      FTInnerLogger.w("HttpBuilder", "[COMPRESSION] Compression not implemented yet, using uncompressed data. Consider using pako library for deflate compression.");
-      
-      return inputData.buffer;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      FTInnerLogger.e("HttpBuilder", `Compression failed: ${errorMessage}`);
-      throw new Error(`Compression failed: ${errorMessage}`);
-    }
-  }
-
-  /**
    * Build common request headers
    * @returns Record containing all request headers
    */
@@ -298,17 +285,6 @@ export class HttpBuilder {
    * Data sync HTTP request (without compression)
    */
   async executeSync(): Promise<FTResponseData> {
-    // Test mode: return mock response if available
-    if (HttpBuilder.testMode && HttpBuilder.mockResponse !== null) {
-      FTInnerLogger.d("HttpBuilder", "[TEST MODE] Returning mock response");
-      return HttpBuilder.mockResponse;
-    }
-
-    // Check network connection status
-    if (!NetworkUtils.isConnected()) {
-      return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, "Network not available");
-    }
-
     try {
       // Build request headers
       const header = this.buildRequestHeaders();
@@ -324,6 +300,18 @@ export class HttpBuilder {
       // Set request body (uncompressed)
       if (this.bodyString) {
         requestOptions.extraData = this.bodyString;
+      }
+
+      // Test mode: return mock response if available
+      if (HttpBuilder.testMode && HttpBuilder.mockResponse !== null) {
+        this.captureTestRequest(header, requestOptions.extraData as string | ArrayBuffer);
+        FTInnerLogger.d("HttpBuilder", "[TEST MODE] Returning mock response");
+        return HttpBuilder.mockResponse;
+      }
+
+      // Check network connection status
+      if (!NetworkUtils.isConnected()) {
+        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, "Network not available");
       }
 
       return await this.executeRequest(requestOptions, header);
@@ -344,14 +332,9 @@ export class HttpBuilder {
 
   /**
    * Data sync HTTP request with compression (deflate)
-   * Compresses the request body using deflate algorithm before sending
+   * Uses an injected compressor when available, otherwise safely falls back to uncompressed data.
    */
   async executeSyncWithCompression(): Promise<FTResponseData> {
-    // Check network connection status
-    if (!NetworkUtils.isConnected()) {
-      return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, "Network not available");
-    }
-
     try {
       // Build request headers
       const header = this.buildRequestHeaders();
@@ -367,30 +350,46 @@ export class HttpBuilder {
       // Compress request body if available
       if (this.bodyString) {
         // Check if Content-Encoding header is already set
-        if (!this.headParams.has(Constants.SYNC_DATA_CONTENT_ENCODING_HEADER)) {
-          try {
-            // Compress the request body using deflate (same as Android SDK)
-            const compressedData = await this.compressData(this.bodyString);
-            
-            // Set compressed data as ArrayBuffer
-            requestOptions.extraData = compressedData;
-            
-            // Add Content-Encoding header
-            header[Constants.SYNC_DATA_CONTENT_ENCODING_HEADER] = "deflate";
-            
-            FTInnerLogger.d("HttpBuilder", `[COMPRESSION] Request body compressed: ${this.bodyString.length} -> ${compressedData.byteLength} bytes`);
-          } catch (error) {
-            FTInnerLogger.e("HttpBuilder", `[COMPRESSION] Compression failed, falling back to uncompressed: ${error}`);
-            // Fallback to uncompressed data
-            requestOptions.extraData = this.bodyString;
-          }
-        } else {
-          // Content-Encoding already set, use uncompressed
+        if (this.headParams.has(Constants.SYNC_DATA_CONTENT_ENCODING_HEADER)) {
           FTInnerLogger.w("HttpBuilder", "[COMPRESSION] Content-Encoding header already set, using uncompressed data");
           requestOptions.extraData = this.bodyString;
+        } else {
+          const compressor = HttpBuilder.payloadCompressor;
+          if (compressor === null) {
+            FTInnerLogger.w("HttpBuilder", "[COMPRESSION] No payload compressor configured, using uncompressed data");
+            requestOptions.extraData = this.bodyString;
+          } else {
+            try {
+              const compressedData = await compressor.compress(this.bodyString);
+
+              // Set compressed data as ArrayBuffer
+              requestOptions.extraData = compressedData;
+
+              // Add Content-Encoding header only after real compression succeeds.
+              header[Constants.SYNC_DATA_CONTENT_ENCODING_HEADER] = compressor.contentEncoding;
+
+              FTInnerLogger.d("HttpBuilder", `[COMPRESSION] Request body compressed: ${this.bodyString.length} -> ${compressedData.byteLength} bytes`);
+            } catch (error) {
+              FTInnerLogger.e("HttpBuilder", `[COMPRESSION] Compression failed, falling back to uncompressed: ${error}`);
+              // Fallback to uncompressed data
+              requestOptions.extraData = this.bodyString;
+            }
+          }
         }
       } else {
         FTInnerLogger.w("HttpBuilder", "[COMPRESSION] No request body to compress");
+      }
+
+      // Test mode: return mock response if available
+      if (HttpBuilder.testMode && HttpBuilder.mockResponse !== null) {
+        this.captureTestRequest(header, requestOptions.extraData as string | ArrayBuffer);
+        FTInnerLogger.d("HttpBuilder", "[TEST MODE] Returning mock response");
+        return HttpBuilder.mockResponse;
+      }
+
+      // Check network connection status
+      if (!NetworkUtils.isConnected()) {
+        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, "Network not available");
       }
 
       return await this.executeRequest(requestOptions, header);
@@ -422,54 +421,6 @@ export class HttpBuilder {
    */
   setReadOutTime(timeout: number): HttpBuilder {
     this.readOutTime = timeout;
-    return this;
-  }
-
-  /**
-   * Enable millisecond precision
-   */
-  enableUrlWithMsPrecision(): HttpBuilder {
-    // The HarmonyOS HTTP API can achieve millisecond precision in other ways
-    return this;
-  }
-
-  /**
-   * Add URL parameters
-   */
-  addParam(key: string, value: string): HttpBuilder {
-    // URL parameter building can be extended here
-    return this;
-  }
-
-  /**
-   * Set form parameters
-   */
-  setFormParams(formParams: Map<string, string>): HttpBuilder {
-    // Form parameter support can be extended here
-    return this;
-  }
-
-  /**
-   * Add a form parameter
-   */
-  addFormParam(key: string, value: string): HttpBuilder {
-    // Form parameter support can be extended here
-    return this;
-  }
-
-  /**
-   * Set file parameters
-   */
-  setFileParams(fileParams: Map<string, FileParam>): HttpBuilder {
-    // File upload support can be extended here
-    return this;
-  }
-
-  /**
-   * Add a file parameter
-   */
-  addFileParam(key: string, name: string, data: ArrayBuffer): HttpBuilder {
-    // File upload support can be extended here
     return this;
   }
 }

@@ -1,6 +1,3 @@
-import * as http from '@ohos.net.http';
-
-
 export enum NetCodeStatus {
   /**
    * Network issue
@@ -26,7 +23,4 @@ export enum NetCodeStatus {
    * Unknown issue
    */
   UNKNOWN_EXCEPTION_CODE = 11000
-}
-
-export class HttpEngine {
 }

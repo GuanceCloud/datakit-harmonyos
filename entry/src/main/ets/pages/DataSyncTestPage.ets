@@ -1,5 +1,4 @@
-import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
+import { FTLogger, FTSDK, FTRUMGlobalManager, Status } from '@guancecloud/ft_sdk/Index';
 import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { TestPageHeader } from '../components/TestPageHeader';
@@ -14,8 +13,8 @@ export struct DataSyncTestPage {
   @State testResults: string = '';
   @State isRunning: boolean = false;
   @State dbSize: string = '0 B';
-  @State dataCount: string = '0';
   @State autoSyncEnabled: boolean = true;
+  @State uploadLaneSummary: string = 'Unknown';
   private updateTimer: number = -1;
 
   aboutToAppear() {
@@ -85,6 +84,10 @@ export struct DataSyncTestPage {
           Text(`Auto Sync: ${this.autoSyncEnabled ? 'Enabled ✅' : 'Disabled ❌'}`)
             .fontSize(14)
             .fontColor(this.autoSyncEnabled ? Color.Green : Color.Orange)
+            .margin({ top: 5 })
+          Text(`Upload Lane: ${this.uploadLaneSummary}`)
+            .fontSize(14)
+            .fontColor(Color.Gray)
             .margin({ top: 5 })
         }
         .padding(20)
@@ -186,6 +189,34 @@ export struct DataSyncTestPage {
             }
           })
 
+        Text('Result Output')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .width('90%')
+          .textAlign(TextAlign.Start)
+          .margin({ top: 10 })
+
+        Button('Clear Result Output')
+          .width('90%')
+          .height(40)
+          .backgroundColor('#6C757D')
+          .onClick(() => {
+            this.clearResultOutput();
+          })
+
+        Column() {
+          Text(this.testResults.length > 0 ? this.testResults : 'No output yet')
+            .fontSize(12)
+            .fontColor('#333333')
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        .padding(12)
+        .backgroundColor('#F5F5F5')
+        .borderRadius(8)
+        .width('90%')
+        .margin({ bottom: 10 })
+
       }
       .width('100%')
       .padding(20)
@@ -203,9 +234,26 @@ export struct DataSyncTestPage {
       const cachePolicy = FTDBCachePolicy.getInstance();
       const currentSize = cachePolicy.getCurrentDbSize();
       this.dbSize = this.formatBytes(currentSize);
+      this.updateUploadLaneSummary();
     } catch (error) {
       DemoLogger.e(TAG, `updateDataInfo error: ${error}`);
       this.dbSize = '0 B';
+    }
+  }
+
+  private updateUploadLaneSummary(): void {
+    try {
+      const status = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+      if (status.isRunning) {
+        this.uploadLaneSummary = `Running, needReschedule=${status.needReschedule}, next=${status.rescheduleDelay}ms`;
+      } else if (status.isScheduled) {
+        this.uploadLaneSummary = `Scheduled, delay=${status.scheduledDelay}ms`;
+      } else {
+        this.uploadLaneSummary = 'Idle';
+      }
+    } catch (error) {
+      this.uploadLaneSummary = 'Unavailable';
+      DemoLogger.e(TAG, `updateUploadLaneSummary error: ${error}`);
     }
   }
 
@@ -241,9 +289,9 @@ export struct DataSyncTestPage {
     this.appendResult('=== Generating Test Data ===\n');
     
     try {
-      // Generate 10 logs
+      // Generate 10 SDK logs
       for (let i = 0; i < 10; i++) {
-        DemoLogger.i(TAG, `Test log ${i + 1} - ${new Date().toISOString()}`);
+        FTLogger.logBackground(`DataSync test log ${i + 1} - ${new Date().toISOString()}`, Status.INFO);
       }
       
       // Generate 10 actions
@@ -253,6 +301,8 @@ export struct DataSyncTestPage {
       }
       
       this.appendResult('✅ Generated 10 logs + 10 actions\n');
+      this.appendResult('Expected upload: type=rum_app rows=10 and type=log rows=10\n');
+      this.appendResult('Filter logs: <FT-UPLOAD-LANE> [BATCH]\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {
@@ -279,9 +329,9 @@ export struct DataSyncTestPage {
     this.appendResult('=== Generating More Test Data (100 logs + 100 actions) ===\n');
     
     try {
-      // Generate 100 logs
+      // Generate 100 SDK logs
       for (let i = 0; i < 100; i++) {
-        DemoLogger.i(TAG, `Batch log ${i + 1} - ${new Date().toISOString()}`);
+        FTLogger.logBackground(`DataSync batch log ${i + 1} - ${new Date().toISOString()}`, Status.INFO);
       }
       
       // Generate 100 actions
@@ -291,6 +341,8 @@ export struct DataSyncTestPage {
       }
       
       this.appendResult('✅ Generated 100 logs + 100 actions\n');
+      this.appendResult('Expected upload: type=rum_app and type=log batches; larger data may upload across multiple polls\n');
+      this.appendResult('Filter logs: <FT-UPLOAD-LANE> [BATCH] and lane=upload\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {
@@ -318,6 +370,7 @@ export struct DataSyncTestPage {
       const newState = !this.autoSyncEnabled;
       syncTaskManager.setAutoSync(newState);
       this.autoSyncEnabled = newState;
+      this.updateUploadLaneSummary();
       this.appendResult(`=== Auto Sync ${newState ? 'Enabled' : 'Disabled'} ===\n`);
       this.appendResult(`Auto sync is now ${newState ? 'ON' : 'OFF'}\n`);
       if (!newState) {
@@ -348,7 +401,8 @@ export struct DataSyncTestPage {
       if (!this.autoSyncEnabled) {
         this.appendResult('💡 Auto sync is disabled, this manual sync is necessary\n');
       }
-      this.appendResult('Note: Check logs to see if data is being uploaded\n\n');
+      this.appendResult('Check logs: <FT-SDK-SCHEDULER> [LANE] lane=upload\n');
+      this.appendResult('Check logs: <FT-UPLOAD-LANE> [BATCH] type=rum_app / type=log\n\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {
@@ -356,6 +410,7 @@ export struct DataSyncTestPage {
           setTimeout(() => {
             this.updateDataInfo();
             this.appendResult(`After sync - DB Size: ${this.dbSize}\n`);
+            this.appendResult(`Upload Lane: ${this.uploadLaneSummary}\n`);
             this.appendResult('=== Test Complete ===\n\n');
             this.isRunning = false;
             resolve();
@@ -381,6 +436,7 @@ export struct DataSyncTestPage {
     try {
       // Call clearAllData
       await FTSDK.clearAllData();
+      this.updateUploadLaneSummary();
       
       this.appendResult('✅ clearAllData() called successfully\n');
       this.appendResult('🗑️ All cached data deleted\n');
@@ -414,5 +470,9 @@ export struct DataSyncTestPage {
       this.testResults = lines.slice(lines.length - 80).join('\n');
     }
     DemoLogger.i(TAG, text.trim());
+  }
+
+  private clearResultOutput(): void {
+    this.testResults = '';
   }
 }

@@ -5,9 +5,12 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { AppState, ErrorType } from '../rum/enum/RUMEnums';
 import { Utils } from '../utils/Utils';
+import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
 
 const TAG = 'ANRDetectManager';
 const WATCHER_NAME = 'ft_sdk_anr_monitor';
+const ANR_LANE_TRACE_PREFIX = '<FT-ANR-LANE>';
+const ANR_PROCESSING_SERIAL_KEY = 'anr-freeze-processing';
 
 interface ErrorPropertyValue {
   value: string | number;
@@ -42,6 +45,7 @@ export interface ANRStatsWithUptime extends ANRStats {
  */
 export class ANRDetectManager {
   private static instance: ANRDetectManager | null = null;
+  private static crashFileTaskSequence: number = 0;
 
   private isInitialized: boolean = false;
   private isMonitoring: boolean = false;
@@ -201,13 +205,15 @@ export class ANRDetectManager {
       params: mergedParams
     };
 
-    this.recordANREvent(mergedEvent);
+    this.submitANRTask('anr.freeze', async () => {
+      await this.recordANREvent(mergedEvent);
+    });
   }
 
   /**
    * Convert a HarmonyOS APP_FREEZE event into a RUM error payload and upload it.
    */
-  private recordANREvent(event: hiAppEvent.AppEventInfo): void {
+  private async recordANREvent(event: hiAppEvent.AppEventInfo): Promise<void> {
     try {
       const rumManager = FTRUMInnerManager.getInstance();
       const dateline = Utils.getCurrentNanoTime();
@@ -512,21 +518,56 @@ export class ANRDetectManager {
       }
 
       const appState = params.foreground === true ? AppState.RUN : AppState.BACKGROUND;
-      rumManager.addError(
+      await rumManager.addError(
         anrStackTrace,
         anrMessage,
         ErrorType.ANR_CRASH,
         appState,
         anrProperty,
         dateline
-      ).catch((error: Error) => {
-        FTInnerLogger.e(TAG, `Failed to record ANR event: ${error}`);
-      });
+      );
       FTInnerLogger.i(TAG, `ANR event uploaded, freeze_type=${params.freeze_type ?? 'unknown'}, foreground=${params.foreground ?? 'unknown'}`);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `Error recording ANR event: ${errorMsg}`);
     }
+  }
+
+  private submitANRTask(name: string, task: SDKTaskRunner): void {
+    const traceName = this.nextANRTaskName(name);
+    this.traceANRLane(`[ENQUEUE] name=${traceName}`);
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.ANR,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: ANR_PROCESSING_SERIAL_KEY,
+      costHint: 'heavy',
+      run: async () => {
+        const startTime = Date.now();
+        let result = 'success';
+        let errorMessage = '';
+        try {
+          await Promise.resolve(task());
+        } catch (error) {
+          result = 'failed';
+          errorMessage = String(error);
+          throw new Error(errorMessage);
+        } finally {
+          const costTime = Math.max(0, Date.now() - startTime);
+          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+          this.traceANRLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-anr-error`);
+        }
+      }
+    });
+  }
+
+  private nextANRTaskName(name: string): string {
+    ANRDetectManager.crashFileTaskSequence++;
+    return `${name}#${ANRDetectManager.crashFileTaskSequence}`;
+  }
+
+  private traceANRLane(message: string): void {
+    FTInnerLogger.i(TAG, `${ANR_LANE_TRACE_PREFIX} ${message}`);
   }
 
   /**

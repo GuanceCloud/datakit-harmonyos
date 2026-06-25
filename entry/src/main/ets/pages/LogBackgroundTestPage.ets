@@ -1,11 +1,8 @@
 import { Context } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
-import { FTLogger } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
-import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
-import { FTLoggerConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
+import { FTLogger, FTLoggerConfig, FTSDK, LogGlobalContextValue, Status } from '@guancecloud/ft_sdk/Index';
 import FTTrackInner from '@guancecloud/ft_sdk/src/main/ets/components/FTTrackInner';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
-import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -41,6 +38,15 @@ export struct LogBackgroundTestPage {
       logConfig.setServiceName("harmonyos_log_test");
       logConfig.setLogLevelFilters([Status.INFO, Status.WARN, Status.ERROR, Status.DEBUG]);
       logConfig.setLogCacheLimitCount(1000);
+
+      const staticContext = new Map<string, LogGlobalContextValue>();
+      staticContext.set('demo_log_static_tag', 'static_dictionary_value');
+      staticContext.set('demo_log_number_tag', 101);
+      staticContext.set('demo_log_boolean_tag', true);
+      staticContext.set('demo_log_zero_tag', 0);
+      staticContext.set('demo_log_false_tag', false);
+      logConfig.addGlobalContext(staticContext);
+      logConfig.addGlobalContext('demo_log_legacy_tag', 'legacy_key_value');
 
       // Use FTSDK.installLogConfig for proper initialization
       FTSDK.installLogConfig(logConfig);
@@ -257,6 +263,31 @@ export struct LogBackgroundTestPage {
   }
 
   /**
+   * Test log global context with dictionary values.
+   */
+  testLogGlobalContextDictionary() {
+    try {
+      const dynamicContext = new Map<string, LogGlobalContextValue>();
+      dynamicContext.set('demo_log_dynamic_tag', 'dynamic_dictionary_value');
+      dynamicContext.set('demo_log_dynamic_number_tag', 202);
+      const messageId = `log_global_context_dictionary_${Date.now()}`;
+      const properties = new Map<string, object>();
+      properties.set("testType", new String("log_global_context_dictionary"));
+      properties.set("messageId", new String(messageId));
+
+      FTSDK.appendLogGlobalContext(dynamicContext);
+      FTSDK.appendLogGlobalContextKeyValue('demo_log_dynamic_single_tag', 'dynamic_single_value');
+
+      FTLogger.logBackground(`Log global context dictionary test ${messageId}`, Status.INFO, properties);
+      this.logCount += 1;
+      this.addTestResult("✅ Log global context dictionary test completed: 1 log sent");
+      this.addTestResult("🔎 Expected tags: demo_log_static_tag, demo_log_number_tag, demo_log_boolean_tag, demo_log_zero_tag, demo_log_false_tag, demo_log_dynamic_tag, demo_log_dynamic_single_tag");
+    } catch (error) {
+      this.addTestResult(`❌ Log global context dictionary test failed: ${error}`);
+    }
+  }
+
+  /**
    * Manually trigger data upload
    */
   async triggerDataUpload() {
@@ -311,6 +342,9 @@ export struct LogBackgroundTestPage {
     await new Promise<void>(resolve => setTimeout(resolve, 100));
     
     this.testServiceNameSetting();
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+
+    this.testLogGlobalContextDictionary();
     await new Promise<void>(resolve => setTimeout(resolve, 100));
     
     this.addTestResult(`🎉 All tests completed! Total logs sent: ${this.logCount}`);
@@ -400,6 +434,12 @@ export struct LogBackgroundTestPage {
             .height(50)
             .backgroundColor('#FD7E14')
             .onClick(() => this.testServiceNameSetting())
+
+          Button('Test Log Global Context Dictionary')
+            .width('100%')
+            .height(50)
+            .backgroundColor('#495057')
+            .onClick(() => this.testLogGlobalContextDictionary())
 
           // Advanced features
           Divider()

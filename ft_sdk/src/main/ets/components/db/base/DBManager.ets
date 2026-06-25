@@ -5,9 +5,9 @@
 import relationalStore from '@ohos.data.relationalStore';
 import { DataBaseCallBack } from './DataBaseCallBack';
 import { FTInnerLogger } from '../../log/FTLogger';
-import { DataProcessThreadPool } from '../../thread/DataProcessThreadPool';
 
 const TAG = "DBManager";
+const LOCK_TAILS: Map<object, Promise<void>> = new Map();
 
 /**
  * Database management abstract base class
@@ -19,17 +19,9 @@ export abstract class DBManager {
 
   private rdbStore: relationalStore.RdbStore | null = null;
   private readonly lock: object = new Object();
-  // Connection pool management
-  private openCounter: number = 0;
-  private lastUsedTime: number = 0;
-  private static readonly IDLE_TIMEOUT: number = 20_000; // 20 seconds
   private static readonly DB_SIZE_CHECK_INTERVAL: number = 10_000; // Database size check interval: 10 seconds
   private lastDbSizeCheckTime: number = 0;
-  private pendingCloseTask: number | null = null;
-  
-  // Thread safety locks
-  private readonly counterLock = new Object();
-  private readonly dbLock = new Object();
+  private noLockShutdownSimulationForTest: boolean = false;
 
   /**
    * Initialize database helper
@@ -43,7 +35,6 @@ export abstract class DBManager {
   protected async getDataBaseHelper(): Promise<relationalStore.RdbStore> {
     if (this.rdbStore === null) {
       try {
-        // Removed test debug logs to reduce log output
         this.rdbStore = await this.initDataBaseHelper();
       } catch (error) {
         throw new Error(`Failed to initialize database helper: ${error as string}`);
@@ -59,7 +50,6 @@ export abstract class DBManager {
    * @param callback Database operation callback
    */
   protected async getDB(write: boolean, callback: DataBaseCallBack): Promise<void> {
-      // Removed test debug logs to reduce log output
     try {
       await this.getDBWithCount(write, 1, callback);
       // FTInnerLogger.d(TAG, ` getDBWithCount completed successfully`);
@@ -77,43 +67,34 @@ export abstract class DBManager {
    * @param callback Database operation callback
    */
   protected async getDBWithCount(write: boolean, operationCount: number, callback: DataBaseCallBack): Promise<void> {
-    try {
-      // Get fresh database connection for each operation (HarmonyOS best practice)
-      // This avoids connection reuse issues and "Already closed" errors
+    const runOperation = async (): Promise<void> => {
       const rdbStore = await this.getDataBaseHelper();
-      // Removed test debug logs to reduce log output
-      // FTInnerLogger.d(TAG, ` getDataBaseHelper result: ${rdbStore ? 'success' : 'null'}`);
-      
-      if (rdbStore) {
-        // Auto-determine: use transaction for write operations with count exceeding threshold
-        const useTransaction = write && operationCount > DBManager.TRANSACTION_LIMIT_COUNT;
-        
-        // Removed test debug logs to reduce log output
-        // FTInnerLogger.d(TAG, ` getDBWithCount: write=${write}, operationCount=${operationCount}, useTransaction=${useTransaction}`);
-        
-        if (useTransaction) {
-          // Use transaction
-          // FTInnerLogger.d(TAG, ` Using transaction for write operation`);
-          await this.executeWithTransaction(rdbStore, callback);
-        } else {
-          // Execute callback with fresh connection
-          if (write) {
-            // Use synchronized for write operations to ensure thread safety
-            await synchronized(this.lock, async () => {
-              await callback.run(rdbStore);
-            });
-          } else {
-            await callback.run(rdbStore);
-          }
-        }
-        
-        // Check database size after write operation
-        if (write && this.shouldCheckDatabaseSize()) {
-          await this.checkDatabaseSize(rdbStore);
-        }
-      } else {
+      if (!rdbStore) {
         FTInnerLogger.e(TAG, "Failed to get database connection: rdbStore is null");
         return;
+      }
+
+      // Auto-determine: use transaction for write operations with count exceeding threshold
+      const useTransaction = write && operationCount > DBManager.TRANSACTION_LIMIT_COUNT;
+      if (useTransaction) {
+        // Use transaction
+        // FTInnerLogger.d(TAG, ` Using transaction for write operation`);
+        await this.executeWithTransaction(rdbStore, callback);
+      } else {
+        await callback.run(rdbStore);
+      }
+
+      // Check database size after write operation
+      if (write && this.shouldCheckDatabaseSize()) {
+        await this.checkDatabaseSize(rdbStore);
+      }
+    };
+
+    try {
+      if (write) {
+        await synchronized(this.lock, runOperation);
+      } else {
+        await runOperation();
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Database operation failed: ${error}`);
@@ -128,15 +109,11 @@ export abstract class DBManager {
    */
   private async executeWithTransaction(rdbStore: relationalStore.RdbStore, callback: DataBaseCallBack): Promise<void> {
     try {
-       rdbStore.beginTransaction();
-      
-      await synchronized(this.lock, async () => {
-        await callback.run(rdbStore);
-      });
-      
-       rdbStore.commit();
+      rdbStore.beginTransaction();
+      await callback.run(rdbStore);
+      rdbStore.commit();
     } catch (error) {
-       rdbStore.rollBack();
+      rdbStore.rollBack();
       throw new Error(`Transaction failed: ${error}`);
     }
   }
@@ -210,128 +187,26 @@ export abstract class DBManager {
     this.rdbStore = null;
   }
 
-  /**
-   * Acquire database connection
-   */
-  private acquire(): void {
-    synchronized(this.counterLock, () => {
-      // Check if database is already closed before acquiring
-      if (this.isDatabaseClosed()) {
-        FTInnerLogger.w(TAG, ` Database is closed, cannot acquire connection`);
-        return;
+  public async simulateNoLockShutdownForTest(): Promise<void> {
+    this.noLockShutdownSimulationForTest = true;
+    const rdbStore = this.rdbStore;
+    this.rdbStore = null;
+    if (rdbStore) {
+      try {
+        await rdbStore.close();
+        FTInnerLogger.d(TAG, `No-lock DB shutdown simulation completed`);
+      } catch (error) {
+        FTInnerLogger.w(TAG, `No-lock DB shutdown simulation failed: ${error}`);
       }
-      
-      this.openCounter++;
-      this.lastUsedTime = Date.now();
-      this.cancelPendingClose();
-      
-      // Warn if connection count is too high
-      if (this.openCounter > 10) {
-        FTInnerLogger.w(TAG, `High connection count: ${this.openCounter}, Thread: main`);
-      }
-      
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` acquire: openCounter=${this.openCounter}`);
-    });
-  }
-
-  /**
-   * Try to close database connection with safe decrement
-   */
-  private tryToClose(): void {
-    synchronized(this.counterLock, () => {
-      // Check if database is already closed before trying to close
-      if (this.isDatabaseClosed()) {
-        FTInnerLogger.w(TAG, ` Database is already closed, skipping tryToClose`);
-        return;
-      }
-      
-      // Safe decrement
-      const currentCount = this.openCounter;
-      const newCount = Math.max(0, currentCount - 1);
-      this.openCounter = newCount;
-      this.lastUsedTime = Date.now();
-      
-
-      // Only schedule close if no active connections
-      if (newCount === 0) {
-        this.scheduleCloseIfIdle();
-      } else {
-        // Removed test debug log to reduce log output
-        // FTInnerLogger.d(TAG, ` Not closing database yet, openCounter=${newCount}`);
-      }
-    });
-  }
-
-  /**
-   * Schedule database close if idle
-   */
-  private scheduleCloseIfIdle(): void {
-    this.cancelPendingClose();
-    if (this.openCounter === 0) {
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` Scheduling database close in ${DBManager.IDLE_TIMEOUT}ms`);
-      // Use DataProcessThreadPool instead of setTimeout
-      DataProcessThreadPool.getInstance().execute(() => {
-        if (this.openCounter === 0 && (Date.now() - this.lastUsedTime) >= DBManager.IDLE_TIMEOUT) {
-          this.closeDatabase();
-        }
-      });
     }
   }
 
-  /**
-   * Cancel pending close task
-   */
-  private cancelPendingClose(): void {
-    if (this.pendingCloseTask !== null) {
-      clearTimeout(this.pendingCloseTask);
-      this.pendingCloseTask = null;
-      // Removed test debug log to reduce log output
-      // FTInnerLogger.d(TAG, ` Cancelled previous close task`);
-    }
+  public clearNoLockShutdownSimulationForTest(): void {
+    this.noLockShutdownSimulationForTest = false;
   }
 
-  /**
-   * Close database
-   */
-  private closeDatabase(): void {
-    synchronized(this.dbLock, async () => {
-      // Removed test debug logs to reduce log output
-      // FTInnerLogger.d(TAG, ` closeDatabase called: rdbStore=${this.rdbStore ? 'exists' : 'null'}, openCounter=${this.openCounter}`);
-      
-      if (this.rdbStore && this.openCounter <= 0) {
-        try {
-          // FTInnerLogger.d(TAG, ` Closing database connection`);
-          
-          // Check if database is already closed before attempting to close
-          if (this.isDatabaseClosed()) {
-            FTInnerLogger.w(TAG, ` Database is already closed, skipping close operation`);
-            this.rdbStore = null;
-            this.pendingCloseTask = null;
-            return;
-          }
-          
-          // Attempt to close the database
-          await this.rdbStore.close();
-          this.rdbStore = null;
-          this.pendingCloseTask = null;
-          // Removed test debug log to reduce log output
-          // FTInnerLogger.d(TAG, ` Database connection closed successfully`);
-        } catch (error) {
-          // If it's an "Already closed" error, treat it as success
-          if (error && error.toString().includes("Already closed")) {
-            FTInnerLogger.w(TAG, ` Database was already closed: ${error}`);
-            this.rdbStore = null;
-            this.pendingCloseTask = null;
-          } else {
-            FTInnerLogger.e(TAG, `Failed to close database: ${error}`);
-          }
-        }
-      } else {
-        FTInnerLogger.d(TAG, ` Skipping database close: rdbStore=${this.rdbStore ? 'exists' : 'null'}, openCounter=${this.openCounter}`);
-      }
-    });
+  protected isNoLockShutdownSimulationForTest(): boolean {
+    return this.noLockShutdownSimulationForTest;
   }
 
   /**
@@ -363,24 +238,26 @@ export abstract class DBManager {
    * Shutdown database manager
    */
   public async shutDown(): Promise<void> {
-    synchronized(this.dbLock, async () => {
-      this.cancelPendingClose();
-      
+    await synchronized(this.lock, async () => {
       if (this.rdbStore) {
         try {
           await this.rdbStore.close();
-          this.rdbStore = null;
+          this.resetDatabaseConnection();
           FTInnerLogger.d(TAG, `Database shutdown completed`);
         } catch (error) {
-          FTInnerLogger.e(TAG, `Failed to shutdown database: ${error}`);
+          if (error && error.toString().includes("Already closed")) {
+            FTInnerLogger.w(TAG, `Database was already closed during shutdown: ${error}`);
+            this.resetDatabaseConnection();
+          } else {
+            FTInnerLogger.e(TAG, `Failed to shutdown database: ${error}`);
+          }
         }
+      } else {
+        this.resetDatabaseConnection();
       }
-      
-      // Reset counters
-      this.openCounter = 0;
-      this.pendingCloseTask = null;
     });
   }
+
 }
 
 /**
@@ -388,21 +265,22 @@ export abstract class DBManager {
  * HarmonyOS version of synchronized lock implementation
  * Supports both synchronous and asynchronous functions
  */
-function synchronized(lock: object, fn: (() => void) | (() => Promise<void>)): void | Promise<void> {
-  // In HarmonyOS, due to the single-threaded model, this is mainly for maintaining interface consistency
-  // Actual multi-threaded safety needs to be handled at the application level
-  // Removed test debug logs to reduce log output
-  // FTInnerLogger.d(TAG, ` synchronized function called`);
-  
-  const result = fn();
-  
-  // Check if the function returns a Promise
-  if (result instanceof Promise) {
-    return result.then(() => {
-      // FTInnerLogger.d(TAG, ` synchronized function completed`);
-    });
-  } else {
-    // FTInnerLogger.d(TAG, ` synchronized function completed`);
-    return result;
+async function synchronized(lock: object, fn: (() => void) | (() => Promise<void>)): Promise<void> {
+  const previousTail = LOCK_TAILS.get(lock) ?? Promise.resolve();
+  let releaseCurrent: () => void = () => {};
+  const currentTail = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const nextTail = previousTail.catch(() => {}).then(() => currentTail);
+  LOCK_TAILS.set(lock, nextTail);
+
+  await previousTail.catch(() => {});
+  try {
+    await Promise.resolve(fn());
+  } finally {
+    releaseCurrent();
+    if (LOCK_TAILS.get(lock) === nextTail) {
+      LOCK_TAILS.delete(lock);
+    }
   }
 }

@@ -7,6 +7,15 @@
       "tablet",
       "2in1"
     ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      }
+    ],
+    "testRunner": {
+      "name": "OpenHarmonyTestRunner",
+      "srcPath": "./ets/testrunner/OpenHarmonyTestRunner.ets"
+    },
     "deliveryWithInstall": true,
     "installationFree": false
   }

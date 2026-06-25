@@ -5,6 +5,7 @@ Guance HarmonyOS core SDK for application monitoring, analytics, logging, and tr
 ## Introduction
 
 `@guancecloud/ft_sdk` is the core Guance HarmonyOS SDK. It provides RUM, logging, tracing, common network tracking helpers, and related monitoring capabilities for HarmonyOS applications.
+Native crash monitoring is optional and lives in `@guancecloud/ft_native`.
 
 ## Features
 
@@ -40,6 +41,10 @@ import {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceManager,
+  FTTraceRequestContext,
   EnvType,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
@@ -58,15 +63,19 @@ import {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceManager,
+  FTTraceRequestContext,
   EnvType,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want): void {
-    const sdkConfig = new FTSDKConfig('YOUR_DATAKIT_OR_DATAWAY_URL')
-    sdkConfig.setEnv(EnvType.PROD)
-    sdkConfig.setServiceName('your_service_name')
+    const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+      .setEnv(EnvType.PROD)
+      .setServiceName('your_service_name')
 
     FTSDK.install(sdkConfig, this.context)
 
@@ -94,9 +103,16 @@ export default class EntryAbility extends UIAbility {
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration
+- `FTTraceContext`: generated Trace Header and RUM linking ID context
+- `FTTraceHeaderHandler`: custom Trace Header context handler interface
+- `FTTraceRequestContext`: current request context passed to custom Trace Header handlers
 - `FTRUMGlobalManager`: RUM reporting API
 - `FTLogger`: custom log API
 - `FTTraceManager`: trace helper API
+- `FTWebViewHandler`: WebView bridge integration API
+- `createFTRCPTrackConfig` / `createFTRCPInterceptors`: RCP auto-track helpers
+- `RCPTraceInterceptor` / `RCPResourceInterceptor`: advanced manual RCP interceptor assembly
+- `DefaultFTTraceInterceptor`: default low-level trace interceptor implementation
 
 ## Requirements
 
@@ -108,7 +124,15 @@ export default class EntryAbility extends UIAbility {
 
 - Call `FTSDK.install(...)` before `installRUMConfig`, `installLogConfig`, and `installTraceConfig`
 - Add `@guancecloud/ft_sdk_ext` when you need HarmonyOS `HttpInterceptor` chain integration
-- Add `@guancecloud/ft_native` when you need native crash monitoring
+- Add `@guancecloud/ft_native` when you need native crash monitoring. `ft_sdk` initializes `libftnativecrash.so` internally when crash tracking is enabled:
+
+```ts
+import { FTRUMConfig } from '@guancecloud/ft_sdk/Index'
+
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTrackAppCrash(true)
+```
 
 ## Documentation
 

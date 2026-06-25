@@ -76,12 +76,10 @@ export class LogBean extends BaseContentBean {
     const fields = super.getAllFields();
     
     // Add extended properties to the field set
-    if (this.property) {
-      const keys = BaseContentBean.getObjectKeys(this.property);
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
-        fields[key] = this.property[key] as object;
-      }
+    const keys = BaseContentBean.getObjectKeys(this.property);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      fields[key] = this.property[key] as object;
     }
     
     return fields;
