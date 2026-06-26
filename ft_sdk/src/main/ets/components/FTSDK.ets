@@ -12,6 +12,7 @@ import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
 import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
 import { TrackLogManager } from "./log/TrackLogManager";
 import { FTInnerLogger } from "./log/FTLogger";
+import { FTInnerLogFileManager } from "./log/FTInnerLogFileManager";
 import { UserDataManager } from "./rum/UserDataManager";
 import { FTNetworkListener } from "./utils/FTNetworkListener";
 import { SyncTaskManager } from "./SyncTaskManager";
@@ -48,6 +49,7 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    FTInnerLogFileManager.getInstance().shutdown(false);
     FTSDK.ftSdk = null;
     FTSDK.anrDetectManager = null;
     FTSDK.rumConfig = null;
@@ -157,12 +159,25 @@ export class FTSDK {
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
 
+    // Get context from Utils (unified context management)
+    const context = getFTSDKRuntime().getAbilityContext();
+
+    if (context && config.isEnableInnerLogFile()) {
+      const innerLogFileConfig = config.getInnerLogFileConfig();
+      FTInnerLogFileManager.getInstance().init(
+        context,
+        innerLogFileConfig.singleFileMaxSize,
+        innerLogFileConfig.totalFileMaxSize,
+        innerLogFileConfig.flushBatchSize,
+        innerLogFileConfig.flushIntervalMs
+      );
+    } else {
+      FTInnerLogFileManager.getInstance().shutdown(false);
+    }
+
     // Start network monitoring
     // Monitor network state changes and update network type cache in real time
     FTNetworkListener.getInstance().monitor();
-
-    // Get context from Utils (unified context management)
-    const context = getFTSDKRuntime().getAbilityContext();
 
     // Initialize sync task manager
     if (context) {
@@ -388,6 +403,7 @@ export class FTSDK {
 
     // Release network listener (similar to Android)
     FTNetworkListener.release();
+    FTInnerLogFileManager.getInstance().shutdown(true);
     FTInnerLogger.d(TAG, "FTSDK shut down, network listener released");
     //todo Clear device configuration
   }

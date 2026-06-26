@@ -32,6 +32,7 @@ export {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTInnerLogFileConfig,
   LogGlobalContextDictionary,
   LogGlobalContextValue
 } from './src/main/ets/components/Configs';

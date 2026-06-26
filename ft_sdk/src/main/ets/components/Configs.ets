@@ -11,6 +11,13 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
 
+export interface FTInnerLogFileConfig {
+  singleFileMaxSize?: number;
+  totalFileMaxSize?: number;
+  flushBatchSize?: number;
+  flushIntervalMs?: number;
+}
+
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
@@ -657,6 +664,8 @@ export class FTSDKConfig {
   private limitWithDbSize: boolean = false;
   private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
+  private enableInnerLogFile: boolean = false;
+  private innerLogFileConfig: FTInnerLogFileConfig = {};
 
   // Constructor
   private constructor(datakitUrl: string = '', datawayUrl: string = '', clientToken: string = '') {
@@ -697,6 +706,32 @@ export class FTSDKConfig {
   setDebug(debug: boolean): FTSDKConfig {
     this.isDebug = debug;
     return this;
+  }
+
+  setEnableInnerLogFile(enable: boolean, config?: FTInnerLogFileConfig): FTSDKConfig {
+    this.enableInnerLogFile = enable;
+    if (config !== undefined) {
+      this.innerLogFileConfig = {
+        singleFileMaxSize: config.singleFileMaxSize,
+        totalFileMaxSize: config.totalFileMaxSize,
+        flushBatchSize: config.flushBatchSize,
+        flushIntervalMs: config.flushIntervalMs
+      };
+    }
+    return this;
+  }
+
+  isEnableInnerLogFile(): boolean {
+    return this.enableInnerLogFile;
+  }
+
+  getInnerLogFileConfig(): FTInnerLogFileConfig {
+    return {
+      singleFileMaxSize: this.innerLogFileConfig.singleFileMaxSize,
+      totalFileMaxSize: this.innerLogFileConfig.totalFileMaxSize,
+      flushBatchSize: this.innerLogFileConfig.flushBatchSize,
+      flushIntervalMs: this.innerLogFileConfig.flushIntervalMs
+    };
   }
 
   getEnv(): string {

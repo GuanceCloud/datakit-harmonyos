@@ -290,6 +290,12 @@ export default class EntryAbility extends UIAbility {
 
       sdkConfig = sdkConfig
         .setDebug(true)
+        .setEnableInnerLogFile(true, {
+          singleFileMaxSize: 5 * 1024 * 1024,
+          totalFileMaxSize: 100 * 1024 * 1024,
+          flushBatchSize: 20,
+          flushIntervalMs: 200
+        })
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
         .setAutoSync(this.resolveAutoSyncEnabled())

@@ -3,6 +3,7 @@ import { LogBean } from '../bean/LogBean';
 import { Status } from '../bean/Status';
 import { Utils } from '../utils/Utils';
 import { StringWrapper } from '../utils/StringWrapper';
+import { FTInnerLogFileManager } from './FTInnerLogFileManager';
 import hilog from '@ohos.hilog';
 import ftnativecrash from 'libftnativecrash.so';
 
@@ -56,12 +57,22 @@ export class FTInnerLogger {
     }
   }
 
+  private static addToLogFile(level: string, tag: string, message: string): void {
+    try {
+      const fullTag = `${FTInnerLogger.TAG_PREFIX}${tag}`;
+      FTInnerLogFileManager.getInstance().append(level, fullTag, message);
+    } catch (error) {
+      // Keep internal logging best-effort and avoid recursive log failures.
+    }
+  }
+
   static d(tag: string, message: string): void {
     if (!FTInnerLogger.DEBUG_ENABLED) {
       return;
     }
     const fullMessage = `${message}`;
     hilog.debug(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("D", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("D", tag, fullMessage);
   }
 
@@ -73,6 +84,7 @@ export class FTInnerLogger {
     }
     const fullMessage = `${message}`;
     hilog.info(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("I", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("I", tag, fullMessage);
   }
 
@@ -84,6 +96,7 @@ export class FTInnerLogger {
     }
     const fullMessage = `${message}`;
     hilog.warn(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("W", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("W", tag, fullMessage);
   }
 
@@ -95,6 +108,7 @@ export class FTInnerLogger {
     }
     const fullMessage = `${message}`;
     hilog.error(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("E", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("E", tag, fullMessage);
   }
 }

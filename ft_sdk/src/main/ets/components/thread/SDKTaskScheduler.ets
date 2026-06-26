@@ -12,6 +12,7 @@ const SCHEDULER_TRACE_PREFIX = "<FT-SDK-SCHEDULER>";
 export enum SDKTaskType {
   EVENT = 'event',
   LOG = 'log',
+  INNER_LOG_FILE = 'inner-log-file',
   DATA_PROCESS = 'data-process',
   CRASH_FILE = 'crash-file',
   UPLOAD = 'upload',
@@ -39,6 +40,7 @@ export interface SDKTask {
   serialKey?: string;
   singleFlightKey?: string;
   costHint?: SDKTaskCostHint;
+  silent?: boolean;
   run: SDKTaskRunner;
 }
 
@@ -50,6 +52,7 @@ export interface SDKTaskOptions {
   serialKey?: string;
   singleFlightKey?: string;
   costHint?: SDKTaskCostHint;
+  silent?: boolean;
   run: SDKTaskRunner;
 }
 
@@ -130,6 +133,7 @@ export class SDKTaskScheduler {
       serialKey: options.serialKey,
       singleFlightKey: options.singleFlightKey,
       costHint: options.costHint,
+      silent: options.silent ?? false,
       run: options.run
     };
   }
@@ -206,6 +210,7 @@ export class SDKTaskScheduler {
     const taskTypes = [
       SDKTaskType.EVENT,
       SDKTaskType.LOG,
+      SDKTaskType.INNER_LOG_FILE,
       SDKTaskType.DATA_PROCESS,
       SDKTaskType.CRASH_FILE,
       SDKTaskType.UPLOAD,
@@ -247,6 +252,7 @@ export class SDKTaskScheduler {
       case SDKTaskType.DATA_PROCESS:
         return 2;
       case SDKTaskType.CRASH_FILE:
+      case SDKTaskType.INNER_LOG_FILE:
         return 1;
       case SDKTaskType.EVENT:
       case SDKTaskType.LOG:
@@ -265,6 +271,8 @@ export class SDKTaskScheduler {
         return SDKTaskPriority.HIGH;
       case SDKTaskType.LOG:
         return SDKTaskPriority.NORMAL;
+      case SDKTaskType.INNER_LOG_FILE:
+        return SDKTaskPriority.BACKGROUND;
       case SDKTaskType.UPLOAD:
       case SDKTaskType.DATA_PROCESS:
       case SDKTaskType.CRASH_FILE:
@@ -285,6 +293,7 @@ export class SDKTaskScheduler {
       serialKey: task.serialKey,
       singleFlightKey: task.singleFlightKey,
       costHint: task.costHint,
+      silent: task.silent ?? false,
       run: task.run,
       resolve,
       reject
@@ -310,10 +319,12 @@ export class SDKTaskScheduler {
     lane.submittedTasks++;
     const laneTrace =
       `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`;
-    if (task.type === SDKTaskType.UPLOAD) {
-      this.traceSchedulerLaneDebug(laneTrace);
-    } else {
-      this.traceSchedulerLane(laneTrace);
+    if (!task.silent) {
+      if (task.type === SDKTaskType.UPLOAD) {
+        this.traceSchedulerLaneDebug(laneTrace);
+      } else {
+        this.traceSchedulerLane(laneTrace);
+      }
     }
     this.processLane(task.type);
   }
@@ -394,7 +405,9 @@ export class SDKTaskScheduler {
       errorMessage = normalizedError.message;
       lane.failedTasks++;
       lane.lastError = normalizedError.message;
-      FTInnerLogger.e(TAG, `Task failed: ${task.id}, name=${task.name}, type=${task.type}, error=${normalizedError.message}`);
+      if (!task.silent) {
+        FTInnerLogger.e(TAG, `Task failed: ${task.id}, name=${task.name}, type=${task.type}, error=${normalizedError.message}`);
+      }
       if (task.reject) {
         task.reject(normalizedError);
       }
