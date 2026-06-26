@@ -4,7 +4,6 @@ import {
   FTRUMGlobalManager,
   NetStatusBean,
   ResourceParams,
-  Status,
   StringWrapper
 } from '@guancecloud/ft_sdk/Index';
 import { LogEntry } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
@@ -658,7 +657,12 @@ export class StressTestManager {
     try {
       const logIndex = this.logCounter++;
       const logMessage = `Stress test log from timer ${threadIndex}, index ${logIndex}`;
-      FTLogger.logBackground(logMessage, Status.INFO.name);
+      FTLogger.batchLog([{
+        tag: STRESS_TEST_LOG_TAG,
+        message: logMessage,
+        level: 'i',
+        timestampMs: Date.now()
+      }]);
       this.currentStats.logsGenerated += 1;
     } catch (error) {
       this.recordErrorMessage(`log failed: ${error}`);
@@ -679,7 +683,7 @@ export class StressTestManager {
       const actionIndex = this.actionCounter++;
       const actionName = `stress_action_timer${threadIndex}_${actionIndex}`;
       const property: Record<string, object> = {
-        "stress_test": new StringWrapper("true"),
+        "tag": new StringWrapper(STRESS_TEST_LOG_TAG),
         "thread_index": new StringWrapper(threadIndex.toString()),
         "action_index": new StringWrapper(actionIndex.toString()),
         "traffic_mode": new StringWrapper(this.currentConfig.trafficMode),
@@ -724,7 +728,8 @@ export class StressTestManager {
   private async sendRealResource(threadIndex: number, resourceIndex: number): Promise<void> {
     const realApiUrl = this.getTraceTestUrl(resourceIndex);
     const separator = realApiUrl.indexOf('?') >= 0 ? '&' : '?';
-    const url = `${realApiUrl}${separator}stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
+    const url =
+      `${realApiUrl}${separator}tag=${STRESS_TEST_LOG_TAG}&stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
     const session = rcp.createSession(createFTRCPTrackConfig());
     const request = new rcp.Request(url, 'GET');
     const response = await session.fetch(request);
@@ -754,7 +759,7 @@ export class StressTestManager {
     params.responseConnection = 'keep-alive';
 
     const propertyMap: Map<string, object> = new Map();
-    propertyMap.set("stress_test", new StringWrapper("true"));
+    propertyMap.set("tag", new StringWrapper(STRESS_TEST_LOG_TAG));
     propertyMap.set("thread_index", new StringWrapper(threadIndex.toString()));
     propertyMap.set("resource_index", new StringWrapper(resourceIndex.toString()));
     propertyMap.set("traffic_mode", new StringWrapper(this.currentConfig.trafficMode));
@@ -795,7 +800,7 @@ export class StressTestManager {
       }
       const errorIndex = this.errorCounter++;
       const property: Record<string, object> = {
-        "stress_test": new StringWrapper("true"),
+        "tag": new StringWrapper(STRESS_TEST_LOG_TAG),
         "error_index": new StringWrapper(errorIndex.toString()),
         "source": new StringWrapper(this.currentConfig.source)
       };
@@ -835,7 +840,7 @@ export class StressTestManager {
       const longTaskIndex = this.longTaskCounter++;
       const durationNs = 350 * MS_TO_NS;
       this.rumManager.addLongTask(`Stress long task ${longTaskIndex}`, durationNs, {
-        "stress_test": true,
+        "tag": STRESS_TEST_LOG_TAG,
         "long_task_index": longTaskIndex,
         "source": this.currentConfig.source
       });
