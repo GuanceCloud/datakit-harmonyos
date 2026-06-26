@@ -291,6 +291,23 @@ static napi_value SetCrashCallback(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// NAPI: Clear crash callback from JavaScript
+static napi_value ClearCrashCallback(napi_env env, napi_callback_info info) {
+    OH_LOG_INFO(LogType::LOG_APP,  "ClearCrashCallback called");
+
+    auto& handler = FTNativeCrashHandler::getInstance();
+    handler.setCrashCallback(nullptr);
+
+    if (g_threadSafeFunction != nullptr) {
+        napi_release_threadsafe_function(g_threadSafeFunction, napi_tsfn_release);
+        g_threadSafeFunction = nullptr;
+    }
+
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
 // NAPI: Start watching crash events
 static napi_value StartWatching(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LogType::LOG_APP,  "StartWatching called");
@@ -309,6 +326,7 @@ static napi_value StopWatching(napi_env env, napi_callback_info info) {
 
     auto& handler = FTNativeCrashHandler::getInstance();
     handler.stopWatching();
+    handler.setCrashCallback(nullptr);
 
     if (g_threadSafeFunction != nullptr) {
         napi_release_threadsafe_function(g_threadSafeFunction, napi_tsfn_release);
@@ -448,6 +466,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"initNativeCrashHandler", nullptr, InitNativeCrashHandler, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCrashCallback", nullptr, SetCrashCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clearCrashCallback", nullptr, ClearCrashCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startWatching", nullptr, StartWatching, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopWatching", nullptr, StopWatching, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"addLog", nullptr, AddLog, nullptr, nullptr, nullptr, napi_default, nullptr},

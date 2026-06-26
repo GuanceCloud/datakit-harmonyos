@@ -2,15 +2,22 @@
  * Trace Function Test Page
  * Test HarmonyOS SDK Trace functionality
  */
-import { FTSDK } from '@guancecloud/ft_sdk/src/main/ets/components/FTSDK';
-import { FTTraceConfig } from '@guancecloud/ft_sdk/src/main/ets/components/Configs';
-import { TraceType } from '@guancecloud/ft_sdk/src/main/ets/components/trace/TraceType';
-import { FTTraceConfigManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceConfigManager';
-import { FTTraceInterceptor, HeaderHandler, HttpRequestData, HttpResponseData, TraceData, DefaultFTTraceInterceptor } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceInterceptor';
-import { FTTraceManager } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceManager';
-import { Status } from '@guancecloud/ft_sdk/src/main/ets/components/bean/Status';
-// import { FTHttpClient } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpClient';
-import { createFTRCPTrackConfig } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
+import {
+  createFTRCPTrackConfig,
+  DefaultFTTraceInterceptor,
+  FTSDK,
+  FTTraceConfig,
+  FTTraceConfigManager,
+  FTTraceContext,
+  FTTraceHeaderHandler,
+  FTTraceInterceptor,
+  FTTraceManager,
+  FTTraceRequestContext,
+  HttpRequestData,
+  HttpResponseData,
+  Status,
+  TraceType
+} from '@guancecloud/ft_sdk/Index';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
@@ -210,16 +217,12 @@ export struct TraceTestPage {
       DemoLogger.d(TAG, "Testing trace interceptor...");
       
       // Create custom header handler
-      class CustomHeaderHandler implements HeaderHandler {
-        processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-          const modifiedHeaders = new Map(headers);
-          modifiedHeaders.set('x-custom-trace-id', traceData.traceId);
-          modifiedHeaders.set('x-custom-span-id', traceData.spanId);
-          return modifiedHeaders;
-        }
-        
-        processResponseHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-          return headers; // Don't modify response headers
+      class CustomHeaderHandler implements FTTraceHeaderHandler {
+        getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+          const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+          traceContext.headers['x-custom-trace-id'] = traceContext.traceId;
+          traceContext.headers['x-custom-span-id'] = traceContext.spanId;
+          return traceContext;
         }
       }
       
@@ -675,15 +678,12 @@ export struct TraceTestPage {
       // }
       
       // Test 3: Custom trace interceptor
-      class CustomHeaderHandler implements HeaderHandler {
-        processRequestHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-          const modifiedHeaders = new Map(headers);
-          modifiedHeaders.set('x-custom-trace-id', traceData.traceId);
-          modifiedHeaders.set('x-custom-span-id', traceData.spanId);
-          return modifiedHeaders;
-        }
-        processResponseHeaders(headers: Map<string, string>, traceData: TraceData): Map<string, string> {
-          return headers;
+      class CustomHeaderHandler implements FTTraceHeaderHandler {
+        getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+          const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+          traceContext.headers['x-custom-trace-id'] = traceContext.traceId;
+          traceContext.headers['x-custom-span-id'] = traceContext.spanId;
+          return traceContext;
         }
       }
       const customHeaderHandler = new CustomHeaderHandler();
@@ -807,33 +807,34 @@ export struct TraceTestPage {
       
       // Test 2: Verify handler was stored
       const handler = traceManager.getHandler(resourceId);
-      if (handler) {
-        this.addTestResult("✅ Handler stored successfully");
-        // Note: FTTraceHeaderHandler interface only has getTraceHeader(), not getTraceID()/getSpanID()
-        // We can verify the handler exists and can generate headers
-        const handlerHeaders = handler.getTraceHeader(testUrl);
-        const handlerHeaderKeys = Object.keys(handlerHeaders);
-        if (handlerHeaderKeys.length > 0) {
-          this.addTestResult("✅ Handler can generate headers");
-          for (let i = 0; i < handlerHeaderKeys.length; i++) {
-            const key = handlerHeaderKeys[i];
-            this.addTestResult(`   - Handler ${key}: ${handlerHeaders[key]}`);
+      const traceContext = traceManager.getTraceContext(resourceId);
+      if (handler && traceContext) {
+        this.addTestResult("✅ Handler and TraceContext stored successfully");
+        const contextHeaders = traceContext.headers;
+        const contextHeaderKeys = Object.keys(contextHeaders);
+        if (contextHeaderKeys.length > 0) {
+          this.addTestResult("✅ TraceContext contains headers");
+          this.addTestResult(`   - Trace ID: ${traceContext.traceId}`);
+          this.addTestResult(`   - Span ID: ${traceContext.spanId}`);
+          for (let i = 0; i < contextHeaderKeys.length; i++) {
+            const key = contextHeaderKeys[i];
+            this.addTestResult(`   - Context ${key}: ${contextHeaders[key]}`);
           }
           
           // Verify headers match (compare first header key)
-          if (handlerHeaderKeys.length > 0 && Object.keys(headers1).length > 0) {
-            const firstKey = handlerHeaderKeys[0];
-            if (handlerHeaders[firstKey] === headers1[firstKey]) {
-              this.addTestResult(`✅ ${firstKey} matches between headers and handler`);
+          if (contextHeaderKeys.length > 0 && Object.keys(headers1).length > 0) {
+            const firstKey = contextHeaderKeys[0];
+            if (contextHeaders[firstKey] === headers1[firstKey]) {
+              this.addTestResult(`✅ ${firstKey} matches between headers and TraceContext`);
             } else {
               this.addTestResult(`❌ ${firstKey} mismatch`);
             }
           }
         } else {
-          this.addTestResult("❌ Handler returned empty headers");
+          this.addTestResult("❌ TraceContext returned empty headers");
         }
       } else {
-        this.addTestResult("❌ Handler not found after getTraceHeader()");
+        this.addTestResult("❌ Handler or TraceContext not found after getTraceHeader()");
       }
       
       // Test 3: getTraceHeaderDirect() - doesn't store handler
@@ -894,6 +895,84 @@ export struct TraceTestPage {
     } catch (error) {
       this.addTestResult(`❌ FTTraceManager API test failed: ${error}`);
       DemoLogger.e(TAG, `FTTraceManager API test failed: ${error}`);
+    }
+  }
+
+  /**
+   * Test custom Trace Header append/modify for manual requests.
+   */
+  testManualCustomTraceHeaderAppend() {
+    try {
+      this.addTestResult("🔍 Testing manual custom Trace Header append/modify");
+
+      class DemoTraceHeaderHandler implements FTTraceHeaderHandler {
+        getTraceContext(request: FTTraceRequestContext): FTTraceContext {
+          const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
+          traceContext.headers['x-global-custom-trace-id'] = traceContext.traceId;
+          traceContext.headers['x-global-custom-span-id'] = traceContext.spanId;
+          return traceContext;
+        }
+      }
+
+      const traceConfig = new FTTraceConfig()
+        .setSamplingRate(1.0)
+        .setTraceType(this.selectedTraceType)
+        .setEnableAutoTrace(true)
+        .setEnableLinkRUMData(true)
+        .setTraceHeaderHandler(new DemoTraceHeaderHandler())
+        .setServiceName(`harmonyos-manual-custom-trace-${this.selectedTraceType.toString().toLowerCase()}`);
+
+      FTSDK.installTraceConfig(traceConfig);
+
+      const traceManager = FTTraceManager.getInstance();
+      const testUrl = this.getTraceTestUrl();
+      const resourceId = `manual-custom-trace-${Date.now()}`;
+
+      const traceHeaders = traceManager.getTraceHeader(resourceId, testUrl);
+      const traceContext = traceManager.getTraceContext(resourceId);
+
+      if (!traceContext) {
+        this.addTestResult("❌ TraceContext not found after getTraceHeader()");
+        return;
+      }
+
+      this.addTestResult("✅ Trace headers generated through getTraceHeader()");
+      this.addTestResult(`   - Trace ID: ${traceContext.traceId}`);
+      this.addTestResult(`   - Span ID: ${traceContext.spanId}`);
+
+      if (traceHeaders['x-global-custom-trace-id'] === traceContext.traceId &&
+        traceHeaders['x-global-custom-span-id'] === traceContext.spanId) {
+        this.addTestResult("✅ setTraceHeaderHandler appended x-global-custom-trace-id/x-global-custom-span-id");
+      } else {
+        this.addTestResult("❌ setTraceHeaderHandler custom headers do not match TraceContext IDs");
+      }
+
+      traceHeaders['x-business-id'] = `business-${Date.now()}`;
+      traceHeaders['x-trace-source'] = 'harmonyos-demo';
+      traceHeaders['x-trace-id'] = traceContext.traceId;
+      traceHeaders['x-span-id'] = traceContext.spanId;
+
+      if (traceHeaders['x-trace-id'] === traceContext.traceId && traceHeaders['x-span-id'] === traceContext.spanId) {
+        this.addTestResult("✅ Manually appended x-trace-id/x-span-id from TraceContext");
+      } else {
+        this.addTestResult("❌ Manually appended trace IDs do not match TraceContext");
+      }
+
+      traceHeaders['x-trace-source'] = 'harmonyos-demo-updated';
+      if (traceHeaders['x-trace-source'] === 'harmonyos-demo-updated') {
+        this.addTestResult("✅ Manually modified x-trace-source for this request");
+      } else {
+        this.addTestResult("❌ Failed to modify x-trace-source");
+      }
+
+      this.addTestResult(`   Final request headers: ${JSON.stringify(traceHeaders)}`);
+      this.addTestResult("📋 Verification:");
+      this.addTestResult("   - Global custom headers are generated inside setTraceHeaderHandler");
+      this.addTestResult("   - Manual headers added after getTraceHeader affect only this request");
+      this.addTestResult("   - x-trace-id/x-span-id are copied from the same TraceContext used for RUM linking");
+    } catch (error) {
+      this.addTestResult(`❌ Manual custom Trace Header append/modify test failed: ${error}`);
+      DemoLogger.e(TAG, `Manual custom Trace Header append/modify test failed: ${error}`);
     }
   }
 
@@ -1073,38 +1152,30 @@ export struct TraceTestPage {
           // Step 8: Wait a moment for resource data to be processed
           await new Promise<void>((resolve) => setTimeout(() => resolve(), 500));
           
-          // Step 9: Get handler from FTTraceManager to verify trace_id and span_id
-          const handler = traceManager.getHandler(testResourceId);
+          // Step 9: Get TraceContext from FTTraceManager to verify trace_id and span_id
+          const traceContext = traceManager.getTraceContext(testResourceId);
           
-          if (handler) {
-            this.addTestResult("✅ Handler found in FTTraceManager");
+          if (traceContext) {
+            this.addTestResult("✅ TraceContext found in FTTraceManager");
             
-            // Check if handler has getTraceID and getSpanID methods
-            if (handler.getTraceID && handler.getSpanID) {
-              const handlerTraceId = handler.getTraceID();
-              const handlerSpanId = handler.getSpanID();
+            if (traceContext.traceId && traceContext.spanId) {
+              this.addTestResult(`✅ TraceContext Trace ID: ${traceContext.traceId}`);
+              this.addTestResult(`✅ TraceContext Span ID: ${traceContext.spanId}`);
               
-              if (handlerTraceId && handlerSpanId) {
-                this.addTestResult(`✅ Handler Trace ID: ${handlerTraceId}`);
-                this.addTestResult(`✅ Handler Span ID: ${handlerSpanId}`);
-                
-                // Verify they match the headers
-                const headerTraceId = traceHeaders['x-datadog-trace-id'];
-                const headerSpanId = traceHeaders['x-datadog-parent-id'];
-                
-                if (handlerTraceId === headerTraceId && handlerSpanId === headerSpanId) {
-                  this.addTestResult("✅ Handler IDs match header IDs");
-                } else {
-                  this.addTestResult("⚠️ Handler IDs do not match header IDs");
-                }
+              // Verify they match the headers
+              const headerTraceId = traceHeaders['x-datadog-trace-id'];
+              const headerSpanId = traceHeaders['x-datadog-parent-id'];
+
+              if (traceContext.traceId === headerTraceId && traceContext.spanId === headerSpanId) {
+                this.addTestResult("✅ TraceContext IDs match header IDs");
               } else {
-                this.addTestResult("⚠️ Handler Trace ID or Span ID is empty");
+                this.addTestResult("⚠️ TraceContext IDs do not match header IDs");
               }
             } else {
-              this.addTestResult("⚠️ Handler does not have getTraceID or getSpanID methods");
+              this.addTestResult("⚠️ TraceContext Trace ID or Span ID is empty");
             }
           } else {
-            this.addTestResult("⚠️ Handler not found in FTTraceManager (may have been cleaned up)");
+            this.addTestResult("⚠️ TraceContext not found in FTTraceManager (may have been cleaned up)");
           }
           
           // Step 10: Verify resource data contains trace_id and span_id
@@ -1341,6 +1412,12 @@ export struct TraceTestPage {
           .margin({ bottom: 10 })
           .onClick(() => this.testTraceManagerAPI())
 
+        Button('Test Custom Trace Header Append')
+          .width('100%')
+          .height(50)
+          .margin({ bottom: 10 })
+          .onClick(() => this.testManualCustomTraceHeaderAppend())
+
         Button('Test Trace ID Generation')
           .width('100%')
           .height(50)
@@ -1368,6 +1445,42 @@ export struct TraceTestPage {
           .height(50)
           .margin({ bottom: 10 })
           .onClick(() => this.runAllTests())
+
+        Column() {
+          Row() {
+            Text('Test Results')
+              .fontSize(16)
+              .fontWeight(FontWeight.Medium)
+              .layoutWeight(1)
+
+            Button('Clear Results')
+              .height(36)
+              .onClick(() => this.clearTestResults())
+          }
+          .width('100%')
+          .margin({ top: 12, bottom: 10 })
+
+          if (this.testResults.length === 0) {
+            Text('No test results yet.')
+              .fontSize(13)
+              .fontColor('#666666')
+              .width('100%')
+          } else {
+            ForEach(this.testResults, (result: string, index: number) => {
+              Text(result)
+                .fontSize(12)
+                .fontColor('#222222')
+                .width('100%')
+                .padding({ top: 6, bottom: 6, left: 8, right: 8 })
+                .backgroundColor(index % 2 === 0 ? '#F7F8FA' : '#FFFFFF')
+                .borderRadius(4)
+                .margin({ bottom: 4 })
+            }, (result: string, index: number) => `${index}-${result}`)
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .margin({ top: 12, bottom: 24 })
 
       }
       .width('100%')

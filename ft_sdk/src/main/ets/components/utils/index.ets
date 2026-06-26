@@ -3,23 +3,6 @@
  * Exports all utility classes related to system information
  */
 
-
-// Monitoring type enums
-export { 
-  ErrorMonitorType,
-  DeviceMetricsMonitorType,
-  PerformanceMonitorType,
-  NetworkMonitorType,
-  StorageMonitorType,
-  SecurityMonitorType,
-  BusinessMonitorType,
-  MonitorLevel,
-  MonitorStatus,
-  type MonitorConfig,
-  type MonitorResult,
-  type IMonitorManager
-} from './MonitorTypes';
-
 // General utilities
 export { Utils } from './Utils';
 

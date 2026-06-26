@@ -160,9 +160,9 @@ export class RateLimitTestUtils {
 
     const limitReached = cachePolicy.isReachDbLimit();
     const shouldDiscard = limitReached;
-    const details = `Database size test completed. Initial size: ${initialSize} bytes, Added: ${addSize} bytes, Limit reached: ${limitReached}, Should discard: ${shouldDiscard}`;
+    const details = `DB cache size test completed. Initial size: ${initialSize} bytes, Added: ${addSize} bytes, Limit reached: ${limitReached}, Should discard: ${shouldDiscard}`;
 
-    DemoLogger.i(TAG, ` Database size test result: ${details}`);
+    DemoLogger.i(TAG, ` DB cache size test result: ${details}`);
     cachePolicy.resetTestConfig();
     return new DatabaseSizeTestResult(initialSize, limitReached, shouldDiscard, details);
   }

@@ -34,6 +34,13 @@ export class DatabaseHelper {
     return DatabaseHelper.instance;
   }
 
+  public static resetInstanceInternal(): void {
+    if (DatabaseHelper.instance) {
+      DatabaseHelper.instance.resetConnection();
+    }
+    DatabaseHelper.instance = null;
+  }
+
   /**
    * Initialize database
    * @returns Promise<relationalStore.RdbStore>
@@ -101,18 +108,13 @@ export class DatabaseHelper {
       return false;
     }
 
-    try {
-      // Check if all three main tables exist
-      const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
-      const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
-      const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-      
-      // All tables must exist
-      return hasViewTable && hasActionTable && hasSyncTable;
-    } catch (error) {
-      FTInnerLogger.w(TAG, `Error checking tables existence: ${error}`);
-      return false;
-    }
+    // Check if all three main tables exist
+    const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
+    const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
+    const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+
+    // All tables must exist
+    return hasViewTable && hasActionTable && hasSyncTable;
   }
 
   /**
@@ -269,11 +271,6 @@ export class DatabaseHelper {
           this.update1to2Sync(rdbStore);
         }
       }
-      // Handle direct upgrade from 1 to 3
-      else if (oldVersion === 1 && newVersion === 3) {
-        this.update1to2Sync(rdbStore);
-        this.update2to3Sync(rdbStore);
-      }
 
       FTInnerLogger.i(TAG, "Database upgrade completed successfully");
     } catch (error) {
@@ -356,19 +353,16 @@ export class DatabaseHelper {
    * Version 1 to version 2 upgrade (asynchronous version)
    */
   private async update1to2(): Promise<void> {
-    if (!this.rdbStore) {
-      throw new Error("Database not initialized");
-    }
-
     try {
+      const rdbStore = this.rdbStore as relationalStore.RdbStore;
       // Add new fields to rum_view table
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_DATA_UPLOAD_TIME} BIGINT DEFAULT 0`
       );
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_DATA_UPDATE_TIME} BIGINT DEFAULT 0`
       );
-      await this.rdbStore.executeSql(
+      await rdbStore.executeSql(
         `ALTER TABLE ${FTSQL.FT_TABLE_VIEW} ADD COLUMN ${FTSQL.RUM_VIEW_UPDATE_TIME} BIGINT DEFAULT 1`
       );
 
@@ -383,13 +377,10 @@ export class DatabaseHelper {
    * Version 2 to version 3 upgrade (asynchronous version)
    */
   private async update2to3(): Promise<void> {
-    if (!this.rdbStore) {
-      throw new Error("Database not initialized");
-    }
-
     try {
+      const rdbStore = this.rdbStore as relationalStore.RdbStore;
       // Create a new sync data table
-      await this.rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
+      await rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
       FTInnerLogger.d(TAG, "Database upgraded from version 2 to 3");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to upgrade from version 2 to 3: ${error}`);
@@ -431,6 +422,14 @@ export class DatabaseHelper {
   }
 
   /**
+   * Clear cached database connection so the next operation opens a fresh store.
+   */
+  public resetConnection(): void {
+    this.rdbStore = null;
+    this.initPromise = null;
+  }
+
+  /**
    * Check whether the database has been initialized
    * @returns boolean
    */
@@ -442,14 +441,19 @@ export class DatabaseHelper {
    * Close the database
    */
   public async closeDatabase(): Promise<void> {
-    if (this.rdbStore) {
-      try {
-        await this.rdbStore.close();
-        this.rdbStore = null;
-        FTInnerLogger.i(TAG, "Database closed successfully");
-      } catch (error) {
-        FTInnerLogger.e(TAG, `Failed to close database: ${error}`);
-      }
+    const rdbStore = this.rdbStore;
+    if (!rdbStore) {
+      this.resetConnection();
+      return;
+    }
+
+    try {
+      await rdbStore.close();
+      FTInnerLogger.i(TAG, "Database closed successfully");
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to close database: ${error}`);
+    } finally {
+      this.resetConnection();
     }
   }
 

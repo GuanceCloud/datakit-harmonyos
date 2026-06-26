@@ -2,8 +2,7 @@
  * View Update Time Test Page
  * Test view_update_time counter functionality
  */
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
-import { createFTRCPTrackConfig } from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
+import { createFTRCPTrackConfig, FTRUMGlobalManager } from '@guancecloud/ft_sdk/Index';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';

@@ -103,16 +103,6 @@ interface BatteryInfo {
 }
 
 /**
- * Battery status data interface
- */
-interface BatteryStatusData {
-  level?: number;
-  charging?: boolean;
-  chargingTime?: number;
-  dischargingTime?: number;
-}
-
-/**
  * Device information interface
  */
 interface DeviceInfo {
@@ -606,31 +596,12 @@ export class DeviceUtils {
    */
   public static async getBatteryInfo(): Promise<BatteryInfo> {
     try {
-      // Use HarmonyOS battery module to get battery information
-      return new Promise((resolve, reject) => {
-        // TODO get battery info
-        // battery.getStatus({
-        //   success: (data: BatteryStatusData) => {
-        //     const result: BatteryInfo = {
-        //       level: data.level || 0,
-        //       charging: data.charging || false,
-        //       chargingTime: data.chargingTime || 0,
-        //       dischargingTime: data.dischargingTime || 0
-        //     };
-        //     resolve(result);
-        //   },
-        //   fail: (data: string, code: number) => {
-        //     FTInnerLogger.e(TAG, `Failed to get battery info: ${code} - ${data}`);
-        //     // Return default value
-        //     resolve({
-        //       level: 0,
-        //       charging: false,
-        //       chargingTime: 0,
-        //       dischargingTime: 0
-        //     });
-        //   }
-        // });
-      });
+      return {
+        level: 0,
+        charging: false,
+        chargingTime: 0,
+        dischargingTime: 0
+      };
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get battery info: ${error}`);
       return {

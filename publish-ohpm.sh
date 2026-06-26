@@ -5,6 +5,9 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY="${OHPM_REGISTRY:-https://ohpm.openharmony.cn/ohpm/}"
 PRODUCT_NAME="${PRODUCT_NAME:-default}"
+FT_SDK_PRODUCT_NAME="${FT_SDK_PRODUCT_NAME:-ft_sdk}"
+FT_SDK_EXT_PRODUCT_NAME="${FT_SDK_EXT_PRODUCT_NAME:-ft_sdk_ext}"
+FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
 MODULE_TYPE="${1:-agent}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
@@ -22,10 +25,24 @@ if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TY
   exit 1
 fi
 
-if command -v ohpm >/dev/null 2>&1; then
+if [[ -n "${OHPM_BIN:-}" ]]; then
+  if [[ "$OHPM_BIN" == */* ]]; then
+    if [[ ! -x "$OHPM_BIN" || -d "$OHPM_BIN" ]]; then
+      echo "Error: OHPM_BIN is set but not executable or not found: $OHPM_BIN"
+      exit 1
+    fi
+  elif command -v "$OHPM_BIN" >/dev/null 2>&1; then
+    OHPM_BIN="$(command -v "$OHPM_BIN")"
+  else
+    echo "Error: OHPM_BIN is set but not executable or not found: $OHPM_BIN"
+    exit 1
+  fi
+elif command -v ohpm >/dev/null 2>&1; then
   OHPM_BIN="$(command -v ohpm)"
+elif [[ -x "/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm" ]]; then
+  OHPM_BIN="/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm"
 else
-  echo "Error: ohpm command not found in PATH"
+  echo "Error: ohpm command not found. Set OHPM_BIN or add ohpm to PATH"
   exit 1
 fi
 
@@ -49,11 +66,29 @@ fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/publish-ohpm.XXXXXX")"
 PREVIOUS_REGISTRY=""
+PREVIOUS_KEY_PASSPHRASE=""
+PREVIOUS_KEY_PASSPHRASE_SET=0
+PREVIOUS_CRYPTO_PATH=""
+PREVIOUS_CRYPTO_PATH_SET=0
+SHOULD_RESTORE_KEY_PASSPHRASE=0
 STARTED_SSH_AGENT=0
 SSH_ASKPASS_SCRIPT=""
 cleanup() {
   if [[ -n "$PREVIOUS_REGISTRY" ]]; then
     "$OHPM_BIN" config set registry "$PREVIOUS_REGISTRY" >/dev/null 2>&1 || true
+  fi
+  if [[ "$SHOULD_RESTORE_KEY_PASSPHRASE" -eq 1 ]]; then
+    if [[ "$PREVIOUS_KEY_PASSPHRASE_SET" -eq 1 ]]; then
+      "$OHPM_BIN" config set key_passphrase "$PREVIOUS_KEY_PASSPHRASE" >/dev/null 2>&1 || true
+    else
+      "$OHPM_BIN" config delete key_passphrase >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$PREVIOUS_CRYPTO_PATH_SET" -eq 1 ]]; then
+      "$OHPM_BIN" config set crypto_path "$PREVIOUS_CRYPTO_PATH" >/dev/null 2>&1 || true
+    else
+      "$OHPM_BIN" config delete crypto_path >/dev/null 2>&1 || true
+    fi
   fi
   if [[ "$STARTED_SSH_AGENT" -eq 1 && -n "${SSH_AGENT_PID:-}" ]]; then
     ssh-agent -k >/dev/null 2>&1 || true
@@ -135,6 +170,105 @@ ensure_key_path() {
   fi
 }
 
+verify_key_passphrase() {
+  if [[ -z "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
+    return
+  fi
+
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    echo "Warning: ssh-keygen not found; skipping private key passphrase verification"
+    return
+  fi
+
+  local configured_key_path
+  configured_key_path="$("$OHPM_BIN" config get key_path 2>/dev/null | tail -n 1 | tr -d '\r')"
+  if [[ -z "$configured_key_path" || "$configured_key_path" == "undefined" || "$configured_key_path" == "null" ]]; then
+    echo "Warning: key_path is empty after configuration; skipping private key passphrase verification"
+    return
+  fi
+
+  if ! ssh-keygen -y -P "$OHPM_KEY_PASSPHRASE_VALUE" -f "$configured_key_path" >/dev/null 2>&1; then
+    echo "Error: OHPM_KEY_PASSPHRASE cannot unlock the configured private key:"
+    echo "  $configured_key_path"
+    echo "Check that OHPM_KEY_PATH points to the expected key and OHPM_KEY_PASSPHRASE is correct."
+    exit 1
+  fi
+}
+
+set_key_passphrase() {
+  if [[ -z "$OHPM_KEY_PASSPHRASE_VALUE" ]]; then
+    return
+  fi
+
+  local existing_key_passphrase
+  if "$OHPM_BIN" config get key_passphrase >/dev/null 2>&1; then
+    existing_key_passphrase="$("$OHPM_BIN" config get key_passphrase 2>/dev/null | tail -n 1 | tr -d '\r')"
+    if [[ -n "$existing_key_passphrase" && "$existing_key_passphrase" != "undefined" && "$existing_key_passphrase" != "null" ]]; then
+      if [[ "$existing_key_passphrase" == security:* ]]; then
+        PREVIOUS_KEY_PASSPHRASE="$existing_key_passphrase"
+        PREVIOUS_KEY_PASSPHRASE_SET=1
+      else
+        echo "Warning: found plaintext ohpm key_passphrase; it will be cleared after publish"
+      fi
+    fi
+  fi
+
+  if "$OHPM_BIN" config get crypto_path >/dev/null 2>&1; then
+    PREVIOUS_CRYPTO_PATH="$("$OHPM_BIN" config get crypto_path 2>/dev/null | tail -n 1 | tr -d '\r')"
+    if [[ -n "$PREVIOUS_CRYPTO_PATH" && "$PREVIOUS_CRYPTO_PATH" != "undefined" && "$PREVIOUS_CRYPTO_PATH" != "null" ]]; then
+      PREVIOUS_CRYPTO_PATH_SET=1
+    fi
+  fi
+
+  local crypto_path="$WORK_DIR/ohpm-crypto"
+  local ohpm_root
+  ohpm_root="$(cd "$(dirname "$OHPM_BIN")/.." && pwd)"
+  local ohpm_crypto_module="$ohpm_root/lib/core/config-encrypt/crypto"
+  if [[ ! -f "$ohpm_crypto_module/index.js" ]]; then
+    echo "Error: unable to find ohpm crypto module at $ohpm_crypto_module"
+    exit 1
+  fi
+
+  local encrypted_passphrase
+  encrypted_passphrase="$(
+    OHPM_CRYPTO_MODULE_FOR_NODE="$ohpm_crypto_module" \
+      OHPM_CRYPTO_PATH_FOR_NODE="$crypto_path" \
+      OHPM_KEY_PASSPHRASE_FOR_NODE="$OHPM_KEY_PASSPHRASE_VALUE" \
+      "$NODE_BIN" <<'NODE'
+const cryptoModulePath = process.env.OHPM_CRYPTO_MODULE_FOR_NODE;
+const cryptoPath = process.env.OHPM_CRYPTO_PATH_FOR_NODE;
+const passphrase = process.env.OHPM_KEY_PASSPHRASE_FOR_NODE;
+
+(async () => {
+  const ohpmCrypto = require(cryptoModulePath);
+  await ohpmCrypto.createCrypto(cryptoPath);
+  const crypto = ohpmCrypto.loadCustomCrypto(cryptoPath);
+  if (!crypto) {
+    throw new Error(`failed to load ohpm crypto component: ${cryptoPath}`);
+  }
+  try {
+    process.stdout.write(crypto.encrypt(passphrase));
+  } finally {
+    crypto.destroy();
+  }
+})().catch((error) => {
+  console.error(error && error.message ? error.message : error);
+  process.exit(1);
+});
+NODE
+  )"
+
+  if [[ "$encrypted_passphrase" != security:* ]]; then
+    echo "Error: failed to encrypt ohpm key_passphrase"
+    exit 1
+  fi
+
+  SHOULD_RESTORE_KEY_PASSPHRASE=1
+  echo "Setting encrypted ohpm key_passphrase from environment variable"
+  "$OHPM_BIN" config set crypto_path "$crypto_path" >/dev/null
+  "$OHPM_BIN" config set key_passphrase "$encrypted_passphrase" >/dev/null
+}
+
 ensure_ssh_agent() {
   local normalized_use_ssh_agent
   normalized_use_ssh_agent="$(printf '%s' "$OHPM_USE_SSH_AGENT_VALUE" | tr '[:upper:]' '[:lower:]')"
@@ -196,15 +330,36 @@ set_registry() {
   "$OHPM_BIN" config set registry "$REGISTRY"
 }
 
+product_for_module() {
+  local module_name="$1"
+
+  case "$module_name" in
+    ft_sdk)
+      echo "$FT_SDK_PRODUCT_NAME"
+      ;;
+    ft_sdk_ext)
+      echo "$FT_SDK_EXT_PRODUCT_NAME"
+      ;;
+    ft_native)
+      echo "$FT_NATIVE_PRODUCT_NAME"
+      ;;
+    *)
+      echo "$PRODUCT_NAME"
+      ;;
+  esac
+}
+
 build_har() {
   local module_name="$1"
   local build_module="${module_name}@${BUILD_TARGET}"
+  local product_name
+  product_name="$(product_for_module "$module_name")"
 
-  echo "Building HAR for ${module_name}..."
+  echo "Building HAR for ${module_name} with product ${product_name}..."
   (
     cd "$ROOT_DIR"
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$PRODUCT_NAME" -p module="$build_module" clean --analyze=normal
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$PRODUCT_NAME" -p module="$build_module" assembleHar --analyze=normal --parallel
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" clean --analyze=normal
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" assembleHar --analyze=normal --parallel
   )
 }
 
@@ -252,7 +407,9 @@ publish_har() {
 
 publish_module() {
   local module_name="$1"
-  local built_har="$ROOT_DIR/${module_name}/build/${PRODUCT_NAME}/outputs/${BUILD_TARGET}/${module_name}.har"
+  local product_name
+  product_name="$(product_for_module "$module_name")"
+  local built_har="$ROOT_DIR/${module_name}/build/${product_name}/outputs/${BUILD_TARGET}/${module_name}.har"
   local staged_har="$WORK_DIR/${module_name}.har"
 
   build_har "$module_name"
@@ -283,6 +440,8 @@ publish_module() {
 main() {
   ensure_publish_id
   ensure_key_path
+  verify_key_passphrase
+  set_key_passphrase
   ensure_ssh_agent
   set_registry
 

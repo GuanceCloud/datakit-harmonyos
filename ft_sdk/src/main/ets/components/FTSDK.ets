@@ -1,41 +1,38 @@
-import BuildProfile from "../../../../BuildProfile";
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from "./Configs";
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig, LogGlobalContextDictionary, LogGlobalContextValue } from "./Configs";
 import { Constants } from "./Constants";
-import FTTrackInner from "./FTTrackInner";
-import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
-import { FTRUMGlobalManager } from "./rum/FTRUMGlobalManager";
-import { FTInnerLogger as FTInnerLogger } from "./log/FTLogger";
-import { SyncTaskManager } from "./SyncTaskManager";
-import { AppUtils } from "./utils/AppUtils";
-import { DeviceUtils } from "./utils/DeviceUtils";
-import { DeviceUUIDManager } from "./utils/DeviceUUIDManager";
-import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
-import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
-import { FTMonitorManager } from "./rum/FTMonitorManager";
-import { TrackLogManager } from "./log/TrackLogManager";
-import { ANRDetectManager } from "./monitor/ANRDetectManager";
 import { UserData } from "./rum/bean/UserData";
-import { UserDataManager } from "./rum/UserDataManager";
-import { FTNetworkListener } from "./utils/FTNetworkListener";
 import { Context, common } from '@kit.AbilityKit';
 import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
-import { FTActionTracker } from "./rum/FTActionTracker";
-import { FTNavigationTracker } from "./rum/FTNavigationTracker";
+import ftnativecrash from 'libftnativecrash.so';
+import BuildProfile from "../../../../BuildProfile";
+import { FTSDKAnrManager, getFTSDKRuntime } from "./internal/runtime/FTSDKRuntime";
+import FTTrackInner from "./FTTrackInner";
+import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
+import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
+import { TrackLogManager } from "./log/TrackLogManager";
+import { FTInnerLogger } from "./log/FTLogger";
+import { UserDataManager } from "./rum/UserDataManager";
+import { FTNetworkListener } from "./utils/FTNetworkListener";
+import { SyncTaskManager } from "./SyncTaskManager";
+import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
-import { FTExceptionHandler } from "./FTExceptionHandler";
-import { FTUIBlockManager } from "./monitor/FTUIBlockManager";
+import { FTRUMGlobalManager } from "./rum/FTRUMGlobalManager";
+import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
+import { FTMonitorManager } from "./rum/FTMonitorManager";
+import { DeviceUtils } from "./utils/DeviceUtils";
+import { DeviceUUIDManager } from "./utils/DeviceUUIDManager";
+import { AppUtils } from "./utils/AppUtils";
+import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
-import ftnativecrash from 'libftnativecrash.so';
-import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 
 const TAG = "FTSDK"
 
 export class FTSDK {
   private static ftSdk: FTSDK | null;
-  private static anrDetectManager: ANRDetectManager | null = null;
+  private static anrDetectManager: FTSDKAnrManager | null = null;
   private static rumConfig: FTRUMConfig | null = null;
   private static uiFeaturesInitialized: boolean = false;
   private static pendingUIFeatureInit: boolean = false;
@@ -44,11 +41,34 @@ export class FTSDK {
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
 
   /**
-   * Get RUM config (for testing purposes)
+   * Get current RUM config
    */
   public static getRumConfig(): FTRUMConfig | null {
     return FTSDK.rumConfig;
   }
+
+  protected static resetInternalState(): void {
+    FTSDK.ftSdk = null;
+    FTSDK.anrDetectManager = null;
+    FTSDK.rumConfig = null;
+    FTSDK.uiFeaturesInitialized = false;
+    FTSDK.pendingUIFeatureInit = false;
+    FTSDK.uiFeatureInitRetryCount = 0;
+    FTSDK.autoActionTrackingEnabled = true;
+    FTSDK.cachedPACKAGE_UUID = null;
+  }
+
+  protected static requiresUIFeaturesInternal(rumConfig: FTRUMConfig): boolean {
+    return rumConfig.isEnableTraceUserAction() ||
+      rumConfig.isEnableTraceUserView() ||
+      rumConfig.isEnableTrackAppCrash() ||
+      rumConfig.isEnableTrackAppANR();
+  }
+
+  protected static requiresLifecycleListenerInternal(rumConfig: FTRUMConfig): boolean {
+    return FTSDK.requiresUIFeaturesInternal(rumConfig);
+  }
+
   private static autoActionTrackingEnabled: boolean = true;
   private ftSDKConfig: FTSDKConfig | null;
 
@@ -96,7 +116,7 @@ export class FTSDK {
     this.ftSDKConfig = sdkConfig;
   }
 
-  static install(sdkConfig: FTSDKConfig, context?: Context): void {
+  static install(sdkConfig: FTSDKConfig | null, context?: Context): void {
 
     try {
       if (sdkConfig == null) {
@@ -106,7 +126,7 @@ export class FTSDK {
 
       // Initialize Utils with context (required for ApplicationContext access)
       if (context && (context as common.UIAbilityContext)) {
-        Utils.init(context as common.UIAbilityContext);
+        getFTSDKRuntime().initUtils(context as common.UIAbilityContext);
         FTInnerLogger.d(TAG, "Utils initialized with UIAbilityContext");
       } else {
         FTInnerLogger.w(TAG, "Context is not UIAbilityContext, Utils.init() skipped");
@@ -142,12 +162,12 @@ export class FTSDK {
     FTNetworkListener.getInstance().monitor();
 
     // Get context from Utils (unified context management)
-    const context = Utils.getAbilityContext();
+    const context = getFTSDKRuntime().getAbilityContext();
 
     // Initialize sync task manager
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
-      SyncTaskManager.getInstance().init(config, context);
+      getFTSDKRuntime().initSyncTaskManager(config, context);
       UserDataManager.getInstance().init(context);
       DeviceUUIDManager.getInstance().init(context);
 
@@ -180,6 +200,8 @@ export class FTSDK {
     try {
       // Initialize TrackLogManager
       TrackLogManager.getInstance().setLogConfig(logConfig);
+      FTDBCachePolicy.getInstance().updateLogCacheLimitCount(logConfig.getLogCacheLimitCount());
+      FTDBCachePolicy.getInstance().updateLogCacheDiscardStrategy(logConfig.getLogCacheDiscardStrategy());
 
       // Initialize FTTrackInner log configuration
       if (FTSDK.ftSdk) {
@@ -214,12 +236,15 @@ export class FTSDK {
   static installRUMConfig(rumConfig: FTRUMConfig): void {
     // Save rumConfig reference for later use (e.g., ActionTracker initialization)
     FTSDK.rumConfig = rumConfig;
-    FTSDK.pendingUIFeatureInit = FTSDK.requiresUIFeatures(rumConfig);
+    FTSDK.updateNativePackageInfo();
+    FTSDK.pendingUIFeatureInit = FTSDK.requiresUIFeaturesInternal(rumConfig);
     FTSDK.uiFeaturesInitialized = false;
     FTSDK.uiFeatureInitRetryCount = 0;
 
     FTSDK.initRUMGlobalContext(rumConfig);
     FTRUMConfigManager.getInstance().initWithConfig(rumConfig);
+    FTDBCachePolicy.getInstance().updateRumCacheLimitCount(rumConfig.getRumCacheLimitCount());
+    FTDBCachePolicy.getInstance().updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
     // Initialize RUM Inner Manager with config (aligned with Android: FTRUMInnerManager.initParams)
     FTRUMInnerManager.getInstance().initParams(rumConfig);
 
@@ -236,9 +261,9 @@ export class FTSDK {
 
     // Register UIAbility lifecycle listener when any UI-bound feature is enabled.
     // This allows SDK to automatically obtain WindowStage/MainWindow/UIContext later.
-    if (FTSDK.requiresLifecycleListener(rumConfig)) {
+    if (FTSDK.requiresLifecycleListenerInternal(rumConfig)) {
       try {
-        FTAbilityLifecycleListener.getInstance().register();
+        getFTSDKRuntime().registerLifecycleListener();
         FTInnerLogger.i(TAG, "UIAbility lifecycle listener registered for automatic UI feature initialization");
       } catch (error) {
         FTInnerLogger.w(TAG, `Failed to register UIAbility lifecycle listener: ${String(error)}`);
@@ -269,26 +294,25 @@ export class FTSDK {
     FTMonitorManager.getInstance().initWithConfig(rumConfig);
 
     // Initialize ANR detect manager
-    FTSDK.anrDetectManager = ANRDetectManager.getInstance();
+    FTSDK.anrDetectManager = getFTSDKRuntime().getAnrDetectManager();
 
     // Initialize exception handler for crash tracking
     // Aligned with Android: FTExceptionHandler.get().initConfig(config)
     if (rumConfig.isEnableTrackAppCrash()) {
-      FTExceptionHandler.getInstance().initConfig(rumConfig);
+      getFTSDKRuntime().initExceptionHandler(rumConfig);
       FTInnerLogger.d(TAG, "FTExceptionHandler initialized for crash tracking");
     }
 
     // Initialize UI block detection
     // Aligned with Android: FTUIBlockManager.get().start(config)
     if (rumConfig.isEnableTrackAppUIBlock()) {
-      const uiBlockManager = FTUIBlockManager.getInstance();
-      uiBlockManager.start(rumConfig);
+      getFTSDKRuntime().startUIBlockManager(rumConfig);
       FTInnerLogger.d(TAG, "FTUIBlockManager initialized for UI block detection");
     }
 
     if (FTSDK.pendingUIFeatureInit) {
-      Utils.setMainWindow();
-      FTSDK.tryInitializeUIFeatures();
+      getFTSDKRuntime().setMainWindow();
+      FTSDK.tryInitializeUIFeaturesInternal();
     }
 
     FTInnerLogger.d(TAG, "installRUMConfig completed");
@@ -359,6 +383,9 @@ export class FTSDK {
       FTInnerLogger.w(TAG, `Failed to unregister UIAbility lifecycle listener: ${String(error)}`);
     }
 
+    // Release RUM manager state to avoid timers and context references surviving SDK shutdown.
+    FTRUMInnerManager.shutdownInternal();
+
     // Release network listener (similar to Android)
     FTNetworkListener.release();
     FTInnerLogger.d(TAG, "FTSDK shut down, network listener released");
@@ -419,7 +446,7 @@ export class FTSDK {
    * Dynamically set log global tag
    * @param globalContext Log global context map
    */
-  static appendLogGlobalContext(globalContext: Map<string, string>): void {
+  static appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
     // Ensure trackInner exists, even if called before install completes
     // Aligned with Android: FTSdk.appendLogGlobalContext() behavior
     if (FTSDK.ftSdk) {
@@ -432,7 +459,7 @@ export class FTSDK {
    * @param key Tag key
    * @param value Tag value
    */
-  static appendLogGlobalContextKeyValue(key: string, value: string): void {
+  static appendLogGlobalContextKeyValue(key: string, value: LogGlobalContextValue): void {
     // Ensure trackInner exists, even if called before install completes
     // Aligned with Android: FTSdk.appendLogGlobalContextKeyValue() behavior
     if (FTSDK.ftSdk) {
@@ -460,15 +487,36 @@ export class FTSDK {
 
   }
 
+  private static getNativeCrashVersion(): string {
+    try {
+      return ftnativecrash.getVersion();
+    } catch (e) {
+      FTInnerLogger.e(TAG, `not ftnativecrash include`);
+      return "";
+    }
+  }
+
+  private static updateNativePackageInfo(): void {
+    if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+      return;
+    }
+    const nativeVersion = FTSDK.getNativeCrashVersion();
+    if (nativeVersion.length === 0) {
+      return;
+    }
+
+    const pkgJson = JSON.stringify(FTSDK.ftSdk.getInnerPkgInfoHashMap(FTSDK.ftSdk.ftSDKConfig));
+    FTSDK.ftSdk.ftSDKConfig.getGlobalContext().set(Constants.KEY_SDK_PACKAGE_INFO, new String(pkgJson));
+    FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_SDK_PACKAGE_INFO, pkgJson);
+  }
+
   private getInnerPkgInfoHashMap(config: FTSDKConfig): Record<string,string> {
     const pkgInfo: Record<string, string> = {};
     //agent
     pkgInfo[Constants.KEY_SDK_PACKAGE_AGENT] = BuildProfile.HAR_VERSION;
-    //todo append native version
-    try {
-      pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_NATIVE] = ftnativecrash.getVersion();
-    }catch (e) {
-      FTInnerLogger.e(TAG, `not ftnativecrash include`);
+    const nativeVersion = FTSDK.getNativeCrashVersion();
+    if (nativeVersion.length > 0) {
+      pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_NATIVE] = nativeVersion;
     }
     // Merge user-defined pkgInfo from config (similar to Android: pkgInfo.putAll(config.getPkgInfo()))
     const userPkgInfo = config.getPkgInfo();
@@ -496,17 +544,18 @@ export class FTSDK {
     }
 
     try {
+      const rumConfig = FTSDK.rumConfig;
       // Initialize action tracker only when explicitly enabled
-      if (FTSDK.rumConfig) {
+      if (rumConfig) {
         if (FTSDK.autoActionTrackingEnabled) {
-          FTActionTracker.getInstance().init(uiContext, FTSDK.rumConfig);
+          getFTSDKRuntime().initActionTracker(uiContext, rumConfig);
           FTInnerLogger.d(TAG, "Action tracker initialized successfully");
         } else {
           FTInnerLogger.i(TAG, "Auto action tracking is disabled; skipping FTActionTracker init");
         }
         // Initialize navigation tracker (automatic view start/stop from navigation/router events)
         // Only initialize if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks)
-        FTNavigationTracker.getInstance().init(uiContext, FTSDK.rumConfig);
+        getFTSDKRuntime().initNavigationTracker(uiContext, rumConfig);
         FTInnerLogger.d(TAG, "Navigation tracker initialized successfully");
       } else {
         FTInnerLogger.w(TAG, "RUM config not available, skipping action tracker initialization");
@@ -519,7 +568,7 @@ export class FTSDK {
         return;
       }
 
-      const enableANRMonitoring = FTSDK.rumConfig ? FTSDK.rumConfig.isEnableTrackAppANR() : false;
+      const enableANRMonitoring = rumConfig.isEnableTrackAppANR();
 
       if (enableANRMonitoring) {
         FTSDK.anrDetectManager.initialize();
@@ -540,12 +589,8 @@ export class FTSDK {
 
   public static onWindowStageActive(mainWindow?: window.Window): void {
     FTSDK.uiFeatureInitRetryCount = 0;
-    if (mainWindow) {
-      Utils.setMainWindow(mainWindow);
-    } else {
-      Utils.setMainWindow();
-    }
-    FTSDK.tryInitializeUIFeatures();
+    getFTSDKRuntime().setMainWindow(mainWindow);
+    FTSDK.tryInitializeUIFeaturesInternal();
   }
 
   /**
@@ -562,15 +607,15 @@ export class FTSDK {
   public static cleanupUIFeatures(): void {
     try {
       FTSDK.uiFeaturesInitialized = false;
-      FTSDK.pendingUIFeatureInit = FTSDK.rumConfig ? FTSDK.requiresUIFeatures(FTSDK.rumConfig) : false;
+      FTSDK.pendingUIFeatureInit = FTSDK.rumConfig ? FTSDK.requiresUIFeaturesInternal(FTSDK.rumConfig) : false;
       FTSDK.uiFeatureInitRetryCount = 0;
 
       // Clean up action tracker (releases UIContext and UIObserver references)
-      FTActionTracker.getInstance().destroy();
+      getFTSDKRuntime().destroyActionTracker();
       FTInnerLogger.d(TAG, "Action tracker destroyed and references released");
       // Clean up navigation tracker state
       try {
-        FTNavigationTracker.getInstance().destroy();
+        getFTSDKRuntime().destroyNavigationTracker();
       } catch (_) {}
 
       // Stop monitoring and clean up ANR detector
@@ -585,7 +630,7 @@ export class FTSDK {
     }
   }
 
-  private static tryInitializeUIFeatures(): void {
+  protected static tryInitializeUIFeaturesInternal(): void {
     if (!FTSDK.pendingUIFeatureInit) {
       return;
     }
@@ -600,7 +645,7 @@ export class FTSDK {
       return;
     }
 
-    const uiContext = Utils.getUIContext();
+    const uiContext = getFTSDKRuntime().getUIContext();
     if (!uiContext) {
       if (FTSDK.uiFeatureInitRetryCount >= FTSDK.UI_FEATURE_INIT_MAX_RETRY) {
         FTInnerLogger.w(TAG, "UIContext is still unavailable after retries, skip automatic UI feature initialization");
@@ -610,23 +655,12 @@ export class FTSDK {
       FTSDK.uiFeatureInitRetryCount++;
       FTInnerLogger.d(TAG, `UIContext not ready, retry automatic UI feature initialization (${FTSDK.uiFeatureInitRetryCount}/${FTSDK.UI_FEATURE_INIT_MAX_RETRY})`);
       setTimeout(() => {
-        FTSDK.tryInitializeUIFeatures();
+        FTSDK.tryInitializeUIFeaturesInternal();
       }, FTSDK.UI_FEATURE_INIT_RETRY_DELAY_MS);
       return;
     }
 
     FTSDK.initializeUIFeatures(uiContext);
-  }
-
-  private static requiresUIFeatures(rumConfig: FTRUMConfig): boolean {
-    return rumConfig.isEnableTraceUserAction() ||
-      rumConfig.isEnableTraceUserView() ||
-      rumConfig.isEnableTrackAppCrash() ||
-      rumConfig.isEnableTrackAppANR();
-  }
-
-  private static requiresLifecycleListener(rumConfig: FTRUMConfig): boolean {
-    return FTSDK.requiresUIFeatures(rumConfig);
   }
 
 
@@ -649,6 +683,7 @@ export class FTSDK {
       }
 
       await FTDBManager.getInstance(context).delete();
+      FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {
       FTInnerLogger.e(TAG, `clearAllData failed: ${error}`);
@@ -667,8 +702,7 @@ export class FTSDK {
         return;
       }
 
-      const syncTaskManager = SyncTaskManager.getInstance();
-      syncTaskManager.executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
+      SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
       FTInnerLogger.d(TAG, "flushSyncData triggered");
     } catch (error) {
       FTInnerLogger.e(TAG, `flushSyncData failed: ${error}`);

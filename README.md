@@ -47,6 +47,7 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 ```
 
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
+`@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
 ## Quick Start
 
@@ -94,7 +95,19 @@ export default class EntryAbility extends UIAbility {
 
 - `@guancecloud/ft_sdk`: standard SDK initialization, RUM, logging, tracing, and common network helpers
 - `@guancecloud/ft_sdk_ext`: add when you need HarmonyOS `HttpInterceptor` chain integration
-- `@guancecloud/ft_native`: add when you need native crash monitoring
+- `@guancecloud/ft_native`: add when you need native crash monitoring through the implicit `libftnativecrash.so` integration
+
+## Native Crash Monitoring
+
+```ts
+import { FTRUMConfig } from '@guancecloud/ft_sdk/Index'
+
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTrackAppCrash(true)
+```
+
+Add `@guancecloud/ft_native` to the application dependencies so `libftnativecrash.so` is packaged with the app. When crash tracking is enabled, `ft_sdk` initializes the native crash module internally.
 
 ## Release Checklist
 

@@ -110,7 +110,7 @@ export class FTMonitorManager {
     if (this.isTVDevice && errorMonitorType === ErrorMonitorType.BATTERY) {
       return false;
     }
-    return (this.errorMonitorType | errorMonitorType) === this.errorMonitorType;
+    return ((this.errorMonitorType & errorMonitorType) >>> 0) === (errorMonitorType >>> 0);
   }
 
   /**
@@ -122,7 +122,7 @@ export class FTMonitorManager {
     if (this.isTVDevice && deviceMetricsMonitorType === DeviceMetricsMonitorType.BATTERY) {
       return false;
     }
-    return (this.deviceMetricsMonitorType | deviceMetricsMonitorType) === this.deviceMetricsMonitorType;
+    return ((this.deviceMetricsMonitorType & deviceMetricsMonitorType) >>> 0) === (deviceMetricsMonitorType >>> 0);
   }
 
   /**

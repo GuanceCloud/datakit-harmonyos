@@ -1,6 +1,6 @@
 import { TraceType } from './TraceType';
 import { Constants } from '../Constants';
-import { HashMap } from '@kit.ArkTS';
+import { FTTraceHeaderHandler } from './FTTraceHeaderHandler';
 
 /**
  * Trace configuration class
@@ -37,7 +37,7 @@ export class FTTraceConfig {
   private serviceName: string = Constants.DEFAULT_SERVICE_NAME;
   
   /**
-   * Custom Header handler
+   * Custom Trace Header handler
    */
   private headerHandler: FTTraceHeaderHandler | null = null;
   
@@ -159,15 +159,15 @@ export class FTTraceConfig {
   }
   
   /**
-   * Get Header handler
+   * Get Trace Header handler
    */
   public getHeaderHandler(): FTTraceHeaderHandler | null {
     return this.headerHandler;
   }
   
   /**
-   * Set Header handler
-   * @param headerHandler Header handler
+   * Set Trace Header handler
+   * @param headerHandler Trace Header handler
    */
   public setHeaderHandler(headerHandler: FTTraceHeaderHandler | null): FTTraceConfig {
     this.headerHandler = headerHandler;
@@ -312,29 +312,7 @@ export class FTTraceConfig {
   }
 }
 
-/**
- * Trace Header handler interface
- */
-export interface FTTraceHeaderHandler {
-  /**
-   * Get Trace Header
-   * @param url URL address
-   * @returns Header key-value pairs
-   */
-  getTraceHeader(url: string): Record<string, string>;
-  
-  /**
-   * Get Trace ID (optional, for RUM data linking)
-   * @returns Trace ID
-   */
-  getTraceID?(): string;
-  
-  /**
-   * Get Span ID (optional, for RUM data linking)
-   * @returns Span ID
-   */
-  getSpanID?(): string;
-}
+export { FTTraceContext, FTTraceHeaderHandler, FTTraceRequestContext } from './FTTraceHeaderHandler';
 
 /**
  * FTTraceConfig JSON interface

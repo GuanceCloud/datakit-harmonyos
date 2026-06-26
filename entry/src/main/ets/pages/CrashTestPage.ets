@@ -1,4 +1,4 @@
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/src/main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/Index';
 import promptAction from '@ohos.promptAction';
 import * as ftcrash from 'libftcrash.so';
 import { SimpleAPMManager } from '../utils/SimpleAPMManager';

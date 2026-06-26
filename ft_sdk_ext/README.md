@@ -50,8 +50,8 @@ Use this package together with `@guancecloud/ft_sdk` when you need `HttpIntercep
 import { createFTHttpInterceptorChain } from '@guancecloud/ft_sdk_ext/Index'
 
 const interceptorChain = createFTHttpInterceptorChain({
-  traceEnable: true,
-  resourceEnable: true
+  enableTraceInterceptor: true,
+  enableResourceInterceptor: true
 })
 ```
 

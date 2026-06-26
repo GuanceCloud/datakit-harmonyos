@@ -50,6 +50,14 @@ export class HttpAutoTrackStateStore {
   public delete(resourceId: string): void {
     this.stateMap.delete(resourceId);
   }
+
+  public clear(): void {
+    this.stateMap.clear();
+  }
+
+  public size(): number {
+    return this.stateMap.size;
+  }
 }
 
 export class AxiosChainMethodStore {
@@ -80,6 +88,14 @@ export class AxiosChainMethodStore {
 
   public delete(uniqueId: string): void {
     this.methodMap.delete(uniqueId);
+  }
+
+  public clear(): void {
+    this.methodMap.clear();
+  }
+
+  public size(): number {
+    return this.methodMap.size;
   }
 }
 
@@ -186,6 +202,10 @@ export function buildAutoTrackResourceId(method: string, url: string, uniqueId: 
 export function extractContentLength(headers: Record<string, string>): number {
   const contentLength = headers['content-length'] || headers['Content-Length'];
   if (!contentLength) {
+    return 0;
+  }
+
+  if (!/^\d+$/.test(contentLength)) {
     return 0;
   }
 

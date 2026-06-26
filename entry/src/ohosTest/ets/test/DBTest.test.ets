@@ -1,205 +1,117 @@
-import hilog from '@ohos.hilog';
-import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
+import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import relationalStore from '@ohos.data.relationalStore';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
+import { DataBaseCallBack } from '@guancecloud/ft_sdk/src/main/ets/components/db/base/DataBaseCallBack';
+import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
+import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import * as FTSQL from '@guancecloud/ft_sdk/src/main/ets/components/db/FTSQL';
+import { EntryDBAssert } from './helpers/EntryDBAssert';
 
-const TAG = 'DBTest';
-const DOMAIN = 0x0001;
+const TEST_NOW_NS = 1700000000000;
+
+function createLogSyncData(label: string, time: number = TEST_NOW_NS): SyncData {
+  const syncData = new SyncData(DataType.LOG);
+  syncData.setTime(time);
+  syncData.setDataString(
+    `df_rum_harmonyos_log,sdk_data_id=${syncData.getUuid()},service=entry_db_test message="${label}" ${time}`
+  );
+  return syncData;
+}
+
+function createRumSyncData(label: string, time: number = TEST_NOW_NS): SyncData {
+  const syncData = new SyncData(DataType.RUM_APP);
+  syncData.setTime(time);
+  syncData.setDataString(
+    `action,action_id=${label},sdk_data_id=${syncData.getUuid()} action_name="${label}" ${time}`
+  );
+  return syncData;
+}
+
+class SchemaProbeCallback implements DataBaseCallBack {
+  public hasViewMigrationColumns: boolean = false;
+  public hasSyncDataFlatTable: boolean = false;
+
+  async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+    const viewResult = await rdbStore.querySql(
+      `SELECT ${FTSQL.RUM_DATA_UPLOAD_TIME}, ${FTSQL.RUM_DATA_UPDATE_TIME}, ${FTSQL.RUM_VIEW_UPDATE_TIME} ` +
+      `FROM ${FTSQL.FT_TABLE_VIEW} LIMIT 1`
+    );
+    this.hasViewMigrationColumns = true;
+    viewResult.close();
+
+    const syncResult = await rdbStore.querySql(
+      `SELECT COUNT(*) as count FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} LIMIT 1`
+    );
+    this.hasSyncDataFlatTable = syncResult.goToFirstRow();
+    syncResult.close();
+  }
+}
 
 export default function dbTest() {
-  describe('DBTestSuite', () => {
-    let rdbStore: relationalStore.RdbStore | null = null;
-    const tableName = 'test_table';
+  describe('EntrySDKDBTest', () => {
+    let dbManager: FTDBManager;
 
-    beforeAll(async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'beforeAll: init database');
-      const context = globalThis.getContext();
-      const config: relationalStore.StoreConfig = {
-        name: 'test.db',
-        securityLevel: relationalStore.SecurityLevel.S1
-      };
-      try {
-        rdbStore = await relationalStore.getRdbStore(context, config);
-        const createTableSql = `
-          CREATE TABLE IF NOT EXISTS ${tableName} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            value INTEGER,
-            timestamp BIGINT
-          )
-        `;
-        await rdbStore.executeSql(createTableSql, []);
-        hilog.info(DOMAIN, TAG, '%{public}s', 'Database initialized successfully');
-      } catch (err) {
-        hilog.error(DOMAIN, TAG, 'Failed to init database: %{public}s', JSON.stringify(err));
-      }
-    })
-
-    afterAll(async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'afterAll: cleanup');
-      if (rdbStore) {
-        try {
-          await rdbStore.executeSql(`DROP TABLE IF EXISTS ${tableName}`, []);
-        } catch (err) {
-          hilog.error(DOMAIN, TAG, 'Failed to drop table: %{public}s', JSON.stringify(err));
-        }
-      }
-    })
-
-    beforeEach(() => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'beforeEach');
-    })
+    beforeEach(async () => {
+      dbManager = await EntryDBAssert.getManager();
+      await dbManager.resetDatabase();
+    });
 
     afterEach(async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'afterEach: cleanup test data');
-      if (rdbStore) {
-        try {
-          const predicates = new relationalStore.RdbPredicates(tableName);
-          await rdbStore.delete(predicates);
-        } catch (err) {
-          hilog.error(DOMAIN, TAG, 'Failed to cleanup: %{public}s', JSON.stringify(err));
-        }
-      }
-    })
+      await dbManager.delete();
+    });
 
-    it('testInsertAndQuery', 0, async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testInsertAndQuery start');
-      if (!rdbStore) {
-        expect(false).assertTrue();
-        return;
-      }
+    it('dbShouldCrudSingleRecord', 0, async () => {
+      const syncData = createLogSyncData('entry-single-insert');
 
-      const values: relationalStore.ValuesBucket = {
-        name: 'test_name',
-        value: 123,
-        timestamp: Date.now()
-      };
+      const inserted = await dbManager.insertFtOperation(syncData);
+      const countAfterInsert = await dbManager.queryTotalCount([DataType.LOG]);
+      const queried = await dbManager.queryFtOperation([DataType.LOG], 10);
+      await dbManager.deleteFtOperation(queried);
+      const countAfterDelete = await dbManager.queryTotalCount([DataType.LOG]);
 
-      const insertId = await rdbStore.insert(tableName, values);
-      hilog.info(DOMAIN, TAG, 'Inserted id: %{public}d', insertId);
-      // expect(insertId).assertGreater(0);
+      expect(inserted).assertTrue();
+      expect(countAfterInsert).assertEqual(1);
+      expect(queried.length).assertEqual(1);
+      expect(queried[0].getDataString().includes('entry-single-insert')).assertTrue();
+      expect(countAfterDelete).assertEqual(0);
+    });
 
-      const predicates = new relationalStore.RdbPredicates(tableName);
-      const resultSet = await rdbStore.query(predicates, ['id', 'name', 'value', 'timestamp']);
-      hilog.info(DOMAIN, TAG, 'Query result count: %{public}d', resultSet.rowCount);
-      expect(resultSet.rowCount).assertEqual(1);
+    it('dbShouldBatchDeleteRecords', 0, async () => {
+      const first = createLogSyncData('entry-batch-1', TEST_NOW_NS + 1);
+      const second = createLogSyncData('entry-batch-2', TEST_NOW_NS + 2);
+      const third = createRumSyncData('entry-rum-1', TEST_NOW_NS + 3);
 
-      resultSet.goToFirstRow();
-      const name = resultSet.getString(resultSet.getColumnIndex('name'));
-      const value = resultSet.getLong(resultSet.getColumnIndex('value'));
-      hilog.info(DOMAIN, TAG, 'Queried name: %{public}s, value: %{public}d', name, value);
+      const inserted = await dbManager.insertFtOptList([first, second, third]);
+      const queried = await dbManager.queryFtOperation([], 10);
+      await dbManager.deleteFtOperation(queried);
+      const countAfterDelete = await dbManager.queryTotalCount([]);
 
-      expect(name).assertEqual('test_name');
-      expect(value).assertEqual(123);
+      expect(inserted).assertTrue();
+      expect(queried.length).assertEqual(3);
+      expect(countAfterDelete).assertEqual(0);
+    });
 
-      resultSet.close();
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testInsertAndQuery end');
-    })
+    it('sdkDatabaseShouldDeleteOldestDataOnly', 0, async () => {
+      await dbManager.insertFtOptList([
+        createLogSyncData('entry-oldest', TEST_NOW_NS + 1),
+        createLogSyncData('entry-middle', TEST_NOW_NS + 2),
+        createLogSyncData('entry-newest', TEST_NOW_NS + 3)
+      ]);
 
-    it('testBatchInsertAndQuery', 0, async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testBatchInsertAndQuery start');
-      if (!rdbStore) {
-        expect(false).assertTrue();
-        return;
-      }
+      await dbManager.deleteOldestData(DataType.LOG, 2);
+      const remaining = await dbManager.queryFtOperation([DataType.LOG], 10);
 
-      const valuesArray: relationalStore.ValuesBucket[] = [
-        { name: 'item_1', value: 1, timestamp: Date.now() },
-        { name: 'item_2', value: 2, timestamp: Date.now() },
-        { name: 'item_3', value: 3, timestamp: Date.now() }
-      ];
+      expect(remaining.length).assertEqual(1);
+      expect(remaining[0].getDataString().includes('entry-newest')).assertTrue();
+    });
 
-      const batchInsertCount = await rdbStore.batchInsert(tableName, valuesArray);
-      hilog.info(DOMAIN, TAG, 'Batch inserted count: %{public}d', batchInsertCount);
-      expect(batchInsertCount).assertEqual(3);
+    it('dbSchemaShouldExist', 0, async () => {
+      const callback = new SchemaProbeCallback();
 
-      const predicates = new relationalStore.RdbPredicates(tableName);
-      const resultSet = await rdbStore.query(predicates, ['id', 'name', 'value']);
-      hilog.info(DOMAIN, TAG, 'Query result count: %{public}d', resultSet.rowCount);
-      expect(resultSet.rowCount).assertEqual(3);
+      await dbManager.executeWithDB(false, callback);
 
-      let count = 0;
-      while (resultSet.goToNextRow()) {
-        count++;
-        const name = resultSet.getString(resultSet.getColumnIndex('name'));
-        const value = resultSet.getLong(resultSet.getColumnIndex('value'));
-        hilog.info(DOMAIN, TAG, 'Row %{public}d: name=%{public}s, value=%{public}d', count, name, value);
-      }
-      expect(count).assertEqual(3);
-
-      resultSet.close();
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testBatchInsertAndQuery end');
-    })
-
-    it('testUpdate', 0, async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testUpdate start');
-      if (!rdbStore) {
-        expect(false).assertTrue();
-        return;
-      }
-
-      const values: relationalStore.ValuesBucket = {
-        name: 'original_name',
-        value: 100,
-        timestamp: Date.now()
-      };
-      const insertId = await rdbStore.insert(tableName, values);
-      hilog.info(DOMAIN, TAG, 'Inserted id: %{public}d', insertId);
-
-      const updateValues: relationalStore.ValuesBucket = {
-        name: 'updated_name',
-        value: 200
-      };
-      const predicates = new relationalStore.RdbPredicates(tableName);
-      predicates.equalTo('id', insertId);
-      const updatedCount = await rdbStore.update(updateValues, predicates);
-      hilog.info(DOMAIN, TAG, 'Updated count: %{public}d', updatedCount);
-      expect(updatedCount).assertEqual(1);
-
-      const resultSet = await rdbStore.query(predicates, ['name', 'value']);
-      resultSet.goToFirstRow();
-      const name = resultSet.getString(resultSet.getColumnIndex('name'));
-      const value = resultSet.getLong(resultSet.getColumnIndex('value'));
-      hilog.info(DOMAIN, TAG, 'Updated name: %{public}s, value: %{public}d', name, value);
-
-      expect(name).assertEqual('updated_name');
-      expect(value).assertEqual(200);
-
-      resultSet.close();
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testUpdate end');
-    })
-
-    it('testDelete', 0, async () => {
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testDelete start');
-      if (!rdbStore) {
-        expect(false).assertTrue();
-        return;
-      }
-
-      const values: relationalStore.ValuesBucket = {
-        name: 'to_be_deleted',
-        value: 999,
-        timestamp: Date.now()
-      };
-      const insertId = await rdbStore.insert(tableName, values);
-      hilog.info(DOMAIN, TAG, 'Inserted id: %{public}d', insertId);
-
-      let predicates = new relationalStore.RdbPredicates(tableName);
-      let resultSet = await rdbStore.query(predicates, ['id']);
-      expect(resultSet.rowCount).assertEqual(1);
-      resultSet.close();
-
-      predicates = new relationalStore.RdbPredicates(tableName);
-      predicates.equalTo('id', insertId);
-      const deletedCount = await rdbStore.delete(predicates);
-      hilog.info(DOMAIN, TAG, 'Deleted count: %{public}d', deletedCount);
-      expect(deletedCount).assertEqual(1);
-
-      resultSet = await rdbStore.query(predicates, ['id']);
-      expect(resultSet.rowCount).assertEqual(0);
-      resultSet.close();
-
-      hilog.info(DOMAIN, TAG, '%{public}s', 'testDelete end');
-    })
-  })
+      expect(callback.hasViewMigrationColumns).assertTrue();
+      expect(callback.hasSyncDataFlatTable).assertTrue();
+    });
+  });
 }

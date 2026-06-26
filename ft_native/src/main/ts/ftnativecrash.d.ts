@@ -2,6 +2,26 @@
  * Type declarations for FT Native Crash Native Module
  */
 declare module 'libftnativecrash.so' {
+  export interface NativeCrashData {
+    timestamp: number;
+    crashType: string;
+    foreground: boolean;
+    bundleVersion: string;
+    bundleName: string;
+    pid: number;
+    uid: number;
+    uuid: string;
+    exception: string;
+    hilogSize: number;
+    externalLog: string;
+    logOverLimit: boolean;
+    memoryNearRegisters: string;
+    maps: string;
+    hilog: string;
+  }
+
+  export type NativeCrashCallback = (crashData: NativeCrashData) => void | Promise<void>;
+
   /**
    * Initialize the native crash handler
    * @returns true if successful, false otherwise
@@ -13,7 +33,12 @@ declare module 'libftnativecrash.so' {
    * @param callback Callback function to receive crash events
    * @returns true if successful, false otherwise
    */
-  export function setCrashCallback(callback: (crashData: any) => void): boolean;
+  export function setCrashCallback(callback: NativeCrashCallback): boolean;
+
+  /**
+   * Clear the crash callback function.
+   */
+  export function clearCrashCallback(): boolean;
 
   /**
    * Start watching for crash events
@@ -55,4 +80,10 @@ declare module 'libftnativecrash.so' {
    * @returns true if successful, false otherwise
    */
   export function setMaxLogSize(maxSize: number): boolean;
+
+  /**
+   * Get the native crash handler version.
+   * @returns Version string reported by the C++ module
+   */
+  export function getVersion(): string;
 }

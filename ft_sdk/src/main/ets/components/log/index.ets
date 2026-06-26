@@ -7,7 +7,6 @@ export { LogBean } from '../bean/LogBean';
 export { BaseContentBean } from '../bean/BaseContentBean';
 export { LineProtocolBean, TimeUtils } from '../bean/LineProtocolBean';
 export { Status } from '../bean/Status';
-export { LogConsumerThreadPool } from '../thread/LogConsumerThreadPool';
 
 // Utility exports
 export { StringWrapper } from '../utils/StringWrapper';

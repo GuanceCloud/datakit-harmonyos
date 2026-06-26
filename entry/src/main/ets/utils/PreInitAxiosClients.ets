@@ -1,12 +1,12 @@
 import {
   applyFTAxiosTrack,
   createFTRCPTrackConfig
-} from '@guancecloud/ft_sdk/src/main/ets/components/network/FTHttpAutoTrack';
+} from '@guancecloud/ft_sdk/Index';
 import {
   applyFTAxiosChainMethodBridge,
   applyFTHttpTrack,
   createFTHttpInterceptorChain
-} from '@guancecloud/ft_sdk_ext/src/main/ets/components/network/FTHttpAutoTrackExt';
+} from '@guancecloud/ft_sdk_ext/Index';
 import { http } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import axios, { AxiosHeaders, AxiosInstance, AxiosRequestConfig, AxiosResponse } from '@ohos/axios';

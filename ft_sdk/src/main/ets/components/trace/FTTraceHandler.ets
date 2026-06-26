@@ -1,6 +1,6 @@
 import { TraceType } from './TraceType';
 import { FTTraceConfig } from '../Configs';
-import { FTTraceHeaderHandler } from './FTTraceConfig';
+import { FTTraceContext, FTTraceHeaderHandler, FTTraceRequestContext } from './FTTraceHeaderHandler';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
@@ -62,6 +62,97 @@ export class FTTraceHandler implements FTTraceHeaderHandler {
    */
   public getSpanID(): string {
     return this.spanID;
+  }
+
+  /**
+   * Generate Trace Headers and IDs together.
+   */
+  public getTraceContext(request: string | FTTraceRequestContext): FTTraceContext {
+    const urlString = typeof request === 'string' ? request : request.url;
+    const headers = this.getTraceHeader(urlString);
+    return {
+      headers: headers,
+      traceId: this.traceID,
+      spanId: this.spanID
+    };
+  }
+
+  /**
+   * Build TraceContext from final headers, similar to Android TraceContext.Simple.fromTraceType(headers).
+   */
+  public static createTraceContextFromHeaders(
+    headers: Record<string, string>,
+    fallbackTraceId: string = "",
+    fallbackSpanId: string = ""
+  ): FTTraceContext {
+    let traceId = fallbackTraceId;
+    let spanId = fallbackSpanId;
+
+    const ddTraceId = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.DD_TRACE_TRACE_ID_KEY);
+    const ddSpanId = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY);
+    if (ddTraceId && ddSpanId) {
+      traceId = ddTraceId;
+      spanId = ddSpanId;
+      return { headers: headers, traceId: traceId, spanId: spanId };
+    }
+
+    const zipkinTraceId = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.ZIPKIN_TRACE_ID);
+    const zipkinSpanId = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.ZIPKIN_SPAN_ID);
+    if (zipkinTraceId && zipkinSpanId) {
+      traceId = zipkinTraceId;
+      spanId = zipkinSpanId;
+      return { headers: headers, traceId: traceId, spanId: spanId };
+    }
+
+    const traceParent = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.W3C_TRACEPARENT_KEY);
+    const traceParentParts = traceParent.split("-");
+    if (traceParentParts.length >= 4 && traceParentParts[1] && traceParentParts[2]) {
+      traceId = traceParentParts[1];
+      spanId = traceParentParts[2];
+      return { headers: headers, traceId: traceId, spanId: spanId };
+    }
+
+    const b3 = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.ZIPKIN_B3_HEADER);
+    const b3Parts = b3.split("-");
+    if (b3Parts.length >= 2 && b3Parts[0] && b3Parts[1]) {
+      traceId = b3Parts[0];
+      spanId = b3Parts[1];
+      return { headers: headers, traceId: traceId, spanId: spanId };
+    }
+
+    const jaeger = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.JAEGER_KEY);
+    const jaegerParts = jaeger.split(":");
+    if (jaegerParts.length >= 2 && jaegerParts[0] && jaegerParts[1]) {
+      traceId = jaegerParts[0];
+      spanId = jaegerParts[1];
+      return { headers: headers, traceId: traceId, spanId: spanId };
+    }
+
+    const sw8 = FTTraceHandler.getHeaderValue(headers, FTTraceHandler.SKYWALKING_V3_SW_8);
+    const sw8Parts = sw8.split("-");
+    if (sw8Parts.length >= 3 && sw8Parts[1] && sw8Parts[2]) {
+      traceId = sw8Parts[1];
+      spanId = sw8Parts[2];
+    }
+
+    return { headers: headers, traceId: traceId, spanId: spanId };
+  }
+
+  private static getHeaderValue(headers: Record<string, string>, key: string): string {
+    const exactValue = headers[key];
+    if (exactValue !== undefined && exactValue !== null) {
+      return exactValue;
+    }
+
+    const lowerKey = key.toLowerCase();
+    const headerKeys = Object.keys(headers);
+    for (let i = 0; i < headerKeys.length; i++) {
+      const headerKey = headerKeys[i];
+      if (headerKey.toLowerCase() === lowerKey) {
+        return headers[headerKey];
+      }
+    }
+    return "";
   }
   
   /**

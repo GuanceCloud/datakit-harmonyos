@@ -1,11 +1,15 @@
 import { Constants } from "./Constants";
-import { DetectFrequency, EnvType, LogCacheDiscard, Status, SyncPageSize } from "./enum/Enums";
+import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SyncPageSize } from "./enum/Enums";
+import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
 import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
-import { HeaderHandler } from "./trace/FTTraceInterceptor";
+import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
+
+export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
+export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
 
 export class FTRUMConfig {
   // Property definitions
@@ -33,6 +37,8 @@ export class FTRUMConfig {
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
+  private rumCacheLimitCount: number = Constants.DEFAULT_DB_RUM_CACHE_NUM;
+  private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
   // Method definitions
   public getSamplingRate(): number {
@@ -55,7 +61,8 @@ export class FTRUMConfig {
    * Set error sampling rate
    * When the session is not sampled by setSamplingRate,
    * if an error occurs during the session, data within 1 minute before the error can be collected.
-   * Range [0,1], 0 means no collection, 1 means full collection, default is 0.
+   * Range [0,1], 0 means no collection, 1 means full collection.
+   * FTRUMConfig defaults to 1.0 for compatibility; calling this setter without an argument sets 0.0.
    */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));
@@ -77,6 +84,39 @@ export class FTRUMConfig {
   public setRumAppId(rumAppId: string): FTRUMConfig {
     this.rumAppId = rumAppId;
     return this;
+  }
+
+  /**
+   * Set maximum RUM entry count, minimum not less than 10000.
+   * Moved from FTSDKConfig to FTRUMConfig.
+   * When FTRUMConfig.setRumCacheLimitCount() is enabled, this count limit is ignored.
+   */
+  public setRumCacheLimitCount(limitCount: number): FTRUMConfig {
+    this.rumCacheLimitCount = Math.max(Constants.MINI_DB_RUM_CACHE_NUM, limitCount);
+    return this;
+  }
+
+  /**
+   * Get maximum RUM entry count limit.
+   */
+  public getRumCacheLimitCount(): number {
+    return this.rumCacheLimitCount;
+  }
+
+  /**
+   * Set RUM cache discard strategy.
+   */
+  public setRumCacheDiscardStrategy(strategy: RUMCacheDiscard | string): FTRUMConfig {
+    this.rumCacheDiscardStrategy =
+      String(strategy) === RUMCacheDiscard.DISCARD_OLDEST ? RUMCacheDiscard.DISCARD_OLDEST : RUMCacheDiscard.DISCARD;
+    return this;
+  }
+
+  /**
+   * Get RUM cache discard strategy.
+   */
+  public getRumCacheDiscardStrategy(): RUMCacheDiscard {
+    return this.rumCacheDiscardStrategy;
   }
 
   public isEnableTrackAppCrash(): boolean {
@@ -170,15 +210,6 @@ export class FTRUMConfig {
     return this;
   }
 
-  public isEnableResourceHostIP(): boolean {
-    return this.enableResourceHostIP;
-  }
-
-  public setEnableResourceHostIP(enableResourceHostIP: boolean): FTRUMConfig {
-    this.enableResourceHostIP = enableResourceHostIP;
-    return this;
-  }
-
   // public getExtraMonitorTypeWithError(): number {
   //   return this.extraMonitorTypeWithError;
   // }
@@ -213,15 +244,6 @@ export class FTRUMConfig {
 
   public getGlobalContext(): Map<string, object> {
     return this.globalContext;
-  }
-
-  public setResourceUrlHandler(handler: FTInTakeUrlHandler): FTRUMConfig {
-    this.intTakeUrlHandler = handler;
-    return this;
-  }
-
-  public getResourceUrlHandler(): FTInTakeUrlHandler | null {
-    return this.intTakeUrlHandler;
   }
 
   /**
@@ -265,6 +287,24 @@ export class FTRUMConfig {
    */
   public getDeviceMetricsMonitorType(): number {
     return this.deviceMetricsMonitorType;
+  }
+
+  public isEnableResourceHostIP(): boolean {
+    return this.enableResourceHostIP;
+  }
+
+  public setEnableResourceHostIP(enableResourceHostIP: boolean): FTRUMConfig {
+    this.enableResourceHostIP = enableResourceHostIP;
+    return this;
+  }
+
+  public setResourceUrlHandler(handler: FTInTakeUrlHandler): FTRUMConfig {
+    this.intTakeUrlHandler = handler;
+    return this;
+  }
+
+  public getResourceUrlHandler(): FTInTakeUrlHandler | null {
+    return this.intTakeUrlHandler;
   }
 
   /**
@@ -344,7 +384,7 @@ export class FTLoggerConfig {
   /**
    * Global context tags
    */
-  private globalContext: Map<string, object> = new Map();
+  private globalContext: Map<string, LogGlobalContextValue> = new Map();
   /**
    * Log data database storage strategy
    */
@@ -385,27 +425,6 @@ export class FTLoggerConfig {
   }
 
   /**
-   * Check if console log capture is enabled
-   */
-  isEnableConsoleLog(): boolean {
-    return this.enableConsoleLog;
-  }
-
-  /**
-   * Set whether to enable console log capture
-   * Aligned with Android: setEnableConsoleLog(boolean) and setEnableConsoleLog(boolean, String)
-   * @param enableConsoleLog Whether to enable console log capture
-   * @param prefix Optional log filter prefix
-   */
-  setEnableConsoleLog(enableConsoleLog: boolean, prefix?: string): FTLoggerConfig {
-    this.enableConsoleLog = enableConsoleLog;
-    if (prefix !== undefined) {
-      this.logPrefix = prefix;
-    }
-    return this;
-  }
-
-  /**
    * Check if custom log is enabled
    */
   isEnableCustomLog(): boolean {
@@ -438,23 +457,24 @@ export class FTLoggerConfig {
   /**
    * Set database data storage strategy
    */
-  setLogCacheDiscardStrategy(logCacheDiscardStrategy: LogCacheDiscard): FTLoggerConfig {
-    this.logCacheDiscardStrategy = logCacheDiscardStrategy;
+  setLogCacheDiscardStrategy(strategy: LogCacheDiscard | string): FTLoggerConfig {
+    this.logCacheDiscardStrategy =
+      String(strategy) === LogCacheDiscard.DISCARD_OLDEST ? LogCacheDiscard.DISCARD_OLDEST : LogCacheDiscard.DISCARD;
     return this;
   }
 
   /**
    * Set log level filters
    * Aligned with Android: setLogLevelFilters(Status[]) and setLogLevelFilters(String[])
-   * @param logLevelFilters Array of Status enum values, Status class instances, or string values
+   * @param logLevelFilters Array of Status class instances, named status-like objects, or string values
    */
   setLogLevelFilters(logLevelFilters: Array<Status | string | StatusWithName>): FTLoggerConfig {
     const array: Array<string> = [];
     for (let i = 0; i < logLevelFilters.length; i++) {
       const item: Status | string | StatusWithName = logLevelFilters[i];
       if (typeof item === 'string') {
-        // String value or Status enum (which is a string enum)
-        array.push(item as string);
+        const status = Status.fromName(item);
+        array.push(status ? status.name : (item as string));
       } else if (item && typeof item === 'object') {
         // Check if it's a Status class instance (has .name property)
         // Use type assertion to access .name property
@@ -462,12 +482,9 @@ export class FTLoggerConfig {
         if (statusObj.name !== undefined && typeof statusObj.name === 'string') {
           array.push(statusObj.name);
         } else {
-          // Status enum value (from enum/Enums.ets) - value is already a string
           array.push(String(item));
         }
       } else {
-        // Status enum value (from enum/Enums.ets) - value is already a string
-        // Convert enum to string by accessing its value
         const statusValue: string = String(item);
         array.push(statusValue);
       }
@@ -504,10 +521,12 @@ export class FTLoggerConfig {
   }
 
   /**
-   * Set maximum log entry count, minimum not less than 1000
+   * Set maximum log entry count, minimum not less than 1000.
+   * Moved from FTSDKConfig to FTLoggerConfig.
+   * When FTLoggerConfig.setLogCacheLimitCount() is enabled, this count limit is ignored.
    */
   setLogCacheLimitCount(count: number): FTLoggerConfig {
-    this.logCacheLimitCount = Math.max(1000, count);
+    this.logCacheLimitCount = Math.max(Constants.MINI_DB_LOG_CACHE_NUM, count);
     return this;
   }
 
@@ -533,18 +552,64 @@ export class FTLoggerConfig {
   }
 
   /**
-   * Add global context
-   * Aligned with Android: addGlobalContext(String, String)
-   * @param key Context key
-   * @param value Context value (string)
+   * Add log global context.
+   * Aligned with Android: addGlobalContext(Map<String, Object>) and addGlobalContext(String, Object).
    */
-  addGlobalContext(key: string, value: string): FTLoggerConfig {
-    this.globalContext.set(key, new String(value));
+  addGlobalContext(globalContext: LogGlobalContextDictionary): FTLoggerConfig;
+  addGlobalContext(key: string, value: LogGlobalContextValue): FTLoggerConfig;
+  addGlobalContext(keyOrContext: string | LogGlobalContextDictionary,
+    value?: LogGlobalContextValue): FTLoggerConfig {
+    if (typeof keyOrContext === 'string') {
+      this.putGlobalContextValue(keyOrContext, value);
+      return this;
+    }
+
+    if (keyOrContext instanceof Map) {
+      keyOrContext.forEach((contextValue: LogGlobalContextValue, contextKey: string) => {
+        this.putGlobalContextValue(contextKey, contextValue);
+      });
+      return this;
+    }
+
+    const contextRecord = keyOrContext as Record<string, LogGlobalContextValue>;
+    const keys = Object.keys(contextRecord);
+    for (let i = 0; i < keys.length; i++) {
+      const contextKey = keys[i];
+      this.putGlobalContextValue(contextKey, contextRecord[contextKey]);
+    }
     return this;
   }
 
-  getGlobalContext(): Map<string, object> {
+  private putGlobalContextValue(key: string, value: LogGlobalContextValue): void {
+    if (!key || value === null || value === undefined) {
+      return;
+    }
+    this.globalContext.set(key, value);
+  }
+
+  getGlobalContext(): Map<string, LogGlobalContextValue> {
     return this.globalContext;
+  }
+
+  /**
+   * Check if console log capture is enabled
+   */
+  isEnableConsoleLog(): boolean {
+    return this.enableConsoleLog;
+  }
+
+  /**
+   * Set whether to enable console log capture
+   * Aligned with Android: setEnableConsoleLog(boolean) and setEnableConsoleLog(boolean, String)
+   * @param enableConsoleLog Whether to enable console log capture
+   * @param prefix Optioal log filter prefix
+   */
+  setEnableConsoleLog(enableConsoleLog: boolean, prefix?: string): FTLoggerConfig {
+    this.enableConsoleLog = enableConsoleLog;
+    if (prefix !== undefined) {
+      this.logPrefix = prefix;
+    }
+    return this;
   }
 }
 
@@ -588,13 +653,10 @@ export class FTSDKConfig {
 
 
   // Cache limit configurations
-  private dbCacheLimit: number = 104857600; // 100MB default
+  private dbCacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
   private limitWithDbSize: boolean = false;
-  private logCacheLimitCount: number = Constants.DEFAULT_DB_LOG_CACHE_NUM;
-  private rumCacheLimitCount: number = Constants.DEFAULT_DB_RUM_CACHE_NUM;
-  private dbCacheDiscard: string = "discard";
-  private logCacheDiscard: string = "discard";
-  private rumCacheDiscard: string = "discard";
+  private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
+  private logCacheDiscard: string = LogCacheDiscard.DISCARD;
 
   // Constructor
   private constructor(datakitUrl: string = '', datawayUrl: string = '', clientToken: string = '') {
@@ -668,24 +730,6 @@ export class FTSDKConfig {
     return this.pageSize;
   }
 
-  setEnableAccessDeviceID(enableAccessDeviceID: boolean): FTSDKConfig {
-    this.enableAccessDeviceID = enableAccessDeviceID;
-    return this;
-  }
-
-  isAccessODIDEnabled(): boolean {
-    return this.enableAccessDeviceID;
-  }
-
-  setOnlySupportMainProcess(onlySupportMainProcess: boolean): FTSDKConfig {
-    this.onlySupportMainProcess = onlySupportMainProcess;
-    return this;
-  }
-
-  isOnlySupportMainProcess(): boolean {
-    return this.onlySupportMainProcess;
-  }
-
   addGlobalContext(key: string, value: object): FTSDKConfig {
     this.globalContext.set(key, value);
     return this;
@@ -693,29 +737,6 @@ export class FTSDKConfig {
 
   getGlobalContext(): Map<string, object> {
     return this.globalContext;
-  }
-
-  /**
-   * Add SDK package info (for sdk_pkg_info field)
-   * Similar to Android's addPkgInfo method
-   * @param key Package info key (e.g., "agent", "track", "native", "web")
-   * @param value Package version value
-   * @returns FTSDKConfig instance for chaining
-   */
-  addPkgInfo(key: string, value: string): FTSDKConfig {
-    if (key && value) {
-      this.pkgInfo.set(key, value);
-    }
-    return this;
-  }
-
-  /**
-   * Get SDK package info
-   * Similar to Android's getPkgInfo method
-   * @returns Map containing package info
-   */
-  getPkgInfo(): Map<string, string> {
-    return this.pkgInfo;
   }
 
   getServiceName(): string {
@@ -738,15 +759,6 @@ export class FTSDKConfig {
     return this;
   }
 
-  setNeedTransformOldCache(needTransformOldCache: boolean): FTSDKConfig {
-    this.needTransformOldCache = needTransformOldCache;
-    return this;
-  }
-
-  isNeedTransformOldCache(): boolean {
-    return this.needTransformOldCache;
-  }
-
   setSyncSleepTime(sleepTimeMs: number): FTSDKConfig {
     this.syncSleepTime =
       Math.max(SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS, Math.min(sleepTimeMs, SyncTaskManager.SYNC_SLEEP_MAX_TIME_MS));
@@ -755,21 +767,6 @@ export class FTSDKConfig {
 
   getSyncSleepTime(): number {
     return this.syncSleepTime;
-  }
-
-  /**
-   * Get data modifier
-   */
-  getDataModifier(): DataModifier | null {
-    return this.dataModifier;
-  }
-
-  /**
-   * Set data modifier
-   */
-  setDataModifier(dataModifier: DataModifier | null): FTSDKConfig {
-    this.dataModifier = dataModifier;
-    return this;
   }
 
   /**
@@ -809,88 +806,10 @@ export class FTSDKConfig {
 
   // Cache limit methods
   /**
-   * Get database cache limit
-   */
-  getDbCacheLimit(): number {
-    return this.dbCacheLimit;
-  }
-
-  /**
-   * Enable database size limit
-   */
-  enableLimitWithDbSize(): FTSDKConfig {
-    this.limitWithDbSize = true;
-    return this;
-  }
-
-  /**
-   * Set database cache limit with custom size
-   * Minimum limit is 30MB (31457280 bytes), aligned with Android SDK
-   */
-  setDbCacheLimit(dbSize: number): FTSDKConfig {
-    this.dbCacheLimit = Math.max(31457280, dbSize); // Minimum 30MB
-    this.limitWithDbSize = true;
-    return this;
-  }
-
-  /**
-   * Check if database size limit is enabled
-   */
-  isLimitWithDbSize(): boolean {
-    return this.limitWithDbSize;
-  }
-
-  /**
-   * Set log cache limit count
-   * Minimum not less than 1000 (aligned with Android)
-   */
-  setLogCacheLimitCount(limitCount: number): FTSDKConfig {
-    this.logCacheLimitCount = Math.max(Constants.MINI_DB_LOG_CACHE_NUM, limitCount);
-    return this;
-  }
-
-  /**
-   * Get log cache limit count
-   */
-  getLogCacheLimitCount(): number {
-    return this.logCacheLimitCount;
-  }
-
-  /**
-   * Set RUM cache limit count
-   */
-  setRumCacheLimitCount(limitCount: number): FTSDKConfig {
-    this.rumCacheLimitCount = Math.max(Constants.MINI_DB_RUM_CACHE_NUM, limitCount);
-    return this;
-  }
-
-  /**
-   * Get RUM cache limit count
-   */
-  getRumCacheLimitCount(): number {
-    return this.rumCacheLimitCount;
-  }
-
-  /**
-   * Set database cache discard strategy
-   */
-  setDBCacheDiscard(strategy: string): FTSDKConfig {
-    this.dbCacheDiscard = strategy;
-    return this;
-  }
-
-  /**
-   * Get database cache discard strategy
-   */
-  getDBCacheDiscard(): string {
-    return this.dbCacheDiscard;
-  }
-
-  /**
    * Set log cache discard strategy
    */
-  setLogCacheDiscard(strategy: string): FTSDKConfig {
-    this.logCacheDiscard = strategy;
+  setLogCacheDiscard(strategy: string | LogCacheDiscard): FTSDKConfig {
+    this.logCacheDiscard = String(strategy);
     return this;
   }
 
@@ -901,19 +820,121 @@ export class FTSDKConfig {
     return this.logCacheDiscard;
   }
 
+  setEnableAccessDeviceID(enableAccessDeviceID: boolean): FTSDKConfig {
+    this.enableAccessDeviceID = enableAccessDeviceID;
+    return this;
+  }
+
+  isAccessODIDEnabled(): boolean {
+    return this.enableAccessDeviceID;
+  }
+
+  setOnlySupportMainProcess(onlySupportMainProcess: boolean): FTSDKConfig {
+    this.onlySupportMainProcess = onlySupportMainProcess;
+    return this;
+  }
+
+  isOnlySupportMainProcess(): boolean {
+    return this.onlySupportMainProcess;
+  }
+
   /**
-   * Set RUM cache discard strategy
+   * Add SDK package info (for sdk_pkg_info field)
+   * Similar to Android's addPkgInfo method
+   * @param key Package info key (e.g., "agent", "track", "native", "web")
+   * @param value Package version value
+   * @returns FTSDKConfig instance for chaining
    */
-  setRumCacheDiscard(strategy: string): FTSDKConfig {
-    this.rumCacheDiscard = strategy;
+  addPkgInfo(key: string, value: string): FTSDKConfig {
+    if (key && value) {
+      this.pkgInfo.set(key, value);
+    }
     return this;
   }
 
   /**
-   * Get RUM cache discard strategy
+   * Get SDK package info
+   * Similar to Android's getPkgInfo method
+   * @returns Map containing package info
    */
-  getRumCacheDiscard(): string {
-    return this.rumCacheDiscard;
+  getPkgInfo(): Map<string, string> {
+    return this.pkgInfo;
+  }
+
+  setNeedTransformOldCache(needTransformOldCache: boolean): FTSDKConfig {
+    this.needTransformOldCache = needTransformOldCache;
+    return this;
+  }
+
+  isNeedTransformOldCache(): boolean {
+    return this.needTransformOldCache;
+  }
+
+  /**
+   * Get data modifier
+   */
+  getDataModifier(): DataModifier | null {
+    return this.dataModifier;
+  }
+
+  /**
+   * Set data modifier
+   */
+  setDataModifier(dataModifier: DataModifier | null): FTSDKConfig {
+    this.dataModifier = dataModifier;
+    return this;
+  }
+
+  /**
+   * Enable database size limit.
+   * Default limit is 100MB. When dbSize is provided, the minimum is 30MB.
+   * When enabled, the database size policy takes priority over the log/RUM count limits
+   * configured by FTLoggerConfig.setLogCacheLimitCount(...) and FTRUMConfig.setRumCacheLimitCount(...).
+   */
+  enableLimitWithDbSize(dbSize?: number): FTSDKConfig {
+    if (dbSize !== undefined) {
+      this.dbCacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, dbSize);
+    }
+    this.limitWithDbSize = true;
+    return this;
+  }
+
+  /**
+   * Set database cache limit with custom size.
+   */
+  setDbCacheLimit(dbSize: number): FTSDKConfig {
+    return this.enableLimitWithDbSize(dbSize);
+  }
+
+  /**
+   * Check if database size limit is enabled.
+   * @deprecated Kept for old DB cache compatibility.
+   */
+  isLimitWithDbSize(): boolean {
+    return this.limitWithDbSize;
+  }
+
+  /**
+   * Get database cache limit in bytes.
+   * @deprecated Kept for old DB cache compatibility.
+   */
+  getDbCacheLimit(): number {
+    return this.dbCacheLimit;
+  }
+
+  /**
+   * Get database cache discard strategy
+   */
+  getDBCacheDiscard(): string {
+    return this.dbCacheDiscard;
+  }
+
+  /**
+   * Set database cache discard strategy
+   */
+  setDbCacheDiscard(strategy: string | DBCacheDiscard): FTSDKConfig {
+    this.dbCacheDiscard = String(strategy);
+    return this;
   }
 }
 
@@ -943,9 +964,9 @@ export class FTTraceConfig {
    */
   serviceName: string = Constants.DEFAULT_SERVICE_NAME;
   /**
-   * Custom header handler
+   * Custom Trace Header handler
    */
-  private headerHandler: HeaderHandler | null = null;
+  private traceHeaderHandler: FTTraceHeaderHandler | null = null;
   /**
    * Global context tags
    */
@@ -1018,13 +1039,6 @@ export class FTTraceConfig {
   }
 
   /**
-   * Get supported content types for trace
-   */
-  getTraceContentType(): string[] {
-    return this.traceContentType;
-  }
-
-  /**
    * Check if auto trace is enabled
    */
   isEnableAutoTrace(): boolean {
@@ -1040,10 +1054,18 @@ export class FTTraceConfig {
   }
 
   /**
-   * Get global context
+   * Get custom Trace Header handler
    */
-  getGlobalContext(): Map<string, object> {
-    return this.globalContext;
+  getTraceHeaderHandler(): FTTraceHeaderHandler | null {
+    return this.traceHeaderHandler;
+  }
+
+  /**
+   * Set custom Trace Header handler
+   */
+  setTraceHeaderHandler(traceHeaderHandler: FTTraceHeaderHandler | null): FTTraceConfig {
+    this.traceHeaderHandler = traceHeaderHandler;
+    return this;
   }
 
   /**
@@ -1051,6 +1073,20 @@ export class FTTraceConfig {
    */
   getServiceName(): string {
     return this.serviceName;
+  }
+
+  /**
+   * Get supported content types for trace
+   */
+  getTraceContentType(): string[] {
+    return this.traceContentType;
+  }
+
+  /**
+   * Get global context
+   */
+  getGlobalContext(): Map<string, object> {
+    return this.globalContext;
   }
 
   /**
@@ -1065,21 +1101,6 @@ export class FTTraceConfig {
    */
   setEnableWebTrace(enableWebTrace: boolean): FTTraceConfig {
     this.enableWebTrace = enableWebTrace;
-    return this;
-  }
-
-  /**
-   * Get custom header handler
-   */
-  getOkHttpTraceHeaderHandler(): HeaderHandler | null {
-    return this.headerHandler;
-  }
-
-  /**
-   * Set custom header handler
-   */
-  setOkHttpTraceHeaderHandler(headerHandler: HeaderHandler | null): FTTraceConfig {
-    this.headerHandler = headerHandler;
     return this;
   }
 

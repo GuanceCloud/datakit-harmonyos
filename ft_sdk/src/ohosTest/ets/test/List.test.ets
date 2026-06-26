@@ -7,26 +7,45 @@
  * @author FT SDK Team
  */
 
-import configTest from './ConfigTest.test';
-import dataFormatTest from './DataFormatTest.test';
-import dataIntegerCompatibleTest from './DataIntegerCompatibleTest.test';
 import dataModifierTest from './DataModifierTest.test';
 import dataSyncTest from './DataSyncTest.test';
+import autoTrackDeviceTest from './AutoTrackDeviceTest.test';
+import ftExceptionHandlerDeviceTest from './FTExceptionHandlerDeviceTest.test';
+import ftNativeCrashHandlerDeviceTest from './FTNativeCrashHandlerDeviceTest.test';
+import ftSDKLifecycleDeviceTest from './FTSDKLifecycleDeviceTest.test';
+import ftDBManagerDeviceTest from './FTDBManagerDeviceTest.test';
+import configTest from './ConfigTest.test';
+import logGlobalContextTest from './LogGlobalContextTest.test';
+import logTest from './LogTest.test';
+import rcpAutoTrackDeviceTest from './RcpAutoTrackDeviceTest.test';
+import resourceAutoTrackDeviceTest from './ResourceAutoTrackDeviceTest.test';
+import realBackendSmokeTest from './RealBackendSmokeTest.test';
+import syncUploadChainDeviceTest from './SyncUploadChainDeviceTest.test';
+import userDataManagerPersistenceTest from './UserDataManagerPersistenceTest.test';
+import webViewAutoTrackDeviceTest from './WebViewAutoTrackDeviceTest.test';
 
 export default function testsuite() {
 
-  // Config Tests (adapted from Android SDK)
+  // User-facing config behavior that affects installed SDK state.
   configTest();
+  ftExceptionHandlerDeviceTest();
+  ftNativeCrashHandlerDeviceTest();
+  ftSDKLifecycleDeviceTest();
 
-  // Data Format Tests (adapted from Android SDK)
-  dataFormatTest();
-
-  // Data Integer Compatible Tests (adapted from Android SDK)
-  dataIntegerCompatibleTest();
-
-  // Data Modifier Tests (adapted from Android SDK)
+  // Public API/demo-triggered data generation, persistence, upload and deletion chains.
+  autoTrackDeviceTest();
   dataModifierTest();
-
-  // Data Sync Tests (adapted from Android SDK)
   dataSyncTest();
+  ftDBManagerDeviceTest();
+  logTest();
+  logGlobalContextTest();
+  rcpAutoTrackDeviceTest();
+  resourceAutoTrackDeviceTest();
+  syncUploadChainDeviceTest();
+  userDataManagerPersistenceTest();
+  webViewAutoTrackDeviceTest();
+
+  // Manual real backend smoke. Disabled by default unless explicitly enabled.
+  realBackendSmokeTest();
+
 }

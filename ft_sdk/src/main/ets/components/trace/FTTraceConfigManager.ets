@@ -5,7 +5,7 @@
 import { FTTraceConfig } from '../Configs';
 import { TraceType } from './TraceType';
 import { FTInnerLogger } from '../log/FTLogger';
-import { HeaderHandler } from './FTTraceInterceptor';
+import { FTTraceHeaderHandler } from './FTTraceHeaderHandler';
 
 const TAG = "FTTraceConfigManager";
 
@@ -55,13 +55,13 @@ export class FTTraceConfigManager {
   }
 
   /**
-   * Get override header handler for custom trace interceptor
+   * Get custom Trace Header handler
    */
-  public getOverrideHeaderHandler(): HeaderHandler | null {
+  public getTraceHeaderHandler(): FTTraceHeaderHandler | null {
     if (!this.config) return null;
-    const headerHandler: HeaderHandler | null = this.config.getOkHttpTraceHeaderHandler();
-    if (!headerHandler) return null;
-    return headerHandler;
+    const traceHeaderHandler: FTTraceHeaderHandler | null = this.config.getTraceHeaderHandler();
+    if (!traceHeaderHandler) return null;
+    return traceHeaderHandler;
   }
 
   /**

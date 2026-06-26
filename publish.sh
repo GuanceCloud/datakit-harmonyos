@@ -30,6 +30,23 @@ elif [ "$MODULE_TYPE" == "native" ]; then
 fi
 OSS_UTIL_PATH=~/ossutilmac64
 
+product_for_module() {
+    case "$1" in
+        ft_sdk)
+            echo "ft_sdk"
+            ;;
+        ft_sdk_ext)
+            echo "ft_sdk_ext"
+            ;;
+        ft_native)
+            echo "ft_native"
+            ;;
+        *)
+            echo "default"
+            ;;
+    esac
+}
+
 # Check required environment variables
 if [ -z "$HARMONY_OS_NODE_PATH" ]; then
     echo "Error: HARMONY_OS_NODE_PATH environment variable is not set"
@@ -47,14 +64,15 @@ if [ -z "$OSS_BASE_PATH" ]; then
 fi
 
 for MODULE_NAME in "${MODULE_NAMES[@]}"; do
+    BUILD_PRODUCT=$(product_for_module "$MODULE_NAME")
     PACKAGE_JSON_PATH="$MODULE_NAME/oh-package.json5"
-    HAR_SOURCE_PATH="$MODULE_NAME/build/default/outputs/default/$MODULE_NAME.har"
+    HAR_SOURCE_PATH="$MODULE_NAME/build/$BUILD_PRODUCT/outputs/default/$MODULE_NAME.har"
     BUILD_MODULE="$MODULE_NAME@default"
 
     # Step 1: Build HAR package
-    echo "Building HAR package for $MODULE_NAME..."
-    $HARMONY_OS_NODE_PATH $HARMONY_OS_HVIGOR_PATH --mode module -p product=default -p module=$BUILD_MODULE clean --analyze=normal
-    $HARMONY_OS_NODE_PATH $HARMONY_OS_HVIGOR_PATH --mode module -p product=default -p module=$BUILD_MODULE assembleHar --analyze=normal --parallel
+    echo "Building HAR package for $MODULE_NAME with product $BUILD_PRODUCT..."
+    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" clean --analyze=normal
+    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" assembleHar --analyze=normal --parallel
 
     # Check if HAR package was built successfully
     if [ ! -f "$HAR_SOURCE_PATH" ]; then
