@@ -117,6 +117,11 @@ export struct StressTestAPage {
     }
     try {
       this.stressTestManager.recordNavigationSwitch();
+      if (!this.stressTestManager.isNavigationScenarioEnabled()) {
+        DemoLogger.i(TAG, "Navigation target reached, returning to RealAppStressTestPage");
+        this.navigateBack();
+        return;
+      }
       // Use replaceUrl to replace current page instead of pushing to stack
       // This prevents page stack overflow when repeatedly navigating between pages
       router.replaceUrl({ url: 'pages/StressTestBPage' });

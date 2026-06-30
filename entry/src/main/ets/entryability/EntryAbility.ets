@@ -309,7 +309,7 @@ export default class EntryAbility extends UIAbility {
         .setSamplingRate(1.0)  // 100% sampling rate
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true)
-        // .setLogCacheLimitCount(30000)
+        // .setLogCacheLimitCount(20000)
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
         .setEnableLinkRumData(true);
@@ -337,7 +337,7 @@ export default class EntryAbility extends UIAbility {
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL)
-        // .setRumCacheLimitCount(12345)
+        // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
 
