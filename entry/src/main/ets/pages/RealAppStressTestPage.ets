@@ -81,31 +81,18 @@ const DEFAULT_STRESS_ERROR_INTERVAL_MS = 1000;
 const DEFAULT_STRESS_LONG_TASK_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LONG_TASK_INTERVAL_MS = 1500;
 const DEFAULT_REAL_RESOURCE_URL = '';
-const MAX_REAL_RESOURCE_URL_COUNT = 10;
 const MIN_STRESS_LOG_BATCH_SIZE = 1;
-const MAX_STRESS_LOG_BATCH_SIZE = 1000;
 const MIN_STRESS_LOG_INTERVAL_MS = 16;
-const MAX_STRESS_LOG_INTERVAL_MS = 10000;
 const MIN_STRESS_ACTION_TIMER_COUNT = 1;
-const MAX_STRESS_ACTION_TIMER_COUNT = 20;
 const MIN_STRESS_ACTION_INTERVAL_MS = 16;
-const MAX_STRESS_ACTION_INTERVAL_MS = 10000;
 const MIN_STRESS_RESOURCE_TIMER_COUNT = 1;
-const MAX_STRESS_RESOURCE_TIMER_COUNT = 20;
 const MIN_STRESS_RESOURCE_INTERVAL_MS = 50;
-const MAX_STRESS_RESOURCE_INTERVAL_MS = 10000;
 const MIN_STRESS_NAVIGATION_INTERVAL_MS = 250;
-const MAX_STRESS_NAVIGATION_INTERVAL_MS = 10000;
 const MIN_STRESS_ERROR_BATCH_SIZE = 1;
-const MAX_STRESS_ERROR_BATCH_SIZE = 1000;
 const MIN_STRESS_ERROR_INTERVAL_MS = 250;
-const MAX_STRESS_ERROR_INTERVAL_MS = 10000;
 const MIN_STRESS_LONG_TASK_BATCH_SIZE = 1;
-const MAX_STRESS_LONG_TASK_BATCH_SIZE = 1000;
 const MIN_STRESS_LONG_TASK_INTERVAL_MS = 250;
-const MAX_STRESS_LONG_TASK_INTERVAL_MS = 10000;
 const MIN_STRESS_TOTAL_COUNT = 1;
-const MAX_STRESS_TOTAL_COUNT = 100000;
 const SDK_LOG_LANE = 'log';
 const SDK_EVENT_LANE = 'event';
 const SDK_DATA_PROCESS_LANE = 'data-process';
@@ -491,7 +478,7 @@ export struct RealAppStressTestPage {
         const savedMinutes = await this.preferencesStore.get(KEY_TEST_MINUTES, 1) as number;
         const savedSeconds = await this.preferencesStore.get(KEY_TEST_SECONDS, 0) as number;
 
-        if (savedMinutes >= 0 && savedMinutes <= 30 && savedSeconds >= 0 && savedSeconds < 60) {
+        if (savedMinutes >= 0 && savedSeconds >= 0) {
           this.testMinutes = savedMinutes;
           this.testSeconds = savedSeconds;
           this.updateTestDuration();
@@ -605,8 +592,7 @@ export struct RealAppStressTestPage {
     }
     this.stressTotalCount = this.clampNumber(
       Math.floor(this.stressTotalCount),
-      MIN_STRESS_TOTAL_COUNT,
-      MAX_STRESS_TOTAL_COUNT
+      MIN_STRESS_TOTAL_COUNT
     );
     this.syncStressTotalCountInput();
   }
@@ -634,6 +620,20 @@ export struct RealAppStressTestPage {
     return digits;
   }
 
+  private parseNumberInput(value: string, currentValue: number, minValue: number): number {
+    const digits = this.extractDigits(value);
+    if (digits.length === 0) {
+      return currentValue;
+    }
+
+    const parsedValue = Number(digits);
+    if (isNaN(parsedValue)) {
+      return currentValue;
+    }
+
+    return this.clampNumber(Math.floor(parsedValue), minValue);
+  }
+
   updateStressTotalCountInput(value: string): void {
     const digits = this.extractDigits(value);
     this.stressTotalCountInput = digits;
@@ -648,8 +648,7 @@ export struct RealAppStressTestPage {
 
     this.stressTotalCount = this.clampNumber(
       Math.floor(parsedValue),
-      MIN_STRESS_TOTAL_COUNT,
-      MAX_STRESS_TOTAL_COUNT
+      MIN_STRESS_TOTAL_COUNT
     );
     if (digits !== `${this.stressTotalCount}`) {
       this.syncStressTotalCountInput();
@@ -657,9 +656,120 @@ export struct RealAppStressTestPage {
     this.saveSettings();
   }
 
+  updateTestMinutesInput(value: string): void {
+    this.testMinutes = this.parseNumberInput(value, this.testMinutes, 0);
+    this.updateTestDuration();
+    this.saveSettings();
+  }
+
+  updateTestSecondsInput(value: string): void {
+    this.testSeconds = this.parseNumberInput(value, this.testSeconds, 0);
+    this.updateTestDuration();
+    this.saveSettings();
+  }
+
+  updateStressLogBatchSizeInput(value: string): void {
+    this.stressLogBatchSize = this.parseNumberInput(
+      value,
+      this.stressLogBatchSize,
+      MIN_STRESS_LOG_BATCH_SIZE
+    );
+    this.saveSettings();
+  }
+
+  updateStressLogIntervalInput(value: string): void {
+    this.stressLogIntervalMs = this.parseNumberInput(
+      value,
+      this.stressLogIntervalMs,
+      MIN_STRESS_LOG_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateStressActionTimerCountInput(value: string): void {
+    this.stressActionTimerCount = this.parseNumberInput(
+      value,
+      this.stressActionTimerCount,
+      MIN_STRESS_ACTION_TIMER_COUNT
+    );
+    this.saveSettings();
+  }
+
+  updateStressActionIntervalInput(value: string): void {
+    this.stressActionIntervalMs = this.parseNumberInput(
+      value,
+      this.stressActionIntervalMs,
+      MIN_STRESS_ACTION_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateStressResourceTimerCountInput(value: string): void {
+    this.stressResourceTimerCount = this.parseNumberInput(
+      value,
+      this.stressResourceTimerCount,
+      MIN_STRESS_RESOURCE_TIMER_COUNT
+    );
+    this.saveSettings();
+  }
+
+  updateStressResourceIntervalInput(value: string): void {
+    this.stressResourceIntervalMs = this.parseNumberInput(
+      value,
+      this.stressResourceIntervalMs,
+      MIN_STRESS_RESOURCE_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateStressNavigationIntervalInput(value: string): void {
+    this.stressNavigationIntervalMs = this.parseNumberInput(
+      value,
+      this.stressNavigationIntervalMs,
+      MIN_STRESS_NAVIGATION_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateStressErrorBatchSizeInput(value: string): void {
+    this.stressErrorBatchSize = this.parseNumberInput(
+      value,
+      this.stressErrorBatchSize,
+      MIN_STRESS_ERROR_BATCH_SIZE
+    );
+    this.saveSettings();
+  }
+
+  updateStressErrorIntervalInput(value: string): void {
+    this.stressErrorIntervalMs = this.parseNumberInput(
+      value,
+      this.stressErrorIntervalMs,
+      MIN_STRESS_ERROR_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
+  updateStressLongTaskBatchSizeInput(value: string): void {
+    this.stressLongTaskBatchSize = this.parseNumberInput(
+      value,
+      this.stressLongTaskBatchSize,
+      MIN_STRESS_LONG_TASK_BATCH_SIZE
+    );
+    this.saveSettings();
+  }
+
+  updateStressLongTaskIntervalInput(value: string): void {
+    this.stressLongTaskIntervalMs = this.parseNumberInput(
+      value,
+      this.stressLongTaskIntervalMs,
+      MIN_STRESS_LONG_TASK_INTERVAL_MS
+    );
+    this.saveSettings();
+  }
+
   adjustMinutes(delta: number): void {
     const newMinutes = this.testMinutes + delta;
-    if (newMinutes >= 0 && newMinutes <= 30) {
+    if (newMinutes >= 0) {
       this.testMinutes = newMinutes;
       this.updateTestDuration();
       this.saveSettings();
@@ -668,13 +778,8 @@ export struct RealAppStressTestPage {
 
   adjustSeconds(delta: number): void {
     const newSeconds = this.testSeconds + delta;
-    if (newSeconds >= 0 && newSeconds < 60) {
+    if (newSeconds >= 0) {
       this.testSeconds = newSeconds;
-      this.updateTestDuration();
-      this.saveSettings();
-    } else if (newSeconds >= 60 && this.testMinutes < 30) {
-      this.testMinutes += 1;
-      this.testSeconds = newSeconds - 60;
       this.updateTestDuration();
       this.saveSettings();
     } else if (newSeconds < 0 && this.testMinutes > 0) {
@@ -688,8 +793,7 @@ export struct RealAppStressTestPage {
   adjustStressTotalCount(delta: number): void {
     this.stressTotalCount = this.clampNumber(
       this.stressTotalCount + delta,
-      MIN_STRESS_TOTAL_COUNT,
-      MAX_STRESS_TOTAL_COUNT
+      MIN_STRESS_TOTAL_COUNT
     );
     this.syncStressTotalCountInput();
     this.saveSettings();
@@ -698,73 +802,62 @@ export struct RealAppStressTestPage {
   private normalizeStressLogSettings(): void {
     this.stressLogBatchSize = this.clampNumber(
       Math.floor(this.stressLogBatchSize),
-      MIN_STRESS_LOG_BATCH_SIZE,
-      MAX_STRESS_LOG_BATCH_SIZE
+      MIN_STRESS_LOG_BATCH_SIZE
     );
     this.stressLogIntervalMs = this.clampNumber(
       Math.floor(this.stressLogIntervalMs),
-      MIN_STRESS_LOG_INTERVAL_MS,
-      MAX_STRESS_LOG_INTERVAL_MS
+      MIN_STRESS_LOG_INTERVAL_MS
     );
   }
 
   private normalizeStressActionSettings(): void {
     this.stressActionTimerCount = this.clampNumber(
       Math.floor(this.stressActionTimerCount),
-      MIN_STRESS_ACTION_TIMER_COUNT,
-      MAX_STRESS_ACTION_TIMER_COUNT
+      MIN_STRESS_ACTION_TIMER_COUNT
     );
     this.stressActionIntervalMs = this.clampNumber(
       Math.floor(this.stressActionIntervalMs),
-      MIN_STRESS_ACTION_INTERVAL_MS,
-      MAX_STRESS_ACTION_INTERVAL_MS
+      MIN_STRESS_ACTION_INTERVAL_MS
     );
   }
 
   private normalizeStressResourceSettings(): void {
     this.stressResourceTimerCount = this.clampNumber(
       Math.floor(this.stressResourceTimerCount),
-      MIN_STRESS_RESOURCE_TIMER_COUNT,
-      MAX_STRESS_RESOURCE_TIMER_COUNT
+      MIN_STRESS_RESOURCE_TIMER_COUNT
     );
     this.stressResourceIntervalMs = this.clampNumber(
       Math.floor(this.stressResourceIntervalMs),
-      MIN_STRESS_RESOURCE_INTERVAL_MS,
-      MAX_STRESS_RESOURCE_INTERVAL_MS
+      MIN_STRESS_RESOURCE_INTERVAL_MS
     );
   }
 
   private normalizeStressNavigationSettings(): void {
     this.stressNavigationIntervalMs = this.clampNumber(
       Math.floor(this.stressNavigationIntervalMs),
-      MIN_STRESS_NAVIGATION_INTERVAL_MS,
-      MAX_STRESS_NAVIGATION_INTERVAL_MS
+      MIN_STRESS_NAVIGATION_INTERVAL_MS
     );
   }
 
   private normalizeStressErrorSettings(): void {
     this.stressErrorBatchSize = this.clampNumber(
       Math.floor(this.stressErrorBatchSize),
-      MIN_STRESS_ERROR_BATCH_SIZE,
-      MAX_STRESS_ERROR_BATCH_SIZE
+      MIN_STRESS_ERROR_BATCH_SIZE
     );
     this.stressErrorIntervalMs = this.clampNumber(
       Math.floor(this.stressErrorIntervalMs),
-      MIN_STRESS_ERROR_INTERVAL_MS,
-      MAX_STRESS_ERROR_INTERVAL_MS
+      MIN_STRESS_ERROR_INTERVAL_MS
     );
   }
 
   private normalizeStressLongTaskSettings(): void {
     this.stressLongTaskBatchSize = this.clampNumber(
       Math.floor(this.stressLongTaskBatchSize),
-      MIN_STRESS_LONG_TASK_BATCH_SIZE,
-      MAX_STRESS_LONG_TASK_BATCH_SIZE
+      MIN_STRESS_LONG_TASK_BATCH_SIZE
     );
     this.stressLongTaskIntervalMs = this.clampNumber(
       Math.floor(this.stressLongTaskIntervalMs),
-      MIN_STRESS_LONG_TASK_INTERVAL_MS,
-      MAX_STRESS_LONG_TASK_INTERVAL_MS
+      MIN_STRESS_LONG_TASK_INTERVAL_MS
     );
   }
 
@@ -792,7 +885,7 @@ export struct RealAppStressTestPage {
   }
 
   private normalizeRealResourceUrlInputs(urls: string[]): string[] {
-    const normalizedUrls = urls.slice(0, MAX_REAL_RESOURCE_URL_COUNT);
+    const normalizedUrls = urls.slice();
     return normalizedUrls.length > 0 ? normalizedUrls : [DEFAULT_REAL_RESOURCE_URL];
   }
 
@@ -809,12 +902,9 @@ export struct RealAppStressTestPage {
     return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
   }
 
-  private clampNumber(value: number, minValue: number, maxValue: number): number {
+  private clampNumber(value: number, minValue: number): number {
     if (value < minValue) {
       return minValue;
-    }
-    if (value > maxValue) {
-      return maxValue;
     }
     return value;
   }
@@ -875,8 +965,7 @@ export struct RealAppStressTestPage {
   adjustStressLogBatchSize(delta: number): void {
     this.stressLogBatchSize = this.clampNumber(
       this.stressLogBatchSize + delta,
-      MIN_STRESS_LOG_BATCH_SIZE,
-      MAX_STRESS_LOG_BATCH_SIZE
+      MIN_STRESS_LOG_BATCH_SIZE
     );
     this.saveSettings();
   }
@@ -884,8 +973,7 @@ export struct RealAppStressTestPage {
   adjustStressLogInterval(delta: number): void {
     this.stressLogIntervalMs = this.clampNumber(
       this.stressLogIntervalMs + delta,
-      MIN_STRESS_LOG_INTERVAL_MS,
-      MAX_STRESS_LOG_INTERVAL_MS
+      MIN_STRESS_LOG_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -893,8 +981,7 @@ export struct RealAppStressTestPage {
   adjustStressActionTimerCount(delta: number): void {
     this.stressActionTimerCount = this.clampNumber(
       this.stressActionTimerCount + delta,
-      MIN_STRESS_ACTION_TIMER_COUNT,
-      MAX_STRESS_ACTION_TIMER_COUNT
+      MIN_STRESS_ACTION_TIMER_COUNT
     );
     this.saveSettings();
   }
@@ -902,8 +989,7 @@ export struct RealAppStressTestPage {
   adjustStressActionInterval(delta: number): void {
     this.stressActionIntervalMs = this.clampNumber(
       this.stressActionIntervalMs + delta,
-      MIN_STRESS_ACTION_INTERVAL_MS,
-      MAX_STRESS_ACTION_INTERVAL_MS
+      MIN_STRESS_ACTION_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -911,8 +997,7 @@ export struct RealAppStressTestPage {
   adjustStressResourceTimerCount(delta: number): void {
     this.stressResourceTimerCount = this.clampNumber(
       this.stressResourceTimerCount + delta,
-      MIN_STRESS_RESOURCE_TIMER_COUNT,
-      MAX_STRESS_RESOURCE_TIMER_COUNT
+      MIN_STRESS_RESOURCE_TIMER_COUNT
     );
     this.saveSettings();
   }
@@ -920,8 +1005,7 @@ export struct RealAppStressTestPage {
   adjustStressResourceInterval(delta: number): void {
     this.stressResourceIntervalMs = this.clampNumber(
       this.stressResourceIntervalMs + delta,
-      MIN_STRESS_RESOURCE_INTERVAL_MS,
-      MAX_STRESS_RESOURCE_INTERVAL_MS
+      MIN_STRESS_RESOURCE_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -929,8 +1013,7 @@ export struct RealAppStressTestPage {
   adjustStressNavigationInterval(delta: number): void {
     this.stressNavigationIntervalMs = this.clampNumber(
       this.stressNavigationIntervalMs + delta,
-      MIN_STRESS_NAVIGATION_INTERVAL_MS,
-      MAX_STRESS_NAVIGATION_INTERVAL_MS
+      MIN_STRESS_NAVIGATION_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -938,8 +1021,7 @@ export struct RealAppStressTestPage {
   adjustStressErrorBatchSize(delta: number): void {
     this.stressErrorBatchSize = this.clampNumber(
       this.stressErrorBatchSize + delta,
-      MIN_STRESS_ERROR_BATCH_SIZE,
-      MAX_STRESS_ERROR_BATCH_SIZE
+      MIN_STRESS_ERROR_BATCH_SIZE
     );
     this.saveSettings();
   }
@@ -947,8 +1029,7 @@ export struct RealAppStressTestPage {
   adjustStressErrorInterval(delta: number): void {
     this.stressErrorIntervalMs = this.clampNumber(
       this.stressErrorIntervalMs + delta,
-      MIN_STRESS_ERROR_INTERVAL_MS,
-      MAX_STRESS_ERROR_INTERVAL_MS
+      MIN_STRESS_ERROR_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -956,8 +1037,7 @@ export struct RealAppStressTestPage {
   adjustStressLongTaskBatchSize(delta: number): void {
     this.stressLongTaskBatchSize = this.clampNumber(
       this.stressLongTaskBatchSize + delta,
-      MIN_STRESS_LONG_TASK_BATCH_SIZE,
-      MAX_STRESS_LONG_TASK_BATCH_SIZE
+      MIN_STRESS_LONG_TASK_BATCH_SIZE
     );
     this.saveSettings();
   }
@@ -965,8 +1045,7 @@ export struct RealAppStressTestPage {
   adjustStressLongTaskInterval(delta: number): void {
     this.stressLongTaskIntervalMs = this.clampNumber(
       this.stressLongTaskIntervalMs + delta,
-      MIN_STRESS_LONG_TASK_INTERVAL_MS,
-      MAX_STRESS_LONG_TASK_INTERVAL_MS
+      MIN_STRESS_LONG_TASK_INTERVAL_MS
     );
     this.saveSettings();
   }
@@ -982,9 +1061,6 @@ export struct RealAppStressTestPage {
   }
 
   addRealResourceUrl(): void {
-    if (this.realResourceUrls.length >= MAX_REAL_RESOURCE_URL_COUNT) {
-      return;
-    }
     const urls = this.realResourceUrls.slice();
     urls.push(DEFAULT_REAL_RESOURCE_URL);
     this.realResourceUrls = urls;
@@ -1454,29 +1530,41 @@ export struct RealAppStressTestPage {
                 Text('Duration Minutes')
                   .fontSize(14)
                   .fontColor(Color.Gray)
-                Row({ space: 20 }) {
+                Row({ space: 8 }) {
                   Button('-')
                     .onClick(() => this.adjustMinutes(-1))
-                    .width(60)
-                    .height(50)
+                    .width(56)
+                    .height(44)
                     .enabled(!this.isTestRunning && this.testMinutes > 0)
 
-                  Text(`${this.testMinutes}`)
-                    .fontSize(24)
+                  TextInput({
+                    placeholder: `${DEFAULT_TEST_MINUTES}`,
+                    text: `${this.testMinutes}`
+                  })
+                    .fontSize(18)
                     .fontWeight(FontWeight.Bold)
-                    .width(80)
+                    .width(112)
+                    .height(44)
                     .textAlign(TextAlign.Center)
+                    .backgroundColor('#FFFFFF')
+                    .borderRadius(6)
+                    .type(InputType.Number)
+                    .enabled(!this.isTestRunning)
+                    .onChange((value: string) => {
+                      this.updateTestMinutesInput(value);
+                    })
 
                   Button('+')
                     .onClick(() => this.adjustMinutes(1))
-                    .width(60)
-                    .height(50)
-                    .enabled(!this.isTestRunning && this.testMinutes < 30)
+                    .width(56)
+                    .height(44)
+                    .enabled(!this.isTestRunning)
                 }
                 .justifyContent(FlexAlign.Center)
                 .width('100%')
               }
               .width('100%')
+              .alignItems(HorizontalAlign.Center)
             }
 
             if (this.stressRunMode === 'duration') {
@@ -1484,29 +1572,41 @@ export struct RealAppStressTestPage {
                 Text('Duration Seconds')
                   .fontSize(14)
                   .fontColor(Color.Gray)
-                Row({ space: 20 }) {
+                Row({ space: 8 }) {
                   Button('-')
                     .onClick(() => this.adjustSeconds(-1))
-                    .width(60)
-                    .height(50)
+                    .width(56)
+                    .height(44)
                     .enabled(!this.isTestRunning && (this.testSeconds > 0 || this.testMinutes > 0))
 
-                  Text(`${this.testSeconds}`)
-                    .fontSize(24)
+                  TextInput({
+                    placeholder: `${DEFAULT_TEST_SECONDS}`,
+                    text: `${this.testSeconds}`
+                  })
+                    .fontSize(18)
                     .fontWeight(FontWeight.Bold)
-                    .width(80)
+                    .width(112)
+                    .height(44)
                     .textAlign(TextAlign.Center)
+                    .backgroundColor('#FFFFFF')
+                    .borderRadius(6)
+                    .type(InputType.Number)
+                    .enabled(!this.isTestRunning)
+                    .onChange((value: string) => {
+                      this.updateTestSecondsInput(value);
+                    })
 
                   Button('+')
                     .onClick(() => this.adjustSeconds(1))
-                    .width(60)
-                    .height(50)
-                    .enabled(!this.isTestRunning && (this.testSeconds < 59 || this.testMinutes < 30))
+                    .width(56)
+                    .height(44)
+                    .enabled(!this.isTestRunning)
                 }
                 .justifyContent(FlexAlign.Center)
                 .width('100%')
               }
               .width('100%')
+              .alignItems(HorizontalAlign.Center)
             }
 
             if (this.stressRunMode === 'total') {
@@ -1514,10 +1614,10 @@ export struct RealAppStressTestPage {
                 Text('Total Count Per Enabled Feature')
                   .fontSize(14)
                   .fontColor(Color.Gray)
-                Row({ space: 14 }) {
+                Row({ space: 8 }) {
                   Button('-100')
                     .onClick(() => this.adjustStressTotalCount(-100))
-                    .width(76)
+                    .width(64)
                     .height(44)
                     .enabled(!this.isTestRunning && this.stressTotalCount > MIN_STRESS_TOTAL_COUNT)
 
@@ -1527,11 +1627,12 @@ export struct RealAppStressTestPage {
                   })
                     .fontSize(18)
                     .fontWeight(FontWeight.Bold)
-                    .width(132)
+                    .width(112)
                     .height(44)
                     .textAlign(TextAlign.Center)
                     .backgroundColor('#FFFFFF')
                     .borderRadius(6)
+                    .type(InputType.Number)
                     .enabled(!this.isTestRunning)
                     .onChange((value: string) => {
                       this.updateStressTotalCountInput(value);
@@ -1539,14 +1640,15 @@ export struct RealAppStressTestPage {
 
                   Button('+100')
                     .onClick(() => this.adjustStressTotalCount(100))
-                    .width(76)
+                    .width(64)
                     .height(44)
-                    .enabled(!this.isTestRunning && this.stressTotalCount < MAX_STRESS_TOTAL_COUNT)
+                    .enabled(!this.isTestRunning)
                 }
                 .justifyContent(FlexAlign.Center)
                 .width('100%')
               }
               .width('100%')
+              .alignItems(HorizontalAlign.Center)
             }
 
             Text(this.stressRunMode === 'total' ?
@@ -1688,29 +1790,41 @@ export struct RealAppStressTestPage {
               Text('Switch Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-250')
                   .onClick(() => this.adjustStressNavigationInterval(-250))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressNavigationIntervalMs > MIN_STRESS_NAVIGATION_INTERVAL_MS)
 
-                Text(`${this.stressNavigationIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_NAVIGATION_INTERVAL_MS}`,
+                  text: `${this.stressNavigationIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressNavigationIntervalInput(value);
+                  })
 
                 Button('+250')
                   .onClick(() => this.adjustStressNavigationInterval(250))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressNavigationIntervalMs < MAX_STRESS_NAVIGATION_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: switch page every ${this.stressNavigationIntervalMs}ms`)
               .fontSize(13)
@@ -1743,57 +1857,81 @@ export struct RealAppStressTestPage {
               Text('Batch Size')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-1')
                   .onClick(() => this.adjustStressLogBatchSize(-1))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressLogBatchSize > MIN_STRESS_LOG_BATCH_SIZE)
 
-                Text(`${this.stressLogBatchSize}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_LOG_BATCH_SIZE}`,
+                  text: `${this.stressLogBatchSize}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressLogBatchSizeInput(value);
+                  })
 
                 Button('+1')
                   .onClick(() => this.adjustStressLogBatchSize(1))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressLogBatchSize < MAX_STRESS_LOG_BATCH_SIZE)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Column({ space: 5 }) {
               Text('Event Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-10')
                   .onClick(() => this.adjustStressLogInterval(-10))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressLogIntervalMs > MIN_STRESS_LOG_INTERVAL_MS)
 
-                Text(`${this.stressLogIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_LOG_INTERVAL_MS}`,
+                  text: `${this.stressLogIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressLogIntervalInput(value);
+                  })
 
                 Button('+10')
                   .onClick(() => this.adjustStressLogInterval(10))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressLogIntervalMs < MAX_STRESS_LOG_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: ${this.stressLogBatchSize} logs per ${this.stressLogIntervalMs}ms, ${this.formatRunTargetSummary()}`)
               .fontSize(13)
@@ -1826,57 +1964,81 @@ export struct RealAppStressTestPage {
               Text('Timer Count')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-1')
                   .onClick(() => this.adjustStressActionTimerCount(-1))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressActionTimerCount > MIN_STRESS_ACTION_TIMER_COUNT)
 
-                Text(`${this.stressActionTimerCount}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_ACTION_TIMER_COUNT}`,
+                  text: `${this.stressActionTimerCount}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressActionTimerCountInput(value);
+                  })
 
                 Button('+1')
                   .onClick(() => this.adjustStressActionTimerCount(1))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressActionTimerCount < MAX_STRESS_ACTION_TIMER_COUNT)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Column({ space: 5 }) {
               Text('Event Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-10')
                   .onClick(() => this.adjustStressActionInterval(-10))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressActionIntervalMs > MIN_STRESS_ACTION_INTERVAL_MS)
 
-                Text(`${this.stressActionIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_ACTION_INTERVAL_MS}`,
+                  text: `${this.stressActionIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressActionIntervalInput(value);
+                  })
 
                 Button('+10')
                   .onClick(() => this.adjustStressActionInterval(10))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressActionIntervalMs < MAX_STRESS_ACTION_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: ${this.stressActionTimerCount} timers, action every ${this.stressActionIntervalMs}ms`)
               .fontSize(13)
@@ -1968,7 +2130,7 @@ export struct RealAppStressTestPage {
                 Button('Add Resource URL')
                   .height(40)
                   .width('100%')
-                  .enabled(!this.isTestRunning && this.realResourceUrls.length < MAX_REAL_RESOURCE_URL_COUNT)
+                  .enabled(!this.isTestRunning)
                   .onClick(() => {
                     this.addRealResourceUrl();
                   })
@@ -1986,57 +2148,81 @@ export struct RealAppStressTestPage {
               Text('Timer Count')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-1')
                   .onClick(() => this.adjustStressResourceTimerCount(-1))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressResourceTimerCount > MIN_STRESS_RESOURCE_TIMER_COUNT)
 
-                Text(`${this.stressResourceTimerCount}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_RESOURCE_TIMER_COUNT}`,
+                  text: `${this.stressResourceTimerCount}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressResourceTimerCountInput(value);
+                  })
 
                 Button('+1')
                   .onClick(() => this.adjustStressResourceTimerCount(1))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressResourceTimerCount < MAX_STRESS_RESOURCE_TIMER_COUNT)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Column({ space: 5 }) {
               Text('Event Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-50')
                   .onClick(() => this.adjustStressResourceInterval(-50))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressResourceIntervalMs > MIN_STRESS_RESOURCE_INTERVAL_MS)
 
-                Text(`${this.stressResourceIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_RESOURCE_INTERVAL_MS}`,
+                  text: `${this.stressResourceIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressResourceIntervalInput(value);
+                  })
 
                 Button('+50')
                   .onClick(() => this.adjustStressResourceInterval(50))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressResourceIntervalMs < MAX_STRESS_RESOURCE_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: ${this.stressResourceTimerCount} timers, resource every ${this.stressResourceIntervalMs}ms`)
               .fontSize(13)
@@ -2069,57 +2255,81 @@ export struct RealAppStressTestPage {
               Text('Batch Size')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-1')
                   .onClick(() => this.adjustStressErrorBatchSize(-1))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressErrorBatchSize > MIN_STRESS_ERROR_BATCH_SIZE)
 
-                Text(`${this.stressErrorBatchSize}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_ERROR_BATCH_SIZE}`,
+                  text: `${this.stressErrorBatchSize}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressErrorBatchSizeInput(value);
+                  })
 
                 Button('+1')
                   .onClick(() => this.adjustStressErrorBatchSize(1))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressErrorBatchSize < MAX_STRESS_ERROR_BATCH_SIZE)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Column({ space: 5 }) {
               Text('Event Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-250')
                   .onClick(() => this.adjustStressErrorInterval(-250))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressErrorIntervalMs > MIN_STRESS_ERROR_INTERVAL_MS)
 
-                Text(`${this.stressErrorIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_ERROR_INTERVAL_MS}`,
+                  text: `${this.stressErrorIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressErrorIntervalInput(value);
+                  })
 
                 Button('+250')
                   .onClick(() => this.adjustStressErrorInterval(250))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressErrorIntervalMs < MAX_STRESS_ERROR_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: ${this.stressErrorBatchSize} custom errors every ${this.stressErrorIntervalMs}ms`)
               .fontSize(13)
@@ -2152,57 +2362,81 @@ export struct RealAppStressTestPage {
               Text('Batch Size')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-1')
                   .onClick(() => this.adjustStressLongTaskBatchSize(-1))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressLongTaskBatchSize > MIN_STRESS_LONG_TASK_BATCH_SIZE)
 
-                Text(`${this.stressLongTaskBatchSize}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_LONG_TASK_BATCH_SIZE}`,
+                  text: `${this.stressLongTaskBatchSize}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressLongTaskBatchSizeInput(value);
+                  })
 
                 Button('+1')
                   .onClick(() => this.adjustStressLongTaskBatchSize(1))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressLongTaskBatchSize < MAX_STRESS_LONG_TASK_BATCH_SIZE)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Column({ space: 5 }) {
               Text('Event Interval (ms)')
                 .fontSize(14)
                 .fontColor(Color.Gray)
-              Row({ space: 14 }) {
+              Row({ space: 8 }) {
                 Button('-250')
                   .onClick(() => this.adjustStressLongTaskInterval(-250))
-                  .width(76)
+                  .width(64)
                   .height(44)
                   .enabled(!this.isTestRunning && this.stressLongTaskIntervalMs > MIN_STRESS_LONG_TASK_INTERVAL_MS)
 
-                Text(`${this.stressLongTaskIntervalMs}`)
-                  .fontSize(20)
+                TextInput({
+                  placeholder: `${DEFAULT_STRESS_LONG_TASK_INTERVAL_MS}`,
+                  text: `${this.stressLongTaskIntervalMs}`
+                })
+                  .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .width(100)
-                    .textAlign(TextAlign.Center)
+                  .width(112)
+                  .height(44)
+                  .textAlign(TextAlign.Center)
+                  .backgroundColor('#FFFFFF')
+                  .borderRadius(6)
+                  .type(InputType.Number)
+                  .enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    this.updateStressLongTaskIntervalInput(value);
+                  })
 
                 Button('+250')
                   .onClick(() => this.adjustStressLongTaskInterval(250))
-                  .width(76)
+                  .width(64)
                   .height(44)
-                  .enabled(!this.isTestRunning && this.stressLongTaskIntervalMs < MAX_STRESS_LONG_TASK_INTERVAL_MS)
+                  .enabled(!this.isTestRunning)
               }
               .justifyContent(FlexAlign.Center)
               .width('100%')
             }
             .width('100%')
+            .alignItems(HorizontalAlign.Center)
 
             Text(`Current: ${this.stressLongTaskBatchSize} long tasks every ${this.stressLongTaskIntervalMs}ms`)
               .fontSize(13)
