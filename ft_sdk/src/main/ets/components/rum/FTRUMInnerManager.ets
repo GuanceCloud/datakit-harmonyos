@@ -1901,9 +1901,6 @@ export class FTRUMInnerManager {
       // Set network status
       this.setNetState(resourceId, netStatusBean);
       
-      // Check if resource is ready to be sent
-      this.checkToAddResource(resourceId);
-      
       FTInnerLogger.d(TAG, `Resource data added successfully: ${resourceId}`);
       
     } catch (error) {

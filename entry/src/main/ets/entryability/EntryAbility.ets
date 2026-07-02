@@ -3,6 +3,7 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
+import { hidebug } from '@kit.PerformanceAnalysisKit';
 import {
   DeviceMetricsMonitorType,
   EnvType,
@@ -92,6 +93,7 @@ export default class EntryAbility extends UIAbility {
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
     DemoLogger.e("log test", `onCreate `);
     console.log("log test,onCreate")
+    this.logAppMemoryLimitOnMainThread();
 
     try {
       this.runtimeConfig = await this.loadRuntimeConfig(want);
@@ -100,6 +102,16 @@ export default class EntryAbility extends UIAbility {
     }
     this.verifyPreInitAxiosClients();
     this.initFTSDK();
+  }
+
+  private logAppMemoryLimitOnMainThread(): void {
+    try {
+      const limit = hidebug.getAppMemoryLimit();
+      console.info(`vmHeapLimit=${limit.vmHeapLimit} KB`);
+      console.info(`vmTotalHeapSize=${limit.vmTotalHeapSize} KB`);
+    } catch (error) {
+      DemoLogger.e(LOG_TAG, `Failed to get app memory limit on main thread: ${error}`);
+    }
   }
 
   onDestroy(): void {

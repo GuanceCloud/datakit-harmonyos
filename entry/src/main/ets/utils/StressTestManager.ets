@@ -767,8 +767,9 @@ export class StressTestManager {
     params.setProperty(propertyMap);
 
     const netStatusBean: NetStatusBean = this.createSyntheticNetStatus();
-    this.rumManager?.addResource(resourceId, params, netStatusBean);
+    this.rumManager?.startResource(resourceId);
     this.rumManager?.stopResource(resourceId, params.resourceStatus || 200, params.responseContentLength || 0);
+    this.rumManager?.addResource(resourceId, params, netStatusBean);
   }
 
   private createSyntheticNetStatus(): NetStatusBean {
