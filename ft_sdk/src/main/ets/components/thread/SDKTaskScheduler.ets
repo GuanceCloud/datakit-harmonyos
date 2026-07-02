@@ -8,6 +8,8 @@ import { FTInnerLogger } from '../log/FTLogger';
 const TAG = "SDKTaskScheduler";
 const EVENT_LANE_TRACE_PREFIX = "<FT-EVENT-LANE>";
 const SCHEDULER_TRACE_PREFIX = "<FT-SDK-SCHEDULER>";
+const SCHEDULER_LANE_TRACE_INTERVAL_MS = 5000;
+const EVENT_LANE_TRACE_INTERVAL_MS = 2000;
 
 export enum SDKTaskType {
   EVENT = 'event',
@@ -104,6 +106,10 @@ export class SDKTaskScheduler {
   private isShutdown: boolean = false;
   private lastEventCompletedName: string = '';
   private lastEventCompletedAt: number = 0;
+  private lastLaneTraceAt: Map<SDKTaskType, number> = new Map();
+  private skippedLaneTraceCount: Map<SDKTaskType, number> = new Map();
+  private lastEventTraceAt: number = 0;
+  private skippedEventTraceCount: number = 0;
 
   private constructor() {
     this.initializeDefaultLanes();
@@ -317,14 +323,8 @@ export class SDKTaskScheduler {
     const lane = this.getLane(task.type);
     lane.queue.push(task);
     lane.submittedTasks++;
-    const laneTrace =
-      `[LANE] lane=${task.type} name=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} priority=${task.priority} serial=${task.serialKey ?? 'none'}`;
     if (!task.silent) {
-      if (task.type === SDKTaskType.UPLOAD) {
-        this.traceSchedulerLaneDebug(laneTrace);
-      } else {
-        this.traceSchedulerLane(laneTrace);
-      }
+      this.traceSchedulerLaneIfNeeded(task, lane);
     }
     this.processLane(task.type);
   }
@@ -421,9 +421,16 @@ export class SDKTaskScheduler {
       }
       this.releaseSingleFlightTask(task);
       if (type === SDKTaskType.EVENT) {
-        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-        this.traceEventLane(
-          `[CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} waited=${waitTime}ms cost=${costTime}ms previous=${previousEventName} gap=${serialGapTime}ms pending=${lane.queue.length} active=${lane.running} completed=${lane.completedTasks} failed=${lane.failedTasks}`
+        this.traceEventLaneIfNeeded(
+          task,
+          lane,
+          result,
+          errorMessage,
+          serialResult,
+          waitTime,
+          costTime,
+          previousEventName,
+          serialGapTime
         );
         this.lastEventCompletedName = task.name;
         this.lastEventCompletedAt = Date.now();
@@ -505,6 +512,69 @@ export class SDKTaskScheduler {
 
   private traceEventLane(message: string): void {
     FTInnerLogger.i(TAG, `${EVENT_LANE_TRACE_PREFIX} ${message}`);
+  }
+
+  private traceSchedulerLaneIfNeeded(task: ScheduledSDKTask, lane: SDKLaneState): void {
+    const skipped = this.skippedLaneTraceCount.get(task.type) ?? 0;
+    if (!this.shouldTraceSchedulerLane(task.type)) {
+      this.skippedLaneTraceCount.set(task.type, skipped + 1);
+      return;
+    }
+
+    this.skippedLaneTraceCount.set(task.type, 0);
+    const message =
+      `[LANE] lane=${task.type} latest=${task.name} pending=${lane.queue.length} active=${lane.running} max=${lane.maxConcurrency} submitted=${lane.submittedTasks} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped}`;
+    if (task.type === SDKTaskType.UPLOAD) {
+      this.traceSchedulerLaneDebug(message);
+    } else {
+      this.traceSchedulerLane(message);
+    }
+  }
+
+  private shouldTraceSchedulerLane(type: SDKTaskType): boolean {
+    const now = Date.now();
+    const lastTraceAt = this.lastLaneTraceAt.get(type) ?? 0;
+    if (now - lastTraceAt < SCHEDULER_LANE_TRACE_INTERVAL_MS) {
+      return false;
+    }
+
+    this.lastLaneTraceAt.set(type, now);
+    return true;
+  }
+
+  private traceEventLaneIfNeeded(
+    task: ScheduledSDKTask,
+    lane: SDKLaneState,
+    result: string,
+    errorMessage: string,
+    serialResult: string,
+    waitTime: number,
+    costTime: number,
+    previousEventName: string,
+    serialGapTime: number
+  ): void {
+    const skipped = this.skippedEventTraceCount;
+    const forceTrace = result !== 'success' || serialResult !== 'PASS';
+    if (!forceTrace && !this.shouldTraceEventLane()) {
+      this.skippedEventTraceCount++;
+      return;
+    }
+
+    this.skippedEventTraceCount = 0;
+    const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+    this.traceEventLane(
+      `[CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} waited=${waitTime}ms cost=${costTime}ms previous=${previousEventName} gap=${serialGapTime}ms pending=${lane.queue.length} active=${lane.running} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped}`
+    );
+  }
+
+  private shouldTraceEventLane(): boolean {
+    const now = Date.now();
+    if (now - this.lastEventTraceAt < EVENT_LANE_TRACE_INTERVAL_MS) {
+      return false;
+    }
+
+    this.lastEventTraceAt = now;
+    return true;
   }
 
   private traceSchedulerLane(message: string): void {
