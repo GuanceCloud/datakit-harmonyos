@@ -1658,20 +1658,6 @@ export class FTRUMInnerManager {
       resourceBean.setEndTime();
 
       this.increaseResourceCount(viewId, actionId);
-
-      if (viewId && this.context) {
-        FTDBManager.getInstance(this.context).updateViewUpdateTime(viewId).then((success: boolean) => {
-          if (success) {
-            FTInnerLogger.d(TAG, `Updated view_update_time for view: ${viewId}`);
-          }
-        }).catch((error: Error) => {
-          FTInnerLogger.e(TAG, `Failed to update view_update_time: ${error}`);
-        });
-      }
-
-      // Reduce pending resource counts (aligned with Android: reduceViewPendingResource and reduceActionPendingResource)
-      FTInnerLogger.d(TAG, `stopResource: Calling decreasePendingResourceCount for viewId=${viewId}, actionId=${actionId}`);
-      this.decreasePendingResourceCount(viewId, actionId);
       
       FTInnerLogger.d(TAG, `Resource stopped successfully: ${resourceId}`);
       
@@ -3079,17 +3065,17 @@ export class FTRUMInnerManager {
         this.activeView.decreasePendingResourceCount();
         // Update database count (aligned with Android SDK)
       }
+      if (this.activeAction && this.activeAction.getId() === actionId) {
+        this.activeAction.decreasePendingResourceCount();
+      }
       if (this.context) {
-        this.submitRumEventTask(`rum.increaseResource:${viewId || actionId || 'unknown'}`, () => {
-          (async () => {
-            try {
-              await FTDBManager.getInstance(this.context!).increaseViewResource(viewId);
-              await FTDBManager.getInstance(this.context!).increaseActionResource(actionId);
-              this.checkActionClose()
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Error increasing view resource count in database: ${error}`);
-            }
-          })();
+        this.submitRumEventTask(`rum.increaseResource:${viewId || actionId || 'unknown'}`, async () => {
+          try {
+            await FTDBManager.getInstance(this.context!).completeResource(viewId, actionId);
+            this.checkActionClose();
+          } catch (error) {
+            FTInnerLogger.e(TAG, `Error completing resource counts in database: ${error}`);
+          }
         });
       }
       
@@ -3113,19 +3099,12 @@ export class FTRUMInnerManager {
     
     // Update database counts (aligned with Android: increaseViewPendingResource and increaseActionPendingResource)
     if (this.context) {
-      this.submitRumEventTask(`rum.increasePendingResource:${viewId || actionId || 'unknown'}`, () => {
-        (async () => {
-          try {
-            if (viewId && viewId.length > 0) {
-              await FTDBManager.getInstance(this.context!).increaseViewPendingResource(viewId);
-            }
-            if (actionId && actionId.length > 0) {
-              await FTDBManager.getInstance(this.context!).increaseActionPendingResource(actionId);
-            }
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Error increasing pending resource count in database: ${error}`);
-          }
-        })();
+      this.submitRumEventTask(`rum.increasePendingResource:${viewId || actionId || 'unknown'}`, async () => {
+        try {
+          await FTDBManager.getInstance(this.context!).increaseResourcePending(viewId, actionId);
+        } catch (error) {
+          FTInnerLogger.e(TAG, `Error increasing pending resource count in database: ${error}`);
+        }
       });
     }
   }
@@ -3134,9 +3113,9 @@ export class FTRUMInnerManager {
    * Decrease pending resource count
    * Aligned with Android: reduceViewPendingResource and reduceActionPendingResource
    */
-  private decreasePendingResourceCount(viewId: string, actionId: string): void {
+  private decreasePendingResourceCount(viewId: string, actionId: string, updateView: boolean = true): void {
     // Update memory counts
-    if (this.activeView && this.activeView.getId() === viewId) {
+    if (updateView && this.activeView && this.activeView.getId() === viewId) {
       this.activeView.decreasePendingResourceCount();
     }
     
@@ -3149,7 +3128,7 @@ export class FTRUMInnerManager {
       this.submitRumEventTask(`rum.decreasePendingResource:${viewId || actionId || 'unknown'}`, () => {
         (async () => {
           try {
-            if (viewId && viewId.length > 0) {
+            if (updateView && viewId && viewId.length > 0) {
               await FTDBManager.getInstance(this.context!).reduceViewPendingResource(viewId);
             }
             if (actionId && actionId.length > 0) {
@@ -3537,10 +3516,8 @@ export class FTRUMInnerManager {
         // So stopResource can still find ResourceBean and call increaseResourceCount
         // HarmonyOS: We also delete ResourceBean asynchronously, so stopResource can find it
         this.putRUMResourcePerformance(resourceId);
-        // After putRUMResourcePerformance, ResourceBean is deleted, but we still need to reduce pending_resource
-        // This is a fallback: if stopResource wasn't called or failed, we ensure pending_resource is reduced
-        // Note: This should normally be handled by stopResource, but this ensures cleanup even if stopResource fails
-        if (viewId || actionId) {
+        // Fallback only: normal stopResource completion already reduces pending_resource.
+        if (resourceBean.endTime <= 0 && (viewId || actionId)) {
           this.decreasePendingResourceCount(viewId || '', actionId || '');
         }
       }

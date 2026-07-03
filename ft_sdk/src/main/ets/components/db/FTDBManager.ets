@@ -56,6 +56,11 @@ enum SyncDataCacheCategory {
   NONE = 'none'
 }
 
+interface SyncDataCacheCountDelta {
+  log: number;
+  rum: number;
+}
+
 /**
  * HarmonyOS SDK Database Manager
  * Inherits from DBManager, implements specific business logic
@@ -326,6 +331,96 @@ export class FTDBManager extends DBManager {
     return SyncDataCacheCategory.NONE;
   }
 
+  private getStoredCacheCategory(dataTypeString: string): SyncDataCacheCategory {
+    if (dataTypeString === DataType.LOG.toString()) {
+      return SyncDataCacheCategory.LOG;
+    }
+    if (dataTypeString === DataType.RUM_APP.toString() || dataTypeString === DataType.RUM_WEBVIEW.toString()) {
+      return SyncDataCacheCategory.RUM;
+    }
+    return SyncDataCacheCategory.NONE;
+  }
+
+  private createCacheCountDelta(): SyncDataCacheCountDelta {
+    return {
+      log: 0,
+      rum: 0
+    };
+  }
+
+  private addCacheCountDelta(
+    countDelta: SyncDataCacheCountDelta,
+    category: SyncDataCacheCategory,
+    delta: number
+  ): void {
+    if (delta === 0) {
+      return;
+    }
+    if (category === SyncDataCacheCategory.LOG) {
+      countDelta.log += delta;
+    } else if (category === SyncDataCacheCategory.RUM) {
+      countDelta.rum += delta;
+    }
+  }
+
+  private addDeletedCacheCountDelta(
+    countDelta: SyncDataCacheCountDelta,
+    types: DataType[],
+    deletedCount: number
+  ): void {
+    if (deletedCount <= 0 || !types || types.length === 0) {
+      return;
+    }
+
+    let hasLog = false;
+    let hasRum = false;
+    for (const type of types) {
+      const category = this.getCacheCategory(type);
+      if (category === SyncDataCacheCategory.LOG) {
+        hasLog = true;
+      } else if (category === SyncDataCacheCategory.RUM) {
+        hasRum = true;
+      }
+    }
+
+    if (hasLog && !hasRum) {
+      countDelta.log -= deletedCount;
+    } else if (hasRum && !hasLog) {
+      countDelta.rum -= deletedCount;
+    }
+  }
+
+  private addInsertedCacheCountDelta(
+    countDelta: SyncDataCacheCountDelta,
+    dataList: SyncData[],
+    insertedCount: number
+  ): void {
+    if (insertedCount <= 0) {
+      return;
+    }
+    const count = Math.min(insertedCount, dataList.length);
+    for (let i = 0; i < count; i++) {
+      const category = this.getStoredCacheCategory(this.getStoredDataTypeString(dataList[i]));
+      this.addCacheCountDelta(countDelta, category, 1);
+    }
+  }
+
+  private applyCacheCountDelta(countDelta: SyncDataCacheCountDelta): void {
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    if (countDelta.log !== 0) {
+      cachePolicy.optLogCount(countDelta.log);
+    }
+    if (countDelta.rum !== 0) {
+      cachePolicy.optRumCount(countDelta.rum);
+    }
+  }
+
+  private applyCacheCountDeltaForStoredType(dataTypeString: string, delta: number): void {
+    const countDelta = this.createCacheCountDelta();
+    this.addCacheCountDelta(countDelta, this.getStoredCacheCategory(dataTypeString), delta);
+    this.applyCacheCountDelta(countDelta);
+  }
+
   private getStoredDataTypeString(data: SyncData): string {
     const customDataType = data.getCustomDataTypeString();
     return customDataType || data.getDataType().toString();
@@ -337,6 +432,10 @@ export class FTDBManager extends DBManager {
       return null;
     }
     return `${dataType.toString()}:${uniqueId}`;
+  }
+
+  private shouldQueryDbForDuplicate(uniqueId: string): boolean {
+    return uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id=');
   }
 
   private getDuplicateSearchPattern(uniqueId: string): string {
@@ -481,7 +580,8 @@ export class FTDBManager extends DBManager {
   private async deleteDuplicateDataLocked(
     rdbStore: relationalStore.RdbStore,
     dataType: DataType,
-    uniqueId: string
+    uniqueId: string,
+    countDelta?: SyncDataCacheCountDelta
   ): Promise<number> {
     if (!uniqueId.startsWith('action_id=') && !uniqueId.startsWith('view_id=')) {
       return 0;
@@ -494,6 +594,9 @@ export class FTDBManager extends DBManager {
     predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
 
     const deletedRows = await rdbStore.delete(predicates);
+    if (countDelta) {
+      this.addCacheCountDelta(countDelta, this.getCacheCategory(dataType), -deletedRows);
+    }
     const key = `${dataType.toString()}:${uniqueId}`;
     this.insertedDataIds.delete(key);
     return deletedRows;
@@ -504,30 +607,21 @@ export class FTDBManager extends DBManager {
     if (!key) {
       return;
     }
-    if (this.insertedDataIds.size > Constants.MAX_MAP_SIZE_DB) {
-      FTInnerLogger.w(TAG, `Dedup cache exceeded limit, clearing memory cache`);
-      this.insertedDataIds.clear();
+    if (!this.insertedDataIds.has(key) && this.insertedDataIds.size >= Constants.MAX_MAP_SIZE_DB) {
+      const firstKey = this.insertedDataIds.keys().next().value as string | undefined;
+      if (firstKey !== undefined) {
+        this.insertedDataIds.delete(firstKey);
+      }
     }
     this.insertedDataIds.set(key, true);
-  }
-
-  private async syncCacheCountsLocked(
-    rdbStore: relationalStore.RdbStore,
-    updateLogCount: boolean,
-    updateRumCount: boolean
-  ): Promise<void> {
-    const cachePolicy = FTDBCachePolicy.getInstance();
-    const logCount = updateLogCount ? await this.queryTotalCountLocked(rdbStore, [DataType.LOG]) : undefined;
-    const rumCount = updateRumCount ?
-      await this.queryTotalCountLocked(rdbStore, [DataType.RUM_APP, DataType.RUM_WEBVIEW]) : undefined;
-    cachePolicy.syncCountsFromDbInternal(logCount, rumCount);
   }
 
   private async resolveAllowedInsertCountLocked(
     rdbStore: relationalStore.RdbStore,
     category: SyncDataCacheCategory,
     requested: number,
-    result: SyncDataWriteResult
+    result: SyncDataWriteResult,
+    countDelta: SyncDataCacheCountDelta
   ): Promise<number> {
     if (requested <= 0 || category === SyncDataCacheCategory.NONE) {
       return requested;
@@ -546,6 +640,7 @@ export class FTDBManager extends DBManager {
       if (String(cachePolicy.getDBCacheDiscard()) === DBCacheDiscard.DISCARD_OLDEST) {
         const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT);
         result.deletedOld += deleted;
+        this.addCacheCountDelta(countDelta, category, -deleted);
         return requested;
       }
       return 0;
@@ -563,6 +658,7 @@ export class FTDBManager extends DBManager {
       if (String(cachePolicy.getDiscardStrategy(DataType.LOG)) === DBCacheDiscard.DISCARD_OLDEST) {
         const deleted = await this.deleteOldestDataLocked(rdbStore, DataType.LOG, overflow);
         result.deletedOld += deleted;
+        this.addCacheCountDelta(countDelta, category, -deleted);
         return requested;
       }
       return Math.max(0, limit - currentCount);
@@ -578,6 +674,7 @@ export class FTDBManager extends DBManager {
     if (String(cachePolicy.getDiscardStrategy(DataType.RUM_APP)) === DBCacheDiscard.DISCARD_OLDEST) {
       const deleted = await this.deleteOldestDataLocked(rdbStore, types, overflow);
       result.deletedOld += deleted;
+      this.addCacheCountDelta(countDelta, category, -deleted);
       return requested;
     }
     return Math.max(0, limit - currentCount);
@@ -586,7 +683,8 @@ export class FTDBManager extends DBManager {
   private async applyCachePolicyLocked(
     rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
-    result: SyncDataWriteResult
+    result: SyncDataWriteResult,
+    countDelta: SyncDataCacheCountDelta
   ): Promise<SyncData[]> {
     let logRequested = 0;
     let rumRequested = 0;
@@ -603,13 +701,15 @@ export class FTDBManager extends DBManager {
       rdbStore,
       SyncDataCacheCategory.LOG,
       logRequested,
-      result
+      result,
+      countDelta
     );
     let allowedRum = await this.resolveAllowedInsertCountLocked(
       rdbStore,
       SyncDataCacheCategory.RUM,
       rumRequested,
-      result
+      result,
+      countDelta
     );
 
     const allowedData: SyncData[] = [];
@@ -641,7 +741,8 @@ export class FTDBManager extends DBManager {
     rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
     reInsert: boolean,
-    result: SyncDataWriteResult
+    result: SyncDataWriteResult,
+    countDelta: SyncDataCacheCountDelta
   ): Promise<SyncData[]> {
     if (reInsert) {
       return dataList;
@@ -665,6 +766,16 @@ export class FTDBManager extends DBManager {
         continue;
       }
 
+      if (!this.shouldQueryDbForDuplicate(uniqueId)) {
+        if (this.insertedDataIds.has(key)) {
+          result.duplicateSkipped++;
+          continue;
+        }
+        seenInBatch.set(key, true);
+        filteredDataList.push(data);
+        continue;
+      }
+
       const exists = await this.checkDataExistsLocked(rdbStore, dataType, dataString);
       if (!exists) {
         seenInBatch.set(key, true);
@@ -672,14 +783,10 @@ export class FTDBManager extends DBManager {
         continue;
       }
 
-      if (uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id=')) {
-        const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId);
-        result.deletedOld += deleted;
-        seenInBatch.set(key, true);
-        filteredDataList.push(data);
-      } else {
-        result.duplicateSkipped++;
-      }
+      const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId, countDelta);
+      result.deletedOld += deleted;
+      seenInBatch.set(key, true);
+      filteredDataList.push(data);
     }
 
     return filteredDataList;
@@ -689,7 +796,8 @@ export class FTDBManager extends DBManager {
     rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
     reInsert: boolean,
-    result: SyncDataWriteResult
+    result: SyncDataWriteResult,
+    countDelta: SyncDataCacheCountDelta
   ): Promise<void> {
     if (!dataList || dataList.length === 0) {
       return;
@@ -702,6 +810,7 @@ export class FTDBManager extends DBManager {
       if (numericId > 0) {
         data.setId(numericId);
         result.inserted++;
+        this.addInsertedCacheCountDelta(countDelta, dataList, 1);
         if (!reInsert) {
           this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
         }
@@ -717,8 +826,10 @@ export class FTDBManager extends DBManager {
     }
 
     const insertedCount = await rdbStore.batchInsert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, valuesArray);
-    result.inserted += Math.max(0, insertedCount);
-    if (!reInsert && insertedCount > 0) {
+    const insertedRows = Math.max(0, insertedCount);
+    result.inserted += insertedRows;
+    this.addInsertedCacheCountDelta(countDelta, dataList, insertedRows);
+    if (!reInsert && insertedRows > 0) {
       for (const data of dataList) {
         this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
       }
@@ -734,18 +845,19 @@ export class FTDBManager extends DBManager {
     const applyCachePolicy = options.applyCachePolicy === true;
     const reInsert = options.reInsert === true;
     let dataToWrite = dataList;
-    const updateLogCount = applyCachePolicy && dataList.some((data) => this.getCacheCategory(data.getDataType()) === SyncDataCacheCategory.LOG);
-    const updateRumCount = applyCachePolicy && dataList.some((data) => this.getCacheCategory(data.getDataType()) === SyncDataCacheCategory.RUM);
+    const countDelta = this.createCacheCountDelta();
 
-    if (applyCachePolicy) {
-      dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result);
-    }
+    try {
+      if (applyCachePolicy) {
+        dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result, countDelta);
+      }
 
-    dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result);
-    await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result);
-
-    if (applyCachePolicy && (updateLogCount || updateRumCount)) {
-      await this.syncCacheCountsLocked(rdbStore, updateLogCount, updateRumCount);
+      dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result, countDelta);
+      await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result, countDelta);
+    } finally {
+      if (applyCachePolicy) {
+        this.applyCacheCountDelta(countDelta);
+      }
     }
   }
 
@@ -1043,6 +1155,9 @@ export class FTDBManager extends DBManager {
 
       const callback = new DeleteOldestCallback();
       await this.getDB(true, callback);
+      const countDelta = this.createCacheCountDelta();
+      this.addDeletedCacheCountDelta(countDelta, typeArray, callback.deletedCount);
+      this.applyCacheCountDelta(countDelta);
       FTInnerLogger.i(TAG, `Oldest data deleted: types=${typeArray}, limit=${limit}, deleted=${callback.deletedCount}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to delete oldest data: ${error}`);
@@ -1919,6 +2034,60 @@ export class FTDBManager extends DBManager {
   }
 
   /**
+   * Increase resource pending counts for view/action with one DB write lock.
+   */
+  public async increaseResourcePending(viewId: string, actionId: string): Promise<void> {
+    const hasViewId = viewId.length > 0;
+    const hasActionId = actionId.length > 0;
+    if (!hasViewId && !hasActionId) {
+      return;
+    }
+
+    try {
+      class IncreaseResourcePendingCallback implements DataBaseCallBack {
+        private viewId: string;
+        private actionId: string;
+
+        constructor(viewId: string, actionId: string) {
+          this.viewId = viewId;
+          this.actionId = actionId;
+        }
+
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          if (this.viewId && this.viewId.length > 0) {
+            try {
+              const viewSql =
+                `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
+                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 ` +
+                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
+              await rdbStore.executeSql(viewSql);
+            } catch (error) {
+              FTInnerLogger.e(TAG, `Increase view resource pending failed: ${this.viewId}, ${error}`);
+            }
+          }
+
+          if (this.actionId && this.actionId.length > 0) {
+            try {
+              const actionSql =
+                `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ` +
+                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 ` +
+                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
+              await rdbStore.executeSql(actionSql);
+            } catch (error) {
+              FTInnerLogger.e(TAG, `Increase action resource pending failed: ${this.actionId}, ${error}`);
+            }
+          }
+        }
+      }
+
+      const callback: DataBaseCallBack = new IncreaseResourcePendingCallback(viewId, actionId);
+      await this.getDB(true, callback);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to increase resource pending counts: ${error}`);
+    }
+  }
+
+  /**
    * Get view pending_resource count
    * @param viewId View ID
    * @returns pending_resource count, or 0 if view not found
@@ -2196,6 +2365,105 @@ export class FTDBManager extends DBManager {
     }
   }
 
+  /**
+   * Complete a resource for the view with one atomic SQL write.
+   *
+   * This is used by stopResource to avoid queueing separate DB writes for
+   * resource_count, pending_resource and view_update_time.
+   */
+  public async completeViewResource(viewId: string): Promise<void> {
+    if (!viewId) {
+      return;
+    }
+    try {
+      class CompleteViewResourceCallback implements DataBaseCallBack {
+        private viewId: string;
+        constructor(viewId: string) {
+          this.viewId = viewId;
+        }
+
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          const updateSql =
+            `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
+              `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
+              `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
+                `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END, ` +
+              `${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + 1, ` +
+              `${FTSQL.RUM_DATA_UPDATE_TIME} = ${Date.now()} ` +
+            `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
+          await rdbStore.executeSql(updateSql);
+        }
+      }
+
+      const callback: DataBaseCallBack = new CompleteViewResourceCallback(viewId);
+      await this.getDB(true, callback);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to complete view resource: ${error}`);
+    }
+  }
+
+  /**
+   * Complete a resource for view/action with one DB write lock.
+   */
+  public async completeResource(viewId: string, actionId: string): Promise<void> {
+    const hasViewId = viewId.length > 0;
+    const hasActionId = actionId.length > 0;
+    if (!hasViewId && !hasActionId) {
+      return;
+    }
+
+    try {
+      class CompleteResourceCallback implements DataBaseCallBack {
+        private viewId: string;
+        private actionId: string;
+
+        constructor(viewId: string, actionId: string) {
+          this.viewId = viewId;
+          this.actionId = actionId;
+        }
+
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          const now = Date.now();
+
+          if (this.viewId && this.viewId.length > 0) {
+            try {
+              const viewSql =
+                `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
+                  `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
+                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
+                    `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END, ` +
+                  `${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + 1, ` +
+                  `${FTSQL.RUM_DATA_UPDATE_TIME} = ${now} ` +
+                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
+              await rdbStore.executeSql(viewSql);
+            } catch (error) {
+              FTInnerLogger.e(TAG, `Complete view resource failed: ${this.viewId}, ${error}`);
+            }
+          }
+
+          if (this.actionId && this.actionId.length > 0) {
+            try {
+              const actionSql =
+                `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ` +
+                  `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
+                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
+                    `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END ` +
+                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
+              await rdbStore.executeSql(actionSql);
+            } catch (error) {
+              FTInnerLogger.e(TAG, `Complete action resource failed: ${this.actionId}, ${error}`);
+            }
+          }
+        }
+      }
+
+      const callback: DataBaseCallBack = new CompleteResourceCallback(viewId, actionId);
+      await this.getDB(true, callback);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to complete resource counts: ${error}`);
+    }
+  }
+
   public async updateViewUpdateTime(viewId: string): Promise<boolean> {
     if (!viewId) {
       return false;
@@ -2210,30 +2478,12 @@ export class FTDBManager extends DBManager {
         }
         
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          // First, get current view_update_time value
-          const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-          predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-          
-          const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_VIEW_UPDATE_TIME]);
-          
-          if (resultSet.goToFirstRow()) {
-            const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME);
-            const currentUpdateTime: number = resultSet.getLong(columnIndex);
-            
-            // Update with incremented counter and current timestamp for data_update_time
-            const values: relationalStore.ValuesBucket = {
-              view_update_time: currentUpdateTime + 1, // Increment counter - aligned with Android
-              data_update_time: Date.now() // Update data update time
-            };
-            
-            const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            await rdbStore.update(values, updatePredicates);
-            
-          } else {
-            FTInnerLogger.w(TAG, `View not found for update: ${this.viewId}`);
-          }
-          resultSet.close();
+          const updateSql =
+            `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
+              `${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + 1, ` +
+              `${FTSQL.RUM_DATA_UPDATE_TIME} = ${Date.now()} ` +
+            `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
+          await rdbStore.executeSql(updateSql);
         }
       }
       
@@ -3005,6 +3255,7 @@ export class FTDBManager extends DBManager {
       const callback = new UpdateDataTypeCallback(dataTypeStr, targetDataType, errorTimeLine);
       await this.getDB(true, callback);
       updateCount = callback.count;
+      this.applyCacheCountDeltaForStoredType(targetDataType, updateCount);
     } catch (error) {
       FTInnerLogger.e(TAG, `updateDataType failed: ${error as string}`);
     }
@@ -3059,6 +3310,7 @@ export class FTDBManager extends DBManager {
       const callback = new DeleteExpireCallback(dataTypeStr, expireTimeline);
       await this.getDB(true, callback);
       deleteCount = callback.count;
+      this.applyCacheCountDeltaForStoredType(dataTypeStr, -deleteCount);
     } catch (error) {
       FTInnerLogger.e(TAG, `deleteExpireCache failed: ${error as string}`);
     }

@@ -1,7 +1,12 @@
 import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
+import { Constants } from '@guancecloud/ft_sdk/src/main/ets/components/Constants';
 import { DbInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/DbInternalTestAccess';
+import { FTInnerLogFileManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTInnerLogFileManager';
+import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
+import { SDKLaneStatus, SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
+import { DeviceUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/DeviceUtils';
 import { FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { Context } from '@kit.AbilityKit';
@@ -33,6 +38,42 @@ const LOG_QUEUE_LOSS_LOG_COUNT = 1500;
 const LOG_QUEUE_LOSS_EXPECTED_QUEUE_CAPACITY = 1000;
 const LOG_QUEUE_LOSS_RECOVERY_COUNT = 50;
 const LOG_QUEUE_LOSS_TIMEOUT_MS = 20000;
+const PHYSICAL_LIMIT_PROBE_LOG_COUNT = 50;
+const PHYSICAL_LIMIT_PROBE_RUM_COUNT = 20;
+const PHYSICAL_LIMIT_PROBE_SETTLE_MS = 5000;
+const LARGE_PHYSICAL_LIMIT_PROBE_LOG_COUNT = 1000;
+const LARGE_PHYSICAL_LIMIT_PROBE_RUM_COUNT = 400;
+const LARGE_PHYSICAL_LIMIT_PROBE_BATCH_SIZE = 50;
+const LARGE_PHYSICAL_LIMIT_PROBE_BATCH_DELAY_MS = 0;
+const LARGE_PHYSICAL_LIMIT_PROBE_SETTLE_MS = 15000;
+const PHYSICAL_LIMIT_PROBE_POLL_MS = 500;
+const SDK_LOG_FLUSH_BATCH_SIZE = 20;
+const SDK_LOG_PROCESS_COALESCE_MS = 100;
+const SDK_UPLOAD_MAX_PAGES_RUM_APP = 2;
+const SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW = 1;
+const SDK_UPLOAD_MAX_PAGES_LOG = 1;
+const DEFAULT_EVENT_COST_MS = 50;
+const DEFAULT_DATA_PROCESS_COST_MS = 50;
+const DEFAULT_UPLOAD_COST_MS = 1000;
+const DEFAULT_INNER_LOG_FILE_COST_MS = 50;
+const SINGLE_LANE_BENCH_TASK_COUNT = 1000;
+const SINGLE_LANE_BENCH_COST_TASK_COUNT = 300;
+const SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT = 200;
+
+interface PhysicalProbeDrainResult {
+  logMissing: string[];
+  rumMissing: string[];
+  elapsedMs: number;
+  completed: boolean;
+}
+
+interface SingleLaneBenchmarkCase {
+  label: string;
+  laneType: SDKTaskType;
+  taskCount: number;
+  taskCostMs: number;
+  useSerialKey: boolean;
+}
 
 @Entry
 @Component
@@ -322,6 +363,93 @@ export struct DBCacheLimitTestPage {
             .onClick(() => {
               this.runCachePolicyTest();
             })
+
+          Button('Measure Device/SDK Physical Ceiling')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#455A64')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSdkPhysicalLimitTest();
+            })
+
+          Button('Measure Device/SDK Physical Ceiling (Stress)')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#263238')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSdkPhysicalLimitTest(true);
+            })
+
+          Button('Benchmark SDK Lanes')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#37474F')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSingleLaneBenchmarkSuite();
+            })
+
+          Button('Benchmark Event Lane')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#546E7A')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSingleLaneBenchmarkOnly({
+                label: 'Event Lane No-op Serial',
+                laneType: SDKTaskType.EVENT,
+                taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+                taskCostMs: 0,
+                useSerialKey: true
+              });
+            })
+
+          Button('Benchmark Data Lane')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#546E7A')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSingleLaneBenchmarkOnly({
+                label: 'Data-Process Lane No-op Parallel',
+                laneType: SDKTaskType.DATA_PROCESS,
+                taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+                taskCostMs: 0,
+                useSerialKey: false
+              });
+            })
+
+          Button('Benchmark Data Lane (5ms)')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#546E7A')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSingleLaneBenchmarkOnly({
+                label: 'Data-Process Lane 5ms Parallel',
+                laneType: SDKTaskType.DATA_PROCESS,
+                taskCount: SINGLE_LANE_BENCH_COST_TASK_COUNT,
+                taskCostMs: 5,
+                useSerialKey: false
+              });
+            })
+
+          Button('Benchmark Upload Lane (10ms)')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#546E7A')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runSingleLaneBenchmarkOnly({
+                label: 'Upload Lane 10ms Serial',
+                laneType: SDKTaskType.UPLOAD,
+                taskCount: SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT,
+                taskCostMs: 10,
+                useSerialKey: true
+              });
+            })
         }
         .padding(16)
         .backgroundColor('#F5F5F5')
@@ -570,6 +698,554 @@ export struct DBCacheLimitTestPage {
     }
     this.appendResult(`Reached: ${cachePolicy.isReachRumLimit()}\n`);
     this.appendResult(`Should Discard: ${cachePolicy.shouldDiscardData(DataType.RUM_APP)}\n`);
+  }
+
+  private async runSdkPhysicalLimitTest(useLargeProbe: boolean = false): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+
+      this.appendResult('\n=== Device + SDK Physical Ceiling Probe ===\n');
+      this.appendResult('Scope: physical device + SDK internal pipeline only. Business cache strategy and product quota are not used as conclusions.\n');
+      this.appendCurrentMachineSnapshot();
+      this.appendSdkLimitConstants();
+      this.appendRuntimeLimitSnapshot();
+      this.appendConsumeCapacitySummary();
+      await this.appendPhysicalLimitProbe(useLargeProbe);
+      this.appendResult('=== Device + SDK Physical Ceiling Probe Completed ===\n');
+    } catch (error) {
+      this.appendResult(`Device + SDK Physical Ceiling Probe failed: ${error}\n`);
+    } finally {
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+      this.isRunning = false;
+    }
+  }
+
+  private async runSingleLaneBenchmarkSuite(): Promise<void> {
+    const cases: SingleLaneBenchmarkCase[] = [
+      {
+        label: 'Event Lane No-op Serial',
+        laneType: SDKTaskType.EVENT,
+        taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+        taskCostMs: 0,
+        useSerialKey: true
+      },
+      {
+        label: 'Log Lane No-op Serial',
+        laneType: SDKTaskType.LOG,
+        taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+        taskCostMs: 0,
+        useSerialKey: true
+      },
+      {
+        label: 'Data-Process Lane No-op Parallel',
+        laneType: SDKTaskType.DATA_PROCESS,
+        taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+        taskCostMs: 0,
+        useSerialKey: false
+      },
+      {
+        label: 'Inner Log File Lane No-op Serial',
+        laneType: SDKTaskType.INNER_LOG_FILE,
+        taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
+        taskCostMs: 0,
+        useSerialKey: true
+      },
+      {
+        label: 'Data-Process Lane 5ms Parallel',
+        laneType: SDKTaskType.DATA_PROCESS,
+        taskCount: SINGLE_LANE_BENCH_COST_TASK_COUNT,
+        taskCostMs: 5,
+        useSerialKey: false
+      },
+      {
+        label: 'Upload Lane 10ms Serial',
+        laneType: SDKTaskType.UPLOAD,
+        taskCount: SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT,
+        taskCostMs: 10,
+        useSerialKey: true
+      }
+    ];
+    await this.runSingleLaneBenchmarkCases('SDK Lane Benchmark Suite', cases);
+  }
+
+  private async runSingleLaneBenchmarkOnly(testCase: SingleLaneBenchmarkCase): Promise<void> {
+    await this.runSingleLaneBenchmarkCases(testCase.label, [testCase]);
+  }
+
+  private async runSingleLaneBenchmarkCases(title: string, cases: SingleLaneBenchmarkCase[]): Promise<void> {
+    this.isRunning = true;
+    const syncTaskManager = SyncTaskManager.getInstance();
+    const originalAutoSync = syncTaskManager.isAutoSyncEnabled();
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+      if (originalAutoSync) {
+        syncTaskManager.setAutoSync(false);
+      }
+
+      this.appendResult(`\n=== Synthetic Single Lane Benchmark: ${title} ===\n`);
+      this.appendResult('Scope: scheduler lane only. This bypasses Log/RUM business APIs, DB serialization, and network payload building.\n');
+      this.appendResult(`Auto Sync Paused During Benchmark: ${originalAutoSync}\n`);
+      this.appendCurrentMachineSnapshot();
+      this.appendResult('\n[Runtime Before Benchmark]\n');
+      this.appendSchedulerLaneSnapshots();
+
+      for (const testCase of cases) {
+        await this.runSingleLaneBenchmarkCase(testCase);
+      }
+
+      this.appendResult('\n[Runtime After Benchmark]\n');
+      this.appendSchedulerLaneSnapshots();
+      this.appendResult(`=== Synthetic Single Lane Benchmark Completed: ${title} ===\n`);
+    } catch (error) {
+      this.appendResult(`Synthetic Single Lane Benchmark failed: ${error}\n`);
+    } finally {
+      if (originalAutoSync) {
+        syncTaskManager.setAutoSync(true);
+      }
+      this.isRunning = false;
+    }
+  }
+
+  private async runSingleLaneBenchmarkCase(testCase: SingleLaneBenchmarkCase): Promise<void> {
+    const scheduler = SDKTaskScheduler.getInstance();
+    const beforeLane = scheduler.getStatus().lanes[testCase.laneType];
+    const beforeSubmitted = beforeLane ? beforeLane.submittedTasks : 0;
+    const beforeCompleted = beforeLane ? beforeLane.completedTasks : 0;
+    const beforeFailed = beforeLane ? beforeLane.failedTasks : 0;
+    const serialKey = testCase.useSerialKey ? `single-lane-${testCase.laneType}-${Date.now()}` : undefined;
+    const tasks: Promise<void>[] = [];
+    const startTime = Date.now();
+
+    for (let i = 0; i < testCase.taskCount; i++) {
+      tasks.push(scheduler.submitTaskAndWait({
+        type: testCase.laneType,
+        name: `single-lane-benchmark-${testCase.laneType}-${i}`,
+        priority: SDKTaskPriority.NORMAL,
+        serialKey,
+        silent: true,
+        costHint: testCase.taskCostMs > 0 ? 'normal' : 'light',
+        run: async () => {
+          if (testCase.taskCostMs > 0) {
+            await this.waitForWriteSettled(testCase.taskCostMs);
+          }
+        }
+      }));
+    }
+
+    const enqueueElapsedMs = Math.max(1, Date.now() - startTime);
+    await Promise.all(tasks);
+    const elapsedMs = Math.max(1, Date.now() - startTime);
+    const afterLane = scheduler.getStatus().lanes[testCase.laneType];
+    const submittedDelta = afterLane ? afterLane.submittedTasks - beforeSubmitted : 0;
+    const completedDelta = afterLane ? afterLane.completedTasks - beforeCompleted : 0;
+    const failedDelta = afterLane ? afterLane.failedTasks - beforeFailed : 0;
+    const throughput = (completedDelta * 1000) / elapsedMs;
+    const enqueueRate = (testCase.taskCount * 1000) / enqueueElapsedMs;
+
+    this.appendResult(`\n[Single Lane Benchmark] ${testCase.label}\n`);
+    this.appendResult(`Lane: ${testCase.laneType}, tasks=${testCase.taskCount}, syntheticCost=${testCase.taskCostMs}ms, serial=${testCase.useSerialKey}\n`);
+    this.appendResult(`Before: ${this.formatLaneBenchmarkStatus(beforeLane)}\n`);
+    this.appendResult(`Submit: elapsed=${enqueueElapsedMs}ms, rate~${this.formatRateValue(enqueueRate)} task/s\n`);
+    this.appendResult(`Drain: elapsed=${elapsedMs}ms, throughput~${this.formatRateValue(throughput)} task/s\n`);
+    this.appendResult(`Delta: submitted=${submittedDelta}, completed=${completedDelta}, failed=${failedDelta}\n`);
+    this.appendResult(`After: ${this.formatLaneBenchmarkStatus(afterLane)}\n`);
+    if (afterLane && (afterLane.pending > 0 || afterLane.running > 0)) {
+      this.appendResult(`Lane Backlog Signal: pending=${afterLane.pending}, running=${afterLane.running}; lane is still busy after this case.\n`);
+    } else {
+      this.appendResult('Lane Backlog Signal: no backlog after this case.\n');
+    }
+  }
+
+  private formatLaneBenchmarkStatus(lane: SDKLaneStatus | undefined): string {
+    if (!lane) {
+      return 'unavailable';
+    }
+    return `pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, ${this.formatLaneDispatchStatus(lane)}`;
+  }
+
+  private formatLaneDispatchStatus(lane: SDKLaneStatus): string {
+    return `dispatchCount=${lane.dispatchCount}, avgDispatchCost=${lane.averageDispatchTime.toFixed(1)}ms, maxDispatchCost=${lane.maxDispatchTime.toFixed(1)}ms, lastDispatchCost=${lane.lastDispatchTime.toFixed(1)}ms, avgScanCount=${lane.averageScanCount.toFixed(1)}, maxScanCount=${lane.maxScanCount}, lastScanCount=${lane.lastScanCount}`;
+  }
+
+  private appendCurrentMachineSnapshot(): void {
+    this.appendResult('\n[Current Machine]\n');
+
+    try {
+      this.appendResult(`Device: type=${DeviceUtils.getDeviceType()}, brand=${DeviceUtils.getDeviceBrand()}, model=${DeviceUtils.getDeviceModel()}, arch=${DeviceUtils.getDeviceArch()}\n`);
+      this.appendResult(`OS: version=${DeviceUtils.getOSVersion()}, major=${DeviceUtils.getOSVersionMajor()}\n`);
+      this.appendResult(`Display: ${DeviceUtils.getDisplay()}, density=${DeviceUtils.getScreenDensity()}, dpi=${DeviceUtils.getScreenDPI()}\n`);
+      this.appendResult(`Network: ${DeviceUtils.getNetworkTypeSync()}\n`);
+    } catch (error) {
+      this.appendResult(`Current machine snapshot unavailable: ${error}\n`);
+    }
+  }
+
+  private appendSdkLimitConstants(): void {
+    this.appendResult('\n[SDK Physical Guards]\n');
+    this.appendResult(`Log Producer Queue Guard: MAX_QUEUE_SIZE_LOG=${Constants.MAX_QUEUE_SIZE_LOG}\n`);
+    this.appendResult(`Generic SDK Queue Guard: MAX_QUEUE_SIZE=${Constants.MAX_QUEUE_SIZE}\n`);
+    this.appendResult(`Upload Dedup Set Guard: MAX_SET_SIZE_UPLOAD=${Constants.MAX_SET_SIZE_UPLOAD}\n`);
+    this.appendResult(`RUM Action Set Guard: MAX_SET_SIZE_ACTION=${Constants.MAX_SET_SIZE_ACTION}\n`);
+    this.appendResult(`RUM View Set Guard: MAX_SET_SIZE_VIEW=${Constants.MAX_SET_SIZE_VIEW}\n`);
+    this.appendResult(`RUM Resource Map Guard: MAX_MAP_SIZE_RESOURCE=${Constants.MAX_MAP_SIZE_RESOURCE}\n`);
+    this.appendResult(`DB Insert Dedup Map Guard: MAX_MAP_SIZE_DB=${Constants.MAX_MAP_SIZE_DB}\n`);
+    this.appendResult(`Click Dedup Map Guard: MAX_MAP_SIZE_CLICK=${Constants.MAX_MAP_SIZE_CLICK}\n`);
+    this.appendResult(`Upload Page Shape: pageSize(runtime), RUM_APP<=${SDK_UPLOAD_MAX_PAGES_RUM_APP} pages/poll, RUM_WEBVIEW<=${SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW} page/poll, LOG<=${SDK_UPLOAD_MAX_PAGES_LOG} page/poll\n`);
+    this.appendResult(`Inner Log File Guard: single file and total file limits are read from runtime status below\n`);
+  }
+
+  private appendRuntimeLimitSnapshot(): void {
+    this.appendResult('\n[Runtime Snapshot]\n');
+
+    try {
+      const syncStatus = SyncTaskManager.getInstance().getStatus();
+      const uploadConsumeCap =
+        syncStatus.pageSize * (SDK_UPLOAD_MAX_PAGES_RUM_APP + SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW + SDK_UPLOAD_MAX_PAGES_LOG);
+      this.appendResult(`Sync Page Size: ${syncStatus.pageSize}, Auto Sync: ${syncStatus.autoSync}, Retry Limit: ${syncStatus.dataSyncMaxRetryCount}, Sleep: ${syncStatus.syncSleepTime}ms\n`);
+      this.appendResult(`Upload Consume Cap Per Poll: RUM_APP<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_RUM_APP}, RUM_WEBVIEW<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW}, LOG<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_LOG}, Total<=${uploadConsumeCap}\n`);
+      this.appendResult(`Upload Lane: running=${syncStatus.uploadLaneStatus.isRunning}, scheduled=${syncStatus.uploadLaneStatus.isScheduled}, needReschedule=${syncStatus.uploadLaneStatus.needReschedule}\n`);
+    } catch (error) {
+      this.appendResult(`Sync status unavailable: ${error}\n`);
+    }
+
+    try {
+      const loggerStatus = FTLogger.getStatus();
+      this.appendResult(`Log Queue Status: queue=${loggerStatus.get('queueSize')}, buffer=${loggerStatus.get('bufferSize')}, processing=${loggerStatus.get('isProcessing')}\n`);
+      this.appendResult(`Log Flush Shape: batch=${SDK_LOG_FLUSH_BATCH_SIZE}, coalesce=${SDK_LOG_PROCESS_COALESCE_MS}ms\n`);
+    } catch (error) {
+      this.appendResult(`Log queue status unavailable: ${error}\n`);
+    }
+
+    try {
+      const innerLogStatus = FTInnerLogFileManager.getInstance().getStatus();
+      this.appendResult(`Inner Log File: enabled=${innerLogStatus.enabled}, queue=${innerLogStatus.queueSize}, dropped=${innerLogStatus.droppedCount}\n`);
+      this.appendResult(`Inner Log File Limits: single=${this.formatBytes(innerLogStatus.singleFileMaxSize)}, total=${this.formatBytes(innerLogStatus.totalFileMaxSize)}, flush=${innerLogStatus.flushBatchSize}/${innerLogStatus.flushIntervalMs}ms\n`);
+    } catch (error) {
+      this.appendResult(`Inner log file status unavailable: ${error}\n`);
+    }
+
+    this.appendSchedulerLaneSnapshots();
+  }
+
+  private appendSchedulerLaneSnapshots(): void {
+    try {
+      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+      this.appendResult(`Scheduler: shutdown=${schedulerStatus.isShutdown}, activeSingleFlight=${schedulerStatus.activeSingleFlightTasks}, rescheduledSingleFlight=${schedulerStatus.rescheduledSingleFlightTasks}\n`);
+
+      const laneNames = ['log', 'event', 'data-process', 'upload', 'inner-log-file'];
+      for (const laneName of laneNames) {
+        const lane = schedulerStatus.lanes[laneName];
+        if (!lane) {
+          continue;
+        }
+        this.appendResult(`Lane ${laneName}: pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, ${this.formatLaneDispatchStatus(lane)}\n`);
+      }
+    } catch (error) {
+      this.appendResult(`Scheduler status unavailable: ${error}\n`);
+    }
+  }
+
+  private appendConsumeCapacitySummary(): void {
+    this.appendResult('\n[Physical Consume Capacity Estimate]\n');
+
+    try {
+      const syncStatus = SyncTaskManager.getInstance().getStatus();
+      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+      const logLane = schedulerStatus.lanes['log'];
+      const eventLane = schedulerStatus.lanes['event'];
+      const dataProcessLane = schedulerStatus.lanes['data-process'];
+      const uploadLane = schedulerStatus.lanes['upload'];
+      const innerLogLane = schedulerStatus.lanes['inner-log-file'];
+      const logProcessRate = this.estimateLogProcessRate(logLane);
+      const eventRate = this.estimateLaneRate(eventLane, 1, DEFAULT_EVENT_COST_MS);
+      const dataProcessRate = this.estimateLaneRate(dataProcessLane, 2, DEFAULT_DATA_PROCESS_COST_MS);
+      const rumEventRate = Math.min(eventRate, dataProcessRate);
+      const uploadRowsPerPoll =
+        syncStatus.pageSize * (SDK_UPLOAD_MAX_PAGES_RUM_APP + SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW + SDK_UPLOAD_MAX_PAGES_LOG);
+      const uploadPollRate = this.estimateUploadPollRate(uploadLane);
+      const uploadRowsPerSecond = uploadRowsPerPoll * uploadPollRate;
+      const innerLogBatchRate = this.estimateInnerLogFileRate(innerLogLane);
+
+      this.appendResult(`Log Producer: queueGuard<=${Constants.MAX_QUEUE_SIZE_LOG}, flush=${SDK_LOG_FLUSH_BATCH_SIZE}/${SDK_LOG_PROCESS_COALESCE_MS}ms, theoreticalDrain~${this.formatRateValue(logProcessRate)} log/s before data-process bottleneck\n`);
+      this.appendResult(`RUM Event Lane: maxRunning=${this.getLaneMaxConcurrency(eventLane, 1)}, eventAvg=${this.formatLaneCost(eventLane, DEFAULT_EVENT_COST_MS)}, theoreticalEvent~${this.formatRateValue(eventRate)} event/s\n`);
+      this.appendResult(`Data Process Lane: maxRunning=${this.getLaneMaxConcurrency(dataProcessLane, 2)}, dataAvg=${this.formatLaneCost(dataProcessLane, DEFAULT_DATA_PROCESS_COST_MS)}, theoreticalProcess~${this.formatRateValue(dataProcessRate)} item/s\n`);
+      this.appendResult(`RUM Combined Physical Estimate: min(event,data-process)~${this.formatRateValue(rumEventRate)} item/s\n`);
+      this.appendResult(`RUM In-Memory Guards: actionSet<=${Constants.MAX_SET_SIZE_ACTION}, viewSet<=${Constants.MAX_SET_SIZE_VIEW}, resourceMap<=${Constants.MAX_MAP_SIZE_RESOURCE}\n`);
+      this.appendResult(`Inner SDK Log File: queueGuard<=${Constants.MAX_QUEUE_SIZE}, theoreticalFileDrain~${this.formatRateValue(innerLogBatchRate)} line/s, fileTotal<=${this.getInnerLogTotalLimitText()}\n`);
+      this.appendResult(`Upload RUM_APP: pageSize=${syncStatus.pageSize}, cap<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_RUM_APP}/poll, pollRate~${this.formatRateValue(uploadPollRate)}/s, rows~${this.formatRateValue(syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_RUM_APP * uploadPollRate)}/s\n`);
+      this.appendResult(`Upload RUM_WEBVIEW: pageSize=${syncStatus.pageSize}, cap<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW}/poll, shares upload lane\n`);
+      this.appendResult(`Upload LOG: pageSize=${syncStatus.pageSize}, cap<=${syncStatus.pageSize * SDK_UPLOAD_MAX_PAGES_LOG}/poll, shares upload lane\n`);
+      this.appendResult(`Upload Total: upload lane max=${this.getLaneMaxConcurrency(uploadLane, 1)}, cap<=${uploadRowsPerPoll}/poll, rows~${this.formatRateValue(uploadRowsPerSecond)}/s by observed upload lane cost, retry<=${syncStatus.dataSyncMaxRetryCount}, autoSync=${syncStatus.autoSync}, sleep=${syncStatus.syncSleepTime}ms\n`);
+    } catch (error) {
+      this.appendResult(`Consume capacity summary unavailable: ${error}\n`);
+    }
+  }
+
+  private estimateLogProcessRate(logLane: SDKLaneStatus | undefined): number {
+    const concurrency = this.getLaneMaxConcurrency(logLane, 1);
+    return (SDK_LOG_FLUSH_BATCH_SIZE * concurrency * 1000) / SDK_LOG_PROCESS_COALESCE_MS;
+  }
+
+  private estimateInnerLogFileRate(innerLogLane: SDKLaneStatus | undefined): number {
+    const innerLogStatus = FTInnerLogFileManager.getInstance().getStatus();
+    const laneRate = this.estimateLaneRate(innerLogLane, 1, DEFAULT_INNER_LOG_FILE_COST_MS);
+    return laneRate * Math.max(1, innerLogStatus.flushBatchSize);
+  }
+
+  private estimateUploadPollRate(uploadLane: SDKLaneStatus | undefined): number {
+    return this.estimateLaneRate(uploadLane, 1, DEFAULT_UPLOAD_COST_MS);
+  }
+
+  private estimateLaneRate(lane: SDKLaneStatus | undefined, fallbackConcurrency: number, fallbackCostMs: number): number {
+    const concurrency = this.getLaneMaxConcurrency(lane, fallbackConcurrency);
+    const costMs = Math.max(1, this.getLaneAverageCostMs(lane, fallbackCostMs));
+    return (concurrency * 1000) / costMs;
+  }
+
+  private getLaneMaxConcurrency(lane: SDKLaneStatus | undefined, fallback: number): number {
+    if (!lane) {
+      return fallback;
+    }
+    return Math.max(1, lane.maxConcurrency);
+  }
+
+  private getLaneAverageCostMs(lane: SDKLaneStatus | undefined, fallback: number): number {
+    if (!lane || lane.averageCostTime <= 0) {
+      return fallback;
+    }
+    return lane.averageCostTime;
+  }
+
+  private formatLaneCost(lane: SDKLaneStatus | undefined, fallback: number): string {
+    return `${this.formatRateValue(this.getLaneAverageCostMs(lane, fallback))}ms`;
+  }
+
+  private formatRateValue(value: number): string {
+    if (!isFinite(value) || isNaN(value)) {
+      return '0';
+    }
+    if (value >= 100) {
+      return `${Math.round(value)}`;
+    }
+    if (value >= 10) {
+      return value.toFixed(1);
+    }
+    return value.toFixed(2);
+  }
+
+  private getInnerLogTotalLimitText(): string {
+    try {
+      return this.formatBytes(FTInnerLogFileManager.getInstance().getStatus().totalFileMaxSize);
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  private formatPercent(value: number, total: number): string {
+    if (total <= 0) {
+      return '0%';
+    }
+    return `${((value * 100) / total).toFixed(1)}%`;
+  }
+
+  private async appendPhysicalLimitProbe(useLargeProbe: boolean = false): Promise<void> {
+    const dbManager = FTDBManager.getInstance(this.context);
+    const runId = `PhysicalLimit_${Date.now()}`;
+    const logCount = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_LOG_COUNT : PHYSICAL_LIMIT_PROBE_LOG_COUNT;
+    const rumCount = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_RUM_COUNT : PHYSICAL_LIMIT_PROBE_RUM_COUNT;
+    const batchSize = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_BATCH_SIZE : PHYSICAL_LIMIT_PROBE_LOG_COUNT;
+    const batchDelayMs = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_BATCH_DELAY_MS : 0;
+    const settleMs = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_SETTLE_MS : PHYSICAL_LIMIT_PROBE_SETTLE_MS;
+    const logMarkers = this.buildLogMarkers(`${runId}_log`, logCount);
+    const rumMarkers = this.buildLogMarkers(`${runId}_rum`, rumCount);
+    const syncTaskManager = SyncTaskManager.getInstance();
+    const originalAutoSync = syncTaskManager.isAutoSyncEnabled();
+    const beforeDbSize = await dbManager.getCurrentDatabaseSize();
+    const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    const beforeRumCount = await this.getRumDbCount();
+
+    this.appendResult('\n[Physical Probe Input]\n');
+    this.appendResult(`Run ID: ${runId}\n`);
+    this.appendResult(`Mode: ${useLargeProbe ? 'stress' : 'quick'}\n`);
+    this.appendResult(`Business Policy: ignored for conclusion; only physical pipeline timing and marker persistence are measured\n`);
+    this.appendResult(`Auto Sync Paused During Probe: ${originalAutoSync}\n`);
+    this.appendResult(`Before: DB=${this.formatBytes(beforeDbSize)}, Log=${beforeLogCount}, RUM=${beforeRumCount}\n`);
+    this.appendResult(`Target: ${logCount} logs + ${rumCount} RUM actions, batch=${batchSize}, interBatchDelay=${batchDelayMs}ms, maxDrainWait=${settleMs}ms\n`);
+
+    const shouldPauseAutoSync = originalAutoSync;
+    try {
+      if (shouldPauseAutoSync) {
+        syncTaskManager.setAutoSync(false);
+      }
+
+      const writeStartTime = Date.now();
+      const logWriteStartTime = Date.now();
+      await this.writePhysicalLimitProbeLogs(logMarkers, batchSize, batchDelayMs);
+      const logWriteElapsedMs = Date.now() - logWriteStartTime;
+      const rumWriteStartTime = Date.now();
+      await this.writePhysicalLimitProbeRum(rumMarkers, batchSize, batchDelayMs);
+      const rumWriteElapsedMs = Date.now() - rumWriteStartTime;
+      FTLogger.flush();
+      const writeElapsedMs = Date.now() - writeStartTime;
+      const drainResult = await this.waitForPhysicalProbeDrain(logMarkers, rumMarkers, settleMs);
+
+      const afterDbSize = await dbManager.getCurrentDatabaseSize();
+      const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const afterRumCount = await this.getRumDbCount();
+      const logMissing = drainResult.logMissing;
+      const rumMissing = drainResult.rumMissing;
+      const insertedLogCount = Math.max(0, afterLogCount - beforeLogCount);
+      const insertedRumCount = Math.max(0, afterRumCount - beforeRumCount);
+      const insertedTotal = insertedLogCount + insertedRumCount;
+      const dbDelta = Math.max(0, afterDbSize - beforeDbSize);
+      const averageBytes = insertedTotal > 0 ? dbDelta / insertedTotal : 0;
+      const foundLogCount = logCount - logMissing.length;
+      const foundRumCount = rumCount - rumMissing.length;
+      const foundTotal = foundLogCount + foundRumCount;
+      const producedTotal = logCount + rumCount;
+      const totalObserveMs = Math.max(1, writeElapsedMs + drainResult.elapsedMs);
+
+      this.appendResult('\n[Physical Probe Timing]\n');
+      this.appendResult(`Producer Wall Time: total=${writeElapsedMs}ms, log=${logWriteElapsedMs}ms, rum=${rumWriteElapsedMs}ms\n`);
+      this.appendResult(`Drain Wait: ${drainResult.elapsedMs}ms, completed=${drainResult.completed}\n`);
+      this.appendResult(`Producer Submit Rate: ${this.formatRateValue((producedTotal * 1000) / Math.max(1, writeElapsedMs))} item/s\n`);
+      this.appendResult(`Observed Durable Rate: ${this.formatRateValue((foundTotal * 1000) / totalObserveMs)} item/s, observeWindow=${totalObserveMs}ms\n`);
+
+      this.appendResult('\n[Physical Probe Result]\n');
+      this.appendResult(`After: DB=${this.formatBytes(afterDbSize)}, Log=${afterLogCount}, RUM=${afterRumCount}\n`);
+      this.appendResult(`DB Delta: ${this.formatBytes(dbDelta)}, Inserted Delta: Log=${insertedLogCount}, RUM=${insertedRumCount}\n`);
+      this.appendMarkerCheckResult('Probe Logs', logCount, logMissing);
+      this.appendMarkerCheckResult('Probe RUM', rumCount, rumMissing);
+      this.appendResult(`Acceptance: Log=${this.formatPercent(foundLogCount, logCount)}, RUM=${this.formatPercent(foundRumCount, rumCount)}, Total=${this.formatPercent(foundTotal, producedTotal)}\n`);
+
+      if (averageBytes > 0) {
+        this.appendResult(`Estimated Average DB Footprint: ${this.formatBytes(Math.round(averageBytes))} / record\n`);
+      } else {
+        this.appendResult('Estimated Average DB Footprint: unavailable; DB size did not grow. Check auto upload/network state and retry offline.\n');
+      }
+
+      this.appendPhysicalProbeReadout(
+        logCount,
+        rumCount,
+        foundLogCount,
+        foundRumCount,
+        writeElapsedMs,
+        totalObserveMs,
+        averageBytes
+      );
+      this.appendResult('\n[Runtime After Probe]\n');
+      this.appendSchedulerLaneSnapshots();
+    } finally {
+      if (shouldPauseAutoSync) {
+        syncTaskManager.setAutoSync(true);
+      }
+    }
+  }
+
+  private async writePhysicalLimitProbeLogs(markers: string[], batchSize: number, delayMs: number): Promise<void> {
+    for (let start = 0; start < markers.length; start += batchSize) {
+      const end = Math.min(start + batchSize, markers.length);
+      for (let i = start; i < end; i++) {
+        FTLogger.logBackground(markers[i], Status.INFO, undefined, true);
+      }
+      FTLogger.flush();
+      if (delayMs > 0) {
+        await this.waitForWriteSettled(delayMs);
+      }
+    }
+    this.writeCount += markers.length;
+  }
+
+  private async writePhysicalLimitProbeRum(markers: string[], batchSize: number, delayMs: number): Promise<void> {
+    const rumManager = FTRUMGlobalManager.getInstance();
+    for (let start = 0; start < markers.length; start += batchSize) {
+      const end = Math.min(start + batchSize, markers.length);
+      for (let i = start; i < end; i++) {
+        rumManager.addAction(markers[i], 'click');
+      }
+      if (delayMs > 0) {
+        await this.waitForWriteSettled(delayMs);
+      }
+    }
+    this.writeCount += markers.length;
+  }
+
+  private async waitForPhysicalProbeDrain(
+    logMarkers: string[],
+    rumMarkers: string[],
+    timeoutMs: number
+  ): Promise<PhysicalProbeDrainResult> {
+    const startTime = Date.now();
+    let logMissing = logMarkers;
+    let rumMissing = rumMarkers;
+    const logQueryLimit = logMarkers.length + 200;
+    const rumQueryLimit = rumMarkers.length + 200;
+
+    while (Date.now() - startTime < timeoutMs) {
+      const logSamples = await this.queryLogDbSamples(logQueryLimit, true);
+      const rumSamples = await this.queryRumDbSamples(rumQueryLimit, true);
+      logMissing = this.findMissingMarkers(logSamples, logMarkers);
+      rumMissing = this.findMissingMarkers(rumSamples, rumMarkers);
+      if (logMissing.length === 0 && rumMissing.length === 0) {
+        return {
+          logMissing,
+          rumMissing,
+          elapsedMs: Date.now() - startTime,
+          completed: true
+        };
+      }
+      await this.waitForWriteSettled(PHYSICAL_LIMIT_PROBE_POLL_MS);
+    }
+
+    const logSamples = await this.queryLogDbSamples(logQueryLimit, true);
+    const rumSamples = await this.queryRumDbSamples(rumQueryLimit, true);
+    logMissing = this.findMissingMarkers(logSamples, logMarkers);
+    rumMissing = this.findMissingMarkers(rumSamples, rumMarkers);
+    return {
+      logMissing,
+      rumMissing,
+      elapsedMs: Date.now() - startTime,
+      completed: logMissing.length === 0 && rumMissing.length === 0
+    };
+  }
+
+  private appendPhysicalProbeReadout(
+    logProduced: number,
+    rumProduced: number,
+    logFound: number,
+    rumFound: number,
+    writeElapsedMs: number,
+    totalObserveMs: number,
+    averageBytes: number
+  ): void {
+    const producedTotal = logProduced + rumProduced;
+    const foundTotal = logFound + rumFound;
+    const submitRate = (producedTotal * 1000) / Math.max(1, writeElapsedMs);
+    const durableRate = (foundTotal * 1000) / Math.max(1, totalObserveMs);
+
+    this.appendResult('\n[Physical Ceiling Readout]\n');
+    this.appendResult(`Current Device Submit Ceiling In This Probe: ~${this.formatRateValue(submitRate)} item/s\n`);
+    this.appendResult(`Current SDK Durable Consume Ceiling In This Probe: ~${this.formatRateValue(durableRate)} item/s\n`);
+    this.appendResult(`Log Physical Acceptance: ${logFound}/${logProduced} (${this.formatPercent(logFound, logProduced)})\n`);
+    this.appendResult(`RUM Physical Acceptance: ${rumFound}/${rumProduced} (${this.formatPercent(rumFound, rumProduced)})\n`);
+    if (averageBytes > 0) {
+      this.appendResult(`Physical DB Growth Per Persisted Record: ~${this.formatBytes(Math.round(averageBytes))}\n`);
+    }
+
+    if (logFound < logProduced || rumFound < rumProduced) {
+      this.appendResult('Bottleneck Signal: SDK pipeline did not persist all probe markers inside the observe window. Check Runtime After Probe lane pending/running and missing preview.\n');
+    } else {
+      this.appendResult('Bottleneck Signal: no marker loss observed in this probe window. Increase probe size if you need to push the current device harder.\n');
+    }
   }
 
   /**

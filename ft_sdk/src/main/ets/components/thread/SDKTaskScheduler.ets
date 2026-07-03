@@ -136,6 +136,7 @@ export class SDKTaskScheduler {
   private lastEventCompletedAt: number = 0;
   private lastLaneTraceAt: Map<SDKTaskType, number> = new Map();
   private skippedLaneTraceCount: Map<SDKTaskType, number> = new Map();
+  private lastLaneIdleProcessedCount: Map<SDKTaskType, number> = new Map();
   private lastEventTraceAt: number = 0;
   private skippedEventTraceCount: number = 0;
 
@@ -615,6 +616,7 @@ export class SDKTaskScheduler {
         this.lastEventCompletedAt = Date.now();
       }
       this.processLane(type);
+      this.traceSchedulerLaneDrainedIfNeeded(type, lane, task);
     }
   }
 
@@ -751,6 +753,39 @@ export class SDKTaskScheduler {
     const message =
       `[LANE] lane=${task.type} latest=${task.name} pending=${lane.pendingCount} active=${lane.running} max=${lane.maxConcurrency} submitted=${lane.submittedTasks} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped}`;
     if (task.type === SDKTaskType.UPLOAD) {
+      this.traceSchedulerLaneDebug(message);
+    } else {
+      this.traceSchedulerLane(message);
+    }
+  }
+
+  private traceSchedulerLaneDrainedIfNeeded(
+    type: SDKTaskType,
+    lane: SDKLaneState,
+    latestTask: ScheduledSDKTask
+  ): void {
+    if (lane.pendingCount > 0 || lane.running > 0) {
+      return;
+    }
+
+    const processedTasks = lane.completedTasks + lane.failedTasks;
+    const lastIdleProcessedCount = this.lastLaneIdleProcessedCount.get(type) ?? 0;
+    const processedSinceLastIdle = Math.max(0, processedTasks - lastIdleProcessedCount);
+    this.lastLaneIdleProcessedCount.set(type, processedTasks);
+
+    if (latestTask.silent) {
+      return;
+    }
+
+    const skipped = this.skippedLaneTraceCount.get(type) ?? 0;
+    if (processedSinceLastIdle <= 1 && skipped <= 0) {
+      return;
+    }
+
+    this.skippedLaneTraceCount.set(type, 0);
+    const message =
+      `[DRAINED] lane=${type} latest=${latestTask.name} pending=${lane.pendingCount} active=${lane.running} max=${lane.maxConcurrency} submitted=${lane.submittedTasks} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped} processedSinceIdle=${processedSinceLastIdle}`;
+    if (type === SDKTaskType.UPLOAD) {
       this.traceSchedulerLaneDebug(message);
     } else {
       this.traceSchedulerLane(message);
