@@ -1616,12 +1616,6 @@ export class FTRUMInnerManager {
       // Associate RUM context
       this.attachRUMRelativeForResource(resourceBean);
       
-      // Check and clean up resourceBeanMap if it exceeds limit before adding
-      if (this.resourceBeanMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
-        FTInnerLogger.w(TAG, `resourceBeanMap size (${this.resourceBeanMap.size}) exceeds limit, clearing to prevent memory leak`);
-        this.resourceBeanMap.clear();
-      }
-      
       // Store resource Bean
       this.resourceBeanMap.set(resourceId, resourceBean);
       
@@ -2464,12 +2458,6 @@ export class FTRUMInnerManager {
       if (this.insertedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
         FTInnerLogger.w(TAG, `insertedActionIds size (${this.insertedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
         this.insertedActionIds.clear();
-      }
-      
-      // Clean up resourceBeanMap (Map type, use MAX_MAP_SIZE_RESOURCE)
-      if (this.resourceBeanMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
-        FTInnerLogger.w(TAG, `resourceBeanMap size (${this.resourceBeanMap.size}) exceeds limit, clearing to prevent memory leak`);
-        this.resourceBeanMap.clear();
       }
       
       // Clean up preActivityDuration (Map type, use MAX_MAP_SIZE_RESOURCE)
