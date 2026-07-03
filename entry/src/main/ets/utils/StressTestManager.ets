@@ -15,6 +15,11 @@ const TAG = "StressTestManager";
 const STRESS_TEST_LOG_TAG = "stress_test";
 export const DEFAULT_REAL_TRAFFIC_URL = "https://httpbin.org/get?from=real-app-stress";
 const MS_TO_NS = 1000000;
+const REAL_RESOURCE_CONNECT_TIMEOUT_MS = 60 * 1000;
+const REAL_RESOURCE_TRANSFER_TIMEOUT_MS = 5 * 60 * 1000;
+const REAL_RESOURCE_INACTIVITY_TIMEOUT_MS = 60 * 1000;
+const REAL_RESOURCE_MAX_CONNECTIONS_PER_HOST = 256;
+const REAL_RESOURCE_MAX_TOTAL_CONNECTIONS = 512;
 
 export type StressStopReason = 'manual' | 'duration' | 'completed' | 'service-stop' | 'service-destroyed' | 'error';
 export type StressTrafficMode = 'fake' | 'real';
@@ -171,6 +176,7 @@ export class StressTestManager {
   private autoStopTimerId: number | null = null;
 
   private rumManager: FTRUMGlobalManager | null = null;
+  private realResourceSession: rcp.Session | null = null;
   private currentConfig: StressTestConfig = createDefaultStressTestConfig(0, false);
   private currentStats: StressTestStats = createEmptyStressTestStats();
   private lastReport: StressTestReport | null = null;
@@ -296,6 +302,7 @@ export class StressTestManager {
     this.isRunning = true;
     this.startTime = Date.now();
     this.durationSeconds = normalizedConfig.durationSeconds;
+    this.closeRealResourceSession();
     this.currentConfig = normalizedConfig;
     this.lastReport = null;
     this.logCounter = 0;
@@ -730,7 +737,7 @@ export class StressTestManager {
     const separator = realApiUrl.indexOf('?') >= 0 ? '&' : '?';
     const url =
       `${realApiUrl}${separator}tag=${STRESS_TEST_LOG_TAG}&stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
-    const session = rcp.createSession(createFTRCPTrackConfig());
+    const session = this.getRealResourceSession();
     const request = new rcp.Request(url, 'GET');
     const response = await session.fetch(request);
 
@@ -738,6 +745,42 @@ export class StressTestManager {
       DemoLogger.i(TAG, `Real resource from timer ${threadIndex}, index ${resourceIndex} successful: ${response.statusCode}`);
     } else {
       throw new Error(`real request returned status=${response.statusCode}`);
+    }
+  }
+
+  private getRealResourceSession(): rcp.Session {
+    if (this.realResourceSession === null) {
+      this.realResourceSession = rcp.createSession(createFTRCPTrackConfig({
+        requestConfiguration: {
+          transfer: {
+            timeout: {
+              connectMs: REAL_RESOURCE_CONNECT_TIMEOUT_MS,
+              transferMs: REAL_RESOURCE_TRANSFER_TIMEOUT_MS,
+              inactivityMs: REAL_RESOURCE_INACTIVITY_TIMEOUT_MS
+            }
+          }
+        },
+        connectionConfiguration: {
+          maxConnectionsPerHost: REAL_RESOURCE_MAX_CONNECTIONS_PER_HOST,
+          maxTotalConnections: REAL_RESOURCE_MAX_TOTAL_CONNECTIONS
+        }
+      }));
+      DemoLogger.i(TAG, "Created reusable real resource RCP session");
+    }
+    return this.realResourceSession;
+  }
+
+  private closeRealResourceSession(): void {
+    if (this.realResourceSession === null) {
+      return;
+    }
+    try {
+      this.realResourceSession.close();
+      DemoLogger.i(TAG, "Closed reusable real resource RCP session");
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to close real resource RCP session: ${error}`);
+    } finally {
+      this.realResourceSession = null;
     }
   }
 
@@ -884,6 +927,7 @@ export class StressTestManager {
     const elapsedSeconds = this.getElapsedSeconds();
     this.isRunning = false;
     this.clearAllTimers();
+    this.closeRealResourceSession();
     if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
       FTLogger.flush();
     }

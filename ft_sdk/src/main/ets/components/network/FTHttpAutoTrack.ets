@@ -612,6 +612,7 @@ export interface FTRCPSessionConfigurationOptions extends FTAutoTrackOptions {
   headers?: Record<string, string>;
   interceptors?: rcp.Interceptor[];
   requestConfiguration?: FTRCPRequestConfiguration;
+  connectionConfiguration?: FTRCPConnectionConfiguration;
 }
 
 export interface FTAxiosRequestConfigTarget {
@@ -676,8 +677,26 @@ interface FTRCPTracingConfiguration {
   collectTimeInfo?: boolean;
 }
 
+interface FTRCPTimeoutConfiguration {
+  connectMs?: number;
+  transferMs?: number;
+  inactivityMs?: number;
+}
+
+interface FTRCPTransferConfiguration {
+  autoRedirect?: boolean;
+  maxAutoRedirects?: number;
+  timeout?: FTRCPTimeoutConfiguration;
+}
+
 interface FTRCPRequestConfiguration {
+  transfer?: FTRCPTransferConfiguration;
   tracing?: FTRCPTracingConfiguration;
+}
+
+interface FTRCPConnectionConfiguration {
+  readonly maxConnectionsPerHost?: number;
+  readonly maxTotalConnections?: number;
 }
 
 interface FTAxiosHeadersSerializable {
@@ -1133,6 +1152,7 @@ export function createFTRCPTrackConfig(
   let requestConfiguration: FTRCPRequestConfiguration;
   if (options.requestConfiguration) {
     requestConfiguration = {
+      transfer: options.requestConfiguration.transfer,
       tracing: mergedTracingConfig
     };
   } else {
@@ -1145,6 +1165,7 @@ export function createFTRCPTrackConfig(
     baseAddress: options.baseAddress,
     headers: options.headers,
     interceptors: interceptors,
-    requestConfiguration: requestConfiguration
+    requestConfiguration: requestConfiguration,
+    connectionConfiguration: options.connectionConfiguration
   };
 }
