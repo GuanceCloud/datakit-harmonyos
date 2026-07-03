@@ -96,6 +96,66 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
+    it('eventLaneShouldUsePriorityBucketFastPathForBacklog', 0, async () => {
+      const order: string[] = [];
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'first-event',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const low = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'low-event',
+        priority: SDKTaskPriority.LOW,
+        run: () => {
+          order.push('low');
+        }
+      });
+
+      const high = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'high-event',
+        priority: SDKTaskPriority.HIGH,
+        run: () => {
+          order.push('high');
+        }
+      });
+
+      const critical = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'critical-event',
+        priority: SDKTaskPriority.CRITICAL,
+        run: () => {
+          order.push('critical');
+        }
+      });
+
+      await flushPromises();
+      const blockedStatus = scheduler.getStatus().lanes[SDKTaskType.EVENT];
+      expect(blockedStatus.pending).assertEqual(3);
+
+      releaseFirst();
+      await first;
+      await critical;
+      await high;
+      await low;
+
+      const finalStatus = scheduler.getStatus().lanes[SDKTaskType.EVENT];
+      expect(order.join(',')).assertEqual('first-start,first-end,critical,high,low');
+      expect(finalStatus.completedTasks).assertEqual(4);
+      expect(finalStatus.maxScanCount <= 1).assertTrue();
+    });
+
     it('logLaneShouldRunTasksSequentially', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
@@ -208,6 +268,53 @@ export default function sdkTaskSchedulerUnitTest() {
       await first;
       await second;
       expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+    });
+
+    it('laneStatusShouldRecordDispatchAndScanMetrics', 0, async () => {
+      const order: string[] = [];
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+      const serialKey = 'same-data-process-serial-key';
+
+      const first = scheduler.submitTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'first-data-process-serial',
+        priority: SDKTaskPriority.LOW,
+        serialKey,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'second-data-process-serial',
+        priority: SDKTaskPriority.LOW,
+        serialKey,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      await flushPromises();
+      const blockedStatus = scheduler.getStatus().lanes[SDKTaskType.DATA_PROCESS];
+      expect(blockedStatus.pending).assertEqual(1);
+      expect(blockedStatus.dispatchCount > 0).assertTrue();
+      expect(blockedStatus.maxScanCount >= 1).assertTrue();
+
+      releaseFirst();
+      await first;
+      await second;
+
+      const finalStatus = scheduler.getStatus().lanes[SDKTaskType.DATA_PROCESS];
+      expect(order.join(',')).assertEqual('first-start,first-end,second');
+      expect(finalStatus.completedTasks).assertEqual(2);
+      expect(finalStatus.dispatchCount >= 3).assertTrue();
+      expect(finalStatus.averageScanCount > 0).assertTrue();
+      expect(finalStatus.maxScanCount >= 1).assertTrue();
     });
 
     it('crashFileLaneShouldRunTasksSequentially', 0, async () => {
