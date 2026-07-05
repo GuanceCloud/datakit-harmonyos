@@ -4,6 +4,7 @@ import Want from '@ohos.app.ability.Want';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import {
+  DBCacheDiscard,
   DeviceMetricsMonitorType,
   EnvType,
   ErrorMonitorType,
@@ -12,6 +13,7 @@ import {
   FTSDK,
   FTSDKConfig,
   FTTraceConfig,
+  LogCacheDiscard,
   Status,
   SyncPageSize,
   TraceType,
@@ -292,7 +294,7 @@ export default class EntryAbility extends UIAbility {
         .setDebug(true)
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
-        .setAutoSync(this.resolveAutoSyncEnabled())
+        .setAutoSync(true)
         .setSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
@@ -306,6 +308,7 @@ export default class EntryAbility extends UIAbility {
         // .setLogCacheLimitCount(30000)
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
+        .setLogCacheDiscardStrategy(LogCacheDiscard.DISCARD_OLDEST)
         .setEnableLinkRumData(true);
       FTSDK.installLogConfig(logConfig);
 

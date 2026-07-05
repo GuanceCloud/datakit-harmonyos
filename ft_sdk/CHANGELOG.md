@@ -707,7 +707,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2025-11-07
 
 ### Added
-- Initial release of DataFlux HarmonyOS SDK
+- Initial release of HarmonyOS SDK
 - RUM (Real User Monitoring) functionality
   - View tracking: Automatic and manual view tracking
   - Action tracking: Automatic UI component click tracking (Button, Checkbox, Radio, Toggle)

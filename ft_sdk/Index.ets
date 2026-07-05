@@ -1,5 +1,5 @@
 /**
- * DataFlux HarmonyOS SDK - Public API Exports
+ *  HarmonyOS SDK - Public API Exports
  * 
  * This file exports all public APIs that should be accessible to SDK users.
  * DO NOT export internal implementation classes or utilities.
