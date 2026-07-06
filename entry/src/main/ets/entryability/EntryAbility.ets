@@ -107,10 +107,18 @@ export default class EntryAbility extends UIAbility {
   private logAppMemoryLimitOnMainThread(): void {
     try {
       const limit = hidebug.getAppMemoryLimit();
-      console.info(`vmHeapLimit=${limit.vmHeapLimit} KB`);
-      console.info(`vmTotalHeapSize=${limit.vmTotalHeapSize} KB`);
+      console.info(`JS-vmHeapLimit=${limit.vmHeapLimit} KB`);
+      console.info(`JS-vmTotalHeapSize=${limit.vmTotalHeapSize} KB`);
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to get app memory limit on main thread: ${error}`);
+    }
+
+    try {
+      const vmMemory = hidebug.getAppVMMemoryInfo();
+      console.info(`JS-heapUsed=${vmMemory.heapUsed} KB`);
+      console.info(`JS-totalHeap=${vmMemory.totalHeap} KB`);
+    } catch (error) {
+      DemoLogger.e(LOG_TAG, `Failed to get app VM memory info on main thread: ${error}`);
     }
   }
 

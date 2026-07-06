@@ -59,6 +59,9 @@ const DEFAULT_INNER_LOG_FILE_COST_MS = 50;
 const SINGLE_LANE_BENCH_TASK_COUNT = 1000;
 const SINGLE_LANE_BENCH_COST_TASK_COUNT = 300;
 const SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT = 200;
+const DB_WRITE_CAPABILITY_BATCHES_PER_CASE = 100;
+const DB_WRITE_CAPABILITY_BATCH_SIZES: number[] = [1, 10, 20, 50];
+const DB_WRITE_CAPABILITY_SETTLE_MS = 200;
 
 interface PhysicalProbeDrainResult {
   logMissing: string[];
@@ -380,6 +383,15 @@ export struct DBCacheLimitTestPage {
             .enabled(!this.autoWriteEnabled && !this.isRunning)
             .onClick(() => {
               this.runSdkPhysicalLimitTest(true);
+            })
+
+          Button('Benchmark DB Write Capability')
+            .width('100%')
+            .height(48)
+            .backgroundColor('#00695C')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.runDbWriteCapabilityBenchmark();
             })
 
           Button('Benchmark SDK Lanes')
@@ -725,6 +737,162 @@ export struct DBCacheLimitTestPage {
       this.updatePolicyInfo();
       this.isRunning = false;
     }
+  }
+
+  private async runDbWriteCapabilityBenchmark(): Promise<void> {
+    this.isRunning = true;
+    const syncTaskManager = SyncTaskManager.getInstance();
+    const originalAutoSync = syncTaskManager.isAutoSyncEnabled();
+    try {
+      if (this.autoWriteEnabled) {
+        this.stopAutoWrite();
+      }
+      if (originalAutoSync) {
+        syncTaskManager.setAutoSync(false);
+      }
+
+      const dbManager = FTDBManager.getInstance(this.context);
+      await dbManager.init();
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+
+      const beforeDbSize = await dbManager.getCurrentDatabaseSize();
+      const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const beforeRumCount = await this.getRumDbCount();
+      FTDBCachePolicy.getInstance().syncCountsFromDbInternal(beforeLogCount, beforeRumCount);
+
+      this.appendResult('\n=== DB Write Capability Benchmark ===\n');
+      this.appendResult('Scope: direct FTDBManager.writeSyncDataAtomically. This bypasses Log/RUM business APIs, scheduler lanes, and upload, while keeping DB write lock, duplicate filtering, and RDB insert/batchInsert behavior.\n');
+      this.appendResult(`Auto Sync Paused During Benchmark: ${originalAutoSync}\n`);
+      this.appendResult(`Batch Plan: ${DB_WRITE_CAPABILITY_BATCHES_PER_CASE} batches per case, batchSize=${DB_WRITE_CAPABILITY_BATCH_SIZES.join('/')}\n`);
+      this.appendCurrentMachineSnapshot();
+      this.appendResult(`Before: DB=${this.formatBytes(beforeDbSize)}, Log=${beforeLogCount}, RUM=${beforeRumCount}\n`);
+
+      for (const batchSize of DB_WRITE_CAPABILITY_BATCH_SIZES) {
+        await this.runDbWriteCapabilityCase(dbManager, batchSize);
+        await this.waitForWriteSettled(DB_WRITE_CAPABILITY_SETTLE_MS);
+      }
+
+      const afterDbSize = await dbManager.getCurrentDatabaseSize();
+      const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const afterRumCount = await this.getRumDbCount();
+      FTDBCachePolicy.getInstance().syncCountsFromDbInternal(afterLogCount, afterRumCount);
+      this.writeCount += Math.max(0, afterLogCount - beforeLogCount);
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+
+      this.appendResult('\n[DB Write Capability Summary]\n');
+      this.appendResult(`After: DB=${this.formatBytes(afterDbSize)}, Log=${afterLogCount}, RUM=${afterRumCount}\n`);
+      this.appendResult(`Delta: DB=${this.formatBytes(Math.max(0, afterDbSize - beforeDbSize))}, Log=${Math.max(0, afterLogCount - beforeLogCount)}, RUM=${Math.max(0, afterRumCount - beforeRumCount)}\n`);
+      this.appendResult('=== DB Write Capability Benchmark Completed ===\n');
+    } catch (error) {
+      this.appendResult(`DB Write Capability Benchmark failed: ${error}\n`);
+    } finally {
+      if (originalAutoSync) {
+        syncTaskManager.setAutoSync(true);
+      }
+      this.isRunning = false;
+    }
+  }
+
+  private async runDbWriteCapabilityCase(dbManager: FTDBManager, batchSize: number): Promise<void> {
+    const runId = `DbWriteCapability_${Date.now()}_b${batchSize}`;
+    const targetRows = batchSize * DB_WRITE_CAPABILITY_BATCHES_PER_CASE;
+    const beforeDbSize = await dbManager.getCurrentDatabaseSize();
+    const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    const batchCostsMs: number[] = [];
+    let requested = 0;
+    let inserted = 0;
+    let dropped = 0;
+    let duplicateSkipped = 0;
+    let deletedOld = 0;
+    let failedBatches = 0;
+    let lastError = '';
+    const startTime = Date.now();
+
+    for (let batchIndex = 0; batchIndex < DB_WRITE_CAPABILITY_BATCHES_PER_CASE; batchIndex++) {
+      const batchStartRow = batchIndex * batchSize;
+      const records = this.buildDbWriteCapabilityBatch(runId, batchStartRow, batchSize);
+      const batchStartTime = Date.now();
+      const result = await dbManager.writeSyncDataAtomically(
+        `db_write_capability_batch_${batchSize}`,
+        records,
+        {
+          applyCachePolicy: false,
+          reInsert: false
+        }
+      );
+      batchCostsMs.push(Math.max(0, Date.now() - batchStartTime));
+      requested += result.requested;
+      inserted += result.inserted;
+      dropped += result.dropped;
+      duplicateSkipped += result.duplicateSkipped;
+      deletedOld += result.deletedOld;
+      if (!result.success) {
+        failedBatches++;
+        lastError = result.errorMessage;
+      }
+    }
+
+    const elapsedMs = Math.max(1, Date.now() - startTime);
+    const afterDbSize = await dbManager.getCurrentDatabaseSize();
+    const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    FTDBCachePolicy.getInstance().syncCountsFromDbInternal(afterLogCount, undefined);
+
+    this.appendResult(`\n[DB Write Case] batchSize=${batchSize}, targetRows=${targetRows}\n`);
+    this.appendResult(`Rows: requested=${requested}, inserted=${inserted}, dropped=${dropped}, duplicate=${duplicateSkipped}, deletedOld=${deletedOld}, failedBatches=${failedBatches}\n`);
+    this.appendResult(`Elapsed: ${elapsedMs}ms, throughput~${this.formatRateValue((inserted * 1000) / elapsedMs)} row/s\n`);
+    this.appendResult(`DB Delta: ${this.formatBytes(Math.max(0, afterDbSize - beforeDbSize))}, Log Delta=${Math.max(0, afterLogCount - beforeLogCount)}\n`);
+    this.appendDbWriteCostStats(batchCostsMs);
+    if (lastError.length > 0) {
+      this.appendResult(`Last Error: ${lastError}\n`);
+    }
+  }
+
+  private buildDbWriteCapabilityBatch(runId: string, startIndex: number, count: number): SyncData[] {
+    const records: SyncData[] = [];
+    for (let i = 0; i < count; i++) {
+      const rowIndex = startIndex + i;
+      records.push(this.createDbWriteCapabilityLogData(`${runId}_${rowIndex}`, rowIndex));
+    }
+    return records;
+  }
+
+  private createDbWriteCapabilityLogData(marker: string, rowIndex: number): SyncData {
+    const data = new SyncData(DataType.LOG);
+    const timeNano = Date.now() * 1000000 + rowIndex;
+    data.setUuid(marker);
+    data.setTime(timeNano);
+    data.setDataString(`df_rum_harmonyos_log,source=db_write_capability,sdk_data_id=${marker} message="${marker}",status="info" ${timeNano}`);
+    return data;
+  }
+
+  private appendDbWriteCostStats(costsMs: number[]): void {
+    if (costsMs.length === 0) {
+      this.appendResult('Batch Cost: no samples\n');
+      return;
+    }
+
+    let total = 0;
+    let max = 0;
+    for (const cost of costsMs) {
+      total += cost;
+      if (cost > max) {
+        max = cost;
+      }
+    }
+    const avg = total / costsMs.length;
+    this.appendResult(`Batch Cost: avg=${this.formatRateValue(avg)}ms, p50=${this.formatRateValue(this.getPercentileValue(costsMs, 50))}ms, p95=${this.formatRateValue(this.getPercentileValue(costsMs, 95))}ms, max=${this.formatRateValue(max)}ms\n`);
+  }
+
+  private getPercentileValue(values: number[], percentile: number): number {
+    if (values.length === 0) {
+      return 0;
+    }
+    const sorted = values.slice();
+    sorted.sort((a: number, b: number) => a - b);
+    const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile * sorted.length) / 100) - 1));
+    return sorted[index];
   }
 
   private async runSingleLaneBenchmarkSuite(): Promise<void> {

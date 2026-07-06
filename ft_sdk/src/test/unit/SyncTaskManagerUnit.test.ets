@@ -577,7 +577,9 @@ export default function syncTaskManagerUnitTest() {
       ]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
-      let releaseHttp: (() => void) | null = null;
+      let releaseHttp: () => void = () => {
+        // Resolver is assigned by the Promise executor below.
+      };
       runtime.httpBarrier = new Promise<void>((resolve: () => void) => {
         releaseHttp = resolve;
       });
@@ -595,9 +597,7 @@ export default function syncTaskManagerUnitTest() {
       expect(db.executeCount).assertEqual(executeCountBefore);
       expect(manager.getStatus().uploadLaneStatus.needReschedule).assertTrue();
 
-      if (releaseHttp) {
-        releaseHttp();
-      }
+      releaseHttp();
       runtime.httpBarrier = null;
       await runScheduledUpload(runtime);
 

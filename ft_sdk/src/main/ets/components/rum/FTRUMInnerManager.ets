@@ -450,7 +450,6 @@ export class FTRUMInnerManager {
                 bean.setErrorCount(dbCounts.errorCount);
                 bean.setLongTaskCount(dbCounts.longTaskCount);
                 bean.setResourceCount(dbCounts.resourceCount);
-                FTInnerLogger.d(TAG, `<FT-ACTION-COUNT> Updated ActionBean counts from DB before delete for ${actionId}: E=${dbCounts.errorCount}, LT=${dbCounts.longTaskCount}, R=${dbCounts.resourceCount}`);
               }
             } catch (error) {
               const errorMessage = error instanceof Error ? error.message : String(error);
@@ -537,17 +536,9 @@ export class FTRUMInnerManager {
           try {
             const dbCounts = await this.getActionCountsFromDB(actionId);
             if (dbCounts) {
-              const oldErrorCount = actionBean.getErrorCount();
-              const oldLongTaskCount = actionBean.getLongTaskCount();
-              const oldResourceCount = actionBean.getResourceCount();
-              
               actionBean.setErrorCount(dbCounts.errorCount);
               actionBean.setLongTaskCount(dbCounts.longTaskCount);
               actionBean.setResourceCount(dbCounts.resourceCount);
-              
-              FTInnerLogger.d(TAG, `<FT-ACTION-COUNT> Updated action ${actionId} counts from DB: error ${oldErrorCount}->${dbCounts.errorCount}, longTask ${oldLongTaskCount}->${dbCounts.longTaskCount}, resource ${oldResourceCount}->${dbCounts.resourceCount}`);
-            } else {
-              FTInnerLogger.d(TAG, `<FT-ACTION-COUNT> No counts found in DB for action ${actionId}, using memory values`);
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -566,8 +557,6 @@ export class FTRUMInnerManager {
               actionBean.setErrorCount(finalDbCounts.errorCount);
               actionBean.setLongTaskCount(finalDbCounts.longTaskCount);
               actionBean.setResourceCount(finalDbCounts.resourceCount);
-              
-              FTInnerLogger.d(TAG, `<FT-ACTION-COUNT> Final query before upload for ${actionId}: E=${finalDbCounts.errorCount}, LT=${finalDbCounts.longTaskCount}, R=${finalDbCounts.resourceCount}`);
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);

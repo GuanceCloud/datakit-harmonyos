@@ -7,6 +7,16 @@ import {
   StringWrapper
 } from '@guancecloud/ft_sdk/Index';
 import { LogEntry } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { TrackLogManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/TrackLogManager';
+import {
+  SDKLaneStatus,
+  SDKTaskGroupStatus,
+  SDKTaskScheduler,
+  SDKTaskType
+} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
+import { util } from '@kit.ArkTS';
+import { fileIo } from '@kit.CoreFileKit';
+import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
@@ -20,6 +30,32 @@ const REAL_RESOURCE_TRANSFER_TIMEOUT_MS = 5 * 60 * 1000;
 const REAL_RESOURCE_INACTIVITY_TIMEOUT_MS = 60 * 1000;
 const REAL_RESOURCE_MAX_CONNECTIONS_PER_HOST = 256;
 const REAL_RESOURCE_MAX_TOTAL_CONNECTIONS = 512;
+const CAPABILITY_CASE_NAME = "real-mixed-consumer-manual";
+const CAPABILITY_SAMPLE_INTERVAL_MS = 500;
+const CAPABILITY_VM_HEAP_FALLBACK_LIMIT_MB = 256;
+const CAPABILITY_VM_HEAP_SAFE_WATERMARK = 0.80;
+const CAPABILITY_RESERVED_HEAP_MB = 25;
+const BYTES_PER_KB = 1024;
+const BYTES_PER_MB = 1024 * 1024;
+const CAPABILITY_TEMPERATURE_UNAVAILABLE_C = -1000;
+const CAPABILITY_TEMPERATURE_ZONE_COUNT = 16;
+const CAPABILITY_LANE_TYPES: SDKTaskType[] = [
+  SDKTaskType.EVENT,
+  SDKTaskType.LOG,
+  SDKTaskType.DATA_PROCESS
+];
+const CAPABILITY_CPU_TEMPERATURE_TYPE_KEYWORDS: string[] = [
+  'cpu',
+  'soc',
+  'ap',
+  'cluster',
+  'tsens',
+  'mtktscpu'
+];
+const CAPABILITY_BATTERY_TEMPERATURE_PATHS: string[] = [
+  '/sys/class/power_supply/battery/temp',
+  '/sys/class/power_supply/battery/batt_temp'
+];
 
 export type StressStopReason = 'manual' | 'duration' | 'completed' | 'service-stop' | 'service-destroyed' | 'error';
 export type StressTrafficMode = 'fake' | 'real';
@@ -84,6 +120,122 @@ export interface StressTestStats {
   lastErrorMessage: string;
 }
 
+export interface StressCapabilityLaneMetric {
+  laneName: string;
+  submitted: number;
+  completed: number;
+  failed: number;
+  pending: number;
+  running: number;
+  queuedTasks: number;
+  avgWaitMs: number;
+  avgCostMs: number;
+  oldestWaitMs: number;
+  bottleneck: string;
+}
+
+export interface StressCapabilityBusinessMetric {
+  eventType: string;
+  taskGroup: string;
+  laneName: string;
+  submitted: number;
+  completed: number;
+  failed: number;
+  queuedTasks: number;
+  avgWaitMs: number;
+  avgCostMs: number;
+  maxWaitMs: number;
+  maxCostMs: number;
+  bottleneck: string;
+}
+
+export interface StressCapabilityReport {
+  caseName: string;
+  inputMixedTasks: number;
+  enabledFeatureCount: number;
+  sampleCount: number;
+  peakQueue: number;
+  peakSchedulerQueue: number;
+  peakLogQueue: number;
+  peakQueueElapsedMs: number;
+  heapStartMb: number;
+  heapPeakMb: number;
+  heapEndMb: number;
+  heapDeltaMb: number;
+  peakHeapDeltaMb: number;
+  avgQueuedTaskKb: number;
+  vmHeapLimitMb: number;
+  vmHeapLimitSource: string;
+  safeWatermark: number;
+  reservedHeapMb: number;
+  safeQueueEstimate: number;
+  productionQps: number;
+  completionQps: number;
+  backlogGrowthPerSecond: number;
+  secondsToHighRisk: number;
+  slowLane: string;
+  slowLaneAvgWaitMs: number;
+  slowLaneAvgCostMs: number;
+  slowLaneBottleneck: string;
+  slowBusinessEvent: string;
+  slowBusinessTaskGroup: string;
+  slowBusinessLane: string;
+  slowBusinessAvgWaitMs: number;
+  slowBusinessAvgCostMs: number;
+  logSubmitted: number;
+  logAccepted: number;
+  logDropped: number;
+  logDropRate: number;
+  logDropCause: string;
+  temperatureAvailable: boolean;
+  temperatureKind: string;
+  temperatureSource: string;
+  temperatureStartC: number;
+  temperaturePeakC: number;
+  temperatureEndC: number;
+  temperatureDeltaC: number;
+  lanes: StressCapabilityLaneMetric[];
+  businessEvents: StressCapabilityBusinessMetric[];
+}
+
+interface StressCapabilitySample {
+  label: string;
+  elapsedMs: number;
+  schedulerQueue: number;
+  logQueue: number;
+  queueTotal: number;
+  runningTotal: number;
+  completedTotal: number;
+  failedTotal: number;
+  heapUsedBytes: number;
+  temperatureAvailable: boolean;
+  temperatureC: number;
+}
+
+interface VmHeapSnapshot {
+  usedBytes: number;
+  limitBytes: number;
+  available: boolean;
+}
+
+interface VmHeapLimitSnapshot {
+  limitBytes: number;
+  source: string;
+}
+
+interface TemperatureProbe {
+  tempPath: string;
+  kind: string;
+  source: string;
+}
+
+interface TemperatureSnapshot {
+  available: boolean;
+  celsius: number;
+  kind: string;
+  source: string;
+}
+
 export interface StressTestReport {
   stopReason: StressStopReason;
   startedAtMs: number;
@@ -91,6 +243,7 @@ export interface StressTestReport {
   elapsedSeconds: number;
   durationSeconds: number;
   stats: StressTestStats;
+  capabilityReport: StressCapabilityReport | null;
 }
 
 export function createDefaultStressTestConfig(
@@ -180,6 +333,16 @@ export class StressTestManager {
   private currentConfig: StressTestConfig = createDefaultStressTestConfig(0, false);
   private currentStats: StressTestStats = createEmptyStressTestStats();
   private lastReport: StressTestReport | null = null;
+  private capabilitySamples: StressCapabilitySample[] = [];
+  private capabilitySampleTimerId: number | null = null;
+  private capabilityStartedAtMs: number = 0;
+  private capabilityLastSampleAtMs: number = 0;
+  private capabilityHeapStartBytes: number = 0;
+  private capabilityHeapLimit: VmHeapLimitSnapshot = {
+    limitBytes: CAPABILITY_VM_HEAP_FALLBACK_LIMIT_MB * BYTES_PER_MB,
+    source: 'fallback'
+  };
+  private capabilityTemperatureProbe: TemperatureProbe | null = null;
 
   private logCounter: number = 0;
   private actionCounter: number = 0;
@@ -315,6 +478,7 @@ export class StressTestManager {
     this.resourceIntervalIds = [];
     this.exceptionIntervalIds = [];
     this.currentStats = this.createStatsForStart(normalizedConfig, this.startTime);
+    this.startCapabilitySampling();
 
     if (this.shouldFailTotalCountStartForRum(normalizedConfig)) {
       const message = "RUM is not initialized; total-count mode cannot run RUM-dependent scenarios";
@@ -384,6 +548,7 @@ export class StressTestManager {
       this.currentStats.logsGenerated += batchLogs.length;
       this.currentStats.logBatchesGenerated += 1;
       DemoLogger.i(TAG, `Submitted log batch: tag=${tag}, size=${batchLogs.length}, totalGenerated=${this.logCounter}`);
+      this.sampleCapabilityIfDue('log-batch');
     } catch (error) {
       this.recordErrorMessage(`batchLog failed: ${error}`);
       DemoLogger.e(TAG, `Failed to submit log batch: ${error}`);
@@ -671,6 +836,7 @@ export class StressTestManager {
         timestampMs: Date.now()
       }]);
       this.currentStats.logsGenerated += 1;
+      this.sampleCapabilityIfDue('log');
     } catch (error) {
       this.recordErrorMessage(`log failed: ${error}`);
       DemoLogger.e(TAG, `Failed to send log from timer ${threadIndex}: ${error}`);
@@ -698,6 +864,7 @@ export class StressTestManager {
       };
       this.rumManager.addActionWithProperty(actionName, 'click', property);
       this.currentStats.actionsGenerated += 1;
+      this.sampleCapabilityIfDue('action');
     } catch (error) {
       this.recordErrorMessage(`action failed: ${error}`);
       DemoLogger.e(TAG, `Failed to send action from timer ${threadIndex}: ${error}`);
@@ -730,6 +897,7 @@ export class StressTestManager {
       this.recordErrorMessage(`resource failed: ${error}`);
       DemoLogger.e(TAG, `Failed to send resource from timer ${threadIndex}: ${error}`);
     }
+    this.sampleCapabilityIfDue('resource');
   }
 
   private async sendRealResource(threadIndex: number, resourceIndex: number): Promise<void> {
@@ -854,6 +1022,7 @@ export class StressTestManager {
         property
       );
       this.currentStats.errorsGenerated += 1;
+      this.sampleCapabilityIfDue('error');
     } catch (error) {
       this.recordErrorMessage(`custom error failed: ${error}`);
       DemoLogger.e(TAG, `Failed to add custom error: ${error}`);
@@ -889,6 +1058,7 @@ export class StressTestManager {
         "source": this.currentConfig.source
       });
       this.currentStats.longTasksGenerated += 1;
+      this.sampleCapabilityIfDue('long-task');
     } catch (error) {
       this.recordErrorMessage(`long task failed: ${error}`);
       DemoLogger.e(TAG, `Failed to add long task: ${error}`);
@@ -911,6 +1081,709 @@ export class StressTestManager {
     return !this.isScenarioTargetReached(this.currentStats.longTasksGenerated, this.currentConfig);
   }
 
+  private startCapabilitySampling(): void {
+    this.clearCapabilitySampleTimer();
+    this.capabilitySamples = [];
+    this.capabilityStartedAtMs = Date.now();
+    this.capabilityLastSampleAtMs = 0;
+    this.capabilityHeapLimit = this.captureVmHeapLimitSnapshot();
+    this.capabilityTemperatureProbe = this.findTemperatureProbe();
+    const heapStart = this.captureVmHeapSnapshot(this.capabilityHeapLimit.limitBytes);
+    this.capabilityHeapStartBytes = heapStart.usedBytes;
+    this.captureCapabilitySample('start');
+    this.capabilitySampleTimerId = setInterval((): void => {
+      if (!this.isRunning) {
+        return;
+      }
+      this.captureCapabilitySample('timer');
+    }, CAPABILITY_SAMPLE_INTERVAL_MS);
+  }
+
+  private stopCapabilitySampling(): StressCapabilityReport | null {
+    if (this.capabilityStartedAtMs <= 0) {
+      return null;
+    }
+    this.clearCapabilitySampleTimer();
+    this.captureCapabilitySample('stop');
+    const report = this.buildCapabilityReport();
+    this.logCapabilityReport(report);
+    this.capabilityStartedAtMs = 0;
+    return report;
+  }
+
+  private clearCapabilitySampleTimer(): void {
+    if (this.capabilitySampleTimerId !== null) {
+      clearInterval(this.capabilitySampleTimerId);
+      this.capabilitySampleTimerId = null;
+    }
+  }
+
+  private sampleCapabilityIfDue(label: string): void {
+    if (!this.isRunning || this.capabilityStartedAtMs <= 0) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.capabilityLastSampleAtMs >= CAPABILITY_SAMPLE_INTERVAL_MS) {
+      this.captureCapabilitySample(label);
+    }
+  }
+
+  private captureCapabilitySample(label: string): StressCapabilitySample {
+    const now = Date.now();
+    const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+    let schedulerQueue = 0;
+    let runningTotal = 0;
+    let completedTotal = 0;
+    let failedTotal = 0;
+
+    CAPABILITY_LANE_TYPES.forEach((type: SDKTaskType) => {
+      const lane = schedulerStatus.lanes[type];
+      if (lane !== undefined) {
+        schedulerQueue += lane.pending;
+        runningTotal += lane.running;
+        completedTotal += lane.completedTasks;
+        failedTotal += lane.failedTasks;
+      }
+    });
+
+    const logStatus = TrackLogManager.getInstance().getQueueStatus();
+    const logQueue = logStatus.queueSize + logStatus.bufferSize;
+    const heap = this.captureVmHeapSnapshot(this.capabilityHeapLimit.limitBytes);
+    const temperature = this.captureTemperatureSnapshot();
+    const sample: StressCapabilitySample = {
+      label,
+      elapsedMs: Math.max(0, now - this.capabilityStartedAtMs),
+      schedulerQueue,
+      logQueue,
+      queueTotal: schedulerQueue + logQueue,
+      runningTotal,
+      completedTotal,
+      failedTotal,
+      heapUsedBytes: heap.usedBytes,
+      temperatureAvailable: temperature.available,
+      temperatureC: temperature.celsius
+    };
+
+    this.capabilitySamples.push(sample);
+    this.capabilityLastSampleAtMs = now;
+    return sample;
+  }
+
+  private buildCapabilityReport(): StressCapabilityReport {
+    const samples = this.capabilitySamples.length > 0 ? this.capabilitySamples : [this.captureCapabilitySample('final')];
+    const peakQueueSample = this.getPeakQueueSample(samples);
+    const heapEnd = this.captureVmHeapSnapshot(this.capabilityHeapLimit.limitBytes);
+    const heapPeakBytes = this.getPeakHeapBytes(samples, this.capabilityHeapStartBytes, heapEnd.usedBytes);
+    const peakHeapDeltaBytes = this.capabilityHeapStartBytes > 0 ? Math.max(0, heapPeakBytes - this.capabilityHeapStartBytes) : 0;
+    const temperatureEnd = this.captureTemperatureSnapshot();
+    const temperatureAvailable = this.hasAvailableTemperature(samples) || temperatureEnd.available;
+    const temperatureStartC = this.getStartTemperatureC(samples, temperatureEnd);
+    const temperaturePeakC = this.getPeakTemperatureC(samples, temperatureEnd);
+    const temperatureEndC = this.getEndTemperatureC(samples, temperatureEnd);
+    const temperatureDeltaC = temperatureAvailable &&
+      temperatureStartC !== CAPABILITY_TEMPERATURE_UNAVAILABLE_C &&
+      temperatureEndC !== CAPABILITY_TEMPERATURE_UNAVAILABLE_C ?
+      this.roundMetric(temperatureEndC - temperatureStartC, 2) : CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+    const avgQueuedTaskBytes = peakQueueSample.queueTotal > 0 && peakHeapDeltaBytes > 0 ?
+      peakHeapDeltaBytes / peakQueueSample.queueTotal : 0;
+    const safeHeapBytes = Math.max(
+      0,
+      this.capabilityHeapLimit.limitBytes * CAPABILITY_VM_HEAP_SAFE_WATERMARK -
+        CAPABILITY_RESERVED_HEAP_MB * BYTES_PER_MB
+    );
+    const safeQueueEstimate = avgQueuedTaskBytes > 0 && this.capabilityHeapStartBytes > 0 ?
+      Math.floor(Math.max(0, safeHeapBytes - this.capabilityHeapStartBytes) / avgQueuedTaskBytes) : 0;
+    const elapsedMs = Math.max(1, Date.now() - this.capabilityStartedAtMs);
+    const inputMixedTasks = this.countInputMixedTasks(this.currentStats);
+    const laneMetrics = this.buildCapabilityLaneMetrics();
+    const businessMetrics = this.buildCapabilityBusinessMetrics();
+    const slowLane = this.getSlowestLane(laneMetrics);
+    const slowBusiness = this.getSlowestBusinessEvent(businessMetrics);
+    const completionTotal = this.sumCompletedTasks(laneMetrics);
+    const productionQps = this.roundMetric(inputMixedTasks * 1000 / elapsedMs, 2);
+    const completionQps = this.roundMetric(completionTotal * 1000 / elapsedMs, 2);
+    const observedBacklogGrowthPerSecond = peakQueueSample.elapsedMs > 0 ?
+      this.roundMetric(peakQueueSample.queueTotal * 1000 / peakQueueSample.elapsedMs, 2) :
+      this.roundMetric(Math.max(0, productionQps - completionQps), 2);
+    const secondsToHighRisk = observedBacklogGrowthPerSecond > 0 && safeQueueEstimate > peakQueueSample.queueTotal ?
+      this.roundMetric((safeQueueEstimate - peakQueueSample.queueTotal) / observedBacklogGrowthPerSecond, 2) : 0;
+    const logStatus = TrackLogManager.getInstance().getQueueStatus();
+    const logDropRate = logStatus.submittedCount > 0 ? this.roundMetric(logStatus.droppedCount / logStatus.submittedCount, 4) : 0;
+
+    return {
+      caseName: CAPABILITY_CASE_NAME,
+      inputMixedTasks,
+      enabledFeatureCount: this.countEnabledFeatures(this.currentStats),
+      sampleCount: samples.length,
+      peakQueue: peakQueueSample.queueTotal,
+      peakSchedulerQueue: peakQueueSample.schedulerQueue,
+      peakLogQueue: peakQueueSample.logQueue,
+      peakQueueElapsedMs: peakQueueSample.elapsedMs,
+      heapStartMb: this.bytesToMb(this.capabilityHeapStartBytes),
+      heapPeakMb: this.bytesToMb(heapPeakBytes),
+      heapEndMb: this.bytesToMb(heapEnd.usedBytes),
+      heapDeltaMb: this.bytesToMb(heapEnd.usedBytes > 0 && this.capabilityHeapStartBytes > 0 ?
+        heapEnd.usedBytes - this.capabilityHeapStartBytes : 0),
+      peakHeapDeltaMb: this.bytesToMb(peakHeapDeltaBytes),
+      avgQueuedTaskKb: this.bytesToKb(avgQueuedTaskBytes),
+      vmHeapLimitMb: this.bytesToMb(this.capabilityHeapLimit.limitBytes),
+      vmHeapLimitSource: this.capabilityHeapLimit.source,
+      safeWatermark: CAPABILITY_VM_HEAP_SAFE_WATERMARK,
+      reservedHeapMb: CAPABILITY_RESERVED_HEAP_MB,
+      safeQueueEstimate,
+      productionQps,
+      completionQps,
+      backlogGrowthPerSecond: observedBacklogGrowthPerSecond,
+      secondsToHighRisk,
+      slowLane: slowLane.laneName,
+      slowLaneAvgWaitMs: slowLane.avgWaitMs,
+      slowLaneAvgCostMs: slowLane.avgCostMs,
+      slowLaneBottleneck: slowLane.bottleneck,
+      slowBusinessEvent: slowBusiness.eventType,
+      slowBusinessTaskGroup: slowBusiness.taskGroup,
+      slowBusinessLane: slowBusiness.laneName,
+      slowBusinessAvgWaitMs: slowBusiness.avgWaitMs,
+      slowBusinessAvgCostMs: slowBusiness.avgCostMs,
+      logSubmitted: logStatus.submittedCount,
+      logAccepted: logStatus.acceptedCount,
+      logDropped: logStatus.droppedCount,
+      logDropRate,
+      logDropCause: this.classifyLogDropCause(logStatus.droppedCount, peakQueueSample.logQueue, peakQueueSample.schedulerQueue),
+      temperatureAvailable,
+      temperatureKind: this.getTemperatureKind(),
+      temperatureSource: this.getTemperatureSource(),
+      temperatureStartC,
+      temperaturePeakC,
+      temperatureEndC,
+      temperatureDeltaC,
+      lanes: laneMetrics,
+      businessEvents: businessMetrics
+    };
+  }
+
+  private captureVmHeapSnapshot(limitBytes: number): VmHeapSnapshot {
+    try {
+      const memoryInfo = hidebug.getAppVMMemoryInfo();
+      const usedBytes = this.kbToBytes(memoryInfo.totalHeap);
+      return {
+        usedBytes,
+        limitBytes,
+        available: usedBytes > 0
+      };
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to capture VM heap info: ${error}`);
+      return {
+        usedBytes: 0,
+        limitBytes,
+        available: false
+      };
+    }
+  }
+
+  private captureVmHeapLimitSnapshot(): VmHeapLimitSnapshot {
+    try {
+      const memoryLimit = hidebug.getAppMemoryLimit();
+      const vmHeapLimitBytes = this.kbToBytes(memoryLimit.vmHeapLimit);
+      if (vmHeapLimitBytes > 0) {
+        return {
+          limitBytes: vmHeapLimitBytes,
+          source: 'hidebug.vmHeapLimit'
+        };
+      }
+      const vmTotalHeapSizeBytes = this.kbToBytes(memoryLimit.vmTotalHeapSize);
+      if (vmTotalHeapSizeBytes > 0) {
+        return {
+          limitBytes: vmTotalHeapSizeBytes,
+          source: 'hidebug.vmTotalHeapSize'
+        };
+      }
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to capture VM heap limit: ${error}`);
+    }
+
+    return {
+      limitBytes: CAPABILITY_VM_HEAP_FALLBACK_LIMIT_MB * BYTES_PER_MB,
+      source: 'fallback'
+    };
+  }
+
+  private findTemperatureProbe(): TemperatureProbe | null {
+    const preferredCpuProbe = this.findThermalZoneProbe(true);
+    if (preferredCpuProbe !== null) {
+      return preferredCpuProbe;
+    }
+
+    const genericThermalProbe = this.findThermalZoneProbe(false);
+    if (genericThermalProbe !== null) {
+      return genericThermalProbe;
+    }
+
+    return this.findBatteryTemperatureProbe();
+  }
+
+  private findThermalZoneProbe(cpuOnly: boolean): TemperatureProbe | null {
+    for (let index = 0; index < CAPABILITY_TEMPERATURE_ZONE_COUNT; index++) {
+      const basePath = `/sys/class/thermal/thermal_zone${index}`;
+      const tempPath = `${basePath}/temp`;
+      const rawType = this.readSystemTextFile(`${basePath}/type`, 64);
+      const zoneType = rawType.length > 0 ? rawType : `thermal_zone${index}`;
+      const isCpuLike = this.isCpuTemperatureType(zoneType);
+      if (cpuOnly && !isCpuLike) {
+        continue;
+      }
+      const celsius = this.readTemperatureCelsius(tempPath);
+      if (celsius === CAPABILITY_TEMPERATURE_UNAVAILABLE_C) {
+        continue;
+      }
+      return {
+        tempPath,
+        kind: isCpuLike ? 'cpu' : 'thermal',
+        source: `${zoneType}:${tempPath}`
+      };
+    }
+    return null;
+  }
+
+  private findBatteryTemperatureProbe(): TemperatureProbe | null {
+    for (let index = 0; index < CAPABILITY_BATTERY_TEMPERATURE_PATHS.length; index++) {
+      const tempPath = CAPABILITY_BATTERY_TEMPERATURE_PATHS[index];
+      const celsius = this.readTemperatureCelsius(tempPath);
+      if (celsius !== CAPABILITY_TEMPERATURE_UNAVAILABLE_C) {
+        return {
+          tempPath,
+          kind: 'battery',
+          source: `battery:${tempPath}`
+        };
+      }
+    }
+    return null;
+  }
+
+  private captureTemperatureSnapshot(): TemperatureSnapshot {
+    if (this.capabilityTemperatureProbe === null) {
+      return this.createUnavailableTemperatureSnapshot();
+    }
+
+    const celsius = this.readTemperatureCelsius(this.capabilityTemperatureProbe.tempPath);
+    if (celsius === CAPABILITY_TEMPERATURE_UNAVAILABLE_C) {
+      return this.createUnavailableTemperatureSnapshot();
+    }
+
+    return {
+      available: true,
+      celsius,
+      kind: this.capabilityTemperatureProbe.kind,
+      source: this.capabilityTemperatureProbe.source
+    };
+  }
+
+  private createUnavailableTemperatureSnapshot(): TemperatureSnapshot {
+    return {
+      available: false,
+      celsius: CAPABILITY_TEMPERATURE_UNAVAILABLE_C,
+      kind: 'unavailable',
+      source: 'unavailable'
+    };
+  }
+
+  private readTemperatureCelsius(path: string): number {
+    const rawText = this.readSystemTextFile(path, 32);
+    if (rawText.length === 0) {
+      return CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+    }
+
+    const rawValue = parseFloat(rawText);
+    if (isNaN(rawValue)) {
+      return CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+    }
+
+    const celsius = this.normalizeTemperatureCelsius(rawValue);
+    if (!this.isValidTemperatureCelsius(celsius)) {
+      return CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+    }
+    return this.roundMetric(celsius, 2);
+  }
+
+  private readSystemTextFile(path: string, maxBytes: number): string {
+    try {
+      const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+      try {
+        const buffer = new ArrayBuffer(maxBytes);
+        const readLen: number = fileIo.readSync(file.fd, buffer);
+        fileIo.closeSync(file);
+        if (readLen <= 0) {
+          return '';
+        }
+        const bufferSlice = buffer.slice(0, readLen);
+        const uint8Array = new Uint8Array(bufferSlice);
+        const textDecoder = util.TextDecoder.create('utf-8');
+        return textDecoder.decodeWithStream(uint8Array, { stream: false }).trim();
+      } catch (readError) {
+        fileIo.closeSync(file);
+        return '';
+      }
+    } catch (openError) {
+      return '';
+    }
+  }
+
+  private normalizeTemperatureCelsius(rawValue: number): number {
+    const absValue = Math.abs(rawValue);
+    if (absValue > 1000) {
+      return rawValue / 1000;
+    }
+    if (absValue > 150) {
+      return rawValue / 10;
+    }
+    return rawValue;
+  }
+
+  private isValidTemperatureCelsius(value: number): boolean {
+    return value >= -30 && value <= 150;
+  }
+
+  private isCpuTemperatureType(typeName: string): boolean {
+    const normalizedType = typeName.toLowerCase();
+    for (let index = 0; index < CAPABILITY_CPU_TEMPERATURE_TYPE_KEYWORDS.length; index++) {
+      if (normalizedType.indexOf(CAPABILITY_CPU_TEMPERATURE_TYPE_KEYWORDS[index]) >= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private hasAvailableTemperature(samples: StressCapabilitySample[]): boolean {
+    for (let index = 0; index < samples.length; index++) {
+      if (samples[index].temperatureAvailable) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private getStartTemperatureC(samples: StressCapabilitySample[], fallback: TemperatureSnapshot): number {
+    for (let index = 0; index < samples.length; index++) {
+      const sample = samples[index];
+      if (sample.temperatureAvailable) {
+        return sample.temperatureC;
+      }
+    }
+    return fallback.available ? fallback.celsius : CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+  }
+
+  private getEndTemperatureC(samples: StressCapabilitySample[], fallback: TemperatureSnapshot): number {
+    if (fallback.available) {
+      return fallback.celsius;
+    }
+    for (let index = samples.length - 1; index >= 0; index--) {
+      const sample = samples[index];
+      if (sample.temperatureAvailable) {
+        return sample.temperatureC;
+      }
+    }
+    return CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+  }
+
+  private getPeakTemperatureC(samples: StressCapabilitySample[], fallback: TemperatureSnapshot): number {
+    let peak = fallback.available ? fallback.celsius : CAPABILITY_TEMPERATURE_UNAVAILABLE_C;
+    samples.forEach((sample: StressCapabilitySample) => {
+      if (sample.temperatureAvailable && sample.temperatureC > peak) {
+        peak = sample.temperatureC;
+      }
+    });
+    return peak;
+  }
+
+  private getTemperatureKind(): string {
+    return this.capabilityTemperatureProbe !== null ? this.capabilityTemperatureProbe.kind : 'unavailable';
+  }
+
+  private getTemperatureSource(): string {
+    return this.capabilityTemperatureProbe !== null ? this.capabilityTemperatureProbe.source : 'unavailable';
+  }
+
+  private kbToBytes(value: bigint | number | undefined): number {
+    if (value === undefined) {
+      return 0;
+    }
+    return Number(value) * BYTES_PER_KB;
+  }
+
+  private getPeakQueueSample(samples: StressCapabilitySample[]): StressCapabilitySample {
+    let peak = samples[0];
+    samples.forEach((sample: StressCapabilitySample) => {
+      if (sample.queueTotal > peak.queueTotal) {
+        peak = sample;
+      }
+    });
+    return peak;
+  }
+
+  private getPeakHeapBytes(samples: StressCapabilitySample[], startHeapBytes: number, endHeapBytes: number): number {
+    let peakHeapBytes = Math.max(startHeapBytes, endHeapBytes);
+    samples.forEach((sample: StressCapabilitySample) => {
+      peakHeapBytes = Math.max(peakHeapBytes, sample.heapUsedBytes);
+    });
+    return peakHeapBytes;
+  }
+
+  private buildCapabilityLaneMetrics(): StressCapabilityLaneMetric[] {
+    const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
+    const metrics: StressCapabilityLaneMetric[] = [];
+    CAPABILITY_LANE_TYPES.forEach((type: SDKTaskType) => {
+      const lane = schedulerStatus.lanes[type];
+      if (lane !== undefined) {
+        metrics.push(this.toLaneMetric(type, lane));
+      }
+    });
+    return metrics;
+  }
+
+  private toLaneMetric(type: SDKTaskType, lane: SDKLaneStatus): StressCapabilityLaneMetric {
+    const avgWaitMs = this.roundMetric(lane.averageWaitTime, 2);
+    const avgCostMs = this.roundMetric(lane.averageCostTime, 2);
+    return {
+      laneName: `${type}`,
+      submitted: lane.submittedTasks,
+      completed: lane.completedTasks,
+      failed: lane.failedTasks,
+      pending: lane.pending,
+      running: lane.running,
+      queuedTasks: lane.queuedTasks,
+      avgWaitMs,
+      avgCostMs,
+      oldestWaitMs: lane.oldestWait,
+      bottleneck: this.classifyBottleneck(avgWaitMs, avgCostMs)
+    };
+  }
+
+  private buildCapabilityBusinessMetrics(): StressCapabilityBusinessMetric[] {
+    const taskGroups = SDKTaskScheduler.getInstance().getStatus().taskGroups;
+    const metrics: StressCapabilityBusinessMetric[] = [];
+    Object.keys(taskGroups).sort().forEach((key: string) => {
+      const group = taskGroups[key];
+      const eventType = this.classifyBusinessEventType(group.groupName);
+      if (eventType.length === 0) {
+        return;
+      }
+      metrics.push(this.toBusinessMetric(eventType, group));
+    });
+    metrics.sort((left: StressCapabilityBusinessMetric, right: StressCapabilityBusinessMetric) => {
+      if (right.avgWaitMs !== left.avgWaitMs) {
+        return right.avgWaitMs - left.avgWaitMs;
+      }
+      return right.avgCostMs - left.avgCostMs;
+    });
+    return metrics;
+  }
+
+  private toBusinessMetric(eventType: string, group: SDKTaskGroupStatus): StressCapabilityBusinessMetric {
+    const avgWaitMs = this.roundMetric(group.averageWaitTime, 2);
+    const avgCostMs = this.roundMetric(group.averageCostTime, 2);
+    return {
+      eventType,
+      taskGroup: group.groupName,
+      laneName: group.laneType,
+      submitted: group.submittedTasks,
+      completed: group.completedTasks,
+      failed: group.failedTasks,
+      queuedTasks: group.queuedTasks,
+      avgWaitMs,
+      avgCostMs,
+      maxWaitMs: group.maxWaitTime,
+      maxCostMs: group.maxCostTime,
+      bottleneck: this.classifyBottleneck(avgWaitMs, avgCostMs)
+    };
+  }
+
+  private classifyBusinessEventType(groupName: string): string {
+    if (groupName.indexOf('data.prepare:view') === 0 || groupName === 'rum.initView') {
+      return 'view';
+    }
+    if (groupName.indexOf('data.prepare:action') === 0 ||
+      groupName === 'rum.addAction' ||
+      groupName === 'rum.startAction' ||
+      groupName === 'rum.closeAction' ||
+      groupName === 'rum.increaseViewAction') {
+      return 'action';
+    }
+    if (groupName.indexOf('data.prepare:resource') === 0 ||
+      groupName === 'rum.resourceCleanup' ||
+      groupName === 'rum.increaseResource' ||
+      groupName === 'rum.increasePendingResource' ||
+      groupName === 'rum.decreasePendingResource') {
+      return 'resource';
+    }
+    if (groupName.indexOf('data.prepare:error') === 0 ||
+      groupName === 'rum.addError' ||
+      groupName === 'rum.increaseError') {
+      return 'error';
+    }
+    if (groupName.indexOf('data.prepare:long_task') === 0 ||
+      groupName === 'rum.increaseLongTaskFromTags' ||
+      groupName === 'rum.increaseViewLongTask' ||
+      groupName === 'rum.increaseActionLongTask') {
+      return 'longtask';
+    }
+    if (groupName.indexOf('data.prepare:df_rum_harmonyos_log') === 0 || groupName === 'log.process' ||
+      groupName === 'log.forceFlush') {
+      return 'log';
+    }
+    return '';
+  }
+
+  private getSlowestLane(metrics: StressCapabilityLaneMetric[]): StressCapabilityLaneMetric {
+    if (metrics.length === 0) {
+      return this.createEmptyLaneMetric();
+    }
+    let slowest = metrics[0];
+    metrics.forEach((metric: StressCapabilityLaneMetric) => {
+      if (metric.avgWaitMs > slowest.avgWaitMs) {
+        slowest = metric;
+      }
+    });
+    return slowest;
+  }
+
+  private createEmptyLaneMetric(): StressCapabilityLaneMetric {
+    return {
+      laneName: 'none',
+      submitted: 0,
+      completed: 0,
+      failed: 0,
+      pending: 0,
+      running: 0,
+      queuedTasks: 0,
+      avgWaitMs: 0,
+      avgCostMs: 0,
+      oldestWaitMs: 0,
+      bottleneck: 'none'
+    };
+  }
+
+  private getSlowestBusinessEvent(metrics: StressCapabilityBusinessMetric[]): StressCapabilityBusinessMetric {
+    if (metrics.length === 0) {
+      return this.createEmptyBusinessMetric();
+    }
+    return metrics[0];
+  }
+
+  private createEmptyBusinessMetric(): StressCapabilityBusinessMetric {
+    return {
+      eventType: 'none',
+      taskGroup: 'none',
+      laneName: 'none',
+      submitted: 0,
+      completed: 0,
+      failed: 0,
+      queuedTasks: 0,
+      avgWaitMs: 0,
+      avgCostMs: 0,
+      maxWaitMs: 0,
+      maxCostMs: 0,
+      bottleneck: 'none'
+    };
+  }
+
+  private countInputMixedTasks(stats: StressTestStats): number {
+    let count = 0;
+    if (stats.enableLogs) {
+      count += stats.logsGenerated;
+    }
+    if (stats.enableActions) {
+      count += stats.actionsGenerated;
+    }
+    if (stats.enableResources) {
+      count += stats.resourcesGenerated;
+    }
+    if (stats.enableNavigation) {
+      count += stats.navigationSwitches;
+    }
+    if (stats.enableErrors) {
+      count += stats.errorsGenerated;
+    }
+    if (stats.enableLongTasks) {
+      count += stats.longTasksGenerated;
+    }
+    return count;
+  }
+
+  private countEnabledFeatures(stats: StressTestStats): number {
+    let count = 0;
+    if (stats.enableLogs) {
+      count++;
+    }
+    if (stats.enableActions) {
+      count++;
+    }
+    if (stats.enableResources) {
+      count++;
+    }
+    if (stats.enableNavigation) {
+      count++;
+    }
+    if (stats.enableErrors) {
+      count++;
+    }
+    if (stats.enableLongTasks) {
+      count++;
+    }
+    return count;
+  }
+
+  private sumCompletedTasks(metrics: StressCapabilityLaneMetric[]): number {
+    let completed = 0;
+    metrics.forEach((metric: StressCapabilityLaneMetric) => {
+      completed += metric.completed;
+    });
+    return completed;
+  }
+
+  private classifyBottleneck(avgWaitMs: number, avgCostMs: number): string {
+    if (avgWaitMs <= 0 && avgCostMs <= 0) {
+      return 'none';
+    }
+    return avgWaitMs >= avgCostMs ? 'queue-wait' : 'processing-cost';
+  }
+
+  private classifyLogDropCause(dropped: number, logQueue: number, schedulerQueue: number): string {
+    if (dropped > 0) {
+      return 'entrance-pressure';
+    }
+    if (logQueue > 0 || schedulerQueue > 0) {
+      return 'consumer-backlog';
+    }
+    return 'none';
+  }
+
+  private bytesToMb(bytes: number): number {
+    return this.roundMetric(bytes / BYTES_PER_MB, 2);
+  }
+
+  private bytesToKb(bytes: number): number {
+    return this.roundMetric(bytes / BYTES_PER_KB, 2);
+  }
+
+  private roundMetric(value: number, digits: number = 2): number {
+    const factor = Math.pow(10, digits);
+    return Math.round(value * factor) / factor;
+  }
+
+  private logCapabilityReport(report: StressCapabilityReport): void {
+    DemoLogger.i(
+      TAG,
+      `RealAppStressCapability case=${report.caseName} inputMixedTasks=${report.inputMixedTasks} ` +
+        `peakQueue=${report.peakQueue} peakSchedulerQueue=${report.peakSchedulerQueue} peakLogQueue=${report.peakLogQueue} ` +
+        `heapStartMb=${report.heapStartMb} heapPeakMb=${report.heapPeakMb} heapEndMb=${report.heapEndMb} ` +
+        `avgQueuedTaskKb=${report.avgQueuedTaskKb} vmHeapLimitMb=${report.vmHeapLimitMb} safeQueueEstimate=${report.safeQueueEstimate} ` +
+        `secondsToHighRisk=${report.secondsToHighRisk} slowLane=${report.slowLane} slowBusinessEvent=${report.slowBusinessEvent} ` +
+        `logDropped=${report.logDropped} logDropCause=${report.logDropCause} ` +
+        `temperatureKind=${report.temperatureKind} temperatureSource=${report.temperatureSource} ` +
+        `temperatureStartC=${report.temperatureStartC} temperaturePeakC=${report.temperaturePeakC} ` +
+        `temperatureEndC=${report.temperatureEndC} temperatureDeltaC=${report.temperatureDeltaC}`
+    );
+  }
+
   public stop(stopReason: StressStopReason = 'manual'): StressTestReport | null {
     if (!this.isRunning) {
       DemoLogger.w(TAG, "Stress test is not running");
@@ -931,6 +1804,7 @@ export class StressTestManager {
     if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
       FTLogger.flush();
     }
+    const capabilityReport = this.stopCapabilitySampling();
 
     this.currentStats.isRunning = false;
     this.currentStats.endedAtMs = Date.now();
@@ -943,7 +1817,8 @@ export class StressTestManager {
       endedAtMs: this.currentStats.endedAtMs,
       elapsedSeconds,
       durationSeconds: this.durationSeconds,
-      stats: this.copyStats(this.currentStats)
+      stats: this.copyStats(this.currentStats),
+      capabilityReport
     };
 
     DemoLogger.i(TAG, `Stress test stopped. ${this.formatReport(this.lastReport)}`);
@@ -1011,6 +1886,7 @@ export class StressTestManager {
       return;
     }
     this.currentStats.navigationSwitches += 1;
+    this.sampleCapabilityIfDue('navigation');
     this.finishTotalCountStressIfComplete();
   }
 
@@ -1042,7 +1918,7 @@ export class StressTestManager {
     const stats = report.stats;
     const resourceTotal = stats.resourcesSucceeded + stats.resourcesFailed;
     const successRate = resourceTotal > 0 ? Math.round((stats.resourcesSucceeded * 10000) / resourceTotal) / 100 : 0;
-    return [
+    const lines: string[] = [
       `Reason: ${report.stopReason}`,
       `Mode: ${stats.runMode}${stats.runMode === 'total' ? `, Target: ${stats.totalTargetCount}` : ''}`,
       `Elapsed: ${report.elapsedSeconds}s / ${report.durationSeconds > 0 ? `${report.durationSeconds}s` : 'indefinite'}`,
@@ -1053,7 +1929,97 @@ export class StressTestManager {
       `Navigation Switches: ${stats.navigationSwitches}, Interval: ${stats.navigationIntervalMs}ms`,
       `Errors: ${stats.errorsGenerated}, LongTasks: ${stats.longTasksGenerated}`,
       stats.lastErrorMessage.length > 0 ? `Last Error: ${stats.lastErrorMessage}` : "Last Error: none"
-    ].join('\n');
+    ];
+
+    if (report.capabilityReport !== null) {
+      lines.push('');
+      this.appendCapabilityReport(lines, report.capabilityReport);
+    }
+    return lines.join('\n');
+  }
+
+  private appendCapabilityReport(lines: string[], report: StressCapabilityReport): void {
+    lines.push(`Capability Case: ${report.caseName}`);
+    lines.push(
+      `Input: ${report.inputMixedTasks} mixed tasks, enabled features=${report.enabledFeatureCount}, samples=${report.sampleCount}`
+    );
+    lines.push(
+      `Queue: peak=${report.peakQueue} (scheduler=${report.peakSchedulerQueue}, logEntry=${report.peakLogQueue}) ` +
+        `at ${this.roundMetric(report.peakQueueElapsedMs / 1000, 2)}s`
+    );
+    lines.push(
+      `JS/VM Heap: ${report.heapStartMb}MB -> ${report.heapPeakMb}MB -> ${report.heapEndMb}MB, ` +
+        `peakDelta=${report.peakHeapDeltaMb}MB, avgQueuedTask=${report.avgQueuedTaskKb}KB`
+    );
+    lines.push(
+      `Temperature: kind=${report.temperatureKind}, source=${report.temperatureSource}, ` +
+        `${this.formatTemperatureC(report.temperatureStartC)} -> ${this.formatTemperatureC(report.temperaturePeakC)} -> ` +
+        `${this.formatTemperatureC(report.temperatureEndC)}, delta=${this.formatTemperatureDeltaC(report)}`
+    );
+    lines.push(
+      `Risk: vmLimit=${report.vmHeapLimitMb}MB(${report.vmHeapLimitSource}), safe=${this.roundMetric(report.safeWatermark * 100, 0)}%, ` +
+        `reserved=${report.reservedHeapMb}MB, safeQueue~${report.safeQueueEstimate}, highRiskIn~${report.secondsToHighRisk}s`
+    );
+    lines.push(
+      `Throughput: production=${report.productionQps}/s, completed=${report.completionQps}/s, backlogGrowth=${report.backlogGrowthPerSecond}/s`
+    );
+    lines.push(
+      `Slow Lane: ${report.slowLane}, wait=${report.slowLaneAvgWaitMs}ms, cost=${report.slowLaneAvgCostMs}ms, bottleneck=${report.slowLaneBottleneck}`
+    );
+    lines.push(
+      `Slow Business: ${report.slowBusinessEvent} (${report.slowBusinessTaskGroup}/${report.slowBusinessLane}), ` +
+        `wait=${report.slowBusinessAvgWaitMs}ms, cost=${report.slowBusinessAvgCostMs}ms`
+    );
+    lines.push(
+      `Log Drop: submitted=${report.logSubmitted}, accepted=${report.logAccepted}, dropped=${report.logDropped}, ` +
+        `dropRate=${report.logDropRate}, cause=${report.logDropCause}`
+    );
+    lines.push(`Lane Detail: ${this.formatLaneMetricSummary(report.lanes)}`);
+    lines.push(`Business Detail: ${this.formatBusinessMetricSummary(report.businessEvents)}`);
+  }
+
+  private formatLaneMetricSummary(metrics: StressCapabilityLaneMetric[]): string {
+    if (metrics.length === 0) {
+      return 'none';
+    }
+    const parts: string[] = [];
+    metrics.forEach((metric: StressCapabilityLaneMetric) => {
+      parts.push(
+        `${metric.laneName}(sub=${metric.submitted},done=${metric.completed},pending=${metric.pending},` +
+          `wait=${metric.avgWaitMs}ms,cost=${metric.avgCostMs}ms,bottleneck=${metric.bottleneck})`
+      );
+    });
+    return parts.join(' | ');
+  }
+
+  private formatBusinessMetricSummary(metrics: StressCapabilityBusinessMetric[]): string {
+    if (metrics.length === 0) {
+      return 'none';
+    }
+    const parts: string[] = [];
+    const count = Math.min(5, metrics.length);
+    for (let index = 0; index < count; index++) {
+      const metric = metrics[index];
+      parts.push(
+        `${metric.eventType}/${metric.taskGroup}/${metric.laneName}(sub=${metric.submitted},done=${metric.completed},` +
+          `wait=${metric.avgWaitMs}ms,cost=${metric.avgCostMs}ms,bottleneck=${metric.bottleneck})`
+      );
+    }
+    return parts.join(' | ');
+  }
+
+  private formatTemperatureC(value: number): string {
+    if (value === CAPABILITY_TEMPERATURE_UNAVAILABLE_C) {
+      return 'unavailable';
+    }
+    return `${value}C`;
+  }
+
+  private formatTemperatureDeltaC(report: StressCapabilityReport): string {
+    if (!report.temperatureAvailable || report.temperatureDeltaC === CAPABILITY_TEMPERATURE_UNAVAILABLE_C) {
+      return 'unavailable';
+    }
+    return `${report.temperatureDeltaC}C`;
   }
 
   private copyStats(stats: StressTestStats): StressTestStats {

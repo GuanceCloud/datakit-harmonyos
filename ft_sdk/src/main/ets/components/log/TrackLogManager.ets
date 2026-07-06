@@ -23,6 +23,10 @@ export interface QueueStatus {
   queueSize: number;
   bufferSize: number;
   isProcessing: boolean;
+  submittedCount: number;
+  acceptedCount: number;
+  droppedCount: number;
+  filteredCount: number;
 }
 
 /**
@@ -68,6 +72,10 @@ export class TrackLogManager {
   private scheduledIsSilence: boolean = true;
   private hasScheduledIsSilence: boolean = false;
   private bufferLocked: boolean = false;
+  private submittedCount: number = 0;
+  private acceptedCount: number = 0;
+  private droppedCount: number = 0;
+  private filteredCount: number = 0;
   
   // Log configuration
   private logConfig: FTLoggerConfig | null = null;
@@ -95,6 +103,10 @@ export class TrackLogManager {
     this.shutdown();
     this.logConfig = null;
     this.bufferLocked = false;
+    this.submittedCount = 0;
+    this.acceptedCount = 0;
+    this.droppedCount = 0;
+    this.filteredCount = 0;
   }
   
   /**
@@ -130,7 +142,9 @@ export class TrackLogManager {
    */
   public trackLog(logBean: LogBean, isSilence: boolean = false): void {
     // Removed verbose debug log to reduce log output
+    this.submittedCount++;
     if (!this.shouldProcessLog(logBean)) {
+      this.filteredCount++;
       return;
     }
     
@@ -145,10 +159,12 @@ export class TrackLogManager {
     if (this.inputQueue.length >= maxSize) {
       // Use default strategy: discard oldest log
       this.inputQueue.shift(); // Remove oldest log
+      this.droppedCount++;
       FTInnerLogger.w(TAG, 'Input queue full, discarding oldest log');
     }
     
     this.inputQueue.push(logBean);
+    this.acceptedCount++;
     // Removed verbose debug log to reduce log output
     // Trigger processing
     
@@ -170,17 +186,21 @@ export class TrackLogManager {
 
     let acceptedCount = 0;
     for (const logBean of logBeans) {
+      this.submittedCount++;
       if (!this.shouldProcessLog(logBean)) {
+        this.filteredCount++;
         continue;
       }
 
       if (this.inputQueue.length >= maxSize) {
         this.inputQueue.shift();
+        this.droppedCount++;
         FTInnerLogger.w(TAG, 'Input queue full, discarding oldest log');
       }
 
       this.inputQueue.push(logBean);
       acceptedCount++;
+      this.acceptedCount++;
     }
 
     if (acceptedCount > 0) {
@@ -198,7 +218,11 @@ export class TrackLogManager {
     return {
       queueSize: this.inputQueue.length + this.processingQueue.length,
       bufferSize: this.logBatchBuffer.length,
-      isProcessing: this.isProcessing
+      isProcessing: this.isProcessing,
+      submittedCount: this.submittedCount,
+      acceptedCount: this.acceptedCount,
+      droppedCount: this.droppedCount,
+      filteredCount: this.filteredCount
     };
   }
   

@@ -66,7 +66,10 @@ export interface SDKLaneStatus {
   submittedTasks: number;
   completedTasks: number;
   failedTasks: number;
+  queuedTasks: number;
   dispatchCount: number;
+  totalWaitTime: number;
+  totalCostTime: number;
   averageWaitTime: number;
   averageCostTime: number;
   averageDispatchTime: number;
@@ -84,6 +87,23 @@ export interface SDKTaskSchedulerStatus {
   activeSingleFlightTasks: number;
   rescheduledSingleFlightTasks: number;
   lanes: Record<string, SDKLaneStatus>;
+  taskGroups: Record<string, SDKTaskGroupStatus>;
+}
+
+export interface SDKTaskGroupStatus {
+  laneType: string;
+  groupName: string;
+  submittedTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  queuedTasks: number;
+  totalWaitTime: number;
+  totalCostTime: number;
+  averageWaitTime: number;
+  averageCostTime: number;
+  maxWaitTime: number;
+  maxCostTime: number;
+  lastTaskName: string;
 }
 
 interface ScheduledSDKTask extends SDKTask {
@@ -102,6 +122,7 @@ interface SDKLaneState {
   submittedTasks: number;
   completedTasks: number;
   failedTasks: number;
+  queuedTasks: number;
   dispatchCount: number;
   totalWaitTime: number;
   totalCostTime: number;
@@ -119,9 +140,24 @@ interface SDKTaskSelection {
   scanCount: number;
 }
 
+interface SDKTaskGroupState {
+  laneType: string;
+  groupName: string;
+  submittedTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  queuedTasks: number;
+  totalWaitTime: number;
+  totalCostTime: number;
+  maxWaitTime: number;
+  maxCostTime: number;
+  lastTaskName: string;
+}
+
 export class SDKTaskScheduler {
   private static instance: SDKTaskScheduler | null = null;
   private lanes: Map<SDKTaskType, SDKLaneState> = new Map();
+  private taskGroups: Map<string, SDKTaskGroupState> = new Map();
   private activeSingleFlightKeys: Set<string> = new Set();
   private rescheduledSingleFlightTasks: Map<string, ScheduledSDKTask> = new Map();
   private nextTaskId: number = 0;
@@ -201,12 +237,17 @@ export class SDKTaskScheduler {
     this.lanes.forEach((lane, type) => {
       lanes[type] = this.getLaneStatus(lane);
     });
+    const taskGroups: Record<string, SDKTaskGroupStatus> = {};
+    this.taskGroups.forEach((group, key) => {
+      taskGroups[key] = this.getTaskGroupStatus(group);
+    });
 
     return {
       isShutdown: this.isShutdown,
       activeSingleFlightTasks: this.activeSingleFlightKeys.size,
       rescheduledSingleFlightTasks: this.rescheduledSingleFlightTasks.size,
-      lanes
+      lanes,
+      taskGroups
     };
   }
 
@@ -233,6 +274,7 @@ export class SDKTaskScheduler {
     });
     this.rescheduledSingleFlightTasks.clear();
     this.activeSingleFlightKeys.clear();
+    this.taskGroups.clear();
   }
 
   private initializeDefaultLanes(): void {
@@ -263,6 +305,7 @@ export class SDKTaskScheduler {
       submittedTasks: 0,
       completedTasks: 0,
       failedTasks: 0,
+      queuedTasks: 0,
       dispatchCount: 0,
       totalWaitTime: 0,
       totalCostTime: 0,
@@ -284,7 +327,6 @@ export class SDKTaskScheduler {
     }
     return lane;
   }
-
 
   private getDefaultMaxConcurrency(type: SDKTaskType): number {
     switch (type) {
@@ -356,6 +398,7 @@ export class SDKTaskScheduler {
     const lane = this.getLane(task.type);
     this.enqueuePendingTask(lane, task);
     lane.submittedTasks++;
+    this.recordTaskGroupSubmitted(task);
     if (!task.silent) {
       this.traceSchedulerLaneIfNeeded(task, lane);
     }
@@ -497,6 +540,9 @@ export class SDKTaskScheduler {
     let previousEventName = 'none';
     let serialGapTime = 0;
     lane.totalWaitTime += waitTime;
+    if (waitTime > 0) {
+      lane.queuedTasks++;
+    }
 
     if (type === SDKTaskType.EVENT) {
       serialResult = lane.running <= 1 ? 'PASS' : 'FAIL';
@@ -525,6 +571,7 @@ export class SDKTaskScheduler {
     } finally {
       const costTime = Math.max(0, Date.now() - startTime);
       lane.totalCostTime += costTime;
+      this.recordTaskGroupFinished(task, waitTime, costTime, result === 'failed');
 
       lane.running = Math.max(0, lane.running - 1);
       if (task.serialKey) {
@@ -566,6 +613,91 @@ export class SDKTaskScheduler {
     }
   }
 
+  private recordTaskGroupSubmitted(task: ScheduledSDKTask): void {
+    const key = this.getTaskGroupKey(task);
+    const group = this.getOrCreateTaskGroup(key, task);
+    group.submittedTasks++;
+    group.lastTaskName = task.name;
+  }
+
+  private recordTaskGroupFinished(task: ScheduledSDKTask, waitTime: number, costTime: number, failed: boolean): void {
+    const key = this.getTaskGroupKey(task);
+    const group = this.getOrCreateTaskGroup(key, task);
+    if (failed) {
+      group.failedTasks++;
+    } else {
+      group.completedTasks++;
+    }
+    group.totalWaitTime += waitTime;
+    group.totalCostTime += costTime;
+    if (waitTime > 0) {
+      group.queuedTasks++;
+    }
+    group.maxWaitTime = Math.max(group.maxWaitTime, waitTime);
+    group.maxCostTime = Math.max(group.maxCostTime, costTime);
+    group.lastTaskName = task.name;
+  }
+
+  private getOrCreateTaskGroup(key: string, task: ScheduledSDKTask): SDKTaskGroupState {
+    let group = this.taskGroups.get(key);
+    if (!group) {
+      group = {
+        laneType: task.type,
+        groupName: this.getTaskGroupName(task.name),
+        submittedTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+        queuedTasks: 0,
+        totalWaitTime: 0,
+        totalCostTime: 0,
+        maxWaitTime: 0,
+        maxCostTime: 0,
+        lastTaskName: ''
+      };
+      this.taskGroups.set(key, group);
+    }
+    return group;
+  }
+
+  private getTaskGroupStatus(group: SDKTaskGroupState): SDKTaskGroupStatus {
+    const processedTasks = group.completedTasks + group.failedTasks;
+    return {
+      laneType: group.laneType,
+      groupName: group.groupName,
+      submittedTasks: group.submittedTasks,
+      completedTasks: group.completedTasks,
+      failedTasks: group.failedTasks,
+      queuedTasks: group.queuedTasks,
+      totalWaitTime: group.totalWaitTime,
+      totalCostTime: group.totalCostTime,
+      averageWaitTime: processedTasks > 0 ? group.totalWaitTime / processedTasks : 0,
+      averageCostTime: processedTasks > 0 ? group.totalCostTime / processedTasks : 0,
+      maxWaitTime: group.maxWaitTime,
+      maxCostTime: group.maxCostTime,
+      lastTaskName: group.lastTaskName
+    };
+  }
+
+  private getTaskGroupKey(task: ScheduledSDKTask): string {
+    return `${task.type}:${this.getTaskGroupName(task.name)}`;
+  }
+
+  private getTaskGroupName(taskName: string): string {
+    let groupName = taskName;
+    const sequenceIndex = groupName.indexOf('#');
+    if (sequenceIndex >= 0) {
+      groupName = groupName.substring(0, sequenceIndex);
+    }
+    if (groupName.indexOf('data.prepare:') === 0) {
+      return groupName;
+    }
+    const detailIndex = groupName.indexOf(':');
+    if (detailIndex > 0) {
+      groupName = groupName.substring(0, detailIndex);
+    }
+    return groupName;
+  }
+
   private getLaneStatus(lane: SDKLaneState): SDKLaneStatus {
     const processedTasks = lane.completedTasks + lane.failedTasks;
     const averageWaitTime = processedTasks > 0 ? lane.totalWaitTime / processedTasks : 0;
@@ -581,7 +713,10 @@ export class SDKTaskScheduler {
       submittedTasks: lane.submittedTasks,
       completedTasks: lane.completedTasks,
       failedTasks: lane.failedTasks,
+      queuedTasks: lane.queuedTasks,
       dispatchCount: lane.dispatchCount,
+      totalWaitTime: lane.totalWaitTime,
+      totalCostTime: lane.totalCostTime,
       averageWaitTime,
       averageCostTime,
       averageDispatchTime,

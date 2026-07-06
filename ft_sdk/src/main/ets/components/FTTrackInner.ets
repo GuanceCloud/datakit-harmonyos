@@ -498,7 +498,8 @@ class FTTrackInner {
     // Reduced logging - only log key information
 
     try {
-      this.submitDataProcessTask('data.prepare', async () => {
+      const taskName = `data.prepare:${measurement}`;
+      this.submitDataProcessTask(taskName, async () => {
         try {
           // Create sync data record
           const syncDataParams: SyncDataParams = {
@@ -521,7 +522,7 @@ class FTTrackInner {
           //   FTInnerLogger.d(TAG, `[FT-LOG-DEBUG] SyncData DataString: ${dataString}`);
           // }
 
-          const writeResult = await this.writePreparedSyncData('data.prepare', [recordData]);
+          const writeResult = await this.writePreparedSyncData(taskName, [recordData]);
           const result = writeResult !== null && writeResult.inserted > 0;
           if (!result && writeResult !== null && writeResult.dropped > 0) {
             FTInnerLogger.e(TAG,
