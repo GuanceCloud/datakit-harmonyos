@@ -96,7 +96,7 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
-    it('eventLaneShouldUsePriorityBucketFastPathForBacklog', 0, async () => {
+    it('eventLaneShouldUseFifoFastPathForBacklog', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
@@ -113,30 +113,30 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const low = scheduler.submitTaskAndWait({
+      const second = scheduler.submitTaskAndWait({
         type: SDKTaskType.EVENT,
-        name: 'low-event',
-        priority: SDKTaskPriority.LOW,
-        run: () => {
-          order.push('low');
-        }
-      });
-
-      const high = scheduler.submitTaskAndWait({
-        type: SDKTaskType.EVENT,
-        name: 'high-event',
+        name: 'second-event',
         priority: SDKTaskPriority.HIGH,
         run: () => {
-          order.push('high');
+          order.push('second');
         }
       });
 
-      const critical = scheduler.submitTaskAndWait({
+      const third = scheduler.submitTaskAndWait({
         type: SDKTaskType.EVENT,
-        name: 'critical-event',
-        priority: SDKTaskPriority.CRITICAL,
+        name: 'third-event',
+        priority: SDKTaskPriority.HIGH,
         run: () => {
-          order.push('critical');
+          order.push('third');
+        }
+      });
+
+      const fourth = scheduler.submitTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'fourth-event',
+        priority: SDKTaskPriority.HIGH,
+        run: () => {
+          order.push('fourth');
         }
       });
 
@@ -146,12 +146,12 @@ export default function sdkTaskSchedulerUnitTest() {
 
       releaseFirst();
       await first;
-      await critical;
-      await high;
-      await low;
+      await second;
+      await third;
+      await fourth;
 
       const finalStatus = scheduler.getStatus().lanes[SDKTaskType.EVENT];
-      expect(order.join(',')).assertEqual('first-start,first-end,critical,high,low');
+      expect(order.join(',')).assertEqual('first-start,first-end,second,third,fourth');
       expect(finalStatus.completedTasks).assertEqual(4);
       expect(finalStatus.maxScanCount <= 1).assertTrue();
     });

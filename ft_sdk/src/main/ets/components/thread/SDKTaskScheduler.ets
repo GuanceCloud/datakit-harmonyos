@@ -10,7 +10,7 @@ const EVENT_LANE_TRACE_PREFIX = "<FT-EVENT-LANE>";
 const SCHEDULER_TRACE_PREFIX = "<FT-SDK-SCHEDULER>";
 const SCHEDULER_LANE_TRACE_INTERVAL_MS = 5000;
 const EVENT_LANE_TRACE_INTERVAL_MS = 2000;
-const PRIORITY_BUCKET_COMPACT_THRESHOLD = 64;
+const QUEUE_COMPACT_THRESHOLD = 64;
 
 export enum SDKTaskType {
   EVENT = 'event',
@@ -92,15 +92,9 @@ interface ScheduledSDKTask extends SDKTask {
   reject?: (error: Error) => void;
 }
 
-interface SDKPriorityBucket {
-  priority: SDKTaskPriority;
-  tasks: ScheduledSDKTask[];
-  headIndex: number;
-}
-
 interface SDKLaneState {
   queue: ScheduledSDKTask[];
-  priorityBuckets: SDKPriorityBucket[] | null;
+  queueHeadIndex: number;
   pendingCount: number;
   running: number;
   maxConcurrency: number;
@@ -254,14 +248,14 @@ export class SDKTaskScheduler {
     ];
 
     for (const type of taskTypes) {
-      this.lanes.set(type, this.createLaneState(type, this.getDefaultMaxConcurrency(type)));
+      this.lanes.set(type, this.createLaneState(this.getDefaultMaxConcurrency(type)));
     }
   }
 
-  private createLaneState(type: SDKTaskType, maxConcurrency: number): SDKLaneState {
+  private createLaneState(maxConcurrency: number): SDKLaneState {
     return {
       queue: [],
-      priorityBuckets: type === SDKTaskType.EVENT ? this.createPriorityBuckets() : null,
+      queueHeadIndex: 0,
       pendingCount: 0,
       running: 0,
       maxConcurrency: Math.max(1, maxConcurrency),
@@ -285,21 +279,12 @@ export class SDKTaskScheduler {
   private getLane(type: SDKTaskType): SDKLaneState {
     let lane = this.lanes.get(type);
     if (!lane) {
-      lane = this.createLaneState(type, this.getDefaultMaxConcurrency(type));
+      lane = this.createLaneState(this.getDefaultMaxConcurrency(type));
       this.lanes.set(type, lane);
     }
     return lane;
   }
 
-  private createPriorityBuckets(): SDKPriorityBucket[] {
-    return [
-      { priority: SDKTaskPriority.CRITICAL, tasks: [], headIndex: 0 },
-      { priority: SDKTaskPriority.HIGH, tasks: [], headIndex: 0 },
-      { priority: SDKTaskPriority.NORMAL, tasks: [], headIndex: 0 },
-      { priority: SDKTaskPriority.LOW, tasks: [], headIndex: 0 },
-      { priority: SDKTaskPriority.BACKGROUND, tasks: [], headIndex: 0 }
-    ];
-  }
 
   private getDefaultMaxConcurrency(type: SDKTaskType): number {
     switch (type) {
@@ -403,29 +388,31 @@ export class SDKTaskScheduler {
   }
 
   private enqueuePendingTask(lane: SDKLaneState, task: ScheduledSDKTask): void {
-    if (lane.priorityBuckets) {
-      this.getPriorityBucket(lane.priorityBuckets, task.priority).tasks.push(task);
-    } else {
-      lane.queue.push(task);
-    }
+    lane.queue.push(task);
     lane.pendingCount++;
   }
 
   private getNextRunnableTaskSelection(type: SDKTaskType, lane: SDKLaneState): SDKTaskSelection {
-    if (this.canUsePriorityBucketFastPath(type, lane)) {
-      return this.getNextRunnableTaskFromPriorityBuckets(lane, false);
-    }
-    if (lane.priorityBuckets) {
-      return this.getNextRunnableTaskFromPriorityBuckets(lane, true);
+    if (this.canUseEventFifoFastPath(type, lane)) {
+      return this.getNextEventTaskFromQueue(lane);
     }
     return this.getNextRunnableTaskFromQueue(lane);
   }
 
-  private canUsePriorityBucketFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
+  private canUseEventFifoFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
     return type === SDKTaskType.EVENT &&
-      lane.priorityBuckets !== null &&
       lane.maxConcurrency === 1 &&
       lane.runningSerialKeys.size === 0;
+  }
+
+  private getNextEventTaskFromQueue(lane: SDKLaneState): SDKTaskSelection {
+    const task = this.pollQueueHead(lane);
+    if (!task) {
+      return { task: null, scanCount: 0 };
+    }
+
+    lane.pendingCount = Math.max(0, lane.pendingCount - 1);
+    return { task, scanCount: 1 };
   }
 
   private getNextRunnableTaskFromQueue(lane: SDKLaneState): SDKTaskSelection {
@@ -433,7 +420,7 @@ export class SDKTaskScheduler {
     let bestTask: ScheduledSDKTask | null = null;
     let scanCount = 0;
 
-    for (let i = 0; i < lane.queue.length; i++) {
+    for (let i = lane.queueHeadIndex; i < lane.queue.length; i++) {
       scanCount++;
       const task = lane.queue[i];
       if (task.serialKey && lane.runningSerialKeys.has(task.serialKey)) {
@@ -447,6 +434,7 @@ export class SDKTaskScheduler {
     }
 
     if (bestIndex < 0) {
+      this.compactPendingQueue(lane);
       return { task: null, scanCount };
     }
 
@@ -454,90 +442,33 @@ export class SDKTaskScheduler {
     return { task: lane.queue.splice(bestIndex, 1)[0], scanCount };
   }
 
-  private getNextRunnableTaskFromPriorityBuckets(lane: SDKLaneState, shouldScanSerialConflict: boolean): SDKTaskSelection {
-    const buckets = lane.priorityBuckets;
-    if (!buckets) {
-      return { task: null, scanCount: 0 };
-    }
-
-    let scanCount = 0;
-    for (const bucket of buckets) {
-      if (shouldScanSerialConflict) {
-        const selection = this.getRunnableTaskFromPriorityBucketWithScan(bucket, lane);
-        scanCount += selection.scanCount;
-        if (selection.task) {
-          lane.pendingCount = Math.max(0, lane.pendingCount - 1);
-          return { task: selection.task, scanCount };
-        }
-        continue;
-      }
-
-      const task = this.pollPriorityBucketHead(bucket);
-      if (task) {
-        lane.pendingCount = Math.max(0, lane.pendingCount - 1);
-        return { task, scanCount: 1 };
-      }
-    }
-
-    return { task: null, scanCount };
-  }
-
-  private getRunnableTaskFromPriorityBucketWithScan(bucket: SDKPriorityBucket, lane: SDKLaneState): SDKTaskSelection {
-    let scanCount = 0;
-    for (let i = bucket.headIndex; i < bucket.tasks.length; i++) {
-      scanCount++;
-      const task = bucket.tasks[i];
-      if (task.serialKey && lane.runningSerialKeys.has(task.serialKey)) {
-        continue;
-      }
-
-      if (i === bucket.headIndex) {
-        return { task: this.pollPriorityBucketHead(bucket), scanCount };
-      }
-
-      return { task: bucket.tasks.splice(i, 1)[0], scanCount };
-    }
-
-    this.compactPriorityBucket(bucket);
-    return { task: null, scanCount };
-  }
-
-  private pollPriorityBucketHead(bucket: SDKPriorityBucket): ScheduledSDKTask | null {
-    if (bucket.headIndex >= bucket.tasks.length) {
-      this.compactPriorityBucket(bucket);
+  private pollQueueHead(lane: SDKLaneState): ScheduledSDKTask | null {
+    if (lane.queueHeadIndex >= lane.queue.length) {
+      this.compactPendingQueue(lane);
       return null;
     }
 
-    const task = bucket.tasks[bucket.headIndex];
-    bucket.headIndex++;
-    this.compactPriorityBucket(bucket);
+    const task = lane.queue[lane.queueHeadIndex];
+    lane.queueHeadIndex++;
+    this.compactPendingQueue(lane);
     return task;
   }
 
-  private compactPriorityBucket(bucket: SDKPriorityBucket): void {
-    if (bucket.headIndex === 0) {
+  private compactPendingQueue(lane: SDKLaneState): void {
+    if (lane.queueHeadIndex === 0) {
       return;
     }
 
-    if (bucket.headIndex >= bucket.tasks.length) {
-      bucket.tasks = [];
-      bucket.headIndex = 0;
+    if (lane.queueHeadIndex >= lane.queue.length) {
+      lane.queue = [];
+      lane.queueHeadIndex = 0;
       return;
     }
 
-    if (bucket.headIndex >= PRIORITY_BUCKET_COMPACT_THRESHOLD && bucket.headIndex * 2 >= bucket.tasks.length) {
-      bucket.tasks = bucket.tasks.slice(bucket.headIndex);
-      bucket.headIndex = 0;
+    if (lane.queueHeadIndex >= QUEUE_COMPACT_THRESHOLD && lane.queueHeadIndex * 2 >= lane.queue.length) {
+      lane.queue = lane.queue.slice(lane.queueHeadIndex);
+      lane.queueHeadIndex = 0;
     }
-  }
-
-  private getPriorityBucket(buckets: SDKPriorityBucket[], priority: SDKTaskPriority): SDKPriorityBucket {
-    for (const bucket of buckets) {
-      if (bucket.priority === priority) {
-        return bucket;
-      }
-    }
-    return buckets[buckets.length - 1];
   }
 
   private recordDispatchStats(lane: SDKLaneState, dispatchTime: number, scanCount: number): void {
@@ -669,48 +600,28 @@ export class SDKTaskScheduler {
       return 0;
     }
 
-    if (lane.priorityBuckets) {
-      let hasOldestTask = false;
-      let oldestBucketCreatedAt = 0;
-      for (const bucket of lane.priorityBuckets) {
-        if (bucket.headIndex < bucket.tasks.length) {
-          const createdAt = bucket.tasks[bucket.headIndex].createdAt;
-          oldestBucketCreatedAt = hasOldestTask ? Math.min(oldestBucketCreatedAt, createdAt) : createdAt;
-          hasOldestTask = true;
-        }
-      }
-      return hasOldestTask ? Math.max(0, Date.now() - oldestBucketCreatedAt) : 0;
+    if (lane.queueHeadIndex >= lane.queue.length) {
+      return 0;
     }
 
-    let oldestCreatedAt = lane.queue[0].createdAt;
-    for (let i = 1; i < lane.queue.length; i++) {
+    let oldestCreatedAt = lane.queue[lane.queueHeadIndex].createdAt;
+    for (let i = lane.queueHeadIndex + 1; i < lane.queue.length; i++) {
       oldestCreatedAt = Math.min(oldestCreatedAt, lane.queue[i].createdAt);
     }
     return Math.max(0, Date.now() - oldestCreatedAt);
   }
 
   private getPendingTasks(lane: SDKLaneState): ScheduledSDKTask[] {
-    if (!lane.priorityBuckets) {
-      return lane.queue;
-    }
-
     const tasks: ScheduledSDKTask[] = [];
-    for (const bucket of lane.priorityBuckets) {
-      for (let i = bucket.headIndex; i < bucket.tasks.length; i++) {
-        tasks.push(bucket.tasks[i]);
-      }
+    for (let i = lane.queueHeadIndex; i < lane.queue.length; i++) {
+      tasks.push(lane.queue[i]);
     }
     return tasks;
   }
 
   private clearPendingTasks(lane: SDKLaneState): void {
     lane.queue = [];
-    if (lane.priorityBuckets) {
-      for (const bucket of lane.priorityBuckets) {
-        bucket.tasks = [];
-        bucket.headIndex = 0;
-      }
-    }
+    lane.queueHeadIndex = 0;
     lane.pendingCount = 0;
   }
 
