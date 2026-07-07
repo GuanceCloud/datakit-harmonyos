@@ -1,7 +1,5 @@
 import { DataType } from '../../enum/Enums';
 
-export const DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT = 50;
-
 /**
  * Serializable upload row used by DataUploadWorker.
  *

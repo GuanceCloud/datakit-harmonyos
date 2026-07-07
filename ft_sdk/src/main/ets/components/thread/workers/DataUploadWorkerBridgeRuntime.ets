@@ -6,7 +6,6 @@ import {
   SDKWorkerPayload
 } from '../SDKWorkerProtocol';
 import {
-  DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT,
   DataUploadBridgeCountPayload,
   DataUploadBridgeDataTypePayload,
   DataUploadBridgeDeleteExpireCachePayload,
@@ -105,7 +104,7 @@ export class DataUploadWorkerBridgeRuntime implements DataUploadWorkerRuntime {
   async queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]> {
     const requestPayload: DataUploadBridgeQueryRowsPayload = {
       dataType: dataType.toString(),
-      pageSize: Math.min(pageSize, DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT)
+      pageSize: Math.max(1, Math.floor(pageSize))
     };
     const payload = await this.sendBridgeRequest(
       DataUploadWorkerBridgeCommand.QUERY_ROWS,

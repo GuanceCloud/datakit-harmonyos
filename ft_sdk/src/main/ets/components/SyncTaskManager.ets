@@ -18,7 +18,7 @@ import {
   SyncTaskPreferences
 } from './internal/runtime/SyncTaskManagerRuntime';
 import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
-import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
+import { SDKDataUploadPoolStatus, SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
   SDKWorkerBridgeRequest,
@@ -34,7 +34,6 @@ import {
 } from './thread/SDKWorkerProtocol';
 import { DataUploadWorkerExecutor } from './thread/workers/DataUploadWorkerExecutor';
 import {
-  DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT,
   DataUploadBridgeCountPayload,
   DataUploadBridgeRowsPayload,
   DataUploadBridgeValuePayload,
@@ -82,6 +81,13 @@ class ConfigRecordImpl implements ConfigRecord {
 
 const TAG = "SyncTaskManager";
 let syncTaskRuntime: SyncTaskManagerRuntime = new DefaultSyncTaskManagerRuntime();
+
+function normalizeUploadPageSize(pageSize: number): number {
+  if (pageSize !== pageSize || pageSize <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.floor(pageSize));
+}
 
 /**
  * Request callback interface
@@ -148,7 +154,7 @@ class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
     await dbManager.init();
     const rows = await dbManager.queryFtOperation(
       [dataType],
-      Math.min(Math.max(1, Math.floor(pageSize)), DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT)
+      normalizeUploadPageSize(pageSize)
     );
     const result: DataUploadRow[] = [];
     for (const row of rows) {
@@ -361,11 +367,12 @@ export class SyncTaskManager {
   private uploadCurrentPollRows = 0;
   private uploadCurrentTaskName = "";
   private uploadStartTraced = false;
+  private lastUploadRescheduleTraceKey = "";
+  private skippedUploadRescheduleTraceCount = 0;
   private syncPollPrecheckRunning = false;
   private syncPollPrecheckPending = false;
   private isStop = false;
   private autoSync = false;
-  private initialSyncPollTriggered = false;
   private syncSleepTime = 0;
   private pageSize = 100; // Default page size (increased from 50 to improve upload throughput)
   private dataSyncMaxRetryCount = 3; // Maximum retry count
@@ -463,17 +470,6 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
-
-    this.triggerInitialSyncPollIfNeeded();
-  }
-
-  private triggerInitialSyncPollIfNeeded(): void {
-    if (this.initialSyncPollTriggered || !this.autoSync || this.isStop || !this.context) {
-      return;
-    }
-
-    this.initialSyncPollTriggered = true;
-    this.executeSyncPoll();
   }
 
   /**
@@ -519,14 +515,35 @@ export class SyncTaskManager {
     const uploadStatus = poolManager.getUploadStatus();
 
     if (accepted) {
+      this.resetUploadRescheduleTrace();
       this.traceUploadLaneDebug(
         `[SCHEDULE] delay=${normalizedDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}`
       );
     } else {
-      this.traceUploadLaneDebug(
-        `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${uploadStatus.rescheduleDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}`
-      );
+      this.traceUploadRescheduleIfNeeded(normalizedDelay, uploadStatus);
     }
+  }
+
+  private traceUploadRescheduleIfNeeded(delay: number, uploadStatus: SDKDataUploadPoolStatus): void {
+    const traceKey =
+      `${uploadStatus.isRunning}:${uploadStatus.isScheduled}:${uploadStatus.rescheduleDelay}`;
+    if (traceKey === this.lastUploadRescheduleTraceKey) {
+      this.skippedUploadRescheduleTraceCount++;
+      return;
+    }
+
+    const skippedPart = this.skippedUploadRescheduleTraceCount > 0 ?
+      ` skipped=${this.skippedUploadRescheduleTraceCount}` : "";
+    this.lastUploadRescheduleTraceKey = traceKey;
+    this.skippedUploadRescheduleTraceCount = 0;
+    this.traceUploadLaneDebug(
+      `[RESCHEDULE] delay=${delay}ms nextDelay=${uploadStatus.rescheduleDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}${skippedPart}`
+    );
+  }
+
+  private resetUploadRescheduleTrace(): void {
+    this.lastUploadRescheduleTraceKey = "";
+    this.skippedUploadRescheduleTraceCount = 0;
   }
 
   private async executeScheduledUpload(taskName: string): Promise<void> {
@@ -666,7 +683,7 @@ export class SyncTaskManager {
   private createDataUploadConsumeOptions(taskName: string): DataUploadConsumeOptions {
     return {
       taskName: taskName && taskName.length > 0 ? taskName : 'upload.poll',
-      pageSize: Math.min(Math.max(1, this.pageSize), DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT),
+      pageSize: normalizeUploadPageSize(this.pageSize),
       syncSleepTime: Math.max(0, this.syncSleepTime),
       errorTimeLine: this.errorTimeLine,
       stopped: this.isStop
@@ -755,7 +772,7 @@ export class SyncTaskManager {
         const responsePayload: DataUploadBridgeRowsPayload = {
           rows: await runtime.queryRows(
             this.readBridgeDataType(payload),
-            this.readBridgeNumber(record, 'pageSize', DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT)
+            this.readBridgeNumber(record, 'pageSize', normalizeUploadPageSize(this.pageSize))
           )
         };
         return responsePayload as Object as SDKWorkerPayload;
@@ -939,7 +956,8 @@ export class SyncTaskManager {
       async run(rdbStore: relationalStore.RdbStore): Promise<void> {
         const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
         predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, this.dataTypes);
-        const resultSet = await rdbStore.query(predicates);
+        predicates.limitAs(1);
+        const resultSet = await rdbStore.query(predicates, [FTSQL.RECORD_COLUMN_ID]);
         try {
           this.hasData = resultSet.goToNextRow();
         } finally {

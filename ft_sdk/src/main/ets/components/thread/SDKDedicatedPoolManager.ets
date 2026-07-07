@@ -22,14 +22,18 @@ import {
   SDKWorkerPathInfo,
   SDKWorkerPathResolver
 } from './SDKWorkerPathResolver';
+import { FTInnerLogger } from '../log/FTLogger';
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 
+const TAG = "SDKDedicatedPoolManager";
 const DEFAULT_WORKER_COMMAND_TIMEOUT_MS = 3000;
 const DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS = 60000;
 const MIN_CORE_WORKER_COUNT = 2;
 const MAX_CORE_WORKER_COUNT = 4;
+const DB_WRITE_SLOW_LOG_THRESHOLD_MS = 100;
 
 export type SDKDedicatedTaskRunner = () => void | Promise<void>;
+export type SDKDbWriteRunner<T> = (dbLaneWaitMs?: number) => T | Promise<T>;
 export type SDKDedicatedCommandRunner = () => SDKWorkerPayload | Promise<SDKWorkerPayload>;
 export type SDKDedicatedPoolTaskStartHandler = (waitTime: number) => void;
 export type SDKWorkerBridgeHandler =
@@ -385,8 +389,9 @@ export class SDKDedicatedPoolManager {
     return this.executeTask(pool, id, name, 7, runner);
   }
 
-  public runDbWrite<T>(name: string, runner: () => T | Promise<T>): Promise<T> {
+  public runDbWrite<T>(name: string, runner: SDKDbWriteRunner<T>): Promise<T> {
     this.dbWritePending++;
+    const queuedAt = Date.now();
     const previousTail = this.dbWriteTail.catch(() => {});
     let releaseCurrent: () => void = () => {};
     const currentTail = new Promise<void>((resolve) => {
@@ -398,8 +403,15 @@ export class SDKDedicatedPoolManager {
       previousTail.then(async () => {
         this.dbWritePending = Math.max(0, this.dbWritePending - 1);
         this.dbWriteRunning++;
+        const dbLaneWaitMs = Math.max(0, Date.now() - queuedAt);
+        const executeStartTime = Date.now();
         try {
-          const result = await Promise.resolve(runner());
+          const result = await Promise.resolve(runner(dbLaneWaitMs));
+          const executeMs = Math.max(0, Date.now() - executeStartTime);
+          if (dbLaneWaitMs >= DB_WRITE_SLOW_LOG_THRESHOLD_MS || executeMs >= DB_WRITE_SLOW_LOG_THRESHOLD_MS) {
+            FTInnerLogger.w(TAG,
+              `<FT-DB-WRITE-LANE> [SLOW] name=${name} dbLaneWait=${dbLaneWaitMs}ms execute=${executeMs}ms pending=${this.dbWritePending} running=${this.dbWriteRunning}`);
+          }
           this.dbWriteCompletedTasks++;
           resolve(result);
         } catch (error) {

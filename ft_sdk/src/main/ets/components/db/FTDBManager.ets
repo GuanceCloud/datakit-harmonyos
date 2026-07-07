@@ -3,7 +3,7 @@
  * Database Manager for HarmonyOS
  */
 import relationalStore from '@ohos.data.relationalStore';
-import { DBManager } from './base/DBManager';
+import { DBManager, DBOperationTiming } from './base/DBManager';
 import { DataBaseCallBack } from './base/DataBaseCallBack';
 import { DatabaseHelper } from './base/DatabaseHelper';
 import * as FTSQL from './FTSQL';
@@ -17,6 +17,7 @@ import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
 
 const TAG = "FTDBManager";
+const DELETE_BATCH_CHUNK_SIZE: number = 500;
 
 /**
  * Action counts interface
@@ -37,6 +38,8 @@ interface ActionInfo {
 export interface SyncDataWriteOptions {
   applyCachePolicy?: boolean;
   reInsert?: boolean;
+  dbLaneWaitMs?: number;
+  forceTransaction?: boolean;
 }
 
 export interface SyncDataWriteResult {
@@ -61,9 +64,49 @@ interface SyncDataCacheCountDelta {
   rum: number;
 }
 
-interface SyncDataWriteTiming {
+interface SyncDataWriteTiming extends DBOperationTiming {
   computeMs: number;
   executeMs: number;
+  insertMs: number;
+}
+
+export class RUMCounterDelta {
+  viewId: string = "";
+  actionId: string = "";
+  viewErrorDelta: number = 0;
+  actionErrorDelta: number = 0;
+  viewLongTaskDelta: number = 0;
+  actionLongTaskDelta: number = 0;
+  viewResourceDelta: number = 0;
+  actionResourceDelta: number = 0;
+  viewPendingDelta: number = 0;
+  actionPendingDelta: number = 0;
+  viewUpdateTimeDelta: number = 0;
+}
+
+class RUMViewCounterAggregate {
+  id: string = "";
+  errorDelta: number = 0;
+  longTaskDelta: number = 0;
+  resourceDelta: number = 0;
+  pendingDelta: number = 0;
+  updateTimeDelta: number = 0;
+
+  constructor(id: string) {
+    this.id = id;
+  }
+}
+
+class RUMActionCounterAggregate {
+  id: string = "";
+  errorDelta: number = 0;
+  longTaskDelta: number = 0;
+  resourceDelta: number = 0;
+  pendingDelta: number = 0;
+
+  constructor(id: string) {
+    this.id = id;
+  }
 }
 
 /**
@@ -75,16 +118,20 @@ export class FTDBManager extends DBManager {
   private databaseHelper: DatabaseHelper | null = null;
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
-  
+
   // Deduplication cache, updated only from the DB write section.
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
   private insertedDataIds: Map<string, boolean> = new Map();
-  
+
   // Maximum size for Map collections to prevent memory leak (using Constants.MAX_MAP_SIZE_DB)
 
   private constructor(context: Context) {
     super();
     this.context = context;
+  }
+
+  private static escapeSqlString(value: string): string {
+    return value.replace(/'/g, "''");
   }
 
   public static resetInstanceInternal(): void {
@@ -115,7 +162,7 @@ export class FTDBManager extends DBManager {
     if (this.initPromise) {
       return await this.initPromise;
     }
-    
+
     // If already initialized (database helper has rdbStore), return immediately
     if (this.databaseHelper) {
       const rdbStore = this.databaseHelper.getRdbStore();
@@ -123,7 +170,7 @@ export class FTDBManager extends DBManager {
         return;
       }
     }
-    
+
     // Start initialization
     this.initPromise = (async () => {
       try {
@@ -135,7 +182,7 @@ export class FTDBManager extends DBManager {
         throw new Error(`FTDBManager initialization failed: ${error}`);
       }
     })();
-    
+
     try {
       await this.initPromise;
     } finally {
@@ -177,17 +224,21 @@ export class FTDBManager extends DBManager {
    * @param rdbStore Database object
    * @param fileSize File size
    */
-  protected onDBSizeCacheChange(rdbStore: relationalStore.RdbStore, fileSize: number): void {
+  protected async onDBSizeCacheChange(
+    rdbStore: relationalStore.RdbStore,
+    fileSize: number,
+    timing?: DBOperationTiming
+  ): Promise<void> {
     //FTInnerLogger.d(TAG, `Database size change: ${(fileSize / 1024).toFixed(2)}KB`);
-    
+
     // Update cache policy with current size (aligned with Android: setCurrentDBSize)
     FTDBCachePolicy.getInstance().setCurrentDbSize(fileSize);
-    
+
     const cachePolicy = FTDBCachePolicy.getInstance();
     if (cachePolicy.isReachDbLimit()) {
       if (cachePolicy.getDBCacheDiscard() === DBCacheDiscard.DISCARD_OLDEST) {
         FTInnerLogger.w(TAG, `DB cache size limit reached, cleaning oldest data`);
-        this.cleanupOldData(rdbStore);
+        await this.cleanupOldData(rdbStore, timing);
       }
     }
   }
@@ -196,17 +247,21 @@ export class FTDBManager extends DBManager {
    * Clean up old data
    * @param rdbStore Database object
    */
-  private async cleanupOldData(rdbStore: relationalStore.RdbStore): Promise<void> {
+  private async cleanupOldData(rdbStore: relationalStore.RdbStore, timing?: DBOperationTiming): Promise<void> {
     try {
       // Delete oldest data, keep the latest
+      const cleanupStartTime = Date.now();
       const result = await rdbStore.executeSql(
-        `DELETE FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} 
+        `DELETE FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}
          WHERE _id IN (
-           SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} 
-           ORDER BY tm ASC 
+           SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}
+           ORDER BY tm ASC
            LIMIT 100
          )`
       );
+      if (timing) {
+        timing.cleanupMs += Math.max(0, Date.now() - cleanupStartTime);
+      }
       FTInnerLogger.i(TAG, `Old data cleaned, affected rows: ${result}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to cleanup old data: ${error}`);
@@ -235,7 +290,7 @@ export class FTDBManager extends DBManager {
           return `action_id=${actionIdMatch[1]}`;
         }
       }
-      
+
       // For view data: extract view_id (priority 1)
       if (dataString.startsWith('view,')) {
         const viewIdMatch = dataString.match(/view_id=([^,\s]+)/);
@@ -243,7 +298,7 @@ export class FTDBManager extends DBManager {
           return `view_id=${viewIdMatch[1]}`;
         }
       }
-      
+
       // For resource data: extract span_id or trace_id (priority 1)
       if (dataString.startsWith('resource,')) {
         const spanIdMatch = dataString.match(/span_id=([^,\s]+)/);
@@ -255,35 +310,35 @@ export class FTDBManager extends DBManager {
           return `trace_id=${traceIdMatch[1]}`;
         }
       }
-      
+
       // For error data: extract error_type + error_message + timestamp (priority 1)
       if (dataString.startsWith('error,')) {
         const errorTypeMatch = dataString.match(/error_type=([^,\s]+)/);
         const errorMessageMatch = dataString.match(/error_message="([^"]+)"/);
         const timestampMatch = dataString.match(/\s(\d+)$/); // Last field is timestamp
-        
+
         const errorType = errorTypeMatch ? errorTypeMatch[1] : '';
         const errorMessage = errorMessageMatch ? errorMessageMatch[1].substring(0, 100) : ''; // Limit length
         const timestamp = timestampMatch ? timestampMatch[1] : '';
-        
+
         if (errorType || errorMessage || timestamp) {
           return `error_type=${errorType}:error_message=${errorMessage}:timestamp=${timestamp}`;
         }
       }
-      
+
       // For longtask data: extract long_task_name + timestamp (priority 1)
       if (dataString.startsWith('longtask,') || dataString.startsWith('long_task,')) {
         const longTaskNameMatch = dataString.match(/long_task_name=([^,\s]+)/);
         const timestampMatch = dataString.match(/\s(\d+)$/); // Last field is timestamp
-        
+
         const longTaskName = longTaskNameMatch ? longTaskNameMatch[1] : '';
         const timestamp = timestampMatch ? timestampMatch[1] : '';
-        
+
         if (longTaskName || timestamp) {
           return `long_task_name=${longTaskName}:timestamp=${timestamp}`;
         }
       }
-      
+
       // For log data: use uuid (extract from sdk_data_id) (priority 1)
       if (dataString.startsWith('df_rum_harmonyos_log,')) {
         const sdkDataIdMatch = dataString.match(/sdk_data_id=([^,\s]+)/);
@@ -297,14 +352,14 @@ export class FTDBManager extends DBManager {
           return `sdk_data_id=${sdkDataIdMatch[1]}`;
         }
       }
-      
+
       // Priority 2: Use timestamp as fallback for all data types
       // All line protocol data ends with timestamp, so this is a reliable fallback
       const timestampMatch = dataString.match(/\s(\d+)$/);
       if (timestampMatch && timestampMatch[1]) {
         return `timestamp=${timestampMatch[1]}`;
       }
-      
+
       // Last resort: return null (should rarely happen)
       return null;
     } catch (error) {
@@ -329,7 +384,11 @@ export class FTDBManager extends DBManager {
   private createSyncDataWriteTiming(): SyncDataWriteTiming {
     return {
       computeMs: 0,
-      executeMs: 0
+      executeMs: 0,
+      insertMs: 0,
+      lockWaitMs: 0,
+      sizeCheckMs: 0,
+      cleanupMs: 0
     };
   }
 
@@ -345,6 +404,13 @@ export class FTDBManager extends DBManager {
       return;
     }
     timing.executeMs += Math.max(0, Date.now() - startTime);
+  }
+
+  private addWriteInsertTime(timing: SyncDataWriteTiming | undefined, startTime: number): void {
+    if (!timing) {
+      return;
+    }
+    timing.insertMs += Math.max(0, Date.now() - startTime);
   }
 
   private getCacheCategory(dataType: DataType): SyncDataCacheCategory {
@@ -916,6 +982,7 @@ export class FTDBManager extends DBManager {
       const executeStartTime = Date.now();
       const rowId = await rdbStore.insert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, values);
       this.addWriteExecuteTime(timing, executeStartTime);
+      this.addWriteInsertTime(timing, executeStartTime);
       const numericId = Number(rowId);
       computeStartTime = Date.now();
       if (numericId > 0) {
@@ -942,6 +1009,7 @@ export class FTDBManager extends DBManager {
     const executeStartTime = Date.now();
     const insertedCount = await rdbStore.batchInsert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, valuesArray);
     this.addWriteExecuteTime(timing, executeStartTime);
+    this.addWriteInsertTime(timing, executeStartTime);
     const insertedRows = Math.max(0, insertedCount);
     computeStartTime = Date.now();
     result.inserted += insertedRows;
@@ -998,6 +1066,8 @@ export class FTDBManager extends DBManager {
     const manager = this;
     const startTime = Date.now();
     const timing = this.createSyncDataWriteTiming();
+    const dbLaneWaitTime = Math.max(0, options.dbLaneWaitMs || 0);
+    const forceTransaction = options.forceTransaction === true || dataList.length > 1;
     class WriteSyncDataCallback implements DataBaseCallBack {
       async run(rdbStore: relationalStore.RdbStore): Promise<void> {
         try {
@@ -1016,24 +1086,33 @@ export class FTDBManager extends DBManager {
         await this.init();
         this.addWriteExecuteTime(timing, executeStartTime);
       }
-      await this.getDB(true, new WriteSyncDataCallback());
+      await this.getDBWithCount(true, dataList.length, new WriteSyncDataCallback(), timing, forceTransaction);
     } catch (error) {
       result.success = false;
       result.errorMessage = String(error);
     } finally {
-      const costTime = Math.max(0, Date.now() - startTime);
+      const dbManagerCostTime = Math.max(0, Date.now() - startTime);
+      const costTime = dbManagerCostTime + dbLaneWaitTime;
       let computeTime = Math.max(0, timing.computeMs);
       let executeTime = Math.max(0, timing.executeMs);
-      const accountedTime = computeTime + executeTime;
+      let insertTime = Math.max(0, timing.insertMs);
+      const lockWaitTime = Math.max(0, timing.lockWaitMs);
+      const sizeCheckTime = Math.max(0, timing.sizeCheckMs);
+      const cleanupTime = Math.max(0, timing.cleanupMs);
+      const accountedTime = dbLaneWaitTime + lockWaitTime + computeTime + executeTime + sizeCheckTime + cleanupTime;
       if (accountedTime > costTime && accountedTime > 0) {
-        const scale = costTime / accountedTime;
+        const scalableTime = computeTime + executeTime;
+        const fixedTime = dbLaneWaitTime + lockWaitTime + sizeCheckTime + cleanupTime;
+        const scale = scalableTime > 0 ? Math.max(0, costTime - fixedTime) / scalableTime : 0;
         computeTime = Math.round(computeTime * scale);
-        executeTime = Math.max(0, costTime - computeTime);
+        executeTime = Math.max(0, costTime - fixedTime - computeTime);
       }
-      const waitTime = Math.max(0, costTime - computeTime - executeTime);
+      insertTime = Math.min(insertTime, executeTime);
+      const waitTime = Math.max(0,
+        costTime - dbLaneWaitTime - lockWaitTime - computeTime - executeTime - sizeCheckTime - cleanupTime);
       const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';
       FTInnerLogger.i(TAG,
-        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
+        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} dbLaneWait=${dbLaneWaitTime}ms lockWait=${lockWaitTime}ms wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms insert=${insertTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
     }
 
     return result;
@@ -1080,14 +1159,14 @@ export class FTDBManager extends DBManager {
       class QueryCallback implements DataBaseCallBack {
         private result: SyncData[] = [];
         private maxLimit: number;
-        
+
         constructor(maxLimit: number) {
           this.maxLimit = maxLimit;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-          
+
           if (types && types.length > 0) {
             const typeValues = types.map(type => type.toString());
             predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, typeValues);
@@ -1095,7 +1174,7 @@ export class FTDBManager extends DBManager {
             // Removed test debug log to reduce log output
             // FTInnerLogger.d(TAG, ` Query predicate: table=${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}, all types`);
           }
-          
+
           // Order by timestamp ascending by default (aligned with Android: ORDER by tm ASC).
           // Tests that assert the most recent crash/ANR data can opt into newest-first queries.
           if (newestFirst) {
@@ -1103,33 +1182,40 @@ export class FTDBManager extends DBManager {
           } else {
             predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
           }
-          
+
           // Apply limit using limitAs (aligned with Android: LIMIT pageSize)
           // Note: limit <= 0 means no limit (query all), but we use a reasonable default
           if (this.maxLimit > 0) {
             predicates.limitAs(this.maxLimit);
           }
-          
-          const resultSet = await rdbStore.query(predicates);
-          
+
+          const resultSet = await rdbStore.query(predicates, [
+            FTSQL.RECORD_COLUMN_ID,
+            FTSQL.RECORD_COLUMN_DATA_UUID,
+            FTSQL.RECORD_COLUMN_DATA_TYPE,
+            FTSQL.RECORD_COLUMN_DATA,
+            FTSQL.RECORD_COLUMN_TM
+          ]);
+
           // Process query results
           try {
             // Iterate through result set (limit already applied by limitAs)
             while (resultSet.goToNextRow()) {
               // Read column data
+              const id: number = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_ID));
               const uuid: string = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_UUID));
               const dataType: string = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_TYPE));
               const data: string = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA));
               const timestamp: number = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_TM));
-              
-              
-              
+
+
+
               if (uuid && dataType && data) {
                 // Create correct SyncData object based on data type
                 let syncData: SyncData;
                 if (dataType === 'log') {
                   syncData = new SyncData(DataType.LOG);
-                  
+
                 } else if (dataType === 'rum_app') {
                   syncData = new SyncData(DataType.RUM_APP);
                   // Removed verbose debug log
@@ -1141,17 +1227,18 @@ export class FTDBManager extends DBManager {
                   syncData = new SyncData(DataType.LOG);
                   // Removed verbose debug log
                 }
-                
+
+                syncData.setId(id);
                 syncData.setUuid(uuid);
                 syncData.setDataString(data);
                 syncData.setTime(timestamp);
-                
+
                 this.result.push(syncData);
                 // Removed individual record logging to reduce log noise
                 // Summary log is available at line 440
               }
             }
-            
+
             resultSet.close();
             // Removed test debug log to reduce log output
             // if (this.result.length > 0) {
@@ -1163,23 +1250,23 @@ export class FTDBManager extends DBManager {
             resultSet.close();
           }
         }
-        
+
         getResult(): SyncData[] {
           return this.result;
         }
       }
-      
+
       const callback = new QueryCallback(limit);
-      
+
       // Check if database is closed and reinitialize if needed
       const isClosed = this.isDatabaseClosed();
       if (isClosed) {
         FTInnerLogger.w(TAG, `DB closed during query, reinitializing`);
         await this.init();
       }
-      
+
       await this.getDB(false, callback);
-      
+
       const queryResult = callback.getResult();
       result.push(...queryResult);
 
@@ -1199,44 +1286,118 @@ export class FTDBManager extends DBManager {
       return;
     }
 
+    const startTime = Date.now();
+    const timing = this.createSyncDataWriteTiming();
+    const manager = this;
+    let actualDeleted = 0;
+    let errorMessage = '';
     try {
       class DeleteCallback implements DataBaseCallBack {
         private dataList: SyncData[];
         private deletedCount: number = 0;
-        
+
         constructor(dataList: SyncData[]) {
           this.dataList = dataList;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          // Delete each record using UUID (aligned with Android: uses batch delete for better performance)
-          // Note: HarmonyOS doesn't support batch operations like Android's applyBatch,
-          // so we delete one by one but ensure each deletion is awaited
+          const rowsWithId: SyncData[] = [];
+          const fallbackRows: SyncData[] = [];
+          const ids: number[] = [];
+          const seenIds: Set<number> = new Set();
+
           for (const data of this.dataList) {
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-            // Use UUID for deletion since UUID is unique
-            predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_UUID, data.getUuid());
-            const deleted = await rdbStore.delete(predicates);
-            if (deleted > 0) {
-              this.deletedCount++;
+            const id = Math.floor(data.getId());
+            if (id > 0) {
+              rowsWithId.push(data);
+              if (!seenIds.has(id)) {
+                seenIds.add(id);
+                ids.push(id);
+              }
+            } else {
+              fallbackRows.push(data);
             }
           }
+
+          const deletedById = await this.deleteByIds(rdbStore, ids);
+          this.deletedCount += deletedById;
+
+          if (fallbackRows.length > 0 || deletedById < ids.length) {
+            const uuidFallbackRows = fallbackRows.length > 0 ? fallbackRows.concat(rowsWithId) : rowsWithId;
+            this.deletedCount += await this.deleteByUuids(rdbStore, uuidFallbackRows);
+          }
         }
-        
+
         getDeletedCount(): number {
           return this.deletedCount;
         }
+
+        private async deleteByIds(rdbStore: relationalStore.RdbStore, ids: number[]): Promise<number> {
+          let deletedCount = 0;
+          for (let start = 0; start < ids.length; start += DELETE_BATCH_CHUNK_SIZE) {
+            const batchIds = ids.slice(start, start + DELETE_BATCH_CHUNK_SIZE);
+            if (batchIds.length === 0) {
+              continue;
+            }
+
+            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+            predicates.in(FTSQL.RECORD_COLUMN_ID, batchIds);
+            const executeStartTime = Date.now();
+            deletedCount += await rdbStore.delete(predicates);
+            manager.addWriteExecuteTime(timing, executeStartTime);
+          }
+          return deletedCount;
+        }
+
+        private async deleteByUuids(rdbStore: relationalStore.RdbStore, rows: SyncData[]): Promise<number> {
+          const uuids: string[] = [];
+          const seenUuids: Set<string> = new Set();
+          for (const row of rows) {
+            const uuid = row.getUuid();
+            if (!uuid || uuid.length === 0 || seenUuids.has(uuid)) {
+              continue;
+            }
+            seenUuids.add(uuid);
+            uuids.push(uuid);
+          }
+
+          let deletedCount = 0;
+          for (let start = 0; start < uuids.length; start += DELETE_BATCH_CHUNK_SIZE) {
+            const batchUuids = uuids.slice(start, start + DELETE_BATCH_CHUNK_SIZE);
+            if (batchUuids.length === 0) {
+              continue;
+            }
+
+            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+            predicates.in(FTSQL.RECORD_COLUMN_DATA_UUID, batchUuids);
+            const executeStartTime = Date.now();
+            deletedCount += await rdbStore.delete(predicates);
+            manager.addWriteExecuteTime(timing, executeStartTime);
+          }
+          return deletedCount;
+        }
       }
-      
+
       const callback = new DeleteCallback(dataList);
-      await this.getDB(true, callback);
-      
-      const actualDeleted = callback.getDeletedCount();
+      await this.getDBWithCount(true, dataList.length, callback, timing, dataList.length > 1);
+
+      actualDeleted = callback.getDeletedCount();
       if (actualDeleted !== dataList.length) {
         FTInnerLogger.w(TAG, `Deleted ${actualDeleted} out of ${dataList.length} sync data items (some may not exist)`);
       }
     } catch (error) {
+      errorMessage = String(error);
       FTInnerLogger.e(TAG, `Failed to delete sync data: ${error as string}`);
+    } finally {
+      const costTime = Math.max(0, Date.now() - startTime);
+      const lockWaitTime = Math.max(0, timing.lockWaitMs);
+      const executeTime = Math.max(0, timing.executeMs);
+      const sizeCheckTime = Math.max(0, timing.sizeCheckMs);
+      const cleanupTime = Math.max(0, timing.cleanupMs);
+      const waitTime = Math.max(0, costTime - lockWaitTime - executeTime - sizeCheckTime - cleanupTime);
+      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+      FTInnerLogger.i(TAG,
+        `[DB-DELETE] source=deleteFtOperation rows=${dataList.length} deleted=${actualDeleted} lockWait=${lockWaitTime}ms wait=${waitTime}ms execute=${executeTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
     }
   }
 
@@ -1248,23 +1409,22 @@ export class FTDBManager extends DBManager {
   public async queryTotalCount(types: DataType[]): Promise<number> {
     try {
       const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-      
+
       if (types && types.length > 0) {
         const typeValues = types.map(type => type.toString());
         predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, typeValues);
       }
 
-      // Use async query directly
       const rdbStore = await this.getDataBaseHelper();
-      const resultSet = await rdbStore.query(predicates);
-      
-      // For quick existence check, only iterate if needed
-      let count = 0;
-      while (resultSet.goToNextRow()) {
-        count++;
+      const resultSet = await rdbStore.query(predicates, ['count(*) as count']);
+      try {
+        if (resultSet.goToFirstRow()) {
+          return resultSet.getLong(0);
+        }
+        return 0;
+      } finally {
+        resultSet.close();
       }
-      
-      return count;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to query total count: ${error}`);
       return 0;
@@ -1336,19 +1496,20 @@ export class FTDBManager extends DBManager {
   public async hasData(types: DataType[]): Promise<boolean> {
     try {
       const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-      
+
       if (types && types.length > 0) {
         const typeValues = types.map(type => type.toString());
         predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, typeValues);
       }
+      predicates.limitAs(1);
 
       const rdbStore = await this.getDataBaseHelper();
-      const resultSet = await rdbStore.query(predicates);
-      
-      // Only check if first row exists, much faster for empty database
-      const hasData = resultSet.goToNextRow();
-      resultSet.close();
-      return hasData;
+      const resultSet = await rdbStore.query(predicates, [FTSQL.RECORD_COLUMN_ID]);
+      try {
+        return resultSet.goToNextRow();
+      } finally {
+        resultSet.close();
+      }
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to check if data exists: ${error}`);
       return false;
@@ -1368,7 +1529,7 @@ export class FTDBManager extends DBManager {
         FTInnerLogger.d(TAG, `View not exists, insertRumView: ${viewBean.getId()}`);
         return true;
       }
-      
+
       // If insert fails (possibly duplicate key), try to update
       FTInnerLogger.d(TAG, `View exists, switching to update: ${viewBean.getId()}`);
       return await this.updateRumView(viewBean);
@@ -1411,7 +1572,7 @@ export class FTDBManager extends DBManager {
           await rdbStore.insert(FTSQL.FT_TABLE_VIEW, values);
         }
       }
-      
+
       const callback: DataBaseCallBack = new InsertViewCallback();
       await this.getDB(true, callback);
 
@@ -1459,7 +1620,7 @@ export class FTDBManager extends DBManager {
           await rdbStore.update(values, predicates);
         }
       }
-      
+
       const callback: DataBaseCallBack = new UpdateViewCallback();
       await this.getDB(true, callback);
 
@@ -1492,7 +1653,7 @@ export class FTDBManager extends DBManager {
         private timeSpent: number;
         private attr: string;
         private newSessionId?: string;
-        
+
         constructor(viewId: string, loadTime: number, timeSpent: number, attr: string, newSessionId?: string) {
           this.viewId = viewId;
           this.loadTime = loadTime;
@@ -1500,11 +1661,11 @@ export class FTDBManager extends DBManager {
           this.attr = attr;
           this.newSessionId = newSessionId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-          
+
           const values: relationalStore.ValuesBucket = {
             is_close: 1,
             view_load_time: this.loadTime,
@@ -1512,12 +1673,12 @@ export class FTDBManager extends DBManager {
             extra_attr: this.attr,
             data_update_time: Date.now()
           };
-          
+
           // Update session ID if provided (for session refresh scenario)
           if (this.newSessionId) {
             values.session_id = this.newSessionId;
           }
-          
+
           const updateCount: number = await rdbStore.update(values, predicates);
           if (updateCount > 0) {
             FTInnerLogger.d(TAG, `View closed: ${this.viewId}`);
@@ -1526,10 +1687,10 @@ export class FTDBManager extends DBManager {
           }
         }
       }
-      
+
       const callback: DataBaseCallBack = new CloseViewCallback(viewId, loadTime, timeSpent, attr, newSessionId);
       await this.getDB(true, callback);
-      
+
       return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to close view: ${error}`);
@@ -1554,12 +1715,12 @@ export class FTDBManager extends DBManager {
         private viewId: string;
         private dateTime: number;
         private success: boolean = false;
-        
+
         constructor(viewId: string, dateTime: number) {
           this.viewId = viewId;
           this.dateTime = dateTime;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const queryPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
           queryPredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
@@ -1596,7 +1757,7 @@ export class FTDBManager extends DBManager {
           return this.success;
         }
       }
-      
+
       const callback = new UpdateViewUploadTimeCallback(viewId, dateTime);
       await this.getDB(true, callback);
       return callback.isSuccess();
@@ -1622,12 +1783,12 @@ export class FTDBManager extends DBManager {
       class IncreaseViewActionCallback implements DataBaseCallBack {
         private viewId: string;
         private viewName: string;
-        
+
         constructor(viewId: string, viewName: string) {
           this.viewId = viewId;
           this.viewName = viewName;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           // Use atomic SQL UPDATE to prevent race conditions (aligned with Android SDK)
           // Android SDK uses: UPDATE table SET column=column+1 WHERE id='...'
@@ -1640,21 +1801,21 @@ export class FTDBManager extends DBManager {
             // Fallback to read-modify-write if atomic SQL fails
             const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
             predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
+
             const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_ACTION_COUNT]);
-            
+
             if (resultSet.goToFirstRow()) {
               const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_COUNT);
               const currentCount: number = resultSet.getLong(columnIndex);
-              
+
               const values: relationalStore.ValuesBucket = {
                 action_count: currentCount + 1
               };
-              
+
               const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
               updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
               await rdbStore.update(values, updatePredicates);
-              
+
             } else {
               FTInnerLogger.w(TAG, `View not found when increasing action count: ${this.viewName} (${this.viewId})`);
             }
@@ -1662,563 +1823,11 @@ export class FTDBManager extends DBManager {
           }
         }
       }
-      
+
       const callback: DataBaseCallBack = new IncreaseViewActionCallback(viewId, viewNameStr);
       await this.getDB(true, callback);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to increase view action count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseViewLongTask
-   * @param viewId View ID
-   * @param viewName Optional view name for logging
-   */
-  public async increaseViewLongTask(viewId: string, viewName?: string): Promise<void> {
-    if (!viewId) {
-      return;
-    }
-    const viewNameStr = viewName || 'unknown';
-    try {
-      class IncreaseViewLongTaskCallback implements DataBaseCallBack {
-        private viewId: string;
-        private viewName: string;
-        constructor(viewId: string, viewName: string) {
-          this.viewId = viewId;
-          this.viewName = viewName;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_LONG_TASK_COUNT} = ${FTSQL.RUM_COLUMN_LONG_TASK_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase view long task count failed: ${this.viewName} (${this.viewId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_LONG_TASK_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_LONG_TASK_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                long_task_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `View not found when increasing long task count: ${this.viewName} (${this.viewId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseViewLongTaskCallback(viewId, viewNameStr);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase view long task count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseActionLongTask
-   * @param actionId Action ID
-   * @param actionName Optional action name for logging
-   */
-  public async increaseActionLongTask(actionId: string, actionName?: string): Promise<void> {
-    if (!actionId) {
-      return;
-    }
-    const actionNameStr = actionName || 'unknown';
-    try {
-      class IncreaseActionLongTaskCallback implements DataBaseCallBack {
-        private actionId: string;
-        private actionName: string;
-        constructor(actionId: string, actionName: string) {
-          this.actionId = actionId;
-          this.actionName = actionName;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_LONG_TASK_COUNT} = ${FTSQL.RUM_COLUMN_LONG_TASK_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase action long task count failed: ${this.actionName} (${this.actionId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_LONG_TASK_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_LONG_TASK_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                long_task_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `Action not found when increasing long task count: ${this.actionName} (${this.actionId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseActionLongTaskCallback(actionId, actionNameStr);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase action long task count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseViewError
-   * @param viewId View ID
-   * @param viewName Optional view name for logging
-   */
-  public async increaseViewError(viewId: string, viewName?: string): Promise<void> {
-    if (!viewId) {
-      return;
-    }
-    const viewNameStr = viewName || 'unknown';
-    try {
-      class IncreaseViewErrorCallback implements DataBaseCallBack {
-        private viewId: string;
-        private viewName: string;
-        constructor(viewId: string, viewName: string) {
-          this.viewId = viewId;
-          this.viewName = viewName;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_ERROR_COUNT} = ${FTSQL.RUM_COLUMN_ERROR_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase view error count failed: ${this.viewName} (${this.viewId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_ERROR_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ERROR_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                error_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `View not found when increasing error count: ${this.viewName} (${this.viewId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseViewErrorCallback(viewId, viewNameStr);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase view error count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseActionError
-   * @param actionId Action ID
-   * @param actionName Optional action name for logging
-   */
-  public async increaseActionError(actionId: string, actionName?: string): Promise<void> {
-    if (!actionId) {
-      return;
-    }
-    const actionNameStr = actionName || 'unknown';
-    try {
-      class IncreaseActionErrorCallback implements DataBaseCallBack {
-        private actionId: string;
-        private actionName: string;
-        constructor(actionId: string, actionName: string) {
-          this.actionId = actionId;
-          this.actionName = actionName;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_ERROR_COUNT} = ${FTSQL.RUM_COLUMN_ERROR_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase action error count failed: ${this.actionName} (${this.actionId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_ERROR_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ERROR_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                error_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `Action not found when increasing error count: ${this.actionName} (${this.actionId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseActionErrorCallback(actionId, actionNameStr);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase action error count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseActionResource
-   * @param actionId Action ID
-   * @param actionName Optional action name for logging
-   */
-  public async increaseActionResource(actionId: string): Promise<void> {
-    if (!actionId) {
-      return;
-    }
-    try {
-      class IncreaseActionResourceCallback implements DataBaseCallBack {
-        private actionId: string;
-        constructor(actionId: string) {
-          this.actionId = actionId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase action resource count failed:  (${this.actionId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_RESOURCE_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_RESOURCE_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                resource_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `Action not found when increasing resource count: (${this.actionId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseActionResourceCallback(actionId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase action resource count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseActionPendingResource
-   * @param actionId Action ID
-   */
-  public async increaseActionPendingResource(actionId: string): Promise<void> {
-    if (!actionId) {
-      return;
-    }
-    try {
-      class IncreaseActionPendingResourceCallback implements DataBaseCallBack {
-        private actionId: string;
-        constructor(actionId: string) {
-          this.actionId = actionId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase action pending resource failed: ${this.actionId}, ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                pending_resource: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `Action not found when increasing pending resource: ${this.actionId}`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseActionPendingResourceCallback(actionId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase action pending resource count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: reduceActionPendingResource
-   * @param actionId Action ID
-   */
-  public async reduceActionPendingResource(actionId: string): Promise<void> {
-    if (!actionId) {
-      return;
-    }
-    try {
-      class ReduceActionPendingResourceCallback implements DataBaseCallBack {
-        private actionId: string;
-        constructor(actionId: string) {
-          this.actionId = actionId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}' AND ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Reduce action pending resource failed: ${this.actionId}, ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              if (currentCount > 0) {
-                const values: relationalStore.ValuesBucket = {
-                  pending_resource: currentCount - 1
-                };
-                
-                const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-                updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-                await rdbStore.update(values, updatePredicates);
-                
-              }
-            } else {
-              FTInnerLogger.w(TAG, `Action not found when reducing pending resource: ${this.actionId}`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new ReduceActionPendingResourceCallback(actionId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to reduce action pending resource count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: increaseViewPendingResource
-   * @param viewId View ID
-   */
-  public async increaseViewPendingResource(viewId: string): Promise<void> {
-    if (!viewId) {
-      return;
-    }
-    try {
-      class IncreaseViewPendingResourceCallback implements DataBaseCallBack {
-        private viewId: string;
-        constructor(viewId: string) {
-          this.viewId = viewId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase view pending resource failed: ${this.viewId}, ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                pending_resource: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `View not found when increasing pending resource: ${this.viewId}`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseViewPendingResourceCallback(viewId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase view pending resource count: ${error}`);
-    }
-  }
-
-  /**
-   * Aligned with Android: reduceViewPendingResource
-   * @param viewId View ID
-   */
-  public async reduceViewPendingResource(viewId: string): Promise<void> {
-    if (!viewId) {
-      return;
-    }
-    try {
-      class ReduceViewPendingResourceCallback implements DataBaseCallBack {
-        private viewId: string;
-        constructor(viewId: string) {
-          this.viewId = viewId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}' AND ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Reduce view pending resource failed: ${this.viewId}, ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              if (currentCount > 0) {
-                const values: relationalStore.ValuesBucket = {
-                  pending_resource: currentCount - 1
-                };
-                
-                const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-                updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-                await rdbStore.update(values, updatePredicates);
-                
-              }
-            } else {
-              FTInnerLogger.w(TAG, `View not found when reducing pending resource: ${this.viewId}`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new ReduceViewPendingResourceCallback(viewId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Reduce view pending resource failed: ${error as string}`);
-    }
-  }
-
-  /**
-   * Increase resource pending counts for view/action with one DB write lock.
-   */
-  public async increaseResourcePending(viewId: string, actionId: string): Promise<void> {
-    const hasViewId = viewId.length > 0;
-    const hasActionId = actionId.length > 0;
-    if (!hasViewId && !hasActionId) {
-      return;
-    }
-
-    try {
-      class IncreaseResourcePendingCallback implements DataBaseCallBack {
-        private viewId: string;
-        private actionId: string;
-
-        constructor(viewId: string, actionId: string) {
-          this.viewId = viewId;
-          this.actionId = actionId;
-        }
-
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          if (this.viewId && this.viewId.length > 0) {
-            try {
-              const viewSql =
-                `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
-                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 ` +
-                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-              await rdbStore.executeSql(viewSql);
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Increase view resource pending failed: ${this.viewId}, ${error}`);
-            }
-          }
-
-          if (this.actionId && this.actionId.length > 0) {
-            try {
-              const actionSql =
-                `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ` +
-                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} + 1 ` +
-                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-              await rdbStore.executeSql(actionSql);
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Increase action resource pending failed: ${this.actionId}, ${error}`);
-            }
-          }
-        }
-      }
-
-      const callback: DataBaseCallBack = new IncreaseResourcePendingCallback(viewId, actionId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase resource pending counts: ${error}`);
     }
   }
 
@@ -2235,29 +1844,29 @@ export class FTDBManager extends DBManager {
       class GetViewPendingResourceCallback implements DataBaseCallBack {
         private viewId: string;
         private pendingResource: number = 0;
-        
+
         constructor(viewId: string) {
           this.viewId = viewId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-          
+
           const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-          
+
           if (resultSet.goToFirstRow()) {
             const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
             this.pendingResource = resultSet.getLong(columnIndex);
           }
           resultSet.close();
         }
-        
+
         getPendingResource(): number {
           return this.pendingResource;
         }
       }
-      
+
       const callback = new GetViewPendingResourceCallback(viewId);
       await this.getDB(false, callback);
       return callback.getPendingResource();
@@ -2285,11 +1894,11 @@ export class FTDBManager extends DBManager {
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-          
+
           const values: relationalStore.ValuesBucket = {
             pending_resource: 0
           };
-          
+
           const updateCount = await rdbStore.update(values, predicates);
           if (updateCount > 0) {
             FTInnerLogger.w(TAG, `Force cleared view pending resource: ${this.viewId}`);
@@ -2298,7 +1907,7 @@ export class FTDBManager extends DBManager {
           }
         }
       }
-      
+
       const callback: DataBaseCallBack = new ForceClearViewPendingResourceCallback(viewId);
       await this.getDB(true, callback);
     } catch (error) {
@@ -2306,11 +1915,6 @@ export class FTDBManager extends DBManager {
     }
   }
 
-  /**
-   * Get action pending_resource count
-   * @param actionId Action ID
-   * @returns pending_resource count, or 0 if action not found
-   */
   /**
    * Get action info (start_time) for calculating duration
    * @param actionId Action ID
@@ -2325,17 +1929,17 @@ export class FTDBManager extends DBManager {
       class GetActionInfoCallback implements DataBaseCallBack {
         private actionId: string;
         private startTime: number | null = null;
-        
+
         constructor(actionId: string) {
           this.actionId = actionId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-          
+
           const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_START_TIME]);
-          
+
           if (resultSet.goToFirstRow()) {
             const startTimeCol = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_START_TIME);
             this.startTime = resultSet.getLong(startTimeCol);
@@ -2344,15 +1948,15 @@ export class FTDBManager extends DBManager {
             resultSet.close();
           }
         }
-        
+
         getStartTime(): number | null {
           return this.startTime;
         }
       }
-      
+
       const callback = new GetActionInfoCallback(actionId);
       await this.getDB(true, callback);
-      
+
       const startTime = callback.getStartTime();
       if (startTime !== null) {
         const actionInfo: ActionInfo = {
@@ -2367,6 +1971,11 @@ export class FTDBManager extends DBManager {
     }
   }
 
+  /**
+   * Get action pending_resource count
+   * @param actionId Action ID
+   * @returns pending_resource count, or 0 if action not found
+   */
   public async getActionPendingResource(actionId: string): Promise<number> {
     if (!actionId) {
       return 0;
@@ -2375,29 +1984,29 @@ export class FTDBManager extends DBManager {
       class GetActionPendingResourceCallback implements DataBaseCallBack {
         private actionId: string;
         private pendingResource: number = 0;
-        
+
         constructor(actionId: string) {
           this.actionId = actionId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-          
+
           const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-          
+
           if (resultSet.goToFirstRow()) {
             const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
             this.pendingResource = resultSet.getLong(columnIndex);
           }
           resultSet.close();
         }
-        
+
         getPendingResource(): number {
           return this.pendingResource;
         }
       }
-      
+
       const callback = new GetActionPendingResourceCallback(actionId);
       await this.getDB(false, callback);
       return callback.getPendingResource();
@@ -2425,11 +2034,11 @@ export class FTDBManager extends DBManager {
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-          
+
           const values: relationalStore.ValuesBucket = {
             pending_resource: 0
           };
-          
+
           const updateCount = await rdbStore.update(values, predicates);
           if (updateCount > 0) {
             FTInnerLogger.w(TAG, `Force cleared action pending resource: ${this.actionId}`);
@@ -2438,7 +2047,7 @@ export class FTDBManager extends DBManager {
           }
         }
       }
-      
+
       const callback: DataBaseCallBack = new ForceClearActionPendingResourceCallback(actionId);
       await this.getDB(true, callback);
     } catch (error) {
@@ -2446,156 +2055,167 @@ export class FTDBManager extends DBManager {
     }
   }
 
-  /**
-   * Aligned with Android: increaseViewResource
-   * @param viewId View ID
-   * @param viewName Optional view name for logging
-   */
-  public async increaseViewResource(viewId: string): Promise<void> {
-    if (!viewId) {
-      return;
+  private getOrCreateViewCounterAggregate(
+    aggregates: Map<string, RUMViewCounterAggregate>,
+    viewId: string
+  ): RUMViewCounterAggregate {
+    let aggregate = aggregates.get(viewId);
+    if (!aggregate) {
+      aggregate = new RUMViewCounterAggregate(viewId);
+      aggregates.set(viewId, aggregate);
     }
-    try {
-      class IncreaseViewResourceCallback implements DataBaseCallBack {
-        private viewId: string;
-        constructor(viewId: string) {
-          this.viewId = viewId;
-        }
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          try {
-            const updateSql = `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1 WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-            await rdbStore.executeSql(updateSql);
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Increase view resource count failed: (${this.viewId}), ${error}`);
-            // Fallback to read-modify-write if atomic SQL fails
-            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-            predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-            
-            const resultSet = await rdbStore.query(predicates, [FTSQL.RUM_COLUMN_RESOURCE_COUNT]);
-            
-            if (resultSet.goToFirstRow()) {
-              const columnIndex: number = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_RESOURCE_COUNT);
-              const currentCount: number = resultSet.getLong(columnIndex);
-              
-              const values: relationalStore.ValuesBucket = {
-                resource_count: currentCount + 1
-              };
-              
-              const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-              updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-              await rdbStore.update(values, updatePredicates);
-              
-            } else {
-              FTInnerLogger.w(TAG, `View not found when increasing resource count: (${this.viewId})`);
-            }
-            resultSet.close();
-          }
-        }
-      }
-      
-      const callback: DataBaseCallBack = new IncreaseViewResourceCallback(viewId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to increase view resource count: ${error}`);
+    return aggregate;
+  }
+
+  private getOrCreateActionCounterAggregate(
+    aggregates: Map<string, RUMActionCounterAggregate>,
+    actionId: string
+  ): RUMActionCounterAggregate {
+    let aggregate = aggregates.get(actionId);
+    if (!aggregate) {
+      aggregate = new RUMActionCounterAggregate(actionId);
+      aggregates.set(actionId, aggregate);
+    }
+    return aggregate;
+  }
+
+  private appendPositiveCounterAssignment(assignments: string[], column: string, delta: number): void {
+    const normalizedDelta = Math.max(0, Math.floor(delta));
+    if (normalizedDelta > 0) {
+      assignments.push(`${column} = ${column} + ${normalizedDelta}`);
     }
   }
 
-  /**
-   * Complete a resource for the view with one atomic SQL write.
-   *
-   * This is used by stopResource to avoid queueing separate DB writes for
-   * resource_count, pending_resource and view_update_time.
-   */
-  public async completeViewResource(viewId: string): Promise<void> {
-    if (!viewId) {
-      return;
-    }
-    try {
-      class CompleteViewResourceCallback implements DataBaseCallBack {
-        private viewId: string;
-        constructor(viewId: string) {
-          this.viewId = viewId;
-        }
-
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          const updateSql =
-            `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
-              `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
-              `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
-                `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END, ` +
-              `${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + 1, ` +
-              `${FTSQL.RUM_DATA_UPDATE_TIME} = ${Date.now()} ` +
-            `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-          await rdbStore.executeSql(updateSql);
-        }
-      }
-
-      const callback: DataBaseCallBack = new CompleteViewResourceCallback(viewId);
-      await this.getDB(true, callback);
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to complete view resource: ${error}`);
+  private appendPendingCounterAssignment(assignments: string[], column: string, delta: number): void {
+    const normalizedDelta = Math.floor(delta);
+    if (normalizedDelta > 0) {
+      assignments.push(`${column} = ${column} + ${normalizedDelta}`);
+    } else if (normalizedDelta < 0) {
+      const decrement = Math.abs(normalizedDelta);
+      assignments.push(
+        `${column} = CASE WHEN ${column} > ${decrement} THEN ${column} - ${decrement} ELSE 0 END`
+      );
     }
   }
 
-  /**
-   * Complete a resource for view/action with one DB write lock.
-   */
-  public async completeResource(viewId: string, actionId: string): Promise<void> {
-    const hasViewId = viewId.length > 0;
-    const hasActionId = actionId.length > 0;
-    if (!hasViewId && !hasActionId) {
+  private async applyRumViewCounterAggregate(
+    rdbStore: relationalStore.RdbStore,
+    aggregate: RUMViewCounterAggregate,
+    now: number
+  ): Promise<void> {
+    const assignments: string[] = [];
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ERROR_COUNT, aggregate.errorDelta);
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_LONG_TASK_COUNT, aggregate.longTaskDelta);
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_RESOURCE_COUNT, aggregate.resourceDelta);
+    this.appendPendingCounterAssignment(assignments, FTSQL.RUM_COLUMN_PENDING_RESOURCE, aggregate.pendingDelta);
+    if (aggregate.updateTimeDelta > 0) {
+      assignments.push(`${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + ${Math.floor(aggregate.updateTimeDelta)}`);
+      assignments.push(`${FTSQL.RUM_DATA_UPDATE_TIME} = ${now}`);
+    }
+    if (assignments.length === 0) {
       return;
     }
 
-    try {
-      class CompleteResourceCallback implements DataBaseCallBack {
-        private viewId: string;
-        private actionId: string;
+    const viewId = FTDBManager.escapeSqlString(aggregate.id);
+    const updateSql =
+      `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${assignments.join(', ')} ` +
+      `WHERE ${FTSQL.RUM_COLUMN_ID} = '${viewId}'`;
+    await rdbStore.executeSql(updateSql);
+  }
 
-        constructor(viewId: string, actionId: string) {
-          this.viewId = viewId;
-          this.actionId = actionId;
+  private async applyRumActionCounterAggregate(
+    rdbStore: relationalStore.RdbStore,
+    aggregate: RUMActionCounterAggregate
+  ): Promise<void> {
+    const assignments: string[] = [];
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ERROR_COUNT, aggregate.errorDelta);
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_LONG_TASK_COUNT, aggregate.longTaskDelta);
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_RESOURCE_COUNT, aggregate.resourceDelta);
+    this.appendPendingCounterAssignment(assignments, FTSQL.RUM_COLUMN_PENDING_RESOURCE, aggregate.pendingDelta);
+    if (assignments.length === 0) {
+      return;
+    }
+
+    const actionId = FTDBManager.escapeSqlString(aggregate.id);
+    const updateSql =
+      `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${assignments.join(', ')} ` +
+      `WHERE ${FTSQL.RUM_COLUMN_ID} = '${actionId}'`;
+    await rdbStore.executeSql(updateSql);
+  }
+
+  private collectRumCounterAggregates(
+    deltas: RUMCounterDelta[],
+    viewAggregates: Map<string, RUMViewCounterAggregate>,
+    actionAggregates: Map<string, RUMActionCounterAggregate>
+  ): void {
+    for (const delta of deltas) {
+      if (delta.viewId && delta.viewId.length > 0) {
+        const viewAggregate = this.getOrCreateViewCounterAggregate(viewAggregates, delta.viewId);
+        viewAggregate.errorDelta += Math.max(0, Math.floor(delta.viewErrorDelta));
+        viewAggregate.longTaskDelta += Math.max(0, Math.floor(delta.viewLongTaskDelta));
+        viewAggregate.resourceDelta += Math.max(0, Math.floor(delta.viewResourceDelta));
+        viewAggregate.pendingDelta += Math.floor(delta.viewPendingDelta);
+        viewAggregate.updateTimeDelta += Math.max(0, Math.floor(delta.viewUpdateTimeDelta));
+      }
+
+      if (delta.actionId && delta.actionId.length > 0) {
+        const actionAggregate = this.getOrCreateActionCounterAggregate(actionAggregates, delta.actionId);
+        actionAggregate.errorDelta += Math.max(0, Math.floor(delta.actionErrorDelta));
+        actionAggregate.longTaskDelta += Math.max(0, Math.floor(delta.actionLongTaskDelta));
+        actionAggregate.resourceDelta += Math.max(0, Math.floor(delta.actionResourceDelta));
+        actionAggregate.pendingDelta += Math.floor(delta.actionPendingDelta);
+      }
+    }
+  }
+
+  public async applyRumCounterDeltas(deltas: RUMCounterDelta[]): Promise<void> {
+    if (!deltas || deltas.length === 0) {
+      return;
+    }
+
+    const manager = this;
+    const viewAggregates: Map<string, RUMViewCounterAggregate> = new Map();
+    const actionAggregates: Map<string, RUMActionCounterAggregate> = new Map();
+    this.collectRumCounterAggregates(deltas, viewAggregates, actionAggregates);
+    const operationCount = Math.max(1, viewAggregates.size + actionAggregates.size);
+
+    class ApplyRumCounterDeltasCallback implements DataBaseCallBack {
+      private viewAggregates: Map<string, RUMViewCounterAggregate>;
+      private actionAggregates: Map<string, RUMActionCounterAggregate>;
+
+      constructor(
+        viewAggregates: Map<string, RUMViewCounterAggregate>,
+        actionAggregates: Map<string, RUMActionCounterAggregate>
+      ) {
+        this.viewAggregates = viewAggregates;
+        this.actionAggregates = actionAggregates;
+      }
+
+      async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+        const now = Date.now();
+        const viewIds = Array.from(this.viewAggregates.keys());
+        for (const viewId of viewIds) {
+          const aggregate = this.viewAggregates.get(viewId);
+          if (aggregate) {
+            await manager.applyRumViewCounterAggregate(rdbStore, aggregate, now);
+          }
         }
 
-        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-          const now = Date.now();
-
-          if (this.viewId && this.viewId.length > 0) {
-            try {
-              const viewSql =
-                `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
-                  `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
-                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
-                    `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END, ` +
-                  `${FTSQL.RUM_VIEW_UPDATE_TIME} = ${FTSQL.RUM_VIEW_UPDATE_TIME} + 1, ` +
-                  `${FTSQL.RUM_DATA_UPDATE_TIME} = ${now} ` +
-                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.viewId}'`;
-              await rdbStore.executeSql(viewSql);
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Complete view resource failed: ${this.viewId}, ${error}`);
-            }
-          }
-
-          if (this.actionId && this.actionId.length > 0) {
-            try {
-              const actionSql =
-                `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ` +
-                  `${FTSQL.RUM_COLUMN_RESOURCE_COUNT} = ${FTSQL.RUM_COLUMN_RESOURCE_COUNT} + 1, ` +
-                  `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 ` +
-                    `THEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END ` +
-                `WHERE ${FTSQL.RUM_COLUMN_ID} = '${this.actionId}'`;
-              await rdbStore.executeSql(actionSql);
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Complete action resource failed: ${this.actionId}, ${error}`);
-            }
+        const actionIds = Array.from(this.actionAggregates.keys());
+        for (const actionId of actionIds) {
+          const aggregate = this.actionAggregates.get(actionId);
+          if (aggregate) {
+            await manager.applyRumActionCounterAggregate(rdbStore, aggregate);
           }
         }
       }
+    }
 
-      const callback: DataBaseCallBack = new CompleteResourceCallback(viewId, actionId);
-      await this.getDB(true, callback);
+    try {
+      const callback: DataBaseCallBack = new ApplyRumCounterDeltasCallback(viewAggregates, actionAggregates);
+      await this.getDBWithCount(true, operationCount, callback, undefined, true);
     } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to complete resource counts: ${error}`);
+      FTInnerLogger.e(TAG, `Failed to apply RUM counter deltas: ${error}`);
     }
   }
 
@@ -2607,11 +2227,11 @@ export class FTDBManager extends DBManager {
     try {
       class UpdateViewUpdateTimeCallback implements DataBaseCallBack {
         private viewId: string;
-        
+
         constructor(viewId: string) {
           this.viewId = viewId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const updateSql =
             `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ` +
@@ -2621,10 +2241,10 @@ export class FTDBManager extends DBManager {
           await rdbStore.executeSql(updateSql);
         }
       }
-      
+
       const callback: DataBaseCallBack = new UpdateViewUpdateTimeCallback(viewId);
       await this.getDB(true, callback);
-      
+
       return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to update view update time: ${error}`);
@@ -2663,7 +2283,7 @@ export class FTDBManager extends DBManager {
           await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
         }
       }
-      
+
       const callback: DataBaseCallBack = new InsertActionCallback();
       await this.getDB(true, callback);
 
@@ -2695,38 +2315,38 @@ export class FTDBManager extends DBManager {
         private force: boolean;
         private wasClosed: boolean = false;
         private hadPendingResource: boolean = false;
-        
+
         constructor(actionId: string, duration: number, force: boolean) {
           this.actionId = actionId;
           this.duration = duration;
           this.force = force;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           // Aligned with Android: query action first to check if it exists and meets conditions
           const queryPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           queryPredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-          
+
           // If not force, only close actions with pending_resource <= 0
           // Note: RdbPredicates doesn't support <= directly, so we query all and filter in memory
           // or use a different approach - for now, we'll query and check
           const resultSet = await rdbStore.query(queryPredicates, [FTSQL.RUM_COLUMN_ID, FTSQL.RUM_COLUMN_PENDING_RESOURCE]);
-          
+
           if (resultSet.goToFirstRow()) {
             const pendingResourceCol = resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE);
             const pendingResource = resultSet.getLong(pendingResourceCol);
-            
+
             // Check if action can be closed (force or pending_resource <= 0)
             if (this.force || pendingResource <= 0) {
               // Update action to closed
               const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
               updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, this.actionId);
-              
+
               const values: relationalStore.ValuesBucket = {
                 is_close: 1,
                 action_duration: this.duration
               };
-              
+
               const updateCount: number = await rdbStore.update(values, updatePredicates);
               if (updateCount > 0) {
                 this.wasClosed = true;
@@ -2744,19 +2364,19 @@ export class FTDBManager extends DBManager {
             resultSet.close();
           }
         }
-        
+
         getWasClosed(): boolean {
           return this.wasClosed;
         }
-        
+
         getHadPendingResource(): boolean {
           return this.hadPendingResource;
         }
       }
-      
+
       const callback = new CloseActionCallback(actionId, duration, force);
       await this.getDB(true, callback);
-      
+
       // If action was closed and had pending_resource, schedule delayed cleanup
       if (callback.getWasClosed() && callback.getHadPendingResource()) {
         // Schedule a delayed task to force clear pending_resource if it's still > 0 after 30 seconds
@@ -2779,7 +2399,7 @@ export class FTDBManager extends DBManager {
           })();
         }, 30 * 1000);
       }
-      
+
       return callback.getWasClosed();
     } catch (error) {
       FTInnerLogger.e(TAG, `Close action failed: ${error as string}`);
@@ -2817,13 +2437,13 @@ export class FTDBManager extends DBManager {
     try {
       class QueryActionCallback implements DataBaseCallBack {
         private result: ActionBean[] = [];
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
           predicates.orderByAsc(FTSQL.RUM_COLUMN_START_TIME);
           predicates.limitAs(limit);
-          
+
           const resultSet = await rdbStore.query(predicates);
           if (resultSet.goToFirstRow()) {
             do {
@@ -2850,18 +2470,18 @@ export class FTDBManager extends DBManager {
               actionBean.setActionName(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_NAME)));
               actionBean.setActionType(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_TYPE)));
               actionBean.setAttrJsonString(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
-              
+
               this.result.push(actionBean);
             } while (resultSet.goToNextRow());
           }
           resultSet.close();
         }
-        
+
         getResult(): ActionBean[] {
           return this.result;
         }
       }
-      
+
       const callback = new QueryActionCallback();
       await this.getDB(false, callback);
       return callback.getResult();
@@ -2925,7 +2545,7 @@ export class FTDBManager extends DBManager {
     try {
       class QueryViewCallback implements DataBaseCallBack {
         private result: ViewBean[] = [];
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const sql = `
             SELECT * FROM ${FTSQL.FT_TABLE_VIEW}
@@ -2972,18 +2592,18 @@ export class FTDBManager extends DBManager {
               viewBean.setDataUploadTime(uploadTime);
               viewBean.setViewUpdateTime(resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME)));
               viewBean.setAttrJsonString(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
-              
+
               this.result.push(viewBean);
             } while (resultSet.goToNextRow());
           }
           resultSet.close();
         }
-        
+
         getResult(): ViewBean[] {
           return this.result;
         }
       }
-      
+
       const callback = new QueryViewCallback();
       await this.getDB(false, callback);
       return callback.getResult();
@@ -3003,20 +2623,20 @@ export class FTDBManager extends DBManager {
     if (!viewId) {
       return null;
     }
-    
+
     try {
       class QueryViewByIdCallback implements DataBaseCallBack {
         private viewId: string;
         private result: ViewBean | null = null;
-        
+
         constructor(viewId: string) {
           this.viewId = viewId;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
           predicates.equalTo(FTSQL.RUM_COLUMN_ID, this.viewId);
-          
+
           const resultSet = await rdbStore.query(predicates);
           if (resultSet.goToFirstRow()) {
             // Use getString() for start_time to handle large BIGINT values (19-digit nanosecond timestamps)
@@ -3042,17 +2662,17 @@ export class FTDBManager extends DBManager {
             viewBean.setDataUploadTime(resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME)));
             viewBean.setViewUpdateTime(resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME)));
             viewBean.setAttrJsonString(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
-            
+
             this.result = viewBean;
           }
           resultSet.close();
         }
-        
+
         getResult(): ViewBean | null {
           return this.result;
         }
       }
-      
+
       const callback = new QueryViewByIdCallback(viewId);
       await this.getDB(false, callback);
       return callback.getResult();
@@ -3076,11 +2696,11 @@ export class FTDBManager extends DBManager {
         class DeleteActionCallback implements DataBaseCallBack {
           private ids: string[];
           private deletedCount: number = 0;
-          
+
           constructor(ids: string[]) {
             this.ids = ids;
           }
-          
+
           async run(rdbStore: relationalStore.RdbStore): Promise<void> {
             // Delete each action by ID (aligned with Android: uses batch delete for better performance)
             // Note: HarmonyOS doesn't support batch operations like Android's applyBatch,
@@ -3094,15 +2714,15 @@ export class FTDBManager extends DBManager {
               }
             }
           }
-          
+
           getDeletedCount(): number {
             return this.deletedCount;
           }
         }
-        
+
         const callback = new DeleteActionCallback(ids);
         await this.getDB(true, callback);
-        
+
         const actualDeleted = callback.getDeletedCount();
         if (actualDeleted !== ids.length) {
           FTInnerLogger.w(TAG, `Clean close action data incomplete: ${actualDeleted}/${ids.length}`);
@@ -3116,20 +2736,20 @@ export class FTDBManager extends DBManager {
         const nowNanos = Utils.getCurrentNanoTime();
         const STALE_ACTION_THRESHOLD_MS = 30 * 1000; // 30 seconds: delete unclosed actions older than 30 seconds even if pending_resource>0
         const staleThresholdNanos = nowNanos - (STALE_ACTION_THRESHOLD_MS * 1000000); // Convert ms to nanoseconds
-        
+
         class DeleteAllCloseActionCallback implements DataBaseCallBack {
           private staleThresholdNanos: number;
-          
+
           constructor(staleThresholdNanos: number) {
             this.staleThresholdNanos = staleThresholdNanos;
           }
-          
+
           async run(rdbStore: relationalStore.RdbStore): Promise<void> {
             // First, delete normal closed actions (is_close=1)
             const normalPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
             normalPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
             await rdbStore.delete(normalPredicates);
-            
+
             // Then, delete stale unclosed actions (is_close=0, pending_resource>0, start_time older than threshold)
             // This prevents data residue in stress test scenarios
             // Note: We need to recreate predicates for deletion because query() may modify the predicates object
@@ -3137,7 +2757,7 @@ export class FTDBManager extends DBManager {
             staleQueryPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
             staleQueryPredicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
             staleQueryPredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_START_TIME, this.staleThresholdNanos);
-            
+
             // First query to count how many stale actions exist (for debugging)
             const countResult = await rdbStore.query(staleQueryPredicates, ['count(*) as count']);
             let staleCount = 0;
@@ -3145,7 +2765,7 @@ export class FTDBManager extends DBManager {
               staleCount = countResult.getLong(0);
             }
             countResult.close();
-            
+
             if (staleCount > 0) {
               // Recreate predicates for deletion (RdbPredicates may be modified by query)
               const staleDeletePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
@@ -3159,7 +2779,7 @@ export class FTDBManager extends DBManager {
             }
           }
         }
-        
+
         const callback = new DeleteAllCloseActionCallback(staleThresholdNanos);
         await this.getDB(true, callback);
       }
@@ -3181,20 +2801,20 @@ export class FTDBManager extends DBManager {
     try {
       const now = Date.now();
       const STALE_VIEW_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes: delete closed views older than 5 minutes even if pending_resource>0
-      
+
       // If ids is provided and not empty, delete specific views
       if (ids && ids.length > 0) {
         class DeleteViewCallback implements DataBaseCallBack {
           private viewIds: string[];
           private now: number;
           private threshold: number;
-          
+
           constructor(viewIds: string[], now: number, threshold: number) {
             this.viewIds = viewIds;
             this.now = now;
             this.threshold = threshold;
           }
-          
+
           async run(rdbStore: relationalStore.RdbStore): Promise<void> {
             for (const id of this.viewIds) {
               const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -3206,7 +2826,7 @@ export class FTDBManager extends DBManager {
             }
           }
         }
-        
+
         const callback = new DeleteViewCallback(ids, now, STALE_VIEW_THRESHOLD_MS);
         await this.getDBWithCount(true, ids.length, callback);
       } else {
@@ -3216,12 +2836,12 @@ export class FTDBManager extends DBManager {
         class DeleteAllCloseViewCallback implements DataBaseCallBack {
           private now: number;
           private threshold: number;
-          
+
           constructor(now: number, threshold: number) {
             this.now = now;
             this.threshold = threshold;
           }
-          
+
           async run(rdbStore: relationalStore.RdbStore): Promise<void> {
             // First, delete normal closed views (pending_resource<=0)
             const normalPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -3229,7 +2849,7 @@ export class FTDBManager extends DBManager {
             normalPredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
             // Aligned with Android: no data_upload_time check
             await rdbStore.delete(normalPredicates);
-            
+
             // Then, delete stale closed views (closed for >5 minutes) even if pending_resource>0
             // This prevents leftover data in stress test scenarios
             const stalePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -3239,7 +2859,7 @@ export class FTDBManager extends DBManager {
             await rdbStore.delete(stalePredicates);
           }
         }
-        
+
         const callback = new DeleteAllCloseViewCallback(now, STALE_VIEW_THRESHOLD_MS);
         await this.getDB(true, callback);
       }
@@ -3264,7 +2884,7 @@ export class FTDBManager extends DBManager {
             data_update_time: Date.now()
           };
           await rdbStore.update(viewValues, viewPredicates);
-          
+
           // Close all actions: set is_close=1, pending_resource=0
           const actionPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
           const actionValues: relationalStore.ValuesBucket = {
@@ -3274,7 +2894,7 @@ export class FTDBManager extends DBManager {
           await rdbStore.update(actionValues, actionPredicates);
         }
       }
-      
+
       const callback = new CloseAllCallback();
       await this.getDB(true, callback);
       FTInnerLogger.i(TAG, "All actions and views closed");
@@ -3338,15 +2958,15 @@ export class FTDBManager extends DBManager {
   public async updateDataType(errorSampledDataType: string, errorTimeLine: number): Promise<number> {
     const ERROR_SAMPLED_SUFFIX = "_error_sampled";
     const dataTypeStr = errorSampledDataType;
-    
+
     // Check if this is an error sampled type
     if (!dataTypeStr.endsWith(ERROR_SAMPLED_SUFFIX)) {
       return 0;
     }
-    
+
     // Remove suffix to get target type
     const targetDataType = dataTypeStr.replace(ERROR_SAMPLED_SUFFIX, "");
-    
+
     let updateCount = 0;
     try {
       class UpdateDataTypeCallback implements DataBaseCallBack {
@@ -3354,39 +2974,39 @@ export class FTDBManager extends DBManager {
         private sourceType: string;
         private targetType: string;
         private timeLine: number;
-        
+
         constructor(sourceType: string, targetType: string, timeLine: number) {
           this.sourceType = sourceType;
           this.targetType = targetType;
           this.timeLine = timeLine;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           // First count records matching criteria
           const countPredicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
           countPredicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.sourceType);
           countPredicates.lessThanOrEqualTo(FTSQL.RECORD_COLUMN_TM, this.timeLine);
-          
+
           const countResult = await rdbStore.query(countPredicates, ['count(*) as count']);
           if (countResult.goToFirstRow()) {
             this.count = countResult.getLong(0);
           }
           countResult.close();
-          
+
           if (this.count > 0) {
             // Update data type
             const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
             updatePredicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.sourceType);
             updatePredicates.lessThanOrEqualTo(FTSQL.RECORD_COLUMN_TM, this.timeLine);
-            
+
             const values: relationalStore.ValuesBucket = {};
             values[FTSQL.RECORD_COLUMN_DATA_TYPE] = this.targetType;
-            
+
             await rdbStore.update(values, updatePredicates);
           }
         }
       }
-      
+
       const callback = new UpdateDataTypeCallback(dataTypeStr, targetDataType, errorTimeLine);
       await this.getDB(true, callback);
       updateCount = callback.count;
@@ -3394,7 +3014,7 @@ export class FTDBManager extends DBManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `updateDataType failed: ${error as string}`);
     }
-    
+
     return updateCount;
   }
 
@@ -3409,39 +3029,39 @@ export class FTDBManager extends DBManager {
   public async deleteExpireCache(dataType: DataType | string, now: number, expireDuration: number): Promise<number> {
     const expireTimeline = now - expireDuration;
     let deleteCount = 0;
-    
+
     const dataTypeStr: string = String(dataType);
-    
+
     try {
       class DeleteExpireCallback implements DataBaseCallBack {
         count: number = 0;
         private typeStr: string;
         private expireTime: number;
-        
+
         constructor(typeStr: string, expireTime: number) {
           this.typeStr = typeStr;
           this.expireTime = expireTime;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           const deletePredicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
           deletePredicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.typeStr);
           deletePredicates.lessThan(FTSQL.RECORD_COLUMN_TM, this.expireTime);
-          
+
           // First count records to be deleted
           const countResult = await rdbStore.query(deletePredicates, ['count(*) as count']);
           if (countResult.goToFirstRow()) {
             this.count = countResult.getLong(0);
           }
           countResult.close();
-          
+
           if (this.count > 0) {
             // Delete expired records
             await rdbStore.delete(deletePredicates);
           }
         }
       }
-      
+
       const callback = new DeleteExpireCallback(dataTypeStr, expireTimeline);
       await this.getDB(true, callback);
       deleteCount = callback.count;
@@ -3449,7 +3069,7 @@ export class FTDBManager extends DBManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `deleteExpireCache failed: ${error as string}`);
     }
-    
+
     return deleteCount;
   }
 
@@ -3464,7 +3084,7 @@ export class FTDBManager extends DBManager {
     if (!actionId || !measurementType) {
       return [];
     }
-    
+
     const uuids: string[] = [];
     try {
       class QueryRelatedUUIDsCallback implements DataBaseCallBack {
@@ -3472,34 +3092,34 @@ export class FTDBManager extends DBManager {
         private measurementType: string;
         private dataTypeStr: string;
         private result: string[] = [];
-        
+
         constructor(actionId: string, measurementType: string, dataTypeStr: string) {
           this.actionId = actionId;
           this.measurementType = measurementType;
           this.dataTypeStr = dataTypeStr;
         }
-        
+
         async run(rdbStore: relationalStore.RdbStore): Promise<void> {
           try {
             // Query sync_data_flat table for records matching dataType
             const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
             predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.dataTypeStr);
-            
+
             const columns = [FTSQL.RECORD_COLUMN_DATA, FTSQL.RECORD_COLUMN_DATA_UUID];
             const resultSet = await rdbStore.query(predicates, columns);
-            
+
             if (resultSet.goToFirstRow()) {
               do {
                 const dataStr = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA));
                 const uuid = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_UUID));
-                
+
                 if (dataStr && uuid) {
                   // Parse Line Protocol format: measurement,tags fields timestamp
                   // Format: measurement,tag1=value1,tag2=value2 field1=value1 field2=value2 timestamp
                   // Check if this record:
                   // 1. Starts with the measurement type (e.g., "error", "resource", "long_task")
                   // 2. Contains action_id=xxx in the tags section (before the first space)
-                  const measurementMatch = dataStr.startsWith(this.measurementType + ',') || 
+                  const measurementMatch = dataStr.startsWith(this.measurementType + ',') ||
                                           dataStr.startsWith(this.measurementType + ' ');
                   if (measurementMatch) {
                     // Find the tags section (between measurement and first space)
@@ -3522,12 +3142,12 @@ export class FTDBManager extends DBManager {
             FTInnerLogger.e(TAG, `queryRelatedUUIDsByActionId failed: ${error}`);
           }
         }
-        
+
         getResult(): string[] {
           return this.result;
         }
       }
-      
+
       const dataTypeStr = String(dataType);
       const callback = new QueryRelatedUUIDsCallback(actionId, measurementType, dataTypeStr);
       await this.getDB(false, callback);

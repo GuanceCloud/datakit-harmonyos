@@ -3,7 +3,6 @@ import { DataType } from '../../enum/Enums';
 import { NetCodeStatus } from '../../http/HttpEngine';
 import { FTInnerLogger } from '../../log/FTLogger';
 import {
-  DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT,
   DataUploadConsumeOptions,
   DataUploadConsumeMetrics,
   DataUploadConsumeResult,
@@ -188,9 +187,9 @@ export class DataUploadWorkerExecutor {
 
   private sanitizePageSize(pageSize: number): number {
     if (pageSize !== pageSize || pageSize <= 0) {
-      return DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT;
+      return 1;
     }
-    return Math.min(Math.floor(pageSize), DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT);
+    return Math.max(1, Math.floor(pageSize));
   }
 
   private async errorSampledConsume(

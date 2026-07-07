@@ -36,10 +36,20 @@ import {
 } from './thread/SDKWorkerProtocol';
 import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
+import { FTDBCachePolicy } from './db/FTDBCachePolicy';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
 const TAG = "FTTrackInner";
+const RUM_DETAIL_DB_BATCH_FLUSH_DELAY_MS = 50;
+const RUM_DETAIL_DB_BATCH_MAX_RECORDS = 64;
+
+enum WriteCacheCategory {
+  LOG = 'log',
+  RUM = 'rum',
+  NONE = 'none',
+  MIXED = 'mixed'
+}
 
 /**
  * Sync Data Parameters Interface
@@ -63,6 +73,28 @@ interface SDKLineProtocolRecordsRequestPayload {
   records: SDKLineProtocolInputDTO[];
 }
 
+interface SyncDataCachePolicyDecision {
+  records: SyncData[];
+  dropped: number;
+  deletedOld: number;
+  reservedLog: number;
+  reservedRum: number;
+  useDatabaseCachePolicy: boolean;
+}
+
+interface SyncDataCacheCountSummary {
+  log: number;
+  rum: number;
+}
+
+interface RumDetailDbWriteBatchEntry {
+  source: string;
+  requested: number;
+  decision: SyncDataCachePolicyDecision;
+  resolve: (result: SyncDataWriteResult | null) => void;
+  reject: (error: Error) => void;
+}
+
 /**
  * Data Tracking Core Class
  * Responsible for data collection, storage, and sync triggering
@@ -77,6 +109,11 @@ class FTTrackInner {
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
   private context: Context | null = null;
+  private logCachePolicyTail: Promise<void> = Promise.resolve();
+  private rumCachePolicyTail: Promise<void> = Promise.resolve();
+  private rumDetailDbWriteBatch: RumDetailDbWriteBatchEntry[] = [];
+  private rumDetailDbWriteBatchTimer: number = -1;
+  private rumDetailDbWriteBatchFlushing: boolean = false;
 
   /**
    * Get all keys of an object (alternative to for...in loop)
@@ -454,6 +491,427 @@ class FTTrackInner {
     }
   }
 
+  private getWriteCacheCategory(dataType: DataType): WriteCacheCategory {
+    if (dataType === DataType.LOG) {
+      return WriteCacheCategory.LOG;
+    }
+    if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
+      return WriteCacheCategory.RUM;
+    }
+    return WriteCacheCategory.NONE;
+  }
+
+  private getWriteCacheCategoryForRecords(records: SyncData[]): WriteCacheCategory {
+    let result = WriteCacheCategory.NONE;
+    for (const record of records) {
+      const category = this.getWriteCacheCategory(record.getDataType());
+      if (category === WriteCacheCategory.NONE) {
+        continue;
+      }
+      if (result === WriteCacheCategory.NONE) {
+        result = category;
+        continue;
+      }
+      if (result !== category) {
+        return WriteCacheCategory.MIXED;
+      }
+    }
+    return result;
+  }
+
+  private createCachePolicyDecision(
+    records: SyncData[],
+    dropped: number,
+    deletedOld: number,
+    reservedLog: number,
+    reservedRum: number,
+    useDatabaseCachePolicy: boolean
+  ): SyncDataCachePolicyDecision {
+    return {
+      records,
+      dropped,
+      deletedOld,
+      reservedLog,
+      reservedRum,
+      useDatabaseCachePolicy
+    };
+  }
+
+  private createPassthroughCachePolicyDecision(records: SyncData[]): SyncDataCachePolicyDecision {
+    return this.createCachePolicyDecision(records, 0, 0, 0, 0, false);
+  }
+
+  private createPolicyOnlyWriteResult(
+    source: string,
+    requested: number,
+    dropped: number,
+    deletedOld: number
+  ): SyncDataWriteResult {
+    return {
+      success: true,
+      source,
+      requested,
+      inserted: 0,
+      dropped,
+      duplicateSkipped: 0,
+      deletedOld,
+      errorMessage: ''
+    };
+  }
+
+  private async runCachePolicyLocked(
+    category: WriteCacheCategory,
+    runner: () => Promise<SyncDataCachePolicyDecision>
+  ): Promise<SyncDataCachePolicyDecision> {
+    const previousTail = category === WriteCacheCategory.LOG ? this.logCachePolicyTail : this.rumCachePolicyTail;
+    let releaseTail: () => void = () => {};
+    const currentTail = new Promise<void>((resolve) => {
+      releaseTail = () => {
+        resolve();
+      };
+    });
+    const chainedTail = previousTail.catch(() => {}).then(() => currentTail);
+    if (category === WriteCacheCategory.LOG) {
+      this.logCachePolicyTail = chainedTail;
+    } else {
+      this.rumCachePolicyTail = chainedTail;
+    }
+
+    await previousTail.catch(() => {});
+    try {
+      return await runner();
+    } finally {
+      releaseTail();
+    }
+  }
+
+  private async applySingleCategoryCachePolicy(
+    category: WriteCacheCategory,
+    records: SyncData[]
+  ): Promise<SyncDataCachePolicyDecision> {
+    if (!this.context) {
+      return this.createPassthroughCachePolicyDecision(records);
+    }
+
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    if (category === WriteCacheCategory.LOG) {
+      const status = await cachePolicy.optLogCachePolicy(this.context, records.length);
+      const deletedOld = status > 0 ? status : 0;
+      if (status < 0) {
+        const dropCount = Math.min(records.length, Math.abs(status));
+        const allowedCount = Math.max(0, records.length - dropCount);
+        const allowedRecords = records.slice(0, allowedCount);
+        if (allowedCount > 0) {
+          cachePolicy.optLogCount(allowedCount);
+        }
+        return this.createCachePolicyDecision(allowedRecords, dropCount, 0, allowedCount, 0, false);
+      }
+
+      cachePolicy.optLogCount(records.length);
+      return this.createCachePolicyDecision(records, 0, deletedOld, records.length, 0, false);
+    }
+
+    if (category === WriteCacheCategory.RUM) {
+      const status = await cachePolicy.optRUMCachePolicy(this.context, records.length);
+      const deletedOld = status > 0 ? status : 0;
+      if (status < 0) {
+        return this.createCachePolicyDecision([], records.length, 0, 0, 0, false);
+      }
+
+      cachePolicy.optRumCount(records.length);
+      return this.createCachePolicyDecision(records, 0, deletedOld, 0, records.length, false);
+    }
+
+    return this.createPassthroughCachePolicyDecision(records);
+  }
+
+  private async applyWriteCachePolicy(records: SyncData[]): Promise<SyncDataCachePolicyDecision> {
+    const category = this.getWriteCacheCategoryForRecords(records);
+    if (category === WriteCacheCategory.LOG || category === WriteCacheCategory.RUM) {
+      return await this.runCachePolicyLocked(category, async () => {
+        return await this.applySingleCategoryCachePolicy(category, records);
+      });
+    }
+
+    if (category === WriteCacheCategory.MIXED) {
+      FTInnerLogger.w(TAG, `Mixed cache categories in one write batch, fallback to DB-side cache policy`);
+      return this.createCachePolicyDecision(records, 0, 0, 0, 0, true);
+    }
+
+    return this.createPassthroughCachePolicyDecision(records);
+  }
+
+  private countInsertedCacheRecords(records: SyncData[], inserted: number): SyncDataCacheCountSummary {
+    const summary: SyncDataCacheCountSummary = {
+      log: 0,
+      rum: 0
+    };
+    const insertedLimit = Math.min(records.length, Math.max(0, inserted));
+    for (let i = 0; i < insertedLimit; i++) {
+      const category = this.getWriteCacheCategory(records[i].getDataType());
+      if (category === WriteCacheCategory.LOG) {
+        summary.log++;
+      } else if (category === WriteCacheCategory.RUM) {
+        summary.rum++;
+      }
+    }
+    return summary;
+  }
+
+  private rollbackReservedCacheCounts(
+    decision: SyncDataCachePolicyDecision,
+    inserted: number,
+    dbDeletedOld: number
+  ): void {
+    if (decision.useDatabaseCachePolicy) {
+      return;
+    }
+
+    const insertedCounts = this.countInsertedCacheRecords(decision.records, inserted);
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    const logDbDeletes = decision.reservedLog > 0 ? dbDeletedOld : 0;
+    const rumDbDeletes = decision.reservedRum > 0 ? dbDeletedOld : 0;
+    const logRollback = Math.max(0, decision.reservedLog + logDbDeletes - insertedCounts.log);
+    const rumRollback = Math.max(0, decision.reservedRum + rumDbDeletes - insertedCounts.rum);
+    if (logRollback > 0) {
+      cachePolicy.optLogCount(-logRollback);
+    }
+    if (rumRollback > 0) {
+      cachePolicy.optRumCount(-rumRollback);
+    }
+  }
+
+  private mergeCachePolicyDecision(
+    result: SyncDataWriteResult,
+    requested: number,
+    decision: SyncDataCachePolicyDecision
+  ): SyncDataWriteResult {
+    result.requested = requested;
+    result.dropped += decision.dropped;
+    result.deletedOld += decision.deletedOld;
+    return result;
+  }
+
+  private isRumDetailBatchSource(source: string): boolean {
+    return source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}` ||
+      source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ERROR}` ||
+      source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_LONG_TASK}`;
+  }
+
+  private shouldCoalesceRumDetailDbWrite(
+    source: string,
+    requestedRecords: SyncData[],
+    decision: SyncDataCachePolicyDecision
+  ): boolean {
+    return this.isRumDetailBatchSource(source) &&
+      requestedRecords.length === 1 &&
+      decision.records.length > 0 &&
+      !decision.useDatabaseCachePolicy;
+  }
+
+  private getRumDetailDbBatchRecordCount(): number {
+    let count = 0;
+    for (const entry of this.rumDetailDbWriteBatch) {
+      count += entry.decision.records.length;
+    }
+    return count;
+  }
+
+  private clearRumDetailDbBatchTimer(): void {
+    if (this.rumDetailDbWriteBatchTimer >= 0) {
+      clearTimeout(this.rumDetailDbWriteBatchTimer);
+      this.rumDetailDbWriteBatchTimer = -1;
+    }
+  }
+
+  private scheduleRumDetailDbBatchFlush(delayMs: number = RUM_DETAIL_DB_BATCH_FLUSH_DELAY_MS): void {
+    if (this.rumDetailDbWriteBatchTimer >= 0 || this.rumDetailDbWriteBatchFlushing) {
+      return;
+    }
+    this.rumDetailDbWriteBatchTimer = setTimeout(() => {
+      this.rumDetailDbWriteBatchTimer = -1;
+      this.flushRumDetailDbBatch().catch((error: Error) => {
+        FTInnerLogger.e(TAG, `RUM detail DB batch flush failed: ${error}`);
+      });
+    }, delayMs) as number;
+  }
+
+  private createRumDetailBatchSource(entries: RumDetailDbWriteBatchEntry[]): string {
+    let resourceCount = 0;
+    let errorCount = 0;
+    let longTaskCount = 0;
+    for (const entry of entries) {
+      const count = entry.decision.records.length;
+      if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}`) {
+        resourceCount += count;
+      } else if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ERROR}`) {
+        errorCount += count;
+      } else if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_LONG_TASK}`) {
+        longTaskCount += count;
+      }
+    }
+    return `data.prepare.batch:resource=${resourceCount}:error=${errorCount}:long_task=${longTaskCount}`;
+  }
+
+  private createBatchEntryWriteResult(
+    source: string,
+    requested: number,
+    success: boolean,
+    inserted: number,
+    duplicateSkipped: number,
+    dbDeletedOld: number,
+    errorMessage: string
+  ): SyncDataWriteResult {
+    return {
+      success,
+      source,
+      requested,
+      inserted,
+      dropped: 0,
+      duplicateSkipped,
+      deletedOld: dbDeletedOld,
+      errorMessage
+    };
+  }
+
+  private resolveRumDetailDbBatchEntries(
+    entries: RumDetailDbWriteBatchEntry[],
+    writeResult: SyncDataWriteResult
+  ): void {
+    let remainingInserted = writeResult.success ? Math.max(0, writeResult.inserted) : 0;
+    let remainingDuplicate = writeResult.success ? Math.max(0, writeResult.duplicateSkipped) : 0;
+    let remainingDbDeletedOld = writeResult.success ? Math.max(0, writeResult.deletedOld) : 0;
+
+    for (const entry of entries) {
+      const eligibleCount = entry.decision.records.length;
+      const inserted = Math.min(eligibleCount, remainingInserted);
+      remainingInserted = Math.max(0, remainingInserted - inserted);
+      const duplicateSkipped = Math.min(Math.max(0, eligibleCount - inserted), remainingDuplicate);
+      remainingDuplicate = Math.max(0, remainingDuplicate - duplicateSkipped);
+      const dbDeletedOld = Math.min(eligibleCount, remainingDbDeletedOld);
+      remainingDbDeletedOld = Math.max(0, remainingDbDeletedOld - dbDeletedOld);
+
+      this.rollbackReservedCacheCounts(entry.decision, inserted, dbDeletedOld);
+      const entryResult = this.createBatchEntryWriteResult(
+        entry.source,
+        entry.requested,
+        writeResult.success,
+        inserted,
+        duplicateSkipped,
+        dbDeletedOld,
+        writeResult.errorMessage
+      );
+      entry.resolve(this.mergeCachePolicyDecision(entryResult, entry.requested, entry.decision));
+    }
+  }
+
+  private async writeRecordsToDb(
+    source: string,
+    records: SyncData[],
+    useDatabaseCachePolicy: boolean,
+    forceTransaction: boolean = false
+  ): Promise<SyncDataWriteResult> {
+    if (!this.context) {
+      throw new Error('Context is null');
+    }
+    const dbManager = FTDBManager.getInstance(this.context);
+    return await SDKDedicatedPoolManager.getInstance().runDbWrite(source, async (dbLaneWaitMs?: number) => {
+      return await dbManager.writeSyncDataAtomically(source, records, {
+        applyCachePolicy: useDatabaseCachePolicy,
+        reInsert: false,
+        dbLaneWaitMs: dbLaneWaitMs || 0,
+        forceTransaction
+      });
+    });
+  }
+
+  private takeRumDetailDbBatchChunk(maxRecords: number): RumDetailDbWriteBatchEntry[] {
+    const entries: RumDetailDbWriteBatchEntry[] = [];
+    let recordCount = 0;
+
+    while (this.rumDetailDbWriteBatch.length > 0) {
+      const entry = this.rumDetailDbWriteBatch[0];
+      const entryRecordCount = entry.decision.records.length;
+      if (entries.length > 0 && recordCount + entryRecordCount > maxRecords) {
+        break;
+      }
+      entries.push(entry);
+      this.rumDetailDbWriteBatch.splice(0, 1);
+      recordCount += entryRecordCount;
+      if (recordCount >= maxRecords) {
+        break;
+      }
+    }
+
+    return entries;
+  }
+
+  private async flushRumDetailDbBatch(): Promise<void> {
+    if (this.rumDetailDbWriteBatchFlushing) {
+      return;
+    }
+    this.clearRumDetailDbBatchTimer();
+    if (this.rumDetailDbWriteBatch.length === 0) {
+      return;
+    }
+
+    this.rumDetailDbWriteBatchFlushing = true;
+    const entries = this.takeRumDetailDbBatchChunk(RUM_DETAIL_DB_BATCH_MAX_RECORDS);
+    const records: SyncData[] = [];
+    for (const entry of entries) {
+      for (const record of entry.decision.records) {
+        records.push(record);
+      }
+    }
+
+    try {
+      const batchSource = this.createRumDetailBatchSource(entries);
+      const writeResult = await this.writeRecordsToDb(batchSource, records, false, records.length > 1);
+      this.resolveRumDetailDbBatchEntries(entries, writeResult);
+      if (writeResult.success && writeResult.inserted > 0) {
+        this.syncTaskManager.executeSyncPoll();
+      }
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      for (const entry of entries) {
+        this.rollbackReservedCacheCounts(entry.decision, 0, 0);
+        entry.reject(normalized);
+      }
+    } finally {
+      this.rumDetailDbWriteBatchFlushing = false;
+      if (this.rumDetailDbWriteBatch.length > 0) {
+        if (this.getRumDetailDbBatchRecordCount() >= RUM_DETAIL_DB_BATCH_MAX_RECORDS) {
+          this.scheduleRumDetailDbBatchFlush(0);
+        } else {
+          this.scheduleRumDetailDbBatchFlush();
+        }
+      }
+    }
+  }
+
+  private enqueueRumDetailDbWrite(
+    source: string,
+    requested: number,
+    decision: SyncDataCachePolicyDecision
+  ): Promise<SyncDataWriteResult | null> {
+    return new Promise<SyncDataWriteResult | null>((resolve, reject) => {
+      const entry: RumDetailDbWriteBatchEntry = {
+        source,
+        requested,
+        decision,
+        resolve,
+        reject
+      };
+      this.rumDetailDbWriteBatch.push(entry);
+      if (this.getRumDetailDbBatchRecordCount() >= RUM_DETAIL_DB_BATCH_MAX_RECORDS) {
+        this.clearRumDetailDbBatchTimer();
+        this.scheduleRumDetailDbBatchFlush(0);
+      } else {
+        this.scheduleRumDetailDbBatchFlush();
+      }
+    });
+  }
+
   private async writePreparedSyncData(source: string, records: SyncData[]): Promise<SyncDataWriteResult | null> {
     if (!records || records.length === 0) {
       return null;
@@ -463,13 +921,30 @@ class FTTrackInner {
       return null;
     }
 
-    const dbManager = FTDBManager.getInstance(this.context);
-    return await SDKDedicatedPoolManager.getInstance().runDbWrite(source, async () => {
-      return await dbManager.writeSyncDataAtomically(source, records, {
-        applyCachePolicy: true,
-        reInsert: false
-      });
-    });
+    const cacheDecision = await this.applyWriteCachePolicy(records);
+    if (cacheDecision.records.length === 0) {
+      return this.createPolicyOnlyWriteResult(source, records.length, cacheDecision.dropped, cacheDecision.deletedOld);
+    }
+
+    if (this.shouldCoalesceRumDetailDbWrite(source, records, cacheDecision)) {
+      return await this.enqueueRumDetailDbWrite(source, records.length, cacheDecision);
+    }
+
+    try {
+      const writeResult = await this.writeRecordsToDb(
+        source,
+        cacheDecision.records,
+        cacheDecision.useDatabaseCachePolicy,
+        cacheDecision.records.length > 1
+      );
+      const dbDeletedOld = writeResult.deletedOld;
+      this.rollbackReservedCacheCounts(cacheDecision, writeResult.inserted, dbDeletedOld);
+      return this.mergeCachePolicyDecision(writeResult, records.length, cacheDecision);
+    } catch (error) {
+      this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      throw normalized;
+    }
   }
 
   /**
@@ -584,6 +1059,7 @@ class FTTrackInner {
 
           const writeResult = await this.writePreparedSyncData(taskName, [recordData]);
           const result = writeResult !== null && writeResult.inserted > 0;
+          const syncPollDeferredToBatch = this.isRumDetailBatchSource(taskName);
           if (!result && writeResult !== null && writeResult.dropped > 0) {
             FTInnerLogger.e(TAG,
               `syncDataBackground: ${measurement} ${dataType}, uuid: ${recordData.getUuid()}, drop by Cache limit`);
@@ -593,7 +1069,7 @@ class FTTrackInner {
             callBack.onComplete();
           }
 
-          if (result) {
+          if (result && !syncPollDeferredToBatch) {
             this.syncTaskManager.executeSyncPoll();
           }
 

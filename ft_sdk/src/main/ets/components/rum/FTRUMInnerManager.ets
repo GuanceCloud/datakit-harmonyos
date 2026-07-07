@@ -13,7 +13,7 @@ import {
   CollectType,
 } from './enum/RUMEnums';
 import FTTrackInner from '../FTTrackInner';
-import { FTDBManager } from '../db/FTDBManager';
+import { FTDBManager, RUMCounterDelta } from '../db/FTDBManager';
 import { FTInnerLogger } from "../log/FTLogger";
 import {
   SDKTaskPriority,
@@ -21,6 +21,7 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from '../thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
 import {
   createSDKWorkerTaskBridgeHandler,
   createSDKWorkerTaskFallbackRunner,
@@ -44,6 +45,9 @@ import { SyncTaskManager } from '../SyncTaskManager';
 import { IS_PRE_CRASH } from '../FTExceptionHandler';
 import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
+
+const RUM_COUNTER_BATCH_FLUSH_DELAY_MS = 50;
+const RUM_COUNTER_BATCH_MAX_KEYS = 256;
 
 /**
  * Property wrapper interface for error properties
@@ -291,6 +295,11 @@ export class FTRUMInnerManager {
   
   // Timer for debouncing generateRumData calls (aligned with Android: mHandler.removeCallbacks)
   private rumDataGenerateTimer: number | null = null;
+
+  private rumCounterBatch: Map<string, RUMCounterDelta> = new Map();
+  private rumCounterBatchTimer: number = -1;
+  private rumCounterBatchNeedsActionCloseCheck: boolean = false;
+  private rumCounterBatchNeedsRumDataGenerate: boolean = false;
   
   // Set to track processed action IDs to prevent duplicate inserts
   // This ensures that even if an action is queried multiple times, it will only be inserted once
@@ -351,6 +360,103 @@ export class FTRUMInnerManager {
       ),
       workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
       workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
+    });
+  }
+
+  private async runRumDbWrite<T>(name: string, runner: () => T | Promise<T>): Promise<T> {
+    return await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      `rum.db.${name}`,
+      async () => await Promise.resolve(runner())
+    );
+  }
+
+  private createRumCounterBatchKey(viewId: string, actionId: string): string {
+    return `${viewId || 'none'}|${actionId || 'none'}`;
+  }
+
+  private getOrCreateRumCounterDelta(
+    viewId: string,
+    actionId: string
+  ): RUMCounterDelta {
+    const key = this.createRumCounterBatchKey(viewId, actionId);
+    let delta = this.rumCounterBatch.get(key);
+    if (!delta) {
+      delta = new RUMCounterDelta();
+      delta.viewId = viewId || "";
+      delta.actionId = actionId || "";
+      this.rumCounterBatch.set(key, delta);
+    }
+    return delta;
+  }
+
+  private clearRumCounterBatchTimer(): void {
+    if (this.rumCounterBatchTimer >= 0) {
+      clearTimeout(this.rumCounterBatchTimer);
+      this.rumCounterBatchTimer = -1;
+    }
+  }
+
+  private scheduleRumCounterBatchFlush(delayMs: number = RUM_COUNTER_BATCH_FLUSH_DELAY_MS): void {
+    if (this.rumCounterBatchTimer >= 0) {
+      return;
+    }
+    this.rumCounterBatchTimer = setTimeout(() => {
+      this.rumCounterBatchTimer = -1;
+      this.flushRumCounterBatch();
+    }, delayMs) as number;
+  }
+
+  private enqueueRumCounterDelta(needsActionCloseCheck: boolean, needsRumDataGenerate: boolean): void {
+    if (needsActionCloseCheck) {
+      this.rumCounterBatchNeedsActionCloseCheck = true;
+    }
+    if (needsRumDataGenerate) {
+      this.rumCounterBatchNeedsRumDataGenerate = true;
+    }
+
+    if (this.rumCounterBatch.size >= RUM_COUNTER_BATCH_MAX_KEYS) {
+      this.clearRumCounterBatchTimer();
+      this.scheduleRumCounterBatchFlush(0);
+    } else {
+      this.scheduleRumCounterBatchFlush();
+    }
+  }
+
+  private flushRumCounterBatch(): void {
+    this.clearRumCounterBatchTimer();
+    if (this.rumCounterBatch.size === 0 || !this.context) {
+      return;
+    }
+
+    const deltas: RUMCounterDelta[] = [];
+    const keys = Array.from(this.rumCounterBatch.keys());
+    for (const key of keys) {
+      const delta = this.rumCounterBatch.get(key);
+      if (delta) {
+        deltas.push(delta);
+      }
+    }
+    this.rumCounterBatch.clear();
+
+    const needsActionCloseCheck = this.rumCounterBatchNeedsActionCloseCheck;
+    const needsRumDataGenerate = this.rumCounterBatchNeedsRumDataGenerate;
+    this.rumCounterBatchNeedsActionCloseCheck = false;
+    this.rumCounterBatchNeedsRumDataGenerate = false;
+
+    this.submitRumEventTask(`rum.counterFlush:${deltas.length}`, async () => {
+      try {
+        await this.runRumDbWrite(`counterFlush:${deltas.length}`, async () => {
+          await FTDBManager.getInstance(this.context!).applyRumCounterDeltas(deltas);
+        });
+        if (needsActionCloseCheck) {
+          this.checkActionClose();
+        }
+        if (needsRumDataGenerate) {
+          this.generateRumData();
+        }
+      } catch (error) {
+        FTInnerLogger.e(TAG, `Error flushing RUM counter batch: ${error}`);
+      }
     });
   }
 
@@ -478,7 +584,9 @@ export class FTRUMInnerManager {
           // Delete actions from database AFTER updating counts
           // This ensures that even if generateActionSum is called again, the same actions won't be queried
           if (deleteIds.length > 0) {
-            await FTDBManager.getInstance(this.context).cleanCloseActionData(deleteIds);
+            await this.runRumDbWrite(`cleanCloseActionData:${deleteIds.length}`, async () => {
+              await FTDBManager.getInstance(this.context!).cleanCloseActionData(deleteIds);
+            });
           }
           
           // Then insert actions to sync table (only unprocessed ones)
@@ -503,7 +611,9 @@ export class FTRUMInnerManager {
       // This prevents data residue when actions cannot be closed due to pending resources
       // Threshold: 30 seconds (gives resources time to complete after the 30-second delayed cleanup)
       // Only clean up once after all batches are processed, not in each loop iteration
-      await FTDBManager.getInstance(this.context).cleanCloseActionData();
+      await this.runRumDbWrite('cleanCloseActionData:stale', async () => {
+        await FTDBManager.getInstance(this.context!).cleanCloseActionData();
+      });
       
       
     } catch (error) {
@@ -726,7 +836,9 @@ export class FTRUMInnerManager {
       // Clean up all closed views from database (aligned with Android: cleanCloseViewData() at the end)
       // This ensures all closed views are deleted, not just the ones we processed
       // This is important because the same view might have multiple closed versions in the database
-      await FTDBManager.getInstance(this.context).cleanCloseViewData();
+      await this.runRumDbWrite('cleanCloseViewData:closed', async () => {
+        await FTDBManager.getInstance(this.context!).cleanCloseViewData();
+      });
       
       
     } catch (error) {
@@ -943,11 +1055,17 @@ export class FTRUMInnerManager {
           // Update upload_time after successful upload (aligned with Android)
           if (self.context) {
             const context = self.context;
-            FTDBManager.getInstance(context).updateViewUploadTime(this.viewId, Date.now()).then((success: boolean) => {
+            SDKDedicatedPoolManager.getInstance().runDbWrite(
+              `rum.db.updateViewUploadTime:${this.viewId}`,
+              async () => await FTDBManager.getInstance(context).updateViewUploadTime(this.viewId, Date.now())
+            ).then((success: boolean) => {
               if (success) {
                 // After upload_time is updated, try to clean up this specific view if it's closed
                 // This ensures the view is cleaned up after upload completes, not before
-                FTDBManager.getInstance(context).cleanCloseViewData([this.viewId]).then(() => {
+                SDKDedicatedPoolManager.getInstance().runDbWrite(
+                  `rum.db.cleanCloseViewData:${this.viewId}`,
+                  async () => await FTDBManager.getInstance(context).cleanCloseViewData([this.viewId])
+                ).then(() => {
                 }).catch((error: Error) => {
                   FTInnerLogger.w(TAG, `Failed to clean up view after upload: ${error}`);
                 });
@@ -1213,7 +1331,9 @@ export class FTRUMInnerManager {
     if (this.context) {
       this.submitRumEventTask('rum.init:closeAllActionAndView', async () => {
         try {
-          await FTDBManager.getInstance(this.context!).closeAllActionAndView();
+          await this.runRumDbWrite('closeAllActionAndView', async () => {
+            await FTDBManager.getInstance(this.context!).closeAllActionAndView();
+          });
           FTInnerLogger.d(TAG, "Closed all existing actions and views");
         } catch (error) {
           FTInnerLogger.e(TAG, `Failed to close all actions and views: ${error}`);
@@ -1799,14 +1919,15 @@ export class FTRUMInnerManager {
               const fieldsMap = self.convertRecordToMap(allFields);
 
               // Send RUM error data
-              class ErrorCallback implements RunnerCompleteCallBack {
-                onComplete(): void {
-                  // Call increaseError on the outer this context
-                  self.increaseError(allTags);
-                  if (actualCallBack != null) {
-                    // Java Crash, Native Crash need to record the crash status of the current state
-                    // Aligned with Android: stopView(null, callBack) in addError callback
-                    // This ensures RUM data (view, action, resource) is generated and uploaded after crash
+	              class ErrorCallback implements RunnerCompleteCallBack {
+	                onComplete(): void {
+	                  // Call increaseError on the outer this context
+	                  self.increaseError(allTags);
+	                  if (actualCallBack != null) {
+	                    self.flushRumCounterBatch();
+	                    // Java Crash, Native Crash need to record the crash status of the current state
+	                    // Aligned with Android: stopView(null, callBack) in addError callback
+	                    // This ensures RUM data (view, action, resource) is generated and uploaded after crash
                     self.stopView().then(() => {
                       FTInnerLogger.i(TAG, "View stopped after error, calling crash callback");
                       actualCallBack.onComplete();
@@ -2484,22 +2605,17 @@ export class FTRUMInnerManager {
     const viewBean = activeViewBean.convertToViewBean();
     
     // Use event thread pool instead of setTimeout
-    this.submitRumEventTask(`rum.initView:${activeViewBean.getViewName()}`, () => {
+    this.submitRumEventTask(`rum.initView:${activeViewBean.getViewName()}`, async () => {
       try {
         if (this.context) {
-          // Use async/await in thread pool
-          (async () => {
-            try {
-              const result = await FTDBManager.getInstance(this.context!).insertRumView(viewBean);
-              if (result) {
-                FTInnerLogger.d(TAG, `View initialized in database successfully`);
-              } else {
-                FTInnerLogger.e(TAG, `View initialization in database failed`);
-              }
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Error initializing view in database: ${error}`);
-            }
-          })();
+          const result = await this.runRumDbWrite(`insertRumView:${viewBean.getId()}`, async () => {
+            return await FTDBManager.getInstance(this.context!).insertRumView(viewBean);
+          });
+          if (result) {
+            FTInnerLogger.d(TAG, `View initialized in database successfully`);
+          } else {
+            FTInnerLogger.e(TAG, `View initialization in database failed`);
+          }
         }
       } catch (error) {
         FTInnerLogger.e(TAG, `Error in initView thread pool: ${error}`);
@@ -2535,9 +2651,11 @@ export class FTRUMInnerManager {
           // Count fields (action_count, error_count, etc.) are maintained by atomic SQL updates
           // Update session_id if it differs from what's in database (e.g., session refreshed after view started)
           // This ensures the closed view uses the current session ID from activeViewBean
-          await FTDBManager.getInstance(this.context).closeView(viewId, loadTime, timeSpent, attr, viewSessionId);
-          // Aligned with Android: updateViewUpdateTime increments view_update_time counter
-          await FTDBManager.getInstance(this.context).updateViewUpdateTime(viewId);
+          await this.runRumDbWrite(`closeView:${viewId}`, async () => {
+            await FTDBManager.getInstance(this.context!).closeView(viewId, loadTime, timeSpent, attr, viewSessionId);
+            // Aligned with Android: updateViewUpdateTime increments view_update_time counter
+            await FTDBManager.getInstance(this.context!).updateViewUpdateTime(viewId);
+          });
           FTInnerLogger.d(
             TAG,
             `closeView persisted: ${activeViewBean.getViewName()}, viewId=${viewId}, sessionId=${viewSessionId}, timeSpent=${timeSpent}, loadTime=${loadTime}, updateTime=${viewBean.getViewUpdateTime()}`
@@ -2556,7 +2674,9 @@ export class FTRUMInnerManager {
                   if (viewPendingResource > 0) {
                     FTInnerLogger.w(TAG, `View ${viewId} still has pending_resource=${viewPendingResource} after 30 seconds, forcing clear to allow cleanup`);
                     // Force clear pending_resource to allow cleanCloseViewData to delete the view
-                    await FTDBManager.getInstance(this.context!).forceClearViewPendingResource(viewId);
+                    await this.runRumDbWrite(`forceClearViewPendingResource:${viewId}`, async () => {
+                      await FTDBManager.getInstance(this.context!).forceClearViewPendingResource(viewId);
+                    });
                   }
                 } catch (error) {
                   FTInnerLogger.e(TAG, `Error checking/clearing pending_resource for view ${viewId}: ${error}`);
@@ -2605,21 +2725,15 @@ export class FTRUMInnerManager {
       });
     } else {
       // startAction: First stores to FT_TABLE_ACTION, then enters FT_SYNC_DATA_FLAT_TABLE_NAME after closing
-      this.submitRumEventTask(`rum.startAction:${actionName}`, () => {
+      this.submitRumEventTask(`rum.startAction:${actionName}`, async () => {
         try {
           if (this.context) {
-            // Use async/await in thread pool
-            (async () => {
-              try {
-                const result = await FTDBManager.getInstance(this.context!).insertRumAction(actionBean);
-                if (result) {
-                } else {
-                  FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-5] startAction insertion failed: ${actionName}`);
-                }
-              } catch (error) {
-                FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-ERROR] Error initializing startAction in database: ${error}`);
-              }
-            })();
+            const result = await this.runRumDbWrite(`insertRumAction:${actionName}`, async () => {
+              return await FTDBManager.getInstance(this.context!).insertRumAction(actionBean);
+            });
+            if (!result) {
+              FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-5] startAction insertion failed: ${actionName}`);
+            }
           } else {
             FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-4] Context not available for startAction: ${actionName}`);
           }
@@ -2642,20 +2756,20 @@ export class FTRUMInnerManager {
       // This ensures the action is written to database before querying
       // Aligned with Android: if timeout, force=true; otherwise, force=false (will check pending_resource in database)
       if (this.context) {
-        this.submitRumEventTask(`rum.closeAction:${activeActionBean.getActionName()}`, () => {
-          (async () => {
-            try {
+        this.submitRumEventTask(`rum.closeAction:${activeActionBean.getActionName()}`, async () => {
+          try {
+            await this.runRumDbWrite(`closeAction:${actionBean.getId()}`, async () => {
               await FTDBManager.getInstance(this.context!).closeAction(actionBean.getId(), actionBean.getDuration(), isTimeout);
+            });
 
-              // Generate RUM data after action is closed in database
-              // This ensures the action can be queried when generateActionSum() is called
-              this.generateRumData();
-            } catch (error) {
-              FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action in database: ${error}`);
-              // Still try to generate RUM data even if closeAction failed
-              this.generateRumData();
-            }
-          })();
+            // Generate RUM data after action is closed in database
+            // This ensures the action can be queried when generateActionSum() is called
+            this.generateRumData();
+          } catch (error) {
+            FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action in database: ${error}`);
+            // Still try to generate RUM data even if closeAction failed
+            this.generateRumData();
+          }
         });
       } else {
         // If no context, still try to generate RUM data (may have other actions to process)
@@ -2991,11 +3105,14 @@ export class FTRUMInnerManager {
     // Update database (aligned with Android: FTDBManager.get().increaseViewAction(viewId))
     // This ensures database is updated when action occurs, preventing duplicate view uploads
     if (this.context && viewId) {
-      this.submitRumEventTask(`rum.increaseViewAction:${viewId}`, () => {
-        FTDBManager.getInstance(this.context!).increaseViewAction(viewId).then(() => {
-        }).catch((error: Error) => {
+      this.submitRumEventTask(`rum.increaseViewAction:${viewId}`, async () => {
+        try {
+          await this.runRumDbWrite(`increaseViewAction:${viewId}`, async () => {
+            await FTDBManager.getInstance(this.context!).increaseViewAction(viewId);
+          });
+        } catch (error) {
           FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INCREASE-ERROR] Failed to update database action count: ${error}`);
-        });
+        }
       });
     }
   }
@@ -3023,29 +3140,18 @@ export class FTRUMInnerManager {
       this.activeAction.increaseErrorCount();
     }
     
-    // Always update database directly using actionId/viewId from tags
-    // This ensures counts are updated correctly even when multiple errors occur simultaneously
-    // Using atomic SQL updates prevents race conditions
-    // IMPORTANT: Use await to ensure database update completes before returning
-    // This prevents generateActionSum() from querying stale counts
     if (this.context) {
-      this.submitRumEventTask(`rum.increaseError:${actionId || viewId || 'unknown'}`, async () => {
-        try {
-          // Always update database using actionId from tags (atomic SQL update)
-          // This ensures correct count even when multiple errors occur for the same action
-          if (actionId && actionId.length > 0) {
-            const actionName = tags[Constants.KEY_RUM_ACTION_NAME] || 'unknown';
-            await FTDBManager.getInstance(this.context!).increaseActionError(actionId, actionName);
-          }
-          // Always update database using viewId from tags (atomic SQL update)
-          if (viewId && viewId.length > 0) {
-            const viewName = tags[Constants.KEY_RUM_VIEW_NAME] || 'unknown';
-            await FTDBManager.getInstance(this.context!).increaseViewError(viewId, viewName);
-          }
-        } catch (error) {
-          FTInnerLogger.e(TAG, `Error increasing error count from tags: ${error}`);
-        }
-      });
+      const delta = this.getOrCreateRumCounterDelta(
+        viewId || "",
+        actionId || ""
+      );
+      if (actionId && actionId.length > 0) {
+        delta.actionErrorDelta += 1;
+      }
+      if (viewId && viewId.length > 0) {
+        delta.viewErrorDelta += 1;
+      }
+      this.enqueueRumCounterDelta(true, false);
     }
   }
   
@@ -3064,14 +3170,17 @@ export class FTRUMInnerManager {
         this.activeAction.decreasePendingResourceCount();
       }
       if (this.context) {
-        this.submitRumEventTask(`rum.increaseResource:${viewId || actionId || 'unknown'}`, async () => {
-          try {
-            await FTDBManager.getInstance(this.context!).completeResource(viewId, actionId);
-            this.checkActionClose();
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Error completing resource counts in database: ${error}`);
-          }
-        });
+        const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
+        if (viewId && viewId.length > 0) {
+          delta.viewResourceDelta += 1;
+          delta.viewPendingDelta -= 1;
+          delta.viewUpdateTimeDelta += 1;
+        }
+        if (actionId && actionId.length > 0) {
+          delta.actionResourceDelta += 1;
+          delta.actionPendingDelta -= 1;
+        }
+        this.enqueueRumCounterDelta(true, false);
       }
       
     } catch (error) {
@@ -3092,21 +3201,22 @@ export class FTRUMInnerManager {
       this.activeAction.increasePendingResourceCount();
     }
     
-    // Update database counts (aligned with Android: increaseViewPendingResource and increaseActionPendingResource)
+    // Update database counts through the batched RUM counter flush.
     if (this.context) {
-      this.submitRumEventTask(`rum.increasePendingResource:${viewId || actionId || 'unknown'}`, async () => {
-        try {
-          await FTDBManager.getInstance(this.context!).increaseResourcePending(viewId, actionId);
-        } catch (error) {
-          FTInnerLogger.e(TAG, `Error increasing pending resource count in database: ${error}`);
-        }
-      });
+      const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
+      if (viewId && viewId.length > 0) {
+        delta.viewPendingDelta += 1;
+      }
+      if (actionId && actionId.length > 0) {
+        delta.actionPendingDelta += 1;
+      }
+      this.enqueueRumCounterDelta(false, false);
     }
   }
   
   /**
    * Decrease pending resource count
-   * Aligned with Android: reduceViewPendingResource and reduceActionPendingResource
+   * Aligned with Android counter semantics; persisted through the batched RUM counter flush.
    */
   private decreasePendingResourceCount(viewId: string, actionId: string, updateView: boolean = true): void {
     // Update memory counts
@@ -3118,23 +3228,16 @@ export class FTRUMInnerManager {
       this.activeAction.decreasePendingResourceCount();
     }
     
-    // Update database counts (aligned with Android: reduceViewPendingResource and reduceActionPendingResource)
+    // Update database counts through the batched RUM counter flush.
     if (this.context) {
-      this.submitRumEventTask(`rum.decreasePendingResource:${viewId || actionId || 'unknown'}`, () => {
-        (async () => {
-          try {
-            if (updateView && viewId && viewId.length > 0) {
-              await FTDBManager.getInstance(this.context!).reduceViewPendingResource(viewId);
-            }
-            if (actionId && actionId.length > 0) {
-              FTInnerLogger.d(TAG, `decreasePendingResourceCount: Calling reduceActionPendingResource for actionId=${actionId}`);
-              await FTDBManager.getInstance(this.context!).reduceActionPendingResource(actionId);
-            }
-          } catch (error) {
-            FTInnerLogger.e(TAG, `Error decreasing pending resource count in database: ${error}`);
-          }
-        })();
-      });
+      const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
+      if (updateView && viewId && viewId.length > 0) {
+        delta.viewPendingDelta -= 1;
+      }
+      if (actionId && actionId.length > 0) {
+        delta.actionPendingDelta -= 1;
+      }
+      this.enqueueRumCounterDelta(false, false);
     }
   }
   
@@ -3277,6 +3380,10 @@ export class FTRUMInnerManager {
         clearTimeout(this.rumDataGenerateTimer);
         this.rumDataGenerateTimer = null;
       }
+      this.clearRumCounterBatchTimer();
+      this.rumCounterBatch.clear();
+      this.rumCounterBatchNeedsActionCloseCheck = false;
+      this.rumCounterBatchNeedsRumDataGenerate = false;
 
       this.context = null;
       this.userData = null;
@@ -3394,29 +3501,24 @@ export class FTRUMInnerManager {
       const viewId = allTags[Constants.KEY_RUM_VIEW_ID];
       
       if (this.context && (actionId || viewId)) {
-        this.submitRumEventTask(`rum.increaseLongTaskFromTags:${actionId || viewId || 'unknown'}`, () => {
-          (async () => {
-            try {
-              // Only update if action/view is not in memory (closed)
-              if (actionId && actionId.length > 0) {
-                const isActionActive = this.activeAction && this.activeAction.getId() === actionId;
-                if (!isActionActive) {
-                  const actionName = allTags[Constants.KEY_RUM_ACTION_NAME] || 'unknown';
-                  await FTDBManager.getInstance(this.context!).increaseActionLongTask(actionId, actionName);
-                }
-              }
-              if (viewId && viewId.length > 0) {
-                const isViewActive = this.activeView && this.activeView.getId() === viewId;
-                if (!isViewActive) {
-                  const viewName = allTags[Constants.KEY_RUM_VIEW_NAME] || 'unknown';
-                  await FTDBManager.getInstance(this.context!).increaseViewLongTask(viewId, viewName);
-                }
-              }
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Error increasing long task count from tags: ${error}`);
-            }
-          })();
-        });
+        const isActionActive: boolean = !!(actionId && actionId.length > 0 && this.activeAction &&
+          this.activeAction.getId() === actionId);
+        const isViewActive: boolean = !!(viewId && viewId.length > 0 && this.activeView &&
+          this.activeView.getId() === viewId);
+        if (!isActionActive || !isViewActive) {
+          const delta = this.getOrCreateRumCounterDelta(
+            !isViewActive ? (viewId || "") : "",
+            !isActionActive ? (actionId || "") : ""
+          );
+          if (!isActionActive && actionId && actionId.length > 0) {
+            delta.actionLongTaskDelta += 1;
+          }
+          if (!isViewActive && viewId && viewId.length > 0) {
+            delta.viewLongTaskDelta += 1;
+            delta.viewUpdateTimeDelta += 1;
+          }
+          this.enqueueRumCounterDelta(true, true);
+        }
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Error adding long task: ${error}`);
@@ -3431,38 +3533,25 @@ export class FTRUMInnerManager {
     try {
       if (this.activeView) {
         const viewId = this.activeView.getId();
-        const viewName = this.activeView.getViewName();
         // Update memory count
         this.activeView.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          this.submitRumEventTask(`rum.increaseViewLongTask:${viewName}`, () => {
-            (async () => {
-              try {
-                await FTDBManager.getInstance(this.context!).increaseViewLongTask(viewId, viewName);
-              } catch (error) {
-                FTInnerLogger.e(TAG, `Error increasing view long task count in database: ${error}`);
-              }
-            })();
-          });
+          const delta = this.getOrCreateRumCounterDelta(viewId, "");
+          delta.viewLongTaskDelta += 1;
+          delta.viewUpdateTimeDelta += 1;
+          this.enqueueRumCounterDelta(true, true);
         }
       }
       if (this.activeAction) {
         const actionId = this.activeAction.getId();
-        const actionName = this.activeAction.getActionName();
         // Update memory count
         this.activeAction.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          this.submitRumEventTask(`rum.increaseActionLongTask:${actionName}`, () => {
-            (async () => {
-              try {
-                await FTDBManager.getInstance(this.context!).increaseActionLongTask(actionId, actionName);
-              } catch (error) {
-                FTInnerLogger.e(TAG, `Error increasing action long task count in database: ${error}`);
-              }
-            })();
-          });
+          const delta = this.getOrCreateRumCounterDelta("", actionId);
+          delta.actionLongTaskDelta += 1;
+          this.enqueueRumCounterDelta(true, true);
         }
       }
     } catch (error) {
