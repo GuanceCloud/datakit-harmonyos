@@ -170,7 +170,6 @@ class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
       `sync.uploadWorker.delete:${rows.length}`,
       async () => await dbManager.deleteFtOperation(syncRows)
     );
-    await this.sleep(30);
   }
 
   async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<void> {
@@ -1732,9 +1731,6 @@ export class SyncTaskManager {
           );
         }
         // FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> [DELETE] Successfully deleted ${list.length} records`);
-        // Small delay to ensure database deletion is fully committed before next query
-        // This helps reduce duplicate filtering in the next batch
-        await this.sleep(30);
       } else {
         FTInnerLogger.w(TAG, `<FT-BATCH-UPLOAD> Context is null, cannot delete uploaded data`);
       }

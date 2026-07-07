@@ -716,7 +716,6 @@ export class DataUploadWorkerExecutor {
       const deleteStartTime = runtime.getCurrentTimeMs();
       await runtime.deleteRows(list);
       this.addDbTime(state, runtime, deleteStartTime);
-      await this.sleepWithMetrics(runtime, state, 30);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Delete uploaded data failed: ${error as string}`);
     }
