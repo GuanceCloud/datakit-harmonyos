@@ -760,7 +760,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-pageSize);
     });
 
-    it('uploadLaneShouldFormatBodyWithoutWorkerCommand', 0, async () => {
+    it('uploadLaneShouldFormatBodyThroughUploadWorkerCommand', 0, async () => {
       const db = new FakeDbManager();
       runtime.dbManager = db;
       manager.init(createConfig(), createContext());

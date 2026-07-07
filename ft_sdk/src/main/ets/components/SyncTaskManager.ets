@@ -19,6 +19,31 @@ import {
 } from './internal/runtime/SyncTaskManagerRuntime';
 import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
 import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerBridgeRequest,
+  SDKWorkerBridgeResponse,
+  SDKWorkerCommand,
+  SDKWorkerErrorPayload,
+  SDKWorkerPayload,
+  SDKWorkerRequest,
+  SDKWorkerResponse,
+  toSDKWorkerErrorDTO,
+  toSDKWorkerErrorPayload
+} from './thread/SDKWorkerProtocol';
+import { DataUploadWorkerExecutor } from './thread/workers/DataUploadWorkerExecutor';
+import {
+  DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT,
+  DataUploadBridgeCountPayload,
+  DataUploadBridgeRowsPayload,
+  DataUploadBridgeValuePayload,
+  DataUploadConsumeOptions,
+  DataUploadConsumeResult,
+  DataUploadHttpResult,
+  DataUploadRow,
+  DataUploadWorkerBridgeCommand,
+  DataUploadWorkerRuntime
+} from './thread/workers/DataUploadWorkerRuntime';
 
 /**
  * Configuration record interface for FTDBCachePolicy
@@ -84,6 +109,224 @@ class RequestCallbackImpl implements SyncTaskRequestCallback {
   }
 }
 
+type UploadBridgePayloadRecord = Record<string, object | string | number | boolean | null | undefined>;
+
+class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
+  private readonly configProvider: () => FTSDKConfig | null;
+  private readonly contextProvider: () => Context | null;
+  private readonly stopProvider: () => boolean;
+
+  constructor(
+    configProvider: () => FTSDKConfig | null,
+    contextProvider: () => Context | null,
+    stopProvider: () => boolean
+  ) {
+    this.configProvider = configProvider;
+    this.contextProvider = contextProvider;
+    this.stopProvider = stopProvider;
+  }
+
+  isStopped(): boolean {
+    return this.stopProvider();
+  }
+
+  async hasData(dataType: DataType): Promise<boolean> {
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return false;
+    }
+    return await dbManager.hasData([dataType]);
+  }
+
+  async queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]> {
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return [];
+    }
+    await dbManager.init();
+    const rows = await dbManager.queryFtOperation(
+      [dataType],
+      Math.min(Math.max(1, Math.floor(pageSize)), DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT)
+    );
+    const result: DataUploadRow[] = [];
+    for (const row of rows) {
+      result.push(this.toUploadRow(row));
+    }
+    return result;
+  }
+
+  async deleteRows(rows: DataUploadRow[]): Promise<void> {
+    if (!rows || rows.length === 0) {
+      return;
+    }
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return;
+    }
+    const syncRows = this.toSyncDataList(rows);
+    await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      `sync.uploadWorker.delete:${rows.length}`,
+      async () => await dbManager.deleteFtOperation(syncRows)
+    );
+    await this.sleep(30);
+  }
+
+  async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<void> {
+    if (!rows || rows.length === 0) {
+      return;
+    }
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return;
+    }
+    const syncRows = this.toSyncDataList(rows);
+    await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      `sync.uploadWorker.insert:${rows.length}`,
+      async () => await dbManager.insertFtOptList(syncRows, reInsert)
+    );
+  }
+
+  async updateDataType(dataType: string, errorTimeLine: number): Promise<number> {
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return 0;
+    }
+    return await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      `sync.uploadWorker.errorSampled.update:${dataType}`,
+      async () => await dbManager.updateDataType(dataType, errorTimeLine)
+    );
+  }
+
+  async deleteExpireCache(dataType: string, now: number, duration: number): Promise<number> {
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return 0;
+    }
+    return await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      `sync.uploadWorker.errorSampled.deleteExpired:${dataType}`,
+      async () => await dbManager.deleteExpireCache(dataType, now, duration)
+    );
+  }
+
+  async executeHttp(dataType: DataType, pkgId: string, body: string): Promise<DataUploadHttpResult> {
+    const config = this.configProvider();
+    if (!config) {
+      throw new Error("SDK config not initialized");
+    }
+
+    let model: string;
+    switch (dataType) {
+      case DataType.LOG:
+        model = Constants.URL_MODEL_LOG;
+        break;
+      case DataType.RUM_APP:
+      case DataType.RUM_WEBVIEW:
+      default:
+        model = Constants.URL_MODEL_RUM;
+        break;
+    }
+
+    if (dataType === DataType.RUM_WEBVIEW) {
+      FTInnerLogger.i(TAG,
+        `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] ========== Uploading WebView data to server ==========`);
+      FTInnerLogger.i(TAG,
+        `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] Body length: ${body.length}, Record count: ${body.split('\n').length}`);
+      FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] Model: ${model}, pkgId: ${pkgId}`);
+      if (body.includes(`${Constants.KEY_RUM_VIEW_IS_WEB_VIEW}=true`)) {
+        FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] WebView data confirmed in body`);
+      }
+    }
+
+    const result = await syncTaskRuntime.executeHttp(config, model, body, pkgId);
+    return {
+      code: result.getCode(),
+      message: result.getMessage(),
+      errorCode: result.getErrorCode()
+    };
+  }
+
+  async shouldDiscardData(dataType: DataType): Promise<boolean> {
+    return syncTaskRuntime.getCachePolicy().shouldDiscardData(dataType);
+  }
+
+  async reduceCacheCount(dataType: DataType, count: number): Promise<void> {
+    if (dataType === DataType.LOG) {
+      syncTaskRuntime.getCachePolicy().optLogCount(-count);
+    } else if (dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW) {
+      syncTaskRuntime.getCachePolicy().optRumCount(-count);
+    }
+  }
+
+  getCurrentTimeMs(): number {
+    return syncTaskRuntime.getCurrentTimeMs();
+  }
+
+  getRandom(): number {
+    return syncTaskRuntime.getRandom();
+  }
+
+  generateUUID(): string {
+    return syncTaskRuntime.generateUUID();
+  }
+
+  sleep(ms: number): Promise<void> {
+    return syncTaskRuntime.sleep(ms);
+  }
+
+  private getDbManager(): SyncTaskDbManager | null {
+    const context = this.contextProvider();
+    if (!context) {
+      return null;
+    }
+    return syncTaskRuntime.getDbManager(context);
+  }
+
+  private toUploadRow(data: SyncData): DataUploadRow {
+    const row: DataUploadRow = {
+      id: data.getId(),
+      dataType: data.getDataType().toString(),
+      dataString: data.getDataString(),
+      uuid: data.getUuid(),
+      time: data.getTime()
+    };
+    const customDataType = data.getCustomDataTypeString();
+    if (customDataType && customDataType.length > 0) {
+      row.customDataType = customDataType;
+    }
+    return row;
+  }
+
+  private toSyncDataList(rows: DataUploadRow[]): SyncData[] {
+    const result: SyncData[] = [];
+    for (const row of rows) {
+      result.push(this.toSyncData(row));
+    }
+    return result;
+  }
+
+  private toSyncData(row: DataUploadRow): SyncData {
+    const data = new SyncData(this.toDataType(row.dataType));
+    data.setId(row.id);
+    data.setDataString(row.dataString);
+    data.setUuid(row.uuid);
+    data.setTime(row.time);
+    if (row.customDataType && row.customDataType.length > 0) {
+      data.setCustomDataTypeString(row.customDataType);
+    }
+    return data;
+  }
+
+  private toDataType(dataType: string): DataType {
+    if (dataType === DataType.RUM_APP.toString()) {
+      return DataType.RUM_APP;
+    }
+    if (dataType === DataType.RUM_WEBVIEW.toString()) {
+      return DataType.RUM_WEBVIEW;
+    }
+    return DataType.LOG;
+  }
+}
+
 enum UploadBatchResult {
   DELETE_NO_BACKOFF = 'delete-no-backoff',
   DELETE_WITH_IGNORED_BACKOFF = 'delete-with-ignored-backoff',
@@ -132,6 +375,7 @@ export class SyncTaskManager {
   private uploadRunnable: (() => Promise<void>) | null = null;
   private errorCountByType: Map<DataType, number> = new Map();
   private ignoredClientErrorCountByType: Map<DataType, number> = new Map();
+  private uploadWorkerExecutor = new DataUploadWorkerExecutor();
   // Package ID generators
   private rumGenerator = new IDGenerator();
   private logGenerator = new IDGenerator();
@@ -162,6 +406,7 @@ export class SyncTaskManager {
   public static resetStateInternal(): void {
     SyncTaskManager.instance = null;
     SyncTaskManager.cachedProcessId = undefined;
+    DataUploadWorkerExecutor.resetStaticStateInternal();
     RUMDataCleanupManagerInternal.resetInternal();
   }
 
@@ -240,18 +485,11 @@ export class SyncTaskManager {
       }
 
       try {
-        // Process error sampled data
-        for (const dataType of this.ERROR_SAMPLED_SYNC_MAP) {
-          await this.errorSampledConsume(dataType);
-        }
+        const result = await this.executeDataUploadWorkerConsume(this.uploadCurrentTaskName);
+        this.uploadCurrentPollRows = result.consumedRows;
+        this.errorCount = result.errorCount;
 
-        // Process normal sync data
-        let hasMoreData = false;
-        for (const dataType of this.SYNC_MAP) {
-          hasMoreData = (await this.handleSyncOpt(dataType)) || hasMoreData;
-        }
-
-        if (hasMoreData && !this.isStop) {
+        if (result.hasMoreData && !this.isStop) {
           this.scheduleUpload(0);
         }
       } catch (e) {
@@ -302,6 +540,18 @@ export class SyncTaskManager {
     this.uploadCurrentTaskName = taskName;
     this.uploadStartTraced = false;
 
+    const startTime = syncTaskRuntime.getCurrentTimeMs();
+    let result = 'success';
+    let errorMessage = '';
+    let consumeResult: DataUploadConsumeResult = {
+      consumedRows: 0,
+      hasMoreData: false,
+      errorCount: this.errorCount
+    };
+    const options = this.createDataUploadConsumeOptions(taskName);
+    const runtime = this.createDataUploadRuntime();
+    const request = this.createDataUploadWorkerRequest(taskName, options);
+
     try {
       await SDKTaskScheduler.getInstance().submitTaskAndWait({
         type: SDKTaskType.UPLOAD,
@@ -309,44 +559,250 @@ export class SyncTaskManager {
         priority: SDKTaskPriority.LOW,
         singleFlightKey: SyncTaskManager.UPLOAD_SINGLE_FLIGHT_KEY,
         costHint: 'normal',
-        run: async () => {
-          const startTime = syncTaskRuntime.getCurrentTimeMs();
-          let result = 'success';
-          let errorMessage = '';
-          try {
-            await Promise.resolve(this.uploadRunnable!());
-          } catch (error) {
-            result = 'failed';
-            errorMessage = String(error);
-            throw new Error(errorMessage);
-          } finally {
-            const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
-            const uploadStatus = SDKDedicatedPoolManager.getInstance().getUploadStatus();
-            const shouldReschedule = uploadStatus.needReschedule;
-            const nextDelay = uploadStatus.rescheduleDelay;
-            this.uploadRunning = false;
-            this.running = false;
-            const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-            const uploadedRows = this.uploadCurrentPollRows;
-            this.uploadCurrentPollRows = 0;
-            this.uploadCurrentTaskName = "";
-            this.uploadStartTraced = false;
-            if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
-              this.traceUploadLaneDebug(
-                `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
-              );
-            }
+        workerRequest: request,
+        workerFallbackRunner: async () => {
+          const inlineResult = await this.uploadWorkerExecutor.consume(runtime, options);
+          return inlineResult as Object as SDKWorkerPayload;
+        },
+        workerBridgeHandler: async (bridgeRequest: SDKWorkerBridgeRequest) =>
+          await this.handleDataUploadBridgeRequest(bridgeRequest),
+        workerResponseHandler: async (response: SDKWorkerResponse) => {
+          if (response.ok) {
+            consumeResult = this.toDataUploadConsumeResult(response);
           }
         }
       });
+      this.uploadCurrentPollRows = consumeResult.consumedRows;
+      this.errorCount = consumeResult.errorCount;
+      if (consumeResult.hasMoreData && !this.isStop) {
+        this.scheduleUpload(0);
+      }
     } catch (error) {
+      result = 'failed';
+      errorMessage = String(error);
       this.uploadRunning = false;
       this.running = false;
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
       FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] execute name=${taskName} error=${error as string}`);
+    } finally {
+      const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
+      const uploadStatus = SDKDedicatedPoolManager.getInstance().getUploadStatus();
+      const shouldReschedule = uploadStatus.needReschedule;
+      const nextDelay = uploadStatus.rescheduleDelay;
+      this.uploadRunning = false;
+      this.running = false;
+      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+      const uploadedRows = this.uploadCurrentPollRows;
+      this.uploadCurrentPollRows = 0;
+      this.uploadCurrentTaskName = "";
+      this.uploadStartTraced = false;
+      if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
+        this.traceUploadLaneDebug(
+          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
+        );
+      }
     }
+  }
+
+  private async executeDataUploadWorkerConsume(taskName: string): Promise<DataUploadConsumeResult> {
+    const options = this.createDataUploadConsumeOptions(taskName);
+    const runtime = this.createDataUploadRuntime();
+    const request = this.createDataUploadWorkerRequest(taskName, options);
+
+    const response = await SDKDedicatedPoolManager.getInstance().executeCommand(
+      request,
+      async () => {
+        const result = await this.uploadWorkerExecutor.consume(runtime, options);
+        return result as Object as SDKWorkerPayload;
+      },
+      async (bridgeRequest: SDKWorkerBridgeRequest) => await this.handleDataUploadBridgeRequest(bridgeRequest)
+    );
+
+    if (!response.ok) {
+      throw new Error(response.errorMessage || `DataUploadWorker command failed: ${request.command}`);
+    }
+
+    return this.toDataUploadConsumeResult(response);
+  }
+
+  private createDataUploadWorkerRequest(taskName: string, options: DataUploadConsumeOptions): SDKWorkerRequest {
+    return {
+      id: `upload.consume:${taskName}:${syncTaskRuntime.getCurrentTimeMs()}`,
+      pool: SDKDedicatedPoolType.DATA_UPLOAD,
+      command: SDKWorkerCommand.UPLOAD_CONSUME,
+      priority: SDKTaskPriority.LOW,
+      createdAt: syncTaskRuntime.getCurrentTimeMs(),
+      payload: options as Object as SDKWorkerPayload
+    };
+  }
+
+  private createDataUploadConsumeOptions(taskName: string): DataUploadConsumeOptions {
+    return {
+      taskName: taskName && taskName.length > 0 ? taskName : 'upload.poll',
+      pageSize: Math.min(Math.max(1, this.pageSize), DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT),
+      syncSleepTime: Math.max(0, this.syncSleepTime),
+      errorTimeLine: this.errorTimeLine,
+      stopped: this.isStop
+    };
+  }
+
+  private createDataUploadRuntime(): DataUploadWorkerRuntime {
+    return new SyncTaskDataUploadRuntime(
+      () => this.sdkConfig,
+      () => this.context,
+      () => this.isStop
+    );
+  }
+
+  private toDataUploadConsumeResult(response: SDKWorkerResponse): DataUploadConsumeResult {
+    const record = this.toUploadBridgeRecord(response.payload);
+    return {
+      consumedRows: typeof record['consumedRows'] === 'number' ? record['consumedRows'] as number : 0,
+      hasMoreData: record['hasMoreData'] === true,
+      errorCount: typeof record['errorCount'] === 'number' ? record['errorCount'] as number : 0
+    };
+  }
+
+  private async handleDataUploadBridgeRequest(request: SDKWorkerBridgeRequest): Promise<SDKWorkerBridgeResponse> {
+    try {
+      const payload = await this.handleDataUploadBridgeCommand(request.command, request.payload);
+      return {
+        id: request.id,
+        sourceRequestId: request.sourceRequestId,
+        ok: true,
+        payload
+      };
+    } catch (error) {
+      const errorDTO = toSDKWorkerErrorDTO(error);
+      const errorPayload: SDKWorkerErrorPayload = toSDKWorkerErrorPayload(errorDTO);
+      return {
+        id: request.id,
+        sourceRequestId: request.sourceRequestId,
+        ok: false,
+        errorMessage: errorDTO.message,
+        payload: errorPayload
+      };
+    }
+  }
+
+  private async handleDataUploadBridgeCommand(
+    command: string,
+    payload?: SDKWorkerPayload
+  ): Promise<SDKWorkerPayload | undefined> {
+    const runtime = this.createDataUploadRuntime();
+    switch (command) {
+      case DataUploadWorkerBridgeCommand.HAS_DATA: {
+        const responsePayload: DataUploadBridgeValuePayload = {
+          value: await runtime.hasData(this.readBridgeDataType(payload))
+        };
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.QUERY_ROWS: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload: DataUploadBridgeRowsPayload = {
+          rows: await runtime.queryRows(
+            this.readBridgeDataType(payload),
+            this.readBridgeNumber(record, 'pageSize', DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT)
+          )
+        };
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.DELETE_ROWS: {
+        await runtime.deleteRows(this.readBridgeRows(payload));
+        return new Object() as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.INSERT_ROWS: {
+        const record = this.toUploadBridgeRecord(payload);
+        await runtime.insertRows(this.readBridgeRows(payload), record['reInsert'] === true);
+        return new Object() as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.UPDATE_DATA_TYPE: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload: DataUploadBridgeCountPayload = {
+          count: await runtime.updateDataType(
+            this.readBridgeString(record, 'dataType', ''),
+            this.readBridgeNumber(record, 'errorTimeLine', -1)
+          )
+        };
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.DELETE_EXPIRE_CACHE: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload: DataUploadBridgeCountPayload = {
+          count: await runtime.deleteExpireCache(
+            this.readBridgeString(record, 'dataType', ''),
+            this.readBridgeNumber(record, 'now', 0),
+            this.readBridgeNumber(record, 'duration', 0)
+          )
+        };
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.EXECUTE_HTTP: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload: DataUploadHttpResult = await runtime.executeHttp(
+          this.readBridgeDataType(payload),
+          this.readBridgeString(record, 'pkgId', ''),
+          this.readBridgeString(record, 'body', '')
+        );
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.SHOULD_DISCARD_DATA: {
+        const responsePayload: DataUploadBridgeValuePayload = {
+          value: await runtime.shouldDiscardData(this.readBridgeDataType(payload))
+        };
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.REDUCE_CACHE_COUNT: {
+        const record = this.toUploadBridgeRecord(payload);
+        await runtime.reduceCacheCount(
+          this.readBridgeDataType(payload),
+          this.readBridgeNumber(record, 'count', 0)
+        );
+        return new Object() as SDKWorkerPayload;
+      }
+      default:
+        throw new Error(`Unsupported DataUploadWorker bridge command: ${command}`);
+    }
+  }
+
+  private toUploadBridgeRecord(payload: SDKWorkerPayload | undefined): UploadBridgePayloadRecord {
+    if (payload && typeof payload === 'object') {
+      return payload as Object as UploadBridgePayloadRecord;
+    }
+    return new Object() as UploadBridgePayloadRecord;
+  }
+
+  private readBridgeDataType(payload: SDKWorkerPayload | undefined): DataType {
+    const record = this.toUploadBridgeRecord(payload);
+    const dataType = this.readBridgeString(record, 'dataType', DataType.LOG.toString());
+    if (dataType === DataType.RUM_APP.toString()) {
+      return DataType.RUM_APP;
+    }
+    if (dataType === DataType.RUM_WEBVIEW.toString()) {
+      return DataType.RUM_WEBVIEW;
+    }
+    return DataType.LOG;
+  }
+
+  private readBridgeRows(payload: SDKWorkerPayload | undefined): DataUploadRow[] {
+    const record = this.toUploadBridgeRecord(payload);
+    const rows = record['rows'];
+    if (Array.isArray(rows)) {
+      return rows as Object as DataUploadRow[];
+    }
+    return [];
+  }
+
+  private readBridgeString(record: UploadBridgePayloadRecord, key: string, defaultValue: string): string {
+    const value = record[key];
+    return typeof value === 'string' ? value as string : defaultValue;
+  }
+
+  private readBridgeNumber(record: UploadBridgePayloadRecord, key: string, defaultValue: number): number {
+    const value = record[key];
+    return typeof value === 'number' ? value as number : defaultValue;
   }
 
   /**

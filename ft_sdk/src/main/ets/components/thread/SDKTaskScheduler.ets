@@ -5,10 +5,12 @@
  */
 import { FTInnerLogger } from '../log/FTLogger';
 import {
+  SDKDedicatedCommandRunner,
   SDKDedicatedPoolManager,
-  SDKDedicatedPoolManagerStatus
+  SDKDedicatedPoolManagerStatus,
+  SDKWorkerBridgeHandler
 } from './SDKDedicatedPoolManager';
-import { SDKDedicatedPoolType, SDKWorkerRequest } from './SDKWorkerProtocol';
+import { SDKDedicatedPoolType, SDKWorkerRequest, SDKWorkerResponse } from './SDKWorkerProtocol';
 
 const TAG = "SDKTaskScheduler";
 const EVENT_LANE_TRACE_PREFIX = "<FT-EVENT-LANE>";
@@ -38,8 +40,20 @@ export enum SDKTaskPriority {
 
 export type SDKTaskCostHint = 'light' | 'normal' | 'heavy';
 export type SDKTaskRunner = () => void | Promise<void>;
+export type SDKTaskWorkerResponseHandler = (response: SDKWorkerResponse) => void | Promise<void>;
 
-export interface SDKTask {
+interface SDKTaskBaseOptions {
+  type: SDKTaskType;
+  name: string;
+  priority?: SDKTaskPriority;
+  retryCount?: number;
+  serialKey?: string;
+  singleFlightKey?: string;
+  costHint?: SDKTaskCostHint;
+  silent?: boolean;
+}
+
+interface SDKTaskRuntimeBase {
   type: SDKTaskType;
   name: string;
   priority: SDKTaskPriority;
@@ -49,20 +63,35 @@ export interface SDKTask {
   singleFlightKey?: string;
   costHint?: SDKTaskCostHint;
   silent?: boolean;
+}
+
+export interface SDKTask extends SDKTaskRuntimeBase {
+  workerRequest: SDKWorkerRequest;
+  workerFallbackRunner?: SDKDedicatedCommandRunner;
+  workerBridgeHandler?: SDKWorkerBridgeHandler;
+  workerResponseHandler?: SDKTaskWorkerResponseHandler;
+}
+
+export interface SDKTaskOptions extends SDKTaskBaseOptions {
+  workerRequest: SDKWorkerRequest;
+  workerFallbackRunner?: SDKDedicatedCommandRunner;
+  workerBridgeHandler?: SDKWorkerBridgeHandler;
+  workerResponseHandler?: SDKTaskWorkerResponseHandler;
+}
+
+export interface SDKRunnableTaskOptions extends SDKTaskBaseOptions {
   workerRequest?: SDKWorkerRequest;
+  workerFallbackRunner?: SDKDedicatedCommandRunner;
+  workerBridgeHandler?: SDKWorkerBridgeHandler;
+  workerResponseHandler?: SDKTaskWorkerResponseHandler;
   run: SDKTaskRunner;
 }
 
-export interface SDKTaskOptions {
-  type: SDKTaskType;
-  name: string;
-  priority?: SDKTaskPriority;
-  retryCount?: number;
-  serialKey?: string;
-  singleFlightKey?: string;
-  costHint?: SDKTaskCostHint;
-  silent?: boolean;
+interface SDKRunnableTask extends SDKTaskRuntimeBase {
   workerRequest?: SDKWorkerRequest;
+  workerFallbackRunner?: SDKDedicatedCommandRunner;
+  workerBridgeHandler?: SDKWorkerBridgeHandler;
+  workerResponseHandler?: SDKTaskWorkerResponseHandler;
   run: SDKTaskRunner;
 }
 
@@ -87,6 +116,10 @@ export interface SDKLaneStatus {
   lastScanCount: number;
   oldestWait: number;
   lastError: string | null;
+  missingWorkerRequestTasks: number;
+  lastMissingWorkerRequestTaskName: string | null;
+  runnableFallbackTasks: number;
+  lastRunnableFallbackTaskName: string | null;
 }
 
 export interface SDKTaskSchedulerStatus {
@@ -114,8 +147,14 @@ export interface SDKTaskGroupStatus {
   lastTaskName: string;
 }
 
-interface ScheduledSDKTask extends SDKTask {
+interface ScheduledSDKTask extends SDKTaskRuntimeBase {
   id: string;
+  workerRequest?: SDKWorkerRequest;
+  workerFallbackRunner?: SDKDedicatedCommandRunner;
+  workerBridgeHandler?: SDKWorkerBridgeHandler;
+  workerResponseHandler?: SDKTaskWorkerResponseHandler;
+  run?: SDKTaskRunner;
+  allowRunnableFallback: boolean;
   resolve?: () => void;
   reject?: (error: Error) => void;
 }
@@ -141,6 +180,10 @@ interface SDKLaneState {
   maxScanCount: number;
   lastScanCount: number;
   lastError: string | null;
+  missingWorkerRequestTasks: number;
+  lastMissingWorkerRequestTaskName: string | null;
+  runnableFallbackTasks: number;
+  lastRunnableFallbackTaskName: string | null;
 }
 
 interface SDKTaskSelection {
@@ -208,7 +251,9 @@ export class SDKTaskScheduler {
       costHint: options.costHint,
       silent: options.silent ?? false,
       workerRequest: options.workerRequest,
-      run: options.run
+      workerFallbackRunner: options.workerFallbackRunner,
+      workerBridgeHandler: options.workerBridgeHandler,
+      workerResponseHandler: options.workerResponseHandler
     };
   }
 
@@ -218,7 +263,7 @@ export class SDKTaskScheduler {
 
   public submit(task: SDKTask): string {
     this.checkNotShutdown();
-    const scheduledTask = this.toScheduledTask(task);
+    const scheduledTask = this.toScheduledTask(task, false);
     this.enqueueTask(scheduledTask);
     return scheduledTask.id;
   }
@@ -230,15 +275,32 @@ export class SDKTaskScheduler {
   public submitAndWait(task: SDKTask): Promise<void> {
     this.checkNotShutdown();
     return new Promise<void>((resolve, reject) => {
-      const scheduledTask = this.toScheduledTask(task, resolve, reject);
+      const scheduledTask = this.toScheduledTask(task, false, resolve, reject);
+      this.enqueueTask(scheduledTask);
+    });
+  }
+
+  public submitRunnableTask(options: SDKRunnableTaskOptions): string {
+    this.checkNotShutdown();
+    const scheduledTask = this.toScheduledTask(this.createRunnableTask(options), true);
+    this.enqueueTask(scheduledTask);
+    return scheduledTask.id;
+  }
+
+  public submitRunnableTaskAndWait(options: SDKRunnableTaskOptions): Promise<void> {
+    this.checkNotShutdown();
+    return new Promise<void>((resolve, reject) => {
+      const scheduledTask = this.toScheduledTask(this.createRunnableTask(options), true, resolve, reject);
       this.enqueueTask(scheduledTask);
     });
   }
 
   public configureLane(type: SDKTaskType, maxConcurrency: number): void {
-    const lane = this.getLane(type);
-    lane.maxConcurrency = Math.max(1, maxConcurrency);
-    this.processLane(type);
+    const poolType = this.getDedicatedPoolType(type);
+    SDKDedicatedPoolManager.getInstance().configurePoolMaxConcurrency(poolType, maxConcurrency);
+    const normalizedMaxConcurrency = SDKDedicatedPoolManager.getInstance().getPoolMaxConcurrency(poolType);
+    this.configureLanesForPool(poolType, normalizedMaxConcurrency);
+    this.processLanesForPool(poolType);
   }
 
   public getStatus(): SDKTaskSchedulerStatus {
@@ -326,7 +388,11 @@ export class SDKTaskScheduler {
       totalScanCount: 0,
       maxScanCount: 0,
       lastScanCount: 0,
-      lastError: null
+      lastError: null,
+      missingWorkerRequestTasks: 0,
+      lastMissingWorkerRequestTaskName: null,
+      runnableFallbackTasks: 0,
+      lastRunnableFallbackTaskName: null
     };
   }
 
@@ -340,20 +406,7 @@ export class SDKTaskScheduler {
   }
 
   private getDefaultMaxConcurrency(type: SDKTaskType): number {
-    switch (type) {
-      case SDKTaskType.DATA_PROCESS:
-        return SDKDedicatedPoolManager.getInstance().getDataProcessWorkerCount();
-      case SDKTaskType.CRASH_FILE:
-      case SDKTaskType.INNER_LOG_FILE:
-        return 1;
-      case SDKTaskType.EVENT:
-      case SDKTaskType.LOG:
-      case SDKTaskType.UPLOAD:
-      case SDKTaskType.ANR:
-      case SDKTaskType.CUSTOM:
-      default:
-        return 1;
-    }
+    return SDKDedicatedPoolManager.getInstance().getPoolMaxConcurrency(this.getDedicatedPoolType(type));
   }
 
   private getDefaultPriority(type: SDKTaskType): SDKTaskPriority {
@@ -374,7 +427,48 @@ export class SDKTaskScheduler {
     }
   }
 
-  private toScheduledTask(task: SDKTask, resolve?: () => void, reject?: (error: Error) => void): ScheduledSDKTask {
+  private configureLanesForPool(poolType: SDKDedicatedPoolType, maxConcurrency: number): void {
+    this.lanes.forEach((lane, type) => {
+      if (this.getDedicatedPoolType(type) === poolType) {
+        lane.maxConcurrency = Math.max(1, maxConcurrency);
+      }
+    });
+  }
+
+  private processLanesForPool(poolType: SDKDedicatedPoolType): void {
+    this.lanes.forEach((_lane, type) => {
+      if (this.getDedicatedPoolType(type) === poolType) {
+        this.processLane(type);
+      }
+    });
+  }
+
+  private createRunnableTask(options: SDKRunnableTaskOptions): SDKRunnableTask {
+    return {
+      type: options.type,
+      name: options.name,
+      priority: options.priority ?? this.getDefaultPriority(options.type),
+      createdAt: Date.now(),
+      retryCount: options.retryCount ?? 0,
+      serialKey: options.serialKey,
+      singleFlightKey: options.singleFlightKey,
+      costHint: options.costHint,
+      silent: options.silent ?? false,
+      workerRequest: options.workerRequest,
+      workerFallbackRunner: options.workerFallbackRunner,
+      workerBridgeHandler: options.workerBridgeHandler,
+      workerResponseHandler: options.workerResponseHandler,
+      run: options.run
+    };
+  }
+
+  private toScheduledTask(
+    task: SDKTask | SDKRunnableTask,
+    allowRunnableFallback: boolean,
+    resolve?: () => void,
+    reject?: (error: Error) => void
+  ): ScheduledSDKTask {
+    const runnableTask = task as SDKRunnableTask;
     return {
       id: this.generateTaskId(task.type, task.name),
       type: task.type,
@@ -387,7 +481,11 @@ export class SDKTaskScheduler {
       costHint: task.costHint,
       silent: task.silent ?? false,
       workerRequest: task.workerRequest,
-      run: task.run,
+      workerFallbackRunner: task.workerFallbackRunner,
+      workerBridgeHandler: task.workerBridgeHandler,
+      workerResponseHandler: task.workerResponseHandler,
+      run: allowRunnableFallback ? runnableTask.run : undefined,
+      allowRunnableFallback,
       resolve,
       reject
     };
@@ -408,6 +506,7 @@ export class SDKTaskScheduler {
     }
 
     const lane = this.getLane(task.type);
+    this.recordMissingWorkerRequestIfNeeded(lane, task);
     this.enqueuePendingTask(lane, task);
     lane.submittedTasks++;
     this.recordTaskGroupSubmitted(task);
@@ -423,7 +522,7 @@ export class SDKTaskScheduler {
     }
 
     const lane = this.getLane(type);
-    while (lane.running < lane.maxConcurrency) {
+    while (true) {
       const dispatchStartTime = Date.now();
       const selection = this.getNextRunnableTaskSelection(type, lane);
       if (!selection.task) {
@@ -557,20 +656,36 @@ export class SDKTaskScheduler {
     }
 
     if (type === SDKTaskType.EVENT) {
-      serialResult = lane.running <= 1 ? 'PASS' : 'FAIL';
+      serialResult = 'PASS';
       previousEventName = this.lastEventCompletedName.length > 0 ? this.lastEventCompletedName : 'none';
       serialGapTime = this.lastEventCompletedName.length > 0 ? Math.max(0, startTime - this.lastEventCompletedAt) : 0;
     }
 
     try {
-      await SDKDedicatedPoolManager.getInstance().executeTask(
-        this.getDedicatedPoolType(type),
-        task.id,
-        task.name,
-        task.priority,
-        task.run,
-        task.workerRequest
-      );
+      if (task.workerRequest) {
+        const response = await SDKDedicatedPoolManager.getInstance().executeCommand(
+          task.workerRequest,
+          task.workerFallbackRunner || this.createFallbackRunnerFromTask(task),
+          task.workerBridgeHandler
+        );
+        if (task.workerResponseHandler) {
+          await Promise.resolve(task.workerResponseHandler(response));
+        }
+        if (!response.ok) {
+          throw new Error(response.errorMessage || `Worker command failed: ${task.workerRequest.command}`);
+        }
+      } else {
+        if (!task.allowRunnableFallback || !task.run) {
+          throw new Error(`SDK task has no workerRequest: ${task.name}`);
+        }
+        await SDKDedicatedPoolManager.getInstance().executeTask(
+          this.getDedicatedPoolType(type),
+          task.id,
+          task.name,
+          task.priority,
+          task.run
+        );
+      }
       lane.completedTasks++;
       if (task.resolve) {
         task.resolve();
@@ -615,6 +730,16 @@ export class SDKTaskScheduler {
       this.processLane(type);
       this.traceSchedulerLaneDrainedIfNeeded(type, lane, task);
     }
+  }
+
+  private createFallbackRunnerFromTask(task: ScheduledSDKTask): SDKDedicatedCommandRunner | undefined {
+    if (!task.run) {
+      return undefined;
+    }
+    return async () => {
+      await Promise.resolve(task.run!());
+      return null;
+    };
   }
 
   private releaseSingleFlightTask(task: ScheduledSDKTask): void {
@@ -745,8 +870,31 @@ export class SDKTaskScheduler {
       maxScanCount: lane.maxScanCount,
       lastScanCount: lane.lastScanCount,
       oldestWait,
-      lastError: lane.lastError
+      lastError: lane.lastError,
+      missingWorkerRequestTasks: lane.missingWorkerRequestTasks,
+      lastMissingWorkerRequestTaskName: lane.lastMissingWorkerRequestTaskName,
+      runnableFallbackTasks: lane.runnableFallbackTasks,
+      lastRunnableFallbackTaskName: lane.lastRunnableFallbackTaskName
     };
+  }
+
+  private recordMissingWorkerRequestIfNeeded(lane: SDKLaneState, task: ScheduledSDKTask): void {
+    if (task.workerRequest) {
+      return;
+    }
+
+    if (task.allowRunnableFallback) {
+      lane.runnableFallbackTasks++;
+      lane.lastRunnableFallbackTaskName = task.name;
+      return;
+    }
+
+    lane.missingWorkerRequestTasks++;
+    lane.lastMissingWorkerRequestTaskName = task.name;
+    FTInnerLogger.w(
+      TAG,
+      `${SCHEDULER_TRACE_PREFIX} [WORKER_REQUEST_MISSING] logicalLane=${task.type} workerPool=${this.getDedicatedPoolType(task.type)} name=${task.name} submitted=${lane.submittedTasks + 1}`
+    );
   }
 
   private getOldestWait(lane: SDKLaneState): number {

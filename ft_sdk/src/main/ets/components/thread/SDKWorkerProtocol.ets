@@ -34,14 +34,22 @@ export interface SDKWorkerResponse {
 export enum SDKWorkerCommand {
   PING = 'sdk.ping',
   RESET = 'sdk.reset',
+  EVENT_RUN = 'event.run',
   EVENT_RUM_COMMAND = 'event.rum.command',
   EVENT_RUM_SNAPSHOT = 'event.rum.snapshot',
+  LOG_RUN = 'log.run',
   LOG_ENQUEUE = 'log.enqueue',
   LOG_FLUSH = 'log.flush',
+  DATA_RUN = 'data.run',
   DATA_CREATE_LINE_PROTOCOL = 'data.createLineProtocol',
   DATA_PASS_THROUGH_DRAFTS = 'data.passThroughDrafts',
+  CRASH_FILE_RUN = 'crashFile.run',
+  ANR_RUN = 'anr.run',
+  CUSTOM_RUN = 'custom.run',
+  INNER_LOG_FILE_RUN = 'innerLogFile.run',
   DATA_PARSE_CRASH_TEXT = 'data.parseCrashText',
   UPLOAD_SCHEDULE = 'upload.schedule',
+  UPLOAD_CONSUME = 'upload.consume',
   UPLOAD_ROUND_FINISH = 'upload.roundFinish',
   UPLOAD_FORMAT_BODY = 'upload.formatBody'
 }

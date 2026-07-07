@@ -1,6 +1,9 @@
 import {
+  assertSDKWorkerSerializable,
   assertSDKWorkerRequestSerializable,
   SDKDedicatedPoolType,
+  SDKWorkerBridgeRequest,
+  SDKWorkerBridgeResponse,
   SDKWorkerErrorPayload,
   SDKWorkerPayload,
   SDKWorkerCommand,
@@ -21,9 +24,14 @@ import {
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 
 const DEFAULT_WORKER_COMMAND_TIMEOUT_MS = 3000;
+const DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS = 60000;
+const MIN_CORE_WORKER_COUNT = 2;
+const MAX_CORE_WORKER_COUNT = 4;
 
 export type SDKDedicatedTaskRunner = () => void | Promise<void>;
 export type SDKDedicatedCommandRunner = () => SDKWorkerPayload | Promise<SDKWorkerPayload>;
+export type SDKWorkerBridgeHandler =
+  (request: SDKWorkerBridgeRequest) => SDKWorkerBridgeResponse | Promise<SDKWorkerBridgeResponse>;
 
 export interface SDKDedicatedPoolStatus {
   pool: string;
@@ -82,13 +90,14 @@ interface SDKWorkerProbePayload {
   probe: boolean;
 }
 
-interface SDKThreadWorkerResponseMessage {
-  data: SDKWorkerResponse;
+interface SDKThreadWorkerMessage {
+  data: object | string | number | boolean | null | undefined;
 }
 
 interface SDKThreadWorkerPendingCommand {
   requestId: string;
   timeoutId: number;
+  bridgeHandler?: SDKWorkerBridgeHandler;
   resolve: (response: SDKWorkerResponse) => void;
   reject: (error: Error) => void;
 }
@@ -232,18 +241,19 @@ export class SDKDedicatedPoolManager {
 
   public executeCommand(
     request: SDKWorkerRequest,
-    runner?: SDKDedicatedCommandRunner
+    runner?: SDKDedicatedCommandRunner,
+    bridgeHandler?: SDKWorkerBridgeHandler
   ): Promise<SDKWorkerResponse> {
     assertSDKWorkerRequestSerializable(request);
 
     if (this.isExecutingPool(request.pool)) {
-      return this.executeCommandInCurrentPool(request, runner);
+      return this.executeCommandInCurrentPool(request, runner, bridgeHandler);
     }
 
     return new Promise<SDKWorkerResponse>((resolve) => {
       this.executeTask(request.pool, request.id, request.command, request.priority, async () => {
         try {
-          const response = await this.dispatchWorkerCommand(request, runner);
+          const response = await this.dispatchWorkerCommand(request, runner, bridgeHandler);
           resolve(response);
           if (!response.ok) {
             throw new Error(response.errorMessage || `Worker command failed: ${request.command}`);
@@ -273,14 +283,15 @@ export class SDKDedicatedPoolManager {
 
   private async executeCommandInCurrentPool(
     request: SDKWorkerRequest,
-    runner?: SDKDedicatedCommandRunner
+    runner?: SDKDedicatedCommandRunner,
+    bridgeHandler?: SDKWorkerBridgeHandler
   ): Promise<SDKWorkerResponse> {
     const state = this.getPool(request.pool);
     state.submittedTasks++;
     const startTime = Date.now();
 
     try {
-      const response = await this.dispatchWorkerCommand(request, runner);
+      const response = await this.dispatchWorkerCommand(request, runner, bridgeHandler);
       if (response.ok) {
         state.completedTasks++;
       } else {
@@ -439,7 +450,21 @@ export class SDKDedicatedPoolManager {
   }
 
   public getDataProcessWorkerCount(): number {
+    return this.getCoreWorkerCount();
+  }
+
+  public getCoreWorkerCount(): number {
     return this.getPool(SDKDedicatedPoolType.DATA_PROCESS).workerCount;
+  }
+
+  public getPoolMaxConcurrency(pool: SDKDedicatedPoolType): number {
+    return this.getPool(pool).maxConcurrency;
+  }
+
+  public configurePoolMaxConcurrency(pool: SDKDedicatedPoolType, maxConcurrency: number): void {
+    const state = this.getPool(pool);
+    state.maxConcurrency = this.normalizePoolMaxConcurrency(state, maxConcurrency);
+    this.processPool(state);
   }
 
   public getStatus(): SDKDedicatedPoolManagerStatus {
@@ -485,31 +510,31 @@ export class SDKDedicatedPoolManager {
   }
 
   private initializePools(): void {
+    const coreWorkers = this.resolveCoreWorkerCount();
     this.pools.set(SDKDedicatedPoolType.EVENT_CONSUMER, this.createPool({
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-      workerCount: 1,
-      maxConcurrency: 1,
+      workerCount: coreWorkers,
+      maxConcurrency: coreWorkers,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.EVENT_CONSUMER)
     }));
     this.pools.set(SDKDedicatedPoolType.LOG_CONSUMER, this.createPool({
       pool: SDKDedicatedPoolType.LOG_CONSUMER,
-      workerCount: 1,
-      maxConcurrency: 1,
+      workerCount: coreWorkers,
+      maxConcurrency: coreWorkers,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.LOG_CONSUMER)
     }));
-    const dataProcessWorkers = this.resolveDataProcessWorkerCount();
     this.pools.set(SDKDedicatedPoolType.DATA_PROCESS, this.createPool({
       pool: SDKDedicatedPoolType.DATA_PROCESS,
-      workerCount: dataProcessWorkers,
-      maxConcurrency: dataProcessWorkers,
+      workerCount: coreWorkers,
+      maxConcurrency: coreWorkers,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_PROCESS)
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_UPLOAD, this.createPool({
       pool: SDKDedicatedPoolType.DATA_UPLOAD,
-      workerCount: 2,
+      workerCount: coreWorkers,
       maxConcurrency: 1,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_UPLOAD)
@@ -520,7 +545,7 @@ export class SDKDedicatedPoolManager {
     return {
       pool: config.pool,
       workerCount: Math.max(1, config.workerCount),
-      maxConcurrency: Math.max(1, config.maxConcurrency),
+      maxConcurrency: this.normalizePoolMaxConcurrency(config, config.maxConcurrency),
       backend: config.backend,
       workerInfo: config.workerInfo,
       queue: [],
@@ -601,14 +626,15 @@ export class SDKDedicatedPoolManager {
 
   private async dispatchWorkerCommand(
     request: SDKWorkerRequest,
-    runner?: SDKDedicatedCommandRunner
+    runner?: SDKDedicatedCommandRunner,
+    bridgeHandler?: SDKWorkerBridgeHandler
   ): Promise<SDKWorkerResponse> {
     const state = this.getPool(request.pool);
     try {
       if (SDKDedicatedPoolManager.workerCommandTimeoutMs <= 1) {
         throw new Error(`ThreadWorker command disabled for ${state.pool}`);
       }
-      return await this.dispatchThreadWorkerCommand(state, request);
+      return await this.dispatchThreadWorkerCommand(state, request, bridgeHandler);
     } catch (error) {
       const fallbackError = error instanceof Error ? error : new Error(String(error));
       state.backend = 'fallback';
@@ -653,7 +679,8 @@ export class SDKDedicatedPoolManager {
 
   private dispatchThreadWorkerCommand(
     state: DedicatedPoolState,
-    request: SDKWorkerRequest
+    request: SDKWorkerRequest,
+    bridgeHandler?: SDKWorkerBridgeHandler
   ): Promise<SDKWorkerResponse> {
     this.ensureThreadWorkers(state);
     const slot = this.findAvailableWorkerSlot(state);
@@ -663,6 +690,7 @@ export class SDKDedicatedPoolManager {
 
     slot.busy = true;
     return new Promise<SDKWorkerResponse>((resolve, reject) => {
+      const commandTimeoutMs = this.getWorkerCommandTimeoutMs(request);
       const timeoutId = setTimeout(() => {
         const pending = slot.pending;
         if (!pending || pending.requestId !== request.id) {
@@ -673,10 +701,11 @@ export class SDKDedicatedPoolManager {
         this.terminateWorkerSlot(slot);
         state.backend = 'fallback';
         reject(new Error(`ThreadWorker command timeout: ${state.pool}/${request.command}`));
-      }, SDKDedicatedPoolManager.workerCommandTimeoutMs);
+      }, commandTimeoutMs);
       slot.pending = {
         requestId: request.id,
         timeoutId,
+        bridgeHandler,
         resolve,
         reject
       };
@@ -690,6 +719,16 @@ export class SDKDedicatedPoolManager {
         reject(normalized);
       }
     });
+  }
+
+  private getWorkerCommandTimeoutMs(request: SDKWorkerRequest): number {
+    if (request.command === SDKWorkerCommand.UPLOAD_CONSUME) {
+      return Math.max(
+        SDKDedicatedPoolManager.workerCommandTimeoutMs,
+        DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS
+      );
+    }
+    return SDKDedicatedPoolManager.workerCommandTimeoutMs;
   }
 
   private ensureThreadWorkers(state: DedicatedPoolState): void {
@@ -759,8 +798,14 @@ export class SDKDedicatedPoolManager {
     slot: SDKThreadWorkerSlot,
     event: MessageEvents
   ): void {
-    const eventRecord = event as Object as SDKThreadWorkerResponseMessage;
-    const response = eventRecord.data as SDKWorkerResponse;
+    const eventRecord = event as Object as SDKThreadWorkerMessage;
+    const message = eventRecord.data;
+    if (this.isWorkerBridgeRequest(message)) {
+      this.handleThreadWorkerBridgeRequest(state, slot, message as Object as SDKWorkerBridgeRequest);
+      return;
+    }
+
+    const response = message as Object as SDKWorkerResponse;
     const pending = slot.pending;
     slot.busy = false;
     slot.pending = null;
@@ -773,6 +818,89 @@ export class SDKDedicatedPoolManager {
       return;
     }
     pending.resolve(response);
+  }
+
+  private handleThreadWorkerBridgeRequest(
+    state: DedicatedPoolState,
+    slot: SDKThreadWorkerSlot,
+    request: SDKWorkerBridgeRequest
+  ): void {
+    const pending = slot.pending;
+    if (!pending || pending.requestId !== request.sourceRequestId || !pending.bridgeHandler) {
+      this.postBridgeResponseIfPossible(slot, this.createBridgeErrorResponse(
+        request,
+        `Unexpected worker bridge request for ${state.pool}`
+      ));
+      return;
+    }
+
+    Promise.resolve(pending.bridgeHandler(request)).then((response: SDKWorkerBridgeResponse) => {
+      const currentPending = slot.pending;
+      if (!slot.workerInstance || !currentPending || currentPending.requestId !== request.sourceRequestId) {
+        return;
+      }
+      const bridgeResponse = this.normalizeBridgeResponse(request, response);
+      assertSDKWorkerSerializable(bridgeResponse as Object, 'bridgeResponse');
+      slot.workerInstance.postMessage(bridgeResponse);
+    }).catch((error: Error) => {
+      this.postBridgeResponseIfPossible(slot, this.createBridgeErrorResponse(
+        request,
+        error.message || String(error)
+      ));
+    });
+  }
+
+  private isWorkerBridgeRequest(message: object | string | number | boolean | null | undefined): boolean {
+    if (!message || typeof message !== 'object') {
+      return false;
+    }
+    const record = message as Object as Record<string, object | string | number | boolean | null | undefined>;
+    return typeof record['id'] === 'string' &&
+      typeof record['sourceRequestId'] === 'string' &&
+      typeof record['command'] === 'string' &&
+      record['ok'] === undefined;
+  }
+
+  private normalizeBridgeResponse(
+    request: SDKWorkerBridgeRequest,
+    response: SDKWorkerBridgeResponse
+  ): SDKWorkerBridgeResponse {
+    return {
+      id: request.id,
+      sourceRequestId: request.sourceRequestId,
+      ok: response.ok === true,
+      payload: response.payload,
+      errorMessage: response.errorMessage || ''
+    };
+  }
+
+  private createBridgeErrorResponse(
+    request: SDKWorkerBridgeRequest,
+    message: string
+  ): SDKWorkerBridgeResponse {
+    const errorDTO = toSDKWorkerErrorDTO(new Error(message));
+    const errorPayload: SDKWorkerErrorPayload = toSDKWorkerErrorPayload(errorDTO);
+    return {
+      id: request.id,
+      sourceRequestId: request.sourceRequestId,
+      ok: false,
+      errorMessage: errorDTO.message,
+      payload: errorPayload
+    };
+  }
+
+  private postBridgeResponseIfPossible(
+    slot: SDKThreadWorkerSlot,
+    response: SDKWorkerBridgeResponse
+  ): void {
+    if (!slot.workerInstance) {
+      return;
+    }
+    try {
+      assertSDKWorkerSerializable(response as Object, 'bridgeResponse');
+      slot.workerInstance.postMessage(response);
+    } catch (_) {
+    }
   }
 
   private handleThreadWorkerFailure(
@@ -930,10 +1058,19 @@ export class SDKDedicatedPoolManager {
     return `${pool}_${name}_${Date.now()}_${this.nextTaskId}`;
   }
 
-  private resolveDataProcessWorkerCount(): number {
+  private resolveCoreWorkerCount(): number {
     // HarmonyOS ArkTS does not expose a stable CPU-count API across all target
     // versions used by this SDK. Keep the Android-aligned strategy centralized
     // here so a platform-specific CPU probe can replace this fallback later.
-    return 2;
+    return this.clampCoreWorkerCount(MIN_CORE_WORKER_COUNT);
+  }
+
+  private clampCoreWorkerCount(workerCount: number): number {
+    return Math.max(MIN_CORE_WORKER_COUNT, Math.min(MAX_CORE_WORKER_COUNT, workerCount));
+  }
+
+  private normalizePoolMaxConcurrency(config: SDKPoolConfig, maxConcurrency: number): number {
+    const workerCount = Math.max(1, config.workerCount);
+    return Math.max(1, Math.min(workerCount, maxConcurrency));
   }
 }
