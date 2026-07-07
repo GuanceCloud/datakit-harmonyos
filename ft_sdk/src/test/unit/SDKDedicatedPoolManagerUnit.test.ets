@@ -75,7 +75,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       SDKDedicatedPoolManager.resetInternal();
     });
 
-    it('eventConsumerPoolShouldRunWithWorkerPoolAndNotBlockLogPool', 0, async () => {
+    it('eventConsumerPoolShouldRunSeriallyAndNotBlockLogPool', 0, async () => {
       const order: string[] = [];
       const eventGate = createGate();
 
@@ -113,14 +113,15 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
       await flushPromises();
       await logTask;
-      expect(order.join(',')).assertEqual('event-1-start,event-2,log');
+      expect(order.join(',')).assertEqual('event-1-start,log');
 
       eventGate.release();
       await firstEvent;
       await secondEvent;
-      expect(order.join(',')).assertEqual('event-1-start,event-2,log,event-1-end');
+      expect(order.join(',')).assertEqual('event-1-start,log,event-1-end,event-2');
       const status = manager.getStatus().pools[SDKDedicatedPoolType.EVENT_CONSUMER];
-      expect(status.maxConcurrency >= 2).assertTrue();
+      expect(status.workerCount).assertEqual(1);
+      expect(status.maxConcurrency).assertEqual(1);
     });
 
     it('eventConsumerPoolShouldSupportSamePoolReentry', 0, async () => {

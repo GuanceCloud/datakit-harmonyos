@@ -101,7 +101,6 @@ const SDK_LOG_PROCESS_COALESCE_MS = 100;
 const SDK_SYNC_PAGE_SIZE = 100;
 const DEFAULT_SDK_EVENT_COST_MS = 50;
 const DEFAULT_SDK_DATA_PROCESS_COST_MS = 50;
-const STATS_COMMIT_THROTTLE_MS = 250;
 
 /**
  * Real App Stress Test Page
@@ -150,80 +149,34 @@ export struct RealAppStressTestPage {
   @StorageLink(KEY_STRESS_SERVICE_LAST_ERROR) backgroundServiceLastError: string = '';
 
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
-  private updateTimer: number | null = null;
-  private statsCommitTimer: number | null = null;
-  private pendingStatsSnapshot: StressTestStats | null = null;
   private preferencesStore: preferences.Preferences | null = null;
   private lastReportEndedAtMs: number = 0;
+  private lastSavedSettingsLogSignature: string = '';
 
   async aboutToAppear() {
     DemoLogger.i(TAG, "RealAppStressTestPage initialized");
     await this.loadSettings();
-    this.refreshStats();
+    this.syncCurrentStatsSnapshot();
     if (this.isTestRunning) {
-      DemoLogger.i(TAG, `Resuming stress test monitoring: elapsed=${this.elapsedSeconds}s, duration=${this.testDuration}s`);
-      this.startUpdateTimer();
+      DemoLogger.i(TAG, `Stress test is already running: elapsed=${this.elapsedSeconds}s, duration=${this.testDuration}s`);
     } else {
       this.refreshReportFromManager(false);
     }
   }
 
   async aboutToDisappear() {
-    this.flushPendingStatsCommit();
-    this.stopUpdateTimer();
     await this.saveSettings();
   }
 
-  private startUpdateTimer(): void {
-    this.stopUpdateTimer();
-    this.updateTimer = setInterval((): void => {
-      this.refreshStats();
-      if (!this.isTestRunning) {
-        DemoLogger.i(TAG, "StressTestManager stopped, stopping update timer");
-        this.stopUpdateTimer();
-        this.refreshReportFromManager(true);
-      }
-    }, 1000);
-  }
-
-  private stopUpdateTimer(): void {
-    if (this.updateTimer !== null) {
-      clearInterval(this.updateTimer);
-      this.updateTimer = null;
-    }
-  }
-
-  private refreshStats(): void {
+  private syncCurrentStatsSnapshot(): void {
     const snapshot = this.stressTestManager.getStatsSnapshot();
-    this.isTestRunning = snapshot.isRunning;
-    this.elapsedSeconds = snapshot.elapsedSeconds;
-    this.pendingStatsSnapshot = snapshot;
-    if (this.statsCommitTimer !== null) {
-      return;
-    }
-    this.statsCommitTimer = setTimeout((): void => {
-      this.statsCommitTimer = null;
-      this.commitPendingStatsSnapshot();
-    }, STATS_COMMIT_THROTTLE_MS);
-  }
-
-  private commitPendingStatsSnapshot(): void {
-    const snapshot = this.pendingStatsSnapshot;
-    if (snapshot === null) {
-      return;
-    }
-    this.pendingStatsSnapshot = null;
     this.stats = snapshot;
     this.isTestRunning = snapshot.isRunning;
     this.elapsedSeconds = snapshot.elapsedSeconds;
   }
 
-  private flushPendingStatsCommit(): void {
-    if (this.statsCommitTimer !== null) {
-      clearTimeout(this.statsCommitTimer);
-      this.statsCommitTimer = null;
-    }
-    this.commitPendingStatsSnapshot();
+  private refreshStats(): void {
+    this.syncCurrentStatsSnapshot();
   }
 
   private refreshReportFromManager(showToast: boolean): void {
@@ -279,7 +232,7 @@ export struct RealAppStressTestPage {
         `Starting stress test: mode=${config.runMode}, duration=${config.durationSeconds}s, totalTarget=${config.totalTargetCount}, traffic=${config.trafficMode}, logBatchSize=${config.logBatchSize}, logInterval=${config.logIntervalMs}, actionTimers=${config.actionThreadCount}, actionInterval=${config.actionIntervalMs}, resourceTimers=${config.resourceThreadCount}, resourceInterval=${config.resourceIntervalMs}, resourceUrls=${this.formatRealResourceUrlSummary(config.realResourceUrl)}, navigationInterval=${config.navigationIntervalMs}, errorBatchSize=${config.errorBatchSize}, errorInterval=${config.errorIntervalMs}, longTaskBatchSize=${config.longTaskBatchSize}, longTaskInterval=${config.longTaskIntervalMs}, background=${this.enableBackgroundService}`);
 
       this.stressTestManager.runWithConfig(config);
-      this.refreshStats();
+      this.syncCurrentStatsSnapshot();
       if (!this.isTestRunning) {
         this.refreshReportFromManager(false);
         promptAction.showToast({
@@ -292,9 +245,6 @@ export struct RealAppStressTestPage {
       if (this.enableBackgroundService) {
         await this.startBackgroundStressService();
       }
-
-      this.refreshStats();
-      this.startUpdateTimer();
 
       promptAction.showToast({
         message: `Stress test started (${this.formatRunTargetForToast()})`,
@@ -310,7 +260,7 @@ export struct RealAppStressTestPage {
       if (this.stressTestManager.isStressTestRunning()) {
         this.stressTestManager.stop('error');
       }
-      this.refreshStats();
+      this.syncCurrentStatsSnapshot();
       this.refreshReportFromManager(false);
       promptAction.showToast({
         message: `Failed to start: ${startErrorMessage}`,
@@ -361,7 +311,6 @@ export struct RealAppStressTestPage {
         await this.stopBackgroundStressService();
       }
 
-      this.stopUpdateTimer();
       this.refreshStats();
       this.refreshReportFromReport(report);
 
@@ -378,7 +327,6 @@ export struct RealAppStressTestPage {
         duration: 3000
       });
       this.isTestRunning = false;
-      this.stopUpdateTimer();
     }
   }
 
@@ -601,11 +549,52 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_LONG_TASK_BATCH_SIZE, this.stressLongTaskBatchSize);
         await this.preferencesStore.put(KEY_STRESS_LONG_TASK_INTERVAL_MS, this.stressLongTaskIntervalMs);
         await this.preferencesStore.flush();
-        DemoLogger.i(TAG, `Saved stress settings: ${this.testMinutes}m ${this.testSeconds}s`);
+        this.traceSavedSettingsIfNeeded();
       }
     } catch (error) {
       DemoLogger.e(TAG, `Failed to save settings: ${error}`);
     }
+  }
+
+  private traceSavedSettingsIfNeeded(): void {
+    const signature = this.buildStressSettingsSignature();
+    if (signature === this.lastSavedSettingsLogSignature) {
+      return;
+    }
+    this.lastSavedSettingsLogSignature = signature;
+    DemoLogger.d(
+      TAG,
+      `Saved stress settings: mode=${this.stressRunMode}, duration=${this.testMinutes}m ${this.testSeconds}s, total=${this.stressTotalCount}, scenarios=${this.formatConfiguredScenarioSummary()}`
+    );
+  }
+
+  private buildStressSettingsSignature(): string {
+    return [
+      this.testMinutes,
+      this.testSeconds,
+      this.stressRunMode,
+      this.stressTotalCount,
+      this.useRealTraffic,
+      this.enableLogs,
+      this.enableActions,
+      this.enableResources,
+      this.enableNavigation,
+      this.enableErrors,
+      this.enableLongTasks,
+      this.enableBackgroundService,
+      this.serializeRealResourceUrls(),
+      this.stressLogBatchSize,
+      this.stressLogIntervalMs,
+      this.stressActionTimerCount,
+      this.stressActionIntervalMs,
+      this.stressResourceTimerCount,
+      this.stressResourceIntervalMs,
+      this.stressNavigationIntervalMs,
+      this.stressErrorBatchSize,
+      this.stressErrorIntervalMs,
+      this.stressLongTaskBatchSize,
+      this.stressLongTaskIntervalMs
+    ].join('|');
   }
 
   updateTestDuration(): void {

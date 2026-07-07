@@ -5,6 +5,7 @@ import { FTInnerLogger } from '../../log/FTLogger';
 import {
   DATA_UPLOAD_WORKER_MAX_BATCH_LIMIT,
   DataUploadConsumeOptions,
+  DataUploadConsumeMetrics,
   DataUploadConsumeResult,
   DataUploadHttpResult,
   DataUploadRow,
@@ -23,6 +24,7 @@ interface DataUploadConsumeState {
   taskName: string;
   startTraced: boolean;
   consumedRows: number;
+  metrics: DataUploadConsumeMetrics;
 }
 
 interface DataUploadHandleResult {
@@ -67,7 +69,8 @@ export class DataUploadWorkerExecutor {
     const state: DataUploadConsumeState = {
       taskName: consumeOptions.taskName,
       startTraced: false,
-      consumedRows: 0
+      consumedRows: 0,
+      metrics: this.createMetrics()
     };
     let hasMoreData = false;
 
@@ -80,7 +83,9 @@ export class DataUploadWorkerExecutor {
         if (runtime.isStopped()) {
           break;
         }
+        const errorSampledStartTime = runtime.getCurrentTimeMs();
         await this.errorSampledConsume(runtime, dataType, consumeOptions.errorTimeLine);
+        this.addDbTime(state, runtime, errorSampledStartTime);
       }
 
       for (const dataType of this.syncMap) {
@@ -105,8 +110,56 @@ export class DataUploadWorkerExecutor {
     return {
       consumedRows: state.consumedRows,
       hasMoreData,
-      errorCount: this.getAggregateErrorCount()
+      errorCount: this.getAggregateErrorCount(),
+      metrics: this.finishMetrics(state.metrics)
     };
+  }
+
+  private createMetrics(): DataUploadConsumeMetrics {
+    return {
+      totalMs: 0,
+      computeMs: 0,
+      dbMs: 0,
+      httpMs: 0,
+      sleepMs: 0,
+      executeMs: 0
+    };
+  }
+
+  private finishMetrics(metrics: DataUploadConsumeMetrics): DataUploadConsumeMetrics {
+    metrics.executeMs = metrics.dbMs + metrics.httpMs + metrics.sleepMs;
+    metrics.totalMs = metrics.computeMs + metrics.executeMs;
+    return metrics;
+  }
+
+  private elapsedSince(runtime: DataUploadWorkerRuntime, startTime: number): number {
+    return Math.max(0, runtime.getCurrentTimeMs() - startTime);
+  }
+
+  private addComputeTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
+    state.metrics.computeMs += this.elapsedSince(runtime, startTime);
+  }
+
+  private addDbTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
+    state.metrics.dbMs += this.elapsedSince(runtime, startTime);
+  }
+
+  private addHttpTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
+    state.metrics.httpMs += this.elapsedSince(runtime, startTime);
+  }
+
+  private addSleepTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
+    state.metrics.sleepMs += this.elapsedSince(runtime, startTime);
+  }
+
+  private async sleepWithMetrics(
+    runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
+    ms: number
+  ): Promise<void> {
+    const startTime = runtime.getCurrentTimeMs();
+    await runtime.sleep(ms);
+    this.addSleepTime(state, runtime, startTime);
   }
 
   private sanitizeConsumeOptions(options: DataUploadConsumeOptions): DataUploadConsumeOptions {
@@ -155,7 +208,9 @@ export class DataUploadWorkerExecutor {
     options: DataUploadConsumeOptions,
     state: DataUploadConsumeState
   ): Promise<DataUploadHandleResult> {
+    const hasDataStartTime = runtime.getCurrentTimeMs();
     const hasData = await runtime.hasData(dataType);
+    this.addDbTime(state, runtime, hasDataStartTime);
     if (!hasData) {
       return { hasMoreData: false };
     }
@@ -166,11 +221,15 @@ export class DataUploadWorkerExecutor {
     let shouldReschedule = false;
 
     while (!runtime.isStopped() && processedPages < maxPages) {
+      const queryStartTime = runtime.getCurrentTimeMs();
       const cacheDataList = await this.queryFromData(runtime, dataType, options.pageSize);
+      this.addDbTime(state, runtime, queryStartTime);
       lastQueryWasFull = cacheDataList.length >= options.pageSize;
 
+      const computeStartTime = runtime.getCurrentTimeMs();
       const deduplicatedDataList = this.deduplicateData(dataType, cacheDataList);
       if (deduplicatedDataList.length === 0) {
+        this.addComputeTime(state, runtime, computeStartTime);
         break;
       }
 
@@ -179,7 +238,9 @@ export class DataUploadWorkerExecutor {
         deduplicatedDataList.length} duplicate record(s) for ${dataType}`);
       }
 
-      if (await runtime.shouldDiscardData(dataType)) {
+      const shouldDiscardData = await runtime.shouldDiscardData(dataType);
+      if (shouldDiscardData) {
+        this.addComputeTime(state, runtime, computeStartTime);
         FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] type=${dataType} reason=cache-limit`);
         break;
       }
@@ -187,9 +248,12 @@ export class DataUploadWorkerExecutor {
       const seqNumber = this.getSeqNumber(dataType);
       const pkgId = this.generatePackageId(runtime, seqNumber, deduplicatedDataList.length);
       const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
+      this.addComputeTime(state, runtime, computeStartTime);
       if (body.trim().length === 0) {
-        await this.deleteLastQuery(runtime, deduplicatedDataList);
+        await this.deleteLastQuery(runtime, state, deduplicatedDataList);
+        const reduceStartTime = runtime.getCurrentTimeMs();
         await runtime.reduceCacheCount(dataType, deduplicatedDataList.length);
+        this.addComputeTime(state, runtime, reduceStartTime);
         processedPages++;
         this.traceUploadLaneDebug(`[SKIP] type=${dataType} rows=${deduplicatedDataList.length} reason=empty-body`);
         if (cacheDataList.length < options.pageSize) {
@@ -200,11 +264,13 @@ export class DataUploadWorkerExecutor {
 
       this.traceUploadStartIfNeeded(state, dataType, deduplicatedDataList.length);
       state.consumedRows += deduplicatedDataList.length;
+      const markStartTime = runtime.getCurrentTimeMs();
       this.markDataAsUploading(dataType, deduplicatedDataList);
+      this.addComputeTime(state, runtime, markStartTime);
 
       try {
         this.printUploadData(body);
-        const result = await this.uploadBatch(runtime, dataType, pkgId, body, deduplicatedDataList);
+        const result = await this.uploadBatch(runtime, state, dataType, pkgId, body, deduplicatedDataList);
         processedPages++;
 
         if (result === UploadBatchResult.RETRY_BACKOFF ||
@@ -217,40 +283,53 @@ export class DataUploadWorkerExecutor {
           break;
         }
         if (options.syncSleepTime > 0 && processedPages < maxPages) {
-          await runtime.sleep(options.syncSleepTime);
+          await this.sleepWithMetrics(runtime, state, options.syncSleepTime);
         }
       } catch (error) {
+        const unmarkStartTime = runtime.getCurrentTimeMs();
         this.unmarkDataAsUploading(dataType, deduplicatedDataList);
+        this.addComputeTime(state, runtime, unmarkStartTime);
         const retryCount = this.incrementErrorCount(dataType);
         FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${dataType}, error: ${error as string}`);
 
         const delayTime = this.getNormalBackoffMs(retryCount);
-        await runtime.sleep(delayTime);
+        await this.sleepWithMetrics(runtime, state, delayTime);
         break;
       }
     }
 
     if (processedPages >= maxPages && lastQueryWasFull) {
-      return { hasMoreData: await runtime.hasData(dataType) };
+      const hasMoreDataStartTime = runtime.getCurrentTimeMs();
+      const hasMoreData = await runtime.hasData(dataType);
+      this.addDbTime(state, runtime, hasMoreDataStartTime);
+      return { hasMoreData };
     }
     return { hasMoreData: shouldReschedule };
   }
 
   private async uploadBatch(
     runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
     dataType: DataType,
     pkgId: string,
     body: string,
     dataList: DataUploadRow[]
   ): Promise<UploadBatchResult> {
     let result: DataUploadHttpResult;
+    const httpStartTime = runtime.getCurrentTimeMs();
+    let httpMeasured = false;
     try {
       result = await runtime.executeHttp(dataType, pkgId, body);
+      this.addHttpTime(state, runtime, httpStartTime);
+      httpMeasured = true;
       if (result.code === NetCodeStatus.NETWORK_EXCEPTION_CODE) {
         FTInnerLogger.e(TAG, "Network not available");
         throw new Error("Network not available");
       }
     } catch (error) {
+      if (!httpMeasured) {
+        this.addHttpTime(state, runtime, httpStartTime);
+      }
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Network request failed: ${error as string}`);
       result = {
         code: NetCodeStatus.UNKNOWN_EXCEPTION_CODE,
@@ -259,11 +338,12 @@ export class DataUploadWorkerExecutor {
       };
     }
 
-    return await this.handleUploadResponse(runtime, dataType, pkgId, result, dataList);
+    return await this.handleUploadResponse(runtime, state, dataType, pkgId, result, dataList);
   }
 
   private async handleUploadResponse(
     runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
     dataType: DataType,
     pkgId: string,
     result: DataUploadHttpResult,
@@ -274,26 +354,36 @@ export class DataUploadWorkerExecutor {
     const errorCode = result.errorCode;
 
     if (this.isIgnoredClientError(code)) {
+      const markStartTime = runtime.getCurrentTimeMs();
       this.markDataAsUploaded(dataType, dataList);
-      await this.deleteLastQuery(runtime, dataList);
+      this.addComputeTime(state, runtime, markStartTime);
+      await this.deleteLastQuery(runtime, state, dataList);
+      const reduceStartTime = runtime.getCurrentTimeMs();
       await runtime.reduceCacheCount(dataType, dataList.length);
+      this.addComputeTime(state, runtime, reduceStartTime);
       this.resetErrorCount(dataType);
       const ignoredCount = this.incrementIgnoredClientErrorCount(dataType);
       const delayTime = this.getIgnoredClientBackoffMs(ignoredCount);
       this.traceUploadLane(
         `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete ignoredBackoff=${delayTime}ms ignoredCount=${ignoredCount} pkg=${pkgId}`
       );
-      await runtime.sleep(delayTime);
+      await this.sleepWithMetrics(runtime, state, delayTime);
       return UploadBatchResult.DELETE_WITH_IGNORED_BACKOFF;
     }
 
     if (this.shouldDeleteWithoutBackoff(code)) {
+      const markStartTime = runtime.getCurrentTimeMs();
       this.markDataAsUploaded(dataType, dataList);
-      await this.deleteLastQuery(runtime, dataList);
+      this.addComputeTime(state, runtime, markStartTime);
+      await this.deleteLastQuery(runtime, state, dataList);
+      const reduceStartTime = runtime.getCurrentTimeMs();
       await runtime.reduceCacheCount(dataType, dataList.length);
+      this.addComputeTime(state, runtime, reduceStartTime);
       this.resetErrorCount(dataType);
       this.resetIgnoredClientErrorCount(dataType);
+      const advanceStartTime = runtime.getCurrentTimeMs();
       this.advancePackageGenerator(dataType, code);
+      this.addComputeTime(state, runtime, advanceStartTime);
       this.traceUploadLane(
         `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete backoff=0ms pkg=${pkgId}`
       );
@@ -301,23 +391,27 @@ export class DataUploadWorkerExecutor {
     }
 
     if (this.isRetryableUploadError(code)) {
+      const unmarkStartTime = runtime.getCurrentTimeMs();
       this.unmarkDataAsUploading(dataType, dataList);
-      await this.reInsertData(runtime, dataList);
+      this.addComputeTime(state, runtime, unmarkStartTime);
+      await this.reInsertData(runtime, state, dataList);
       this.resetIgnoredClientErrorCount(dataType);
       const retryCount = this.incrementErrorCount(dataType);
       const delayTime = this.getNormalBackoffMs(retryCount);
       FTInnerLogger.w(TAG,
         `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=reinsert retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
-      await runtime.sleep(delayTime);
+      await this.sleepWithMetrics(runtime, state, delayTime);
       return UploadBatchResult.RETRY_BACKOFF;
     }
 
+    const unmarkStartTime = runtime.getCurrentTimeMs();
     this.unmarkDataAsUploading(dataType, dataList);
+    this.addComputeTime(state, runtime, unmarkStartTime);
     const retryCount = this.incrementErrorCount(dataType);
     const delayTime = this.getNormalBackoffMs(retryCount);
     FTInnerLogger.w(TAG,
       `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=retry retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
-    await runtime.sleep(delayTime);
+    await this.sleepWithMetrics(runtime, state, delayTime);
     return UploadBatchResult.RETRY_BACKOFF;
   }
 
@@ -595,23 +689,34 @@ export class DataUploadWorkerExecutor {
     FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========================================`);
   }
 
-  private async deleteLastQuery(runtime: DataUploadWorkerRuntime, list: DataUploadRow[]): Promise<void> {
+  private async deleteLastQuery(
+    runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
+    list: DataUploadRow[]
+  ): Promise<void> {
     try {
       if (!list || list.length === 0) {
         return;
       }
 
+      const deleteStartTime = runtime.getCurrentTimeMs();
       await runtime.deleteRows(list);
-      await runtime.sleep(30);
+      this.addDbTime(state, runtime, deleteStartTime);
+      await this.sleepWithMetrics(runtime, state, 30);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Delete uploaded data failed: ${error as string}`);
     }
   }
 
-  private async reInsertData(runtime: DataUploadWorkerRuntime, list: DataUploadRow[]): Promise<void> {
+  private async reInsertData(
+    runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
+    list: DataUploadRow[]
+  ): Promise<void> {
     try {
-      await this.deleteLastQuery(runtime, list);
+      await this.deleteLastQuery(runtime, state, list);
 
+      const computeStartTime = runtime.getCurrentTimeMs();
       const reInsertList: DataUploadRow[] = [];
       for (const data of list) {
         reInsertList.push({
@@ -623,8 +728,11 @@ export class DataUploadWorkerExecutor {
           customDataType: data.customDataType
         });
       }
+      this.addComputeTime(state, runtime, computeStartTime);
 
+      const insertStartTime = runtime.getCurrentTimeMs();
       await runtime.insertRows(reInsertList, true);
+      this.addDbTime(state, runtime, insertStartTime);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Reinsert data failed: ${error as string}`);
     }

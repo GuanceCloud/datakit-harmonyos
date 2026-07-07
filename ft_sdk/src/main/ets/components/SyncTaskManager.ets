@@ -28,6 +28,7 @@ import {
   SDKWorkerPayload,
   SDKWorkerRequest,
   SDKWorkerResponse,
+  SDKWorkerTiming,
   toSDKWorkerErrorDTO,
   toSDKWorkerErrorPayload
 } from './thread/SDKWorkerProtocol';
@@ -38,6 +39,7 @@ import {
   DataUploadBridgeRowsPayload,
   DataUploadBridgeValuePayload,
   DataUploadConsumeOptions,
+  DataUploadConsumeMetrics,
   DataUploadConsumeResult,
   DataUploadHttpResult,
   DataUploadRow,
@@ -551,6 +553,7 @@ export class SyncTaskManager {
     const options = this.createDataUploadConsumeOptions(taskName);
     const runtime = this.createDataUploadRuntime();
     const request = this.createDataUploadWorkerRequest(taskName, options);
+    let workerMetrics: SDKWorkerTiming = {};
 
     try {
       await SDKTaskScheduler.getInstance().submitTaskAndWait({
@@ -567,6 +570,9 @@ export class SyncTaskManager {
         workerBridgeHandler: async (bridgeRequest: SDKWorkerBridgeRequest) =>
           await this.handleDataUploadBridgeRequest(bridgeRequest),
         workerResponseHandler: async (response: SDKWorkerResponse) => {
+          if (response.metrics !== undefined) {
+            workerMetrics = response.metrics;
+          }
           if (response.ok) {
             consumeResult = this.toDataUploadConsumeResult(response);
           }
@@ -595,12 +601,29 @@ export class SyncTaskManager {
       this.running = false;
       const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
       const uploadedRows = this.uploadCurrentPollRows;
+      const uploadMetrics = consumeResult.metrics;
+      const schedulerWaitTime = this.normalizeMetricTime(workerMetrics.schedulerWaitMs);
+      const schedulerComputeTime = this.normalizeMetricTime(workerMetrics.schedulerComputeMs);
+      const schedulerExecuteTime = this.normalizeMetricTime(workerMetrics.schedulerExecuteMs);
+      const poolWaitTime = this.normalizeMetricTime(workerMetrics.poolWaitMs);
+      const poolExecuteTime = this.normalizeMetricTime(workerMetrics.poolExecuteMs);
+      const uploadComputeTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.computeMs) : 0;
+      const uploadExecuteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.executeMs) :
+        Math.max(0, costTime - schedulerWaitTime - schedulerComputeTime - poolWaitTime);
+      const uploadDbTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbMs) : 0;
+      const uploadHttpTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.httpMs) : 0;
+      const uploadSleepTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.sleepMs) : 0;
+      const uploadWorkerTotalTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.totalMs) : poolExecuteTime;
+      const waitTime = schedulerWaitTime + poolWaitTime;
+      const computeTime = schedulerComputeTime + uploadComputeTime;
+      const executeTime = uploadExecuteTime;
+      const unaccountedTime = Math.max(0, costTime - waitTime - computeTime - executeTime);
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
       if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
         this.traceUploadLaneDebug(
-          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
+          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms db=${uploadDbTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
         );
       }
     }
@@ -661,8 +684,33 @@ export class SyncTaskManager {
     return {
       consumedRows: typeof record['consumedRows'] === 'number' ? record['consumedRows'] as number : 0,
       hasMoreData: record['hasMoreData'] === true,
-      errorCount: typeof record['errorCount'] === 'number' ? record['errorCount'] as number : 0
+      errorCount: typeof record['errorCount'] === 'number' ? record['errorCount'] as number : 0,
+      metrics: this.toDataUploadConsumeMetrics(record['metrics'])
     };
+  }
+
+  private toDataUploadConsumeMetrics(
+    value: object | string | number | boolean | null | undefined
+  ): DataUploadConsumeMetrics | undefined {
+    if (value && typeof value === 'object') {
+      const record = value as Object as UploadBridgePayloadRecord;
+      return {
+        totalMs: this.readBridgeNumber(record, 'totalMs', 0),
+        computeMs: this.readBridgeNumber(record, 'computeMs', 0),
+        dbMs: this.readBridgeNumber(record, 'dbMs', 0),
+        httpMs: this.readBridgeNumber(record, 'httpMs', 0),
+        sleepMs: this.readBridgeNumber(record, 'sleepMs', 0),
+        executeMs: this.readBridgeNumber(record, 'executeMs', 0)
+      };
+    }
+    return undefined;
+  }
+
+  private normalizeMetricTime(value: number | undefined): number {
+    if (typeof value !== 'number' || value <= 0) {
+      return 0;
+    }
+    return value;
   }
 
   private async handleDataUploadBridgeRequest(request: SDKWorkerBridgeRequest): Promise<SDKWorkerBridgeResponse> {

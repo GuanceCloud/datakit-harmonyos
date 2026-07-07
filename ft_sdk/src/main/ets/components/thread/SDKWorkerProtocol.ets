@@ -29,6 +29,15 @@ export interface SDKWorkerResponse {
   ok: boolean;
   payload?: SDKWorkerPayload;
   errorMessage?: string;
+  metrics?: SDKWorkerTiming;
+}
+
+export interface SDKWorkerTiming {
+  schedulerWaitMs?: number;
+  schedulerComputeMs?: number;
+  schedulerExecuteMs?: number;
+  poolWaitMs?: number;
+  poolExecuteMs?: number;
 }
 
 export enum SDKWorkerCommand {

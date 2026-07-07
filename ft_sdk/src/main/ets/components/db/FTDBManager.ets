@@ -61,6 +61,11 @@ interface SyncDataCacheCountDelta {
   rum: number;
 }
 
+interface SyncDataWriteTiming {
+  computeMs: number;
+  executeMs: number;
+}
+
 /**
  * HarmonyOS SDK Database Manager
  * Inherits from DBManager, implements specific business logic
@@ -321,6 +326,27 @@ export class FTDBManager extends DBManager {
     };
   }
 
+  private createSyncDataWriteTiming(): SyncDataWriteTiming {
+    return {
+      computeMs: 0,
+      executeMs: 0
+    };
+  }
+
+  private addWriteComputeTime(timing: SyncDataWriteTiming | undefined, startTime: number): void {
+    if (!timing) {
+      return;
+    }
+    timing.computeMs += Math.max(0, Date.now() - startTime);
+  }
+
+  private addWriteExecuteTime(timing: SyncDataWriteTiming | undefined, startTime: number): void {
+    if (!timing) {
+      return;
+    }
+    timing.executeMs += Math.max(0, Date.now() - startTime);
+  }
+
   private getCacheCategory(dataType: DataType): SyncDataCacheCategory {
     if (dataType === DataType.LOG) {
       return SyncDataCacheCategory.LOG;
@@ -466,13 +492,20 @@ export class FTDBManager extends DBManager {
     return values;
   }
 
-  private async queryTotalCountLocked(rdbStore: relationalStore.RdbStore, types: DataType[]): Promise<number> {
+  private async queryTotalCountLocked(
+    rdbStore: relationalStore.RdbStore,
+    types: DataType[],
+    timing?: SyncDataWriteTiming
+  ): Promise<number> {
+    const computeStartTime = Date.now();
     const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
     if (types && types.length > 0) {
       const typeValues = types.map(type => type.toString());
       predicates.in(FTSQL.RECORD_COLUMN_DATA_TYPE, typeValues);
     }
+    this.addWriteComputeTime(timing, computeStartTime);
 
+    const executeStartTime = Date.now();
     const resultSet = await rdbStore.query(predicates, ['count(*) as count']);
     try {
       if (resultSet.goToFirstRow()) {
@@ -481,10 +514,15 @@ export class FTDBManager extends DBManager {
       return 0;
     } finally {
       resultSet.close();
+      this.addWriteExecuteTime(timing, executeStartTime);
     }
   }
 
-  private async getCurrentDatabaseSizeLocked(rdbStore: relationalStore.RdbStore): Promise<number> {
+  private async getCurrentDatabaseSizeLocked(
+    rdbStore: relationalStore.RdbStore,
+    timing?: SyncDataWriteTiming
+  ): Promise<number> {
+    const executeStartTime = Date.now();
     const resultSet = await rdbStore.querySql("PRAGMA page_count");
     try {
       if (resultSet && resultSet.goToFirstRow()) {
@@ -495,6 +533,7 @@ export class FTDBManager extends DBManager {
       return 0;
     } finally {
       resultSet?.close();
+      this.addWriteExecuteTime(timing, executeStartTime);
     }
   }
 
@@ -509,11 +548,13 @@ export class FTDBManager extends DBManager {
   private async deleteOldestDataLocked(
     rdbStore: relationalStore.RdbStore,
     types: DataType | DataType[],
-    limit: number
+    limit: number,
+    timing?: SyncDataWriteTiming
   ): Promise<number> {
     if (limit <= 0) {
       return 0;
     }
+    const computeStartTime = Date.now();
     const typeArray = Array.isArray(types) ? types : [types];
     const whereClause = this.buildDataTypeWhereClause(typeArray);
     const wherePart = whereClause ? ` WHERE ${whereClause}` : '';
@@ -521,8 +562,10 @@ export class FTDBManager extends DBManager {
       SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}${wherePart}
       ORDER BY ${FTSQL.RECORD_COLUMN_TM} ASC LIMIT ${limit}
     )`;
+    this.addWriteComputeTime(timing, computeStartTime);
 
     let deleteCount = 0;
+    let executeStartTime = Date.now();
     const resultSet = await rdbStore.querySql(countSql);
     try {
       if (resultSet.goToFirstRow()) {
@@ -530,32 +573,41 @@ export class FTDBManager extends DBManager {
       }
     } finally {
       resultSet.close();
+      this.addWriteExecuteTime(timing, executeStartTime);
     }
 
     if (deleteCount <= 0) {
       return 0;
     }
 
+    const deleteSqlStartTime = Date.now();
     const deleteSql = `DELETE FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} WHERE _id IN (
       SELECT _id FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}${wherePart}
       ORDER BY ${FTSQL.RECORD_COLUMN_TM} ASC LIMIT ${limit}
     )`;
+    this.addWriteComputeTime(timing, deleteSqlStartTime);
+    executeStartTime = Date.now();
     await rdbStore.executeSql(deleteSql);
+    this.addWriteExecuteTime(timing, executeStartTime);
     return deleteCount;
   }
 
   private async checkDataExistsLocked(
     rdbStore: relationalStore.RdbStore,
     dataType: DataType,
-    dataString: string
+    dataString: string,
+    timing?: SyncDataWriteTiming
   ): Promise<boolean> {
+    const computeStartTime = Date.now();
     const uniqueId = this.extractUniqueId(dataType, dataString);
     if (!uniqueId) {
+      this.addWriteComputeTime(timing, computeStartTime);
       return false;
     }
 
     const key = `${dataType.toString()}:${uniqueId}`;
     if (this.insertedDataIds.has(key)) {
+      this.addWriteComputeTime(timing, computeStartTime);
       return true;
     }
 
@@ -564,16 +616,21 @@ export class FTDBManager extends DBManager {
     const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
     predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
     predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
+    this.addWriteComputeTime(timing, computeStartTime);
 
+    const executeStartTime = Date.now();
     const resultSet = await rdbStore.query(predicates, ['_id']);
     try {
       const exists = resultSet.goToFirstRow();
       if (exists) {
+        const markStartTime = Date.now();
         this.insertedDataIds.set(key, true);
+        this.addWriteComputeTime(timing, markStartTime);
       }
       return exists;
     } finally {
       resultSet.close();
+      this.addWriteExecuteTime(timing, executeStartTime);
     }
   }
 
@@ -581,24 +638,31 @@ export class FTDBManager extends DBManager {
     rdbStore: relationalStore.RdbStore,
     dataType: DataType,
     uniqueId: string,
-    countDelta?: SyncDataCacheCountDelta
+    countDelta?: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
   ): Promise<number> {
     if (!uniqueId.startsWith('action_id=') && !uniqueId.startsWith('view_id=')) {
       return 0;
     }
 
+    const computeStartTime = Date.now();
     const searchPattern = this.getDuplicateSearchPattern(uniqueId);
     const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
     const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
     predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
     predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
+    this.addWriteComputeTime(timing, computeStartTime);
 
+    const executeStartTime = Date.now();
     const deletedRows = await rdbStore.delete(predicates);
+    this.addWriteExecuteTime(timing, executeStartTime);
+    const markStartTime = Date.now();
     if (countDelta) {
       this.addCacheCountDelta(countDelta, this.getCacheCategory(dataType), -deletedRows);
     }
     const key = `${dataType.toString()}:${uniqueId}`;
     this.insertedDataIds.delete(key);
+    this.addWriteComputeTime(timing, markStartTime);
     return deletedRows;
   }
 
@@ -621,62 +685,83 @@ export class FTDBManager extends DBManager {
     category: SyncDataCacheCategory,
     requested: number,
     result: SyncDataWriteResult,
-    countDelta: SyncDataCacheCountDelta
+    countDelta: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
   ): Promise<number> {
+    const computeStartTime = Date.now();
     if (requested <= 0 || category === SyncDataCacheCategory.NONE) {
+      this.addWriteComputeTime(timing, computeStartTime);
       return requested;
     }
 
     const cachePolicy = FTDBCachePolicy.getInstance();
     const types = category === SyncDataCacheCategory.LOG ? [DataType.LOG] : [DataType.RUM_APP, DataType.RUM_WEBVIEW];
+    this.addWriteComputeTime(timing, computeStartTime);
 
     if (cachePolicy.isEnableLimitWithDbSize()) {
-      const currentDbSize = await this.getCurrentDatabaseSizeLocked(rdbStore);
+      const currentDbSize = await this.getCurrentDatabaseSizeLocked(rdbStore, timing);
+      const sizePolicyStartTime = Date.now();
       cachePolicy.setCurrentDbSize(currentDbSize);
       if (!cachePolicy.isReachDbLimit()) {
+        this.addWriteComputeTime(timing, sizePolicyStartTime);
         return requested;
       }
 
       if (String(cachePolicy.getDBCacheDiscard()) === DBCacheDiscard.DISCARD_OLDEST) {
-        const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT);
+        this.addWriteComputeTime(timing, sizePolicyStartTime);
+        const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT, timing);
+        const deletedPolicyStartTime = Date.now();
         result.deletedOld += deleted;
         this.addCacheCountDelta(countDelta, category, -deleted);
+        this.addWriteComputeTime(timing, deletedPolicyStartTime);
         return requested;
       }
+      this.addWriteComputeTime(timing, sizePolicyStartTime);
       return 0;
     }
 
-    const currentCount = await this.queryTotalCountLocked(rdbStore, types);
+    const currentCount = await this.queryTotalCountLocked(rdbStore, types, timing);
+    const countPolicyStartTime = Date.now();
     if (category === SyncDataCacheCategory.LOG) {
       cachePolicy.syncCountsFromDbInternal(currentCount, undefined);
       const limit = cachePolicy.getLogLimitCount();
       if (limit <= 0 || currentCount + requested <= limit) {
+        this.addWriteComputeTime(timing, countPolicyStartTime);
         return requested;
       }
 
       const overflow = currentCount + requested - limit;
       if (String(cachePolicy.getDiscardStrategy(DataType.LOG)) === DBCacheDiscard.DISCARD_OLDEST) {
-        const deleted = await this.deleteOldestDataLocked(rdbStore, DataType.LOG, overflow);
+        this.addWriteComputeTime(timing, countPolicyStartTime);
+        const deleted = await this.deleteOldestDataLocked(rdbStore, DataType.LOG, overflow, timing);
+        const deletedPolicyStartTime = Date.now();
         result.deletedOld += deleted;
         this.addCacheCountDelta(countDelta, category, -deleted);
+        this.addWriteComputeTime(timing, deletedPolicyStartTime);
         return requested;
       }
+      this.addWriteComputeTime(timing, countPolicyStartTime);
       return Math.max(0, limit - currentCount);
     }
 
     cachePolicy.syncCountsFromDbInternal(undefined, currentCount);
     const limit = cachePolicy.getRumLimitCount();
     if (limit <= 0 || currentCount + requested <= limit) {
+      this.addWriteComputeTime(timing, countPolicyStartTime);
       return requested;
     }
 
     const overflow = currentCount + requested - limit;
     if (String(cachePolicy.getDiscardStrategy(DataType.RUM_APP)) === DBCacheDiscard.DISCARD_OLDEST) {
-      const deleted = await this.deleteOldestDataLocked(rdbStore, types, overflow);
+      this.addWriteComputeTime(timing, countPolicyStartTime);
+      const deleted = await this.deleteOldestDataLocked(rdbStore, types, overflow, timing);
+      const deletedPolicyStartTime = Date.now();
       result.deletedOld += deleted;
       this.addCacheCountDelta(countDelta, category, -deleted);
+      this.addWriteComputeTime(timing, deletedPolicyStartTime);
       return requested;
     }
+    this.addWriteComputeTime(timing, countPolicyStartTime);
     return Math.max(0, limit - currentCount);
   }
 
@@ -684,8 +769,10 @@ export class FTDBManager extends DBManager {
     rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
     result: SyncDataWriteResult,
-    countDelta: SyncDataCacheCountDelta
+    countDelta: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
   ): Promise<SyncData[]> {
+    let computeStartTime = Date.now();
     let logRequested = 0;
     let rumRequested = 0;
     for (const data of dataList) {
@@ -696,22 +783,26 @@ export class FTDBManager extends DBManager {
         rumRequested++;
       }
     }
+    this.addWriteComputeTime(timing, computeStartTime);
 
     let allowedLogs = await this.resolveAllowedInsertCountLocked(
       rdbStore,
       SyncDataCacheCategory.LOG,
       logRequested,
       result,
-      countDelta
+      countDelta,
+      timing
     );
     let allowedRum = await this.resolveAllowedInsertCountLocked(
       rdbStore,
       SyncDataCacheCategory.RUM,
       rumRequested,
       result,
-      countDelta
+      countDelta,
+      timing
     );
 
+    computeStartTime = Date.now();
     const allowedData: SyncData[] = [];
     for (const data of dataList) {
       const category = this.getCacheCategory(data.getDataType());
@@ -734,6 +825,7 @@ export class FTDBManager extends DBManager {
       }
     }
 
+    this.addWriteComputeTime(timing, computeStartTime);
     return allowedData;
   }
 
@@ -742,7 +834,8 @@ export class FTDBManager extends DBManager {
     dataList: SyncData[],
     reInsert: boolean,
     result: SyncDataWriteResult,
-    countDelta: SyncDataCacheCountDelta
+    countDelta: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
   ): Promise<SyncData[]> {
     if (reInsert) {
       return dataList;
@@ -752,41 +845,52 @@ export class FTDBManager extends DBManager {
     const seenInBatch: Map<string, boolean> = new Map();
 
     for (const data of dataList) {
+      let computeStartTime = Date.now();
       const dataString = data.getDataString();
       const dataType = data.getDataType();
       const uniqueId = this.extractUniqueId(dataType, dataString);
       if (!uniqueId) {
         filteredDataList.push(data);
+        this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
       const key = `${dataType.toString()}:${uniqueId}`;
       if (seenInBatch.has(key)) {
         result.duplicateSkipped++;
+        this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
       if (!this.shouldQueryDbForDuplicate(uniqueId)) {
         if (this.insertedDataIds.has(key)) {
           result.duplicateSkipped++;
+          this.addWriteComputeTime(timing, computeStartTime);
           continue;
         }
         seenInBatch.set(key, true);
         filteredDataList.push(data);
+        this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
-      const exists = await this.checkDataExistsLocked(rdbStore, dataType, dataString);
+      this.addWriteComputeTime(timing, computeStartTime);
+      const exists = await this.checkDataExistsLocked(rdbStore, dataType, dataString, timing);
+      computeStartTime = Date.now();
       if (!exists) {
         seenInBatch.set(key, true);
         filteredDataList.push(data);
+        this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
-      const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId, countDelta);
+      this.addWriteComputeTime(timing, computeStartTime);
+      const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId, countDelta, timing);
+      computeStartTime = Date.now();
       result.deletedOld += deleted;
       seenInBatch.set(key, true);
       filteredDataList.push(data);
+      this.addWriteComputeTime(timing, computeStartTime);
     }
 
     return filteredDataList;
@@ -797,7 +901,8 @@ export class FTDBManager extends DBManager {
     dataList: SyncData[],
     reInsert: boolean,
     result: SyncDataWriteResult,
-    countDelta: SyncDataCacheCountDelta
+    countDelta: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
   ): Promise<void> {
     if (!dataList || dataList.length === 0) {
       return;
@@ -805,8 +910,14 @@ export class FTDBManager extends DBManager {
 
     if (dataList.length === 1) {
       const data = dataList[0];
-      const rowId = await rdbStore.insert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, this.toSyncDataValuesBucket(data));
+      let computeStartTime = Date.now();
+      const values = this.toSyncDataValuesBucket(data);
+      this.addWriteComputeTime(timing, computeStartTime);
+      const executeStartTime = Date.now();
+      const rowId = await rdbStore.insert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, values);
+      this.addWriteExecuteTime(timing, executeStartTime);
       const numericId = Number(rowId);
+      computeStartTime = Date.now();
       if (numericId > 0) {
         data.setId(numericId);
         result.inserted++;
@@ -817,16 +928,22 @@ export class FTDBManager extends DBManager {
       } else {
         result.errorMessage = `Invalid rowId returned: ${rowId}`;
       }
+      this.addWriteComputeTime(timing, computeStartTime);
       return;
     }
 
+    let computeStartTime = Date.now();
     const valuesArray: relationalStore.ValuesBucket[] = [];
     for (const data of dataList) {
       valuesArray.push(this.toSyncDataValuesBucket(data));
     }
+    this.addWriteComputeTime(timing, computeStartTime);
 
+    const executeStartTime = Date.now();
     const insertedCount = await rdbStore.batchInsert(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME, valuesArray);
+    this.addWriteExecuteTime(timing, executeStartTime);
     const insertedRows = Math.max(0, insertedCount);
+    computeStartTime = Date.now();
     result.inserted += insertedRows;
     this.addInsertedCacheCountDelta(countDelta, dataList, insertedRows);
     if (!reInsert && insertedRows > 0) {
@@ -834,29 +951,35 @@ export class FTDBManager extends DBManager {
         this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
       }
     }
+    this.addWriteComputeTime(timing, computeStartTime);
   }
 
   private async writeSyncDataLocked(
     rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
     options: SyncDataWriteOptions,
-    result: SyncDataWriteResult
+    result: SyncDataWriteResult,
+    timing?: SyncDataWriteTiming
   ): Promise<void> {
+    const initComputeStartTime = Date.now();
     const applyCachePolicy = options.applyCachePolicy === true;
     const reInsert = options.reInsert === true;
     let dataToWrite = dataList;
     const countDelta = this.createCacheCountDelta();
+    this.addWriteComputeTime(timing, initComputeStartTime);
 
     try {
       if (applyCachePolicy) {
-        dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result, countDelta);
+        dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result, countDelta, timing);
       }
 
-      dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result, countDelta);
-      await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result, countDelta);
+      dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result, countDelta, timing);
+      await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result, countDelta, timing);
     } finally {
       if (applyCachePolicy) {
+        const applyDeltaStartTime = Date.now();
         this.applyCacheCountDelta(countDelta);
+        this.addWriteComputeTime(timing, applyDeltaStartTime);
       }
     }
   }
@@ -874,10 +997,11 @@ export class FTDBManager extends DBManager {
 
     const manager = this;
     const startTime = Date.now();
+    const timing = this.createSyncDataWriteTiming();
     class WriteSyncDataCallback implements DataBaseCallBack {
       async run(rdbStore: relationalStore.RdbStore): Promise<void> {
         try {
-          await manager.writeSyncDataLocked(rdbStore, dataList, options, result);
+          await manager.writeSyncDataLocked(rdbStore, dataList, options, result, timing);
         } catch (error) {
           result.success = false;
           result.errorMessage = String(error);
@@ -888,7 +1012,9 @@ export class FTDBManager extends DBManager {
 
     try {
       if (this.isDatabaseClosed()) {
+        const executeStartTime = Date.now();
         await this.init();
+        this.addWriteExecuteTime(timing, executeStartTime);
       }
       await this.getDB(true, new WriteSyncDataCallback());
     } catch (error) {
@@ -896,9 +1022,18 @@ export class FTDBManager extends DBManager {
       result.errorMessage = String(error);
     } finally {
       const costTime = Math.max(0, Date.now() - startTime);
+      let computeTime = Math.max(0, timing.computeMs);
+      let executeTime = Math.max(0, timing.executeMs);
+      const accountedTime = computeTime + executeTime;
+      if (accountedTime > costTime && accountedTime > 0) {
+        const scale = costTime / accountedTime;
+        computeTime = Math.round(computeTime * scale);
+        executeTime = Math.max(0, costTime - computeTime);
+      }
+      const waitTime = Math.max(0, costTime - computeTime - executeTime);
       const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';
       FTInnerLogger.i(TAG,
-        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} cost=${costTime}ms${errorPart}`);
+        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
     }
 
     return result;

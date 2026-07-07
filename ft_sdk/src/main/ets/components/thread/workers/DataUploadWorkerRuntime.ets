@@ -35,6 +35,16 @@ export interface DataUploadConsumeResult {
   consumedRows: number;
   hasMoreData: boolean;
   errorCount: number;
+  metrics?: DataUploadConsumeMetrics;
+}
+
+export interface DataUploadConsumeMetrics {
+  totalMs: number;
+  computeMs: number;
+  dbMs: number;
+  httpMs: number;
+  sleepMs: number;
+  executeMs: number;
 }
 
 export enum DataUploadWorkerBridgeCommand {

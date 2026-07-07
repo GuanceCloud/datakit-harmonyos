@@ -9,6 +9,7 @@ import {
   SDKWorkerCommand,
   SDKWorkerRequest,
   SDKWorkerResponse,
+  SDKWorkerTiming,
   toSDKWorkerErrorDTO,
   toSDKWorkerErrorPayload
 } from './SDKWorkerProtocol';
@@ -30,6 +31,7 @@ const MAX_CORE_WORKER_COUNT = 4;
 
 export type SDKDedicatedTaskRunner = () => void | Promise<void>;
 export type SDKDedicatedCommandRunner = () => SDKWorkerPayload | Promise<SDKWorkerPayload>;
+export type SDKDedicatedPoolTaskStartHandler = (waitTime: number) => void;
 export type SDKWorkerBridgeHandler =
   (request: SDKWorkerBridgeRequest) => SDKWorkerBridgeResponse | Promise<SDKWorkerBridgeResponse>;
 
@@ -120,6 +122,7 @@ interface QueuedPoolTask {
   resolve: () => void;
   reject: (error: Error) => void;
   request?: SDKWorkerRequest;
+  onStart?: SDKDedicatedPoolTaskStartHandler;
 }
 
 interface DedicatedPoolState extends SDKPoolConfig {
@@ -207,7 +210,8 @@ export class SDKDedicatedPoolManager {
     name: string,
     priority: number,
     runner: SDKDedicatedTaskRunner,
-    request?: SDKWorkerRequest
+    request?: SDKWorkerRequest,
+    onStart?: SDKDedicatedPoolTaskStartHandler
   ): Promise<void> {
     const state = this.getPool(pool);
     if (state.isShutdown) {
@@ -227,7 +231,8 @@ export class SDKDedicatedPoolManager {
         run: runner,
         resolve,
         reject,
-        request
+        request,
+        onStart
       };
 
       state.submittedTasks++;
@@ -251,32 +256,46 @@ export class SDKDedicatedPoolManager {
     }
 
     return new Promise<SDKWorkerResponse>((resolve) => {
+      let poolWaitTime = 0;
       this.executeTask(request.pool, request.id, request.command, request.priority, async () => {
+        const poolExecuteStartTime = Date.now();
         try {
           const response = await this.dispatchWorkerCommand(request, runner, bridgeHandler);
-          resolve(response);
+          const timedResponse = this.withWorkerTiming(response, {
+            poolWaitMs: poolWaitTime,
+            poolExecuteMs: Math.max(0, Date.now() - poolExecuteStartTime)
+          });
+          resolve(timedResponse);
           if (!response.ok) {
             throw new Error(response.errorMessage || `Worker command failed: ${request.command}`);
           }
         } catch (error) {
           const errorDTO = toSDKWorkerErrorDTO(error);
           const errorPayload: SDKWorkerErrorPayload = toSDKWorkerErrorPayload(errorDTO);
-          resolve({
+          resolve(this.withWorkerTiming({
             id: request.id,
             ok: false,
             errorMessage: errorDTO.message,
             payload: errorPayload
-          });
+          }, {
+            poolWaitMs: poolWaitTime,
+            poolExecuteMs: Math.max(0, Date.now() - poolExecuteStartTime)
+          }));
         }
-      }, request).catch((error: Error) => {
+      }, request, (waitTime: number) => {
+        poolWaitTime = waitTime;
+      }).catch((error: Error) => {
         const errorDTO = toSDKWorkerErrorDTO(error);
         const errorPayload: SDKWorkerErrorPayload = toSDKWorkerErrorPayload(errorDTO);
-        resolve({
+        resolve(this.withWorkerTiming({
           id: request.id,
           ok: false,
           errorMessage: errorDTO.message,
           payload: errorPayload
-        });
+        }, {
+          poolWaitMs: poolWaitTime,
+          poolExecuteMs: 0
+        }));
       });
     });
   }
@@ -292,24 +311,31 @@ export class SDKDedicatedPoolManager {
 
     try {
       const response = await this.dispatchWorkerCommand(request, runner, bridgeHandler);
+      const timedResponse = this.withWorkerTiming(response, {
+        poolWaitMs: 0,
+        poolExecuteMs: Math.max(0, Date.now() - startTime)
+      });
       if (response.ok) {
         state.completedTasks++;
       } else {
         state.failedTasks++;
         state.lastError = response.errorMessage || `Worker command failed: ${request.command}`;
       }
-      return response;
+      return timedResponse;
     } catch (error) {
       const errorDTO = toSDKWorkerErrorDTO(error);
       const errorPayload: SDKWorkerErrorPayload = toSDKWorkerErrorPayload(errorDTO);
       state.failedTasks++;
       state.lastError = errorDTO.message;
-      return {
+      return this.withWorkerTiming({
         id: request.id,
         ok: false,
         errorMessage: errorDTO.message,
         payload: errorPayload
-      };
+      }, {
+        poolWaitMs: 0,
+        poolExecuteMs: Math.max(0, Date.now() - startTime)
+      });
     } finally {
       state.totalCostTime += Math.max(0, Date.now() - startTime);
     }
@@ -513,8 +539,8 @@ export class SDKDedicatedPoolManager {
     const coreWorkers = this.resolveCoreWorkerCount();
     this.pools.set(SDKDedicatedPoolType.EVENT_CONSUMER, this.createPool({
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-      workerCount: coreWorkers,
-      maxConcurrency: coreWorkers,
+      workerCount: 1,
+      maxConcurrency: 1,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.EVENT_CONSUMER)
     }));
@@ -605,6 +631,9 @@ export class SDKDedicatedPoolManager {
     const startTime = Date.now();
     const waitTime = Math.max(0, startTime - task.createdAt);
     state.totalWaitTime += waitTime;
+    if (task.onStart) {
+      task.onStart(waitTime);
+    }
     this.activePoolStack.push(state.pool);
 
     try {
@@ -675,6 +704,46 @@ export class SDKDedicatedPoolManager {
         payload: errorPayload
       };
     }
+  }
+
+  private withWorkerTiming(response: SDKWorkerResponse, timing: SDKWorkerTiming): SDKWorkerResponse {
+    return {
+      id: response.id,
+      ok: response.ok,
+      payload: response.payload,
+      errorMessage: response.errorMessage,
+      metrics: this.mergeWorkerTiming(response.metrics, timing)
+    };
+  }
+
+  private mergeWorkerTiming(
+    current: SDKWorkerTiming | undefined,
+    next: SDKWorkerTiming
+  ): SDKWorkerTiming {
+    const merged: SDKWorkerTiming = {};
+    if (current) {
+      merged.schedulerWaitMs = current.schedulerWaitMs;
+      merged.schedulerComputeMs = current.schedulerComputeMs;
+      merged.schedulerExecuteMs = current.schedulerExecuteMs;
+      merged.poolWaitMs = current.poolWaitMs;
+      merged.poolExecuteMs = current.poolExecuteMs;
+    }
+    if (next.schedulerWaitMs !== undefined) {
+      merged.schedulerWaitMs = next.schedulerWaitMs;
+    }
+    if (next.schedulerComputeMs !== undefined) {
+      merged.schedulerComputeMs = next.schedulerComputeMs;
+    }
+    if (next.schedulerExecuteMs !== undefined) {
+      merged.schedulerExecuteMs = next.schedulerExecuteMs;
+    }
+    if (next.poolWaitMs !== undefined) {
+      merged.poolWaitMs = next.poolWaitMs;
+    }
+    if (next.poolExecuteMs !== undefined) {
+      merged.poolExecuteMs = next.poolExecuteMs;
+    }
+    return merged;
   }
 
   private dispatchThreadWorkerCommand(

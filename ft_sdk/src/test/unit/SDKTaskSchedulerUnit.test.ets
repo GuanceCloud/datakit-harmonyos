@@ -157,7 +157,7 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
-    it('eventLaneShouldUseWorkerPoolForTasksWithoutSerialKey', 0, async () => {
+    it('eventLaneShouldUseSerialWorkerPoolForTasksWithoutSerialKey', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
@@ -189,15 +189,21 @@ export default function sdkTaskSchedulerUnitTest() {
       });
 
       await flushPromises();
-      expect(order.join(',')).assertEqual('first-start,second-start');
-      expect(scheduler.getStatus().lanes[SDKTaskType.EVENT].maxConcurrency >= 2).assertTrue();
+      const blockedStatus = scheduler.getStatus();
+      const blockedPool = blockedStatus.dedicatedPools.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+      expect(order.join(',')).assertEqual('first-start');
+      expect(blockedStatus.lanes[SDKTaskType.EVENT].maxConcurrency).assertEqual(1);
+      expect(blockedPool.workerCount).assertEqual(1);
+      expect(blockedPool.maxConcurrency).assertEqual(1);
+      expect(blockedPool.running).assertEqual(1);
+      expect(blockedPool.pending).assertEqual(1);
 
       releaseFirst();
       releaseSecond();
       await first;
       await second;
 
-      expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+      expect(order.join(',')).assertEqual('first-start,first-end,second-start,second-end');
     });
 
     it('eventLaneShouldDrainRunnableTasksIntoDedicatedWorkerPool', 0, async () => {

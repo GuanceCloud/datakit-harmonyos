@@ -11,7 +11,7 @@ import {
   SDKDedicatedPoolStatus,
   SDKWorkerBridgeHandler
 } from './SDKDedicatedPoolManager';
-import { SDKDedicatedPoolType, SDKWorkerRequest, SDKWorkerResponse } from './SDKWorkerProtocol';
+import { SDKDedicatedPoolType, SDKWorkerRequest, SDKWorkerResponse, SDKWorkerTiming } from './SDKWorkerProtocol';
 
 const TAG = "SDKTaskScheduler";
 const EVENT_WORKER_POOL_TRACE_PREFIX = "<FT-EVENT-WORKER-POOL>";
@@ -174,6 +174,8 @@ interface SDKLaneState {
   dispatchCount: number;
   totalWaitTime: number;
   totalCostTime: number;
+  lastWaitTime: number;
+  lastCostTime: number;
   totalDispatchTime: number;
   maxDispatchTime: number;
   lastDispatchTime: number;
@@ -383,6 +385,8 @@ export class SDKTaskScheduler {
       dispatchCount: 0,
       totalWaitTime: 0,
       totalCostTime: 0,
+      lastWaitTime: 0,
+      lastCostTime: 0,
       totalDispatchTime: 0,
       maxDispatchTime: 0,
       lastDispatchTime: 0,
@@ -664,10 +668,16 @@ export class SDKTaskScheduler {
 
     try {
       if (task.workerRequest) {
-        const response = await SDKDedicatedPoolManager.getInstance().executeCommand(
+        let response = await SDKDedicatedPoolManager.getInstance().executeCommand(
           task.workerRequest,
           task.workerFallbackRunner || this.createFallbackRunnerFromTask(task),
           task.workerBridgeHandler
+        );
+        response = this.withSchedulerTiming(
+          response,
+          waitTime,
+          lane.lastDispatchTime,
+          Math.max(0, Date.now() - startTime)
         );
         if (task.workerResponseHandler) {
           await Promise.resolve(task.workerResponseHandler(response));
@@ -706,6 +716,8 @@ export class SDKTaskScheduler {
     } finally {
       const costTime = Math.max(0, Date.now() - startTime);
       lane.totalCostTime += costTime;
+      lane.lastWaitTime = waitTime;
+      lane.lastCostTime = costTime;
       this.recordTaskGroupFinished(task, waitTime, costTime, result === 'failed');
 
       lane.running = Math.max(0, lane.running - 1);
@@ -740,6 +752,29 @@ export class SDKTaskScheduler {
     return async () => {
       await Promise.resolve(task.run!());
       return null;
+    };
+  }
+
+  private withSchedulerTiming(
+    response: SDKWorkerResponse,
+    waitTime: number,
+    computeTime: number,
+    executeTime: number
+  ): SDKWorkerResponse {
+    const metrics: SDKWorkerTiming = {};
+    if (response.metrics) {
+      metrics.poolWaitMs = response.metrics.poolWaitMs;
+      metrics.poolExecuteMs = response.metrics.poolExecuteMs;
+    }
+    metrics.schedulerWaitMs = waitTime;
+    metrics.schedulerComputeMs = computeTime;
+    metrics.schedulerExecuteMs = executeTime;
+    return {
+      id: response.id,
+      ok: response.ok,
+      payload: response.payload,
+      errorMessage: response.errorMessage,
+      metrics
     };
   }
 
@@ -983,7 +1018,7 @@ export class SDKTaskScheduler {
 
     this.skippedLaneTraceCount.set(task.type, 0);
     const message =
-      `[WORKER_POOL] logicalLane=${task.type} latest=${task.name} ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`;
+      `[WORKER_POOL] logicalLane=${task.type} latest=${task.name} ${this.formatSchedulerTimingTrace(lane)} ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`;
     if (task.type === SDKTaskType.UPLOAD) {
       this.traceSchedulerLaneDebug(message);
     } else {
@@ -1016,7 +1051,7 @@ export class SDKTaskScheduler {
 
     this.skippedLaneTraceCount.set(type, 0);
     const message =
-      `[WORKER_POOL_DRAINED] logicalLane=${type} latest=${latestTask.name} ${this.formatWorkerPoolTrace(type, lane)} skipped=${skipped} processedSinceIdle=${processedSinceLastIdle}`;
+      `[WORKER_POOL_DRAINED] logicalLane=${type} latest=${latestTask.name} ${this.formatSchedulerTimingTrace(lane)} ${this.formatWorkerPoolTrace(type, lane)} skipped=${skipped} processedSinceIdle=${processedSinceLastIdle}`;
     if (type === SDKTaskType.UPLOAD) {
       this.traceSchedulerLaneDebug(message);
     } else {
@@ -1055,8 +1090,10 @@ export class SDKTaskScheduler {
 
     this.skippedEventTraceCount = 0;
     const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+    const computeTime = lane.lastDispatchTime;
+    const totalTime = waitTime + computeTime + costTime;
     this.traceEventLane(
-      `[WORKER_POOL_CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} waited=${waitTime}ms cost=${costTime}ms dispatchCost=${lane.lastDispatchTime}ms scanCount=${lane.lastScanCount} previous=${previousEventName} gap=${serialGapTime}ms ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`
+      `[WORKER_POOL_CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} wait=${waitTime}ms compute=${computeTime}ms execute=${costTime}ms total=${totalTime}ms cost=${costTime}ms dispatchCost=${computeTime}ms scanCount=${lane.lastScanCount} previous=${previousEventName} gap=${serialGapTime}ms ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`
     );
   }
 
@@ -1078,6 +1115,18 @@ export class SDKTaskScheduler {
     }
 
     return `workerPool=${poolType} backend=${poolStatus.backend} workerCount=${poolStatus.workerCount} poolPending=${poolStatus.pending} poolRunning=${poolStatus.running} poolMax=${poolStatus.maxConcurrency} poolSubmitted=${poolStatus.submittedTasks} poolCompleted=${poolStatus.completedTasks} poolFailed=${poolStatus.failedTasks} logicalPending=${lane.pendingCount} logicalRunning=${lane.running} logicalSubmitted=${lane.submittedTasks} logicalCompleted=${lane.completedTasks} logicalFailed=${lane.failedTasks}`;
+  }
+
+  private formatSchedulerTimingTrace(lane: SDKLaneState): string {
+    const processedTasks = lane.completedTasks + lane.failedTasks;
+    const oldestWait = this.getOldestWait(lane);
+    const waitTime = lane.pendingCount > 0 ? oldestWait : lane.lastWaitTime;
+    const computeTime = lane.lastDispatchTime;
+    const executeTime = lane.lastCostTime;
+    const totalTime = waitTime + computeTime + executeTime;
+    const averageWaitTime = processedTasks > 0 ? Math.round(lane.totalWaitTime / processedTasks) : 0;
+    const averageCostTime = processedTasks > 0 ? Math.round(lane.totalCostTime / processedTasks) : 0;
+    return `wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${totalTime}ms cost=${executeTime}ms avgWait=${averageWaitTime}ms avgCost=${averageCostTime}ms totalWait=${lane.totalWaitTime}ms totalCost=${lane.totalCostTime}ms oldestWait=${oldestWait}ms dispatchCost=${computeTime}ms`;
   }
 
   private getWorkerPoolStatus(poolType: SDKDedicatedPoolType): SDKDedicatedPoolStatus | null {
