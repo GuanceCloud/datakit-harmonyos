@@ -8,6 +8,15 @@ import {
   FTNativeCrashHandlerRuntime
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
 import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from './thread/SDKWorkerTaskBridge';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from './thread/SDKWorkerProtocol';
 
 const TAG = "FTNativeCrashHandler";
 const CRASH_FILE_TRACE_PREFIX = "<FT-CRASH-FILE-LANE>";
@@ -251,9 +260,29 @@ export class FTNativeCrashHandler {
 
   private async submitCrashFileTask(name: string, task: SDKTaskRunner, crashData: NativeCrashData): Promise<void> {
     const traceName = this.nextCrashFileTaskName(name);
+    const command = SDKWorkerCommand.CRASH_FILE_RUN;
     this.traceCrashFileLane(
       `[ENQUEUE] name=${traceName} type=${crashData.crashType || 'unknown'} memory=${this.getTextSize(crashData.memoryNearRegisters)} maps=${this.getTextSize(crashData.maps)} hilog=${this.getTextSize(crashData.hilog)} external=${this.getTextSize(crashData.externalLog)}`
     );
+
+    const runTask = async () => {
+      const startTime = Date.now();
+      let result = 'success';
+      let errorMessage = '';
+      try {
+        await Promise.resolve(task());
+      } catch (error) {
+        result = 'failed';
+        errorMessage = String(error);
+        throw new Error(errorMessage);
+      } finally {
+        const costTime = Math.max(0, Date.now() - startTime);
+        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+        this.traceCrashFileLane(
+          `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-rum-error`
+        );
+      }
+    };
 
     await SDKTaskScheduler.getInstance().submitTaskAndWait({
       type: SDKTaskType.CRASH_FILE,
@@ -261,24 +290,14 @@ export class FTNativeCrashHandler {
       priority: SDKTaskPriority.HIGH,
       serialKey: NATIVE_CRASH_FILE_SERIAL_KEY,
       costHint: 'heavy',
-      run: async () => {
-        const startTime = Date.now();
-        let result = 'success';
-        let errorMessage = '';
-        try {
-          await Promise.resolve(task());
-        } catch (error) {
-          result = 'failed';
-          errorMessage = String(error);
-          throw new Error(errorMessage);
-        } finally {
-          const costTime = Math.max(0, Date.now() - startTime);
-          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-          this.traceCrashFileLane(
-            `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-rum-error`
-          );
-        }
-      }
+      workerRequest: createSDKWorkerTaskRequest(
+        SDKDedicatedPoolType.DATA_PROCESS,
+        command,
+        traceName,
+        SDKTaskPriority.HIGH
+      ),
+      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
     });
   }
 

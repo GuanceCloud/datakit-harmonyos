@@ -459,6 +459,10 @@ function aggregateLaneStatuses(types: SDKTaskType[]): SDKLaneStatus {
   let lastScanCount = 0;
   let oldestWait = 0;
   let lastError: string | null = null;
+  let missingWorkerRequestTasks = 0;
+  let lastMissingWorkerRequestTaskName: string | null = null;
+  let runnableFallbackTasks = 0;
+  let lastRunnableFallbackTaskName: string | null = null;
 
   for (const type of types) {
     const status = getLaneStatus(type);
@@ -483,6 +487,14 @@ function aggregateLaneStatuses(types: SDKTaskType[]): SDKLaneStatus {
     if (lastError === null && status.lastError !== null) {
       lastError = status.lastError;
     }
+    missingWorkerRequestTasks += status.missingWorkerRequestTasks;
+    if (lastMissingWorkerRequestTaskName === null && status.lastMissingWorkerRequestTaskName !== null) {
+      lastMissingWorkerRequestTaskName = status.lastMissingWorkerRequestTaskName;
+    }
+    runnableFallbackTasks += status.runnableFallbackTasks;
+    if (lastRunnableFallbackTaskName === null && status.lastRunnableFallbackTaskName !== null) {
+      lastRunnableFallbackTaskName = status.lastRunnableFallbackTaskName;
+    }
   }
 
   const processedTasks = completedTasks + failedTasks;
@@ -506,7 +518,11 @@ function aggregateLaneStatuses(types: SDKTaskType[]): SDKLaneStatus {
     maxScanCount,
     lastScanCount,
     oldestWait,
-    lastError
+    lastError,
+    missingWorkerRequestTasks,
+    lastMissingWorkerRequestTaskName,
+    runnableFallbackTasks,
+    lastRunnableFallbackTaskName
   };
 }
 
@@ -1002,7 +1018,7 @@ function submitBusinessProbe(
   const createdAt = Date.now();
   const probeIndex = tasks.length;
 
-  tasks.push(scheduler.submitTaskAndWait({
+  tasks.push(scheduler.submitRunnableTaskAndWait({
     type: laneType,
     name: `business-probe-${eventType}-${probeIndex}`,
     priority: SDKTaskPriority.HIGH,
@@ -1021,7 +1037,7 @@ function submitBusinessProbe(
         return;
       }
 
-      await scheduler.submitTaskAndWait({
+      await scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
         name: `business-probe-data-${eventType}-${probeIndex}`,
         priority: SDKTaskPriority.LOW,
@@ -1346,7 +1362,7 @@ export default function sdkThreadPoolCapabilityUnitTest() {
       for (let i = 0; i < PURE_MIXED_DISPATCH_TASK_COUNT; i++) {
         const type = PURE_MIXED_LANE_TYPES[i % PURE_MIXED_LANE_TYPES.length];
         const createdAt = Date.now();
-        tasks.push(scheduler.submitTaskAndWait({
+        tasks.push(scheduler.submitRunnableTaskAndWait({
           type,
           name: `pure-mixed-${type}-${i}`,
           priority: getPureDispatchPriority(i),

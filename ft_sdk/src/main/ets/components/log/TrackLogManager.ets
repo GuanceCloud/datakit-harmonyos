@@ -13,6 +13,11 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from '../thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from '../thread/SDKWorkerTaskBridge';
 import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
@@ -428,6 +433,10 @@ export class TrackLogManager {
   private submitLogTask(name: string, task: (traceName: string) => void | Promise<void>): boolean {
     const traceName = this.nextLogTaskName(name);
     try {
+      const command = SDKWorkerCommand.LOG_RUN;
+      const runTask = async () => {
+        await this.runLogTaskSafely(traceName, task);
+      };
       this.traceLogLane(`[ENQUEUE] name=${traceName} input=${this.inputQueue.length} processing=${this.processingQueue.length} buffer=${this.logBatchBuffer.length}`);
       SDKTaskScheduler.getInstance().submitTask({
         type: SDKTaskType.LOG,
@@ -435,9 +444,14 @@ export class TrackLogManager {
         priority: SDKTaskPriority.NORMAL,
         serialKey: TrackLogManager.LOG_SERIAL_KEY,
         costHint: 'normal',
-        run: async () => {
-          await this.runLogTaskSafely(traceName, task);
-        }
+        workerRequest: createSDKWorkerTaskRequest(
+          SDKDedicatedPoolType.LOG_CONSUMER,
+          command,
+          traceName,
+          SDKTaskPriority.NORMAL
+        ),
+        workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+        workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
       });
       return true;
     } catch (error) {

@@ -4,6 +4,15 @@ import { FTTraceConfigManager } from './FTTraceConfigManager';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from '../thread/SDKWorkerTaskBridge';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from '../thread/SDKWorkerProtocol';
 
 const TAG = Constants.LOG_TAG_PREFIX + "FTTraceManager";
 const CUSTOM_LANE_TRACE_PREFIX = "<FT-CUSTOM-LANE>";
@@ -378,6 +387,25 @@ export class FTTraceManager {
 
   private submitCustomTask(name: string, task: SDKTaskRunner): void {
     const traceName = this.nextCustomTaskName(name);
+    const command = SDKWorkerCommand.CUSTOM_RUN;
+    const runTask = async () => {
+      const startTime = Date.now();
+      let result = 'success';
+      let errorMessage = '';
+      try {
+        await Promise.resolve(task());
+      } catch (error) {
+        result = 'failed';
+        errorMessage = String(error);
+        throw new Error(errorMessage);
+      } finally {
+        const costTime = Math.max(0, Date.now() - startTime);
+        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+        this.traceCustomLane(
+          `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms handlers=${this.getHandlerCount()}`
+        );
+      }
+    };
     const pendingBefore = this.getHandlerCount();
     this.traceCustomLane(`[ENQUEUE] name=${traceName} handlers=${pendingBefore}`);
     SDKTaskScheduler.getInstance().submitTask({
@@ -387,24 +415,14 @@ export class FTTraceManager {
       serialKey: TRACE_CLEANUP_SERIAL_KEY,
       singleFlightKey: TRACE_CLEANUP_SINGLE_FLIGHT_KEY,
       costHint: 'light',
-      run: async () => {
-        const startTime = Date.now();
-        let result = 'success';
-        let errorMessage = '';
-        try {
-          await Promise.resolve(task());
-        } catch (error) {
-          result = 'failed';
-          errorMessage = String(error);
-          throw new Error(errorMessage);
-        } finally {
-          const costTime = Math.max(0, Date.now() - startTime);
-          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-          this.traceCustomLane(
-            `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms handlers=${this.getHandlerCount()}`
-          );
-        }
-      }
+      workerRequest: createSDKWorkerTaskRequest(
+        SDKDedicatedPoolType.DATA_PROCESS,
+        command,
+        traceName,
+        SDKTaskPriority.BACKGROUND
+      ),
+      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
     });
   }
 

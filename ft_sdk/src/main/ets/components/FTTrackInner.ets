@@ -19,6 +19,11 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from './thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from './thread/SDKWorkerTaskBridge';
 import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
@@ -112,27 +117,36 @@ class FTTrackInner {
 
   private submitDataProcessTask(name: string, task: SDKTaskRunner): void {
     const traceName = this.nextDataProcessTaskName(name);
+    const command = SDKWorkerCommand.DATA_RUN;
+    const runTask = async () => {
+      const startTime = Date.now();
+      let result = 'success';
+      let errorMessage = '';
+      try {
+        await Promise.resolve(task());
+      } catch (error) {
+        result = 'failed';
+        errorMessage = String(error);
+        throw new Error(errorMessage);
+      } finally {
+        const costTime = Math.max(0, Date.now() - startTime);
+        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+        this.traceDataLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms`);
+      }
+    };
     SDKTaskScheduler.getInstance().submitTask({
       type: SDKTaskType.DATA_PROCESS,
       name: traceName,
       priority: SDKTaskPriority.LOW,
       costHint: 'normal',
-      run: async () => {
-        const startTime = Date.now();
-        let result = 'success';
-        let errorMessage = '';
-        try {
-          await Promise.resolve(task());
-        } catch (error) {
-          result = 'failed';
-          errorMessage = String(error);
-          throw new Error(errorMessage);
-        } finally {
-          const costTime = Math.max(0, Date.now() - startTime);
-          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-          this.traceDataLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms`);
-        }
-      }
+      workerRequest: createSDKWorkerTaskRequest(
+        SDKDedicatedPoolType.DATA_PROCESS,
+        command,
+        traceName,
+        SDKTaskPriority.LOW
+      ),
+      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
     });
   }
 

@@ -1,9 +1,14 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import {
+  SDKTask,
   SDKTaskPriority,
   SDKTaskScheduler,
   SDKTaskType
 } from '../../main/ets/components/thread/SDKTaskScheduler';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from '../../main/ets/components/thread/SDKWorkerProtocol';
 
 async function flushPromises(): Promise<void> {
   for (let i = 0; i < 5; i++) {
@@ -41,10 +46,10 @@ export default function sdkTaskSchedulerUnitTest() {
       SDKTaskScheduler.resetInternal();
     });
 
-    it('submitAndWaitShouldAwaitAsyncRun', 0, async () => {
+    it('submitRunnableAndWaitShouldAwaitAsyncRun', 0, async () => {
       let completed = false;
 
-      await scheduler.submitTaskAndWait({
+      await scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'async-event',
         priority: SDKTaskPriority.HIGH,
@@ -58,18 +63,73 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(completed).assertTrue();
       expect(status.lanes[SDKTaskType.EVENT].completedTasks).assertEqual(1);
       expect(status.lanes[SDKTaskType.EVENT].failedTasks).assertEqual(0);
+      expect(status.lanes[SDKTaskType.EVENT].missingWorkerRequestTasks).assertEqual(0);
+      expect(status.lanes[SDKTaskType.EVENT].runnableFallbackTasks).assertEqual(1);
     });
 
-    it('eventLaneShouldRunTasksSequentially', 0, async () => {
+    it('submitAndWaitShouldExecuteSerializableWorkerRequestWithoutRun', 0, async () => {
+      let responseOk = false;
+
+      await scheduler.submitTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'worker-request-only',
+        priority: SDKTaskPriority.NORMAL,
+        workerRequest: {
+          id: 'worker-request-only',
+          pool: SDKDedicatedPoolType.LOG_CONSUMER,
+          command: SDKWorkerCommand.PING,
+          priority: SDKTaskPriority.NORMAL,
+          createdAt: Date.now()
+        },
+        workerResponseHandler: (response) => {
+          responseOk = response.ok;
+        }
+      });
+
+      const status = scheduler.getStatus();
+      expect(responseOk).assertTrue();
+      expect(status.lanes[SDKTaskType.LOG].completedTasks).assertEqual(1);
+      expect(status.lanes[SDKTaskType.LOG].failedTasks).assertEqual(0);
+      expect(status.lanes[SDKTaskType.LOG].missingWorkerRequestTasks).assertEqual(0);
+      expect(status.lanes[SDKTaskType.LOG].runnableFallbackTasks).assertEqual(0);
+    });
+
+    it('submitTaskAndWaitShouldRecordMissingWorkerRequest', 0, async () => {
+      let rejected = false;
+      const task = {
+        type: SDKTaskType.LOG,
+        name: 'missing-worker-request',
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        retryCount: 0
+      } as SDKTask;
+
+      try {
+        await scheduler.submitAndWait(task);
+      } catch (error) {
+        rejected = true;
+      }
+
+      const status = scheduler.getStatus();
+      expect(rejected).assertTrue();
+      expect(status.lanes[SDKTaskType.LOG].completedTasks).assertEqual(0);
+      expect(status.lanes[SDKTaskType.LOG].failedTasks).assertEqual(1);
+      expect(status.lanes[SDKTaskType.LOG].missingWorkerRequestTasks).assertEqual(1);
+      expect(status.lanes[SDKTaskType.LOG].lastMissingWorkerRequestTaskName).assertEqual('missing-worker-request');
+    });
+
+    it('eventLaneShouldRespectSerialKey', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
+      const serialKey = 'rum-event-state';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'first-event',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: async () => {
           order.push('first-start');
           await firstGate;
@@ -77,10 +137,11 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'second-event',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: () => {
           order.push('second');
         }
@@ -96,13 +157,101 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
+    it('eventLaneShouldUseWorkerPoolForTasksWithoutSerialKey', 0, async () => {
+      const order: string[] = [];
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+      const secondGateObject = createGate();
+      const secondGate = secondGateObject.promise;
+      const releaseSecond = secondGateObject.release;
+
+      const first = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'first-event-worker',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.EVENT,
+        name: 'second-event-worker',
+        priority: SDKTaskPriority.HIGH,
+        run: async () => {
+          order.push('second-start');
+          await secondGate;
+          order.push('second-end');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start,second-start');
+      expect(scheduler.getStatus().lanes[SDKTaskType.EVENT].maxConcurrency >= 2).assertTrue();
+
+      releaseFirst();
+      releaseSecond();
+      await first;
+      await second;
+
+      expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+    });
+
+    it('eventLaneShouldDrainRunnableTasksIntoDedicatedWorkerPool', 0, async () => {
+      const order: string[] = [];
+      const initialStatus = scheduler.getStatus();
+      const workerCount = initialStatus.lanes[SDKTaskType.EVENT].maxConcurrency;
+      const taskCount = workerCount + 1;
+      const gates: ReleaseGate[] = [];
+      const tasks: Promise<void>[] = [];
+
+      for (let i = 0; i < taskCount; i++) {
+        const taskIndex = i;
+        const gate = createGate();
+        gates.push(gate);
+        tasks.push(scheduler.submitRunnableTaskAndWait({
+          type: SDKTaskType.EVENT,
+          name: `event-worker-pool-${taskIndex}`,
+          priority: SDKTaskPriority.HIGH,
+          run: async () => {
+            order.push(`task-${taskIndex}-start`);
+            await gate.promise;
+            order.push(`task-${taskIndex}-end`);
+          }
+        }));
+      }
+
+      await flushPromises();
+      const status = scheduler.getStatus();
+      const eventLane = status.lanes[SDKTaskType.EVENT];
+      const eventPool = status.dedicatedPools.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+      expect(order.length).assertEqual(workerCount);
+      expect(eventLane.pending).assertEqual(0);
+      expect(eventLane.running).assertEqual(taskCount);
+      expect(eventPool.running).assertEqual(workerCount);
+      expect(eventPool.pending).assertEqual(1);
+
+      for (let i = 0; i < gates.length; i++) {
+        gates[i].release();
+      }
+      await Promise.all(tasks);
+
+      const finalStatus = scheduler.getStatus();
+      expect(finalStatus.lanes[SDKTaskType.EVENT].completedTasks).assertEqual(taskCount);
+      expect(finalStatus.dedicatedPools.pools[SDKDedicatedPoolType.EVENT_CONSUMER].pending).assertEqual(0);
+    });
+
     it('eventLaneShouldUseFifoFastPathForBacklog', 0, async () => {
+      scheduler.configureLane(SDKTaskType.EVENT, 1);
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'first-event',
         priority: SDKTaskPriority.HIGH,
@@ -113,7 +262,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'second-event',
         priority: SDKTaskPriority.HIGH,
@@ -122,7 +271,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const third = scheduler.submitTaskAndWait({
+      const third = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'third-event',
         priority: SDKTaskPriority.HIGH,
@@ -131,7 +280,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const fourth = scheduler.submitTaskAndWait({
+      const fourth = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'fourth-event',
         priority: SDKTaskPriority.HIGH,
@@ -141,8 +290,12 @@ export default function sdkTaskSchedulerUnitTest() {
       });
 
       await flushPromises();
-      const blockedStatus = scheduler.getStatus().lanes[SDKTaskType.EVENT];
-      expect(blockedStatus.pending).assertEqual(3);
+      const blockedStatus = scheduler.getStatus();
+      const blockedLane = blockedStatus.lanes[SDKTaskType.EVENT];
+      const blockedPool = blockedStatus.dedicatedPools.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+      expect(blockedLane.pending).assertEqual(0);
+      expect(blockedPool.pending).assertEqual(3);
+      expect(blockedPool.running).assertEqual(1);
 
       releaseFirst();
       await first;
@@ -156,16 +309,18 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(finalStatus.maxScanCount <= 1).assertTrue();
     });
 
-    it('logLaneShouldRunTasksSequentially', 0, async () => {
+    it('logLaneShouldRespectSerialKey', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
+      const serialKey = 'log-consumer-state';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.LOG,
         name: 'first-log',
         priority: SDKTaskPriority.NORMAL,
+        serialKey,
         run: async () => {
           order.push('first-start');
           await firstGate;
@@ -173,10 +328,11 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.LOG,
         name: 'second-log',
         priority: SDKTaskPriority.NORMAL,
+        serialKey,
         run: () => {
           order.push('second');
         }
@@ -192,13 +348,56 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
+    it('logLaneShouldUseWorkerPoolForTasksWithoutSerialKey', 0, async () => {
+      const order: string[] = [];
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+      const secondGateObject = createGate();
+      const secondGate = secondGateObject.promise;
+      const releaseSecond = secondGateObject.release;
+
+      const first = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'first-log-worker',
+        priority: SDKTaskPriority.NORMAL,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.LOG,
+        name: 'second-log-worker',
+        priority: SDKTaskPriority.NORMAL,
+        run: async () => {
+          order.push('second-start');
+          await secondGate;
+          order.push('second-end');
+        }
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start,second-start');
+      expect(scheduler.getStatus().lanes[SDKTaskType.LOG].maxConcurrency >= 2).assertTrue();
+
+      releaseFirst();
+      releaseSecond();
+      await first;
+      await second;
+
+      expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+    });
+
     it('logLaneShouldNotWaitForRunningEventLane', 0, async () => {
       const order: string[] = [];
       const eventGateObject = createGate();
       const eventGate = eventGateObject.promise;
       const releaseEvent = eventGateObject.release;
 
-      const eventTask = scheduler.submitTaskAndWait({
+      const eventTask = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.EVENT,
         name: 'long-event',
         priority: SDKTaskPriority.HIGH,
@@ -209,7 +408,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const logTask = scheduler.submitTaskAndWait({
+      const logTask = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.LOG,
         name: 'independent-log',
         priority: SDKTaskPriority.NORMAL,
@@ -237,7 +436,7 @@ export default function sdkTaskSchedulerUnitTest() {
       const secondGate = secondGateObject.promise;
       const releaseSecond = secondGateObject.release;
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
         name: 'first-data-process',
         priority: SDKTaskPriority.LOW,
@@ -248,7 +447,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
         name: 'second-data-process',
         priority: SDKTaskPriority.LOW,
@@ -277,7 +476,7 @@ export default function sdkTaskSchedulerUnitTest() {
       const releaseFirst = firstGateObject.release;
       const serialKey = 'same-data-process-serial-key';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
         name: 'first-data-process-serial',
         priority: SDKTaskPriority.LOW,
@@ -289,7 +488,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.DATA_PROCESS,
         name: 'second-data-process-serial',
         priority: SDKTaskPriority.LOW,
@@ -317,16 +516,18 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(finalStatus.maxScanCount >= 1).assertTrue();
     });
 
-    it('crashFileLaneShouldRunTasksSequentially', 0, async () => {
+    it('crashFileLaneShouldRespectSerialKey', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
+      const serialKey = 'native-crash-file';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CRASH_FILE,
         name: 'first-crash-file',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: async () => {
           order.push('first-start');
           await firstGate;
@@ -334,10 +535,11 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CRASH_FILE,
         name: 'second-crash-file',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: () => {
           order.push('second');
         }
@@ -352,20 +554,22 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency >= 2).assertTrue();
       expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(2);
     });
 
-    it('anrLaneShouldRunTasksSequentiallyAndStayIndependentFromCrashFile', 0, async () => {
+    it('anrLaneShouldRespectSerialKeyAndStayIndependentFromCrashFile', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
+      const serialKey = 'anr-freeze-processing';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.ANR,
         name: 'first-anr',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: async () => {
           order.push('first-start');
           await firstGate;
@@ -373,10 +577,11 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.ANR,
         name: 'second-anr',
         priority: SDKTaskPriority.HIGH,
+        serialKey,
         run: () => {
           order.push('second');
         }
@@ -391,21 +596,23 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.ANR].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.ANR].maxConcurrency >= 2).assertTrue();
       expect(status.lanes[SDKTaskType.ANR].completedTasks).assertEqual(2);
       expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(0);
     });
 
-    it('customLaneShouldRunMaintenanceTasksSequentially', 0, async () => {
+    it('customLaneShouldRespectSerialKeyForMaintenanceTasks', 0, async () => {
       const order: string[] = [];
       const firstGateObject = createGate();
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
+      const serialKey = 'trace-cleanup-state';
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CUSTOM,
         name: 'first-custom-maintenance',
         priority: SDKTaskPriority.BACKGROUND,
+        serialKey,
         run: async () => {
           order.push('first-start');
           await firstGate;
@@ -413,10 +620,11 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const second = scheduler.submitTaskAndWait({
+      const second = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CUSTOM,
         name: 'second-custom-maintenance',
         priority: SDKTaskPriority.BACKGROUND,
+        serialKey,
         run: () => {
           order.push('second');
         }
@@ -431,7 +639,7 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency).assertEqual(1);
+      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency >= 2).assertTrue();
       expect(status.lanes[SDKTaskType.CUSTOM].completedTasks).assertEqual(2);
       expect(status.lanes['remote'] === undefined).assertTrue();
     });
@@ -442,7 +650,7 @@ export default function sdkTaskSchedulerUnitTest() {
       const firstGate = firstGateObject.promise;
       const releaseFirst = firstGateObject.release;
 
-      const first = scheduler.submitTaskAndWait({
+      const first = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CUSTOM,
         name: 'trace-cleanup-first',
         priority: SDKTaskPriority.BACKGROUND,
@@ -454,7 +662,7 @@ export default function sdkTaskSchedulerUnitTest() {
         }
       });
 
-      const replaced = scheduler.submitTaskAndWait({
+      const replaced = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CUSTOM,
         name: 'trace-cleanup-replaced',
         priority: SDKTaskPriority.BACKGROUND,
@@ -468,7 +676,7 @@ export default function sdkTaskSchedulerUnitTest() {
         order.push('replaced-rejected');
       });
 
-      const latest = scheduler.submitTaskAndWait({
+      const latest = scheduler.submitRunnableTaskAndWait({
         type: SDKTaskType.CUSTOM,
         name: 'trace-cleanup-latest',
         priority: SDKTaskPriority.BACKGROUND,

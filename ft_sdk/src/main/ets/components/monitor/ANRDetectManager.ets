@@ -6,6 +6,15 @@ import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { AppState, ErrorType } from '../rum/enum/RUMEnums';
 import { Utils } from '../utils/Utils';
 import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from '../thread/SDKWorkerTaskBridge';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from '../thread/SDKWorkerProtocol';
 
 const TAG = 'ANRDetectManager';
 const WATCHER_NAME = 'ft_sdk_anr_monitor';
@@ -535,6 +544,23 @@ export class ANRDetectManager {
 
   private submitANRTask(name: string, task: SDKTaskRunner): void {
     const traceName = this.nextANRTaskName(name);
+    const command = SDKWorkerCommand.ANR_RUN;
+    const runTask = async () => {
+      const startTime = Date.now();
+      let result = 'success';
+      let errorMessage = '';
+      try {
+        await Promise.resolve(task());
+      } catch (error) {
+        result = 'failed';
+        errorMessage = String(error);
+        throw new Error(errorMessage);
+      } finally {
+        const costTime = Math.max(0, Date.now() - startTime);
+        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+        this.traceANRLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-anr-error`);
+      }
+    };
     this.traceANRLane(`[ENQUEUE] name=${traceName}`);
     SDKTaskScheduler.getInstance().submitTask({
       type: SDKTaskType.ANR,
@@ -542,22 +568,14 @@ export class ANRDetectManager {
       priority: SDKTaskPriority.HIGH,
       serialKey: ANR_PROCESSING_SERIAL_KEY,
       costHint: 'heavy',
-      run: async () => {
-        const startTime = Date.now();
-        let result = 'success';
-        let errorMessage = '';
-        try {
-          await Promise.resolve(task());
-        } catch (error) {
-          result = 'failed';
-          errorMessage = String(error);
-          throw new Error(errorMessage);
-        } finally {
-          const costTime = Math.max(0, Date.now() - startTime);
-          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-          this.traceANRLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-anr-error`);
-        }
-      }
+      workerRequest: createSDKWorkerTaskRequest(
+        SDKDedicatedPoolType.DATA_PROCESS,
+        command,
+        traceName,
+        SDKTaskPriority.HIGH
+      ),
+      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
     });
   }
 

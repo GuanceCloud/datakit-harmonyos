@@ -3,6 +3,15 @@ import { fileIo } from '@kit.CoreFileKit';
 import hilog from '@ohos.hilog';
 import { Constants } from '../Constants';
 import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from '../thread/SDKWorkerTaskBridge';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from '../thread/SDKWorkerProtocol';
 
 interface InnerLogFileRuntimeConfig {
   singleFileMaxSize: number;
@@ -451,6 +460,10 @@ export class FTInnerLogFileManager {
 
   private submitSilentTask(name: string, task: () => Promise<void>): void {
     try {
+      const command = SDKWorkerCommand.INNER_LOG_FILE_RUN;
+      const runTask = async () => {
+        await task();
+      };
       SDKTaskScheduler.getInstance().submitTask({
         type: SDKTaskType.INNER_LOG_FILE,
         name,
@@ -458,9 +471,14 @@ export class FTInnerLogFileManager {
         serialKey: FTInnerLogFileManager.SERIAL_KEY,
         costHint: 'normal',
         silent: true,
-        run: async () => {
-          await task();
-        }
+        workerRequest: createSDKWorkerTaskRequest(
+          SDKDedicatedPoolType.DATA_PROCESS,
+          command,
+          name,
+          SDKTaskPriority.BACKGROUND
+        ),
+        workerFallbackRunner: createSDKWorkerTaskFallbackRunner(name, command, runTask),
+        workerBridgeHandler: createSDKWorkerTaskBridgeHandler(name, command, runTask)
       });
     } catch (error) {
       this.isFlushing = false;
@@ -470,6 +488,10 @@ export class FTInnerLogFileManager {
 
   private async submitSilentTaskAndWait(name: string, task: () => Promise<void>): Promise<void> {
     try {
+      const command = SDKWorkerCommand.INNER_LOG_FILE_RUN;
+      const runTask = async () => {
+        await task();
+      };
       await SDKTaskScheduler.getInstance().submitTaskAndWait({
         type: SDKTaskType.INNER_LOG_FILE,
         name,
@@ -477,9 +499,14 @@ export class FTInnerLogFileManager {
         serialKey: FTInnerLogFileManager.SERIAL_KEY,
         costHint: 'normal',
         silent: true,
-        run: async () => {
-          await task();
-        }
+        workerRequest: createSDKWorkerTaskRequest(
+          SDKDedicatedPoolType.DATA_PROCESS,
+          command,
+          name,
+          SDKTaskPriority.BACKGROUND
+        ),
+        workerFallbackRunner: createSDKWorkerTaskFallbackRunner(name, command, runTask),
+        workerBridgeHandler: createSDKWorkerTaskBridgeHandler(name, command, runTask)
       });
     } catch (error) {
       this.recordError(`submitSilentTaskAndWait failed: ${String(error)}`);

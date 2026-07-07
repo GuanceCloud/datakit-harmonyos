@@ -5,7 +5,13 @@ import { Constants } from '@guancecloud/ft_sdk/src/main/ets/components/Constants
 import { DbInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { FTInnerLogFileManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTInnerLogFileManager';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
-import { SDKLaneStatus, SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
+import {
+  SDKLaneStatus,
+  SDKRunnableTaskOptions,
+  SDKTaskPriority,
+  SDKTaskScheduler,
+  SDKTaskType
+} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
 import { DeviceUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/DeviceUtils';
 import { FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
@@ -994,7 +1000,7 @@ export struct DBCacheLimitTestPage {
     const startTime = Date.now();
 
     for (let i = 0; i < testCase.taskCount; i++) {
-      tasks.push(scheduler.submitTaskAndWait({
+      const taskOptions: SDKRunnableTaskOptions = {
         type: testCase.laneType,
         name: `single-lane-benchmark-${testCase.laneType}-${i}`,
         priority: SDKTaskPriority.NORMAL,
@@ -1006,7 +1012,8 @@ export struct DBCacheLimitTestPage {
             await this.waitForWriteSettled(testCase.taskCostMs);
           }
         }
-      }));
+      };
+      tasks.push(scheduler.submitRunnableTaskAndWait(taskOptions));
     }
 
     const enqueueElapsedMs = Math.max(1, Date.now() - startTime);

@@ -21,6 +21,15 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from '../thread/SDKTaskScheduler';
+import {
+  createSDKWorkerTaskBridgeHandler,
+  createSDKWorkerTaskFallbackRunner,
+  createSDKWorkerTaskRequest
+} from '../thread/SDKWorkerTaskBridge';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerCommand
+} from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
@@ -324,15 +333,24 @@ export class FTRUMInnerManager {
 
   private submitRumEventTask(name: string, task: SDKTaskRunner): void {
     const traceName = this.nextRumEventTaskName(name);
+    const command = SDKWorkerCommand.EVENT_RUN;
+    const runTask = async () => {
+      await this.runRumEventTaskSafely(traceName, task);
+    };
     SDKTaskScheduler.getInstance().submitTask({
       type: SDKTaskType.EVENT,
       name: traceName,
       priority: SDKTaskPriority.HIGH,
       serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
       costHint: 'light',
-      run: async () => {
-        await this.runRumEventTaskSafely(traceName, task);
-      }
+      workerRequest: createSDKWorkerTaskRequest(
+        SDKDedicatedPoolType.EVENT_CONSUMER,
+        command,
+        traceName,
+        SDKTaskPriority.HIGH
+      ),
+      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
+      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
     });
   }
 
