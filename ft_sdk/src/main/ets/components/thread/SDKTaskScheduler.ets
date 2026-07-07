@@ -8,15 +8,16 @@ import {
   SDKDedicatedCommandRunner,
   SDKDedicatedPoolManager,
   SDKDedicatedPoolManagerStatus,
+  SDKDedicatedPoolStatus,
   SDKWorkerBridgeHandler
 } from './SDKDedicatedPoolManager';
 import { SDKDedicatedPoolType, SDKWorkerRequest, SDKWorkerResponse } from './SDKWorkerProtocol';
 
 const TAG = "SDKTaskScheduler";
-const EVENT_LANE_TRACE_PREFIX = "<FT-EVENT-LANE>";
+const EVENT_WORKER_POOL_TRACE_PREFIX = "<FT-EVENT-WORKER-POOL>";
 const SCHEDULER_TRACE_PREFIX = "<FT-SDK-SCHEDULER>";
-const SCHEDULER_LANE_TRACE_INTERVAL_MS = 5000;
-const EVENT_LANE_TRACE_INTERVAL_MS = 2000;
+const SCHEDULER_WORKER_POOL_TRACE_INTERVAL_MS = 5000;
+const EVENT_WORKER_POOL_TRACE_INTERVAL_MS = 2000;
 const QUEUE_COMPACT_THRESHOLD = 64;
 
 export enum SDKTaskType {
@@ -970,7 +971,7 @@ export class SDKTaskScheduler {
   }
 
   private traceEventLane(message: string): void {
-    FTInnerLogger.i(TAG, `${EVENT_LANE_TRACE_PREFIX} ${message}`);
+    FTInnerLogger.i(TAG, `${EVENT_WORKER_POOL_TRACE_PREFIX} ${message}`);
   }
 
   private traceSchedulerLaneIfNeeded(task: ScheduledSDKTask, lane: SDKLaneState): void {
@@ -982,7 +983,7 @@ export class SDKTaskScheduler {
 
     this.skippedLaneTraceCount.set(task.type, 0);
     const message =
-      `[LANE] lane=${task.type} latest=${task.name} pending=${lane.pendingCount} active=${lane.running} max=${lane.maxConcurrency} submitted=${lane.submittedTasks} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped}`;
+      `[WORKER_POOL] logicalLane=${task.type} latest=${task.name} ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`;
     if (task.type === SDKTaskType.UPLOAD) {
       this.traceSchedulerLaneDebug(message);
     } else {
@@ -1015,7 +1016,7 @@ export class SDKTaskScheduler {
 
     this.skippedLaneTraceCount.set(type, 0);
     const message =
-      `[DRAINED] lane=${type} latest=${latestTask.name} pending=${lane.pendingCount} active=${lane.running} max=${lane.maxConcurrency} submitted=${lane.submittedTasks} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped} processedSinceIdle=${processedSinceLastIdle}`;
+      `[WORKER_POOL_DRAINED] logicalLane=${type} latest=${latestTask.name} ${this.formatWorkerPoolTrace(type, lane)} skipped=${skipped} processedSinceIdle=${processedSinceLastIdle}`;
     if (type === SDKTaskType.UPLOAD) {
       this.traceSchedulerLaneDebug(message);
     } else {
@@ -1026,7 +1027,7 @@ export class SDKTaskScheduler {
   private shouldTraceSchedulerLane(type: SDKTaskType): boolean {
     const now = Date.now();
     const lastTraceAt = this.lastLaneTraceAt.get(type) ?? 0;
-    if (now - lastTraceAt < SCHEDULER_LANE_TRACE_INTERVAL_MS) {
+    if (now - lastTraceAt < SCHEDULER_WORKER_POOL_TRACE_INTERVAL_MS) {
       return false;
     }
 
@@ -1055,18 +1056,37 @@ export class SDKTaskScheduler {
     this.skippedEventTraceCount = 0;
     const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
     this.traceEventLane(
-      `[CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} waited=${waitTime}ms cost=${costTime}ms dispatchCost=${lane.lastDispatchTime}ms scanCount=${lane.lastScanCount} previous=${previousEventName} gap=${serialGapTime}ms pending=${lane.pendingCount} active=${lane.running} completed=${lane.completedTasks} failed=${lane.failedTasks} skipped=${skipped}`
+      `[WORKER_POOL_CONSUMED] ${serialResult} ${this.formatEventTask(task)} result=${result}${errorPart} waited=${waitTime}ms cost=${costTime}ms dispatchCost=${lane.lastDispatchTime}ms scanCount=${lane.lastScanCount} previous=${previousEventName} gap=${serialGapTime}ms ${this.formatWorkerPoolTrace(task.type, lane)} skipped=${skipped}`
     );
   }
 
   private shouldTraceEventLane(): boolean {
     const now = Date.now();
-    if (now - this.lastEventTraceAt < EVENT_LANE_TRACE_INTERVAL_MS) {
+    if (now - this.lastEventTraceAt < EVENT_WORKER_POOL_TRACE_INTERVAL_MS) {
       return false;
     }
 
     this.lastEventTraceAt = now;
     return true;
+  }
+
+  private formatWorkerPoolTrace(type: SDKTaskType, lane: SDKLaneState): string {
+    const poolType = this.getDedicatedPoolType(type);
+    const poolStatus = this.getWorkerPoolStatus(poolType);
+    if (!poolStatus) {
+      return `workerPool=${poolType} logicalPending=${lane.pendingCount} logicalRunning=${lane.running} logicalMax=${lane.maxConcurrency} logicalSubmitted=${lane.submittedTasks} logicalCompleted=${lane.completedTasks} logicalFailed=${lane.failedTasks} poolStatus=unavailable`;
+    }
+
+    return `workerPool=${poolType} backend=${poolStatus.backend} workerCount=${poolStatus.workerCount} poolPending=${poolStatus.pending} poolRunning=${poolStatus.running} poolMax=${poolStatus.maxConcurrency} poolSubmitted=${poolStatus.submittedTasks} poolCompleted=${poolStatus.completedTasks} poolFailed=${poolStatus.failedTasks} logicalPending=${lane.pendingCount} logicalRunning=${lane.running} logicalSubmitted=${lane.submittedTasks} logicalCompleted=${lane.completedTasks} logicalFailed=${lane.failedTasks}`;
+  }
+
+  private getWorkerPoolStatus(poolType: SDKDedicatedPoolType): SDKDedicatedPoolStatus | null {
+    const pools = SDKDedicatedPoolManager.getInstance().getStatus().pools;
+    const status = pools[poolType];
+    if (!status) {
+      return null;
+    }
+    return status;
   }
 
   private traceSchedulerLane(message: string): void {
