@@ -472,7 +472,7 @@ export class FTInnerLogFileManager {
         costHint: 'normal',
         silent: true,
         workerRequest: createSDKWorkerTaskRequest(
-          SDKDedicatedPoolType.DATA_PROCESS,
+          SDKDedicatedPoolType.BACKGROUND,
           command,
           name,
           SDKTaskPriority.BACKGROUND
@@ -500,7 +500,7 @@ export class FTInnerLogFileManager {
         costHint: 'normal',
         silent: true,
         workerRequest: createSDKWorkerTaskRequest(
-          SDKDedicatedPoolType.DATA_PROCESS,
+          SDKDedicatedPoolType.BACKGROUND,
           command,
           name,
           SDKTaskPriority.BACKGROUND

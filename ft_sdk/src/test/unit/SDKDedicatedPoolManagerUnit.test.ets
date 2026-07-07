@@ -271,6 +271,34 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(response.payload, 'backend').length > 0).assertTrue();
     });
 
+    it('extraWorkerPoolsShouldReturnIndependentPingPayloads', 0, async () => {
+      const pools: SDKDedicatedPoolType[] = [
+        SDKDedicatedPoolType.CRASH_FILE,
+        SDKDedicatedPoolType.ANR,
+        SDKDedicatedPoolType.BACKGROUND
+      ];
+
+      for (const pool of pools) {
+        const response = await manager.executeCommand({
+          id: `ping-${pool}`,
+          pool,
+          command: SDKWorkerCommand.PING,
+          priority: 5,
+          createdAt: Date.now(),
+          payload: null
+        });
+
+        expect(response.ok).assertTrue();
+        expect(getPayloadString(response.payload, 'pool')).assertEqual(pool);
+        expect(getPayloadString(response.payload, 'workerName').length > 0).assertTrue();
+      }
+
+      const status = manager.getStatus().pools;
+      expect(status[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.ANR].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.BACKGROUND].maxConcurrency).assertEqual(1);
+    });
+
     it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {
       const tags: SDKStringRecord = {};
       tags['sdk_data_id'] = 'uuid-1';

@@ -45,6 +45,7 @@ export interface DataUploadConsumeMetrics {
   httpMs: number;
   sleepMs: number;
   executeMs: number;
+  unaccountedMs: number;
 }
 
 export enum DataUploadWorkerBridgeCommand {

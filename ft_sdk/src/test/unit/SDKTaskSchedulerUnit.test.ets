@@ -94,6 +94,26 @@ export default function sdkTaskSchedulerUnitTest() {
       expect(status.lanes[SDKTaskType.LOG].runnableFallbackTasks).assertEqual(0);
     });
 
+    it('extraLanesShouldUseDedicatedWorkerPools', 0, async () => {
+      const status = scheduler.getStatus();
+
+      expect(status.lanes[SDKTaskType.ANR].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.ANR].maxConcurrency
+      );
+      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency
+      );
+      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.BACKGROUND].maxConcurrency
+      );
+      expect(status.lanes[SDKTaskType.INNER_LOG_FILE].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.BACKGROUND].maxConcurrency
+      );
+      expect(status.lanes[SDKTaskType.DATA_PROCESS].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.DATA_PROCESS].maxConcurrency
+      );
+    });
+
     it('submitTaskAndWaitShouldRecordMissingWorkerRequest', 0, async () => {
       let rejected = false;
       const task = {
@@ -560,7 +580,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency >= 2).assertTrue();
+      expect(status.lanes[SDKTaskType.CRASH_FILE].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency
+      );
       expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(2);
     });
 
@@ -602,7 +624,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.ANR].maxConcurrency >= 2).assertTrue();
+      expect(status.lanes[SDKTaskType.ANR].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.ANR].maxConcurrency
+      );
       expect(status.lanes[SDKTaskType.ANR].completedTasks).assertEqual(2);
       expect(status.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(0);
     });
@@ -645,7 +669,9 @@ export default function sdkTaskSchedulerUnitTest() {
 
       const status = scheduler.getStatus();
       expect(order.join(',')).assertEqual('first-start,first-end,second');
-      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency >= 2).assertTrue();
+      expect(status.lanes[SDKTaskType.CUSTOM].maxConcurrency).assertEqual(
+        status.dedicatedPools.pools[SDKDedicatedPoolType.BACKGROUND].maxConcurrency
+      );
       expect(status.lanes[SDKTaskType.CUSTOM].completedTasks).assertEqual(2);
       expect(status.lanes['remote'] === undefined).assertTrue();
     });

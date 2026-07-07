@@ -958,12 +958,15 @@ export class SDKTaskScheduler {
       case SDKTaskType.UPLOAD:
         return SDKDedicatedPoolType.DATA_UPLOAD;
       case SDKTaskType.DATA_PROCESS:
-      case SDKTaskType.CRASH_FILE:
+        return SDKDedicatedPoolType.DATA_PROCESS;
       case SDKTaskType.ANR:
+        return SDKDedicatedPoolType.ANR;
+      case SDKTaskType.CRASH_FILE:
+        return SDKDedicatedPoolType.CRASH_FILE;
       case SDKTaskType.INNER_LOG_FILE:
       case SDKTaskType.CUSTOM:
       default:
-        return SDKDedicatedPoolType.DATA_PROCESS;
+        return SDKDedicatedPoolType.BACKGROUND;
     }
   }
 

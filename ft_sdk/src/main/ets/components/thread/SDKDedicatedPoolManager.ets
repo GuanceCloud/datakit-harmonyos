@@ -346,6 +346,9 @@ export class SDKDedicatedPoolManager {
       SDKDedicatedPoolType.EVENT_CONSUMER,
       SDKDedicatedPoolType.LOG_CONSUMER,
       SDKDedicatedPoolType.DATA_PROCESS,
+      SDKDedicatedPoolType.CRASH_FILE,
+      SDKDedicatedPoolType.ANR,
+      SDKDedicatedPoolType.BACKGROUND,
       SDKDedicatedPoolType.DATA_UPLOAD
     ];
     const tasks: Promise<SDKWorkerResponse>[] = [];
@@ -553,10 +556,31 @@ export class SDKDedicatedPoolManager {
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_PROCESS, this.createPool({
       pool: SDKDedicatedPoolType.DATA_PROCESS,
-      workerCount: coreWorkers,
-      maxConcurrency: coreWorkers,
+      workerCount: 4,
+      maxConcurrency: 8,
       backend: 'inline',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_PROCESS)
+    }));
+    this.pools.set(SDKDedicatedPoolType.CRASH_FILE, this.createPool({
+      pool: SDKDedicatedPoolType.CRASH_FILE,
+      workerCount: 1,
+      maxConcurrency: 1,
+      backend: 'inline',
+      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.CRASH_FILE)
+    }));
+    this.pools.set(SDKDedicatedPoolType.ANR, this.createPool({
+      pool: SDKDedicatedPoolType.ANR,
+      workerCount: 1,
+      maxConcurrency: 1,
+      backend: 'inline',
+      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.ANR)
+    }));
+    this.pools.set(SDKDedicatedPoolType.BACKGROUND, this.createPool({
+      pool: SDKDedicatedPoolType.BACKGROUND,
+      workerCount: 1,
+      maxConcurrency: 1,
+      backend: 'inline',
+      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.BACKGROUND)
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_UPLOAD, this.createPool({
       pool: SDKDedicatedPoolType.DATA_UPLOAD,

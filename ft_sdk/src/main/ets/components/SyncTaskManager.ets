@@ -608,22 +608,25 @@ export class SyncTaskManager {
       const poolWaitTime = this.normalizeMetricTime(workerMetrics.poolWaitMs);
       const poolExecuteTime = this.normalizeMetricTime(workerMetrics.poolExecuteMs);
       const uploadComputeTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.computeMs) : 0;
-      const uploadExecuteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.executeMs) :
+      const uploadWorkerExecuteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.executeMs) :
         Math.max(0, costTime - schedulerWaitTime - schedulerComputeTime - poolWaitTime);
       const uploadDbTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbMs) : 0;
       const uploadHttpTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.httpMs) : 0;
       const uploadSleepTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.sleepMs) : 0;
       const uploadWorkerTotalTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.totalMs) : poolExecuteTime;
+      const uploadWorkerUnaccountedTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.unaccountedMs) :
+        Math.max(0, uploadWorkerTotalTime - uploadComputeTime - uploadWorkerExecuteTime);
       const waitTime = schedulerWaitTime + poolWaitTime;
       const computeTime = schedulerComputeTime + uploadComputeTime;
-      const executeTime = uploadExecuteTime;
+      const executeTime = Math.max(0, costTime - waitTime - computeTime);
+      const overheadTime = Math.max(0, executeTime - uploadWorkerExecuteTime - uploadWorkerUnaccountedTime);
       const unaccountedTime = Math.max(0, costTime - waitTime - computeTime - executeTime);
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
       if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
         this.traceUploadLaneDebug(
-          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms db=${uploadDbTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
+          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms workerCompute=${uploadComputeTime}ms workerExecute=${uploadWorkerExecuteTime}ms db=${uploadDbTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms workerUnaccounted=${uploadWorkerUnaccountedTime}ms overhead=${overheadTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
         );
       }
     }
@@ -700,7 +703,8 @@ export class SyncTaskManager {
         dbMs: this.readBridgeNumber(record, 'dbMs', 0),
         httpMs: this.readBridgeNumber(record, 'httpMs', 0),
         sleepMs: this.readBridgeNumber(record, 'sleepMs', 0),
-        executeMs: this.readBridgeNumber(record, 'executeMs', 0)
+        executeMs: this.readBridgeNumber(record, 'executeMs', 0),
+        unaccountedMs: this.readBridgeNumber(record, 'unaccountedMs', 0)
       };
     }
     return undefined;

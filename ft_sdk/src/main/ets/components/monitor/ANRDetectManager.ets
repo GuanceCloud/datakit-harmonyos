@@ -569,7 +569,7 @@ export class ANRDetectManager {
       serialKey: ANR_PROCESSING_SERIAL_KEY,
       costHint: 'heavy',
       workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.ANR,
         command,
         traceName,
         SDKTaskPriority.HIGH

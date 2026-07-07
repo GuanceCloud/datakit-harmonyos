@@ -416,7 +416,7 @@ export class FTTraceManager {
       singleFlightKey: TRACE_CLEANUP_SINGLE_FLIGHT_KEY,
       costHint: 'light',
       workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.BACKGROUND,
         command,
         traceName,
         SDKTaskPriority.BACKGROUND

@@ -24,6 +24,7 @@ interface DataUploadConsumeState {
   taskName: string;
   startTraced: boolean;
   consumedRows: number;
+  startedAt: number;
   metrics: DataUploadConsumeMetrics;
 }
 
@@ -70,13 +71,14 @@ export class DataUploadWorkerExecutor {
       taskName: consumeOptions.taskName,
       startTraced: false,
       consumedRows: 0,
+      startedAt: runtime.getCurrentTimeMs(),
       metrics: this.createMetrics()
     };
     let hasMoreData = false;
 
     try {
       if (runtime.isStopped()) {
-        return this.createResult(state, false);
+        return this.createResult(state, runtime, false);
       }
 
       for (const dataType of this.errorSampledSyncMap) {
@@ -99,19 +101,23 @@ export class DataUploadWorkerExecutor {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${error as string}`);
     }
 
-    return this.createResult(state, hasMoreData);
+    return this.createResult(state, runtime, hasMoreData);
   }
 
   public getErrorCount(): number {
     return this.getAggregateErrorCount();
   }
 
-  private createResult(state: DataUploadConsumeState, hasMoreData: boolean): DataUploadConsumeResult {
+  private createResult(
+    state: DataUploadConsumeState,
+    runtime: DataUploadWorkerRuntime,
+    hasMoreData: boolean
+  ): DataUploadConsumeResult {
     return {
       consumedRows: state.consumedRows,
       hasMoreData,
       errorCount: this.getAggregateErrorCount(),
-      metrics: this.finishMetrics(state.metrics)
+      metrics: this.finishMetrics(state.metrics, runtime, state.startedAt)
     };
   }
 
@@ -122,13 +128,21 @@ export class DataUploadWorkerExecutor {
       dbMs: 0,
       httpMs: 0,
       sleepMs: 0,
-      executeMs: 0
+      executeMs: 0,
+      unaccountedMs: 0
     };
   }
 
-  private finishMetrics(metrics: DataUploadConsumeMetrics): DataUploadConsumeMetrics {
+  private finishMetrics(
+    metrics: DataUploadConsumeMetrics,
+    runtime: DataUploadWorkerRuntime,
+    startedAt: number
+  ): DataUploadConsumeMetrics {
     metrics.executeMs = metrics.dbMs + metrics.httpMs + metrics.sleepMs;
-    metrics.totalMs = metrics.computeMs + metrics.executeMs;
+    const measuredTotal = Math.max(0, runtime.getCurrentTimeMs() - startedAt);
+    const accountedTime = metrics.computeMs + metrics.executeMs;
+    metrics.unaccountedMs = Math.max(0, measuredTotal - accountedTime);
+    metrics.totalMs = accountedTime + metrics.unaccountedMs;
     return metrics;
   }
 

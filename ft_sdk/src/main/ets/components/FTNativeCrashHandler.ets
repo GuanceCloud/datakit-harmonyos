@@ -291,7 +291,7 @@ export class FTNativeCrashHandler {
       serialKey: NATIVE_CRASH_FILE_SERIAL_KEY,
       costHint: 'heavy',
       workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.CRASH_FILE,
         command,
         traceName,
         SDKTaskPriority.HIGH

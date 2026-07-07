@@ -12,6 +12,9 @@ export enum SDKDedicatedPoolType {
   EVENT_CONSUMER = 'event-consumer',
   LOG_CONSUMER = 'log-consumer',
   DATA_PROCESS = 'data-process',
+  CRASH_FILE = 'crash-file',
+  ANR = 'anr',
+  BACKGROUND = 'background',
   DATA_UPLOAD = 'data-upload'
 }
 
