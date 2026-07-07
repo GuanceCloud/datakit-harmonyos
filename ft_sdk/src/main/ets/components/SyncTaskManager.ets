@@ -35,11 +35,13 @@ import {
 import { DataUploadWorkerExecutor } from './thread/workers/DataUploadWorkerExecutor';
 import {
   DataUploadBridgeCountPayload,
+  DataUploadBridgeDbWritePayload,
   DataUploadBridgeRowsPayload,
   DataUploadBridgeValuePayload,
   DataUploadConsumeOptions,
   DataUploadConsumeMetrics,
   DataUploadConsumeResult,
+  DataUploadDbWriteResult,
   DataUploadHttpResult,
   DataUploadRow,
   DataUploadWorkerBridgeCommand,
@@ -163,34 +165,79 @@ class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
     return result;
   }
 
-  async deleteRows(rows: DataUploadRow[]): Promise<void> {
+  async deleteRows(rows: DataUploadRow[]): Promise<DataUploadDbWriteResult> {
     if (!rows || rows.length === 0) {
-      return;
+      return this.createDbWriteResult(0, 0);
     }
     const dbManager = this.getDbManager();
     if (!dbManager) {
-      return;
+      return this.createDbWriteResult(0, 0);
     }
-    const syncRows = this.toSyncDataList(rows);
-    await SDKDedicatedPoolManager.getInstance().runDbWrite(
-      `sync.uploadWorker.delete:${rows.length}`,
-      async () => await dbManager.deleteFtOperation(syncRows)
-    );
+    const rowIds = this.toRowIds(rows);
+    if (rowIds.length === 0) {
+      const syncRows = this.toSyncDataList(rows);
+      let dbLaneWaitTime = 0;
+      await SDKDedicatedPoolManager.getInstance().runDbWrite(
+        `sync.uploadWorker.delete:${rows.length}`,
+        async (dbLaneWaitMs?: number) => {
+          dbLaneWaitTime = Math.max(0, dbLaneWaitMs || 0);
+          await dbManager.deleteFtOperation(syncRows);
+          return 0;
+        }
+      );
+      return this.createDbWriteResult(rows.length, dbLaneWaitTime);
+    }
+
+    return await this.deleteRowIds(rowIds, `sync.uploadWorker.deleteIds:${rowIds.length}`);
   }
 
-  async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<void> {
-    if (!rows || rows.length === 0) {
-      return;
+  async deleteRowIdsAndReduceCache(
+    dataType: DataType,
+    rowIds: number[],
+    count: number
+  ): Promise<DataUploadDbWriteResult> {
+    const result = await this.deleteRowIds(rowIds, `sync.uploadWorker.deleteIdsAndReduce:${rowIds.length}`);
+    await this.reduceCacheCount(dataType, count);
+    return result;
+  }
+
+  private async deleteRowIds(rowIds: number[], source: string): Promise<DataUploadDbWriteResult> {
+    if (!rowIds || rowIds.length === 0) {
+      return this.createDbWriteResult(0, 0);
     }
     const dbManager = this.getDbManager();
     if (!dbManager) {
-      return;
+      return this.createDbWriteResult(0, 0);
+    }
+    let dbLaneWaitTime = 0;
+    const affectedRows = await SDKDedicatedPoolManager.getInstance().runDbWrite(
+      source,
+      async (dbLaneWaitMs?: number) => {
+        dbLaneWaitTime = Math.max(0, dbLaneWaitMs || 0);
+        return await dbManager.deleteFtOperationByIds(rowIds);
+      }
+    );
+    return this.createDbWriteResult(affectedRows, dbLaneWaitTime);
+  }
+
+  async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<DataUploadDbWriteResult> {
+    if (!rows || rows.length === 0) {
+      return this.createDbWriteResult(0, 0);
+    }
+    const dbManager = this.getDbManager();
+    if (!dbManager) {
+      return this.createDbWriteResult(0, 0);
     }
     const syncRows = this.toSyncDataList(rows);
-    await SDKDedicatedPoolManager.getInstance().runDbWrite(
+    let dbLaneWaitTime = 0;
+    const inserted = await SDKDedicatedPoolManager.getInstance().runDbWrite(
       `sync.uploadWorker.insert:${rows.length}`,
-      async () => await dbManager.insertFtOptList(syncRows, reInsert)
+      async (dbLaneWaitMs?: number) => {
+        dbLaneWaitTime = Math.max(0, dbLaneWaitMs || 0);
+        return await dbManager.insertFtOptList(syncRows, reInsert);
+      }
     );
+    return this.createDbWriteResult(inserted === false ? 0 : rows.length, dbLaneWaitTime);
   }
 
   async updateDataType(dataType: string, errorTimeLine: number): Promise<number> {
@@ -280,6 +327,13 @@ class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
     return syncTaskRuntime.sleep(ms);
   }
 
+  private createDbWriteResult(affectedRows: number, dbLaneWaitMs: number): DataUploadDbWriteResult {
+    return {
+      affectedRows: Math.max(0, affectedRows),
+      dbLaneWaitMs: Math.max(0, dbLaneWaitMs)
+    };
+  }
+
   private getDbManager(): SyncTaskDbManager | null {
     const context = this.contextProvider();
     if (!context) {
@@ -301,6 +355,20 @@ class SyncTaskDataUploadRuntime implements DataUploadWorkerRuntime {
       row.customDataType = customDataType;
     }
     return row;
+  }
+
+  private toRowIds(rows: DataUploadRow[]): number[] {
+    const rowIds: number[] = [];
+    const seenIds: Set<number> = new Set();
+    for (const row of rows) {
+      const id = Math.floor(row.id);
+      if (id <= 0 || seenIds.has(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      rowIds.push(id);
+    }
+    return rowIds;
   }
 
   private toSyncDataList(rows: DataUploadRow[]): SyncData[] {
@@ -627,6 +695,12 @@ export class SyncTaskManager {
       const uploadWorkerExecuteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.executeMs) :
         Math.max(0, costTime - schedulerWaitTime - schedulerComputeTime - poolWaitTime);
       const uploadDbTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbMs) : 0;
+      const uploadDbErrorSampledTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbErrorSampledMs) : 0;
+      const uploadDbHasDataTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbHasDataMs) : 0;
+      const uploadDbQueryTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbQueryMs) : 0;
+      const uploadDbDeleteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbDeleteMs) : 0;
+      const uploadDbInsertTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbInsertMs) : 0;
+      const uploadDbWriteQueueWaitTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbWriteQueueWaitMs) : 0;
       const uploadHttpTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.httpMs) : 0;
       const uploadSleepTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.sleepMs) : 0;
       const uploadWorkerTotalTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.totalMs) : poolExecuteTime;
@@ -642,7 +716,7 @@ export class SyncTaskManager {
       this.uploadStartTraced = false;
       if (result !== 'success' || uploadedRows > 0 || shouldReschedule) {
         this.traceUploadLaneDebug(
-          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms workerCompute=${uploadComputeTime}ms workerExecute=${uploadWorkerExecuteTime}ms db=${uploadDbTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms workerUnaccounted=${uploadWorkerUnaccountedTime}ms overhead=${overheadTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
+          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms workerCompute=${uploadComputeTime}ms workerExecute=${uploadWorkerExecuteTime}ms db=${uploadDbTime}ms dbErrorSampled=${uploadDbErrorSampledTime}ms dbHasData=${uploadDbHasDataTime}ms dbQuery=${uploadDbQueryTime}ms dbDelete=${uploadDbDeleteTime}ms dbInsert=${uploadDbInsertTime}ms dbWriteQueue=${uploadDbWriteQueueWaitTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms workerUnaccounted=${uploadWorkerUnaccountedTime}ms overhead=${overheadTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
         );
       }
     }
@@ -717,6 +791,12 @@ export class SyncTaskManager {
         totalMs: this.readBridgeNumber(record, 'totalMs', 0),
         computeMs: this.readBridgeNumber(record, 'computeMs', 0),
         dbMs: this.readBridgeNumber(record, 'dbMs', 0),
+        dbErrorSampledMs: this.readBridgeNumber(record, 'dbErrorSampledMs', 0),
+        dbHasDataMs: this.readBridgeNumber(record, 'dbHasDataMs', 0),
+        dbQueryMs: this.readBridgeNumber(record, 'dbQueryMs', 0),
+        dbDeleteMs: this.readBridgeNumber(record, 'dbDeleteMs', 0),
+        dbInsertMs: this.readBridgeNumber(record, 'dbInsertMs', 0),
+        dbWriteQueueWaitMs: this.readBridgeNumber(record, 'dbWriteQueueWaitMs', 0),
         httpMs: this.readBridgeNumber(record, 'httpMs', 0),
         sleepMs: this.readBridgeNumber(record, 'sleepMs', 0),
         executeMs: this.readBridgeNumber(record, 'executeMs', 0),
@@ -778,13 +858,37 @@ export class SyncTaskManager {
         return responsePayload as Object as SDKWorkerPayload;
       }
       case DataUploadWorkerBridgeCommand.DELETE_ROWS: {
-        await runtime.deleteRows(this.readBridgeRows(payload));
-        return new Object() as SDKWorkerPayload;
+        const responsePayload = this.toBridgeDbWritePayload(await runtime.deleteRows(this.readBridgeRows(payload)));
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.DELETE_ROW_IDS: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload = this.toBridgeDbWritePayload(
+          await runtime.deleteRowIdsAndReduceCache(
+            DataType.LOG,
+            this.readBridgeRowIds(record),
+            0
+          )
+        );
+        return responsePayload as Object as SDKWorkerPayload;
+      }
+      case DataUploadWorkerBridgeCommand.DELETE_ROW_IDS_AND_REDUCE_CACHE: {
+        const record = this.toUploadBridgeRecord(payload);
+        const responsePayload = this.toBridgeDbWritePayload(
+          await runtime.deleteRowIdsAndReduceCache(
+            this.readBridgeDataType(payload),
+            this.readBridgeRowIds(record),
+            this.readBridgeNumber(record, 'count', 0)
+          )
+        );
+        return responsePayload as Object as SDKWorkerPayload;
       }
       case DataUploadWorkerBridgeCommand.INSERT_ROWS: {
         const record = this.toUploadBridgeRecord(payload);
-        await runtime.insertRows(this.readBridgeRows(payload), record['reInsert'] === true);
-        return new Object() as SDKWorkerPayload;
+        const responsePayload = this.toBridgeDbWritePayload(
+          await runtime.insertRows(this.readBridgeRows(payload), record['reInsert'] === true)
+        );
+        return responsePayload as Object as SDKWorkerPayload;
       }
       case DataUploadWorkerBridgeCommand.UPDATE_DATA_TYPE: {
         const record = this.toUploadBridgeRecord(payload);
@@ -861,6 +965,32 @@ export class SyncTaskManager {
       return rows as Object as DataUploadRow[];
     }
     return [];
+  }
+
+  private readBridgeRowIds(record: UploadBridgePayloadRecord): number[] {
+    const idsValue = record['ids'];
+    const rowIds: number[] = [];
+    const seenIds: Set<number> = new Set();
+    if (!Array.isArray(idsValue)) {
+      return rowIds;
+    }
+    const ids = idsValue as Object as number[];
+    for (const value of ids) {
+      const id = Math.floor(value);
+      if (id <= 0 || seenIds.has(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      rowIds.push(id);
+    }
+    return rowIds;
+  }
+
+  private toBridgeDbWritePayload(result: DataUploadDbWriteResult): DataUploadBridgeDbWritePayload {
+    return {
+      affectedRows: result.affectedRows,
+      dbLaneWaitMs: result.dbLaneWaitMs
+    };
   }
 
   private readBridgeString(record: UploadBridgePayloadRecord, key: string, defaultValue: string): string {

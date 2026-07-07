@@ -31,6 +31,7 @@ export interface SyncTaskDbManager {
   init(): Promise<void>;
   queryFtOperation(dataTypes: DataType[], pageSize: number): Promise<SyncData[]>;
   deleteFtOperation(list: SyncData[]): Promise<void>;
+  deleteFtOperationByIds(ids: number[]): Promise<number>;
   insertFtOptList(list: SyncData[], reInsert?: boolean): Promise<boolean | void>;
   executeWithDB(isWrite: boolean, callback: DataBaseCallBack): Promise<void>;
 }

@@ -40,16 +40,29 @@ export interface DataUploadConsumeMetrics {
   totalMs: number;
   computeMs: number;
   dbMs: number;
+  dbErrorSampledMs: number;
+  dbHasDataMs: number;
+  dbQueryMs: number;
+  dbDeleteMs: number;
+  dbInsertMs: number;
+  dbWriteQueueWaitMs: number;
   httpMs: number;
   sleepMs: number;
   executeMs: number;
   unaccountedMs: number;
 }
 
+export interface DataUploadDbWriteResult {
+  affectedRows: number;
+  dbLaneWaitMs: number;
+}
+
 export enum DataUploadWorkerBridgeCommand {
   HAS_DATA = 'upload.bridge.hasData',
   QUERY_ROWS = 'upload.bridge.queryRows',
   DELETE_ROWS = 'upload.bridge.deleteRows',
+  DELETE_ROW_IDS = 'upload.bridge.deleteRowIds',
+  DELETE_ROW_IDS_AND_REDUCE_CACHE = 'upload.bridge.deleteRowIdsAndReduceCache',
   INSERT_ROWS = 'upload.bridge.insertRows',
   UPDATE_DATA_TYPE = 'upload.bridge.updateDataType',
   DELETE_EXPIRE_CACHE = 'upload.bridge.deleteExpireCache',
@@ -69,6 +82,16 @@ export interface DataUploadBridgeQueryRowsPayload {
 
 export interface DataUploadBridgeRowsPayload {
   rows: DataUploadRow[];
+}
+
+export interface DataUploadBridgeRowIdsPayload {
+  ids: number[];
+}
+
+export interface DataUploadBridgeDeleteAndReducePayload {
+  dataType: string;
+  ids: number[];
+  count: number;
 }
 
 export interface DataUploadBridgeInsertRowsPayload {
@@ -106,6 +129,11 @@ export interface DataUploadBridgeCountPayload {
   count: number;
 }
 
+export interface DataUploadBridgeDbWritePayload {
+  affectedRows: number;
+  dbLaneWaitMs: number;
+}
+
 /**
  * Worker-safe runtime boundary for the real upload consumer.
  *
@@ -116,8 +144,9 @@ export interface DataUploadWorkerRuntime {
   isStopped(): boolean;
   hasData(dataType: DataType): Promise<boolean>;
   queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]>;
-  deleteRows(rows: DataUploadRow[]): Promise<void>;
-  insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<void>;
+  deleteRows(rows: DataUploadRow[]): Promise<DataUploadDbWriteResult>;
+  deleteRowIdsAndReduceCache(dataType: DataType, rowIds: number[], count: number): Promise<DataUploadDbWriteResult>;
+  insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<DataUploadDbWriteResult>;
   updateDataType(dataType: string, errorTimeLine: number): Promise<number>;
   deleteExpireCache(dataType: string, now: number, duration: number): Promise<number>;
   executeHttp(dataType: DataType, pkgId: string, body: string): Promise<DataUploadHttpResult>;

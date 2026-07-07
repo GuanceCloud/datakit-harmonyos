@@ -6,6 +6,7 @@ import {
   DataUploadConsumeOptions,
   DataUploadConsumeMetrics,
   DataUploadConsumeResult,
+  DataUploadDbWriteResult,
   DataUploadHttpResult,
   DataUploadRow,
   DataUploadWorkerRuntime
@@ -86,7 +87,7 @@ export class DataUploadWorkerExecutor {
         }
         const errorSampledStartTime = runtime.getCurrentTimeMs();
         await this.errorSampledConsume(runtime, dataType, consumeOptions.errorTimeLine);
-        this.addDbTime(state, runtime, errorSampledStartTime);
+        this.addDbErrorSampledTime(state, runtime, errorSampledStartTime);
       }
 
       for (const dataType of this.syncMap) {
@@ -125,6 +126,12 @@ export class DataUploadWorkerExecutor {
       totalMs: 0,
       computeMs: 0,
       dbMs: 0,
+      dbErrorSampledMs: 0,
+      dbHasDataMs: 0,
+      dbQueryMs: 0,
+      dbDeleteMs: 0,
+      dbInsertMs: 0,
+      dbWriteQueueWaitMs: 0,
       httpMs: 0,
       sleepMs: 0,
       executeMs: 0,
@@ -153,8 +160,51 @@ export class DataUploadWorkerExecutor {
     state.metrics.computeMs += this.elapsedSince(runtime, startTime);
   }
 
-  private addDbTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
-    state.metrics.dbMs += this.elapsedSince(runtime, startTime);
+  private addDbErrorSampledTime(
+    state: DataUploadConsumeState,
+    runtime: DataUploadWorkerRuntime,
+    startTime: number
+  ): void {
+    const elapsed = this.elapsedSince(runtime, startTime);
+    state.metrics.dbMs += elapsed;
+    state.metrics.dbErrorSampledMs += elapsed;
+  }
+
+  private addDbQueryTime(
+    state: DataUploadConsumeState,
+    runtime: DataUploadWorkerRuntime,
+    startTime: number
+  ): void {
+    const elapsed = this.elapsedSince(runtime, startTime);
+    state.metrics.dbMs += elapsed;
+    state.metrics.dbQueryMs += elapsed;
+  }
+
+  private addDbDeleteTime(
+    state: DataUploadConsumeState,
+    runtime: DataUploadWorkerRuntime,
+    startTime: number
+  ): void {
+    const elapsed = this.elapsedSince(runtime, startTime);
+    state.metrics.dbMs += elapsed;
+    state.metrics.dbDeleteMs += elapsed;
+  }
+
+  private addDbInsertTime(
+    state: DataUploadConsumeState,
+    runtime: DataUploadWorkerRuntime,
+    startTime: number
+  ): void {
+    const elapsed = this.elapsedSince(runtime, startTime);
+    state.metrics.dbMs += elapsed;
+    state.metrics.dbInsertMs += elapsed;
+  }
+
+  private addDbWriteQueueWait(state: DataUploadConsumeState, result: DataUploadDbWriteResult | undefined): void {
+    if (!result) {
+      return;
+    }
+    state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
   }
 
   private addHttpTime(state: DataUploadConsumeState, runtime: DataUploadWorkerRuntime, startTime: number): void {
@@ -221,13 +271,6 @@ export class DataUploadWorkerExecutor {
     options: DataUploadConsumeOptions,
     state: DataUploadConsumeState
   ): Promise<DataUploadHandleResult> {
-    const hasDataStartTime = runtime.getCurrentTimeMs();
-    const hasData = await runtime.hasData(dataType);
-    this.addDbTime(state, runtime, hasDataStartTime);
-    if (!hasData) {
-      return { hasMoreData: false };
-    }
-
     const maxPages = this.getUploadMaxPages(dataType);
     let processedPages = 0;
     let lastQueryWasFull = false;
@@ -236,7 +279,7 @@ export class DataUploadWorkerExecutor {
     while (!runtime.isStopped() && processedPages < maxPages) {
       const queryStartTime = runtime.getCurrentTimeMs();
       const cacheDataList = await this.queryFromData(runtime, dataType, options.pageSize);
-      this.addDbTime(state, runtime, queryStartTime);
+      this.addDbQueryTime(state, runtime, queryStartTime);
       lastQueryWasFull = cacheDataList.length >= options.pageSize;
 
       const computeStartTime = runtime.getCurrentTimeMs();
@@ -263,10 +306,7 @@ export class DataUploadWorkerExecutor {
       const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
       this.addComputeTime(state, runtime, computeStartTime);
       if (body.trim().length === 0) {
-        await this.deleteLastQuery(runtime, state, deduplicatedDataList);
-        const reduceStartTime = runtime.getCurrentTimeMs();
-        await runtime.reduceCacheCount(dataType, deduplicatedDataList.length);
-        this.addComputeTime(state, runtime, reduceStartTime);
+        await this.deleteAndReduceCache(runtime, state, dataType, deduplicatedDataList);
         processedPages++;
         this.traceUploadLaneDebug(`[SKIP] type=${dataType} rows=${deduplicatedDataList.length} reason=empty-body`);
         if (cacheDataList.length < options.pageSize) {
@@ -312,10 +352,7 @@ export class DataUploadWorkerExecutor {
     }
 
     if (processedPages >= maxPages && lastQueryWasFull) {
-      const hasMoreDataStartTime = runtime.getCurrentTimeMs();
-      const hasMoreData = await runtime.hasData(dataType);
-      this.addDbTime(state, runtime, hasMoreDataStartTime);
-      return { hasMoreData };
+      return { hasMoreData: true };
     }
     return { hasMoreData: shouldReschedule };
   }
@@ -370,10 +407,7 @@ export class DataUploadWorkerExecutor {
       const markStartTime = runtime.getCurrentTimeMs();
       this.markDataAsUploaded(dataType, dataList);
       this.addComputeTime(state, runtime, markStartTime);
-      await this.deleteLastQuery(runtime, state, dataList);
-      const reduceStartTime = runtime.getCurrentTimeMs();
-      await runtime.reduceCacheCount(dataType, dataList.length);
-      this.addComputeTime(state, runtime, reduceStartTime);
+      await this.deleteAndReduceCache(runtime, state, dataType, dataList);
       this.resetErrorCount(dataType);
       const ignoredCount = this.incrementIgnoredClientErrorCount(dataType);
       const delayTime = this.getIgnoredClientBackoffMs(ignoredCount);
@@ -388,10 +422,7 @@ export class DataUploadWorkerExecutor {
       const markStartTime = runtime.getCurrentTimeMs();
       this.markDataAsUploaded(dataType, dataList);
       this.addComputeTime(state, runtime, markStartTime);
-      await this.deleteLastQuery(runtime, state, dataList);
-      const reduceStartTime = runtime.getCurrentTimeMs();
-      await runtime.reduceCacheCount(dataType, dataList.length);
-      this.addComputeTime(state, runtime, reduceStartTime);
+      await this.deleteAndReduceCache(runtime, state, dataType, dataList);
       this.resetErrorCount(dataType);
       this.resetIgnoredClientErrorCount(dataType);
       const advanceStartTime = runtime.getCurrentTimeMs();
@@ -713,11 +744,57 @@ export class DataUploadWorkerExecutor {
       }
 
       const deleteStartTime = runtime.getCurrentTimeMs();
-      await runtime.deleteRows(list);
-      this.addDbTime(state, runtime, deleteStartTime);
+      const result = await runtime.deleteRows(list);
+      this.addDbDeleteTime(state, runtime, deleteStartTime);
+      this.addDbWriteQueueWait(state, result);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Delete uploaded data failed: ${error as string}`);
     }
+  }
+
+  private async deleteAndReduceCache(
+    runtime: DataUploadWorkerRuntime,
+    state: DataUploadConsumeState,
+    dataType: DataType,
+    list: DataUploadRow[]
+  ): Promise<void> {
+    try {
+      if (!list || list.length === 0) {
+        return;
+      }
+
+      const rowIds = this.toRowIds(list);
+      const deleteStartTime = runtime.getCurrentTimeMs();
+      if (rowIds.length === list.length) {
+        const result = await runtime.deleteRowIdsAndReduceCache(dataType, rowIds, list.length);
+        this.addDbDeleteTime(state, runtime, deleteStartTime);
+        this.addDbWriteQueueWait(state, result);
+        return;
+      }
+
+      const result = await runtime.deleteRows(list);
+      this.addDbDeleteTime(state, runtime, deleteStartTime);
+      this.addDbWriteQueueWait(state, result);
+      const reduceStartTime = runtime.getCurrentTimeMs();
+      await runtime.reduceCacheCount(dataType, list.length);
+      this.addComputeTime(state, runtime, reduceStartTime);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Delete uploaded data failed: ${error as string}`);
+    }
+  }
+
+  private toRowIds(list: DataUploadRow[]): number[] {
+    const rowIds: number[] = [];
+    const seenIds: Set<number> = new Set();
+    for (const row of list) {
+      const id = Math.floor(row.id);
+      if (id <= 0 || seenIds.has(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      rowIds.push(id);
+    }
+    return rowIds;
   }
 
   private async reInsertData(
@@ -743,8 +820,9 @@ export class DataUploadWorkerExecutor {
       this.addComputeTime(state, runtime, computeStartTime);
 
       const insertStartTime = runtime.getCurrentTimeMs();
-      await runtime.insertRows(reInsertList, true);
-      this.addDbTime(state, runtime, insertStartTime);
+      const result = await runtime.insertRows(reInsertList, true);
+      this.addDbInsertTime(state, runtime, insertStartTime);
+      this.addDbWriteQueueWait(state, result);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Reinsert data failed: ${error as string}`);
     }

@@ -8,14 +8,18 @@ import {
 import {
   DataUploadBridgeCountPayload,
   DataUploadBridgeDataTypePayload,
+  DataUploadBridgeDbWritePayload,
+  DataUploadBridgeDeleteAndReducePayload,
   DataUploadBridgeDeleteExpireCachePayload,
   DataUploadBridgeHttpPayload,
   DataUploadBridgeInsertRowsPayload,
   DataUploadBridgeQueryRowsPayload,
   DataUploadBridgeReduceCachePayload,
+  DataUploadBridgeRowIdsPayload,
   DataUploadBridgeRowsPayload,
   DataUploadBridgeUpdateDataTypePayload,
   DataUploadBridgeValuePayload,
+  DataUploadDbWriteResult,
   DataUploadHttpResult,
   DataUploadRow,
   DataUploadWorkerBridgeCommand,
@@ -118,25 +122,56 @@ export class DataUploadWorkerBridgeRuntime implements DataUploadWorkerRuntime {
     return rowsValue as Object as DataUploadRow[];
   }
 
-  async deleteRows(rows: DataUploadRow[]): Promise<void> {
-    const requestPayload: DataUploadBridgeRowsPayload = {
-      rows: this.toDeleteRows(rows)
+  async deleteRows(rows: DataUploadRow[]): Promise<DataUploadDbWriteResult> {
+    const rowIds = this.toRowIds(rows);
+    if (rowIds.length !== rows.length) {
+      const fallbackPayload: DataUploadBridgeRowsPayload = {
+        rows: this.toDeleteRows(rows)
+      };
+      const fallbackResponse = await this.sendBridgeRequest(
+        DataUploadWorkerBridgeCommand.DELETE_ROWS,
+        fallbackPayload as Object as SDKWorkerPayload
+      );
+      return this.readDbWriteResult(fallbackResponse);
+    }
+
+    const requestPayload: DataUploadBridgeRowIdsPayload = {
+      ids: rowIds
     };
-    await this.sendBridgeRequest(
-      DataUploadWorkerBridgeCommand.DELETE_ROWS,
+    const payload = await this.sendBridgeRequest(
+      DataUploadWorkerBridgeCommand.DELETE_ROW_IDS,
       requestPayload as Object as SDKWorkerPayload
     );
+    return this.readDbWriteResult(payload);
   }
 
-  async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<void> {
+  async deleteRowIdsAndReduceCache(
+    dataType: DataType,
+    rowIds: number[],
+    count: number
+  ): Promise<DataUploadDbWriteResult> {
+    const requestPayload: DataUploadBridgeDeleteAndReducePayload = {
+      dataType: dataType.toString(),
+      ids: rowIds,
+      count
+    };
+    const payload = await this.sendBridgeRequest(
+      DataUploadWorkerBridgeCommand.DELETE_ROW_IDS_AND_REDUCE_CACHE,
+      requestPayload as Object as SDKWorkerPayload
+    );
+    return this.readDbWriteResult(payload);
+  }
+
+  async insertRows(rows: DataUploadRow[], reInsert: boolean): Promise<DataUploadDbWriteResult> {
     const requestPayload: DataUploadBridgeInsertRowsPayload = {
       rows,
       reInsert
     };
-    await this.sendBridgeRequest(
+    const payload = await this.sendBridgeRequest(
       DataUploadWorkerBridgeCommand.INSERT_ROWS,
       requestPayload as Object as SDKWorkerPayload
     );
+    return this.readDbWriteResult(payload);
   }
 
   async updateDataType(dataType: string, errorTimeLine: number): Promise<number> {
@@ -272,6 +307,20 @@ export class DataUploadWorkerBridgeRuntime implements DataUploadWorkerRuntime {
     });
   }
 
+  private toRowIds(rows: DataUploadRow[]): number[] {
+    const rowIds: number[] = [];
+    const seenIds: Set<number> = new Set();
+    for (const row of rows) {
+      const id = Math.floor(row.id);
+      if (id <= 0 || seenIds.has(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      rowIds.push(id);
+    }
+    return rowIds;
+  }
+
   private toDeleteRows(rows: DataUploadRow[]): DataUploadRow[] {
     const deleteRows: DataUploadRow[] = [];
     for (const row of rows) {
@@ -298,6 +347,14 @@ export class DataUploadWorkerBridgeRuntime implements DataUploadWorkerRuntime {
   private readCount(payload: SDKWorkerPayload | undefined): number {
     const countPayload = this.toRecord(payload) as Object as DataUploadBridgeCountPayload;
     return typeof countPayload.count === 'number' ? countPayload.count : 0;
+  }
+
+  private readDbWriteResult(payload: SDKWorkerPayload | undefined): DataUploadDbWriteResult {
+    const resultPayload = this.toRecord(payload) as Object as DataUploadBridgeDbWritePayload;
+    return {
+      affectedRows: typeof resultPayload.affectedRows === 'number' ? resultPayload.affectedRows : 0,
+      dbLaneWaitMs: typeof resultPayload.dbLaneWaitMs === 'number' ? resultPayload.dbLaneWaitMs : 0
+    };
   }
 
   private toRecord(payload: SDKWorkerPayload | undefined): BridgePayloadRecord {

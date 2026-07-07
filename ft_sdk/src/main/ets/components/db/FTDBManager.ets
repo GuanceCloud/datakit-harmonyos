@@ -1401,6 +1401,77 @@ export class FTDBManager extends DBManager {
     }
   }
 
+  public async deleteFtOperationByIds(ids: number[]): Promise<number> {
+    const rowIds: number[] = [];
+    const seenIds: Set<number> = new Set();
+    if (ids) {
+      for (const value of ids) {
+        const id = Math.floor(value);
+        if (id <= 0 || seenIds.has(id)) {
+          continue;
+        }
+        seenIds.add(id);
+        rowIds.push(id);
+      }
+    }
+
+    if (rowIds.length === 0) {
+      return 0;
+    }
+
+    const startTime = Date.now();
+    const timing = this.createSyncDataWriteTiming();
+    const manager = this;
+    let actualDeleted = 0;
+    let errorMessage = '';
+    try {
+      class DeleteByIdsCallback implements DataBaseCallBack {
+        deletedCount: number = 0;
+        private readonly rowIds: number[];
+
+        constructor(rowIds: number[]) {
+          this.rowIds = rowIds;
+        }
+
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          for (let start = 0; start < this.rowIds.length; start += DELETE_BATCH_CHUNK_SIZE) {
+            const batchIds = this.rowIds.slice(start, start + DELETE_BATCH_CHUNK_SIZE);
+            if (batchIds.length === 0) {
+              continue;
+            }
+
+            const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+            predicates.in(FTSQL.RECORD_COLUMN_ID, batchIds);
+            const executeStartTime = Date.now();
+            this.deletedCount += await rdbStore.delete(predicates);
+            manager.addWriteExecuteTime(timing, executeStartTime);
+          }
+        }
+      }
+
+      const callback = new DeleteByIdsCallback(rowIds);
+      await this.getDBWithCount(true, rowIds.length, callback, timing, rowIds.length > 1);
+      actualDeleted = callback.deletedCount;
+      if (actualDeleted !== rowIds.length) {
+        FTInnerLogger.w(TAG, `Deleted ${actualDeleted} out of ${rowIds.length} sync data ids (some may not exist)`);
+      }
+    } catch (error) {
+      errorMessage = String(error);
+      FTInnerLogger.e(TAG, `Failed to delete sync data by ids: ${error as string}`);
+    } finally {
+      const costTime = Math.max(0, Date.now() - startTime);
+      const lockWaitTime = Math.max(0, timing.lockWaitMs);
+      const executeTime = Math.max(0, timing.executeMs);
+      const sizeCheckTime = Math.max(0, timing.sizeCheckMs);
+      const cleanupTime = Math.max(0, timing.cleanupMs);
+      const waitTime = Math.max(0, costTime - lockWaitTime - executeTime - sizeCheckTime - cleanupTime);
+      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+      FTInnerLogger.i(TAG,
+        `[DB-DELETE] source=deleteFtOperationByIds rows=${rowIds.length} deleted=${actualDeleted} lockWait=${lockWaitTime}ms wait=${waitTime}ms execute=${executeTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
+    }
+    return actualDeleted;
+  }
+
   /**
    * Query total count
    * @param types Data type array
