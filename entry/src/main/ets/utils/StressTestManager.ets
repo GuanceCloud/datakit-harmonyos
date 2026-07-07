@@ -1,12 +1,14 @@
 import {
   createFTRCPTrackConfig,
   FTLogger,
+  FTSDK,
   FTRUMGlobalManager,
   NetStatusBean,
   ResourceParams,
   StringWrapper
 } from '@guancecloud/ft_sdk/Index';
 import { LogEntry } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTLogger';
+import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { TrackLogManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/TrackLogManager';
 import {
   SDKLaneStatus,
@@ -32,6 +34,7 @@ const REAL_RESOURCE_MAX_CONNECTIONS_PER_HOST = 256;
 const REAL_RESOURCE_MAX_TOTAL_CONNECTIONS = 512;
 const CAPABILITY_CASE_NAME = "real-mixed-consumer-manual";
 const CAPABILITY_SAMPLE_INTERVAL_MS = 500;
+const FINAL_UPLOAD_FLUSH_DELAYS_MS: number[] = [0, 500, 1500, 3000];
 const CAPABILITY_VM_HEAP_FALLBACK_LIMIT_MB = 256;
 const CAPABILITY_VM_HEAP_SAFE_WATERMARK = 0.80;
 const CAPABILITY_RESERVED_HEAP_MB = 25;
@@ -322,6 +325,7 @@ export class StressTestManager {
   private actionIntervalIds: number[] = [];
   private resourceIntervalIds: number[] = [];
   private exceptionIntervalIds: number[] = [];
+  private finalUploadFlushTimerIds: number[] = [];
 
   private isRunning: boolean = false;
   private startTime: number = 0;
@@ -466,6 +470,7 @@ export class StressTestManager {
     this.startTime = Date.now();
     this.durationSeconds = normalizedConfig.durationSeconds;
     this.closeRealResourceSession();
+    this.clearFinalUploadFlushTimers();
     this.currentConfig = normalizedConfig;
     this.lastReport = null;
     this.logCounter = 0;
@@ -1804,6 +1809,7 @@ export class StressTestManager {
     if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
       FTLogger.flush();
     }
+    this.scheduleFinalUploadFlushes(stopReason);
     const capabilityReport = this.stopCapabilitySampling();
 
     this.currentStats.isRunning = false;
@@ -1823,6 +1829,49 @@ export class StressTestManager {
 
     DemoLogger.i(TAG, `Stress test stopped. ${this.formatReport(this.lastReport)}`);
     return this.lastReport;
+  }
+
+  private scheduleFinalUploadFlushes(stopReason: StressStopReason): void {
+    this.clearFinalUploadFlushTimers();
+    for (let i = 0; i < FINAL_UPLOAD_FLUSH_DELAYS_MS.length; i++) {
+      const delayMs = FINAL_UPLOAD_FLUSH_DELAYS_MS[i];
+      const timerId = setTimeout((): void => {
+        this.removeFinalUploadFlushTimer(timerId);
+        this.triggerFinalUploadFlush(stopReason, delayMs);
+      }, delayMs);
+      this.finalUploadFlushTimerIds.push(timerId);
+    }
+  }
+
+  private triggerFinalUploadFlush(stopReason: StressStopReason, delayMs: number): void {
+    try {
+      FTSDK.flushSyncData();
+      const status = SyncTaskManager.getInstance().getStatus();
+      DemoLogger.i(TAG,
+        `<FT-STRESS-UPLOAD-FLUSH> reason=${stopReason} delayMs=${delayMs} autoSync=${status.autoSync} ` +
+          `running=${status.running} uploadRunning=${status.uploadLaneStatus.isRunning} ` +
+          `uploadScheduled=${status.uploadLaneStatus.isScheduled} needReschedule=${status.uploadLaneStatus.needReschedule}`);
+    } catch (error) {
+      this.recordErrorMessage(`final upload flush failed: ${error}`);
+      DemoLogger.e(TAG, `<FT-STRESS-UPLOAD-FLUSH> failed reason=${stopReason} delayMs=${delayMs} error=${error}`);
+    }
+  }
+
+  private clearFinalUploadFlushTimers(): void {
+    for (let i = 0; i < this.finalUploadFlushTimerIds.length; i++) {
+      clearTimeout(this.finalUploadFlushTimerIds[i]);
+    }
+    this.finalUploadFlushTimerIds = [];
+  }
+
+  private removeFinalUploadFlushTimer(timerId: number): void {
+    const nextTimers: number[] = [];
+    for (let i = 0; i < this.finalUploadFlushTimerIds.length; i++) {
+      if (this.finalUploadFlushTimerIds[i] !== timerId) {
+        nextTimers.push(this.finalUploadFlushTimerIds[i]);
+      }
+    }
+    this.finalUploadFlushTimerIds = nextTimers;
   }
 
   private clearAllTimers(): void {

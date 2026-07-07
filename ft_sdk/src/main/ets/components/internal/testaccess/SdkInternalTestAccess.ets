@@ -3,6 +3,11 @@ import { FTExceptionHandler } from '../../FTExceptionHandler';
 import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 import { FTSDK } from '../../FTSDK';
 import ftnativecrash from 'libftnativecrash.so';
+import {
+  SDKDedicatedPoolManager,
+  SDKDedicatedPoolManagerStatus
+} from '../../thread/SDKDedicatedPoolManager';
+import { SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
 import { FTExceptionHandlerRuntime } from '../runtime/FTExceptionHandlerRuntime';
 import { FTNativeCrashHandlerRuntime } from '../runtime/FTNativeCrashHandlerRuntime';
 import {
@@ -26,6 +31,14 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static requiresUIFeatures(config: FTRUMConfig): boolean {
     return SdkInternalTestAccess.requiresUIFeaturesInternal(config);
+  }
+
+  public static getDedicatedPoolStatus(): SDKDedicatedPoolManagerStatus {
+    return SDKDedicatedPoolManager.getInstance().getStatus();
+  }
+
+  public static probeDedicatedWorkers(): Promise<SDKWorkerResponse[]> {
+    return SDKDedicatedPoolManager.getInstance().probeDedicatedWorkers();
   }
 
   public static setExceptionHandlerRuntime(runtime: FTExceptionHandlerRuntime): void {

@@ -21,6 +21,7 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from '../../main/ets/components/thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
 import { CpuUtils } from '../../main/ets/components/utils/CpuUtils';
 import { MemoryUtils } from '../../main/ets/components/utils/MemoryUtils';
 import { TestReset } from '../helpers/TestReset';
@@ -1319,6 +1320,7 @@ export default function sdkThreadPoolCapabilityUnitTest() {
       FTRUMGlobalManager.resetStateInternal();
       FTRUMConfigManager.getInstance().release();
       FTTrackInner.resetInstanceInternal();
+      SDKDedicatedPoolManager.setWorkerCommandTimeoutMsInternal(1);
       TestReset.resetP0State();
     });
 
@@ -1328,6 +1330,7 @@ export default function sdkThreadPoolCapabilityUnitTest() {
       FTRUMConfigManager.getInstance().release();
       FTTrackInner.resetInstanceInternal();
       SDKTaskScheduler.resetInternal();
+      SDKDedicatedPoolManager.resetWorkerCommandTimeoutMsInternal();
       TestReset.resetP0State();
       await CpuUtils.getInstance().release();
       await MemoryUtils.getInstance().release();

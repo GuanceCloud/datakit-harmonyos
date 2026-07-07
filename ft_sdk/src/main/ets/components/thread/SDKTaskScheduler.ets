@@ -4,6 +4,11 @@
  * Provides one submit entry while keeping execution isolated by task lane.
  */
 import { FTInnerLogger } from '../log/FTLogger';
+import {
+  SDKDedicatedPoolManager,
+  SDKDedicatedPoolManagerStatus
+} from './SDKDedicatedPoolManager';
+import { SDKDedicatedPoolType, SDKWorkerRequest } from './SDKWorkerProtocol';
 
 const TAG = "SDKTaskScheduler";
 const EVENT_LANE_TRACE_PREFIX = "<FT-EVENT-LANE>";
@@ -44,6 +49,7 @@ export interface SDKTask {
   singleFlightKey?: string;
   costHint?: SDKTaskCostHint;
   silent?: boolean;
+  workerRequest?: SDKWorkerRequest;
   run: SDKTaskRunner;
 }
 
@@ -56,6 +62,7 @@ export interface SDKTaskOptions {
   singleFlightKey?: string;
   costHint?: SDKTaskCostHint;
   silent?: boolean;
+  workerRequest?: SDKWorkerRequest;
   run: SDKTaskRunner;
 }
 
@@ -88,6 +95,7 @@ export interface SDKTaskSchedulerStatus {
   rescheduledSingleFlightTasks: number;
   lanes: Record<string, SDKLaneStatus>;
   taskGroups: Record<string, SDKTaskGroupStatus>;
+  dedicatedPools: SDKDedicatedPoolManagerStatus;
 }
 
 export interface SDKTaskGroupStatus {
@@ -199,6 +207,7 @@ export class SDKTaskScheduler {
       singleFlightKey: options.singleFlightKey,
       costHint: options.costHint,
       silent: options.silent ?? false,
+      workerRequest: options.workerRequest,
       run: options.run
     };
   }
@@ -247,7 +256,8 @@ export class SDKTaskScheduler {
       activeSingleFlightTasks: this.activeSingleFlightKeys.size,
       rescheduledSingleFlightTasks: this.rescheduledSingleFlightTasks.size,
       lanes,
-      taskGroups
+      taskGroups,
+      dedicatedPools: SDKDedicatedPoolManager.getInstance().getStatus()
     };
   }
 
@@ -275,6 +285,7 @@ export class SDKTaskScheduler {
     this.rescheduledSingleFlightTasks.clear();
     this.activeSingleFlightKeys.clear();
     this.taskGroups.clear();
+    SDKDedicatedPoolManager.resetInternal();
   }
 
   private initializeDefaultLanes(): void {
@@ -331,7 +342,7 @@ export class SDKTaskScheduler {
   private getDefaultMaxConcurrency(type: SDKTaskType): number {
     switch (type) {
       case SDKTaskType.DATA_PROCESS:
-        return 2;
+        return SDKDedicatedPoolManager.getInstance().getDataProcessWorkerCount();
       case SDKTaskType.CRASH_FILE:
       case SDKTaskType.INNER_LOG_FILE:
         return 1;
@@ -375,6 +386,7 @@ export class SDKTaskScheduler {
       singleFlightKey: task.singleFlightKey,
       costHint: task.costHint,
       silent: task.silent ?? false,
+      workerRequest: task.workerRequest,
       run: task.run,
       resolve,
       reject
@@ -551,7 +563,14 @@ export class SDKTaskScheduler {
     }
 
     try {
-      await Promise.resolve(task.run());
+      await SDKDedicatedPoolManager.getInstance().executeTask(
+        this.getDedicatedPoolType(type),
+        task.id,
+        task.name,
+        task.priority,
+        task.run,
+        task.workerRequest
+      );
       lane.completedTasks++;
       if (task.resolve) {
         task.resolve();
@@ -744,6 +763,24 @@ export class SDKTaskScheduler {
       oldestCreatedAt = Math.min(oldestCreatedAt, lane.queue[i].createdAt);
     }
     return Math.max(0, Date.now() - oldestCreatedAt);
+  }
+
+  private getDedicatedPoolType(type: SDKTaskType): SDKDedicatedPoolType {
+    switch (type) {
+      case SDKTaskType.EVENT:
+        return SDKDedicatedPoolType.EVENT_CONSUMER;
+      case SDKTaskType.LOG:
+        return SDKDedicatedPoolType.LOG_CONSUMER;
+      case SDKTaskType.UPLOAD:
+        return SDKDedicatedPoolType.DATA_UPLOAD;
+      case SDKTaskType.DATA_PROCESS:
+      case SDKTaskType.CRASH_FILE:
+      case SDKTaskType.ANR:
+      case SDKTaskType.INNER_LOG_FILE:
+      case SDKTaskType.CUSTOM:
+      default:
+        return SDKDedicatedPoolType.DATA_PROCESS;
+    }
   }
 
   private getPendingTasks(lane: SDKLaneState): ScheduledSDKTask[] {

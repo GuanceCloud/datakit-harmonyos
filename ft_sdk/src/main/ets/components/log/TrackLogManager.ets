@@ -13,6 +13,14 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from '../thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKLogDTO,
+  SDKStringRecord,
+  SDKWorkerCommand,
+  SDKWorkerPayload
+} from '../thread/SDKWorkerProtocol';
 
 const TAG = "TrackLogManager";
 
@@ -46,6 +54,19 @@ interface LogProcessSummary {
   needNext: boolean;
 }
 
+interface LogWorkerBatchPayload {
+  batches: SDKLogDTO[][];
+  queueSize: number;
+  bufferSize: number;
+  coalesceDelayMs: number;
+  batchSize: number;
+}
+
+interface LogWorkerEnqueueRequestPayload {
+  logs: SDKLogDTO[];
+  forceFlush: boolean;
+}
+
 /**
  * Log tracking manager - HarmonyOS implementation
  * Responsible for managing log queues, batch processing and async processing
@@ -58,6 +79,7 @@ export class TrackLogManager {
   private static readonly LOG_PROCESS_COALESCE_DELAY_MS = 100;
   private static readonly LOG_SERIAL_KEY = "log-consumer-state";
   private static logTaskSequence: number = 0;
+  private static logWorkerCommandSequence: number = 0;
   
   // Core components - Dual Queue Design
   // inputQueue: Receives new logs from producers (trackLog calls)
@@ -507,34 +529,11 @@ export class TrackLogManager {
     };
     
     try {
-      let processedCount = 0;
-      
-      // Process all logs from processingQueue (snapshot)
-      // Since processingQueue is a snapshot, we can fully drain it without worrying about new logs
-      while (this.processingQueue.length > 0) {
-        const logBean = this.processingQueue.shift();
-        
-        if (logBean) {
-          processedCount++;
-          this.addToBatchBuffer(logBean);
-          // Removed verbose debug log to reduce log output
-        }
-        
-        // Check if should flush batch (matching Android's shouldFlushBatch logic)
-        // Flush if: buffer >= DEFAULT_BATCH_SIZE OR (queue empty && buffer not empty)
-        const shouldFlush = this.shouldFlushBatch(this.processingQueue.length === 0 ? undefined : logBean);
-        if (shouldFlush) {
-          this.recordFlushSummary(summary, this.flushBatch(isSilence));
-        }
+      const logs = this.drainProcessingQueue();
+      summary.drainedCount = logs.length;
+      if (logs.length > 0) {
+        await this.processLogsWithWorker(logs, isSilence, summary);
       }
-      
-      // Flush any remaining buffer when processingQueue is empty
-      const shouldFlushRemaining = this.shouldFlushBatch(undefined);
-      if (shouldFlushRemaining) {
-        this.recordFlushSummary(summary, this.flushBatch(isSilence));
-      }
-      
-      summary.drainedCount = processedCount;
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error processing log queue: ${error}`);
@@ -544,6 +543,125 @@ export class TrackLogManager {
       summary.needNext = summary.newInputCount > 0;
       
       return summary;
+    }
+  }
+
+  private drainProcessingQueue(): LogBean[] {
+    const logs: LogBean[] = [];
+    while (this.processingQueue.length > 0) {
+      const logBean = this.processingQueue.shift();
+      if (logBean) {
+        logs.push(logBean);
+      }
+    }
+    return logs;
+  }
+
+  private async processLogsWithWorker(
+    logs: LogBean[],
+    isSilence: boolean,
+    summary: LogProcessSummary
+  ): Promise<void> {
+    const logDTOs: SDKLogDTO[] = [];
+    for (let i = 0; i < logs.length; i++) {
+      logDTOs.push(this.toLogDTO(logs[i]));
+    }
+
+    try {
+      TrackLogManager.logWorkerCommandSequence++;
+      const requestPayload: LogWorkerEnqueueRequestPayload = {
+        logs: logDTOs,
+        forceFlush: true
+      };
+
+      const response = await SDKDedicatedPoolManager.getInstance().executeCommand({
+        id: `log.enqueue.${TrackLogManager.logWorkerCommandSequence}.${Date.now()}`,
+        pool: SDKDedicatedPoolType.LOG_CONSUMER,
+        command: SDKWorkerCommand.LOG_ENQUEUE,
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        payload: requestPayload as Object as SDKWorkerPayload
+      });
+
+      if (response.ok && response.payload) {
+        const payload = response.payload as Object as LogWorkerBatchPayload;
+        const batches = payload.batches || [];
+        for (let i = 0; i < batches.length; i++) {
+          const batch = batches[i];
+          if (batch.length > 0) {
+            FTTrackInner.getInstance().batchLogDTOSync(batch, isSilence);
+            this.recordFlushSummary(summary, batch.length);
+          }
+        }
+        return;
+      }
+
+      FTInnerLogger.w(TAG, `<FT-LOG-LANE> LogWorker failed, fallback to host batch: ${response.errorMessage || 'empty response'}`);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `<FT-LOG-LANE> LogWorker error, fallback to host batch: ${error}`);
+    }
+
+    this.flushLogBeansInHost(logs, isSilence, summary);
+  }
+
+  private flushLogBeansInHost(logs: LogBean[], isSilence: boolean, summary: LogProcessSummary): void {
+    let index = 0;
+    while (index < logs.length) {
+      const batch: BaseContentBean[] = [];
+      while (index < logs.length && batch.length < TrackLogManager.DEFAULT_BATCH_SIZE) {
+        batch.push(logs[index]);
+        index++;
+      }
+      if (batch.length > 0) {
+        FTTrackInner.getInstance().batchLogBeanSync(batch, isSilence);
+        this.recordFlushSummary(summary, batch.length);
+      }
+    }
+  }
+
+  private toLogDTO(logBean: LogBean): SDKLogDTO {
+    const tags = this.objectRecordToStringRecord(logBean.getAllTags());
+    const fields = this.objectRecordToStringRecord(logBean.getAllFields());
+    fields[Constants.KEY_MESSAGE] = logBean.getContent();
+    return {
+      measurement: logBean.getMeasurement() || Constants.FT_LOG_DEFAULT_MEASUREMENT,
+      content: logBean.getContent(),
+      status: logBean.getStatus(),
+      time: logBean.getTime(),
+      timeNano: logBean.getTimeNano(),
+      tags,
+      fields
+    };
+  }
+
+  private objectRecordToStringRecord(record: Record<string, object>): SDKStringRecord {
+    const result: SDKStringRecord = {};
+    if (!record) {
+      return result;
+    }
+    const keys = Object.keys(record);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      result[key] = this.objectValueToString(record[key]);
+    }
+    return result;
+  }
+
+  private objectValueToString(value: object | string | number | boolean | null | undefined): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    const valueRecord = value as Record<string, object>;
+    if (valueRecord && valueRecord['value'] !== undefined) {
+      return String(valueRecord['value']);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
     }
   }
 

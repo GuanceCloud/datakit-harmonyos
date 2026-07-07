@@ -9,7 +9,7 @@ import { BaseContentBean } from './bean/BaseContentBean';
 import { Context } from '@kit.AbilityKit';
 import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
 import { Constants } from './Constants';
-import { SyncDataHelper } from './SyncDataHelper';
+import { PreparedLineProtocolContent, SyncDataHelper } from './SyncDataHelper';
 import { SyncTaskManager } from './SyncTaskManager';
 import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
@@ -19,6 +19,16 @@ import {
   SDKTaskScheduler,
   SDKTaskType
 } from './thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKLineProtocolInputDTO,
+  SDKLogDTO,
+  SDKStringRecord,
+  SDKSyncDataDraftDTO,
+  SDKWorkerCommand,
+  SDKWorkerPayload
+} from './thread/SDKWorkerProtocol';
 import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
@@ -38,6 +48,14 @@ interface SyncDataParams {
 
 interface FTTrackValueAccessor {
   getValue(): string;
+}
+
+interface SDKLineProtocolDraftsResponsePayload {
+  drafts: SDKSyncDataDraftDTO[];
+}
+
+interface SDKLineProtocolRecordsRequestPayload {
+  records: SDKLineProtocolInputDTO[];
 }
 
 /**
@@ -396,6 +414,32 @@ class FTTrackInner {
     }
   }
 
+  batchLogDTOSync(batchData: SDKLogDTO[], isSilence: boolean): void {
+    FTInnerLogger.d(TAG, `FTTrackInner.batchLogDTOSync entry: size=${batchData?.length || 0}, isSilence=${isSilence}`);
+
+    if (!batchData || batchData.length === 0) {
+      return;
+    }
+
+    try {
+      this.submitDataProcessTask(`data.prepare.logDTOBatch:${batchData.length}`, async () => {
+        const records = await this.createSyncDataFromLogDTOs(batchData);
+        const writeResult = await this.writePreparedSyncData('data.prepare.logDTOBatch', records);
+        const successCount = writeResult ? writeResult.inserted : 0;
+        const droppedCount = writeResult ? writeResult.dropped : 0;
+        const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
+        FTInnerLogger.d(TAG,
+          `Batch log DTO processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+
+        if (successCount > 0 && !isSilence) {
+          this.syncTaskManager.executeSyncPoll();
+        }
+      });
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error in batchLogDTOSync: ${error}`);
+    }
+  }
+
   private async writePreparedSyncData(source: string, records: SyncData[]): Promise<SyncDataWriteResult | null> {
     if (!records || records.length === 0) {
       return null;
@@ -406,9 +450,11 @@ class FTTrackInner {
     }
 
     const dbManager = FTDBManager.getInstance(this.context);
-    return await dbManager.writeSyncDataAtomically(source, records, {
-      applyCachePolicy: true,
-      reInsert: false
+    return await SDKDedicatedPoolManager.getInstance().runDbWrite(source, async () => {
+      return await dbManager.writeSyncDataAtomically(source, records, {
+        applyCachePolicy: true,
+        reInsert: false
+      });
     });
   }
 
@@ -637,23 +683,14 @@ class FTTrackInner {
       // Use logBean.getMeasurement() to get the measurement name (e.g., "df_rum_harmonyos_log")
       const finalMeasurement = measurement || Constants.FT_LOG_DEFAULT_MEASUREMENT;
 
-      const dataString = this.dataHelper.getBodyContent(
-        finalMeasurement, // Use LogBean's measurement (e.g., Constants.FT_LOG_DEFAULT_MEASUREMENT)
+      return await this.createSyncDataWithWorker(
+        DataType.LOG,
+        finalMeasurement,
         tags,
         fields,
-        logBean.getTimeNano(), // Use nanoseconds for line protocol
-        DataType.LOG,
+        logBean.getTimeNano(),
         uuid
       );
-
-      // Create SyncData
-      const syncData = new SyncData(DataType.LOG);
-      syncData.setUuid(uuid);
-      syncData.setTime(logBean.getTimeNano()); // Use nanoseconds
-      syncData.setDataString(dataString);
-
-
-      return syncData;
     } catch (error) {
       FTInnerLogger.e(TAG, `Error creating SyncData from LogBean: ${error}`);
       throw new Error(`Operation failed: ${error}`);
@@ -672,24 +709,15 @@ class FTTrackInner {
       // Generate UUID
       const uuid = Utils.generateUUID();
 
-      // Get data content
-      const dataString = dataHelper.getBodyContent(
+      return await this.createSyncDataWithWorker(
+        dataType,
         data.measurement,
         data.tags,
         data.fields,
         data.time,
-        dataType,
-        uuid
+        uuid,
+        dataHelper
       );
-
-      // Create SyncData object
-      const syncData = new SyncData(dataType);
-      syncData.setId(this.generateId());
-      syncData.setUuid(uuid);
-      syncData.setDataString(dataString);
-      syncData.setTime(data.time);
-
-      return syncData;
 
     } catch (error) {
       FTInnerLogger.e(TAG, `createSyncData failed: ${error}`);
@@ -702,6 +730,150 @@ class FTTrackInner {
    */
   private generateId(): number {
     return Date.now() + Math.floor(Math.random() * 1000);
+  }
+
+  private async createSyncDataFromLogDTOs(logDTOs: SDKLogDTO[]): Promise<SyncData[]> {
+    const inputs: SDKLineProtocolInputDTO[] = [];
+    const dataTypes: DataType[] = [];
+
+    for (let i = 0; i < logDTOs.length; i++) {
+      const logDTO = logDTOs[i];
+      const uuid = Utils.generateUUID();
+      const tags = SyncDataHelper.recordToStringMap(logDTO.tags || {});
+      const fields = SyncDataHelper.recordToStringMap(logDTO.fields || {});
+      if (!fields.has(Constants.KEY_MESSAGE)) {
+        fields.set(Constants.KEY_MESSAGE, logDTO.content || '');
+      }
+      const measurement = logDTO.measurement && logDTO.measurement.length > 0 ?
+        logDTO.measurement : Constants.FT_LOG_DEFAULT_MEASUREMENT;
+      const prepared = this.dataHelper.prepareLineProtocolContent(
+        measurement,
+        tags,
+        fields,
+        logDTO.timeNano,
+        DataType.LOG,
+        uuid
+      );
+      inputs.push(this.toLineProtocolInput(DataType.LOG, uuid, prepared));
+      dataTypes.push(DataType.LOG);
+    }
+
+    return await this.createSyncDataFromLineInputs(inputs, dataTypes);
+  }
+
+  private async createSyncDataWithWorker(
+    dataType: DataType,
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    time: number,
+    uuid: string,
+    dataHelper: SyncDataHelper = this.dataHelper
+  ): Promise<SyncData> {
+    const prepared = dataHelper.prepareLineProtocolContent(measurement, tags, fields, time, dataType, uuid);
+    const input = this.toLineProtocolInput(dataType, uuid, prepared);
+    const records = await this.createSyncDataFromLineInputs([input], [dataType]);
+    if (records.length > 0) {
+      return records[0];
+    }
+
+    const fallbackDataString = dataHelper.getBodyContent(measurement, tags, fields, time, dataType, uuid);
+    return this.createSyncDataFromDraft({
+      dataType: dataType.toString(),
+      dataString: fallbackDataString,
+      uuid,
+      time
+    }, dataType);
+  }
+
+  private toLineProtocolInput(
+    dataType: DataType,
+    uuid: string,
+    prepared: PreparedLineProtocolContent
+  ): SDKLineProtocolInputDTO {
+    return {
+      dataType: dataType.toString(),
+      measurement: prepared.measurement,
+      tags: prepared.tags as SDKStringRecord,
+      fields: prepared.fields as SDKStringRecord,
+      time: prepared.time,
+      uuid,
+      integerCompatible: prepared.integerCompatible
+    };
+  }
+
+  private async createSyncDataFromLineInputs(
+    inputs: SDKLineProtocolInputDTO[],
+    dataTypes: DataType[]
+  ): Promise<SyncData[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+
+    try {
+      const requestPayload: SDKLineProtocolRecordsRequestPayload = {
+        records: inputs
+      };
+
+      const response = await SDKDedicatedPoolManager.getInstance().executeCommand({
+        id: `data.createLineProtocol.${Date.now()}.${Math.floor(Math.random() * 100000)}`,
+        pool: SDKDedicatedPoolType.DATA_PROCESS,
+        command: SDKWorkerCommand.DATA_CREATE_LINE_PROTOCOL,
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        payload: requestPayload as Object as SDKWorkerPayload
+      });
+
+      if (response.ok && response.payload) {
+        const payload = response.payload as Object as SDKLineProtocolDraftsResponsePayload;
+        const drafts = payload.drafts || [];
+        const records: SyncData[] = [];
+        for (let i = 0; i < drafts.length; i++) {
+          const dataType = i < dataTypes.length ? dataTypes[i] : DataType.LOG;
+          records.push(this.createSyncDataFromDraft(drafts[i], dataType));
+        }
+        return records;
+      }
+
+      FTInnerLogger.w(TAG, `DataProcessWorker line protocol failed: ${response.errorMessage || 'empty response'}`);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `DataProcessWorker line protocol error: ${error}`);
+    }
+
+    const fallbackRecords: SyncData[] = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const input = inputs[i];
+      const dataType = i < dataTypes.length ? dataTypes[i] : DataType.LOG;
+      const tags = SyncDataHelper.recordToStringMap(input.tags);
+      const fields = SyncDataHelper.recordToStringMap(input.fields);
+      const dataString = SyncDataHelper.convertToLineProtocolLine(
+        input.measurement,
+        tags,
+        fields,
+        input.time,
+        input.integerCompatible === true
+      );
+      fallbackRecords.push(this.createSyncDataFromDraft({
+        dataType: input.dataType,
+        customDataType: input.customDataType,
+        dataString,
+        uuid: input.uuid,
+        time: input.time
+      }, dataType));
+    }
+    return fallbackRecords;
+  }
+
+  private createSyncDataFromDraft(draft: SDKSyncDataDraftDTO, dataType: DataType): SyncData {
+    const syncData = new SyncData(dataType);
+    syncData.setId(this.generateId());
+    syncData.setUuid(draft.uuid);
+    syncData.setDataString(draft.dataString);
+    syncData.setTime(draft.time);
+    if (draft.customDataType && draft.customDataType.length > 0) {
+      syncData.setCustomDataTypeString(draft.customDataType);
+    }
+    return syncData;
   }
 
   /*

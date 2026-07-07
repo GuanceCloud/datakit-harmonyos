@@ -18,6 +18,7 @@ import httpAutoTrackRcpConfigUnitTest from './unit/HttpAutoTrackRcpConfigUnit.te
 import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
+import sdkDedicatedPoolManagerUnitTest from './unit/SDKDedicatedPoolManagerUnit.test';
 import sdkThreadPoolCapabilityUnitTest from './unit/SDKThreadPoolCapabilityUnit.test';
 import sdkTaskSchedulerUnitTest from './unit/SDKTaskSchedulerUnit.test';
 import syncDataHelperUnitTest from './unit/SyncDataHelperUnit.test';
@@ -43,6 +44,7 @@ export default function testsuite() {
 
   // Small high-risk internal guardrails retained to prevent regressions.
   samplingUnitTest();
+  sdkDedicatedPoolManagerUnitTest();
   sdkTaskSchedulerUnitTest();
   sdkThreadPoolCapabilityUnitTest();
   ftExceptionHandlerUnitTest();

@@ -18,6 +18,7 @@ import {
   SyncTaskPreferences
 } from './internal/runtime/SyncTaskManagerRuntime';
 import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
 
 /**
  * Configuration record interface for FTDBCachePolicy
@@ -112,12 +113,6 @@ export class SyncTaskManager {
   private errorCount = 0;
   private running = false;
   private uploadRunning = false;
-  private uploadScheduled = false;
-  private uploadNeedReschedule = false;
-  private uploadRescheduleDelay = 0;
-  private uploadScheduledDelay = 0;
-  private uploadScheduledAt = 0;
-  private uploadScheduleTimer = -1;
   private uploadTaskSequence = 0;
   private uploadCurrentPollRows = 0;
   private uploadCurrentTaskName = "";
@@ -277,79 +272,38 @@ export class SyncTaskManager {
     }
 
     const normalizedDelay = Math.max(0, delay);
-    if (this.uploadScheduled && !this.uploadRunning) {
-      const elapsed = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - this.uploadScheduledAt);
-      const remainingDelay = Math.max(0, this.uploadScheduledDelay - elapsed);
-      if (normalizedDelay < remainingDelay) {
-        this.clearUploadScheduleTimer();
-        this.uploadScheduled = false;
-        this.uploadScheduledAt = 0;
-        this.uploadScheduledDelay = 0;
-        this.traceUploadLaneDebug(`[RESCHEDULE] replaceScheduled oldRemaining=${remainingDelay}ms newDelay=${normalizedDelay}ms`);
-        this.scheduleUpload(normalizedDelay);
-      }
-      return;
-    }
+    const poolManager = SDKDedicatedPoolManager.getInstance();
+    const taskName = this.nextUploadTaskName();
+    const accepted = poolManager.scheduleDataUpload(taskName, async () => {
+      await this.executeScheduledUpload(taskName);
+    }, normalizedDelay);
+    const uploadStatus = poolManager.getUploadStatus();
 
-    if (this.uploadRunning || this.uploadScheduled) {
-      const previousNeedReschedule = this.uploadNeedReschedule;
-      const previousRescheduleDelay = this.uploadRescheduleDelay;
-      if (this.uploadNeedReschedule) {
-        this.uploadRescheduleDelay = Math.min(this.uploadRescheduleDelay, normalizedDelay);
-      } else {
-        this.uploadRescheduleDelay = normalizedDelay;
-      }
-      this.uploadNeedReschedule = true;
-      if (!previousNeedReschedule || previousRescheduleDelay !== this.uploadRescheduleDelay) {
-        this.traceUploadLaneDebug(
-          `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${this.uploadRescheduleDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
-        );
-      }
-      return;
-    }
-
-    this.uploadScheduled = true;
-    this.uploadScheduledDelay = normalizedDelay;
-    this.uploadScheduledAt = syncTaskRuntime.getCurrentTimeMs();
-    this.traceUploadLaneDebug(`[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`);
-
-    if (normalizedDelay > 0) {
-      this.clearUploadScheduleTimer();
-      this.uploadScheduleTimer = setTimeout(() => {
-        this.uploadScheduleTimer = -1;
-        this.executeScheduledUpload();
-      }, normalizedDelay);
+    if (accepted) {
+      this.traceUploadLaneDebug(
+        `[SCHEDULE] delay=${normalizedDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}`
+      );
     } else {
-      this.executeScheduledUpload();
+      this.traceUploadLaneDebug(
+        `[RESCHEDULE] delay=${normalizedDelay}ms nextDelay=${uploadStatus.rescheduleDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}`
+      );
     }
   }
 
-  private executeScheduledUpload(): void {
+  private async executeScheduledUpload(taskName: string): Promise<void> {
     if (!this.uploadRunnable || this.isStop) {
-      this.uploadScheduled = false;
-      this.uploadScheduledAt = 0;
-      this.uploadScheduledDelay = 0;
       return;
     }
 
-    if (this.uploadRunning) {
-      this.scheduleUpload(0);
-      return;
-    }
-
-    this.uploadScheduled = false;
-    this.uploadScheduledAt = 0;
-    this.uploadScheduledDelay = 0;
     this.uploadRunning = true;
     this.running = true;
 
-    const taskName = this.nextUploadTaskName();
     this.uploadCurrentPollRows = 0;
     this.uploadCurrentTaskName = taskName;
     this.uploadStartTraced = false;
 
     try {
-      SDKTaskScheduler.getInstance().submitTask({
+      await SDKTaskScheduler.getInstance().submitTaskAndWait({
         type: SDKTaskType.UPLOAD,
         name: taskName,
         priority: SDKTaskPriority.LOW,
@@ -367,12 +321,11 @@ export class SyncTaskManager {
             throw new Error(errorMessage);
           } finally {
             const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
-            const shouldReschedule = this.uploadNeedReschedule;
-            const nextDelay = this.uploadRescheduleDelay;
+            const uploadStatus = SDKDedicatedPoolManager.getInstance().getUploadStatus();
+            const shouldReschedule = uploadStatus.needReschedule;
+            const nextDelay = uploadStatus.rescheduleDelay;
             this.uploadRunning = false;
             this.running = false;
-            this.uploadNeedReschedule = false;
-            this.uploadRescheduleDelay = 0;
             const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
             const uploadedRows = this.uploadCurrentPollRows;
             this.uploadCurrentPollRows = 0;
@@ -383,20 +336,16 @@ export class SyncTaskManager {
                 `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} cost=${costTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
               );
             }
-            if (shouldReschedule && !this.isStop) {
-              this.scheduleUpload(nextDelay);
-            }
           }
         }
       });
     } catch (error) {
       this.uploadRunning = false;
       this.running = false;
-      this.uploadScheduled = false;
       this.uploadCurrentPollRows = 0;
       this.uploadCurrentTaskName = "";
       this.uploadStartTraced = false;
-      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] schedule name=${taskName} error=${error as string}`);
+      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] execute name=${taskName} error=${error as string}`);
     }
   }
 
@@ -422,7 +371,8 @@ export class SyncTaskManager {
       return;
     }
 
-    if (this.uploadRunning || this.uploadScheduled) {
+    const uploadStatus = SDKDedicatedPoolManager.getInstance().getUploadStatus();
+    if (uploadStatus.isRunning || uploadStatus.isScheduled) {
       this.scheduleUpload(0);
       return;
     }
@@ -531,7 +481,10 @@ export class SyncTaskManager {
       // Update data type if errorTimeLine is set
       if (this.errorTimeLine > 0) {
         // Convert error sampled data type back to normal type for records before errorTimeLine
-        const updateCount = await dbManager.updateDataType(errorSampledType, this.errorTimeLine);
+        const updateCount = await SDKDedicatedPoolManager.getInstance().runDbWrite(
+          `sync.errorSampled.update:${errorSampledType}`,
+          async () => await dbManager.updateDataType(errorSampledType, this.errorTimeLine)
+        );
         if (updateCount > 0) {
           // Removed verbose debug log to reduce log output
         }
@@ -539,8 +492,10 @@ export class SyncTaskManager {
 
       // Delete expired error sampled cache (older than 1 minute)
       const now = this.getCurrentNanoTime();
-      const deleteCount =
-        await dbManager.deleteExpireCache(errorSampledType, now, SyncTaskManager.ONE_MINUTE_DURATION_NS);
+      const deleteCount = await SDKDedicatedPoolManager.getInstance().runDbWrite(
+        `sync.errorSampled.deleteExpired:${errorSampledType}`,
+        async () => await dbManager.deleteExpireCache(errorSampledType, now, SyncTaskManager.ONE_MINUTE_DURATION_NS)
+      );
       if (deleteCount > 0) {
         // Removed verbose debug log to reduce log output
       }
@@ -668,7 +623,7 @@ export class SyncTaskManager {
 
       const seqNumber = this.getSeqNumber(dataType);
       const pkgId = this.generatePackageId(seqNumber, deduplicatedDataList.length);
-      const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
+      const body = await this.formatLineProtocolDataForUpload(deduplicatedDataList, pkgId);
       if (body.trim().length === 0) {
         await this.deleteLastQuery(deduplicatedDataList);
         this.reduceCacheCount(dataType, deduplicatedDataList.length);
@@ -734,7 +689,9 @@ export class SyncTaskManager {
           } catch (error) {
             reject(error);
           }
-        }));
+        })).catch((error: Error) => {
+          reject(error);
+        });
     });
     return batchResult;
   }
@@ -1261,7 +1218,10 @@ export class SyncTaskManager {
       if (this.context) {
         const dbManager = syncTaskRuntime.getDbManager(this.context);
         if (dbManager) {
-          await dbManager.deleteFtOperation(list);
+          await SDKDedicatedPoolManager.getInstance().runDbWrite(
+            `sync.deleteLastQuery:${list.length}`,
+            async () => await dbManager.deleteFtOperation(list)
+          );
         }
         // FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> [DELETE] Successfully deleted ${list.length} records`);
         // Small delay to ensure database deletion is fully committed before next query
@@ -1298,7 +1258,10 @@ export class SyncTaskManager {
       if (this.context) {
         const dbManager = syncTaskRuntime.getDbManager(this.context);
         if (dbManager) {
-          await dbManager.insertFtOptList(list, true);
+          await SDKDedicatedPoolManager.getInstance().runDbWrite(
+            `sync.reInsertData:${list.length}`,
+            async () => await dbManager.insertFtOptList(list, true)
+          );
         }
         // Removed verbose debug log to reduce log output
       }
@@ -1476,21 +1439,15 @@ export class SyncTaskManager {
     return `upload.poll#${this.uploadTaskSequence}`;
   }
 
-  private clearUploadScheduleTimer(): void {
-    if (this.uploadScheduleTimer >= 0) {
-      clearTimeout(this.uploadScheduleTimer);
-      this.uploadScheduleTimer = -1;
-    }
-  }
-
   private getUploadLaneStatus(): UploadLaneStatus {
+    const uploadStatus = SDKDedicatedPoolManager.getInstance().getUploadStatus();
     return {
-      isRunning: this.uploadRunning,
-      isScheduled: this.uploadScheduled,
-      needReschedule: this.uploadNeedReschedule,
-      scheduledDelay: this.uploadScheduledDelay,
-      scheduledAt: this.uploadScheduledAt,
-      rescheduleDelay: this.uploadRescheduleDelay
+      isRunning: uploadStatus.isRunning,
+      isScheduled: uploadStatus.isScheduled,
+      needReschedule: uploadStatus.needReschedule,
+      scheduledDelay: uploadStatus.scheduledDelay,
+      scheduledAt: uploadStatus.scheduledAt,
+      rescheduleDelay: uploadStatus.rescheduleDelay
     };
   }
 
@@ -1518,12 +1475,7 @@ export class SyncTaskManager {
     this.isStop = true;
     this.running = false;
     this.uploadRunning = false;
-    this.uploadScheduled = false;
-    this.uploadNeedReschedule = false;
-    this.uploadRescheduleDelay = 0;
-    this.uploadScheduledDelay = 0;
-    this.uploadScheduledAt = 0;
-    this.clearUploadScheduleTimer();
+    SDKDedicatedPoolManager.getInstance().cancelDataUploadSchedule();
 
     // Stop RUM cleanup timer
     RUMDataCleanupManagerInternal.getInstance().destroy();
@@ -1550,6 +1502,15 @@ export class SyncTaskManager {
   /**
    * Format data as Line Protocol
    */
+  private async formatLineProtocolDataForUpload(
+    dataList: SyncData[],
+    pkgId: string
+  ): Promise<string> {
+    // Keep upload progress independent from DATA_UPLOAD worker availability. A stuck worker command
+    // blocks before [START]/HTTP logs, leaving the upload lane running and all new data rescheduled.
+    return this.formatLineProtocolData(dataList, pkgId);
+  }
+
   private formatLineProtocolData(dataList: SyncData[], pkgId: string): string {
     if (!dataList || dataList.length === 0) {
       return "";

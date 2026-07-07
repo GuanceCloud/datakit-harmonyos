@@ -19,6 +19,8 @@ import {
 } from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { SDKTaskScheduler, SDKTaskType } from '../../main/ets/components/thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
+import { SDKDedicatedPoolType } from '../../main/ets/components/thread/SDKWorkerProtocol';
 
 const TEST_URL = 'http://localhost';
 
@@ -493,6 +495,7 @@ export default function syncTaskManagerUnitTest() {
 
     beforeEach(() => {
       runtime = new FakeRuntime();
+      SDKDedicatedPoolManager.setWorkerCommandTimeoutMsInternal(1);
       SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.setRuntime(runtime);
       SyncInternalTestAccess.resetState();
@@ -501,6 +504,7 @@ export default function syncTaskManagerUnitTest() {
 
     afterEach(() => {
       manager.stop();
+      SDKDedicatedPoolManager.resetWorkerCommandTimeoutMsInternal();
       SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.resetRuntime();
       SyncInternalTestAccess.resetState();
@@ -754,6 +758,27 @@ export default function syncTaskManagerUnitTest() {
       expect(db.queryCount).assertEqual(4);
       expect(runtime.cachePolicy.rumDelta).assertEqual(-(pageSize * 3));
       expect(runtime.cachePolicy.logDelta).assertEqual(-pageSize);
+    });
+
+    it('uploadLaneShouldFormatBodyWithoutWorkerCommand', 0, async () => {
+      const db = new FakeDbManager();
+      runtime.dbManager = db;
+      manager.init(createConfig(), createContext());
+
+      db.hasDataResult = false;
+      db.hasDataQueue.push(false, false, true);
+      db.queryQueue.push([
+        createSyncData(DataType.LOG, 'log-local-format', 'df_rum_harmonyos_log,sdk_data_id=log-local-format value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      const dataUploadPool = SDKDedicatedPoolManager.getInstance().getStatus().pools[SDKDedicatedPoolType.DATA_UPLOAD];
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(dataUploadPool.submittedTasks).assertEqual(1);
+      expect(dataUploadPool.completedTasks).assertEqual(1);
     });
 
     it('uploadLaneShouldDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {

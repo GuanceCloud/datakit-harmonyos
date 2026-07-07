@@ -1,6 +1,14 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "sourceOption": {
+      "workers": [
+        "./src/main/ets/components/thread/workers/EventConsumerWorker.ets",
+        "./src/main/ets/components/thread/workers/LogConsumerWorker.ets",
+        "./src/main/ets/components/thread/workers/DataProcessWorker.ets",
+        "./src/main/ets/components/thread/workers/DataUploadWorker.ets"
+      ]
+    }
   },
   "buildOptionSet": [
     {

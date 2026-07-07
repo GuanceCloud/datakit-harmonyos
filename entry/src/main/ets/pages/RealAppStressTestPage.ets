@@ -101,6 +101,7 @@ const SDK_LOG_PROCESS_COALESCE_MS = 100;
 const SDK_SYNC_PAGE_SIZE = 100;
 const DEFAULT_SDK_EVENT_COST_MS = 50;
 const DEFAULT_SDK_DATA_PROCESS_COST_MS = 50;
+const STATS_COMMIT_THROTTLE_MS = 250;
 
 /**
  * Real App Stress Test Page
@@ -150,6 +151,8 @@ export struct RealAppStressTestPage {
 
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
   private updateTimer: number | null = null;
+  private statsCommitTimer: number | null = null;
+  private pendingStatsSnapshot: StressTestStats | null = null;
   private preferencesStore: preferences.Preferences | null = null;
   private lastReportEndedAtMs: number = 0;
 
@@ -166,6 +169,7 @@ export struct RealAppStressTestPage {
   }
 
   async aboutToDisappear() {
+    this.flushPendingStatsCommit();
     this.stopUpdateTimer();
     await this.saveSettings();
   }
@@ -191,9 +195,35 @@ export struct RealAppStressTestPage {
 
   private refreshStats(): void {
     const snapshot = this.stressTestManager.getStatsSnapshot();
+    this.isTestRunning = snapshot.isRunning;
+    this.elapsedSeconds = snapshot.elapsedSeconds;
+    this.pendingStatsSnapshot = snapshot;
+    if (this.statsCommitTimer !== null) {
+      return;
+    }
+    this.statsCommitTimer = setTimeout((): void => {
+      this.statsCommitTimer = null;
+      this.commitPendingStatsSnapshot();
+    }, STATS_COMMIT_THROTTLE_MS);
+  }
+
+  private commitPendingStatsSnapshot(): void {
+    const snapshot = this.pendingStatsSnapshot;
+    if (snapshot === null) {
+      return;
+    }
+    this.pendingStatsSnapshot = null;
     this.stats = snapshot;
     this.isTestRunning = snapshot.isRunning;
     this.elapsedSeconds = snapshot.elapsedSeconds;
+  }
+
+  private flushPendingStatsCommit(): void {
+    if (this.statsCommitTimer !== null) {
+      clearTimeout(this.statsCommitTimer);
+      this.statsCommitTimer = null;
+    }
+    this.commitPendingStatsSnapshot();
   }
 
   private refreshReportFromManager(showToast: boolean): void {
