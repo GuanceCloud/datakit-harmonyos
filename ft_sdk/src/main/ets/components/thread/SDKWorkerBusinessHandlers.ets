@@ -72,10 +72,11 @@ interface SDKRumCommandResultPayload {
   sequence: number;
   eventType: string;
   activeViewId: string;
+  activeViewName: string;
   activeActionId: string;
+  activeActionName: string;
   activeResourceCount: number;
-  dataProcessRequests: string[];
-  bridgeCommands: string[];
+  syncDrafts: SDKSyncDataDraftDTO[];
 }
 
 interface SDKLogEnqueuePayload {
@@ -286,14 +287,32 @@ function handleRumCommand(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): 
     state.activeResources[event.resourceId] = '';
   }
 
+  const syncDrafts: SDKSyncDataDraftDTO[] = [];
+  if (event.measurement && event.uuid) {
+    syncDrafts.push({
+      dataType: event.dataType || '',
+      customDataType: event.customDataType,
+      dataString: buildLineProtocol(
+        event.measurement,
+        event.tags || {},
+        event.fields || {},
+        event.time,
+        event.integerCompatible === true
+      ),
+      uuid: event.uuid,
+      time: event.time
+    });
+  }
+
   const payload: SDKRumCommandResultPayload = {
     sequence: state.eventSequence,
     eventType,
     activeViewId: state.activeViewId,
+    activeViewName: state.activeViewName,
     activeActionId: state.activeActionId,
+    activeActionName: state.activeActionName,
     activeResourceCount: getActiveResourceCount(state),
-    dataProcessRequests: [],
-    bridgeCommands: []
+    syncDrafts
   };
   return payload as Object as SDKWorkerPayload;
 }

@@ -5,6 +5,7 @@ import {
 import {
   SDKDedicatedPoolType,
   SDKLineProtocolInputDTO,
+  SDKRumEventDTO,
   SDKStringRecord,
   SDKUploadPageDTO,
   SDKUploadRowDTO,
@@ -335,6 +336,50 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('df_rum_harmonyos_log')).assertTrue();
       expect(String(draft['dataString']).includes('message=\"hello worker\"')).assertTrue();
       expect(String(draft['uuid'])).assertEqual('uuid-1');
+    });
+
+    it('eventRumCommandShouldCreateSyncDraftFromSerializableDto', 0, async () => {
+      const tags: SDKStringRecord = {};
+      tags['sdk_data_id'] = 'rum-uuid-1';
+      tags['session_id'] = 'session-1';
+      tags['view_id'] = 'view-1';
+      tags['view_name'] = 'Home';
+      const fields: SDKStringRecord = {};
+      fields['duration'] = '42';
+      fields['is_active'] = 'true';
+      const rumEvent: SDKRumEventDTO = {
+        eventType: 'view.start',
+        name: 'Home',
+        time: 456,
+        dataType: 'rum_app',
+        measurement: 'view',
+        uuid: 'rum-uuid-1',
+        viewId: 'view-1',
+        viewName: 'Home',
+        sessionId: 'session-1',
+        tags,
+        fields
+      };
+      const request: SDKWorkerRequest = {
+        id: 'rum-dto',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: rumEvent as Object as SDKWorkerPayload
+      };
+
+      const response = await manager.executeCommand(request);
+      expect(response.ok).assertTrue();
+      expect(getPayloadString(response.payload, 'activeViewId')).assertEqual('view-1');
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const draft = drafts[0] as Record<string, object>;
+      expect(String(draft['dataType'])).assertEqual('rum_app');
+      expect(String(draft['uuid'])).assertEqual('rum-uuid-1');
+      expect(String(draft['dataString']).includes('view')).assertTrue();
+      expect(String(draft['dataString']).includes('sdk_data_id=rum-uuid-1')).assertTrue();
+      expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
     });
 
     it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {

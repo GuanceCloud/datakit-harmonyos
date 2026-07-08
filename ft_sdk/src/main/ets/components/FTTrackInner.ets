@@ -29,10 +29,13 @@ import {
   SDKDedicatedPoolType,
   SDKLineProtocolInputDTO,
   SDKLogDTO,
+  SDKRumEventDTO,
   SDKStringRecord,
   SDKSyncDataDraftDTO,
   SDKWorkerCommand,
-  SDKWorkerPayload
+  SDKWorkerPayload,
+  SDKWorkerRequest,
+  SDKWorkerResponse
 } from './thread/SDKWorkerProtocol';
 import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
@@ -69,6 +72,10 @@ interface SDKLineProtocolDraftsResponsePayload {
   drafts: SDKSyncDataDraftDTO[];
 }
 
+interface SDKRumCommandResponsePayload {
+  syncDrafts: SDKSyncDataDraftDTO[];
+}
+
 interface SDKLineProtocolRecordsRequestPayload {
   records: SDKLineProtocolInputDTO[];
 }
@@ -102,6 +109,7 @@ interface RumDetailDbWriteBatchEntry {
 class FTTrackInner {
   private static instance: FTTrackInner | null = null;
   private static dataProcessTaskSequence: number = 0;
+  private static rumWorkerTaskSequence: number = 0;
   private dataHelper: SyncDataHelper;
   private syncTaskManager: SyncTaskManager;
   private trackLogManager: TrackLogManager;
@@ -187,13 +195,325 @@ class FTTrackInner {
     });
   }
 
+  private submitRumWorkerDraftTask(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    time: number,
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    callBack: RunnerCompleteCallBack | null,
+    callbackOnFinish: boolean
+  ): void {
+    try {
+      const traceName = this.nextRumWorkerTaskName(source);
+      const uuid = Utils.generateUUID();
+      const prepared = this.dataHelper.prepareLineProtocolContent(measurement, tags, fields, time, dataType, uuid);
+      const rumEvent = this.createRumWorkerEventDTO(dataType, customDataType, measurement, prepared, uuid);
+      const workerRequest: SDKWorkerRequest = {
+        id: `${SDKWorkerCommand.EVENT_RUM_COMMAND}:${traceName}:${Date.now()}`,
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: SDKTaskPriority.HIGH,
+        createdAt: Date.now(),
+        payload: rumEvent as Object as SDKWorkerPayload
+      };
+
+      SDKTaskScheduler.getInstance().submitTask({
+        type: SDKTaskType.EVENT,
+        name: traceName,
+        priority: SDKTaskPriority.HIGH,
+        serialKey: 'rum-worker-draft',
+        costHint: 'normal',
+        workerRequest,
+        workerResponseHandler: async (response: SDKWorkerResponse) => {
+          try {
+            await this.handleRumWorkerDraftResponse(
+              source,
+              dataType,
+              customDataType,
+              measurement,
+              response,
+              callBack,
+              callbackOnFinish
+            );
+          } catch (error) {
+            FTInnerLogger.e(TAG, `RUM worker draft task failed: source=${source}, measurement=${measurement}, error=${error}`);
+            if (callbackOnFinish && callBack) {
+              callBack.onComplete();
+            }
+            throw error instanceof Error ? error : new Error(String(error));
+          }
+        }
+      });
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error scheduling RUM worker draft task: ${error}`);
+      if (callbackOnFinish && callBack) {
+        callBack.onComplete();
+      }
+    }
+  }
+
+  private submitRumDraftWriteTask(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    drafts: SDKSyncDataDraftDTO[],
+    callBack: RunnerCompleteCallBack | null,
+    callbackOnFinish: boolean
+  ): void {
+    try {
+      const traceName = this.nextDataProcessTaskName(source);
+      const payload: SDKLineProtocolDraftsResponsePayload = {
+        drafts
+      };
+      const workerRequest: SDKWorkerRequest = {
+        id: `${SDKWorkerCommand.DATA_PASS_THROUGH_DRAFTS}:${traceName}:${Date.now()}`,
+        pool: SDKDedicatedPoolType.DATA_PROCESS,
+        command: SDKWorkerCommand.DATA_PASS_THROUGH_DRAFTS,
+        priority: SDKTaskPriority.LOW,
+        createdAt: Date.now(),
+        payload: payload as Object as SDKWorkerPayload
+      };
+
+      SDKTaskScheduler.getInstance().submitTask({
+        type: SDKTaskType.DATA_PROCESS,
+        name: traceName,
+        priority: SDKTaskPriority.LOW,
+        costHint: 'normal',
+        workerRequest,
+        workerResponseHandler: async (response: SDKWorkerResponse) => {
+          try {
+            await this.handleRumDraftWriteResponse(
+              source,
+              dataType,
+              customDataType,
+              measurement,
+              response,
+              callBack,
+              callbackOnFinish
+            );
+          } catch (error) {
+            FTInnerLogger.e(TAG, `RUM draft write task failed: source=${source}, measurement=${measurement}, error=${error}`);
+            if (callbackOnFinish && callBack) {
+              callBack.onComplete();
+            }
+            throw error instanceof Error ? error : new Error(String(error));
+          }
+        }
+      });
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error scheduling RUM draft write task: ${error}`);
+      if (callbackOnFinish && callBack) {
+        callBack.onComplete();
+      }
+    }
+  }
+
   private nextDataProcessTaskName(name: string): string {
     FTTrackInner.dataProcessTaskSequence++;
     return `${name}#${FTTrackInner.dataProcessTaskSequence}`;
   }
 
+  private nextRumWorkerTaskName(name: string): string {
+    FTTrackInner.rumWorkerTaskSequence++;
+    return `${name}#${FTTrackInner.rumWorkerTaskSequence}`;
+  }
+
   private traceDataLane(message: string): void {
     FTInnerLogger.i(TAG, `<FT-DATA-LANE> ${message}`);
+  }
+
+  private createRumWorkerEventDTO(
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    prepared: PreparedLineProtocolContent,
+    uuid: string
+  ): SDKRumEventDTO {
+    const tags = prepared.tags as SDKStringRecord;
+    const fields = prepared.fields as SDKStringRecord;
+    return {
+      eventType: this.resolveRumWorkerEventType(measurement, fields),
+      name: this.resolveRumWorkerEventName(measurement, tags, fields),
+      time: prepared.time,
+      dataType: dataType.toString(),
+      customDataType,
+      measurement: prepared.measurement,
+      uuid,
+      integerCompatible: prepared.integerCompatible,
+      viewId: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_ID),
+      viewName: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_NAME),
+      actionId: this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_ID),
+      actionName: this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_NAME),
+      resourceId: this.resolveRumWorkerResourceId(tags),
+      sessionId: this.readStringRecordValue(tags, Constants.KEY_RUM_SESSION_ID),
+      tags,
+      fields
+    };
+  }
+
+  private async handleRumWorkerDraftResponse(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    response: SDKWorkerResponse,
+    callBack: RunnerCompleteCallBack | null,
+    callbackOnFinish: boolean
+  ): Promise<void> {
+    if (!response.ok) {
+      throw new Error(response.errorMessage || `RUM worker command failed: ${measurement}`);
+    }
+    if (!response.payload) {
+      throw new Error(`RUM worker command returned empty payload: ${measurement}`);
+    }
+
+    const payload = response.payload as Object as SDKRumCommandResponsePayload;
+    const drafts = payload.syncDrafts || [];
+    if (drafts.length === 0) {
+      if (callbackOnFinish && callBack) {
+        callBack.onComplete();
+      }
+      return;
+    }
+
+    this.submitRumDraftWriteTask(source, dataType, customDataType, measurement, drafts, callBack, callbackOnFinish);
+  }
+
+  private async handleRumDraftWriteResponse(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    response: SDKWorkerResponse,
+    callBack: RunnerCompleteCallBack | null,
+    callbackOnFinish: boolean
+  ): Promise<void> {
+    if (!response.ok) {
+      throw new Error(response.errorMessage || `RUM draft write command failed: ${measurement}`);
+    }
+    if (!response.payload) {
+      throw new Error(`RUM draft write command returned empty payload: ${measurement}`);
+    }
+
+    const payload = response.payload as Object as SDKLineProtocolDraftsResponsePayload;
+    const records = this.createSyncDataRecordsFromRumDrafts(payload.drafts || [], dataType);
+    if (records.length === 0) {
+      if (callbackOnFinish && callBack) {
+        callBack.onComplete();
+      }
+      return;
+    }
+
+    const writeResult = await this.writePreparedSyncData(source, records);
+    const result = writeResult !== null && writeResult.inserted > 0;
+    const syncPollDeferredToBatch = this.isRumDetailBatchSource(source);
+    const firstUuid = records[0].getUuid();
+
+    if (result && customDataType && customDataType.length > 0) {
+      FTInnerLogger.d(TAG,
+        `[FT-ERROR-SAMPLING] Successfully stored data as ${customDataType}: uuid=${firstUuid}, measurement=${measurement}`);
+    } else if (!result && writeResult !== null && writeResult.dropped > 0) {
+      FTInnerLogger.e(TAG,
+        `RUM worker draft write: ${measurement} ${customDataType || dataType.toString()}, uuid: ${firstUuid}, drop by Cache limit`);
+    }
+
+    if (result && callBack) {
+      callBack.onComplete();
+    } else if (!result && callbackOnFinish && callBack) {
+      callBack.onComplete();
+    }
+
+    if (result && !syncPollDeferredToBatch) {
+      this.syncTaskManager.executeSyncPoll();
+    }
+  }
+
+  private createSyncDataRecordsFromRumDrafts(
+    drafts: SDKSyncDataDraftDTO[],
+    fallbackDataType: DataType
+  ): SyncData[] {
+    const records: SyncData[] = [];
+    for (let i = 0; i < drafts.length; i++) {
+      const draft = drafts[i];
+      const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
+      records.push(this.createSyncDataFromDraft(draft, dataType));
+    }
+    return records;
+  }
+
+  private dataTypeFromWorkerString(value: string | undefined, fallback: DataType): DataType {
+    if (value === DataType.RUM_APP.toString()) {
+      return DataType.RUM_APP;
+    }
+    if (value === DataType.RUM_WEBVIEW.toString()) {
+      return DataType.RUM_WEBVIEW;
+    }
+    if (value === DataType.LOG.toString()) {
+      return DataType.LOG;
+    }
+    return fallback;
+  }
+
+  private resolveRumWorkerEventType(measurement: string, fields: SDKStringRecord): string {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+      const isActive = this.readStringRecordValue(fields, Constants.KEY_RUM_VIEW_IS_ACTIVE);
+      return isActive === 'false' ? 'view.stop' : 'view.start';
+    }
+    if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+      return 'action.add';
+    }
+    if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+      return 'resource.complete';
+    }
+    return measurement || '';
+  }
+
+  private resolveRumWorkerEventName(
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord
+  ): string {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+      return this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_NAME) || measurement;
+    }
+    if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+      return this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_NAME) || measurement;
+    }
+    if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+      return this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL) || measurement;
+    }
+    if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+      return this.readStringRecordValue(tags, Constants.KEY_RUM_ERROR_TYPE) ||
+        this.readStringRecordValue(fields, Constants.KEY_RUM_ERROR_MESSAGE) ||
+        measurement;
+    }
+    return measurement || '';
+  }
+
+  private resolveRumWorkerResourceId(tags: SDKStringRecord): string | undefined {
+    const method = this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_METHOD);
+    const url = this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL);
+    if (method && url) {
+      return `${method}:${url}`;
+    }
+    return url ||
+      this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_TRACE_ID) ||
+      this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL_PATH);
+  }
+
+  private readStringRecordValue(record: SDKStringRecord, key: string): string | undefined {
+    if (!record) {
+      return undefined;
+    }
+    const value = record[key];
+    if (value !== undefined && value !== null && value.length > 0) {
+      return value;
+    }
+    return undefined;
   }
 
   /**
@@ -962,61 +1282,17 @@ class FTTrackInner {
     fields: Map<string, string>,
     callBack: RunnerCompleteCallBack | null = null
   ): void {
-    // Use the same logic as syncDataBackground, but with custom dataTypeForStorage
-
-    try {
-      this.submitDataProcessTask('data.prepare.errorSampled', async () => {
-        try {
-          // Create sync data record using dataTypeForContent for getBodyContent
-          const syncDataParams: SyncDataParams = {
-            measurement,
-            tags,
-            fields,
-            time
-          };
-
-          const recordData = await this.createSyncData(
-            this.dataHelper,
-            dataTypeForContent,
-            syncDataParams
-          );
-
-          // Set custom dataType string for error_sampled type
-          recordData.setCustomDataTypeString(dataTypeForStorage);
-
-          const writeResult = await this.writePreparedSyncData('data.prepare.errorSampled', [recordData]);
-          const result = writeResult !== null && writeResult.inserted > 0;
-
-          if (result) {
-            FTInnerLogger.d(TAG,
-              `[FT-ERROR-SAMPLING] Successfully stored data as ${dataTypeForStorage}: uuid=${recordData.getUuid()}, measurement=${measurement}, time=${time}`);
-          } else if (writeResult !== null && writeResult.dropped > 0) {
-            FTInnerLogger.e(TAG,
-              `syncDataBackgroundWithErrorSampled: ${measurement} ${dataTypeForStorage}, uuid: ${recordData.getUuid()}, drop by Cache limit`);
-          }
-
-          // Trigger sync if needed
-          if (result && this.syncTaskManager) {
-            this.syncTaskManager.executeSyncPoll();
-          }
-
-          // Call callback if provided
-          if (callBack) {
-            callBack.onComplete();
-          }
-        } catch (error) {
-          FTInnerLogger.e(TAG, `syncDataBackgroundWithErrorSampled failed: ${error}`);
-          if (callBack) {
-            callBack.onComplete();
-          }
-        }
-      });
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error scheduling syncDataBackgroundWithErrorSampled task: ${error}`);
-      if (callBack) {
-        callBack.onComplete();
-      }
-    }
+    this.submitRumWorkerDraftTask(
+      'data.prepare.errorSampled',
+      dataTypeForContent,
+      dataTypeForStorage,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      true
+    );
   }
 
   /**
@@ -1032,54 +1308,8 @@ class FTTrackInner {
   ): void {
     // Reduced logging - only log key information
 
-    try {
-      const taskName = `data.prepare:${measurement}`;
-      this.submitDataProcessTask(taskName, async () => {
-        try {
-          // Create sync data record
-          const syncDataParams: SyncDataParams = {
-            measurement,
-            tags,
-            fields,
-            time
-          };
-
-          const recordData = await this.createSyncData(
-            this.dataHelper,
-            dataType,
-            syncDataParams
-          );
-
-          // const dataString = recordData.getDataString();
-          // if (dataString && dataString.length > 0) {
-          //   // Use unified format: SyncData DataString: for all RUM data types (action, view, resource)
-          //   // This makes it easier to filter line protocol data from logs
-          //   FTInnerLogger.d(TAG, `[FT-LOG-DEBUG] SyncData DataString: ${dataString}`);
-          // }
-
-          const writeResult = await this.writePreparedSyncData(taskName, [recordData]);
-          const result = writeResult !== null && writeResult.inserted > 0;
-          const syncPollDeferredToBatch = this.isRumDetailBatchSource(taskName);
-          if (!result && writeResult !== null && writeResult.dropped > 0) {
-            FTInnerLogger.e(TAG,
-              `syncDataBackground: ${measurement} ${dataType}, uuid: ${recordData.getUuid()}, drop by Cache limit`);
-          }
-
-          if (result && callBack) {
-            callBack.onComplete();
-          }
-
-          if (result && !syncPollDeferredToBatch) {
-            this.syncTaskManager.executeSyncPoll();
-          }
-
-        } catch (error) {
-          FTInnerLogger.e(TAG, `syncDataBackground failed: ${error}`);
-        }
-      });
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error scheduling syncDataBackground task: ${error}`);
-    }
+    const taskName = `data.prepare:${measurement}`;
+    this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
   }
 
   /**

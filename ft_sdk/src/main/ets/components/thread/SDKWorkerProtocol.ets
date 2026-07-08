@@ -110,6 +110,11 @@ export interface SDKRumEventDTO {
   eventType: string;
   name: string;
   time: number;
+  dataType?: string;
+  customDataType?: string;
+  measurement?: string;
+  uuid?: string;
+  integerCompatible?: boolean;
   viewId?: string;
   viewName?: string;
   actionId?: string;
