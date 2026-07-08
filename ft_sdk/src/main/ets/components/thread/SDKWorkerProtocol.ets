@@ -48,6 +48,7 @@ export enum SDKWorkerCommand {
   RESET = 'sdk.reset',
   EVENT_RUN = 'event.run',
   EVENT_RUM_COMMAND = 'event.rum.command',
+  EVENT_RUM_COMPLETED_ACTION = 'event.rum.completedAction',
   EVENT_RUM_COUNTER_UPDATE = 'event.rum.counterUpdate',
   EVENT_RUM_COUNTER_FLUSH = 'event.rum.counterFlush',
   EVENT_RUM_SNAPSHOT = 'event.rum.snapshot',
@@ -134,6 +135,31 @@ export interface SDKRumCounterUpdateDTO {
   actionId?: string;
   updateView?: boolean;
   flushMaxKeys?: number;
+}
+
+export interface SDKRumCompletedActionDTO {
+  dataType: string;
+  customDataType?: string;
+  measurement: string;
+  uuid: string;
+  time: number;
+  dynamicTags?: SDKStringRecord;
+  actionId: string;
+  actionName: string;
+  actionType: string;
+  sessionId: string;
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  duration: number;
+  errorCount: number;
+  longTaskCount: number;
+  resourceCount: number;
+  properties?: Record<string, object>;
+}
+
+export interface SDKLineProtocolRecordsDTO {
+  records: SDKLineProtocolInputDTO[];
 }
 
 export interface SDKRumCounterDeltaDTO {

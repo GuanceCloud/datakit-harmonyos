@@ -40,6 +40,7 @@ export interface SyncDataWriteOptions {
   reInsert?: boolean;
   dbLaneWaitMs?: number;
   forceTransaction?: boolean;
+  updateOrInsertByUuid?: boolean;
 }
 
 export interface SyncDataWriteResult {
@@ -47,6 +48,7 @@ export interface SyncDataWriteResult {
   source: string;
   requested: number;
   inserted: number;
+  updated: number;
   dropped: number;
   duplicateSkipped: number;
   deletedOld: number;
@@ -376,6 +378,7 @@ export class FTDBManager extends DBManager {
       source,
       requested,
       inserted: 0,
+      updated: 0,
       dropped: 0,
       duplicateSkipped: 0,
       deletedOld: 0,
@@ -520,35 +523,12 @@ export class FTDBManager extends DBManager {
     return customDataType || data.getDataType().toString();
   }
 
-  private getDedupKey(dataType: DataType, dataString: string): string | null {
-    const uniqueId = this.extractUniqueId(dataType, dataString);
+  private getDedupKeyForData(data: SyncData): string | null {
+    const uniqueId = this.extractUniqueId(data.getDataType(), data.getDataString());
     if (!uniqueId) {
       return null;
     }
-    return `${dataType.toString()}:${uniqueId}`;
-  }
-
-  private shouldQueryDbForDuplicate(uniqueId: string): boolean {
-    return uniqueId.startsWith('action_id=') || uniqueId.startsWith('view_id=');
-  }
-
-  private getDuplicateSearchPattern(uniqueId: string): string {
-    if (uniqueId.startsWith('action_id=')) {
-      return `action_id=${uniqueId.substring(10)}`;
-    }
-    if (uniqueId.startsWith('view_id=')) {
-      return `view_id=${uniqueId.substring(8)}`;
-    }
-    if (uniqueId.startsWith('uuid=')) {
-      return uniqueId.substring(5);
-    }
-    if (uniqueId.startsWith('error_type=')) {
-      return `error_type=${uniqueId.split(':')[0].substring(11)}`;
-    }
-    if (uniqueId.startsWith('long_task_name=')) {
-      return `long_task_name=${uniqueId.split(':')[0].substring(15)}`;
-    }
-    return uniqueId;
+    return `${this.getStoredDataTypeString(data)}:${uniqueId}`;
   }
 
   private toSyncDataValuesBucket(data: SyncData): relationalStore.ValuesBucket {
@@ -660,82 +640,8 @@ export class FTDBManager extends DBManager {
     return deleteCount;
   }
 
-  private async checkDataExistsLocked(
-    rdbStore: relationalStore.RdbStore,
-    dataType: DataType,
-    dataString: string,
-    timing?: SyncDataWriteTiming
-  ): Promise<boolean> {
-    const computeStartTime = Date.now();
-    const uniqueId = this.extractUniqueId(dataType, dataString);
-    if (!uniqueId) {
-      this.addWriteComputeTime(timing, computeStartTime);
-      return false;
-    }
-
-    const key = `${dataType.toString()}:${uniqueId}`;
-    if (this.insertedDataIds.has(key)) {
-      this.addWriteComputeTime(timing, computeStartTime);
-      return true;
-    }
-
-    const searchPattern = this.getDuplicateSearchPattern(uniqueId);
-    const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
-    predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
-    this.addWriteComputeTime(timing, computeStartTime);
-
-    const executeStartTime = Date.now();
-    const resultSet = await rdbStore.query(predicates, ['_id']);
-    try {
-      const exists = resultSet.goToFirstRow();
-      if (exists) {
-        const markStartTime = Date.now();
-        this.insertedDataIds.set(key, true);
-        this.addWriteComputeTime(timing, markStartTime);
-      }
-      return exists;
-    } finally {
-      resultSet.close();
-      this.addWriteExecuteTime(timing, executeStartTime);
-    }
-  }
-
-  private async deleteDuplicateDataLocked(
-    rdbStore: relationalStore.RdbStore,
-    dataType: DataType,
-    uniqueId: string,
-    countDelta?: SyncDataCacheCountDelta,
-    timing?: SyncDataWriteTiming
-  ): Promise<number> {
-    if (!uniqueId.startsWith('action_id=') && !uniqueId.startsWith('view_id=')) {
-      return 0;
-    }
-
-    const computeStartTime = Date.now();
-    const searchPattern = this.getDuplicateSearchPattern(uniqueId);
-    const escapedPattern = searchPattern.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, dataType.toString());
-    predicates.like(FTSQL.RECORD_COLUMN_DATA, `%${escapedPattern}%`);
-    this.addWriteComputeTime(timing, computeStartTime);
-
-    const executeStartTime = Date.now();
-    const deletedRows = await rdbStore.delete(predicates);
-    this.addWriteExecuteTime(timing, executeStartTime);
-    const markStartTime = Date.now();
-    if (countDelta) {
-      this.addCacheCountDelta(countDelta, this.getCacheCategory(dataType), -deletedRows);
-    }
-    const key = `${dataType.toString()}:${uniqueId}`;
-    this.insertedDataIds.delete(key);
-    this.addWriteComputeTime(timing, markStartTime);
-    return deletedRows;
-  }
-
-  private markDataAsInsertedLocked(dataType: DataType, dataString: string): void {
-    const key = this.getDedupKey(dataType, dataString);
+  private markDataAsInsertedLocked(data: SyncData): void {
+    const key = this.getDedupKeyForData(data);
     if (!key) {
       return;
     }
@@ -898,11 +804,9 @@ export class FTDBManager extends DBManager {
   }
 
   private async filterDuplicatesLocked(
-    rdbStore: relationalStore.RdbStore,
     dataList: SyncData[],
     reInsert: boolean,
     result: SyncDataWriteResult,
-    countDelta: SyncDataCacheCountDelta,
     timing?: SyncDataWriteTiming
   ): Promise<SyncData[]> {
     if (reInsert) {
@@ -913,49 +817,20 @@ export class FTDBManager extends DBManager {
     const seenInBatch: Map<string, boolean> = new Map();
 
     for (const data of dataList) {
-      let computeStartTime = Date.now();
-      const dataString = data.getDataString();
-      const dataType = data.getDataType();
-      const uniqueId = this.extractUniqueId(dataType, dataString);
-      if (!uniqueId) {
+      const computeStartTime = Date.now();
+      const key = this.getDedupKeyForData(data);
+      if (!key) {
         filteredDataList.push(data);
         this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
-      const key = `${dataType.toString()}:${uniqueId}`;
-      if (seenInBatch.has(key)) {
+      if (seenInBatch.has(key) || this.insertedDataIds.has(key)) {
         result.duplicateSkipped++;
         this.addWriteComputeTime(timing, computeStartTime);
         continue;
       }
 
-      if (!this.shouldQueryDbForDuplicate(uniqueId)) {
-        if (this.insertedDataIds.has(key)) {
-          result.duplicateSkipped++;
-          this.addWriteComputeTime(timing, computeStartTime);
-          continue;
-        }
-        seenInBatch.set(key, true);
-        filteredDataList.push(data);
-        this.addWriteComputeTime(timing, computeStartTime);
-        continue;
-      }
-
-      this.addWriteComputeTime(timing, computeStartTime);
-      const exists = await this.checkDataExistsLocked(rdbStore, dataType, dataString, timing);
-      computeStartTime = Date.now();
-      if (!exists) {
-        seenInBatch.set(key, true);
-        filteredDataList.push(data);
-        this.addWriteComputeTime(timing, computeStartTime);
-        continue;
-      }
-
-      this.addWriteComputeTime(timing, computeStartTime);
-      const deleted = await this.deleteDuplicateDataLocked(rdbStore, dataType, uniqueId, countDelta, timing);
-      computeStartTime = Date.now();
-      result.deletedOld += deleted;
       seenInBatch.set(key, true);
       filteredDataList.push(data);
       this.addWriteComputeTime(timing, computeStartTime);
@@ -992,7 +867,7 @@ export class FTDBManager extends DBManager {
         result.inserted++;
         this.addInsertedCacheCountDelta(countDelta, dataList, 1);
         if (!reInsert) {
-          this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
+          this.markDataAsInsertedLocked(data);
         }
       } else {
         result.errorMessage = `Invalid rowId returned: ${rowId}`;
@@ -1018,10 +893,59 @@ export class FTDBManager extends DBManager {
     this.addInsertedCacheCountDelta(countDelta, dataList, insertedRows);
     if (!reInsert && insertedRows > 0) {
       for (const data of dataList) {
-        this.markDataAsInsertedLocked(data.getDataType(), data.getDataString());
+        this.markDataAsInsertedLocked(data);
       }
     }
     this.addWriteComputeTime(timing, computeStartTime);
+  }
+
+  private async updatePreparedDataByUuidLocked(
+    rdbStore: relationalStore.RdbStore,
+    data: SyncData,
+    timing?: SyncDataWriteTiming
+  ): Promise<number> {
+    const computeStartTime = Date.now();
+    const uuid = data.getUuid();
+    if (!uuid || uuid.length === 0) {
+      this.addWriteComputeTime(timing, computeStartTime);
+      return 0;
+    }
+
+    const values = this.toSyncDataValuesBucket(data);
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_UUID, uuid);
+    this.addWriteComputeTime(timing, computeStartTime);
+
+    const executeStartTime = Date.now();
+    const updatedRows = await rdbStore.update(values, predicates);
+    this.addWriteExecuteTime(timing, executeStartTime);
+    return Math.max(0, updatedRows);
+  }
+
+  private async updateOrInsertPreparedDataByUuidLocked(
+    rdbStore: relationalStore.RdbStore,
+    dataList: SyncData[],
+    reInsert: boolean,
+    result: SyncDataWriteResult,
+    countDelta: SyncDataCacheCountDelta,
+    timing?: SyncDataWriteTiming
+  ): Promise<void> {
+    if (!dataList || dataList.length === 0) {
+      return;
+    }
+
+    for (const data of dataList) {
+      const updatedRows = await this.updatePreparedDataByUuidLocked(rdbStore, data, timing);
+      if (updatedRows > 0) {
+        result.updated += updatedRows;
+        if (!reInsert) {
+          this.markDataAsInsertedLocked(data);
+        }
+        continue;
+      }
+
+      await this.insertPreparedDataLocked(rdbStore, [data], reInsert, result, countDelta, timing);
+    }
   }
 
   private async writeSyncDataLocked(
@@ -1043,7 +967,12 @@ export class FTDBManager extends DBManager {
         dataToWrite = await this.applyCachePolicyLocked(rdbStore, dataToWrite, result, countDelta, timing);
       }
 
-      dataToWrite = await this.filterDuplicatesLocked(rdbStore, dataToWrite, reInsert, result, countDelta, timing);
+      if (options.updateOrInsertByUuid === true) {
+        await this.updateOrInsertPreparedDataByUuidLocked(rdbStore, dataToWrite, reInsert, result, countDelta, timing);
+        return;
+      }
+
+      dataToWrite = await this.filterDuplicatesLocked(dataToWrite, reInsert, result, timing);
       await this.insertPreparedDataLocked(rdbStore, dataToWrite, reInsert, result, countDelta, timing);
     } finally {
       if (applyCachePolicy) {
@@ -1114,7 +1043,7 @@ export class FTDBManager extends DBManager {
         costTime - dbLaneWaitTime - lockWaitTime - computeTime - executeTime - sizeCheckTime - cleanupTime);
       const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';
       FTInnerLogger.i(TAG,
-        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} dbLaneWait=${dbLaneWaitTime}ms lockWait=${lockWaitTime}ms wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms insert=${insertTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
+        `[DB-WRITE] source=${source} rows=${result.requested} inserted=${result.inserted} updated=${result.updated} dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} dbLaneWait=${dbLaneWaitTime}ms lockWait=${lockWaitTime}ms wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms insert=${insertTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms total=${costTime}ms cost=${costTime}ms${errorPart}`);
     }
 
     return result;
@@ -1131,7 +1060,21 @@ export class FTDBManager extends DBManager {
       applyCachePolicy: false,
       reInsert
     });
-    return result.inserted > 0;
+    return result.inserted + result.updated > 0;
+  }
+
+  /**
+   * Update existing sync data by uuid, or insert it if no row exists.
+   * This is mainly used by RUM view data so repeated view summaries update the same upload row.
+   */
+  public async updateOrInsertSyncData(data: SyncData): Promise<boolean> {
+    const result = await this.writeSyncDataAtomically('updateOrInsertSyncData', [data], {
+      applyCachePolicy: false,
+      reInsert: false,
+      forceTransaction: true,
+      updateOrInsertByUuid: true
+    });
+    return result.inserted + result.updated > 0;
   }
 
   /**
@@ -2758,105 +2701,41 @@ export class FTDBManager extends DBManager {
   }
 
   /**
-   * Delete closed Action data
+   * Delete processed Action data.
    * Aligned with Android SDK: cleanCloseActionData(String[] ids)
-   * Additionally, deletes stale unclosed actions (older than 30 seconds) even if pending_resource>0
-   * This prevents data residue in stress test scenarios where resources may never complete
-   * @param ids Action ID array (if provided and not empty, only deletes these specific actions)
+   * @param ids Action ID array. Empty input is ignored.
    */
   public async cleanCloseActionData(ids?: string[]): Promise<void> {
+    if (!ids || ids.length === 0) {
+      return;
+    }
+
     try {
-      // If ids is provided and not empty, delete specific actions (aligned with Android SDK behavior)
-      if (ids && ids.length > 0) {
-        class DeleteActionCallback implements DataBaseCallBack {
-          private ids: string[];
-          private deletedCount: number = 0;
+      class DeleteActionCallback implements DataBaseCallBack {
+        private ids: string[];
+        private deletedCount: number = 0;
 
-          constructor(ids: string[]) {
-            this.ids = ids;
-          }
-
-          async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-            // Delete each action by ID (aligned with Android: uses batch delete for better performance)
-            // Note: HarmonyOS doesn't support batch operations like Android's applyBatch,
-            // so we delete one by one but ensure each deletion is awaited
-            for (const id of this.ids) {
-              const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              predicates.equalTo(FTSQL.RUM_COLUMN_ID, id);
-              const deleted = await rdbStore.delete(predicates);
-              if (deleted > 0) {
-                this.deletedCount++;
-              }
-            }
-          }
-
-          getDeletedCount(): number {
-            return this.deletedCount;
-          }
+        constructor(ids: string[]) {
+          this.ids = ids;
         }
 
-        const callback = new DeleteActionCallback(ids);
-        await this.getDB(true, callback);
-
-        const actualDeleted = callback.getDeletedCount();
-        if (actualDeleted !== ids.length) {
-          FTInnerLogger.w(TAG, `Clean close action data incomplete: ${actualDeleted}/${ids.length}`);
-        }
-      } else {
-        // If ids is not provided or empty, delete all closed actions and stale unclosed actions
-        // Aligned with Android SDK: DELETE FROM action WHERE is_close=1 (for closed actions)
-        // Additionally, delete stale unclosed actions (is_close=0, pending_resource>0, start_time older than threshold)
-        // Threshold: 30 seconds - gives resources time to complete after the 30-second delayed cleanup
-        // This prevents data residue in stress test scenarios where resources may never complete
-        const nowNanos = Utils.getCurrentNanoTime();
-        const STALE_ACTION_THRESHOLD_MS = 30 * 1000; // 30 seconds: delete unclosed actions older than 30 seconds even if pending_resource>0
-        const staleThresholdNanos = nowNanos - (STALE_ACTION_THRESHOLD_MS * 1000000); // Convert ms to nanoseconds
-
-        class DeleteAllCloseActionCallback implements DataBaseCallBack {
-          private staleThresholdNanos: number;
-
-          constructor(staleThresholdNanos: number) {
-            this.staleThresholdNanos = staleThresholdNanos;
-          }
-
-          async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-            // First, delete normal closed actions (is_close=1)
-            const normalPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            normalPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-            await rdbStore.delete(normalPredicates);
-
-            // Then, delete stale unclosed actions (is_close=0, pending_resource>0, start_time older than threshold)
-            // This prevents data residue in stress test scenarios
-            // Note: We need to recreate predicates for deletion because query() may modify the predicates object
-            const staleQueryPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-            staleQueryPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
-            staleQueryPredicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-            staleQueryPredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_START_TIME, this.staleThresholdNanos);
-
-            // First query to count how many stale actions exist (for debugging)
-            const countResult = await rdbStore.query(staleQueryPredicates, ['count(*) as count']);
-            let staleCount = 0;
-            if (countResult.goToFirstRow()) {
-              staleCount = countResult.getLong(0);
-            }
-            countResult.close();
-
-            if (staleCount > 0) {
-              // Recreate predicates for deletion (RdbPredicates may be modified by query)
-              const staleDeletePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-              staleDeletePredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
-              staleDeletePredicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-              staleDeletePredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_START_TIME, this.staleThresholdNanos);
-              const staleDeleted = await rdbStore.delete(staleDeletePredicates);
-              if (staleDeleted <= 0) {
-                FTInnerLogger.w(TAG, `Stale action cleanup skipped unexpectedly: count=${staleCount}`);
-              }
-            }
-          }
+        async run(rdbStore: relationalStore.RdbStore): Promise<void> {
+          const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+          predicates.in(FTSQL.RUM_COLUMN_ID, this.ids);
+          this.deletedCount = await rdbStore.delete(predicates);
         }
 
-        const callback = new DeleteAllCloseActionCallback(staleThresholdNanos);
-        await this.getDB(true, callback);
+        getDeletedCount(): number {
+          return this.deletedCount;
+        }
+      }
+
+      const callback = new DeleteActionCallback(ids);
+      await this.getDB(true, callback);
+
+      const actualDeleted = callback.getDeletedCount();
+      if (actualDeleted !== ids.length) {
+        FTInnerLogger.w(TAG, `Clean close action data incomplete: ${actualDeleted}/${ids.length}`);
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Clean close action data failed: ${error as string}`);

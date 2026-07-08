@@ -204,11 +204,12 @@ class FTTrackInner {
     tags: Map<string, string>,
     fields: Map<string, string>,
     callBack: RunnerCompleteCallBack | null,
-    callbackOnFinish: boolean
+    callbackOnFinish: boolean,
+    draftUuid?: string
   ): void {
     try {
       const traceName = this.nextRumWorkerTaskName(source);
-      const uuid = Utils.generateUUID();
+      const uuid = draftUuid && draftUuid.length > 0 ? draftUuid : this.createRumSyncDataUuid(measurement, tags);
       const prepared = this.dataHelper.prepareLineProtocolContent(measurement, tags, fields, time, dataType, uuid);
       const rumEvent = this.createRumWorkerEventDTO(dataType, customDataType, measurement, prepared, uuid);
       const workerRequest: SDKWorkerRequest = {
@@ -409,7 +410,7 @@ class FTTrackInner {
     }
 
     const writeResult = await this.writePreparedSyncData(source, records);
-    const result = writeResult !== null && writeResult.inserted > 0;
+    const result = this.getWriteAffectedCount(writeResult) > 0;
     const syncPollDeferredToBatch = this.isRumDetailBatchSource(source);
     const firstUuid = records[0].getUuid();
 
@@ -514,6 +515,39 @@ class FTTrackInner {
       return value;
     }
     return undefined;
+  }
+
+  private createRumSyncDataUuid(measurement: string, tags: Map<string, string>): string {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+      const viewId = tags.get(Constants.KEY_RUM_VIEW_ID);
+      if (viewId && viewId.length > 0) {
+        return viewId.substring(0, Math.min(16, viewId.length));
+      }
+    }
+    return Utils.generateUUID();
+  }
+
+  private getWriteAffectedCount(result: SyncDataWriteResult | null): number {
+    if (!result) {
+      return 0;
+    }
+    return Math.max(0, result.inserted) + Math.max(0, result.updated);
+  }
+
+  private isViewSyncDataRecord(record: SyncData): boolean {
+    return record.getDataString().startsWith(`${Constants.FT_MEASUREMENT_RUM_VIEW},`);
+  }
+
+  private shouldUpdateOrInsertByUuid(records: SyncData[]): boolean {
+    if (!records || records.length === 0) {
+      return false;
+    }
+    for (const record of records) {
+      if (!this.isViewSyncDataRecord(record)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -872,6 +906,7 @@ class FTTrackInner {
       source,
       requested,
       inserted: 0,
+      updated: 0,
       dropped,
       duplicateSkipped: 0,
       deletedOld,
@@ -1013,7 +1048,8 @@ class FTTrackInner {
   }
 
   private isRumDetailBatchSource(source: string): boolean {
-    return source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}` ||
+    return source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ACTION}` ||
+      source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}` ||
       source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ERROR}` ||
       source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_LONG_TASK}`;
   }
@@ -1057,12 +1093,15 @@ class FTTrackInner {
   }
 
   private createRumDetailBatchSource(entries: RumDetailDbWriteBatchEntry[]): string {
+    let actionCount = 0;
     let resourceCount = 0;
     let errorCount = 0;
     let longTaskCount = 0;
     for (const entry of entries) {
       const count = entry.decision.records.length;
-      if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}`) {
+      if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ACTION}`) {
+        actionCount += count;
+      } else if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_RESOURCE}`) {
         resourceCount += count;
       } else if (entry.source === `data.prepare:${Constants.FT_MEASUREMENT_RUM_ERROR}`) {
         errorCount += count;
@@ -1070,7 +1109,7 @@ class FTTrackInner {
         longTaskCount += count;
       }
     }
-    return `data.prepare.batch:resource=${resourceCount}:error=${errorCount}:long_task=${longTaskCount}`;
+    return `data.prepare.batch:action=${actionCount}:resource=${resourceCount}:error=${errorCount}:long_task=${longTaskCount}`;
   }
 
   private createBatchEntryWriteResult(
@@ -1078,6 +1117,7 @@ class FTTrackInner {
     requested: number,
     success: boolean,
     inserted: number,
+    updated: number,
     duplicateSkipped: number,
     dbDeletedOld: number,
     errorMessage: string
@@ -1087,6 +1127,7 @@ class FTTrackInner {
       source,
       requested,
       inserted,
+      updated,
       dropped: 0,
       duplicateSkipped,
       deletedOld: dbDeletedOld,
@@ -1099,6 +1140,7 @@ class FTTrackInner {
     writeResult: SyncDataWriteResult
   ): void {
     let remainingInserted = writeResult.success ? Math.max(0, writeResult.inserted) : 0;
+    let remainingUpdated = writeResult.success ? Math.max(0, writeResult.updated) : 0;
     let remainingDuplicate = writeResult.success ? Math.max(0, writeResult.duplicateSkipped) : 0;
     let remainingDbDeletedOld = writeResult.success ? Math.max(0, writeResult.deletedOld) : 0;
 
@@ -1106,7 +1148,9 @@ class FTTrackInner {
       const eligibleCount = entry.decision.records.length;
       const inserted = Math.min(eligibleCount, remainingInserted);
       remainingInserted = Math.max(0, remainingInserted - inserted);
-      const duplicateSkipped = Math.min(Math.max(0, eligibleCount - inserted), remainingDuplicate);
+      const updated = Math.min(Math.max(0, eligibleCount - inserted), remainingUpdated);
+      remainingUpdated = Math.max(0, remainingUpdated - updated);
+      const duplicateSkipped = Math.min(Math.max(0, eligibleCount - inserted - updated), remainingDuplicate);
       remainingDuplicate = Math.max(0, remainingDuplicate - duplicateSkipped);
       const dbDeletedOld = Math.min(eligibleCount, remainingDbDeletedOld);
       remainingDbDeletedOld = Math.max(0, remainingDbDeletedOld - dbDeletedOld);
@@ -1117,6 +1161,7 @@ class FTTrackInner {
         entry.requested,
         writeResult.success,
         inserted,
+        updated,
         duplicateSkipped,
         dbDeletedOld,
         writeResult.errorMessage
@@ -1135,12 +1180,14 @@ class FTTrackInner {
       throw new Error('Context is null');
     }
     const dbManager = FTDBManager.getInstance(this.context);
+    const updateOrInsertByUuid = this.shouldUpdateOrInsertByUuid(records);
     return await SDKDedicatedPoolManager.getInstance().runDbWrite(source, async (dbLaneWaitMs?: number) => {
       return await dbManager.writeSyncDataAtomically(source, records, {
         applyCachePolicy: useDatabaseCachePolicy,
         reInsert: false,
         dbLaneWaitMs: dbLaneWaitMs || 0,
-        forceTransaction
+        forceTransaction: forceTransaction || updateOrInsertByUuid,
+        updateOrInsertByUuid
       });
     });
   }
@@ -1188,7 +1235,7 @@ class FTTrackInner {
       const batchSource = this.createRumDetailBatchSource(entries);
       const writeResult = await this.writeRecordsToDb(batchSource, records, false, records.length > 1);
       this.resolveRumDetailDbBatchEntries(entries, writeResult);
-      if (writeResult.success && writeResult.inserted > 0) {
+      if (writeResult.success && this.getWriteAffectedCount(writeResult) > 0) {
         this.syncTaskManager.executeSyncPoll();
       }
     } catch (error) {
@@ -1310,6 +1357,48 @@ class FTTrackInner {
 
     const taskName = `data.prepare:${measurement}`;
     this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+  }
+
+  public rumInputFromWorker(
+    source: string,
+    input: SDKLineProtocolInputDTO,
+    callBack: RunnerCompleteCallBack | null = null
+  ): void {
+    if (!input) {
+      if (callBack) {
+        callBack.onComplete();
+      }
+      return;
+    }
+
+    const dataType = this.dataTypeFromWorkerString(input.dataType, DataType.RUM_APP);
+    const tags = this.stringRecordToMap(input.tags || {});
+    const fields = this.stringRecordToMap(input.fields || {});
+    this.submitRumWorkerDraftTask(
+      source,
+      dataType,
+      input.customDataType,
+      input.time,
+      input.measurement,
+      tags,
+      fields,
+      callBack,
+      false,
+      input.uuid
+    );
+  }
+
+  private stringRecordToMap(record: SDKStringRecord): Map<string, string> {
+    const result = new Map<string, string>();
+    if (!record) {
+      return result;
+    }
+    const keys = Object.keys(record);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      result.set(key, record[key]);
+    }
+    return result;
   }
 
   /**

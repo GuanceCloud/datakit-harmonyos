@@ -29,6 +29,8 @@ import {
 } from '../thread/SDKWorkerTaskBridge';
 import {
   SDKDedicatedPoolType,
+  SDKLineProtocolRecordsDTO,
+  SDKRumCompletedActionDTO,
   SDKRumCounterDeltaDTO,
   SDKRumCounterFlushResultDTO,
   SDKRumCounterUpdateDTO,
@@ -53,6 +55,7 @@ import { SyncTaskManager } from '../SyncTaskManager';
 import { IS_PRE_CRASH } from '../FTExceptionHandler';
 import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
+import { DataType } from '../enum/Enums';
 
 const RUM_COUNTER_BATCH_FLUSH_DELAY_MS = 50;
 const RUM_COUNTER_BATCH_MAX_KEYS = 256;
@@ -578,6 +581,110 @@ export class FTRUMInnerManager {
     });
   }
 
+  private submitCompletedActionWorkerInput(actionBean: ActionBean, traceBaseName: string): void {
+    const actionId = actionBean.getId();
+    this.actionInsertLock = this.actionInsertLock.then(async () => {
+      try {
+        if (this.insertedActionIds.has(actionId)) {
+          FTInnerLogger.d(TAG, `[FT-ACTION-DEBUG] Action ${actionId} (${actionBean.getActionName()}) already inserted, skipping duplicate insert`);
+          return;
+        }
+
+        if (this.insertedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
+          FTInnerLogger.w(TAG, `insertedActionIds size (${this.insertedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
+          this.insertedActionIds.clear();
+        }
+        if (this.processedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
+          FTInnerLogger.w(TAG, `processedActionIds size (${this.processedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
+          this.processedActionIds.clear();
+        }
+
+        this.insertedActionIds.add(actionId);
+        this.processedActionIds.add(actionId);
+        this.submitCompletedActionWorkerRequest(actionBean, traceBaseName);
+      } catch (error) {
+        FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Error scheduling completed action worker input: ${error}`);
+        this.insertedActionIds.delete(actionId);
+        this.processedActionIds.delete(actionId);
+      }
+    }).catch((error: Error) => {
+      FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Error in completed action insert lock: ${error}`);
+      this.insertedActionIds.delete(actionId);
+      this.processedActionIds.delete(actionId);
+    });
+  }
+
+  private submitCompletedActionWorkerRequest(actionBean: ActionBean, traceBaseName: string): void {
+    const traceName = this.nextRumEventTaskName(traceBaseName);
+    const payload = this.createCompletedActionDTO(actionBean);
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload: payload as Object as SDKWorkerPayload
+    };
+
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.EVENT,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
+      costHint: 'normal',
+      workerRequest,
+      workerResponseHandler: (response: SDKWorkerResponse) => {
+        this.handleCompletedActionWorkerResponse(actionBean, response);
+      }
+    });
+  }
+
+  private handleCompletedActionWorkerResponse(actionBean: ActionBean, response: SDKWorkerResponse): void {
+    const actionId = actionBean.getId();
+    if (!response.ok) {
+      FTInnerLogger.e(TAG, `Completed action worker command failed: action=${actionBean.getActionName()}, error=${response.errorMessage || 'unknown'}`);
+      this.insertedActionIds.delete(actionId);
+      this.processedActionIds.delete(actionId);
+      return;
+    }
+
+    const payload = response.payload as Object as SDKLineProtocolRecordsDTO;
+    const records = payload && payload.records ? payload.records : [];
+    if (records.length === 0) {
+      FTInnerLogger.w(TAG, `Completed action worker returned empty records: action=${actionBean.getActionName()}`);
+      this.insertedActionIds.delete(actionId);
+      this.processedActionIds.delete(actionId);
+      return;
+    }
+
+    const source = `data.prepare:${Constants.FT_MEASUREMENT_RUM_ACTION}`;
+    for (let i = 0; i < records.length; i++) {
+      FTTrackInner.getInstance().rumInputFromWorker(source, records[i]);
+    }
+  }
+
+  private createCompletedActionDTO(actionBean: ActionBean): SDKRumCompletedActionDTO {
+    return {
+      dataType: DataType.RUM_APP.toString(),
+      measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
+      uuid: Utils.generateUUID(),
+      time: actionBean.getStartTime(),
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
+      actionId: actionBean.getId(),
+      actionName: actionBean.getActionName(),
+      actionType: actionBean.getActionType(),
+      sessionId: actionBean.getSessionId(),
+      viewId: actionBean.getViewId(),
+      viewName: actionBean.getViewName(),
+      viewReferrer: actionBean.getViewReferrer(),
+      duration: actionBean.getDuration(),
+      errorCount: actionBean.getErrorCount(),
+      longTaskCount: actionBean.getLongTaskCount(),
+      resourceCount: actionBean.getResourceCount(),
+      properties: actionBean.getProperty()
+    };
+  }
+
   private createActionLifecycleEvent(eventType: string, actionBean: ActionBean): SDKRumEventDTO {
     return {
       eventType,
@@ -752,15 +859,6 @@ export class FTRUMInnerManager {
         }
       } while (beans.length >= LIMIT_SIZE);
       
-      // Clean up stale unclosed actions (older than 30 seconds with pending_resource>0)
-      // This prevents data residue when actions cannot be closed due to pending resources
-      // Threshold: 30 seconds (gives resources time to complete after the 30-second delayed cleanup)
-      // Only clean up once after all batches are processed, not in each loop iteration
-      await this.runRumDbWrite('cleanCloseActionData:stale', async () => {
-        await FTDBManager.getInstance(this.context!).cleanCloseActionData();
-      });
-      
-      
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in generateActionSum: ${error}`);
     } finally {
@@ -773,7 +871,7 @@ export class FTRUMInnerManager {
    * Insert action data 
    * Call FTTrackInner.rum() to store and sync data
    */
-  private insertAction(actionBean: ActionBean): void {
+  private insertAction(actionBean: ActionBean, refreshCountsFromDb: boolean = false): void {
     const actionId = actionBean.getId();
     
     // Use Promise-based lock to ensure thread-safe insertion
@@ -802,10 +900,7 @@ export class FTRUMInnerManager {
         // Also mark as processed to prevent generateActionSum from processing it again
         this.processedActionIds.add(actionId);
         
-        // Update ActionBean counts from database to ensure we have the latest values
-        // This is important because resources/errors/long tasks may be added asynchronously
-        // after the action is closed, and the database has the most up-to-date counts
-        if (this.context) {
+        if (refreshCountsFromDb && this.context) {
           try {
             const dbCounts = await this.getActionCountsFromDB(actionId);
             if (dbCounts) {
@@ -817,24 +912,6 @@ export class FTRUMInnerManager {
             const errorMessage = error instanceof Error ? error.message : String(error);
             FTInnerLogger.w(TAG, `Failed to update action counts from database for ${actionId}: ${errorMessage}`);
             // Continue with memory values if database query fails
-          }
-        }
-        
-        // Query database one more time right before building fields to ensure we have the latest counts
-        // This is important because resources/errors/long tasks may complete asynchronously after the first query
-        if (this.context) {
-          try {
-            const finalDbCounts = await this.getActionCountsFromDB(actionId);
-            if (finalDbCounts) {
-              // Update ActionBean with the latest counts
-              actionBean.setErrorCount(finalDbCounts.errorCount);
-              actionBean.setLongTaskCount(finalDbCounts.longTaskCount);
-              actionBean.setResourceCount(finalDbCounts.resourceCount);
-            }
-          } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            FTInnerLogger.w(TAG, `Failed to query final action counts from database for ${actionId}: ${errorMessage}`);
-            // Continue with existing values if query fails
           }
         }
         
@@ -1837,15 +1914,10 @@ export class FTRUMInnerManager {
         completedAction.setProperty(property);
       }
       
-      // Convert to ActionBean and send directly 
+      // Convert to ActionBean and send directly
       const actionBean = completedAction.convertToActionBean();
-      this.submitRumLifecycleWorkerCommand(`rum.addAction:${actionName}`, this.createActionLifecycleEvent('action.complete', actionBean), () => {
-        try {
-          this.insertAction(actionBean);
-        } catch (error) {
-          FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Error in insertAction: ${error}`);
-        }
-      });
+      this.increaseActionCount(actionBean.getViewId());
+      this.submitCompletedActionWorkerInput(actionBean, `rum.addAction:${actionName}`);
       
 
     } catch (error) {
@@ -2863,19 +2935,13 @@ export class FTRUMInnerManager {
     const actionBean = activeActionBean.convertToActionBean();
     const actionName = activeActionBean.getActionName();
     
-    // Increase action count
-    this.increaseActionCount(actionBean.getViewId());
-
     if (isAddAction) {
       // addAction: Directly enters FT_SYNC_DATA_FLAT_TABLE_NAME
-      this.submitRumLifecycleWorkerCommand(`rum.addAction:${actionName}`, this.createActionLifecycleEvent('action.complete', actionBean), () => {
-        try {
-          this.insertAction(actionBean);
-        } catch (error) {
-          FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-ERROR] Error inserting addAction to sync table: ${error}`);
-        }
-      });
+      this.increaseActionCount(actionBean.getViewId());
+      this.submitCompletedActionWorkerInput(actionBean, `rum.addAction:${actionName}`);
     } else {
+      // Increase action count
+      this.increaseActionCount(actionBean.getViewId());
       // startAction: First stores to FT_TABLE_ACTION, then enters FT_SYNC_DATA_FLAT_TABLE_NAME after closing
       this.submitRumEventTask(`rum.startAction:${actionName}`, async () => {
         try {

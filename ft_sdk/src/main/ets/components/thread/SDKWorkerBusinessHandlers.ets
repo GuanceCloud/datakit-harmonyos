@@ -1,8 +1,10 @@
 import {
   SDKCrashFileDTO,
   SDKDedicatedPoolType,
+  SDKLineProtocolRecordsDTO,
   SDKLineProtocolInputDTO,
   SDKLogDTO,
+  SDKRumCompletedActionDTO,
   SDKRumCounterDeltaDTO,
   SDKRumCounterFlushResultDTO,
   SDKRumCounterUpdateDTO,
@@ -19,6 +21,7 @@ import {
   toSDKWorkerErrorDTO,
   toSDKWorkerErrorPayload
 } from './SDKWorkerProtocol';
+import { Constants } from '../Constants';
 
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
@@ -206,6 +209,8 @@ function handleSDKWorkerCommand(request: SDKWorkerRequest, state: SDKWorkerRunti
       return getStateSnapshot(state);
     case SDKWorkerCommand.EVENT_RUM_COMMAND:
       return handleRumCommand(request.payload as SDKRumEventDTO, state);
+    case SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION:
+      return handleRumCompletedAction(request.payload as SDKRumCompletedActionDTO, state);
     case SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE:
       return handleRumCounterUpdate(request.payload as SDKRumCounterUpdateDTO, state);
     case SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH:
@@ -342,6 +347,48 @@ function handleRumCommand(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): 
     activeActionName: state.activeActionName,
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
+  };
+  return payload as Object as SDKWorkerPayload;
+}
+
+function handleRumCompletedAction(
+  action: SDKRumCompletedActionDTO,
+  state: SDKWorkerRuntimeState
+): SDKWorkerPayload {
+  if (!action) {
+    throw new Error('RUM completed action payload is required');
+  }
+
+  state.eventSequence++;
+  const tags = copyStringRecord(action.dynamicTags || {});
+  tags[Constants.KEY_RUM_VIEW_ID] = action.viewId || '';
+  tags[Constants.KEY_RUM_VIEW_NAME] = action.viewName || '';
+  tags[Constants.KEY_RUM_SESSION_ID] = action.sessionId || '';
+  tags[Constants.KEY_RUM_VIEW_REFERRER] = action.viewReferrer || '';
+  if (action.actionType && action.actionType.length > 0) {
+    tags[Constants.KEY_RUM_ACTION_TYPE] = action.actionType;
+  }
+  tags[Constants.KEY_RUM_ACTION_ID] = action.actionId || '';
+  tags[Constants.KEY_RUM_ACTION_NAME] = action.actionName || '';
+
+  const fields: SDKStringRecord = {};
+  fields[Constants.KEY_RUM_ACTION_DURATION] = String(action.duration || 0);
+  fields[Constants.KEY_RUM_ACTION_ERROR_COUNT] = String(action.errorCount || 0);
+  fields[Constants.KEY_RUM_ACTION_LONG_TASK_COUNT] = String(action.longTaskCount || 0);
+  fields[Constants.KEY_RUM_ACTION_RESOURCE_COUNT] = String(action.resourceCount || 0);
+  copyActionPropertiesToFields(action.properties || {}, fields);
+
+  const records: SDKLineProtocolInputDTO[] = [{
+    dataType: action.dataType || '',
+    customDataType: action.customDataType,
+    measurement: action.measurement || Constants.FT_MEASUREMENT_RUM_ACTION,
+    tags,
+    fields,
+    time: action.time || 0,
+    uuid: action.uuid || ''
+  }];
+  const payload: SDKLineProtocolRecordsDTO = {
+    records
   };
   return payload as Object as SDKWorkerPayload;
 }
@@ -742,6 +789,39 @@ function copyStringRecord(record: SDKStringRecord): SDKStringRecord {
     copied[key] = record[key];
   }
   return copied;
+}
+
+function copyActionPropertiesToFields(properties: Record<string, object>, fields: SDKStringRecord): void {
+  const keys = Object.keys(properties);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    fields[key] = stringifyActionPropertyValue(properties[key]);
+  }
+}
+
+function stringifyActionPropertyValue(value: object): string {
+  let normalized = value;
+  if (typeof normalized === 'object' && normalized !== null) {
+    try {
+      const wrapper = normalized as Record<string, object>;
+      if (wrapper.value !== undefined) {
+        normalized = wrapper.value;
+      }
+    } catch (_) {
+    }
+  }
+
+  if (typeof normalized === 'string' || typeof normalized === 'number' || typeof normalized === 'boolean') {
+    return String(normalized);
+  }
+  if (typeof normalized === 'object' && normalized !== null) {
+    try {
+      return JSON.stringify(normalized);
+    } catch (_) {
+      return String(normalized);
+    }
+  }
+  return String(normalized);
 }
 
 function getOrCreateRumCounterDelta(

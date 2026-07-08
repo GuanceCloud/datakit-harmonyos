@@ -5,6 +5,7 @@ import {
 import {
   SDKDedicatedPoolType,
   SDKLineProtocolInputDTO,
+  SDKRumCompletedActionDTO,
   SDKRumCounterUpdateDTO,
   SDKRumEventDTO,
   SDKStringRecord,
@@ -497,6 +498,59 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(completeResponse.ok).assertTrue();
       expect(getPayloadString(completeResponse.payload, 'activeResourceCount')).assertEqual('0');
+    });
+
+    it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {
+      const completedAction: SDKRumCompletedActionDTO = {
+        dataType: 'rum_app',
+        measurement: 'action',
+        uuid: 'action-sync-uuid',
+        time: 12345,
+        dynamicTags: {
+          env: 'test'
+        },
+        actionId: 'action-1',
+        actionName: 'tap',
+        actionType: 'click',
+        sessionId: 'session-1',
+        viewId: 'view-1',
+        viewName: 'Home',
+        viewReferrer: 'Launcher',
+        duration: 42,
+        errorCount: 1,
+        longTaskCount: 2,
+        resourceCount: 3,
+        properties: {
+          custom_text: { value: 'fast' },
+          custom_json: { nested: 'yes' }
+        }
+      };
+
+      const response = await manager.executeCommand({
+        id: 'rum-completed-action',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: completedAction as Object as SDKWorkerPayload
+      });
+      expect(response.ok).assertTrue();
+      const records = getPayloadArray(response.payload, 'records');
+      expect(records.length).assertEqual(1);
+      const record = records[0] as Record<string, object>;
+      const tags = record['tags'] as Record<string, object>;
+      const fields = record['fields'] as Record<string, object>;
+      expect(String(record['measurement'])).assertEqual('action');
+      expect(String(record['uuid'])).assertEqual('action-sync-uuid');
+      expect(String(tags['action_id'])).assertEqual('action-1');
+      expect(String(tags['action_type'])).assertEqual('click');
+      expect(String(tags['view_id'])).assertEqual('view-1');
+      expect(String(fields['duration'])).assertEqual('42');
+      expect(String(fields['action_error_count'])).assertEqual('1');
+      expect(String(fields['action_long_task_count'])).assertEqual('2');
+      expect(String(fields['action_resource_count'])).assertEqual('3');
+      expect(String(fields['custom_text'])).assertEqual('fast');
+      expect(String(fields['custom_json']).includes('nested')).assertTrue();
     });
 
     it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {
