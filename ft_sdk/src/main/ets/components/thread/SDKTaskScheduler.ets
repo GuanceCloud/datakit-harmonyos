@@ -164,6 +164,9 @@ interface SDKLaneState {
   queue: ScheduledSDKTask[];
   queueHeadIndex: number;
   pendingCount: number;
+  pendingFifoPriority: SDKTaskPriority | null;
+  pendingFifoSerialKey: string | null;
+  pendingFifoHomogeneous: boolean;
   running: number;
   maxConcurrency: number;
   runningSerialKeys: Set<string>;
@@ -375,6 +378,9 @@ export class SDKTaskScheduler {
       queue: [],
       queueHeadIndex: 0,
       pendingCount: 0,
+      pendingFifoPriority: null,
+      pendingFifoSerialKey: null,
+      pendingFifoHomogeneous: true,
       running: 0,
       maxConcurrency: Math.max(1, maxConcurrency),
       runningSerialKeys: new Set<string>(),
@@ -549,13 +555,27 @@ export class SDKTaskScheduler {
   private enqueuePendingTask(lane: SDKLaneState, task: ScheduledSDKTask): void {
     lane.queue.push(task);
     lane.pendingCount++;
+    this.updatePendingFifoStateOnEnqueue(lane, task);
   }
 
   private getNextRunnableTaskSelection(type: SDKTaskType, lane: SDKLaneState): SDKTaskSelection {
-    if (this.canUseEventFifoFastPath(type, lane)) {
-      return this.getNextEventTaskFromQueue(lane);
+    if (this.canUseFifoFastPath(type, lane)) {
+      return this.getNextFifoTaskFromQueue(lane);
     }
     return this.getNextRunnableTaskFromQueue(lane);
+  }
+
+  private canUseFifoFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
+    if (this.canUseEventFifoFastPath(type, lane)) {
+      return true;
+    }
+    if (this.canUseDataProcessFifoFastPath(type, lane)) {
+      return true;
+    }
+    if (this.canUseLogFifoFastPath(type, lane)) {
+      return true;
+    }
+    return false;
   }
 
   private canUseEventFifoFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
@@ -564,13 +584,39 @@ export class SDKTaskScheduler {
       lane.runningSerialKeys.size === 0;
   }
 
-  private getNextEventTaskFromQueue(lane: SDKLaneState): SDKTaskSelection {
+  private canUseDataProcessFifoFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
+    if (type !== SDKTaskType.DATA_PROCESS) {
+      return false;
+    }
+    const head = this.peekQueueHead(lane);
+    return !head || !this.isTaskBlockedBySerialKey(head, lane);
+  }
+
+  private canUseLogFifoFastPath(type: SDKTaskType, lane: SDKLaneState): boolean {
+    if (type !== SDKTaskType.LOG) {
+      return false;
+    }
+    const head = this.peekQueueHead(lane);
+    if (!head) {
+      return true;
+    }
+    return lane.pendingFifoHomogeneous &&
+      lane.pendingFifoPriority === head.priority &&
+      lane.pendingFifoSerialKey === this.getTaskSerialKey(head);
+  }
+
+  private getNextFifoTaskFromQueue(lane: SDKLaneState): SDKTaskSelection {
+    const head = this.peekQueueHead(lane);
+    if (head && this.isTaskBlockedBySerialKey(head, lane)) {
+      return { task: null, scanCount: 1 };
+    }
     const task = this.pollQueueHead(lane);
     if (!task) {
       return { task: null, scanCount: 0 };
     }
 
     lane.pendingCount = Math.max(0, lane.pendingCount - 1);
+    this.resetPendingFifoStateIfEmpty(lane);
     return { task, scanCount: 1 };
   }
 
@@ -582,7 +628,7 @@ export class SDKTaskScheduler {
     for (let i = lane.queueHeadIndex; i < lane.queue.length; i++) {
       scanCount++;
       const task = lane.queue[i];
-      if (task.serialKey && lane.runningSerialKeys.has(task.serialKey)) {
+      if (this.isTaskBlockedBySerialKey(task, lane)) {
         continue;
       }
 
@@ -598,7 +644,53 @@ export class SDKTaskScheduler {
     }
 
     lane.pendingCount = Math.max(0, lane.pendingCount - 1);
-    return { task: lane.queue.splice(bestIndex, 1)[0], scanCount };
+    const task = lane.queue.splice(bestIndex, 1)[0];
+    this.resetPendingFifoStateIfEmpty(lane);
+    return { task, scanCount };
+  }
+
+  private peekQueueHead(lane: SDKLaneState): ScheduledSDKTask | null {
+    if (lane.queueHeadIndex >= lane.queue.length) {
+      this.compactPendingQueue(lane);
+      return null;
+    }
+    return lane.queue[lane.queueHeadIndex];
+  }
+
+  private isTaskBlockedBySerialKey(task: ScheduledSDKTask, lane: SDKLaneState): boolean {
+    return !!task.serialKey && lane.runningSerialKeys.has(task.serialKey);
+  }
+
+  private getTaskSerialKey(task: ScheduledSDKTask): string | null {
+    return task.serialKey ?? null;
+  }
+
+  private updatePendingFifoStateOnEnqueue(lane: SDKLaneState, task: ScheduledSDKTask): void {
+    if (task.type !== SDKTaskType.LOG) {
+      return;
+    }
+    const serialKey = this.getTaskSerialKey(task);
+    if (lane.pendingCount === 1) {
+      lane.pendingFifoPriority = task.priority;
+      lane.pendingFifoSerialKey = serialKey;
+      lane.pendingFifoHomogeneous = true;
+      return;
+    }
+    if (!lane.pendingFifoHomogeneous) {
+      return;
+    }
+    if (lane.pendingFifoPriority !== task.priority || lane.pendingFifoSerialKey !== serialKey) {
+      lane.pendingFifoHomogeneous = false;
+    }
+  }
+
+  private resetPendingFifoStateIfEmpty(lane: SDKLaneState): void {
+    if (lane.pendingCount > 0) {
+      return;
+    }
+    lane.pendingFifoPriority = null;
+    lane.pendingFifoSerialKey = null;
+    lane.pendingFifoHomogeneous = true;
   }
 
   private pollQueueHead(lane: SDKLaneState): ScheduledSDKTask | null {
@@ -982,6 +1074,7 @@ export class SDKTaskScheduler {
     lane.queue = [];
     lane.queueHeadIndex = 0;
     lane.pendingCount = 0;
+    this.resetPendingFifoStateIfEmpty(lane);
   }
 
   private generateTaskId(type: SDKTaskType, name: string): string {

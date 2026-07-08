@@ -372,6 +372,7 @@ export default function sdkTaskSchedulerUnitTest() {
       await second;
 
       expect(order.join(',')).assertEqual('first-start,first-end,second');
+      expect(scheduler.getStatus().lanes[SDKTaskType.LOG].maxScanCount <= 1).assertTrue();
     });
 
     it('logLaneShouldUseWorkerPoolForTasksWithoutSerialKey', 0, async () => {
@@ -493,6 +494,71 @@ export default function sdkTaskSchedulerUnitTest() {
       await first;
       await second;
       expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
+    });
+
+    it('dataProcessLaneShouldUseFifoFastPathForBacklog', 0, async () => {
+      scheduler.configureLane(SDKTaskType.DATA_PROCESS, 1);
+      const order: string[] = [];
+      const firstGateObject = createGate();
+      const firstGate = firstGateObject.promise;
+      const releaseFirst = firstGateObject.release;
+
+      const first = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'first-data-process-fifo',
+        priority: SDKTaskPriority.LOW,
+        run: async () => {
+          order.push('first-start');
+          await firstGate;
+          order.push('first-end');
+        }
+      });
+
+      const second = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'second-data-process-fifo',
+        priority: SDKTaskPriority.LOW,
+        run: () => {
+          order.push('second');
+        }
+      });
+
+      const third = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'third-data-process-fifo',
+        priority: SDKTaskPriority.LOW,
+        run: () => {
+          order.push('third');
+        }
+      });
+
+      const fourth = scheduler.submitRunnableTaskAndWait({
+        type: SDKTaskType.DATA_PROCESS,
+        name: 'fourth-data-process-fifo',
+        priority: SDKTaskPriority.LOW,
+        run: () => {
+          order.push('fourth');
+        }
+      });
+
+      await flushPromises();
+      const blockedStatus = scheduler.getStatus();
+      const blockedLane = blockedStatus.lanes[SDKTaskType.DATA_PROCESS];
+      const blockedPool = blockedStatus.dedicatedPools.pools[SDKDedicatedPoolType.DATA_PROCESS];
+      expect(blockedLane.pending).assertEqual(0);
+      expect(blockedPool.pending).assertEqual(3);
+      expect(blockedPool.running).assertEqual(1);
+
+      releaseFirst();
+      await first;
+      await second;
+      await third;
+      await fourth;
+
+      const finalStatus = scheduler.getStatus().lanes[SDKTaskType.DATA_PROCESS];
+      expect(order.join(',')).assertEqual('first-start,first-end,second,third,fourth');
+      expect(finalStatus.completedTasks).assertEqual(4);
+      expect(finalStatus.maxScanCount <= 1).assertTrue();
     });
 
     it('laneStatusShouldRecordDispatchAndScanMetrics', 0, async () => {
