@@ -31,10 +31,7 @@ import {
   SDKDedicatedPoolType,
   SDKLineProtocolRecordsDTO,
   SDKRumCompletedActionDTO,
-  SDKRumCounterDeltaDTO,
-  SDKRumCounterFlushResultDTO,
   SDKRumCounterUpdateDTO,
-  SDKRumCounterUpdateResultDTO,
   SDKRumEventDTO,
   SDKWorkerCommand,
   SDKWorkerPayload,
@@ -56,9 +53,6 @@ import { IS_PRE_CRASH } from '../FTExceptionHandler';
 import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { DataType } from '../enum/Enums';
-
-const RUM_COUNTER_BATCH_FLUSH_DELAY_MS = 50;
-const RUM_COUNTER_BATCH_MAX_KEYS = 256;
 
 /**
  * Property wrapper interface for error properties
@@ -306,8 +300,6 @@ export class FTRUMInnerManager {
   
   // Timer for debouncing generateRumData calls (aligned with Android: mHandler.removeCallbacks)
   private rumDataGenerateTimer: number | null = null;
-
-  private rumCounterBatchTimer: number = -1;
   
   // Set to track processed action IDs to prevent duplicate inserts
   // This ensures that even if an action is queried multiple times, it will only be inserted once
@@ -378,173 +370,109 @@ export class FTRUMInnerManager {
     );
   }
 
-  private clearRumCounterBatchTimer(): void {
-    if (this.rumCounterBatchTimer >= 0) {
-      clearTimeout(this.rumCounterBatchTimer);
-      this.rumCounterBatchTimer = -1;
-    }
-  }
-
-  private scheduleRumCounterBatchFlush(delayMs: number = RUM_COUNTER_BATCH_FLUSH_DELAY_MS): void {
-    if (this.rumCounterBatchTimer >= 0) {
-      return;
-    }
-    this.rumCounterBatchTimer = setTimeout(() => {
-      this.rumCounterBatchTimer = -1;
-      this.flushRumCounterBatch();
-    }, delayMs) as number;
-  }
-
   private submitRumCounterUpdateTask(update: SDKRumCounterUpdateDTO): void {
-    if (!this.context) {
+    const context = this.context;
+    if (!context || !update) {
       return;
     }
 
-    const traceName = this.nextRumEventTaskName(`rum.counter:${update.updateType}`);
-    const payload: SDKRumCounterUpdateDTO = {
-      updateType: update.updateType,
-      viewId: update.viewId || '',
-      actionId: update.actionId || '',
-      updateView: update.updateView !== false,
-      flushMaxKeys: RUM_COUNTER_BATCH_MAX_KEYS
-    };
-    const workerRequest: SDKWorkerRequest = {
-      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE}:${traceName}:${Date.now()}`,
-      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-      command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE,
-      priority: SDKTaskPriority.HIGH,
-      createdAt: Date.now(),
-      payload: payload as Object as SDKWorkerPayload
-    };
-
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.EVENT,
-      name: traceName,
-      priority: SDKTaskPriority.HIGH,
-      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
-      costHint: 'light',
-      workerRequest,
-      workerResponseHandler: (response: SDKWorkerResponse) => {
-        if (!response.ok) {
-          FTInnerLogger.e(TAG, `RUM counter update failed: ${response.errorMessage || update.updateType}`);
-          return;
-        }
-        const result = response.payload as Object as SDKRumCounterUpdateResultDTO;
-        if (result && result.shouldFlush) {
-          this.clearRumCounterBatchTimer();
-          this.scheduleRumCounterBatchFlush(0);
-        } else {
-          this.scheduleRumCounterBatchFlush();
-        }
-      }
-    });
-  }
-
-  private flushRumCounterBatch(): void {
-    this.clearRumCounterBatchTimer();
-    if (!this.context) {
+    const updateType = update.updateType || '';
+    const delta = this.createRumCounterDelta(update);
+    if (!delta || !this.hasRumCounterDelta(delta)) {
       return;
     }
 
-    const traceName = this.nextRumEventTaskName('rum.counterFlush');
-    const workerRequest: SDKWorkerRequest = {
-      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:${traceName}:${Date.now()}`,
-      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-      command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
-      priority: SDKTaskPriority.HIGH,
-      createdAt: Date.now()
-    };
-
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.EVENT,
-      name: traceName,
-      priority: SDKTaskPriority.HIGH,
-      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
-      costHint: 'light',
-      workerRequest,
-      workerResponseHandler: (response: SDKWorkerResponse) => {
-        if (!response.ok) {
-          FTInnerLogger.e(TAG, `RUM counter flush failed: ${response.errorMessage || 'unknown'}`);
-          return;
-        }
-        const result = response.payload as Object as SDKRumCounterFlushResultDTO;
-        if (!result || !result.deltas || result.deltas.length === 0) {
-          return;
-        }
-        this.submitRumCounterDbWriteTask(result);
-      }
-    });
-  }
-
-  private submitRumCounterDbWriteTask(result: SDKRumCounterFlushResultDTO): void {
-    const traceName = this.nextRumEventTaskName(`rum.counterDbWrite:${result.deltas.length}`);
-    const workerRequest: SDKWorkerRequest = {
-      id: `${SDKWorkerCommand.DATA_PASS_THROUGH_RUM_COUNTER_DELTAS}:${traceName}:${Date.now()}`,
-      pool: SDKDedicatedPoolType.DATA_PROCESS,
-      command: SDKWorkerCommand.DATA_PASS_THROUGH_RUM_COUNTER_DELTAS,
-      priority: SDKTaskPriority.LOW,
-      createdAt: Date.now(),
-      payload: result as Object as SDKWorkerPayload
-    };
-
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.DATA_PROCESS,
-      name: traceName,
-      priority: SDKTaskPriority.LOW,
-      costHint: 'normal',
-      workerRequest,
-      workerResponseHandler: async (response: SDKWorkerResponse) => {
-        if (!response.ok) {
-          FTInnerLogger.e(TAG, `RUM counter DB write pass-through failed: ${response.errorMessage || 'unknown'}`);
-          return;
-        }
-        const payload = response.payload as Object as SDKRumCounterFlushResultDTO;
-        await this.applyRumCounterFlushResult(payload);
-      }
-    });
-  }
-
-  private async applyRumCounterFlushResult(result: SDKRumCounterFlushResultDTO): Promise<void> {
-    if (!result || !result.deltas || result.deltas.length === 0 || !this.context) {
-      return;
-    }
-
-    const deltas = this.toRumCounterDeltas(result.deltas);
-    try {
-      await this.runRumDbWrite(`counterFlush:${deltas.length}`, async () => {
-        await FTDBManager.getInstance(this.context!).applyRumCounterDeltas(deltas);
-      });
-      if (result.needsActionCloseCheck) {
+    this.runRumDbWrite(`counter:${updateType}`, async () => {
+      await FTDBManager.getInstance(context).applyRumCounterDeltas([delta]);
+    }).then(() => {
+      if (this.shouldCheckActionCloseAfterCounterUpdate(updateType)) {
         this.checkActionClose();
       }
-      if (result.needsRumDataGenerate) {
+      if (this.shouldGenerateRumDataAfterCounterUpdate(updateType)) {
         this.generateRumData();
       }
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Error applying RUM counter flush: ${error}`);
-    }
+    }).catch((error: Error) => {
+      FTInnerLogger.e(TAG, `RUM counter update failed: ${updateType}, error=${error.message}`);
+    });
   }
 
-  private toRumCounterDeltas(dtos: SDKRumCounterDeltaDTO[]): RUMCounterDelta[] {
-    const deltas: RUMCounterDelta[] = [];
-    for (let i = 0; i < dtos.length; i++) {
-      const dto = dtos[i];
-      const delta = new RUMCounterDelta();
-      delta.viewId = dto.viewId || '';
-      delta.actionId = dto.actionId || '';
-      delta.viewErrorDelta = dto.viewErrorDelta || 0;
-      delta.actionErrorDelta = dto.actionErrorDelta || 0;
-      delta.viewLongTaskDelta = dto.viewLongTaskDelta || 0;
-      delta.actionLongTaskDelta = dto.actionLongTaskDelta || 0;
-      delta.viewResourceDelta = dto.viewResourceDelta || 0;
-      delta.actionResourceDelta = dto.actionResourceDelta || 0;
-      delta.viewPendingDelta = dto.viewPendingDelta || 0;
-      delta.actionPendingDelta = dto.actionPendingDelta || 0;
-      delta.viewActionDelta = dto.viewActionDelta || 0;
-      delta.viewUpdateTimeDelta = dto.viewUpdateTimeDelta || 0;
-      deltas.push(delta);
+  private createRumCounterDelta(update: SDKRumCounterUpdateDTO): RUMCounterDelta | null {
+    const updateType = update.updateType || '';
+    const viewId = update.viewId || '';
+    const actionId = update.actionId || '';
+    const updateView = update.updateView !== false;
+    const delta = new RUMCounterDelta();
+
+    if (updateType === 'view.action') {
+      delta.viewId = viewId;
+      delta.viewActionDelta = viewId.length > 0 ? 1 : 0;
+    } else if (updateType === 'rum.error') {
+      delta.viewId = viewId;
+      delta.actionId = actionId;
+      delta.viewErrorDelta = viewId.length > 0 ? 1 : 0;
+      delta.actionErrorDelta = actionId.length > 0 ? 1 : 0;
+    } else if (updateType === 'resource.complete') {
+      delta.viewId = viewId;
+      delta.actionId = actionId;
+      if (viewId.length > 0) {
+        delta.viewResourceDelta = 1;
+        delta.viewPendingDelta = -1;
+        delta.viewUpdateTimeDelta = 1;
+      }
+      if (actionId.length > 0) {
+        delta.actionResourceDelta = 1;
+        delta.actionPendingDelta = -1;
+      }
+    } else if (updateType === 'resource.pending.increase') {
+      delta.viewId = viewId;
+      delta.actionId = actionId;
+      delta.viewPendingDelta = viewId.length > 0 ? 1 : 0;
+      delta.actionPendingDelta = actionId.length > 0 ? 1 : 0;
+    } else if (updateType === 'resource.pending.decrease') {
+      delta.viewId = viewId;
+      delta.actionId = actionId;
+      delta.viewPendingDelta = updateView && viewId.length > 0 ? -1 : 0;
+      delta.actionPendingDelta = actionId.length > 0 ? -1 : 0;
+    } else if (updateType === 'long_task.view') {
+      delta.viewId = viewId;
+      if (viewId.length > 0) {
+        delta.viewLongTaskDelta = 1;
+        delta.viewUpdateTimeDelta = 1;
+      }
+    } else if (updateType === 'long_task.action') {
+      delta.actionId = actionId;
+      delta.actionLongTaskDelta = actionId.length > 0 ? 1 : 0;
+    } else {
+      FTInnerLogger.e(TAG, `Unsupported RUM counter update type: ${updateType}`);
+      return null;
     }
-    return deltas;
+
+    return delta;
+  }
+
+  private hasRumCounterDelta(delta: RUMCounterDelta): boolean {
+    return delta.viewActionDelta !== 0 ||
+      delta.viewErrorDelta !== 0 ||
+      delta.actionErrorDelta !== 0 ||
+      delta.viewResourceDelta !== 0 ||
+      delta.actionResourceDelta !== 0 ||
+      delta.viewLongTaskDelta !== 0 ||
+      delta.actionLongTaskDelta !== 0 ||
+      delta.viewPendingDelta !== 0 ||
+      delta.actionPendingDelta !== 0 ||
+      delta.viewUpdateTimeDelta !== 0;
+  }
+
+  private shouldCheckActionCloseAfterCounterUpdate(updateType: string): boolean {
+    return updateType === 'rum.error' ||
+      updateType === 'resource.complete' ||
+      updateType === 'long_task.view' ||
+      updateType === 'long_task.action';
+  }
+
+  private shouldGenerateRumDataAfterCounterUpdate(updateType: string): boolean {
+    return updateType === 'long_task.view' ||
+      updateType === 'long_task.action';
   }
 
   private submitRumLifecycleWorkerCommand(
@@ -2148,7 +2076,6 @@ export class FTRUMInnerManager {
 	                  // Call increaseError on the outer this context
 	                  self.increaseError(allTags);
 	                  if (actualCallBack != null) {
-	                    self.flushRumCounterBatch();
 	                    // Java Crash, Native Crash need to record the crash status of the current state
 	                    // Aligned with Android: stopView(null, callBack) in addError callback
 	                    // This ensures RUM data (view, action, resource) is generated and uploaded after crash
@@ -3580,7 +3507,6 @@ export class FTRUMInnerManager {
         clearTimeout(this.rumDataGenerateTimer);
         this.rumDataGenerateTimer = null;
       }
-      this.clearRumCounterBatchTimer();
 
       this.context = null;
       this.userData = null;
