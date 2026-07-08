@@ -370,6 +370,10 @@ export class FTRUMInnerManager {
     );
   }
 
+  private async awaitRumDbWriteIdle(name: string): Promise<void> {
+    await SDKDedicatedPoolManager.getInstance().awaitDbWriteIdle(`rum.${name}`);
+  }
+
   private submitRumCounterUpdateTask(update: SDKRumCounterUpdateDTO): void {
     const context = this.context;
     if (!context || !update) {
@@ -699,14 +703,13 @@ export class FTRUMInnerManager {
         this.isGeneratingActionSum = false;
         return;
       }
-      
-      
       // Query actions from database 
       const LIMIT_SIZE = 50;
       let beans: ActionBean[] = [];
       
       do {
         try {
+          await this.awaitRumDbWriteIdle('generateActionSum:beforeQuery');
           beans = await FTDBManager.getInstance(this.context).querySumAction(LIMIT_SIZE);
           
           // Filter out already processed actions to prevent duplicate inserts
@@ -733,16 +736,7 @@ export class FTRUMInnerManager {
             }
           }
           
-          // Wait a short time to ensure all pending database updates (errors, long tasks, resources) complete
-          // This is necessary because increaseError/increaseLongTask use async RUM event lane tasks
-          // and the database updates may not complete immediately when action is closed
-          // Android SDK uses 100ms delay in generateRumData(), but we need additional delay here because
-          // errors/long tasks may be added asynchronously after action is closed (e.g., via setTimeout in test code)
-          await new Promise<void>((resolve) => {
-            setTimeout(() => {
-              resolve();
-            }, 100); // Wait 100ms for pending database updates to complete (total delay: 100ms from generateRumData + 100ms here = 200ms)
-          });
+          await this.awaitRumDbWriteIdle('generateActionSum:beforeCounts');
           
           // Update ActionBean counts from database BEFORE deleting actions
           // This ensures we have the latest counts even if resources/errors/long tasks complete asynchronously
@@ -963,14 +957,13 @@ export class FTRUMInnerManager {
         this.isGeneratingViewSum = false;
         return;
       }
-      
-      
       // Query views from database 
       const LIMIT_SIZE = 50;
       let beans: ViewBean[] = [];
       
       do {
         try {
+          await this.awaitRumDbWriteIdle('generateViewSum:beforeQuery');
           beans = await FTDBManager.getInstance(this.context).querySumView(LIMIT_SIZE);
           
           for (const bean of beans) {

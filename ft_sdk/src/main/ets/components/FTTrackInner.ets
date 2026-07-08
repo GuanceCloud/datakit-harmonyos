@@ -107,8 +107,6 @@ class FTTrackInner {
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
   private context: Context | null = null;
-  private logCachePolicyTail: Promise<void> = Promise.resolve();
-  private rumCachePolicyTail: Promise<void> = Promise.resolve();
 
   /**
    * Get all keys of an object (alternative to for...in loop)
@@ -900,78 +898,10 @@ class FTTrackInner {
     };
   }
 
-  private async runCachePolicyLocked(
-    category: WriteCacheCategory,
-    runner: () => Promise<SyncDataCachePolicyDecision>
-  ): Promise<SyncDataCachePolicyDecision> {
-    const previousTail = category === WriteCacheCategory.LOG ? this.logCachePolicyTail : this.rumCachePolicyTail;
-    let releaseTail: () => void = () => {};
-    const currentTail = new Promise<void>((resolve) => {
-      releaseTail = () => {
-        resolve();
-      };
-    });
-    const chainedTail = previousTail.catch(() => {}).then(() => currentTail);
-    if (category === WriteCacheCategory.LOG) {
-      this.logCachePolicyTail = chainedTail;
-    } else {
-      this.rumCachePolicyTail = chainedTail;
-    }
-
-    await previousTail.catch(() => {});
-    try {
-      return await runner();
-    } finally {
-      releaseTail();
-    }
-  }
-
-  private async applySingleCategoryCachePolicy(
-    category: WriteCacheCategory,
-    records: SyncData[]
-  ): Promise<SyncDataCachePolicyDecision> {
-    if (!this.context) {
-      return this.createPassthroughCachePolicyDecision(records);
-    }
-
-    const cachePolicy = FTDBCachePolicy.getInstance();
-    if (category === WriteCacheCategory.LOG) {
-      const status = await cachePolicy.optLogCachePolicy(this.context, records.length);
-      const deletedOld = status > 0 ? status : 0;
-      if (status < 0) {
-        const dropCount = Math.min(records.length, Math.abs(status));
-        const allowedCount = Math.max(0, records.length - dropCount);
-        const allowedRecords = records.slice(0, allowedCount);
-        if (allowedCount > 0) {
-          cachePolicy.optLogCount(allowedCount);
-        }
-        return this.createCachePolicyDecision(allowedRecords, dropCount, 0, allowedCount, 0, false);
-      }
-
-      cachePolicy.optLogCount(records.length);
-      return this.createCachePolicyDecision(records, 0, deletedOld, records.length, 0, false);
-    }
-
-    if (category === WriteCacheCategory.RUM) {
-      const status = await cachePolicy.optRUMCachePolicy(this.context, records.length);
-      const deletedOld = status > 0 ? status : 0;
-      if (status < 0) {
-        return this.createCachePolicyDecision([], records.length, 0, 0, 0, false);
-      }
-
-      cachePolicy.optRumCount(records.length);
-      return this.createCachePolicyDecision(records, 0, deletedOld, 0, records.length, false);
-    }
-
-    return this.createPassthroughCachePolicyDecision(records);
-  }
-
   private async applyWriteCachePolicy(records: SyncData[]): Promise<SyncDataCachePolicyDecision> {
     const category = this.getWriteCacheCategoryForRecords(records);
     if (category === WriteCacheCategory.LOG || category === WriteCacheCategory.RUM) {
-      return await this.runCachePolicyLocked(category, async () => {
-        return await this.applySingleCategoryCachePolicy(category, records);
-      });
+      return this.createCachePolicyDecision(records, 0, 0, 0, 0, true);
     }
 
     if (category === WriteCacheCategory.MIXED) {
@@ -1049,7 +979,7 @@ class FTTrackInner {
         applyCachePolicy: useDatabaseCachePolicy,
         reInsert: false,
         dbLaneWaitMs: dbLaneWaitMs || 0,
-        forceTransaction: forceTransaction || updateOrInsertByUuid,
+        forceTransaction: forceTransaction || updateOrInsertByUuid || useDatabaseCachePolicy,
         updateOrInsertByUuid
       });
     });

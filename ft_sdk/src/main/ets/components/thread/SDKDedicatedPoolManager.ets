@@ -433,6 +433,17 @@ export class SDKDedicatedPoolManager {
     });
   }
 
+  public async awaitDbWriteIdle(name: string = 'db.idle'): Promise<void> {
+    const waitStartTime = Date.now();
+    const tailSnapshot = this.dbWriteTail.catch(() => {});
+    await tailSnapshot;
+    const waitMs = Math.max(0, Date.now() - waitStartTime);
+    if (waitMs >= DB_WRITE_SLOW_LOG_THRESHOLD_MS) {
+      FTInnerLogger.w(TAG,
+        `<FT-DB-WRITE-LANE> [IDLE-WAIT] name=${name} wait=${waitMs}ms pending=${this.dbWritePending} running=${this.dbWriteRunning}`);
+    }
+  }
+
   public scheduleDataUpload(name: string, runner: SDKDedicatedTaskRunner, delay: number = 0): boolean {
     const normalizedDelay = Math.max(0, delay);
     if (this.uploadScheduled || this.uploadRunning) {

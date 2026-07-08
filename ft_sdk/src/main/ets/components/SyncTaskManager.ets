@@ -2442,7 +2442,10 @@ class RUMDataCleanupManagerInternal {
       const callback = new CleanupViewCallback();
       const dbManager = syncTaskRuntime.getDbManager(this.context!);
       if (dbManager) {
-        await dbManager.executeWithDB(true, callback);
+        await SDKDedicatedPoolManager.getInstance().runDbWrite(
+          'sync.cleanupExpiredRumView',
+          async () => await dbManager.executeWithDB(true, callback)
+        );
       }
       FTInnerLogger.d(TAG, `Cleaned up expired rum_view data: ${callback.deletedCount} records deleted`);
     } catch (error) {
@@ -2475,7 +2478,10 @@ class RUMDataCleanupManagerInternal {
       const callback = new CleanupActionCallback();
       const dbManager = syncTaskRuntime.getDbManager(this.context!);
       if (dbManager) {
-        await dbManager.executeWithDB(true, callback);
+        await SDKDedicatedPoolManager.getInstance().runDbWrite(
+          'sync.cleanupExpiredRumAction',
+          async () => await dbManager.executeWithDB(true, callback)
+        );
       }
       FTInnerLogger.d(TAG, `Cleaned up expired rum_action data: ${callback.deletedCount} records deleted`);
     } catch (error) {

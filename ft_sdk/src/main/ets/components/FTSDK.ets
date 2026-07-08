@@ -28,6 +28,7 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
+import { SDKDedicatedPoolManager } from "./thread/SDKDedicatedPoolManager";
 
 const TAG = "FTSDK"
 
@@ -698,7 +699,10 @@ export class FTSDK {
         return;
       }
 
-      await FTDBManager.getInstance(context).delete();
+      await SDKDedicatedPoolManager.getInstance().runDbWrite(
+        'sdk.clearAllData',
+        async () => await FTDBManager.getInstance(context).delete()
+      );
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {

@@ -211,6 +211,35 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(order.join(',')).assertEqual('first-start,first-end,second');
     });
 
+    it('dbWriteIdleShouldWaitForQueuedWrites', 0, async () => {
+      const order: string[] = [];
+      const firstGate = createGate();
+
+      const first = manager.runDbWrite('db.idle.first', async () => {
+        order.push('first-start');
+        await firstGate.promise;
+        order.push('first-end');
+        return true;
+      });
+      const second = manager.runDbWrite('db.idle.second', async () => {
+        order.push('second');
+        return true;
+      });
+
+      const idle = manager.awaitDbWriteIdle('unit.idle').then(() => {
+        order.push('idle');
+      });
+
+      await flushPromises();
+      expect(order.join(',')).assertEqual('first-start');
+
+      firstGate.release();
+      await first;
+      await second;
+      await idle;
+      expect(order.join(',')).assertEqual('first-start,first-end,second,idle');
+    });
+
     it('dataUploadPoolShouldCoalesceSchedulesWhileRunning', 0, async () => {
       const firstGate = createGate();
       let runCount = 0;
