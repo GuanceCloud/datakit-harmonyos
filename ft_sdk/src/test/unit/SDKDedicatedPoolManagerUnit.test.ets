@@ -5,6 +5,7 @@ import {
 import {
   SDKDedicatedPoolType,
   SDKLineProtocolInputDTO,
+  SDKRumCounterUpdateDTO,
   SDKRumEventDTO,
   SDKStringRecord,
   SDKUploadPageDTO,
@@ -380,6 +381,122 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('view')).assertTrue();
       expect(String(draft['dataString']).includes('sdk_data_id=rum-uuid-1')).assertTrue();
       expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
+    });
+
+    it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
+      const updates: SDKRumCounterUpdateDTO[] = [
+        {
+          updateType: 'resource.pending.increase',
+          viewId: 'view-1',
+          actionId: 'action-1'
+        },
+        {
+          updateType: 'resource.complete',
+          viewId: 'view-1',
+          actionId: 'action-1'
+        },
+        {
+          updateType: 'view.action',
+          viewId: 'view-1'
+        }
+      ];
+
+      for (let i = 0; i < updates.length; i++) {
+        const update = updates[i];
+        const response = await manager.executeCommand({
+          id: `rum-counter-${i}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE,
+          priority: 7,
+          createdAt: Date.now(),
+          payload: update as Object as SDKWorkerPayload
+        });
+        expect(response.ok).assertTrue();
+      }
+
+      const flushResponse = await manager.executeCommand({
+        id: 'rum-counter-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      expect(flushResponse.ok).assertTrue();
+      expect(getPayloadString(flushResponse.payload, 'needsActionCloseCheck')).assertEqual('true');
+      const deltas = getPayloadArray(flushResponse.payload, 'deltas');
+      expect(deltas.length).assertEqual(2);
+      let resourceJoined = '';
+      let viewActionDelta = '';
+      for (let i = 0; i < deltas.length; i++) {
+        const delta = deltas[i] as Record<string, object>;
+        if (String(delta['actionId']) === 'action-1') {
+          resourceJoined = `${String(delta['viewResourceDelta'])},${String(delta['viewPendingDelta'])},${String(delta['actionResourceDelta'])},${String(delta['actionPendingDelta'])}`;
+        } else {
+          viewActionDelta = String(delta['viewActionDelta']);
+        }
+      }
+      expect(resourceJoined).assertEqual('1,0,1,0');
+      expect(viewActionDelta).assertEqual('1');
+    });
+
+    it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
+      const actionResponse = await manager.executeCommand({
+        id: 'rum-action-complete',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: {
+          eventType: 'action.complete',
+          name: 'tap',
+          time: 100,
+          actionId: 'action-1',
+          actionName: 'tap',
+          viewId: 'view-1',
+          viewName: 'Home',
+          sessionId: 'session-1'
+        } as Object as SDKWorkerPayload
+      });
+      expect(actionResponse.ok).assertTrue();
+      expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('');
+
+      const startResponse = await manager.executeCommand({
+        id: 'rum-resource-start',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: {
+          eventType: 'resource.start',
+          name: 'https://example.com',
+          time: 101,
+          resourceId: 'resource-1',
+          viewId: 'view-1',
+          actionId: 'action-1',
+          sessionId: 'session-1'
+        } as Object as SDKWorkerPayload
+      });
+      expect(startResponse.ok).assertTrue();
+      expect(getPayloadString(startResponse.payload, 'activeResourceCount')).assertEqual('1');
+
+      const completeResponse = await manager.executeCommand({
+        id: 'rum-resource-complete',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: {
+          eventType: 'resource.complete',
+          name: 'https://example.com',
+          time: 102,
+          resourceId: 'resource-1',
+          viewId: 'view-1',
+          actionId: 'action-1',
+          sessionId: 'session-1'
+        } as Object as SDKWorkerPayload
+      });
+      expect(completeResponse.ok).assertTrue();
+      expect(getPayloadString(completeResponse.payload, 'activeResourceCount')).assertEqual('0');
     });
 
     it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {

@@ -3,6 +3,10 @@ import {
   SDKDedicatedPoolType,
   SDKLineProtocolInputDTO,
   SDKLogDTO,
+  SDKRumCounterDeltaDTO,
+  SDKRumCounterFlushResultDTO,
+  SDKRumCounterUpdateDTO,
+  SDKRumCounterUpdateResultDTO,
   SDKRumEventDTO,
   SDKStringRecord,
   SDKSyncDataDraftDTO,
@@ -29,6 +33,9 @@ export interface SDKWorkerRuntimeState {
   activeActionId: string;
   activeActionName: string;
   activeResources: SDKStringRecord;
+  rumCounterDeltas: Record<string, SDKRumCounterDeltaDTO>;
+  rumCounterNeedsActionCloseCheck: boolean;
+  rumCounterNeedsRumDataGenerate: boolean;
   logQueue: SDKLogDTO[];
   logBatchBuffer: SDKLogDTO[];
   uploadIsScheduled: boolean;
@@ -149,6 +156,9 @@ export function createSDKWorkerRuntimeStateWithBackend(
     activeActionId: '',
     activeActionName: '',
     activeResources: {},
+    rumCounterDeltas: {},
+    rumCounterNeedsActionCloseCheck: false,
+    rumCounterNeedsRumDataGenerate: false,
     logQueue: [],
     logBatchBuffer: [],
     uploadIsScheduled: false,
@@ -196,6 +206,10 @@ function handleSDKWorkerCommand(request: SDKWorkerRequest, state: SDKWorkerRunti
       return getStateSnapshot(state);
     case SDKWorkerCommand.EVENT_RUM_COMMAND:
       return handleRumCommand(request.payload as SDKRumEventDTO, state);
+    case SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE:
+      return handleRumCounterUpdate(request.payload as SDKRumCounterUpdateDTO, state);
+    case SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH:
+      return handleRumCounterFlush(state);
     case SDKWorkerCommand.EVENT_RUM_SNAPSHOT:
       return getStateSnapshot(state);
     case SDKWorkerCommand.LOG_ENQUEUE:
@@ -212,6 +226,16 @@ function handleSDKWorkerCommand(request: SDKWorkerRequest, state: SDKWorkerRunti
         drafts: []
       };
       return emptyDrafts as Object as SDKWorkerPayload;
+    case SDKWorkerCommand.DATA_PASS_THROUGH_RUM_COUNTER_DELTAS:
+      if (request.payload) {
+        return request.payload;
+      }
+      const emptyCounterDeltas: SDKRumCounterFlushResultDTO = {
+        deltas: [],
+        needsActionCloseCheck: false,
+        needsRumDataGenerate: false
+      };
+      return emptyCounterDeltas as Object as SDKWorkerPayload;
     case SDKWorkerCommand.DATA_PARSE_CRASH_TEXT:
       return handleParseCrashText(request.payload as SDKCrashFileDTO);
     case SDKWorkerCommand.UPLOAD_SCHEDULE:
@@ -232,6 +256,9 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.activeActionId = '';
   state.activeActionName = '';
   state.activeResources = {};
+  state.rumCounterDeltas = {};
+  state.rumCounterNeedsActionCloseCheck = false;
+  state.rumCounterNeedsRumDataGenerate = false;
   state.logQueue = [];
   state.logBatchBuffer = [];
   state.uploadIsScheduled = false;
@@ -278,6 +305,8 @@ function handleRumCommand(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): 
   } else if (eventType === 'action.start' || eventType === 'action.add') {
     state.activeActionId = event.actionId || '';
     state.activeActionName = event.actionName || event.name || '';
+  } else if (eventType === 'action.complete') {
+    // Completed actions are one-shot RUM events and must not become the active action.
   } else if (eventType === 'action.stop' || eventType === 'action.close') {
     state.activeActionId = '';
     state.activeActionName = '';
@@ -314,6 +343,95 @@ function handleRumCommand(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): 
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
   };
+  return payload as Object as SDKWorkerPayload;
+}
+
+function handleRumCounterUpdate(
+  update: SDKRumCounterUpdateDTO,
+  state: SDKWorkerRuntimeState
+): SDKWorkerPayload {
+  if (!update) {
+    throw new Error('RUM counter update payload is required');
+  }
+
+  const updateType = update.updateType || '';
+  const viewId = update.viewId || '';
+  const actionId = update.actionId || '';
+  const updateView = update.updateView !== false;
+  if (updateType === 'view.action') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, '');
+    delta.viewActionDelta += viewId.length > 0 ? 1 : 0;
+  } else if (updateType === 'rum.error') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
+    delta.viewErrorDelta += viewId.length > 0 ? 1 : 0;
+    delta.actionErrorDelta += actionId.length > 0 ? 1 : 0;
+    state.rumCounterNeedsActionCloseCheck = true;
+  } else if (updateType === 'resource.complete') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
+    if (viewId.length > 0) {
+      delta.viewResourceDelta += 1;
+      delta.viewPendingDelta -= 1;
+      delta.viewUpdateTimeDelta += 1;
+    }
+    if (actionId.length > 0) {
+      delta.actionResourceDelta += 1;
+      delta.actionPendingDelta -= 1;
+    }
+    state.rumCounterNeedsActionCloseCheck = true;
+  } else if (updateType === 'resource.pending.increase') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
+    delta.viewPendingDelta += viewId.length > 0 ? 1 : 0;
+    delta.actionPendingDelta += actionId.length > 0 ? 1 : 0;
+  } else if (updateType === 'resource.pending.decrease') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
+    delta.viewPendingDelta -= updateView && viewId.length > 0 ? 1 : 0;
+    delta.actionPendingDelta -= actionId.length > 0 ? 1 : 0;
+  } else if (updateType === 'long_task.view') {
+    const delta = getOrCreateRumCounterDelta(state, viewId, '');
+    if (viewId.length > 0) {
+      delta.viewLongTaskDelta += 1;
+      delta.viewUpdateTimeDelta += 1;
+    }
+    state.rumCounterNeedsActionCloseCheck = true;
+    state.rumCounterNeedsRumDataGenerate = true;
+  } else if (updateType === 'long_task.action') {
+    const delta = getOrCreateRumCounterDelta(state, '', actionId);
+    delta.actionLongTaskDelta += actionId.length > 0 ? 1 : 0;
+    state.rumCounterNeedsActionCloseCheck = true;
+    state.rumCounterNeedsRumDataGenerate = true;
+  } else {
+    throw new Error(`Unsupported RUM counter update type: ${updateType}`);
+  }
+
+  const pendingCount = getRumCounterPendingCount(state);
+  const flushMaxKeys = update.flushMaxKeys && update.flushMaxKeys > 0 ? update.flushMaxKeys : 256;
+  const payload: SDKRumCounterUpdateResultDTO = {
+    accepted: true,
+    pendingCount,
+    shouldFlush: pendingCount >= flushMaxKeys
+  };
+  return payload as Object as SDKWorkerPayload;
+}
+
+function handleRumCounterFlush(state: SDKWorkerRuntimeState): SDKWorkerPayload {
+  const deltas: SDKRumCounterDeltaDTO[] = [];
+  const keys = Object.keys(state.rumCounterDeltas);
+  for (let i = 0; i < keys.length; i++) {
+    const delta = state.rumCounterDeltas[keys[i]];
+    if (delta) {
+      deltas.push(delta);
+    }
+  }
+
+  const payload: SDKRumCounterFlushResultDTO = {
+    deltas,
+    needsActionCloseCheck: state.rumCounterNeedsActionCloseCheck,
+    needsRumDataGenerate: state.rumCounterNeedsRumDataGenerate
+  };
+
+  state.rumCounterDeltas = {};
+  state.rumCounterNeedsActionCloseCheck = false;
+  state.rumCounterNeedsRumDataGenerate = false;
   return payload as Object as SDKWorkerPayload;
 }
 
@@ -624,6 +742,37 @@ function copyStringRecord(record: SDKStringRecord): SDKStringRecord {
     copied[key] = record[key];
   }
   return copied;
+}
+
+function getOrCreateRumCounterDelta(
+  state: SDKWorkerRuntimeState,
+  viewId: string,
+  actionId: string
+): SDKRumCounterDeltaDTO {
+  const key = `${viewId || 'none'}|${actionId || 'none'}`;
+  let delta = state.rumCounterDeltas[key];
+  if (!delta) {
+    delta = {
+      viewId: viewId || '',
+      actionId: actionId || '',
+      viewErrorDelta: 0,
+      actionErrorDelta: 0,
+      viewLongTaskDelta: 0,
+      actionLongTaskDelta: 0,
+      viewResourceDelta: 0,
+      actionResourceDelta: 0,
+      viewPendingDelta: 0,
+      actionPendingDelta: 0,
+      viewActionDelta: 0,
+      viewUpdateTimeDelta: 0
+    };
+    state.rumCounterDeltas[key] = delta;
+  }
+  return delta;
+}
+
+function getRumCounterPendingCount(state: SDKWorkerRuntimeState): number {
+  return Object.keys(state.rumCounterDeltas).length;
 }
 
 function getActiveResourceCount(state: SDKWorkerRuntimeState): number {

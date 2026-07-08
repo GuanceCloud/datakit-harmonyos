@@ -48,6 +48,8 @@ export enum SDKWorkerCommand {
   RESET = 'sdk.reset',
   EVENT_RUN = 'event.run',
   EVENT_RUM_COMMAND = 'event.rum.command',
+  EVENT_RUM_COUNTER_UPDATE = 'event.rum.counterUpdate',
+  EVENT_RUM_COUNTER_FLUSH = 'event.rum.counterFlush',
   EVENT_RUM_SNAPSHOT = 'event.rum.snapshot',
   LOG_RUN = 'log.run',
   LOG_ENQUEUE = 'log.enqueue',
@@ -55,6 +57,7 @@ export enum SDKWorkerCommand {
   DATA_RUN = 'data.run',
   DATA_CREATE_LINE_PROTOCOL = 'data.createLineProtocol',
   DATA_PASS_THROUGH_DRAFTS = 'data.passThroughDrafts',
+  DATA_PASS_THROUGH_RUM_COUNTER_DELTAS = 'data.passThroughRumCounterDeltas',
   CRASH_FILE_RUN = 'crashFile.run',
   ANR_RUN = 'anr.run',
   CUSTOM_RUN = 'custom.run',
@@ -123,6 +126,41 @@ export interface SDKRumEventDTO {
   sessionId?: string;
   tags?: SDKStringRecord;
   fields?: SDKStringRecord;
+}
+
+export interface SDKRumCounterUpdateDTO {
+  updateType: string;
+  viewId?: string;
+  actionId?: string;
+  updateView?: boolean;
+  flushMaxKeys?: number;
+}
+
+export interface SDKRumCounterDeltaDTO {
+  viewId: string;
+  actionId: string;
+  viewErrorDelta: number;
+  actionErrorDelta: number;
+  viewLongTaskDelta: number;
+  actionLongTaskDelta: number;
+  viewResourceDelta: number;
+  actionResourceDelta: number;
+  viewPendingDelta: number;
+  actionPendingDelta: number;
+  viewActionDelta: number;
+  viewUpdateTimeDelta: number;
+}
+
+export interface SDKRumCounterUpdateResultDTO {
+  accepted: boolean;
+  pendingCount: number;
+  shouldFlush: boolean;
+}
+
+export interface SDKRumCounterFlushResultDTO {
+  deltas: SDKRumCounterDeltaDTO[];
+  needsActionCloseCheck: boolean;
+  needsRumDataGenerate: boolean;
 }
 
 export interface SDKLineProtocolInputDTO {

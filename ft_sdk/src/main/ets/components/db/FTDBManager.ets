@@ -81,11 +81,13 @@ export class RUMCounterDelta {
   actionResourceDelta: number = 0;
   viewPendingDelta: number = 0;
   actionPendingDelta: number = 0;
+  viewActionDelta: number = 0;
   viewUpdateTimeDelta: number = 0;
 }
 
 class RUMViewCounterAggregate {
   id: string = "";
+  actionDelta: number = 0;
   errorDelta: number = 0;
   longTaskDelta: number = 0;
   resourceDelta: number = 0;
@@ -2175,6 +2177,7 @@ export class FTDBManager extends DBManager {
     now: number
   ): Promise<void> {
     const assignments: string[] = [];
+    this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ACTION_COUNT, aggregate.actionDelta);
     this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ERROR_COUNT, aggregate.errorDelta);
     this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_LONG_TASK_COUNT, aggregate.longTaskDelta);
     this.appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_RESOURCE_COUNT, aggregate.resourceDelta);
@@ -2222,6 +2225,7 @@ export class FTDBManager extends DBManager {
     for (const delta of deltas) {
       if (delta.viewId && delta.viewId.length > 0) {
         const viewAggregate = this.getOrCreateViewCounterAggregate(viewAggregates, delta.viewId);
+        viewAggregate.actionDelta += Math.max(0, Math.floor(delta.viewActionDelta));
         viewAggregate.errorDelta += Math.max(0, Math.floor(delta.viewErrorDelta));
         viewAggregate.longTaskDelta += Math.max(0, Math.floor(delta.viewLongTaskDelta));
         viewAggregate.resourceDelta += Math.max(0, Math.floor(delta.viewResourceDelta));

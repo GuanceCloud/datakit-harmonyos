@@ -29,7 +29,15 @@ import {
 } from '../thread/SDKWorkerTaskBridge';
 import {
   SDKDedicatedPoolType,
-  SDKWorkerCommand
+  SDKRumCounterDeltaDTO,
+  SDKRumCounterFlushResultDTO,
+  SDKRumCounterUpdateDTO,
+  SDKRumCounterUpdateResultDTO,
+  SDKRumEventDTO,
+  SDKWorkerCommand,
+  SDKWorkerPayload,
+  SDKWorkerRequest,
+  SDKWorkerResponse
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
@@ -296,10 +304,7 @@ export class FTRUMInnerManager {
   // Timer for debouncing generateRumData calls (aligned with Android: mHandler.removeCallbacks)
   private rumDataGenerateTimer: number | null = null;
 
-  private rumCounterBatch: Map<string, RUMCounterDelta> = new Map();
   private rumCounterBatchTimer: number = -1;
-  private rumCounterBatchNeedsActionCloseCheck: boolean = false;
-  private rumCounterBatchNeedsRumDataGenerate: boolean = false;
   
   // Set to track processed action IDs to prevent duplicate inserts
   // This ensures that even if an action is queried multiple times, it will only be inserted once
@@ -370,25 +375,6 @@ export class FTRUMInnerManager {
     );
   }
 
-  private createRumCounterBatchKey(viewId: string, actionId: string): string {
-    return `${viewId || 'none'}|${actionId || 'none'}`;
-  }
-
-  private getOrCreateRumCounterDelta(
-    viewId: string,
-    actionId: string
-  ): RUMCounterDelta {
-    const key = this.createRumCounterBatchKey(viewId, actionId);
-    let delta = this.rumCounterBatch.get(key);
-    if (!delta) {
-      delta = new RUMCounterDelta();
-      delta.viewId = viewId || "";
-      delta.actionId = actionId || "";
-      this.rumCounterBatch.set(key, delta);
-    }
-    return delta;
-  }
-
   private clearRumCounterBatchTimer(): void {
     if (this.rumCounterBatchTimer >= 0) {
       clearTimeout(this.rumCounterBatchTimer);
@@ -406,58 +392,217 @@ export class FTRUMInnerManager {
     }, delayMs) as number;
   }
 
-  private enqueueRumCounterDelta(needsActionCloseCheck: boolean, needsRumDataGenerate: boolean): void {
-    if (needsActionCloseCheck) {
-      this.rumCounterBatchNeedsActionCloseCheck = true;
-    }
-    if (needsRumDataGenerate) {
-      this.rumCounterBatchNeedsRumDataGenerate = true;
+  private submitRumCounterUpdateTask(update: SDKRumCounterUpdateDTO): void {
+    if (!this.context) {
+      return;
     }
 
-    if (this.rumCounterBatch.size >= RUM_COUNTER_BATCH_MAX_KEYS) {
-      this.clearRumCounterBatchTimer();
-      this.scheduleRumCounterBatchFlush(0);
-    } else {
-      this.scheduleRumCounterBatchFlush();
-    }
+    const traceName = this.nextRumEventTaskName(`rum.counter:${update.updateType}`);
+    const payload: SDKRumCounterUpdateDTO = {
+      updateType: update.updateType,
+      viewId: update.viewId || '',
+      actionId: update.actionId || '',
+      updateView: update.updateView !== false,
+      flushMaxKeys: RUM_COUNTER_BATCH_MAX_KEYS
+    };
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload: payload as Object as SDKWorkerPayload
+    };
+
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.EVENT,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
+      costHint: 'light',
+      workerRequest,
+      workerResponseHandler: (response: SDKWorkerResponse) => {
+        if (!response.ok) {
+          FTInnerLogger.e(TAG, `RUM counter update failed: ${response.errorMessage || update.updateType}`);
+          return;
+        }
+        const result = response.payload as Object as SDKRumCounterUpdateResultDTO;
+        if (result && result.shouldFlush) {
+          this.clearRumCounterBatchTimer();
+          this.scheduleRumCounterBatchFlush(0);
+        } else {
+          this.scheduleRumCounterBatchFlush();
+        }
+      }
+    });
   }
 
   private flushRumCounterBatch(): void {
     this.clearRumCounterBatchTimer();
-    if (this.rumCounterBatch.size === 0 || !this.context) {
+    if (!this.context) {
       return;
     }
 
-    const deltas: RUMCounterDelta[] = [];
-    const keys = Array.from(this.rumCounterBatch.keys());
-    for (const key of keys) {
-      const delta = this.rumCounterBatch.get(key);
-      if (delta) {
-        deltas.push(delta);
-      }
-    }
-    this.rumCounterBatch.clear();
+    const traceName = this.nextRumEventTaskName('rum.counterFlush');
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now()
+    };
 
-    const needsActionCloseCheck = this.rumCounterBatchNeedsActionCloseCheck;
-    const needsRumDataGenerate = this.rumCounterBatchNeedsRumDataGenerate;
-    this.rumCounterBatchNeedsActionCloseCheck = false;
-    this.rumCounterBatchNeedsRumDataGenerate = false;
-
-    this.submitRumEventTask(`rum.counterFlush:${deltas.length}`, async () => {
-      try {
-        await this.runRumDbWrite(`counterFlush:${deltas.length}`, async () => {
-          await FTDBManager.getInstance(this.context!).applyRumCounterDeltas(deltas);
-        });
-        if (needsActionCloseCheck) {
-          this.checkActionClose();
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.EVENT,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
+      costHint: 'light',
+      workerRequest,
+      workerResponseHandler: (response: SDKWorkerResponse) => {
+        if (!response.ok) {
+          FTInnerLogger.e(TAG, `RUM counter flush failed: ${response.errorMessage || 'unknown'}`);
+          return;
         }
-        if (needsRumDataGenerate) {
-          this.generateRumData();
+        const result = response.payload as Object as SDKRumCounterFlushResultDTO;
+        if (!result || !result.deltas || result.deltas.length === 0) {
+          return;
         }
-      } catch (error) {
-        FTInnerLogger.e(TAG, `Error flushing RUM counter batch: ${error}`);
+        this.submitRumCounterDbWriteTask(result);
       }
     });
+  }
+
+  private submitRumCounterDbWriteTask(result: SDKRumCounterFlushResultDTO): void {
+    const traceName = this.nextRumEventTaskName(`rum.counterDbWrite:${result.deltas.length}`);
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.DATA_PASS_THROUGH_RUM_COUNTER_DELTAS}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.DATA_PROCESS,
+      command: SDKWorkerCommand.DATA_PASS_THROUGH_RUM_COUNTER_DELTAS,
+      priority: SDKTaskPriority.LOW,
+      createdAt: Date.now(),
+      payload: result as Object as SDKWorkerPayload
+    };
+
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.DATA_PROCESS,
+      name: traceName,
+      priority: SDKTaskPriority.LOW,
+      costHint: 'normal',
+      workerRequest,
+      workerResponseHandler: async (response: SDKWorkerResponse) => {
+        if (!response.ok) {
+          FTInnerLogger.e(TAG, `RUM counter DB write pass-through failed: ${response.errorMessage || 'unknown'}`);
+          return;
+        }
+        const payload = response.payload as Object as SDKRumCounterFlushResultDTO;
+        await this.applyRumCounterFlushResult(payload);
+      }
+    });
+  }
+
+  private async applyRumCounterFlushResult(result: SDKRumCounterFlushResultDTO): Promise<void> {
+    if (!result || !result.deltas || result.deltas.length === 0 || !this.context) {
+      return;
+    }
+
+    const deltas = this.toRumCounterDeltas(result.deltas);
+    try {
+      await this.runRumDbWrite(`counterFlush:${deltas.length}`, async () => {
+        await FTDBManager.getInstance(this.context!).applyRumCounterDeltas(deltas);
+      });
+      if (result.needsActionCloseCheck) {
+        this.checkActionClose();
+      }
+      if (result.needsRumDataGenerate) {
+        this.generateRumData();
+      }
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error applying RUM counter flush: ${error}`);
+    }
+  }
+
+  private toRumCounterDeltas(dtos: SDKRumCounterDeltaDTO[]): RUMCounterDelta[] {
+    const deltas: RUMCounterDelta[] = [];
+    for (let i = 0; i < dtos.length; i++) {
+      const dto = dtos[i];
+      const delta = new RUMCounterDelta();
+      delta.viewId = dto.viewId || '';
+      delta.actionId = dto.actionId || '';
+      delta.viewErrorDelta = dto.viewErrorDelta || 0;
+      delta.actionErrorDelta = dto.actionErrorDelta || 0;
+      delta.viewLongTaskDelta = dto.viewLongTaskDelta || 0;
+      delta.actionLongTaskDelta = dto.actionLongTaskDelta || 0;
+      delta.viewResourceDelta = dto.viewResourceDelta || 0;
+      delta.actionResourceDelta = dto.actionResourceDelta || 0;
+      delta.viewPendingDelta = dto.viewPendingDelta || 0;
+      delta.actionPendingDelta = dto.actionPendingDelta || 0;
+      delta.viewActionDelta = dto.viewActionDelta || 0;
+      delta.viewUpdateTimeDelta = dto.viewUpdateTimeDelta || 0;
+      deltas.push(delta);
+    }
+    return deltas;
+  }
+
+  private submitRumLifecycleWorkerCommand(
+    name: string,
+    event: SDKRumEventDTO,
+    onComplete?: () => void | Promise<void>
+  ): void {
+    const traceName = this.nextRumEventTaskName(name);
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COMMAND}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload: event as Object as SDKWorkerPayload
+    };
+
+    SDKTaskScheduler.getInstance().submitTask({
+      type: SDKTaskType.EVENT,
+      name: traceName,
+      priority: SDKTaskPriority.HIGH,
+      serialKey: FTRUMInnerManager.RUM_EVENT_SERIAL_KEY,
+      costHint: 'light',
+      workerRequest,
+      workerResponseHandler: async (response: SDKWorkerResponse) => {
+        if (!response.ok) {
+          FTInnerLogger.e(TAG, `RUM lifecycle worker command failed: ${name}, error=${response.errorMessage || 'unknown'}`);
+          return;
+        }
+        if (onComplete) {
+          await Promise.resolve(onComplete());
+        }
+      }
+    });
+  }
+
+  private createActionLifecycleEvent(eventType: string, actionBean: ActionBean): SDKRumEventDTO {
+    return {
+      eventType,
+      name: actionBean.getActionName(),
+      time: actionBean.getStartTime(),
+      sessionId: actionBean.getSessionId(),
+      viewId: actionBean.getViewId(),
+      viewName: actionBean.getViewName(),
+      actionId: actionBean.getId(),
+      actionName: actionBean.getActionName()
+    };
+  }
+
+  private createResourceLifecycleEvent(eventType: string, resourceId: string, resourceBean: ResourceBean): SDKRumEventDTO {
+    return {
+      eventType,
+      name: resourceBean.url || resourceId,
+      time: Utils.getCurrentNanoTime(),
+      sessionId: resourceBean.sessionId || '',
+      viewId: resourceBean.viewId || '',
+      viewName: resourceBean.viewName || '',
+      actionId: resourceBean.actionId || '',
+      actionName: resourceBean.actionName || '',
+      resourceId
+    };
   }
 
   private async runRumEventTaskSafely(traceName: string, task: SDKTaskRunner): Promise<void> {
@@ -1694,8 +1839,7 @@ export class FTRUMInnerManager {
       
       // Convert to ActionBean and send directly 
       const actionBean = completedAction.convertToActionBean();
-      // Send directly through the RUM event lane
-      this.submitRumEventTask(`rum.addAction:${actionName}`, () => {
+      this.submitRumLifecycleWorkerCommand(`rum.addAction:${actionName}`, this.createActionLifecycleEvent('action.complete', actionBean), () => {
         try {
           this.insertAction(actionBean);
         } catch (error) {
@@ -1745,6 +1889,10 @@ export class FTRUMInnerManager {
       
       // Store resource Bean
       this.resourceBeanMap.set(resourceId, resourceBean);
+      this.submitRumLifecycleWorkerCommand(
+        `rum.resourceStart:${resourceId}`,
+        this.createResourceLifecycleEvent('resource.start', resourceId, resourceBean)
+      );
       
       // Increase pending resource count
       this.increasePendingResourceCount(resourceBean.viewId, resourceBean.actionId);
@@ -1777,6 +1925,10 @@ export class FTRUMInnerManager {
 
       // Set end time
       resourceBean.setEndTime();
+      this.submitRumLifecycleWorkerCommand(
+        `rum.resourceStop:${resourceId}`,
+        this.createResourceLifecycleEvent('resource.stop', resourceId, resourceBean)
+      );
 
       this.increaseResourceCount(viewId, actionId);
       
@@ -2716,7 +2868,7 @@ export class FTRUMInnerManager {
 
     if (isAddAction) {
       // addAction: Directly enters FT_SYNC_DATA_FLAT_TABLE_NAME
-      this.submitRumEventTask(`rum.addAction:${actionName}`, () => {
+      this.submitRumLifecycleWorkerCommand(`rum.addAction:${actionName}`, this.createActionLifecycleEvent('action.complete', actionBean), () => {
         try {
           this.insertAction(actionBean);
         } catch (error) {
@@ -3077,11 +3229,15 @@ export class FTRUMInnerManager {
       // Remove resourceBean from map asynchronously (aligned with Android SDK event consumer ordering)
       // Android SDK: putRUMResourcePerformance deletes ResourceBean in the event consumer path (async)
       // This ensures stopResource can still find ResourceBean and call increaseResourceCount
-      // HarmonyOS: Use the RUM event lane to delete ResourceBean asynchronously
-      this.submitRumEventTask(`rum.resourceCleanup:${resourceId}`, () => {
+      // HarmonyOS: Use serial EVENT_CONSUMER DTO ordering, without bridge closures.
+      this.submitRumLifecycleWorkerCommand(
+        `rum.resourceCleanup:${resourceId}`,
+        this.createResourceLifecycleEvent('resource.complete', resourceId, resourceBean),
+        () => {
         this.resourceBeanMap.delete(resourceId);
         FTInnerLogger.d(TAG, `<FT-RESOURCE-UPLOAD> ResourceBean removed from map: ${resourceId}`);
-      });
+        }
+      );
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error processing resource performance for ${resourceId}: ${error}`);
@@ -3105,14 +3261,9 @@ export class FTRUMInnerManager {
     // Update database (aligned with Android: FTDBManager.get().increaseViewAction(viewId))
     // This ensures database is updated when action occurs, preventing duplicate view uploads
     if (this.context && viewId) {
-      this.submitRumEventTask(`rum.increaseViewAction:${viewId}`, async () => {
-        try {
-          await this.runRumDbWrite(`increaseViewAction:${viewId}`, async () => {
-            await FTDBManager.getInstance(this.context!).increaseViewAction(viewId);
-          });
-        } catch (error) {
-          FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INCREASE-ERROR] Failed to update database action count: ${error}`);
-        }
+      this.submitRumCounterUpdateTask({
+        updateType: 'view.action',
+        viewId
       });
     }
   }
@@ -3141,17 +3292,11 @@ export class FTRUMInnerManager {
     }
     
     if (this.context) {
-      const delta = this.getOrCreateRumCounterDelta(
-        viewId || "",
-        actionId || ""
-      );
-      if (actionId && actionId.length > 0) {
-        delta.actionErrorDelta += 1;
-      }
-      if (viewId && viewId.length > 0) {
-        delta.viewErrorDelta += 1;
-      }
-      this.enqueueRumCounterDelta(true, false);
+      this.submitRumCounterUpdateTask({
+        updateType: 'rum.error',
+        viewId: viewId || '',
+        actionId: actionId || ''
+      });
     }
   }
   
@@ -3170,17 +3315,11 @@ export class FTRUMInnerManager {
         this.activeAction.decreasePendingResourceCount();
       }
       if (this.context) {
-        const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
-        if (viewId && viewId.length > 0) {
-          delta.viewResourceDelta += 1;
-          delta.viewPendingDelta -= 1;
-          delta.viewUpdateTimeDelta += 1;
-        }
-        if (actionId && actionId.length > 0) {
-          delta.actionResourceDelta += 1;
-          delta.actionPendingDelta -= 1;
-        }
-        this.enqueueRumCounterDelta(true, false);
+        this.submitRumCounterUpdateTask({
+          updateType: 'resource.complete',
+          viewId: viewId || '',
+          actionId: actionId || ''
+        });
       }
       
     } catch (error) {
@@ -3203,14 +3342,11 @@ export class FTRUMInnerManager {
     
     // Update database counts through the batched RUM counter flush.
     if (this.context) {
-      const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
-      if (viewId && viewId.length > 0) {
-        delta.viewPendingDelta += 1;
-      }
-      if (actionId && actionId.length > 0) {
-        delta.actionPendingDelta += 1;
-      }
-      this.enqueueRumCounterDelta(false, false);
+      this.submitRumCounterUpdateTask({
+        updateType: 'resource.pending.increase',
+        viewId: viewId || '',
+        actionId: actionId || ''
+      });
     }
   }
   
@@ -3230,14 +3366,12 @@ export class FTRUMInnerManager {
     
     // Update database counts through the batched RUM counter flush.
     if (this.context) {
-      const delta = this.getOrCreateRumCounterDelta(viewId || "", actionId || "");
-      if (updateView && viewId && viewId.length > 0) {
-        delta.viewPendingDelta -= 1;
-      }
-      if (actionId && actionId.length > 0) {
-        delta.actionPendingDelta -= 1;
-      }
-      this.enqueueRumCounterDelta(false, false);
+      this.submitRumCounterUpdateTask({
+        updateType: 'resource.pending.decrease',
+        viewId: viewId || '',
+        actionId: actionId || '',
+        updateView
+      });
     }
   }
   
@@ -3381,9 +3515,6 @@ export class FTRUMInnerManager {
         this.rumDataGenerateTimer = null;
       }
       this.clearRumCounterBatchTimer();
-      this.rumCounterBatch.clear();
-      this.rumCounterBatchNeedsActionCloseCheck = false;
-      this.rumCounterBatchNeedsRumDataGenerate = false;
 
       this.context = null;
       this.userData = null;
@@ -3506,18 +3637,18 @@ export class FTRUMInnerManager {
         const isViewActive: boolean = !!(viewId && viewId.length > 0 && this.activeView &&
           this.activeView.getId() === viewId);
         if (!isActionActive || !isViewActive) {
-          const delta = this.getOrCreateRumCounterDelta(
-            !isViewActive ? (viewId || "") : "",
-            !isActionActive ? (actionId || "") : ""
-          );
           if (!isActionActive && actionId && actionId.length > 0) {
-            delta.actionLongTaskDelta += 1;
+            this.submitRumCounterUpdateTask({
+              updateType: 'long_task.action',
+              actionId
+            });
           }
           if (!isViewActive && viewId && viewId.length > 0) {
-            delta.viewLongTaskDelta += 1;
-            delta.viewUpdateTimeDelta += 1;
+            this.submitRumCounterUpdateTask({
+              updateType: 'long_task.view',
+              viewId
+            });
           }
-          this.enqueueRumCounterDelta(true, true);
         }
       }
     } catch (error) {
@@ -3537,10 +3668,10 @@ export class FTRUMInnerManager {
         this.activeView.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          const delta = this.getOrCreateRumCounterDelta(viewId, "");
-          delta.viewLongTaskDelta += 1;
-          delta.viewUpdateTimeDelta += 1;
-          this.enqueueRumCounterDelta(true, true);
+          this.submitRumCounterUpdateTask({
+            updateType: 'long_task.view',
+            viewId
+          });
         }
       }
       if (this.activeAction) {
@@ -3549,9 +3680,10 @@ export class FTRUMInnerManager {
         this.activeAction.increaseLongTaskCount();
         // Update database count (aligned with Android SDK)
         if (this.context) {
-          const delta = this.getOrCreateRumCounterDelta("", actionId);
-          delta.actionLongTaskDelta += 1;
-          this.enqueueRumCounterDelta(true, true);
+          this.submitRumCounterUpdateTask({
+            updateType: 'long_task.action',
+            actionId
+          });
         }
       }
     } catch (error) {
