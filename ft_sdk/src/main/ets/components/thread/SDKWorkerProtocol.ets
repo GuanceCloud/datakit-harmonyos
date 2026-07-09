@@ -43,46 +43,36 @@ export interface SDKWorkerTiming {
   poolExecuteMs?: number;
 }
 
+export enum SDKTaskPriority {
+  CRITICAL = 9,
+  HIGH = 7,
+  NORMAL = 5,
+  LOW = 3,
+  BACKGROUND = 1
+}
+
 export enum SDKWorkerCommand {
   PING = 'sdk.ping',
   RESET = 'sdk.reset',
-  EVENT_RUN = 'event.run',
+  LINE_CONTEXT_UPDATE = 'line.context.update',
   EVENT_RUM_COMMAND = 'event.rum.command',
+  EVENT_RUM_COMMAND_BATCH = 'event.rum.commandBatch',
+  EVENT_RUM_ERROR_COMMAND_BATCH = 'event.rum.errorCommandBatch',
+  EVENT_RUM_RESOURCE_COMMAND_BATCH = 'event.rum.resourceCommandBatch',
   EVENT_RUM_COMPLETED_ACTION = 'event.rum.completedAction',
+  EVENT_RUM_COMPLETED_ACTION_BATCH = 'event.rum.completedActionBatch',
   EVENT_RUM_COUNTER_UPDATE = 'event.rum.counterUpdate',
+  EVENT_RUM_COUNTER_UPDATE_BATCH = 'event.rum.counterUpdateBatch',
   EVENT_RUM_COUNTER_FLUSH = 'event.rum.counterFlush',
   EVENT_RUM_SNAPSHOT = 'event.rum.snapshot',
-  LOG_RUN = 'log.run',
   LOG_ENQUEUE = 'log.enqueue',
   LOG_FLUSH = 'log.flush',
-  DATA_RUN = 'data.run',
   DATA_CREATE_LINE_PROTOCOL = 'data.createLineProtocol',
-  DATA_PASS_THROUGH_DRAFTS = 'data.passThroughDrafts',
-  DATA_PASS_THROUGH_RUM_COUNTER_DELTAS = 'data.passThroughRumCounterDeltas',
-  CRASH_FILE_RUN = 'crashFile.run',
-  ANR_RUN = 'anr.run',
-  CUSTOM_RUN = 'custom.run',
-  INNER_LOG_FILE_RUN = 'innerLogFile.run',
   DATA_PARSE_CRASH_TEXT = 'data.parseCrashText',
   UPLOAD_SCHEDULE = 'upload.schedule',
   UPLOAD_CONSUME = 'upload.consume',
   UPLOAD_ROUND_FINISH = 'upload.roundFinish',
   UPLOAD_FORMAT_BODY = 'upload.formatBody'
-}
-
-export interface SDKWorkerBridgeRequest {
-  id: string;
-  sourceRequestId: string;
-  command: string;
-  payload?: SDKWorkerPayload;
-}
-
-export interface SDKWorkerBridgeResponse {
-  id: string;
-  sourceRequestId: string;
-  ok: boolean;
-  payload?: SDKWorkerPayload;
-  errorMessage?: string;
 }
 
 export interface SDKWorkerErrorDTO {
@@ -108,6 +98,19 @@ export interface SDKLogDTO {
   timeNano: number;
   tags: SDKStringRecord;
   fields: SDKStringRecord;
+  isSilence?: boolean;
+}
+
+export interface SDKLineProtocolContextDTO {
+  basePublicTags: SDKStringRecord;
+  logTags: SDKStringRecord;
+  rumTags: SDKStringRecord;
+  dynamicBaseTags: SDKStringRecord;
+  dynamicLogTags: SDKStringRecord;
+  dynamicRumTags: SDKStringRecord;
+  rumStaticFields: SDKStringRecord;
+  logLinkRumData: boolean;
+  integerCompatible: boolean;
 }
 
 export interface SDKRumEventDTO {
@@ -119,6 +122,8 @@ export interface SDKRumEventDTO {
   measurement?: string;
   uuid?: string;
   integerCompatible?: boolean;
+  lineContext?: SDKLineProtocolContextDTO;
+  lineProtocolPrepared?: boolean;
   viewId?: string;
   viewName?: string;
   actionId?: string;
@@ -135,6 +140,95 @@ export interface SDKRumCounterUpdateDTO {
   actionId?: string;
   updateView?: boolean;
   flushMaxKeys?: number;
+}
+
+export interface SDKRumCounterUpdateBatchDTO {
+  updates: SDKRumCounterUpdateDTO[];
+}
+
+export interface SDKRumEventBatchDTO {
+  events: SDKRumEventDTO[];
+}
+
+export interface SDKRumResourceContextDTO {
+  sessionId: string;
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  actionId: string;
+  actionName: string;
+}
+
+export interface SDKRumResourceParamsDTO {
+  url: string;
+  requestHeader: string;
+  responseHeader: string;
+  responseConnection: string;
+  responseContentType: string;
+  responseContentEncoding: string;
+  responseContentLength: number;
+  resourceMethod: string;
+  responseBody: string;
+  resourceStatus: number;
+  resourceType: string;
+  requestErrorStack: string;
+  requestErrorMsg: string;
+  property: SDKStringRecord;
+  traceId?: string;
+  spanId?: string;
+}
+
+export interface SDKRumResourceNetStatusDTO {
+  dnsTime: number;
+  dnsStartTime: number;
+  tcpTime: number;
+  tcpStartTime: number;
+  sslTime: number;
+  sslStartTime: number;
+  ttfbTime: number;
+  responseTime: number;
+  firstByteTime: number;
+  firstByteStartTime: number;
+  downloadTime: number;
+  downloadStartTime: number;
+  holeRequestTime: number;
+  resourceHostIP: string;
+}
+
+export interface SDKRumResourceCommandDTO {
+  commandType: string;
+  resourceId: string;
+  context?: SDKRumResourceContextDTO;
+  params?: SDKRumResourceParamsDTO;
+  netStatus?: SDKRumResourceNetStatusDTO;
+  startTime?: number;
+  endTime?: number;
+  eventTime?: number;
+  fallbackActionId?: string;
+  shouldCollect?: boolean;
+  customDataType?: string;
+  counterFlushMaxEvents?: number;
+}
+
+export interface SDKRumResourceCommandBatchDTO {
+  commands: SDKRumResourceCommandDTO[];
+}
+
+export interface SDKRumErrorCommandDTO {
+  context: SDKRumResourceContextDTO;
+  log: string;
+  message: string;
+  errorType: string;
+  errorSource: string;
+  appState: string;
+  property: SDKStringRecord;
+  time: number;
+  customDataType?: string;
+  counterFlushMaxEvents?: number;
+}
+
+export interface SDKRumErrorCommandBatchDTO {
+  commands: SDKRumErrorCommandDTO[];
 }
 
 export interface SDKRumCompletedActionDTO {
@@ -156,6 +250,12 @@ export interface SDKRumCompletedActionDTO {
   longTaskCount: number;
   resourceCount: number;
   properties?: Record<string, object>;
+  countViewAction?: boolean;
+  counterFlushMaxEvents?: number;
+}
+
+export interface SDKRumCompletedActionBatchDTO {
+  actions: SDKRumCompletedActionDTO[];
 }
 
 export interface SDKLineProtocolRecordsDTO {
@@ -181,6 +281,9 @@ export interface SDKRumCounterUpdateResultDTO {
   accepted: boolean;
   pendingCount: number;
   shouldFlush: boolean;
+  deltas?: SDKRumCounterDeltaDTO[];
+  needsActionCloseCheck?: boolean;
+  needsRumDataGenerate?: boolean;
 }
 
 export interface SDKRumCounterFlushResultDTO {

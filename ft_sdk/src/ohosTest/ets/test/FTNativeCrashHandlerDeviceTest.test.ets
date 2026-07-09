@@ -11,7 +11,8 @@ import {
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { AppState, ErrorType } from '../../../main/ets/components/rum/enum/RUMEnums';
 import { RunnerCompleteCallBack } from '../../../main/ets/components/rum/callback/RunnerCompleteCallBack';
-import { SDKTaskScheduler, SDKTaskType } from '../../../main/ets/components/thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '../../../main/ets/components/thread/SDKDedicatedPoolManager';
+import { SDKDedicatedPoolType } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 
 interface NativeTestValueWrapper {
   value: string | number | boolean;
@@ -239,7 +240,7 @@ export default function ftNativeCrashHandlerDeviceTest() {
     let handler: FTNativeCrashHandler;
 
     beforeEach(() => {
-      SDKTaskScheduler.resetInternal();
+      SDKDedicatedPoolManager.resetInternal();
       runtime = new DeviceFakeNativeCrashRuntime();
       SdkInternalTestAccess.setNativeCrashHandlerRuntime(runtime);
       handler = new FTNativeCrashHandler();
@@ -248,7 +249,7 @@ export default function ftNativeCrashHandlerDeviceTest() {
     afterEach(() => {
       handler.shutdown();
       SdkInternalTestAccess.resetNativeCrashHandlerRuntime();
-      SDKTaskScheduler.resetInternal();
+      SDKDedicatedPoolManager.resetInternal();
     });
 
     it('nativeCrashShouldStartWatching', 0, async () => {
@@ -268,8 +269,8 @@ export default function ftNativeCrashHandlerDeviceTest() {
 
       await runtime.nativeModule.emitCrash(createNativeCrashData());
 
-      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
-      expect(schedulerStatus.lanes[SDKTaskType.CRASH_FILE].completedTasks).assertEqual(1);
+      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus().pools[SDKDedicatedPoolType.CRASH_FILE];
+      expect(poolStatus.completedTasks).assertEqual(1);
       expect(runtime.rumManager.addErrorCount).assertEqual(1);
       expect(runtime.rumManager.lastMessage).assertEqual('Native Crash: NativeCrash');
       expect(runtime.rumManager.lastErrorType).assertEqual(ErrorType.NATIVE_CRASH.toString());

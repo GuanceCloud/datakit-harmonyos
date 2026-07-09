@@ -6,6 +6,7 @@ import { FTInnerLogger } from './log/FTLogger';
 import { DataModifier, LineDataModifier, DefaultDataModifier, DefaultLineDataModifier } from './DataModifier';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import { CollectType } from './rum/enum/RUMEnums';
+import { SDKLineProtocolContextDTO } from './thread/SDKWorkerProtocol';
 
 const TAG = "SyncDataHelper";
 
@@ -587,6 +588,24 @@ export class SyncDataHelper {
       tags: SyncDataHelper.mapToStringRecord(mergeTags),
       fields: SyncDataHelper.mapToStringRecord(fields),
       time: timeStamp,
+      integerCompatible: this.enableDataIntegerCompatible
+    };
+  }
+
+  createWorkerLineProtocolContextSnapshot(): SDKLineProtocolContextDTO | null {
+    if (!(this.lineDataModifier instanceof DefaultLineDataModifier)) {
+      return null;
+    }
+
+    return {
+      basePublicTags: SyncDataHelper.mapToStringRecord(this.basePublicTags),
+      logTags: SyncDataHelper.mapToStringRecord(this.logTags),
+      rumTags: SyncDataHelper.mapToStringRecord(this.rumTags),
+      dynamicBaseTags: SyncDataHelper.mapToStringRecord(this.dynamicBaseTags),
+      dynamicLogTags: SyncDataHelper.mapToStringRecord(this.dynamicLogTags),
+      dynamicRumTags: SyncDataHelper.mapToStringRecord(this.dynamicRumTags),
+      rumStaticFields: SyncDataHelper.mapToStringRecord(this.rumStaticFields),
+      logLinkRumData: this.logConfig !== null && this.logConfig.isEnableLinkRumData(),
       integerCompatible: this.enableDataIntegerCompatible
     };
   }

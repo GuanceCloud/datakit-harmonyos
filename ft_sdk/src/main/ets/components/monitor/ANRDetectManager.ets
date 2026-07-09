@@ -5,21 +5,10 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { AppState, ErrorType } from '../rum/enum/RUMEnums';
 import { Utils } from '../utils/Utils';
-import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
-import {
-  createSDKWorkerTaskBridgeHandler,
-  createSDKWorkerTaskFallbackRunner,
-  createSDKWorkerTaskRequest
-} from '../thread/SDKWorkerTaskBridge';
-import {
-  SDKDedicatedPoolType,
-  SDKWorkerCommand
-} from '../thread/SDKWorkerProtocol';
 
 const TAG = 'ANRDetectManager';
 const WATCHER_NAME = 'ft_sdk_anr_monitor';
 const ANR_LANE_TRACE_PREFIX = '<FT-ANR-LANE>';
-const ANR_PROCESSING_SERIAL_KEY = 'anr-freeze-processing';
 
 interface ErrorPropertyValue {
   value: string | number;
@@ -214,9 +203,7 @@ export class ANRDetectManager {
       params: mergedParams
     };
 
-    this.submitANRTask('anr.freeze', async () => {
-      await this.recordANREvent(mergedEvent);
-    });
+    this.recordANREventSafely('anr.freeze', mergedEvent);
   }
 
   /**
@@ -542,41 +529,20 @@ export class ANRDetectManager {
     }
   }
 
-  private submitANRTask(name: string, task: SDKTaskRunner): void {
+  private recordANREventSafely(name: string, event: hiAppEvent.AppEventInfo): void {
     const traceName = this.nextANRTaskName(name);
-    const command = SDKWorkerCommand.ANR_RUN;
-    const runTask = async () => {
-      const startTime = Date.now();
-      let result = 'success';
-      let errorMessage = '';
-      try {
-        await Promise.resolve(task());
-      } catch (error) {
-        result = 'failed';
-        errorMessage = String(error);
-        throw new Error(errorMessage);
-      } finally {
-        const costTime = Math.max(0, Date.now() - startTime);
-        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-        this.traceANRLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-anr-error`);
-      }
-    };
     this.traceANRLane(`[ENQUEUE] name=${traceName}`);
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.ANR,
-      name: traceName,
-      priority: SDKTaskPriority.HIGH,
-      serialKey: ANR_PROCESSING_SERIAL_KEY,
-      costHint: 'heavy',
-      workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.ANR,
-        command,
-        traceName,
-        SDKTaskPriority.HIGH
-      ),
-      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
-      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
-    });
+    const startTime = Date.now();
+    this.recordANREvent(event)
+      .then(() => {
+        const costTime = Math.max(0, Date.now() - startTime);
+        this.traceANRLane(`[CONSUMED] name=${traceName} result=success cost=${costTime}ms action=report-anr-error`);
+      })
+      .catch((error: Error) => {
+        const costTime = Math.max(0, Date.now() - startTime);
+        this.traceANRLane(`[CONSUMED] name=${traceName} result=failed error=${error.message} cost=${costTime}ms action=report-anr-error`);
+        FTInnerLogger.e(TAG, `${ANR_LANE_TRACE_PREFIX} Failed to record ANR task: name=${traceName}, error=${error.message}`);
+      });
   }
 
   private nextANRTaskName(name: string): string {

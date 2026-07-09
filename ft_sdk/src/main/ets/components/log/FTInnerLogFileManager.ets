@@ -2,16 +2,6 @@ import { Context } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import hilog from '@ohos.hilog';
 import { Constants } from '../Constants';
-import { SDKTaskPriority, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
-import {
-  createSDKWorkerTaskBridgeHandler,
-  createSDKWorkerTaskFallbackRunner,
-  createSDKWorkerTaskRequest
-} from '../thread/SDKWorkerTaskBridge';
-import {
-  SDKDedicatedPoolType,
-  SDKWorkerCommand
-} from '../thread/SDKWorkerProtocol';
 
 interface InnerLogFileRuntimeConfig {
   singleFileMaxSize: number;
@@ -70,8 +60,6 @@ export class FTInnerLogFileManager {
   private static readonly DEFAULT_FLUSH_INTERVAL_MS = 200;
   private static readonly MIN_FLUSH_INTERVAL_MS = 50;
   private static readonly MAX_FLUSH_INTERVAL_MS = 5000;
-  private static readonly SERIAL_KEY = "inner-log-file";
-
   private enabled: boolean = false;
   private initialized: boolean = false;
   private logDir: string = "";
@@ -460,56 +448,21 @@ export class FTInnerLogFileManager {
 
   private submitSilentTask(name: string, task: () => Promise<void>): void {
     try {
-      const command = SDKWorkerCommand.INNER_LOG_FILE_RUN;
-      const runTask = async () => {
-        await task();
-      };
-      SDKTaskScheduler.getInstance().submitTask({
-        type: SDKTaskType.INNER_LOG_FILE,
-        name,
-        priority: SDKTaskPriority.BACKGROUND,
-        serialKey: FTInnerLogFileManager.SERIAL_KEY,
-        costHint: 'normal',
-        silent: true,
-        workerRequest: createSDKWorkerTaskRequest(
-          SDKDedicatedPoolType.BACKGROUND,
-          command,
-          name,
-          SDKTaskPriority.BACKGROUND
-        ),
-        workerFallbackRunner: createSDKWorkerTaskFallbackRunner(name, command, runTask),
-        workerBridgeHandler: createSDKWorkerTaskBridgeHandler(name, command, runTask)
+      task().catch((error: Error) => {
+        this.isFlushing = false;
+        this.recordError(`${name} failed: ${error.message}`);
       });
     } catch (error) {
       this.isFlushing = false;
-      this.recordError(`submitSilentTask failed: ${String(error)}`);
+      this.recordError(`${name} failed: ${String(error)}`);
     }
   }
 
   private async submitSilentTaskAndWait(name: string, task: () => Promise<void>): Promise<void> {
     try {
-      const command = SDKWorkerCommand.INNER_LOG_FILE_RUN;
-      const runTask = async () => {
-        await task();
-      };
-      await SDKTaskScheduler.getInstance().submitTaskAndWait({
-        type: SDKTaskType.INNER_LOG_FILE,
-        name,
-        priority: SDKTaskPriority.BACKGROUND,
-        serialKey: FTInnerLogFileManager.SERIAL_KEY,
-        costHint: 'normal',
-        silent: true,
-        workerRequest: createSDKWorkerTaskRequest(
-          SDKDedicatedPoolType.BACKGROUND,
-          command,
-          name,
-          SDKTaskPriority.BACKGROUND
-        ),
-        workerFallbackRunner: createSDKWorkerTaskFallbackRunner(name, command, runTask),
-        workerBridgeHandler: createSDKWorkerTaskBridgeHandler(name, command, runTask)
-      });
+      await task();
     } catch (error) {
-      this.recordError(`submitSilentTaskAndWait failed: ${String(error)}`);
+      this.recordError(`${name} failed: ${String(error)}`);
     }
   }
 

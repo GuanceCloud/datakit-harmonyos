@@ -3,21 +3,9 @@ import { FTTraceContext, FTTraceHeaderHandler, FTTraceRequestContext } from './F
 import { FTTraceConfigManager } from './FTTraceConfigManager';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
-import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from '../thread/SDKTaskScheduler';
-import {
-  createSDKWorkerTaskBridgeHandler,
-  createSDKWorkerTaskFallbackRunner,
-  createSDKWorkerTaskRequest
-} from '../thread/SDKWorkerTaskBridge';
-import {
-  SDKDedicatedPoolType,
-  SDKWorkerCommand
-} from '../thread/SDKWorkerProtocol';
 
 const TAG = Constants.LOG_TAG_PREFIX + "FTTraceManager";
 const CUSTOM_LANE_TRACE_PREFIX = "<FT-CUSTOM-LANE>";
-const TRACE_CLEANUP_SERIAL_KEY = "trace-handler-cleanup";
-const TRACE_CLEANUP_SINGLE_FLIGHT_KEY = "trace-handler-cleanup";
 const TRACE_CLEANUP_INTERVAL_MS = 300000;
 
 interface TraceContextGenerationResult {
@@ -119,6 +107,7 @@ export class FTTraceManager {
   private static instance: FTTraceManager | null = null;
   private static customTaskSequence: number = 0;
   private cleanupTimer: number | null = null;
+  private cleanupTaskRunning: boolean = false;
   
   /**
    * Trace handler mapping table, limited to 1000 entries
@@ -379,51 +368,34 @@ export class FTTraceManager {
     }
 
     this.cleanupTimer = setInterval(() => {
-      this.submitCustomTask('trace.cleanupExpiredHandlers', () => {
-        this.cleanupExpiredHandlers();
-      });
+      this.cleanupExpiredHandlersSafely('trace.cleanupExpiredHandlers');
     }, TRACE_CLEANUP_INTERVAL_MS);
   }
 
-  private submitCustomTask(name: string, task: SDKTaskRunner): void {
+  private cleanupExpiredHandlersSafely(name: string): void {
+    if (this.cleanupTaskRunning) {
+      return;
+    }
+    this.cleanupTaskRunning = true;
     const traceName = this.nextCustomTaskName(name);
-    const command = SDKWorkerCommand.CUSTOM_RUN;
-    const runTask = async () => {
-      const startTime = Date.now();
-      let result = 'success';
-      let errorMessage = '';
-      try {
-        await Promise.resolve(task());
-      } catch (error) {
-        result = 'failed';
-        errorMessage = String(error);
-        throw new Error(errorMessage);
-      } finally {
-        const costTime = Math.max(0, Date.now() - startTime);
-        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-        this.traceCustomLane(
-          `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms handlers=${this.getHandlerCount()}`
-        );
-      }
-    };
     const pendingBefore = this.getHandlerCount();
     this.traceCustomLane(`[ENQUEUE] name=${traceName} handlers=${pendingBefore}`);
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.CUSTOM,
-      name: traceName,
-      priority: SDKTaskPriority.BACKGROUND,
-      serialKey: TRACE_CLEANUP_SERIAL_KEY,
-      singleFlightKey: TRACE_CLEANUP_SINGLE_FLIGHT_KEY,
-      costHint: 'light',
-      workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.BACKGROUND,
-        command,
-        traceName,
-        SDKTaskPriority.BACKGROUND
-      ),
-      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
-      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
-    });
+    const startTime = Date.now();
+    let result = 'success';
+    let errorMessage = '';
+    try {
+      this.cleanupExpiredHandlers();
+    } catch (error) {
+      result = 'failed';
+      errorMessage = String(error);
+    } finally {
+      const costTime = Math.max(0, Date.now() - startTime);
+      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+      this.traceCustomLane(
+        `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms handlers=${this.getHandlerCount()}`
+      );
+      this.cleanupTaskRunning = false;
+    }
   }
 
   private nextCustomTaskName(name: string): string {

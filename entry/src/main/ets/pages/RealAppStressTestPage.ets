@@ -10,7 +10,8 @@ import {
   StressRunMode,
   StressTestStats
 } from '../utils/StressTestManager';
-import { SDKTaskScheduler } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
+import { SDKDedicatedPoolManager } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKDedicatedPoolManager';
+import { SDKDedicatedPoolType } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
 import preferences from '@ohos.data.preferences';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -150,6 +151,7 @@ export struct RealAppStressTestPage {
 
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
   private preferencesStore: preferences.Preferences | null = null;
+  private statsRefreshTimerId: number | null = null;
   private lastReportEndedAtMs: number = 0;
   private lastSavedSettingsLogSignature: string = '';
 
@@ -162,9 +164,11 @@ export struct RealAppStressTestPage {
     } else {
       this.refreshReportFromManager(false);
     }
+    this.startStatsRefreshTimer();
   }
 
   async aboutToDisappear() {
+    this.stopStatsRefreshTimer();
     await this.saveSettings();
   }
 
@@ -177,6 +181,23 @@ export struct RealAppStressTestPage {
 
   private refreshStats(): void {
     this.syncCurrentStatsSnapshot();
+  }
+
+  private startStatsRefreshTimer(): void {
+    this.stopStatsRefreshTimer();
+    this.statsRefreshTimerId = setInterval((): void => {
+      this.refreshStats();
+      if (!this.isTestRunning) {
+        this.refreshReportFromManager(false);
+      }
+    }, 1000) as number;
+  }
+
+  private stopStatsRefreshTimer(): void {
+    if (this.statsRefreshTimerId !== null) {
+      clearInterval(this.statsRefreshTimerId);
+      this.statsRefreshTimerId = null;
+    }
   }
 
   private refreshReportFromManager(showToast: boolean): void {
@@ -1243,6 +1264,24 @@ export struct RealAppStressTestPage {
     return this.enableResources && this.useRealTraffic ? 'real' : 'fake';
   }
 
+  private formatRealtimeUiJankSignal(): string {
+    return this.stressTestManager.formatUiJankSignal(
+      this.stats.uiJankMaxDriftMs,
+      this.stats.uiJankOver50Count,
+      this.stats.uiJankOver100Count
+    );
+  }
+
+  private getRealtimeUiJankColor(): string {
+    if (this.stats.uiJankOver100Count > 0) {
+      return '#F53F3F';
+    }
+    if (this.stats.uiJankOver50Count > 0) {
+      return '#D46B08';
+    }
+    return '#4CAF50';
+  }
+
   private formatRealtimeRunMode(): string {
     const mode = this.getRealtimeRunMode();
     return mode === 'total' ? 'Total Count' : 'Duration';
@@ -1350,28 +1389,38 @@ export struct RealAppStressTestPage {
 
   private getSdkLaneConcurrency(laneName: string, fallback: number): number {
     try {
-      const status = SDKTaskScheduler.getInstance().getStatus();
-      const lane = status.lanes[laneName];
-      if (lane !== undefined && lane.maxConcurrency > 0) {
-        return lane.maxConcurrency;
+      const poolType = this.getSdkPoolType(laneName);
+      const pool = SDKDedicatedPoolManager.getInstance().getStatus().pools[poolType];
+      if (pool !== undefined && pool.maxConcurrency > 0) {
+        return pool.maxConcurrency;
       }
     } catch (error) {
-      DemoLogger.w(TAG, `Failed to read SDK lane status for ${laneName}: ${error}`);
+      DemoLogger.w(TAG, `Failed to read SDK pool status for ${laneName}: ${error}`);
     }
     return fallback;
   }
 
   private getSdkLaneAverageCostMs(laneName: string, fallback: number): number {
     try {
-      const status = SDKTaskScheduler.getInstance().getStatus();
-      const lane = status.lanes[laneName];
-      if (lane !== undefined && lane.averageCostTime > 0) {
-        return lane.averageCostTime;
+      const poolType = this.getSdkPoolType(laneName);
+      const pool = SDKDedicatedPoolManager.getInstance().getStatus().pools[poolType];
+      if (pool !== undefined && pool.averageCostTime > 0) {
+        return pool.averageCostTime;
       }
     } catch (error) {
-      DemoLogger.w(TAG, `Failed to read SDK lane cost for ${laneName}: ${error}`);
+      DemoLogger.w(TAG, `Failed to read SDK pool cost for ${laneName}: ${error}`);
     }
     return fallback;
+  }
+
+  private getSdkPoolType(laneName: string): SDKDedicatedPoolType {
+    if (laneName === SDK_EVENT_LANE) {
+      return SDKDedicatedPoolType.EVENT_CONSUMER;
+    }
+    if (laneName === SDK_LOG_LANE) {
+      return SDKDedicatedPoolType.LOG_CONSUMER;
+    }
+    return SDKDedicatedPoolType.DATA_PROCESS;
   }
 
   private estimateSdkLaneRate(laneName: string, fallbackConcurrency: number, fallbackCostMs: number): number {
@@ -2621,6 +2670,11 @@ export struct RealAppStressTestPage {
               `Elapsed: ${this.formatElapsedTime(this.stats.elapsedSeconds)} | Remaining: ${this.stats.remainingSeconds >= 0 ? this.formatElapsedTime(this.stats.remainingSeconds) : '∞'}`)
               .fontSize(14)
               .fontWeight(FontWeight.Medium)
+              .width('100%')
+
+            Text(`UI Drift: max=${this.stats.uiJankMaxDriftMs}ms, avg=${this.stats.uiJankAvgDriftMs}ms, >=50ms=${this.stats.uiJankOver50Count}, >=100ms=${this.stats.uiJankOver100Count}, signal=${this.formatRealtimeUiJankSignal()}`)
+              .fontSize(13)
+              .fontColor(this.getRealtimeUiJankColor())
               .width('100%')
 
             Column({ space: 4 }) {

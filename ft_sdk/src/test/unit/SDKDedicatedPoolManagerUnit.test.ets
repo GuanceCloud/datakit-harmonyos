@@ -13,40 +13,22 @@ import {
   SDKUploadRowDTO,
   SDKWorkerCommand,
   SDKWorkerPayload,
-  SDKWorkerRequest
+  SDKWorkerRequest,
+  SDKWorkerResponse
 } from '../../main/ets/components/thread/SDKWorkerProtocol';
-
-interface ReleaseGate {
-  promise: Promise<void>;
-  release: () => void;
-}
+import {
+  createSDKWorkerRuntimeStateWithBackend,
+  handleSDKWorkerRequest,
+  SDKWorkerRuntimeState
+} from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
 
 interface SDKLineProtocolRecordsTestPayload {
   records: SDKLineProtocolInputDTO[];
 }
 
-function createGate(): ReleaseGate {
-  let release = (): void => {};
-  const promise = new Promise<void>((resolve) => {
-    release = () => resolve();
-  });
-  return { promise, release };
-}
-
-async function flushPromises(): Promise<void> {
-  for (let i = 0; i < 5; i++) {
-    await Promise.resolve();
-  }
-}
-
-async function waitUntil(predicate: () => boolean, maxTicks: number = 100): Promise<boolean> {
-  for (let i = 0; i < maxTicks; i++) {
-    await flushPromises();
-    if (predicate()) {
-      return true;
-    }
-  }
-  return false;
+interface SDKCompletedActionPropertyTestValue {
+  value?: string;
+  nested?: string;
 }
 
 function getPayloadString(payload: SDKWorkerPayload | undefined, key: string): string {
@@ -65,6 +47,21 @@ function getPayloadArray(payload: SDKWorkerPayload | undefined, key: string): ob
   return record[key] as object[];
 }
 
+let unitWorkerStates: Record<string, SDKWorkerRuntimeState> = {};
+
+function resetUnitWorkerStates(): void {
+  unitWorkerStates = {};
+}
+
+async function executeWorkerCommandForUnit(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+  let state = unitWorkerStates[request.pool];
+  if (!state) {
+    state = createSDKWorkerRuntimeStateWithBackend(request.pool, `${request.pool}.UnitWorker`, 'unit-worker');
+    unitWorkerStates[request.pool] = state;
+  }
+  return handleSDKWorkerRequest(request, state);
+}
+
 export default function sdkDedicatedPoolManagerUnitTest() {
   describe('SDKDedicatedPoolManagerUnit', () => {
     let manager: SDKDedicatedPoolManager;
@@ -72,198 +69,18 @@ export default function sdkDedicatedPoolManagerUnitTest() {
     beforeEach(() => {
       SDKDedicatedPoolManager.resetInternal();
       manager = SDKDedicatedPoolManager.getInstance();
+      resetUnitWorkerStates();
     });
 
     afterEach(() => {
       SDKDedicatedPoolManager.resetInternal();
     });
 
-    it('eventConsumerPoolShouldRunSeriallyAndNotBlockLogPool', 0, async () => {
-      const order: string[] = [];
-      const eventGate = createGate();
-
-      const firstEvent = manager.executeTask(
-        SDKDedicatedPoolType.EVENT_CONSUMER,
-        'event-1',
-        'event.first',
-        7,
-        async () => {
-          order.push('event-1-start');
-          await eventGate.promise;
-          order.push('event-1-end');
-        }
-      );
-
-      const secondEvent = manager.executeTask(
-        SDKDedicatedPoolType.EVENT_CONSUMER,
-        'event-2',
-        'event.second',
-        7,
-        () => {
-          order.push('event-2');
-        }
-      );
-
-      const logTask = manager.executeTask(
-        SDKDedicatedPoolType.LOG_CONSUMER,
-        'log-1',
-        'log.independent',
-        5,
-        () => {
-          order.push('log');
-        }
-      );
-
-      await flushPromises();
-      await logTask;
-      expect(order.join(',')).assertEqual('event-1-start,log');
-
-      eventGate.release();
-      await firstEvent;
-      await secondEvent;
-      expect(order.join(',')).assertEqual('event-1-start,log,event-1-end,event-2');
-      const status = manager.getStatus().pools[SDKDedicatedPoolType.EVENT_CONSUMER];
-      expect(status.workerCount).assertEqual(1);
-      expect(status.maxConcurrency).assertEqual(1);
-    });
-
-    it('eventConsumerPoolShouldSupportSamePoolReentry', 0, async () => {
-      const order: string[] = [];
-
-      await manager.executeEventReentrant('event.outer', async () => {
-        order.push('outer-start');
-        await manager.executeEventReentrant('event.inner', () => {
-          order.push('inner');
-        });
-        order.push('outer-end');
-      });
-
-      expect(order.join(',')).assertEqual('outer-start,inner,outer-end');
-      const status = manager.getStatus().pools[SDKDedicatedPoolType.EVENT_CONSUMER];
-      expect(status.completedTasks).assertEqual(2);
-      expect(status.pending).assertEqual(0);
-      expect(status.running).assertEqual(0);
-    });
-
-    it('dataProcessPoolShouldUseConfiguredWorkerCountForParallelWork', 0, async () => {
+    it('dataProcessCommandShouldUseConfiguredWorkerCount', 0, async () => {
       const workerCount = manager.getDataProcessWorkerCount();
-      const order: string[] = [];
-      const firstGate = createGate();
-      const secondGate = createGate();
-
-      const first = manager.executeTask(
-        SDKDedicatedPoolType.DATA_PROCESS,
-        'data-1',
-        'data.first',
-        3,
-        async () => {
-          order.push('first-start');
-          await firstGate.promise;
-          order.push('first-end');
-        }
-      );
-
-      const second = manager.executeTask(
-        SDKDedicatedPoolType.DATA_PROCESS,
-        'data-2',
-        'data.second',
-        3,
-        async () => {
-          order.push('second-start');
-          await secondGate.promise;
-          order.push('second-end');
-        }
-      );
-
-      await flushPromises();
-      expect(workerCount >= 2).assertTrue();
-      expect(order.join(',')).assertEqual('first-start,second-start');
-
-      firstGate.release();
-      secondGate.release();
-      await first;
-      await second;
-      expect(order.join(',')).assertEqual('first-start,second-start,first-end,second-end');
-    });
-
-    it('dbWriteLaneShouldRunWritesSerially', 0, async () => {
-      const order: string[] = [];
-      const firstGate = createGate();
-
-      const first = manager.runDbWrite('db.first', async () => {
-        order.push('first-start');
-        await firstGate.promise;
-        order.push('first-end');
-        return true;
-      });
-
-      const second = manager.runDbWrite('db.second', async () => {
-        order.push('second');
-        return true;
-      });
-
-      await flushPromises();
-      expect(order.join(',')).assertEqual('first-start');
-
-      firstGate.release();
-      await first;
-      await second;
-      expect(order.join(',')).assertEqual('first-start,first-end,second');
-    });
-
-    it('dbWriteIdleShouldWaitForQueuedWrites', 0, async () => {
-      const order: string[] = [];
-      const firstGate = createGate();
-
-      const first = manager.runDbWrite('db.idle.first', async () => {
-        order.push('first-start');
-        await firstGate.promise;
-        order.push('first-end');
-        return true;
-      });
-      const second = manager.runDbWrite('db.idle.second', async () => {
-        order.push('second');
-        return true;
-      });
-
-      const idle = manager.awaitDbWriteIdle('unit.idle').then(() => {
-        order.push('idle');
-      });
-
-      await flushPromises();
-      expect(order.join(',')).assertEqual('first-start');
-
-      firstGate.release();
-      await first;
-      await second;
-      await idle;
-      expect(order.join(',')).assertEqual('first-start,first-end,second,idle');
-    });
-
-    it('dataUploadPoolShouldCoalesceSchedulesWhileRunning', 0, async () => {
-      const firstGate = createGate();
-      let runCount = 0;
-      const runner = async (): Promise<void> => {
-        runCount++;
-        if (runCount === 1) {
-          await firstGate.promise;
-        }
-      };
-
-      manager.scheduleDataUpload('upload.poll', runner, 0);
-      await flushPromises();
-      expect(manager.getUploadStatus().isRunning).assertTrue();
-
-      manager.scheduleDataUpload('upload.poll', runner, 0);
-      manager.scheduleDataUpload('upload.poll', runner, 0);
-      expect(manager.getUploadStatus().needReschedule).assertTrue();
-
-      firstGate.release();
-      const completed = await waitUntil(() => runCount === 2 && !manager.getUploadStatus().isRunning);
-      expect(completed).assertTrue();
-      expect(runCount).assertEqual(2);
-      expect(manager.getUploadStatus().isScheduled).assertFalse();
-      expect(manager.getUploadStatus().needReschedule).assertFalse();
+      expect(workerCount).assertEqual(1);
+      const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_PROCESS];
+      expect(status.workerCount).assertEqual(workerCount);
     });
 
     it('workerProtocolShouldRejectNonSerializablePayload', 0, async () => {
@@ -278,7 +95,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       };
 
       try {
-        await manager.executeCommand(request, () => null);
+        await manager.executeCommand(request);
       } catch (_) {
         rejected = true;
       }
@@ -286,7 +103,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(rejected).assertTrue();
     });
 
-    it('workerCommandShouldReturnPingPayloadWithFallbackAllowed', 0, async () => {
+    it('workerHandlerShouldReturnPingPayload', 0, async () => {
       const request: SDKWorkerRequest = {
         id: 'ping-data-process',
         pool: SDKDedicatedPoolType.DATA_PROCESS,
@@ -296,7 +113,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: null
       };
 
-      const response = await manager.executeCommand(request);
+      const response = await executeWorkerCommandForUnit(request);
       expect(response.ok).assertTrue();
       expect(getPayloadString(response.payload, 'pool')).assertEqual(SDKDedicatedPoolType.DATA_PROCESS);
       expect(getPayloadString(response.payload, 'workerName').length > 0).assertTrue();
@@ -311,7 +128,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       ];
 
       for (const pool of pools) {
-        const response = await manager.executeCommand({
+        const response = await executeWorkerCommandForUnit({
           id: `ping-${pool}`,
           pool,
           command: SDKWorkerCommand.PING,
@@ -359,7 +176,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: payload as Object as SDKWorkerPayload
       };
 
-      const response = await manager.executeCommand(request);
+      const response = await executeWorkerCommandForUnit(request);
       expect(response.ok).assertTrue();
       const drafts = getPayloadArray(response.payload, 'drafts');
       expect(drafts.length).assertEqual(1);
@@ -400,7 +217,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: rumEvent as Object as SDKWorkerPayload
       };
 
-      const response = await manager.executeCommand(request);
+      const response = await executeWorkerCommandForUnit(request);
       expect(response.ok).assertTrue();
       expect(getPayloadString(response.payload, 'activeViewId')).assertEqual('view-1');
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
@@ -433,7 +250,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
       for (let i = 0; i < updates.length; i++) {
         const update = updates[i];
-        const response = await manager.executeCommand({
+        const response = await executeWorkerCommandForUnit({
           id: `rum-counter-${i}`,
           pool: SDKDedicatedPoolType.EVENT_CONSUMER,
           command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE,
@@ -444,7 +261,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         expect(response.ok).assertTrue();
       }
 
-      const flushResponse = await manager.executeCommand({
+      const flushResponse = await executeWorkerCommandForUnit({
         id: 'rum-counter-flush',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
@@ -470,92 +287,96 @@ export default function sdkDedicatedPoolManagerUnitTest() {
     });
 
     it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
-      const actionResponse = await manager.executeCommand({
+      const actionPayload: SDKRumEventDTO = {
+        eventType: 'action.complete',
+        name: 'tap',
+        time: 100,
+        actionId: 'action-1',
+        actionName: 'tap',
+        viewId: 'view-1',
+        viewName: 'Home',
+        sessionId: 'session-1'
+      };
+      const actionResponse = await executeWorkerCommandForUnit({
         id: 'rum-action-complete',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COMMAND,
         priority: 7,
         createdAt: Date.now(),
-        payload: {
-          eventType: 'action.complete',
-          name: 'tap',
-          time: 100,
-          actionId: 'action-1',
-          actionName: 'tap',
-          viewId: 'view-1',
-          viewName: 'Home',
-          sessionId: 'session-1'
-        } as Object as SDKWorkerPayload
+        payload: actionPayload as Object as SDKWorkerPayload
       });
       expect(actionResponse.ok).assertTrue();
       expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('');
 
-      const startResponse = await manager.executeCommand({
+      const resourceStartPayload: SDKRumEventDTO = {
+        eventType: 'resource.start',
+        name: 'https://example.com',
+        time: 101,
+        resourceId: 'resource-1',
+        viewId: 'view-1',
+        actionId: 'action-1',
+        sessionId: 'session-1'
+      };
+      const startResponse = await executeWorkerCommandForUnit({
         id: 'rum-resource-start',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COMMAND,
         priority: 7,
         createdAt: Date.now(),
-        payload: {
-          eventType: 'resource.start',
-          name: 'https://example.com',
-          time: 101,
-          resourceId: 'resource-1',
-          viewId: 'view-1',
-          actionId: 'action-1',
-          sessionId: 'session-1'
-        } as Object as SDKWorkerPayload
+        payload: resourceStartPayload as Object as SDKWorkerPayload
       });
       expect(startResponse.ok).assertTrue();
       expect(getPayloadString(startResponse.payload, 'activeResourceCount')).assertEqual('1');
 
-      const completeResponse = await manager.executeCommand({
+      const resourceCompletePayload: SDKRumEventDTO = {
+        eventType: 'resource.complete',
+        name: 'https://example.com',
+        time: 102,
+        resourceId: 'resource-1',
+        viewId: 'view-1',
+        actionId: 'action-1',
+        sessionId: 'session-1'
+      };
+      const completeResponse = await executeWorkerCommandForUnit({
         id: 'rum-resource-complete',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COMMAND,
         priority: 7,
         createdAt: Date.now(),
-        payload: {
-          eventType: 'resource.complete',
-          name: 'https://example.com',
-          time: 102,
-          resourceId: 'resource-1',
-          viewId: 'view-1',
-          actionId: 'action-1',
-          sessionId: 'session-1'
-        } as Object as SDKWorkerPayload
+        payload: resourceCompletePayload as Object as SDKWorkerPayload
       });
       expect(completeResponse.ok).assertTrue();
       expect(getPayloadString(completeResponse.payload, 'activeResourceCount')).assertEqual('0');
     });
 
     it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {
-      const completedAction: SDKRumCompletedActionDTO = {
-        dataType: 'rum_app',
-        measurement: 'action',
-        uuid: 'action-sync-uuid',
-        time: 12345,
-        dynamicTags: {
-          env: 'test'
-        },
-        actionId: 'action-1',
-        actionName: 'tap',
-        actionType: 'click',
-        sessionId: 'session-1',
-        viewId: 'view-1',
-        viewName: 'Home',
-        viewReferrer: 'Launcher',
-        duration: 42,
-        errorCount: 1,
-        longTaskCount: 2,
-        resourceCount: 3,
-        properties: {
-          custom_text: { value: 'fast' },
-          custom_json: { nested: 'yes' }
-        }
-      };
+      const customText: SDKCompletedActionPropertyTestValue = { value: 'fast' };
+      const customJson: SDKCompletedActionPropertyTestValue = { nested: 'yes' };
+      const properties = new Object() as Record<string, object>;
+      properties['custom_text'] = customText;
+      properties['custom_json'] = customJson;
+      const dynamicTags = new Object() as SDKStringRecord;
+      dynamicTags['env'] = 'test';
+      const completedAction = new Object() as SDKRumCompletedActionDTO;
+      completedAction.dataType = 'rum_app';
+      completedAction.measurement = 'action';
+      completedAction.uuid = 'action-sync-uuid';
+      completedAction.time = 12345;
+      completedAction.dynamicTags = dynamicTags;
+      completedAction.actionId = 'action-1';
+      completedAction.actionName = 'tap';
+      completedAction.actionType = 'click';
+      completedAction.sessionId = 'session-1';
+      completedAction.viewId = 'view-1';
+      completedAction.viewName = 'Home';
+      completedAction.viewReferrer = 'Launcher';
+      completedAction.duration = 42;
+      completedAction.errorCount = 1;
+      completedAction.longTaskCount = 2;
+      completedAction.resourceCount = 3;
+      completedAction.properties = properties;
 
-      const response = await manager.executeCommand({
+      const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION,
@@ -583,41 +404,30 @@ export default function sdkDedicatedPoolManagerUnitTest() {
     });
 
     it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {
-      let body = '';
+      const row: SDKUploadRowDTO = {
+        id: 1,
+        dataType: 'log',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=uuid-1 message=\"hello\" 123',
+        uuid: 'uuid-1',
+        time: 123
+      };
+      const page: SDKUploadPageDTO = {
+        dataType: 'log',
+        rows: [row],
+        packageId: 'pkg-1'
+      };
+      const request: SDKWorkerRequest = {
+        id: 'upload-format-body',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_FORMAT_BODY,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: page as Object as SDKWorkerPayload
+      };
 
-      await manager.executeTask(
-        SDKDedicatedPoolType.DATA_UPLOAD,
-        'upload-outer',
-        'upload.outer',
-        5,
-        async () => {
-          const row: SDKUploadRowDTO = {
-            id: 1,
-            dataType: 'log',
-            dataString: 'df_rum_harmonyos_log,sdk_data_id=uuid-1 message=\"hello\" 123',
-            uuid: 'uuid-1',
-            time: 123
-          };
-          const page: SDKUploadPageDTO = {
-            dataType: 'log',
-            rows: [row],
-            packageId: 'pkg-1'
-          };
-          const request: SDKWorkerRequest = {
-            id: 'upload-format-body',
-            pool: SDKDedicatedPoolType.DATA_UPLOAD,
-            command: SDKWorkerCommand.UPLOAD_FORMAT_BODY,
-            priority: 5,
-            createdAt: Date.now(),
-            payload: page as Object as SDKWorkerPayload
-          };
-
-          const response = await manager.executeCommand(request);
-          expect(response.ok).assertTrue();
-          body = getPayloadString(response.payload, 'body');
-        }
-      );
-
+      const response = await executeWorkerCommandForUnit(request);
+      expect(response.ok).assertTrue();
+      const body = getPayloadString(response.payload, 'body');
       expect(body.includes('pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
     });

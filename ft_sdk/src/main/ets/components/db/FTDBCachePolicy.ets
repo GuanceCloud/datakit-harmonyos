@@ -1,22 +1,36 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { DataType, LogCacheDiscard, RUMCacheDiscard, DBCacheDiscard } from '../enum/Enums';
-import { FTDBManager } from './FTDBManager';
 import { ConfigRecord } from '../SyncTaskManager';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from '../Constants';
+import { FTDBTaskPoolExecutor } from './FTDBTaskPoolExecutor';
 
 // Re-export enum types for external use
 export { DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../enum/Enums';
 
 const TAG = "FTDBCachePolicy";
 
-class DefaultFTDBCachePolicyRuntime {
-  getDbManager(context: Context): FTDBManager {
-    return FTDBManager.getInstance(context);
+interface FTDBCachePolicyRuntime {
+  queryTotalCount(context: Context, dataTypes: string[]): Promise<number>;
+  deleteOldestSyncData(context: Context, dataTypes: string[], limit: number): Promise<number>;
+  getCurrentDatabaseSize(context: Context): Promise<number>;
+}
+
+class DefaultFTDBCachePolicyRuntime implements FTDBCachePolicyRuntime {
+  async queryTotalCount(context: Context, dataTypes: string[]): Promise<number> {
+    return await FTDBTaskPoolExecutor.queryTotalCount(context, dataTypes);
+  }
+
+  async deleteOldestSyncData(context: Context, dataTypes: string[], limit: number): Promise<number> {
+    return await FTDBTaskPoolExecutor.deleteOldestSyncData(context, dataTypes, limit);
+  }
+
+  async getCurrentDatabaseSize(context: Context): Promise<number> {
+    return await FTDBTaskPoolExecutor.getCurrentDatabaseSize(context);
   }
 }
 
-let ftDBCachePolicyRuntime: Object = new DefaultFTDBCachePolicyRuntime();
+let ftDBCachePolicyRuntime: FTDBCachePolicyRuntime = new DefaultFTDBCachePolicyRuntime();
 
 /**
  * Database cache discard policy for HarmonyOS SDK
@@ -59,7 +73,7 @@ export class FTDBCachePolicy {
   }
 
   public static setRuntimeInternal(runtime: Object): void {
-    ftDBCachePolicyRuntime = runtime;
+    ftDBCachePolicyRuntime = runtime as FTDBCachePolicyRuntime;
   }
 
   public static resetRuntimeInternal(): void {
@@ -93,11 +107,29 @@ export class FTDBCachePolicy {
   }
 
   private async loadCountsFromDb(context: Context): Promise<void> {
-    const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
-    this.logCount = await dbManager.queryTotalCount([DataType.LOG]);
-    this.rumCount = await dbManager.queryTotalCount([DataType.RUM_APP, DataType.RUM_WEBVIEW]);
+    this.logCount = await ftDBCachePolicyRuntime.queryTotalCount(context, this.toDataTypeStrings([DataType.LOG]));
+    this.rumCount = await ftDBCachePolicyRuntime.queryTotalCount(
+      context,
+      this.toDataTypeStrings([DataType.RUM_APP, DataType.RUM_WEBVIEW])
+    );
     this.countsInitialized = true;
     FTInnerLogger.d(TAG, `Initialized counts from DB: logCount=${this.logCount}, rumCount=${this.rumCount}`);
+  }
+
+  private toDataTypeStrings(types: DataType | DataType[]): string[] {
+    const source = Array.isArray(types) ? types : [types];
+    const result: string[] = [];
+    for (let i = 0; i < source.length; i++) {
+      result.push(source[i].toString());
+    }
+    return result;
+  }
+
+  private async refreshDbSize(context: Context): Promise<void> {
+    if (!this.enableLimitWithDbSize) {
+      return;
+    }
+    this.currentDbSize = Math.max(0, await ftDBCachePolicyRuntime.getCurrentDatabaseSize(context));
   }
 
   /**
@@ -311,8 +343,8 @@ export class FTDBCachePolicy {
    */
   public async optRUMCachePolicy(context: Context, limit: number): Promise<number> {
     if (this.enableLimitWithDbSize) {
+      await this.refreshDbSize(context);
       if (this.isReachDbLimit()) {
-        const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
         FTInnerLogger.w(TAG, ` optRUMCachePolicy: DB limit reached! currentSize=${this.currentDbSize}, limitSize=${this.dbLimitSize}, discard=${this.dbCacheDiscard}`);
         switch (this.dbCacheDiscard) {
           case DBCacheDiscard.DISCARD:
@@ -320,11 +352,21 @@ export class FTDBCachePolicy {
             return -1;
           case DBCacheDiscard.DISCARD_OLDEST:
             const deleteCount = Constants.DB_OLD_CACHE_REMOVE_COUNT;
-            const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+            const beforeLogCount = await ftDBCachePolicyRuntime.queryTotalCount(
+              context,
+              this.toDataTypeStrings([DataType.LOG])
+            );
             if (beforeLogCount > 0) {
               FTInnerLogger.w(TAG, ` optRUMCachePolicy: deleting oldest ${deleteCount} log records first (DB size limit exceeded)`);
-              await dbManager.deleteOldestData(DataType.LOG, deleteCount);
-              const logCount = await dbManager.queryTotalCount([DataType.LOG]);
+              await ftDBCachePolicyRuntime.deleteOldestSyncData(
+                context,
+                this.toDataTypeStrings(DataType.LOG),
+                deleteCount
+              );
+              const logCount = await ftDBCachePolicyRuntime.queryTotalCount(
+                context,
+                this.toDataTypeStrings([DataType.LOG])
+              );
               this.logCount = logCount;
               if (logCount < beforeLogCount) {
                 return 1;
@@ -332,12 +374,14 @@ export class FTDBCachePolicy {
             }
 
             FTInnerLogger.w(TAG, ` optRUMCachePolicy: deleting oldest ${deleteCount} RUM records (DB size limit exceeded)`);
-            await dbManager.deleteOldestData(
-              [DataType.RUM_APP, DataType.RUM_WEBVIEW],
+            await ftDBCachePolicyRuntime.deleteOldestSyncData(
+              context,
+              this.toDataTypeStrings([DataType.RUM_APP, DataType.RUM_WEBVIEW]),
               deleteCount
             );
-            const rumCount = await dbManager.queryTotalCount(
-              [DataType.RUM_APP, DataType.RUM_WEBVIEW]
+            const rumCount = await ftDBCachePolicyRuntime.queryTotalCount(
+              context,
+              this.toDataTypeStrings([DataType.RUM_APP, DataType.RUM_WEBVIEW])
             );
             this.rumCount = rumCount;
             return 1;
@@ -355,13 +399,14 @@ export class FTDBCachePolicy {
       if (this.rumCacheDiscardStrategy === RUMCacheDiscard.DISCARD) {
         status = -1;
       } else {
-        const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
-        await dbManager.deleteOldestData(
-          [DataType.RUM_APP, DataType.RUM_WEBVIEW],
+        await ftDBCachePolicyRuntime.deleteOldestSyncData(
+          context,
+          this.toDataTypeStrings([DataType.RUM_APP, DataType.RUM_WEBVIEW]),
           limit
         );
-        const rumCount = await dbManager.queryTotalCount(
-          [DataType.RUM_APP, DataType.RUM_WEBVIEW]
+        const rumCount = await ftDBCachePolicyRuntime.queryTotalCount(
+          context,
+          this.toDataTypeStrings([DataType.RUM_APP, DataType.RUM_WEBVIEW])
         );
         this.rumCount = rumCount;
         status = 1;
@@ -381,8 +426,8 @@ export class FTDBCachePolicy {
    */
   public async optLogCachePolicy(context: Context, limit: number): Promise<number> {
     if (this.enableLimitWithDbSize) {
+      await this.refreshDbSize(context);
       if (this.isReachDbLimit()) {
-        const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
         FTInnerLogger.w(TAG, ` optLogCachePolicy: DB limit reached! currentSize=${this.currentDbSize}, limitSize=${this.dbLimitSize}, discard=${this.dbCacheDiscard}`);
         switch (this.dbCacheDiscard) {
           case DBCacheDiscard.DISCARD:
@@ -391,8 +436,15 @@ export class FTDBCachePolicy {
           case DBCacheDiscard.DISCARD_OLDEST:
             const deleteCount = Constants.DB_OLD_CACHE_REMOVE_COUNT;
             FTInnerLogger.w(TAG, ` optLogCachePolicy: deleting oldest ${deleteCount} records (DB size limit exceeded)`);
-            await dbManager.deleteOldestData(DataType.LOG, deleteCount);
-            const logCount = await dbManager.queryTotalCount([DataType.LOG]);
+            await ftDBCachePolicyRuntime.deleteOldestSyncData(
+              context,
+              this.toDataTypeStrings(DataType.LOG),
+              deleteCount
+            );
+            const logCount = await ftDBCachePolicyRuntime.queryTotalCount(
+              context,
+              this.toDataTypeStrings([DataType.LOG])
+            );
             this.logCount = logCount;
             return limit;
         }
@@ -409,9 +461,11 @@ export class FTDBCachePolicy {
       if (this.logCacheDiscardStrategy === LogCacheDiscard.DISCARD) {
         status = -limit;
       } else {
-        const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
-        await dbManager.deleteOldestData(DataType.LOG, limit);
-        const logCount = await dbManager.queryTotalCount([DataType.LOG]);
+        await ftDBCachePolicyRuntime.deleteOldestSyncData(context, this.toDataTypeStrings(DataType.LOG), limit);
+        const logCount = await ftDBCachePolicyRuntime.queryTotalCount(
+          context,
+          this.toDataTypeStrings([DataType.LOG])
+        );
         this.logCount = logCount;
         status = limit;
       }
@@ -422,9 +476,11 @@ export class FTDBCachePolicy {
         if (this.logCacheDiscardStrategy === LogCacheDiscard.DISCARD) {
           status = -needRemove;
         } else {
-          const dbManager = (ftDBCachePolicyRuntime as DefaultFTDBCachePolicyRuntime).getDbManager(context);
-          await dbManager.deleteOldestData(DataType.LOG, needRemove);
-          const logCount = await dbManager.queryTotalCount([DataType.LOG]);
+          await ftDBCachePolicyRuntime.deleteOldestSyncData(context, this.toDataTypeStrings(DataType.LOG), needRemove);
+          const logCount = await ftDBCachePolicyRuntime.queryTotalCount(
+            context,
+            this.toDataTypeStrings([DataType.LOG])
+          );
           this.logCount = logCount;
           status = needRemove;
         }

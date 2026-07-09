@@ -1,17 +1,23 @@
 import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { Constants } from '@guancecloud/ft_sdk/src/main/ets/components/Constants';
 import { DbInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { FTInnerLogFileManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTInnerLogFileManager';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import {
-  SDKLaneStatus,
-  SDKRunnableTaskOptions,
+  SDKDedicatedPoolManager,
+  SDKDedicatedPoolStatus
+} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
   SDKTaskPriority,
-  SDKTaskScheduler,
-  SDKTaskType
-} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKTaskScheduler';
+  SDKWorkerCommand,
+  SDKWorkerPayload,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
 import { DeviceUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/DeviceUtils';
 import { FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
@@ -78,10 +84,13 @@ interface PhysicalProbeDrainResult {
 
 interface SingleLaneBenchmarkCase {
   label: string;
-  laneType: SDKTaskType;
+  poolType: SDKDedicatedPoolType;
   taskCount: number;
   taskCostMs: number;
-  useSerialKey: boolean;
+}
+
+interface SyntheticPoolPingPayload {
+  syntheticCostMs: number;
 }
 
 @Entry
@@ -108,6 +117,8 @@ export struct DBCacheLimitTestPage {
   @State context: Context = getContext(this) as Context;
   private writeTimer: number = -1;
   private infoTimer: number = -1;
+  private resultFlushTimer: number = -1;
+  private resultLines: string[] = [];
   private dbMetricsRefreshing: boolean = false;
   private lastDbMetricsRefreshTime: number = 0;
   private limitReachedNoticeShown: boolean = false;
@@ -135,6 +146,10 @@ export struct DBCacheLimitTestPage {
     if (this.infoTimer !== -1) {
       clearInterval(this.infoTimer);
       this.infoTimer = -1;
+    }
+    if (this.resultFlushTimer !== -1) {
+      clearTimeout(this.resultFlushTimer);
+      this.resultFlushTimer = -1;
     }
   }
 
@@ -417,10 +432,9 @@ export struct DBCacheLimitTestPage {
             .onClick(() => {
               this.runSingleLaneBenchmarkOnly({
                 label: 'Event Lane No-op Serial',
-                laneType: SDKTaskType.EVENT,
+                poolType: SDKDedicatedPoolType.EVENT_CONSUMER,
                 taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-                taskCostMs: 0,
-                useSerialKey: true
+                taskCostMs: 0
               });
             })
 
@@ -432,10 +446,9 @@ export struct DBCacheLimitTestPage {
             .onClick(() => {
               this.runSingleLaneBenchmarkOnly({
                 label: 'Data-Process Lane No-op Parallel',
-                laneType: SDKTaskType.DATA_PROCESS,
+                poolType: SDKDedicatedPoolType.DATA_PROCESS,
                 taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-                taskCostMs: 0,
-                useSerialKey: false
+                taskCostMs: 0
               });
             })
 
@@ -447,10 +460,9 @@ export struct DBCacheLimitTestPage {
             .onClick(() => {
               this.runSingleLaneBenchmarkOnly({
                 label: 'Data-Process Lane 5ms Parallel',
-                laneType: SDKTaskType.DATA_PROCESS,
+                poolType: SDKDedicatedPoolType.DATA_PROCESS,
                 taskCount: SINGLE_LANE_BENCH_COST_TASK_COUNT,
-                taskCostMs: 5,
-                useSerialKey: false
+                taskCostMs: 5
               });
             })
 
@@ -462,10 +474,9 @@ export struct DBCacheLimitTestPage {
             .onClick(() => {
               this.runSingleLaneBenchmarkOnly({
                 label: 'Upload Lane 10ms Serial',
-                laneType: SDKTaskType.UPLOAD,
+                poolType: SDKDedicatedPoolType.DATA_UPLOAD,
                 taskCount: SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT,
-                taskCostMs: 10,
-                useSerialKey: true
+                taskCostMs: 10
               });
             })
         }
@@ -762,8 +773,8 @@ export struct DBCacheLimitTestPage {
       await this.refreshActualDbCounts(true);
       this.updatePolicyInfo();
 
-      const beforeDbSize = await dbManager.getCurrentDatabaseSize();
-      const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const beforeDbSize = await this.queryCurrentDbSize();
+      const beforeLogCount = await this.queryDbCount([DataType.LOG]);
       const beforeRumCount = await this.getRumDbCount();
       FTDBCachePolicy.getInstance().syncCountsFromDbInternal(beforeLogCount, beforeRumCount);
 
@@ -779,8 +790,8 @@ export struct DBCacheLimitTestPage {
         await this.waitForWriteSettled(DB_WRITE_CAPABILITY_SETTLE_MS);
       }
 
-      const afterDbSize = await dbManager.getCurrentDatabaseSize();
-      const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const afterDbSize = await this.queryCurrentDbSize();
+      const afterLogCount = await this.queryDbCount([DataType.LOG]);
       const afterRumCount = await this.getRumDbCount();
       FTDBCachePolicy.getInstance().syncCountsFromDbInternal(afterLogCount, afterRumCount);
       this.writeCount += Math.max(0, afterLogCount - beforeLogCount);
@@ -804,8 +815,8 @@ export struct DBCacheLimitTestPage {
   private async runDbWriteCapabilityCase(dbManager: FTDBManager, batchSize: number): Promise<void> {
     const runId = `DbWriteCapability_${Date.now()}_b${batchSize}`;
     const targetRows = batchSize * DB_WRITE_CAPABILITY_BATCHES_PER_CASE;
-    const beforeDbSize = await dbManager.getCurrentDatabaseSize();
-    const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    const beforeDbSize = await this.queryCurrentDbSize();
+    const beforeLogCount = await this.queryDbCount([DataType.LOG]);
     const batchCostsMs: number[] = [];
     let requested = 0;
     let inserted = 0;
@@ -841,8 +852,8 @@ export struct DBCacheLimitTestPage {
     }
 
     const elapsedMs = Math.max(1, Date.now() - startTime);
-    const afterDbSize = await dbManager.getCurrentDatabaseSize();
-    const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    const afterDbSize = await this.queryCurrentDbSize();
+    const afterLogCount = await this.queryDbCount([DataType.LOG]);
     FTDBCachePolicy.getInstance().syncCountsFromDbInternal(afterLogCount, undefined);
 
     this.appendResult(`\n[DB Write Case] batchSize=${batchSize}, targetRows=${targetRows}\n`);
@@ -905,45 +916,39 @@ export struct DBCacheLimitTestPage {
     const cases: SingleLaneBenchmarkCase[] = [
       {
         label: 'Event Lane No-op Serial',
-        laneType: SDKTaskType.EVENT,
+        poolType: SDKDedicatedPoolType.EVENT_CONSUMER,
         taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-        taskCostMs: 0,
-        useSerialKey: true
+        taskCostMs: 0
       },
       {
         label: 'Log Lane No-op Serial',
-        laneType: SDKTaskType.LOG,
+        poolType: SDKDedicatedPoolType.LOG_CONSUMER,
         taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-        taskCostMs: 0,
-        useSerialKey: true
+        taskCostMs: 0
       },
       {
         label: 'Data-Process Lane No-op Parallel',
-        laneType: SDKTaskType.DATA_PROCESS,
+        poolType: SDKDedicatedPoolType.DATA_PROCESS,
         taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-        taskCostMs: 0,
-        useSerialKey: false
+        taskCostMs: 0
       },
       {
         label: 'Inner Log File Lane No-op Serial',
-        laneType: SDKTaskType.INNER_LOG_FILE,
+        poolType: SDKDedicatedPoolType.BACKGROUND,
         taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
-        taskCostMs: 0,
-        useSerialKey: true
+        taskCostMs: 0
       },
       {
         label: 'Data-Process Lane 5ms Parallel',
-        laneType: SDKTaskType.DATA_PROCESS,
+        poolType: SDKDedicatedPoolType.DATA_PROCESS,
         taskCount: SINGLE_LANE_BENCH_COST_TASK_COUNT,
-        taskCostMs: 5,
-        useSerialKey: false
+        taskCostMs: 5
       },
       {
         label: 'Upload Lane 10ms Serial',
-        laneType: SDKTaskType.UPLOAD,
+        poolType: SDKDedicatedPoolType.DATA_UPLOAD,
         taskCount: SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT,
-        taskCostMs: 10,
-        useSerialKey: true
+        taskCostMs: 10
       }
     ];
     await this.runSingleLaneBenchmarkCases('SDK Lane Benchmark Suite', cases);
@@ -966,7 +971,7 @@ export struct DBCacheLimitTestPage {
       }
 
       this.appendResult(`\n=== Synthetic Single Lane Benchmark: ${title} ===\n`);
-      this.appendResult('Scope: scheduler lane only. This bypasses Log/RUM business APIs, DB serialization, and network payload building.\n');
+      this.appendResult('Scope: dedicated pool only. This bypasses Log/RUM business APIs, DB serialization, and network payload building.\n');
       this.appendResult(`Auto Sync Paused During Benchmark: ${originalAutoSync}\n`);
       this.appendCurrentMachineSnapshot();
       this.appendResult('\n[Runtime Before Benchmark]\n');
@@ -990,36 +995,34 @@ export struct DBCacheLimitTestPage {
   }
 
   private async runSingleLaneBenchmarkCase(testCase: SingleLaneBenchmarkCase): Promise<void> {
-    const scheduler = SDKTaskScheduler.getInstance();
-    const beforeLane = scheduler.getStatus().lanes[testCase.laneType];
+    const poolManager = SDKDedicatedPoolManager.getInstance();
+    const beforeLane = poolManager.getStatus().pools[testCase.poolType];
     const beforeSubmitted = beforeLane ? beforeLane.submittedTasks : 0;
     const beforeCompleted = beforeLane ? beforeLane.completedTasks : 0;
     const beforeFailed = beforeLane ? beforeLane.failedTasks : 0;
-    const serialKey = testCase.useSerialKey ? `single-lane-${testCase.laneType}-${Date.now()}` : undefined;
-    const tasks: Promise<void>[] = [];
+    const tasks: Promise<SDKWorkerResponse>[] = [];
     const startTime = Date.now();
 
     for (let i = 0; i < testCase.taskCount; i++) {
-      const taskOptions: SDKRunnableTaskOptions = {
-        type: testCase.laneType,
-        name: `single-lane-benchmark-${testCase.laneType}-${i}`,
-        priority: SDKTaskPriority.NORMAL,
-        serialKey,
-        silent: true,
-        costHint: testCase.taskCostMs > 0 ? 'normal' : 'light',
-        run: async () => {
-          if (testCase.taskCostMs > 0) {
-            await this.waitForWriteSettled(testCase.taskCostMs);
-          }
-        }
+      const taskName = `single-lane-benchmark-${testCase.poolType}-${i}`;
+      const payload: SyntheticPoolPingPayload = {
+        syntheticCostMs: testCase.taskCostMs
       };
-      tasks.push(scheduler.submitRunnableTaskAndWait(taskOptions));
+      const request: SDKWorkerRequest = {
+        id: taskName,
+        pool: testCase.poolType,
+        command: SDKWorkerCommand.PING,
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        payload: payload as Object as SDKWorkerPayload
+      };
+      tasks.push(poolManager.executeCommand(request));
     }
 
     const enqueueElapsedMs = Math.max(1, Date.now() - startTime);
     await Promise.all(tasks);
     const elapsedMs = Math.max(1, Date.now() - startTime);
-    const afterLane = scheduler.getStatus().lanes[testCase.laneType];
+    const afterLane = poolManager.getStatus().pools[testCase.poolType];
     const submittedDelta = afterLane ? afterLane.submittedTasks - beforeSubmitted : 0;
     const completedDelta = afterLane ? afterLane.completedTasks - beforeCompleted : 0;
     const failedDelta = afterLane ? afterLane.failedTasks - beforeFailed : 0;
@@ -1027,28 +1030,24 @@ export struct DBCacheLimitTestPage {
     const enqueueRate = (testCase.taskCount * 1000) / enqueueElapsedMs;
 
     this.appendResult(`\n[Single Lane Benchmark] ${testCase.label}\n`);
-    this.appendResult(`Lane: ${testCase.laneType}, tasks=${testCase.taskCount}, syntheticCost=${testCase.taskCostMs}ms, serial=${testCase.useSerialKey}\n`);
+    this.appendResult(`Pool: ${testCase.poolType}, commands=${testCase.taskCount}, syntheticCostHint=${testCase.taskCostMs}ms, max=${afterLane ? afterLane.maxConcurrency : 0}\n`);
     this.appendResult(`Before: ${this.formatLaneBenchmarkStatus(beforeLane)}\n`);
     this.appendResult(`Submit: elapsed=${enqueueElapsedMs}ms, rate~${this.formatRateValue(enqueueRate)} task/s\n`);
     this.appendResult(`Drain: elapsed=${elapsedMs}ms, throughput~${this.formatRateValue(throughput)} task/s\n`);
     this.appendResult(`Delta: submitted=${submittedDelta}, completed=${completedDelta}, failed=${failedDelta}\n`);
     this.appendResult(`After: ${this.formatLaneBenchmarkStatus(afterLane)}\n`);
     if (afterLane && (afterLane.pending > 0 || afterLane.running > 0)) {
-      this.appendResult(`Lane Backlog Signal: pending=${afterLane.pending}, running=${afterLane.running}; lane is still busy after this case.\n`);
+      this.appendResult(`Pool Backlog Signal: pending=${afterLane.pending}, running=${afterLane.running}; pool is still busy after this case.\n`);
     } else {
-      this.appendResult('Lane Backlog Signal: no backlog after this case.\n');
+      this.appendResult('Pool Backlog Signal: no backlog after this case.\n');
     }
   }
 
-  private formatLaneBenchmarkStatus(lane: SDKLaneStatus | undefined): string {
+  private formatLaneBenchmarkStatus(lane: SDKDedicatedPoolStatus | undefined): string {
     if (!lane) {
       return 'unavailable';
     }
-    return `pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, ${this.formatLaneDispatchStatus(lane)}`;
-  }
-
-  private formatLaneDispatchStatus(lane: SDKLaneStatus): string {
-    return `dispatchCount=${lane.dispatchCount}, avgDispatchCost=${lane.averageDispatchTime.toFixed(1)}ms, maxDispatchCost=${lane.maxDispatchTime.toFixed(1)}ms, lastDispatchCost=${lane.lastDispatchTime.toFixed(1)}ms, avgScanCount=${lane.averageScanCount.toFixed(1)}, maxScanCount=${lane.maxScanCount}, lastScanCount=${lane.lastScanCount}`;
+    return `pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, backend=${lane.backend}`;
   }
 
   private appendCurrentMachineSnapshot(): void {
@@ -1113,19 +1112,28 @@ export struct DBCacheLimitTestPage {
 
   private appendSchedulerLaneSnapshots(): void {
     try {
-      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
-      this.appendResult(`Scheduler: shutdown=${schedulerStatus.isShutdown}, activeSingleFlight=${schedulerStatus.activeSingleFlightTasks}, rescheduledSingleFlight=${schedulerStatus.rescheduledSingleFlightTasks}\n`);
+      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus();
+      const uploadCommandLane = poolStatus.pools[SDKDedicatedPoolType.DATA_UPLOAD];
+      if (uploadCommandLane) {
+        this.appendResult(`Dedicated Pool Upload Command: pending=${uploadCommandLane.pending}, running=${uploadCommandLane.running}, backend=${uploadCommandLane.backend}\n`);
+      }
 
-      const laneNames = ['log', 'event', 'data-process', 'upload', 'inner-log-file'];
-      for (const laneName of laneNames) {
-        const lane = schedulerStatus.lanes[laneName];
+      const poolTypes: SDKDedicatedPoolType[] = [
+        SDKDedicatedPoolType.LOG_CONSUMER,
+        SDKDedicatedPoolType.EVENT_CONSUMER,
+        SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.DATA_UPLOAD,
+        SDKDedicatedPoolType.BACKGROUND
+      ];
+      for (const poolType of poolTypes) {
+        const lane = poolStatus.pools[poolType];
         if (!lane) {
           continue;
         }
-        this.appendResult(`Lane ${laneName}: pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, ${this.formatLaneDispatchStatus(lane)}\n`);
+        this.appendResult(`Pool ${poolType}: pending=${lane.pending}, running=${lane.running}, max=${lane.maxConcurrency}, submitted=${lane.submittedTasks}, completed=${lane.completedTasks}, failed=${lane.failedTasks}, avgWait=${lane.averageWaitTime.toFixed(1)}ms, avgCost=${lane.averageCostTime.toFixed(1)}ms, backend=${lane.backend}\n`);
       }
     } catch (error) {
-      this.appendResult(`Scheduler status unavailable: ${error}\n`);
+      this.appendResult(`Dedicated pool status unavailable: ${error}\n`);
     }
   }
 
@@ -1134,12 +1142,12 @@ export struct DBCacheLimitTestPage {
 
     try {
       const syncStatus = SyncTaskManager.getInstance().getStatus();
-      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
-      const logLane = schedulerStatus.lanes['log'];
-      const eventLane = schedulerStatus.lanes['event'];
-      const dataProcessLane = schedulerStatus.lanes['data-process'];
-      const uploadLane = schedulerStatus.lanes['upload'];
-      const innerLogLane = schedulerStatus.lanes['inner-log-file'];
+      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus();
+      const logLane = poolStatus.pools[SDKDedicatedPoolType.LOG_CONSUMER];
+      const eventLane = poolStatus.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+      const dataProcessLane = poolStatus.pools[SDKDedicatedPoolType.DATA_PROCESS];
+      const uploadLane = poolStatus.pools[SDKDedicatedPoolType.DATA_UPLOAD];
+      const innerLogLane = poolStatus.pools[SDKDedicatedPoolType.BACKGROUND];
       const logProcessRate = this.estimateLogProcessRate(logLane);
       const eventRate = this.estimateLaneRate(eventLane, 1, DEFAULT_EVENT_COST_MS);
       const dataProcessRate = this.estimateLaneRate(dataProcessLane, 2, DEFAULT_DATA_PROCESS_COST_MS);
@@ -1165,42 +1173,42 @@ export struct DBCacheLimitTestPage {
     }
   }
 
-  private estimateLogProcessRate(logLane: SDKLaneStatus | undefined): number {
+  private estimateLogProcessRate(logLane: SDKDedicatedPoolStatus | undefined): number {
     const concurrency = this.getLaneMaxConcurrency(logLane, 1);
     return (SDK_LOG_FLUSH_BATCH_SIZE * concurrency * 1000) / SDK_LOG_PROCESS_COALESCE_MS;
   }
 
-  private estimateInnerLogFileRate(innerLogLane: SDKLaneStatus | undefined): number {
+  private estimateInnerLogFileRate(innerLogLane: SDKDedicatedPoolStatus | undefined): number {
     const innerLogStatus = FTInnerLogFileManager.getInstance().getStatus();
     const laneRate = this.estimateLaneRate(innerLogLane, 1, DEFAULT_INNER_LOG_FILE_COST_MS);
     return laneRate * Math.max(1, innerLogStatus.flushBatchSize);
   }
 
-  private estimateUploadPollRate(uploadLane: SDKLaneStatus | undefined): number {
+  private estimateUploadPollRate(uploadLane: SDKDedicatedPoolStatus | undefined): number {
     return this.estimateLaneRate(uploadLane, 1, DEFAULT_UPLOAD_COST_MS);
   }
 
-  private estimateLaneRate(lane: SDKLaneStatus | undefined, fallbackConcurrency: number, fallbackCostMs: number): number {
+  private estimateLaneRate(lane: SDKDedicatedPoolStatus | undefined, fallbackConcurrency: number, fallbackCostMs: number): number {
     const concurrency = this.getLaneMaxConcurrency(lane, fallbackConcurrency);
     const costMs = Math.max(1, this.getLaneAverageCostMs(lane, fallbackCostMs));
     return (concurrency * 1000) / costMs;
   }
 
-  private getLaneMaxConcurrency(lane: SDKLaneStatus | undefined, fallback: number): number {
+  private getLaneMaxConcurrency(lane: SDKDedicatedPoolStatus | undefined, fallback: number): number {
     if (!lane) {
       return fallback;
     }
     return Math.max(1, lane.maxConcurrency);
   }
 
-  private getLaneAverageCostMs(lane: SDKLaneStatus | undefined, fallback: number): number {
+  private getLaneAverageCostMs(lane: SDKDedicatedPoolStatus | undefined, fallback: number): number {
     if (!lane || lane.averageCostTime <= 0) {
       return fallback;
     }
     return lane.averageCostTime;
   }
 
-  private formatLaneCost(lane: SDKLaneStatus | undefined, fallback: number): string {
+  private formatLaneCost(lane: SDKDedicatedPoolStatus | undefined, fallback: number): string {
     return `${this.formatRateValue(this.getLaneAverageCostMs(lane, fallback))}ms`;
   }
 
@@ -1233,7 +1241,6 @@ export struct DBCacheLimitTestPage {
   }
 
   private async appendPhysicalLimitProbe(useLargeProbe: boolean = false): Promise<void> {
-    const dbManager = FTDBManager.getInstance(this.context);
     const runId = `PhysicalLimit_${Date.now()}`;
     const logCount = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_LOG_COUNT : PHYSICAL_LIMIT_PROBE_LOG_COUNT;
     const rumCount = useLargeProbe ? LARGE_PHYSICAL_LIMIT_PROBE_RUM_COUNT : PHYSICAL_LIMIT_PROBE_RUM_COUNT;
@@ -1244,8 +1251,8 @@ export struct DBCacheLimitTestPage {
     const rumMarkers = this.buildLogMarkers(`${runId}_rum`, rumCount);
     const syncTaskManager = SyncTaskManager.getInstance();
     const originalAutoSync = syncTaskManager.isAutoSyncEnabled();
-    const beforeDbSize = await dbManager.getCurrentDatabaseSize();
-    const beforeLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+    const beforeDbSize = await this.queryCurrentDbSize();
+    const beforeLogCount = await this.queryDbCount([DataType.LOG]);
     const beforeRumCount = await this.getRumDbCount();
 
     this.appendResult('\n[Physical Probe Input]\n');
@@ -1273,8 +1280,8 @@ export struct DBCacheLimitTestPage {
       const writeElapsedMs = Date.now() - writeStartTime;
       const drainResult = await this.waitForPhysicalProbeDrain(logMarkers, rumMarkers, settleMs);
 
-      const afterDbSize = await dbManager.getCurrentDatabaseSize();
-      const afterLogCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const afterDbSize = await this.queryCurrentDbSize();
+      const afterLogCount = await this.queryDbCount([DataType.LOG]);
       const afterRumCount = await this.getRumDbCount();
       const logMissing = drainResult.logMissing;
       const rumMissing = drainResult.rumMissing;
@@ -1335,6 +1342,8 @@ export struct DBCacheLimitTestPage {
       FTLogger.flush();
       if (delayMs > 0) {
         await this.waitForWriteSettled(delayMs);
+      } else {
+        await this.yieldToUi();
       }
     }
     this.writeCount += markers.length;
@@ -1349,6 +1358,8 @@ export struct DBCacheLimitTestPage {
       }
       if (delayMs > 0) {
         await this.waitForWriteSettled(delayMs);
+      } else {
+        await this.yieldToUi();
       }
     }
     this.writeCount += markers.length;
@@ -1540,7 +1551,7 @@ export struct DBCacheLimitTestPage {
   /**
    * Write logs in batch
    */
-  private writeLogsBatch(count: number) {
+  private async writeLogsBatch(count: number): Promise<void> {
     this.isRunning = true;
     this.appendResult(`=== Writing ${count} Logs ===\n`);
     
@@ -1548,6 +1559,9 @@ export struct DBCacheLimitTestPage {
       for (let i = 0; i < count; i++) {
         const logMessage = `Batch log ${i + 1} - ${new Date().toISOString()}`;
         FTLogger.logBackground(logMessage, Status.INFO, undefined, true);
+        if ((i + 1) % 50 === 0) {
+          await this.yieldToUi();
+        }
       }
       
       this.writeCount += count;
@@ -1569,7 +1583,7 @@ export struct DBCacheLimitTestPage {
   /**
    * Write RUM data in batch
    */
-  private writeRUMBatch(count: number) {
+  private async writeRUMBatch(count: number): Promise<void> {
     this.isRunning = true;
     this.appendResult(`=== Writing ${count} RUM Data ===\n`);
     
@@ -1579,6 +1593,9 @@ export struct DBCacheLimitTestPage {
       for (let i = 0; i < count; i++) {
         rumManager.addAction(`BatchAction_${i}`, 'click');
         rumManager.addCustomError(`BatchError_${i}`, `Error ${i}`);
+        if ((i + 1) % 25 === 0) {
+          await this.yieldToUi();
+        }
       }
       
       this.writeCount += count * 2;
@@ -1608,9 +1625,8 @@ export struct DBCacheLimitTestPage {
     this.dbMetricsRefreshing = true;
     this.lastDbMetricsRefreshTime = now;
     try {
-      const dbManager = FTDBManager.getInstance(this.context);
-      const actualDbSize = await dbManager.getCurrentDatabaseSize();
-      const logDbCount = await dbManager.queryTotalCount([DataType.LOG]);
+      const actualDbSize = await this.queryCurrentDbSize();
+      const logDbCount = await this.queryDbCount([DataType.LOG]);
       const rumDbCount = await this.getRumDbCount();
       FTDBCachePolicy.getInstance().setCurrentDbSize(actualDbSize);
       this.currentDbSize = this.formatBytes(actualDbSize);
@@ -1666,19 +1682,41 @@ export struct DBCacheLimitTestPage {
     return '';
   }
 
+  private async queryCurrentDbSize(): Promise<number> {
+    return await FTDBTaskPoolExecutor.getCurrentDatabaseSize(this.context);
+  }
+
+  private async queryDbCount(types: DataType[]): Promise<number> {
+    return await FTDBTaskPoolExecutor.queryTotalCount(this.context, this.toDbDataTypeStrings(types));
+  }
+
+  private async queryDbSamples(types: DataType[], limit: number, newestFirst: boolean): Promise<SyncData[]> {
+    return await FTDBTaskPoolExecutor.querySyncData(
+      this.context,
+      this.toDbDataTypeStrings(types),
+      limit,
+      newestFirst
+    );
+  }
+
+  private toDbDataTypeStrings(types: DataType[]): string[] {
+    const result: string[] = [];
+    for (let i = 0; i < types.length; i++) {
+      result.push(types[i].toString());
+    }
+    return result;
+  }
+
   private async getRumDbCount(): Promise<number> {
-    const dbManager = FTDBManager.getInstance(this.context);
-    return await dbManager.queryTotalCount([DataType.RUM_APP, DataType.RUM_WEBVIEW]);
+    return await this.queryDbCount([DataType.RUM_APP, DataType.RUM_WEBVIEW]);
   }
 
   private async queryRumDbSamples(limit: number, newestFirst: boolean): Promise<SyncData[]> {
-    const dbManager = FTDBManager.getInstance(this.context);
-    return await dbManager.queryFtOperation([DataType.RUM_APP, DataType.RUM_WEBVIEW], limit, newestFirst);
+    return await this.queryDbSamples([DataType.RUM_APP, DataType.RUM_WEBVIEW], limit, newestFirst);
   }
 
   private async queryLogDbSamples(limit: number, newestFirst: boolean): Promise<SyncData[]> {
-    const dbManager = FTDBManager.getInstance(this.context);
-    return await dbManager.queryFtOperation([DataType.LOG], limit, newestFirst);
+    return await this.queryDbSamples([DataType.LOG], limit, newestFirst);
   }
 
   private containsMarker(dataList: SyncData[], marker: string): boolean {
@@ -1705,6 +1743,10 @@ export struct DBCacheLimitTestPage {
         resolve();
       }, delayMs);
     });
+  }
+
+  private yieldToUi(): Promise<void> {
+    return this.waitForWriteSettled(0);
   }
 
   private findMissingMarkers(dataList: SyncData[], markers: string[]): string[] {
@@ -2104,20 +2146,48 @@ export struct DBCacheLimitTestPage {
    * Append a test result
    */
   private appendResult(text: string) {
-    this.testResults += text;
-    const lines = this.testResults.split('\n');
-    if (lines.length > MAX_RESULT_LINES) {
-      this.testResults = lines.slice(lines.length - MAX_RESULT_LINES).join('\n');
+    this.appendResultToBuffer(text);
+    this.scheduleResultFlush();
+
+    const trimmed = text.trim();
+    if (trimmed.length > 0) {
+      DemoLogger.i(TAG, trimmed.length > 1000 ? `${trimmed.substring(0, 1000)}...` : trimmed);
     }
-    if (text.trim().length > 0) {
-      DemoLogger.i(TAG, text.trim());
+  }
+
+  private appendResultToBuffer(text: string): void {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      this.resultLines.push(lines[i]);
     }
+    if (this.resultLines.length > MAX_RESULT_LINES) {
+      this.resultLines.splice(0, this.resultLines.length - MAX_RESULT_LINES);
+    }
+  }
+
+  private scheduleResultFlush(): void {
+    if (this.resultFlushTimer !== -1) {
+      return;
+    }
+    this.resultFlushTimer = setTimeout(() => {
+      this.resultFlushTimer = -1;
+      this.flushResultBuffer();
+    }, 100) as number;
+  }
+
+  private flushResultBuffer(): void {
+    this.testResults = this.resultLines.join('\n');
   }
 
   /**
    * Clear the visible test results.
    */
   private clearResults() {
+    if (this.resultFlushTimer !== -1) {
+      clearTimeout(this.resultFlushTimer);
+      this.resultFlushTimer = -1;
+    }
+    this.resultLines = [];
     this.testResults = '';
     DemoLogger.i(TAG, 'Test results cleared');
   }

@@ -38,7 +38,7 @@ function createContext(): Context {
   return new Object() as Context;
 }
 
-class FakeCachePolicyDbManager {
+class FakeCachePolicyDbTaskPool {
   currentDbSize: number = 0;
   totalCount: number = 0;
   logTotalCount: number = -1;
@@ -50,26 +50,27 @@ class FakeCachePolicyDbManager {
   lastDeleteTypes: string = '';
   lastQueryTypes: string = '';
 
-  async getCurrentDatabaseSize(): Promise<number> {
+  async getCurrentDatabaseSize(_context: Context): Promise<number> {
     this.currentDatabaseSizeCallCount++;
     return this.currentDbSize;
   }
 
-  async deleteOldestData(types: DataType | DataType[], limit: number): Promise<void> {
+  async deleteOldestSyncData(_context: Context, dataTypes: string[], limit: number): Promise<number> {
     this.deleteCount++;
     this.lastDeleteLimit = limit;
-    this.lastDeleteTypes = Array.isArray(types) ? types.map(type => type.toString()).join(',') : types.toString();
+    this.lastDeleteTypes = dataTypes.join(',');
+    return limit;
   }
 
-  async queryTotalCount(types: DataType[]): Promise<number> {
+  async queryTotalCount(_context: Context, dataTypes: string[]): Promise<number> {
     this.queryTotalCountCallCount++;
-    this.lastQueryTypes = types.map(type => type.toString()).join(',');
+    this.lastQueryTypes = dataTypes.join(',');
     let hasLog = false;
     let hasRum = false;
-    for (let i = 0; i < types.length; i++) {
-      if (types[i] === DataType.LOG) {
+    for (let i = 0; i < dataTypes.length; i++) {
+      if (dataTypes[i] === DataType.LOG.toString()) {
         hasLog = true;
-      } else if (types[i] === DataType.RUM_APP || types[i] === DataType.RUM_WEBVIEW) {
+      } else if (dataTypes[i] === DataType.RUM_APP.toString() || dataTypes[i] === DataType.RUM_WEBVIEW.toString()) {
         hasRum = true;
       }
     }
@@ -84,10 +85,18 @@ class FakeCachePolicyDbManager {
 }
 
 class FakeCachePolicyRuntime {
-  dbManager: FakeCachePolicyDbManager = new FakeCachePolicyDbManager();
+  dbTaskPool: FakeCachePolicyDbTaskPool = new FakeCachePolicyDbTaskPool();
 
-  getDbManager(_context: Context): Object {
-    return this.dbManager;
+  async getCurrentDatabaseSize(context: Context): Promise<number> {
+    return await this.dbTaskPool.getCurrentDatabaseSize(context);
+  }
+
+  async deleteOldestSyncData(context: Context, dataTypes: string[], limit: number): Promise<number> {
+    return await this.dbTaskPool.deleteOldestSyncData(context, dataTypes, limit);
+  }
+
+  async queryTotalCount(context: Context, dataTypes: string[]): Promise<number> {
+    return await this.dbTaskPool.queryTotalCount(context, dataTypes);
   }
 }
 
@@ -164,7 +173,7 @@ export default function cachePolicyUnitTest() {
 
     it('dbSizePolicyShouldApplyOldestDiscard', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
-      runtime.dbManager.totalCount = 3;
+      runtime.dbTaskPool.totalCount = 3;
       DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
@@ -173,12 +182,12 @@ export default function cachePolicyUnitTest() {
         .enableLimitWithDbSize(Constants.MINI_CACHE_LIMIT_SIZE)
         .setDbCacheDiscard(DBCacheDiscard.DISCARD_OLDEST);
       cachePolicy.initSDKParams(new TestConfigRecord(config));
-      runtime.dbManager.currentDbSize = cachePolicy.getDbLimitSize();
+      runtime.dbTaskPool.currentDbSize = cachePolicy.getDbLimitSize();
 
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(5);
-      expect(runtime.dbManager.deleteCount).assertEqual(1);
-      expect(runtime.dbManager.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
-      expect(runtime.dbManager.lastDeleteTypes).assertEqual(DataType.LOG.toString());
+      expect(runtime.dbTaskPool.deleteCount).assertEqual(1);
+      expect(runtime.dbTaskPool.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
+      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual(DataType.LOG.toString());
     });
 
     it('cachePolicyShouldIgnoreCountUpdates', 0, () => {
@@ -206,8 +215,8 @@ export default function cachePolicyUnitTest() {
 
     it('countPolicyShouldRecoverExistingDbCountsBeforeFirstWrite', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
-      runtime.dbManager.logTotalCount = 5;
-      runtime.dbManager.rumTotalCount = 4;
+      runtime.dbTaskPool.logTotalCount = 5;
+      runtime.dbTaskPool.rumTotalCount = 4;
       DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
@@ -219,16 +228,16 @@ export default function cachePolicyUnitTest() {
       expect(await cachePolicy.optLogCachePolicy(context, 1)).assertEqual(-1);
       expect(cachePolicy.getLogCount()).assertEqual(5);
       expect(cachePolicy.getRumCount()).assertEqual(4);
-      expect(runtime.dbManager.queryTotalCountCallCount).assertEqual(2);
+      expect(runtime.dbTaskPool.queryTotalCountCallCount).assertEqual(2);
 
       expect(await cachePolicy.optRUMCachePolicy(context, 1)).assertEqual(-1);
-      expect(runtime.dbManager.queryTotalCountCallCount).assertEqual(2);
+      expect(runtime.dbTaskPool.queryTotalCountCallCount).assertEqual(2);
     });
 
     it('dbSizePolicyShouldSkipCountInitialization', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
-      runtime.dbManager.logTotalCount = 100;
-      runtime.dbManager.rumTotalCount = 100;
+      runtime.dbTaskPool.logTotalCount = 100;
+      runtime.dbTaskPool.rumTotalCount = 100;
       DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
@@ -236,17 +245,17 @@ export default function cachePolicyUnitTest() {
       cachePolicy.initSDKParams(new TestConfigRecord(FTSDKConfig.builder(TEST_FAKE_URL)
         .enableLimitWithDbSize(Constants.MINI_CACHE_LIMIT_SIZE)
         .setDbCacheDiscard(DBCacheDiscard.DISCARD)));
-      runtime.dbManager.currentDbSize = cachePolicy.getDbLimitSize();
+      runtime.dbTaskPool.currentDbSize = cachePolicy.getDbLimitSize();
 
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(-5);
       expect(await cachePolicy.optRUMCachePolicy(context, 5)).assertEqual(-1);
-      expect(runtime.dbManager.queryTotalCountCallCount).assertEqual(0);
-      expect(runtime.dbManager.currentDatabaseSizeCallCount).assertEqual(2);
+      expect(runtime.dbTaskPool.queryTotalCountCallCount).assertEqual(0);
+      expect(runtime.dbTaskPool.currentDatabaseSizeCallCount).assertEqual(2);
     });
 
     it('countPolicyShouldDeleteOrDiscard', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
-      runtime.dbManager.totalCount = 4;
+      runtime.dbTaskPool.totalCount = 4;
       DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
@@ -260,8 +269,8 @@ export default function cachePolicyUnitTest() {
 
       expect(await cachePolicy.optLogCachePolicy(context, 3)).assertEqual(2);
       expect(await cachePolicy.optRUMCachePolicy(context, 7)).assertEqual(1);
-      expect(runtime.dbManager.deleteCount).assertEqual(2);
-      expect(runtime.dbManager.lastDeleteTypes).assertEqual(`${DataType.RUM_APP.toString()},${DataType.RUM_WEBVIEW.toString()}`);
+      expect(runtime.dbTaskPool.deleteCount).assertEqual(2);
+      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual(`${DataType.RUM_APP.toString()},${DataType.RUM_WEBVIEW.toString()}`);
 
       cachePolicy.resetCounts();
       cachePolicy.initSDKParams(new TestConfigRecord(FTSDKConfig.builder(TEST_FAKE_URL)
@@ -277,7 +286,7 @@ export default function cachePolicyUnitTest() {
 
     it('dbSizePolicyShouldDeleteOrDiscard', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
-      runtime.dbManager.totalCount = 11;
+      runtime.dbTaskPool.totalCount = 11;
       DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
       const context = createContext();
@@ -286,17 +295,17 @@ export default function cachePolicyUnitTest() {
         .enableLimitWithDbSize(4096)
         .setDbCacheDiscard(DBCacheDiscard.DISCARD_OLDEST);
       cachePolicy.initSDKParams(new TestConfigRecord(oldestConfig));
-      runtime.dbManager.currentDbSize = cachePolicy.getDbLimitSize();
+      runtime.dbTaskPool.currentDbSize = cachePolicy.getDbLimitSize();
 
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(5);
-      expect(runtime.dbManager.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
-      expect(runtime.dbManager.lastDeleteTypes).assertEqual(DataType.LOG.toString());
+      expect(runtime.dbTaskPool.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
+      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual(DataType.LOG.toString());
 
       const discardConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .setDbCacheLimit(4096)
         .setDbCacheDiscard(DBCacheDiscard.DISCARD);
       cachePolicy.initSDKParams(new TestConfigRecord(discardConfig));
-      runtime.dbManager.currentDbSize = cachePolicy.getDbLimitSize();
+      runtime.dbTaskPool.currentDbSize = cachePolicy.getDbLimitSize();
 
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(-5);
       expect(await cachePolicy.optRUMCachePolicy(context, 5)).assertEqual(-1);

@@ -18,6 +18,7 @@ import { FTNetworkListener } from "./utils/FTNetworkListener";
 import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
+import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
 import { FTRUMGlobalManager } from "./rum/FTRUMGlobalManager";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
@@ -28,7 +29,6 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
-import { SDKDedicatedPoolManager } from "./thread/SDKDedicatedPoolManager";
 
 const TAG = "FTSDK"
 
@@ -184,6 +184,10 @@ export class FTSDK {
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
+      FTDBSpoolManager.getInstance().init(context);
+      FTDBSpoolManager.getInstance().replay(context, "sdk.init").catch((error: Error) => {
+        FTInnerLogger.e(TAG, `DB spool replay on init failed: ${error.message}`);
+      });
       UserDataManager.getInstance().init(context);
       DeviceUUIDManager.getInstance().init(context);
 
@@ -699,10 +703,7 @@ export class FTSDK {
         return;
       }
 
-      await SDKDedicatedPoolManager.getInstance().runDbWrite(
-        'sdk.clearAllData',
-        async () => await FTDBManager.getInstance(context).delete()
-      );
+      await FTDBManager.getInstance(context).delete();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {
@@ -722,7 +723,14 @@ export class FTSDK {
         return;
       }
 
-      SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
+      FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> [FLUSH] requested`);
+      FTTrackInner.getInstance().flushPendingWorkerDataBeforeUpload().then(() => {
+        FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> [FLUSH] worker-drained scheduling upload`);
+        SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
+      }).catch((error: Error) => {
+        FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FLUSH] worker-drain failed scheduling upload: ${error.message}`);
+        SyncTaskManager.getInstance().executePoll(false);
+      });
       FTInnerLogger.d(TAG, "flushSyncData triggered");
     } catch (error) {
       FTInnerLogger.e(TAG, `flushSyncData failed: ${error}`);

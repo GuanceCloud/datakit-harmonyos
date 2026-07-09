@@ -13,25 +13,18 @@ import { PreparedLineProtocolContent, SyncDataHelper } from './SyncDataHelper';
 import { SyncTaskManager } from './SyncTaskManager';
 import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
-import {
-  SDKTaskPriority,
-  SDKTaskRunner,
-  SDKTaskScheduler,
-  SDKTaskType
-} from './thread/SDKTaskScheduler';
-import {
-  createSDKWorkerTaskBridgeHandler,
-  createSDKWorkerTaskFallbackRunner,
-  createSDKWorkerTaskRequest
-} from './thread/SDKWorkerTaskBridge';
 import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
+  SDKLineProtocolContextDTO,
   SDKLineProtocolInputDTO,
   SDKLogDTO,
+  SDKRumCounterDeltaDTO,
+  SDKRumEventBatchDTO,
   SDKRumEventDTO,
   SDKStringRecord,
   SDKSyncDataDraftDTO,
+  SDKTaskPriority,
   SDKWorkerCommand,
   SDKWorkerPayload,
   SDKWorkerRequest,
@@ -40,10 +33,14 @@ import {
 import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
 import { FTDBCachePolicy } from './db/FTDBCachePolicy';
+import { FTDBSpoolManager } from './db/FTDBSpoolManager';
+import { FTDBTaskPoolSyncDraftDTO } from './db/FTDBTaskPoolExecutor';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
 const TAG = "FTTrackInner";
+const RUM_WORKER_EVENT_BATCH_SIZE = 64;
+const RUM_WORKER_EVENT_BATCH_DELAY_MS = 16;
 
 enum WriteCacheCategory {
   LOG = 'log',
@@ -71,7 +68,10 @@ interface SDKLineProtocolDraftsResponsePayload {
 }
 
 interface SDKRumCommandResponsePayload {
-  syncDrafts: SDKSyncDataDraftDTO[];
+  syncDrafts?: SDKSyncDataDraftDTO[];
+  deltas?: SDKRumCounterDeltaDTO[];
+  needsActionCloseCheck?: boolean;
+  needsRumDataGenerate?: boolean;
 }
 
 interface SDKLineProtocolRecordsRequestPayload {
@@ -92,17 +92,48 @@ interface SyncDataCacheCountSummary {
   rum: number;
 }
 
+interface PendingRumWorkerCallback {
+  source: string;
+  dataType: DataType;
+  customDataType?: string;
+  measurement: string;
+  callBack: RunnerCompleteCallBack | null;
+  callbackOnFinish: boolean;
+}
+
+interface PendingRumWorkerEventCommand {
+  source: string;
+  dataType: DataType;
+  customDataType?: string;
+  measurement: string;
+  rumEvent: SDKRumEventDTO;
+}
+
+interface SDKWorkerDrainBarrierPayload {
+  probe: boolean;
+  source: string;
+}
+
 /**
  * Data Tracking Core Class
  * Responsible for data collection, storage, and sync triggering
  */
 class FTTrackInner {
   private static instance: FTTrackInner | null = null;
-  private static dataProcessTaskSequence: number = 0;
   private static rumWorkerTaskSequence: number = 0;
+  private static lineContextCommandSequence: number = 0;
+  private static workerDrainBarrierSequence: number = 0;
   private dataHelper: SyncDataHelper;
   private syncTaskManager: SyncTaskManager;
   private trackLogManager: TrackLogManager;
+  private pendingRumWorkerCallbacks: Map<string, PendingRumWorkerCallback> = new Map();
+  private pendingRumWorkerEvents: PendingRumWorkerEventCommand[] = [];
+  private rumWorkerEventFlushTimer: number | null = null;
+  private workerLineProtocolContextSnapshot: SDKLineProtocolContextDTO | null = null;
+  private workerLineProtocolContextVersion: number = 0;
+  private syncedLineContextVersionByPool: Map<SDKDedicatedPoolType, number> = new Map();
+  private syncedLineContextRestartByPool: Map<SDKDedicatedPoolType, number> = new Map();
+  private pendingWorkerDbWriteCount: number = 0;
   // SessionReplay functionality has been migrated to independent library
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
@@ -145,41 +176,6 @@ class FTTrackInner {
     FTTrackInner.instance = null;
   }
 
-  private submitDataProcessTask(name: string, task: SDKTaskRunner): void {
-    const traceName = this.nextDataProcessTaskName(name);
-    const command = SDKWorkerCommand.DATA_RUN;
-    const runTask = async () => {
-      const startTime = Date.now();
-      let result = 'success';
-      let errorMessage = '';
-      try {
-        await Promise.resolve(task());
-      } catch (error) {
-        result = 'failed';
-        errorMessage = String(error);
-        throw new Error(errorMessage);
-      } finally {
-        const costTime = Math.max(0, Date.now() - startTime);
-        const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-        this.traceDataLane(`[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms`);
-      }
-    };
-    SDKTaskScheduler.getInstance().submitTask({
-      type: SDKTaskType.DATA_PROCESS,
-      name: traceName,
-      priority: SDKTaskPriority.LOW,
-      costHint: 'normal',
-      workerRequest: createSDKWorkerTaskRequest(
-        SDKDedicatedPoolType.DATA_PROCESS,
-        command,
-        traceName,
-        SDKTaskPriority.LOW
-      ),
-      workerFallbackRunner: createSDKWorkerTaskFallbackRunner(traceName, command, runTask),
-      workerBridgeHandler: createSDKWorkerTaskBridgeHandler(traceName, command, runTask)
-    });
-  }
-
   private submitRumWorkerDraftTask(
     source: string,
     dataType: DataType,
@@ -193,46 +189,32 @@ class FTTrackInner {
     draftUuid?: string
   ): void {
     try {
-      const traceName = this.nextRumWorkerTaskName(source);
       const uuid = draftUuid && draftUuid.length > 0 ? draftUuid : this.createRumSyncDataUuid(measurement, tags);
-      const prepared = this.dataHelper.prepareLineProtocolContent(measurement, tags, fields, time, dataType, uuid);
-      const rumEvent = this.createRumWorkerEventDTO(dataType, customDataType, measurement, prepared, uuid);
-      const workerRequest: SDKWorkerRequest = {
-        id: `${SDKWorkerCommand.EVENT_RUM_COMMAND}:${traceName}:${Date.now()}`,
-        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
-        priority: SDKTaskPriority.HIGH,
-        createdAt: Date.now(),
-        payload: rumEvent as Object as SDKWorkerPayload
-      };
-
-      SDKTaskScheduler.getInstance().submitTask({
-        type: SDKTaskType.EVENT,
-        name: traceName,
-        priority: SDKTaskPriority.HIGH,
-        serialKey: 'rum-worker-draft',
-        costHint: 'normal',
-        workerRequest,
-        workerResponseHandler: async (response: SDKWorkerResponse) => {
-          try {
-            await this.handleRumWorkerDraftResponse(
-              source,
-              dataType,
-              customDataType,
-              measurement,
-              response,
-              callBack,
-              callbackOnFinish
-            );
-          } catch (error) {
-            FTInnerLogger.e(TAG, `RUM worker draft task failed: source=${source}, measurement=${measurement}, error=${error}`);
-            if (callbackOnFinish && callBack) {
-              callBack.onComplete();
-            }
-            throw error instanceof Error ? error : new Error(String(error));
-          }
-        }
-      });
+      const lineContext = dataType === DataType.RUM_APP ? this.getWorkerLineProtocolContextSnapshot() : null;
+      const contextSynced = lineContext !== null ?
+        this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER) : false;
+      const rumEvent = lineContext === null ?
+        this.createPreparedRumWorkerEventDTO(dataType, customDataType, measurement, tags, fields, time, uuid) :
+        this.createRawRumWorkerEventDTO(
+          dataType,
+          customDataType,
+          measurement,
+          tags,
+          fields,
+          time,
+          uuid,
+          lineContext,
+          !contextSynced
+        );
+      this.postRumWorkerDraftEvent(
+        source,
+        dataType,
+        customDataType,
+        measurement,
+        rumEvent,
+        callBack,
+        callbackOnFinish
+      );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error scheduling RUM worker draft task: ${error}`);
       if (callbackOnFinish && callBack) {
@@ -241,66 +223,250 @@ class FTTrackInner {
     }
   }
 
-  private submitRumDraftWriteTask(
+  private submitRumWorkerDraftRecordTask(
     source: string,
     dataType: DataType,
     customDataType: string | undefined,
+    time: number,
     measurement: string,
-    drafts: SDKSyncDataDraftDTO[],
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
     callBack: RunnerCompleteCallBack | null,
-    callbackOnFinish: boolean
+    callbackOnFinish: boolean,
+    draftUuid?: string
   ): void {
     try {
-      const traceName = this.nextDataProcessTaskName(source);
-      const payload: SDKLineProtocolDraftsResponsePayload = {
-        drafts
-      };
-      const workerRequest: SDKWorkerRequest = {
-        id: `${SDKWorkerCommand.DATA_PASS_THROUGH_DRAFTS}:${traceName}:${Date.now()}`,
-        pool: SDKDedicatedPoolType.DATA_PROCESS,
-        command: SDKWorkerCommand.DATA_PASS_THROUGH_DRAFTS,
-        priority: SDKTaskPriority.LOW,
-        createdAt: Date.now(),
-        payload: payload as Object as SDKWorkerPayload
-      };
-
-      SDKTaskScheduler.getInstance().submitTask({
-        type: SDKTaskType.DATA_PROCESS,
-        name: traceName,
-        priority: SDKTaskPriority.LOW,
-        costHint: 'normal',
-        workerRequest,
-        workerResponseHandler: async (response: SDKWorkerResponse) => {
-          try {
-            await this.handleRumDraftWriteResponse(
-              source,
-              dataType,
-              customDataType,
-              measurement,
-              response,
-              callBack,
-              callbackOnFinish
-            );
-          } catch (error) {
-            FTInnerLogger.e(TAG, `RUM draft write task failed: source=${source}, measurement=${measurement}, error=${error}`);
-            if (callbackOnFinish && callBack) {
-              callBack.onComplete();
-            }
-            throw error instanceof Error ? error : new Error(String(error));
-          }
-        }
-      });
+      const uuid = draftUuid && draftUuid.length > 0 ? draftUuid : this.createRumSyncDataUuidFromRecord(measurement, tags);
+      const lineContext = dataType === DataType.RUM_APP ? this.getWorkerLineProtocolContextSnapshot() : null;
+      const contextSynced = lineContext !== null ?
+        this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER) : false;
+      const rumEvent = lineContext === null ?
+        this.createPreparedRumWorkerEventDTOFromRecords(dataType, customDataType, measurement, tags, fields, time, uuid) :
+        this.createRawRumWorkerEventDTOFromRecords(
+          dataType,
+          customDataType,
+          measurement,
+          tags,
+          fields,
+          time,
+          uuid,
+          lineContext,
+          !contextSynced
+        );
+      this.postRumWorkerDraftEvent(
+        source,
+        dataType,
+        customDataType,
+        measurement,
+        rumEvent,
+        callBack,
+        callbackOnFinish
+      );
     } catch (error) {
-      FTInnerLogger.e(TAG, `Error scheduling RUM draft write task: ${error}`);
+      FTInnerLogger.e(TAG, `Error scheduling RUM worker record draft task: ${error}`);
       if (callbackOnFinish && callBack) {
         callBack.onComplete();
       }
     }
   }
 
-  private nextDataProcessTaskName(name: string): string {
-    FTTrackInner.dataProcessTaskSequence++;
-    return `${name}#${FTTrackInner.dataProcessTaskSequence}`;
+  private postRumWorkerDraftEvent(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    rumEvent: SDKRumEventDTO,
+    callBack: RunnerCompleteCallBack | null,
+    callbackOnFinish: boolean
+  ): void {
+    if (!callBack && !callbackOnFinish) {
+      this.enqueueRumWorkerDraftEvent(source, dataType, customDataType, measurement, rumEvent);
+      return;
+    }
+    if (this.pendingRumWorkerEvents.length > 0) {
+      this.flushRumWorkerEventBatch('rum.beforeCallback');
+    }
+
+    const traceName = this.nextRumWorkerTaskName(source);
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COMMAND}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload: rumEvent as Object as SDKWorkerPayload
+    };
+
+    if (callBack || callbackOnFinish) {
+      this.pendingRumWorkerCallbacks.set(workerRequest.id, {
+        source,
+        dataType,
+        customDataType,
+        measurement,
+        callBack,
+        callbackOnFinish
+      });
+    }
+    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
+    if (!posted) {
+      this.pendingRumWorkerCallbacks.delete(workerRequest.id);
+      FTInnerLogger.e(TAG, `RUM worker mailbox post failed: ${traceName}`);
+      if (callbackOnFinish && callBack) {
+        callBack.onComplete();
+      }
+    }
+  }
+
+  private enqueueRumWorkerDraftEvent(
+    source: string,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    rumEvent: SDKRumEventDTO
+  ): void {
+    this.pendingRumWorkerEvents.push({
+      source,
+      dataType,
+      customDataType,
+      measurement,
+      rumEvent
+    });
+    if (this.pendingRumWorkerEvents.length >= RUM_WORKER_EVENT_BATCH_SIZE) {
+      this.flushRumWorkerEventBatch(source);
+      return;
+    }
+    this.scheduleRumWorkerEventBatchFlush(source);
+  }
+
+  private scheduleRumWorkerEventBatchFlush(source: string): void {
+    if (this.rumWorkerEventFlushTimer !== null) {
+      return;
+    }
+    this.rumWorkerEventFlushTimer = setTimeout(() => {
+      this.rumWorkerEventFlushTimer = null;
+      this.flushRumWorkerEventBatch(source);
+    }, RUM_WORKER_EVENT_BATCH_DELAY_MS) as number;
+  }
+
+  private flushRumWorkerEventBatch(source: string = 'rum.worker.batch'): void {
+    if (this.rumWorkerEventFlushTimer !== null) {
+      clearTimeout(this.rumWorkerEventFlushTimer);
+      this.rumWorkerEventFlushTimer = null;
+    }
+    if (this.pendingRumWorkerEvents.length === 0) {
+      return;
+    }
+
+    const batchSize = Math.min(RUM_WORKER_EVENT_BATCH_SIZE, this.pendingRumWorkerEvents.length);
+    const batch = this.pendingRumWorkerEvents.splice(0, batchSize);
+    const events: SDKRumEventDTO[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      events.push(batch[i].rumEvent);
+    }
+
+    const traceName = this.nextRumWorkerTaskName(`${source}.batch`);
+    const payload: SDKRumEventBatchDTO = {
+      events
+    };
+    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+      id: `${SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload: payload as Object as SDKWorkerPayload
+    });
+    if (!posted) {
+      FTInnerLogger.e(TAG, `RUM worker mailbox batch post failed: size=${batch.length}`);
+    }
+    if (this.pendingRumWorkerEvents.length > 0) {
+      this.scheduleRumWorkerEventBatchFlush(source);
+    }
+  }
+
+  public async flushPendingWorkerDataBeforeUpload(timeoutMs: number = 10000): Promise<void> {
+    this.flushAllRumWorkerEventBatches('upload.beforeQuery');
+    FTRUMInnerManager.getInstance().flushPendingWorkerCommandsBeforeUpload();
+    this.trackLogManager.forceFlush(false);
+    await this.waitForWorkerMailboxBarriers('upload.beforeQuery', timeoutMs);
+    await this.waitForWorkerMailboxAndDbWrites(timeoutMs);
+    FTInnerLogger.d(TAG, `flush pending worker data drained before upload: timeoutMs=${timeoutMs}`);
+  }
+
+  private flushAllRumWorkerEventBatches(source: string): void {
+    while (this.pendingRumWorkerEvents.length > 0) {
+      this.flushRumWorkerEventBatch(source);
+    }
+  }
+
+  private async waitForWorkerMailboxAndDbWrites(timeoutMs: number): Promise<void> {
+    const startTime = Date.now();
+    while (Date.now() - startTime <= timeoutMs) {
+      if (this.isWorkerMailboxAndDbWriteDrained()) {
+        return;
+      }
+      await this.sleep(16);
+    }
+
+    const status = SDKDedicatedPoolManager.getInstance().getStatus();
+    const eventStatus = status.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+    const logStatus = status.pools[SDKDedicatedPoolType.LOG_CONSUMER];
+    FTInnerLogger.w(TAG,
+      `flush pending worker data timeout: eventMailbox=${eventStatus ? eventStatus.mailboxPending : 0}, ` +
+        `logMailbox=${logStatus ? logStatus.mailboxPending : 0}, dbWrites=${this.pendingWorkerDbWriteCount}`);
+  }
+
+  private async waitForWorkerMailboxBarriers(source: string, timeoutMs: number): Promise<void> {
+    await this.waitForWorkerMailboxBarrier(SDKDedicatedPoolType.EVENT_CONSUMER, source, timeoutMs);
+    await this.waitForWorkerMailboxBarrier(SDKDedicatedPoolType.LOG_CONSUMER, source, timeoutMs);
+  }
+
+  private async waitForWorkerMailboxBarrier(
+    pool: SDKDedicatedPoolType,
+    source: string,
+    timeoutMs: number
+  ): Promise<void> {
+    FTTrackInner.workerDrainBarrierSequence++;
+    const requestId =
+      `${SDKWorkerCommand.PING}:drain.${pool}.${source}.${Date.now()}.${FTTrackInner.workerDrainBarrierSequence}`;
+    try {
+      const payload: SDKWorkerDrainBarrierPayload = {
+        probe: true,
+        source
+      };
+      const response = await SDKDedicatedPoolManager.getInstance().postCommandAndWait({
+        id: requestId,
+        pool,
+        command: SDKWorkerCommand.PING,
+        priority: SDKTaskPriority.LOW,
+        createdAt: Date.now(),
+        payload: payload as Object as SDKWorkerPayload
+      }, timeoutMs);
+      if (!response.ok) {
+        FTInnerLogger.w(TAG,
+          `worker mailbox drain barrier failed: pool=${pool}, source=${source}, error=${response.errorMessage || 'unknown'}`);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.w(TAG, `worker mailbox drain barrier timeout: pool=${pool}, source=${source}, error=${errorMessage}`);
+    }
+  }
+
+  private isWorkerMailboxAndDbWriteDrained(): boolean {
+    const status = SDKDedicatedPoolManager.getInstance().getStatus();
+    const eventStatus = status.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
+    const logStatus = status.pools[SDKDedicatedPoolType.LOG_CONSUMER];
+    const eventPending = eventStatus ? eventStatus.mailboxPending : 0;
+    const logPending = logStatus ? logStatus.mailboxPending : 0;
+    return eventPending === 0 && logPending === 0 && this.pendingWorkerDbWriteCount === 0;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        resolve();
+      }, ms);
+    });
   }
 
   private nextRumWorkerTaskName(name: string): string {
@@ -308,28 +474,133 @@ class FTTrackInner {
     return `${name}#${FTTrackInner.rumWorkerTaskSequence}`;
   }
 
-  private traceDataLane(message: string): void {
-    FTInnerLogger.i(TAG, `<FT-DATA-LANE> ${message}`);
-  }
-
-  private createRumWorkerEventDTO(
+  private createPreparedRumWorkerEventDTO(
     dataType: DataType,
     customDataType: string | undefined,
     measurement: string,
-    prepared: PreparedLineProtocolContent,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    time: number,
     uuid: string
   ): SDKRumEventDTO {
-    const tags = prepared.tags as SDKStringRecord;
-    const fields = prepared.fields as SDKStringRecord;
+    const prepared = this.dataHelper.prepareLineProtocolContent(measurement, tags, fields, time, dataType, uuid);
+    const event = this.createRumWorkerEventFromRecords(
+      dataType,
+      customDataType,
+      prepared.measurement,
+      prepared.tags as SDKStringRecord,
+      prepared.fields as SDKStringRecord,
+      prepared.time,
+      uuid,
+      prepared.integerCompatible
+    );
+    event.lineProtocolPrepared = true;
+    return event;
+  }
+
+  private createPreparedRumWorkerEventDTOFromRecords(
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    time: number,
+    uuid: string
+  ): SDKRumEventDTO {
+    const prepared = this.dataHelper.prepareLineProtocolContent(
+      measurement,
+      this.stringRecordToMap(tags),
+      this.stringRecordToMap(fields),
+      time,
+      dataType,
+      uuid
+    );
+    const event = this.createRumWorkerEventFromRecords(
+      dataType,
+      customDataType,
+      prepared.measurement,
+      prepared.tags as SDKStringRecord,
+      prepared.fields as SDKStringRecord,
+      prepared.time,
+      uuid,
+      prepared.integerCompatible
+    );
+    event.lineProtocolPrepared = true;
+    return event;
+  }
+
+  private createRawRumWorkerEventDTO(
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    time: number,
+    uuid: string,
+    lineContext: SDKLineProtocolContextDTO,
+    attachLineContext: boolean
+  ): SDKRumEventDTO {
+    const tagRecord = this.mapToStringRecord(tags);
+    const fieldRecord = this.mapToStringRecord(fields);
+    return this.createRawRumWorkerEventDTOFromRecords(
+      dataType,
+      customDataType,
+      measurement,
+      tagRecord,
+      fieldRecord,
+      time,
+      uuid,
+      lineContext,
+      attachLineContext
+    );
+  }
+
+  private createRawRumWorkerEventDTOFromRecords(
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    time: number,
+    uuid: string,
+    lineContext: SDKLineProtocolContextDTO,
+    attachLineContext: boolean
+  ): SDKRumEventDTO {
+    const event = this.createRumWorkerEventFromRecords(
+      dataType,
+      customDataType,
+      measurement,
+      tags,
+      fields,
+      time,
+      uuid,
+      lineContext.integerCompatible === true
+    );
+    if (attachLineContext) {
+      event.lineContext = lineContext;
+    }
+    return event;
+  }
+
+  private createRumWorkerEventFromRecords(
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    time: number,
+    uuid: string,
+    integerCompatible: boolean
+  ): SDKRumEventDTO {
     return {
       eventType: this.resolveRumWorkerEventType(measurement, fields),
       name: this.resolveRumWorkerEventName(measurement, tags, fields),
-      time: prepared.time,
+      time,
       dataType: dataType.toString(),
       customDataType,
-      measurement: prepared.measurement,
+      measurement,
       uuid,
-      integerCompatible: prepared.integerCompatible,
+      integerCompatible,
       viewId: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_ID),
       viewName: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_NAME),
       actionId: this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_ID),
@@ -341,62 +612,119 @@ class FTTrackInner {
     };
   }
 
-  private async handleRumWorkerDraftResponse(
-    source: string,
-    dataType: DataType,
-    customDataType: string | undefined,
-    measurement: string,
-    response: SDKWorkerResponse,
-    callBack: RunnerCompleteCallBack | null,
-    callbackOnFinish: boolean
-  ): Promise<void> {
+  private mapToStringRecord(map: Map<string, string>): SDKStringRecord {
+    const record: SDKStringRecord = {};
+    if (!map) {
+      return record;
+    }
+    map.forEach((value, key) => {
+      if (value !== null && value !== undefined) {
+        record[key] = String(value);
+      }
+    });
+    return record;
+  }
+
+  private handleEventMailboxResponse(response: SDKWorkerResponse): void {
+    if (this.isRumCounterMailboxResponse(response)) {
+      FTRUMInnerManager.getInstance().handleRumCounterMailboxResponse(response);
+      return;
+    }
+
+    const callback = this.pendingRumWorkerCallbacks.get(response.id);
+    if (callback) {
+      this.pendingRumWorkerCallbacks.delete(response.id);
+    }
+
     if (!response.ok) {
-      throw new Error(response.errorMessage || `RUM worker command failed: ${measurement}`);
+      FTInnerLogger.e(TAG, `EVENT mailbox command failed: id=${response.id}, error=${response.errorMessage || 'unknown'}`);
+      this.completeRumWorkerCallback(callback, false);
+      return;
     }
     if (!response.payload) {
-      throw new Error(`RUM worker command returned empty payload: ${measurement}`);
+      this.completeRumWorkerCallback(callback, false);
+      return;
     }
 
     const payload = response.payload as Object as SDKRumCommandResponsePayload;
+    if (payload.deltas && payload.deltas.length > 0) {
+      FTRUMInnerManager.getInstance().handleRumCounterDeltas(
+        payload.deltas,
+        payload.needsActionCloseCheck,
+        payload.needsRumDataGenerate
+      );
+    }
     const drafts = payload.syncDrafts || [];
     if (drafts.length === 0) {
-      if (callbackOnFinish && callBack) {
-        callBack.onComplete();
-      }
+      this.completeRumWorkerCallback(callback, true);
       return;
     }
 
-    this.submitRumDraftWriteTask(source, dataType, customDataType, measurement, drafts, callBack, callbackOnFinish);
+    const source = callback ? callback.source : 'event.mailbox.rumWorkerDraft';
+    const fallbackDataType = callback ? callback.dataType : this.resolveFallbackDataTypeFromDrafts(drafts);
+    this.pendingWorkerDbWriteCount++;
+    this.handleRumDraftWrite(
+      source,
+      fallbackDataType,
+      callback ? callback.customDataType : undefined,
+      callback ? callback.measurement : 'event.mailbox',
+      drafts,
+      callback ? callback.callBack : null,
+      callback ? callback.callbackOnFinish : false
+    ).then(() => {
+      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
+    }).catch((error: Error) => {
+      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
+      FTInnerLogger.e(TAG, `EVENT mailbox draft write failed: id=${response.id}, error=${error.message}`);
+      this.completeRumWorkerCallback(callback, false);
+    });
   }
 
-  private async handleRumDraftWriteResponse(
+  private isRumCounterMailboxResponse(response: SDKWorkerResponse): boolean {
+    if (!response || !response.id) {
+      return false;
+    }
+    return response.id.indexOf(`${SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE}:`) === 0 ||
+      response.id.indexOf(`${SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE_BATCH}:`) === 0 ||
+      response.id.indexOf(`${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:`) === 0;
+  }
+
+  private completeRumWorkerCallback(callback: PendingRumWorkerCallback | undefined, result: boolean): void {
+    if (!callback || !callback.callBack) {
+      return;
+    }
+    if (result || callback.callbackOnFinish) {
+      callback.callBack.onComplete();
+    }
+  }
+
+  private resolveFallbackDataTypeFromDrafts(drafts: SDKSyncDataDraftDTO[]): DataType {
+    if (!drafts || drafts.length === 0) {
+      return DataType.RUM_APP;
+    }
+    return this.dataTypeFromWorkerString(drafts[0].dataType, DataType.RUM_APP);
+  }
+
+  private async handleRumDraftWrite(
     source: string,
     dataType: DataType,
     customDataType: string | undefined,
     measurement: string,
-    response: SDKWorkerResponse,
+    drafts: SDKSyncDataDraftDTO[],
     callBack: RunnerCompleteCallBack | null,
     callbackOnFinish: boolean
   ): Promise<void> {
-    if (!response.ok) {
-      throw new Error(response.errorMessage || `RUM draft write command failed: ${measurement}`);
-    }
-    if (!response.payload) {
-      throw new Error(`RUM draft write command returned empty payload: ${measurement}`);
-    }
-
-    const payload = response.payload as Object as SDKLineProtocolDraftsResponsePayload;
-    const records = this.createSyncDataRecordsFromRumDrafts(payload.drafts || [], dataType);
-    if (records.length === 0) {
+    const normalizedDrafts = drafts || [];
+    if (normalizedDrafts.length === 0) {
       if (callbackOnFinish && callBack) {
         callBack.onComplete();
       }
       return;
     }
 
-    const writeResult = await this.writePreparedSyncData(source, records);
+    const writeResult = await this.writeWorkerDraftsToDb(source, normalizedDrafts, dataType);
     const result = this.getWriteAffectedCount(writeResult) > 0;
-    const firstUuid = records[0].getUuid();
+    const firstUuid = normalizedDrafts[0].uuid;
 
     if (result && customDataType && customDataType.length > 0) {
       FTInnerLogger.d(TAG,
@@ -417,17 +745,109 @@ class FTTrackInner {
     }
   }
 
-  private createSyncDataRecordsFromRumDrafts(
+  public getWorkerLineProtocolContextSnapshot(): SDKLineProtocolContextDTO | null {
+    return this.workerLineProtocolContextSnapshot;
+  }
+
+  public ensureWorkerLineProtocolContextSynced(pool: SDKDedicatedPoolType): boolean {
+    const currentVersion = this.workerLineProtocolContextVersion;
+    const restartCount = SDKDedicatedPoolManager.getInstance().getPoolRestartCount(pool);
+    const syncedVersion = this.syncedLineContextVersionByPool.get(pool);
+    const syncedRestart = this.syncedLineContextRestartByPool.get(pool);
+    if (syncedVersion === currentVersion && syncedRestart === restartCount) {
+      return true;
+    }
+
+    FTTrackInner.lineContextCommandSequence++;
+    const payload: SDKWorkerPayload = this.workerLineProtocolContextSnapshot === null ?
+      null : this.workerLineProtocolContextSnapshot as Object as SDKWorkerPayload;
+    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+      id: `${SDKWorkerCommand.LINE_CONTEXT_UPDATE}:${pool}:${currentVersion}:${FTTrackInner.lineContextCommandSequence}`,
+      pool,
+      command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now(),
+      payload
+    });
+    if (posted) {
+      this.syncedLineContextVersionByPool.set(pool, currentVersion);
+      this.syncedLineContextRestartByPool.set(pool, restartCount);
+    }
+    return posted;
+  }
+
+  private refreshWorkerLineProtocolContextSnapshot(): void {
+    this.flushRumWorkerEventBatch('lineContext.beforeUpdate');
+    this.workerLineProtocolContextSnapshot = this.dataHelper.createWorkerLineProtocolContextSnapshot();
+    this.workerLineProtocolContextVersion++;
+    this.syncedLineContextVersionByPool.clear();
+    this.syncedLineContextRestartByPool.clear();
+  }
+
+  private syncLineProtocolContextToDefaultWorkers(): void {
+    this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
+    this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.LOG_CONSUMER);
+  }
+
+  public writeLogDraftsFromWorker(drafts: SDKSyncDataDraftDTO[], isSilence: boolean): void {
+    if (!drafts || drafts.length === 0) {
+      return;
+    }
+
+    this.pendingWorkerDbWriteCount++;
+    this.writeLogDraftsFromWorkerAsync(drafts, isSilence);
+  }
+
+  private async writeLogDraftsFromWorkerAsync(drafts: SDKSyncDataDraftDTO[], isSilence: boolean): Promise<void> {
+    try {
+      const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
+      const affected = this.getWriteAffectedCount(writeResult);
+      FTInnerLogger.d(TAG,
+        `Log worker drafts written: insertedOrUpdated=${affected}, requested=${drafts.length}`);
+      if (affected > 0 && !isSilence) {
+        this.syncTaskManager.executeSyncPoll();
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `Log worker draft write failed: ${errorMessage}`);
+    } finally {
+      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
+    }
+  }
+
+  private async writeWorkerDraftsToDb(
+    source: string,
     drafts: SDKSyncDataDraftDTO[],
     fallbackDataType: DataType
-  ): SyncData[] {
-    const records: SyncData[] = [];
-    for (let i = 0; i < drafts.length; i++) {
-      const draft = drafts[i];
-      const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
-      records.push(this.createSyncDataFromDraft(draft, dataType));
+  ): Promise<SyncDataWriteResult | null> {
+    if (!drafts || drafts.length === 0) {
+      return null;
     }
-    return records;
+    if (!this.context) {
+      FTInnerLogger.e(TAG, `Context is null`);
+      return null;
+    }
+
+    const dbManager = FTDBManager.getInstance(this.context);
+    const taskPoolDrafts = drafts as Object as FTDBTaskPoolSyncDraftDTO[];
+    return await dbManager.writeSyncDraftsAtomically(source, taskPoolDrafts, fallbackDataType, {
+      applyCachePolicy: true,
+      reInsert: false,
+      forceTransaction: drafts.length > 1,
+      updateOrInsertByUuid: this.shouldUpdateOrInsertByDraftUuid(drafts)
+    });
+  }
+
+  private shouldUpdateOrInsertByDraftUuid(drafts: SDKSyncDataDraftDTO[]): boolean {
+    if (!drafts || drafts.length === 0) {
+      return false;
+    }
+    for (const draft of drafts) {
+      if (!draft || !draft.dataString || !draft.dataString.startsWith(`${Constants.FT_MEASUREMENT_RUM_VIEW},`)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private dataTypeFromWorkerString(value: string | undefined, fallback: DataType): DataType {
@@ -511,6 +931,16 @@ class FTTrackInner {
     return Utils.generateUUID();
   }
 
+  private createRumSyncDataUuidFromRecord(measurement: string, tags: SDKStringRecord): string {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+      const viewId = this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_ID);
+      if (viewId && viewId.length > 0) {
+        return viewId.substring(0, Math.min(16, viewId.length));
+      }
+    }
+    return Utils.generateUUID();
+  }
+
   private getWriteAffectedCount(result: SyncDataWriteResult | null): number {
     if (!result) {
       return 0;
@@ -541,7 +971,15 @@ class FTTrackInner {
 
     this.sdkConfig = config;
     this.context = context;
+    SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
+      SDKDedicatedPoolType.EVENT_CONSUMER,
+      (response: SDKWorkerResponse) => {
+        this.handleEventMailboxResponse(response);
+      }
+    );
     this.dataHelper.initBaseConfig(config);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
 
     // Debug log for SyncTaskManager initialization
     this.syncTaskManager.init(config, context);
@@ -554,6 +992,8 @@ class FTTrackInner {
    */
   initLogConfig(config: FTLoggerConfig): void {
     this.dataHelper.initLogConfig(config);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
 
     // Also set to TrackLogManager
     this.trackLogManager.setLogConfig(config);
@@ -571,6 +1011,8 @@ class FTTrackInner {
    */
   initRUMConfig(config: FTRUMConfig): void {
     this.dataHelper.initRUMConfig(config);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
     FTInnerLogger.i(TAG, "FTTrackInner RUM config initialized");
   }
 
@@ -579,6 +1021,8 @@ class FTTrackInner {
    */
   appendGlobalContext(globalContext: Map<string, string>): void {
     this.dataHelper.appendGlobalContext(globalContext);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -594,6 +1038,8 @@ class FTTrackInner {
    */
   appendGlobalContextKeyValue(key: string, value: string): void {
     this.dataHelper.appendGlobalContextByKeyValue(key, value);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -601,6 +1047,8 @@ class FTTrackInner {
    */
   appendRUMGlobalContext(globalContext: Map<string, string>): void {
     this.dataHelper.appendRUMGlobalContext(globalContext);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -608,6 +1056,8 @@ class FTTrackInner {
    */
   appendRUMGlobalContextKeyValue(key: string, value: string): void {
     this.dataHelper.appendRUMGlobalContextByKeyValue(key, value);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -615,6 +1065,8 @@ class FTTrackInner {
    */
   appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
     this.dataHelper.appendLogGlobalContext(globalContext);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -622,6 +1074,8 @@ class FTTrackInner {
    */
   appendLogGlobalContextKeyValue(key: string, value: LogGlobalContextValue): void {
     this.dataHelper.appendLogGlobalContextByKeyValue(key, value);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
   }
 
   /**
@@ -641,7 +1095,7 @@ class FTTrackInner {
     // FTInnerLogger.d(TAG, ` FTTrackInner context status: ${this.context ? 'available' : 'null'}`);
 
     // If it's error data, add special logs
-    if (measurement === 'error') {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
       const errorMessage = fields.get('error_message') || 'unknown';
       const errorType = tags.get('error_type') || 'unknown';
       FTInnerLogger.d(TAG,
@@ -707,6 +1161,49 @@ class FTTrackInner {
 
   }
 
+  public rumRecords(
+    time: number,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    callBack: RunnerCompleteCallBack | null = null,
+    collectTypeParam: CollectType | null = null
+  ): void {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+      const errorMessage = this.readStringRecordValue(fields, Constants.KEY_RUM_ERROR_MESSAGE) || 'unknown';
+      const errorType = this.readStringRecordValue(tags, Constants.KEY_RUM_ERROR_TYPE) || 'unknown';
+      FTInnerLogger.d(TAG,
+        ` FTTrackInner.rumRecords processing error: message=${errorMessage}, type=${errorType}`);
+    }
+
+    const sessionId = this.readStringRecordValue(tags, Constants.KEY_RUM_SESSION_ID);
+    if (!sessionId && (collectTypeParam === null || collectTypeParam === undefined)) {
+      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+      return;
+    }
+
+    const collectType = collectTypeParam !== null && collectTypeParam !== undefined
+      ? collectTypeParam
+      : FTRUMInnerManager.getInstance().checkSessionWillCollect(sessionId);
+
+    if (collectType === CollectType.ALL) {
+      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+    } else if (collectType === CollectType.SAMPLING) {
+      this.syncDataBackgroundWithErrorSampledRecords(
+        DataType.RUM_APP,
+        'rum_app_error_sampled',
+        time,
+        measurement,
+        tags,
+        fields,
+        callBack
+      );
+    } else {
+      FTInnerLogger.w(TAG,
+        `[FT-ACTION-DEBUG] Session will not collect: sessionId=${sessionId}, collectType=${collectType}`);
+    }
+  }
+
   /**
    * WebView RUM data tracking
    */
@@ -766,38 +1263,10 @@ class FTTrackInner {
     }
 
     try {
-      this.submitDataProcessTask(`data.prepare.logBatch:${batchData.length}`, async () => {
-        const createTasks: Promise<SyncData | null>[] = [];
-
-        for (const logBean of batchData) {
-          if (logBean instanceof LogBean) {
-            createTasks.push(this.createSyncDataFromLogBean(logBean).catch((error: Error) => {
-              FTInnerLogger.e(TAG, `Error creating SyncData from LogBean: ${error}`);
-              return null;
-            }));
-          }
-        }
-
-        const createdRecords = await Promise.all(createTasks);
-        const records: SyncData[] = [];
-        for (const record of createdRecords) {
-          if (record !== null) {
-            records.push(record);
-          }
-        }
-
-        const writeResult = await this.writePreparedSyncData('data.prepare.logBatch', records);
-        const successCount = writeResult ? writeResult.inserted : 0;
-        const droppedCount = writeResult ? writeResult.dropped : 0;
-        const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
-        FTInnerLogger.d(TAG,
-          `Batch log processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
-
-        if (successCount > 0 && !isSilence) {
-          this.syncTaskManager.executeSyncPoll();
-        }
-      });
-
+      this.processLogBeanBatch(batchData, isSilence)
+        .catch((error: Error) => {
+          FTInnerLogger.e(TAG, `Error processing LogBean batch: ${error.message}`);
+        });
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in batchLogBeanSync: ${error}`);
     }
@@ -811,21 +1280,58 @@ class FTTrackInner {
     }
 
     try {
-      this.submitDataProcessTask(`data.prepare.logDTOBatch:${batchData.length}`, async () => {
-        const records = await this.createSyncDataFromLogDTOs(batchData);
-        const writeResult = await this.writePreparedSyncData('data.prepare.logDTOBatch', records);
-        const successCount = writeResult ? writeResult.inserted : 0;
-        const droppedCount = writeResult ? writeResult.dropped : 0;
-        const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
-        FTInnerLogger.d(TAG,
-          `Batch log DTO processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
-
-        if (successCount > 0 && !isSilence) {
-          this.syncTaskManager.executeSyncPoll();
-        }
-      });
+      this.processLogDTOBatch(batchData, isSilence)
+        .catch((error: Error) => {
+          FTInnerLogger.e(TAG, `Error processing LogDTO batch: ${error.message}`);
+        });
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in batchLogDTOSync: ${error}`);
+    }
+  }
+
+  private async processLogBeanBatch(batchData: BaseContentBean[], isSilence: boolean): Promise<void> {
+    const createTasks: Promise<SyncData | null>[] = [];
+
+    for (const logBean of batchData) {
+      if (logBean instanceof LogBean) {
+        createTasks.push(this.createSyncDataFromLogBean(logBean).catch((error: Error) => {
+          FTInnerLogger.e(TAG, `Error creating SyncData from LogBean: ${error}`);
+          return null;
+        }));
+      }
+    }
+
+    const createdRecords = await Promise.all(createTasks);
+    const records: SyncData[] = [];
+    for (const record of createdRecords) {
+      if (record !== null) {
+        records.push(record);
+      }
+    }
+
+    const writeResult = await this.writePreparedSyncData('data.prepare.logBatch', records);
+    const successCount = writeResult ? writeResult.inserted : 0;
+    const droppedCount = writeResult ? writeResult.dropped : 0;
+    const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
+    FTInnerLogger.d(TAG,
+      `Batch log processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+
+    if (successCount > 0 && !isSilence) {
+      this.syncTaskManager.executeSyncPoll();
+    }
+  }
+
+  private async processLogDTOBatch(batchData: SDKLogDTO[], isSilence: boolean): Promise<void> {
+    const records = await this.createSyncDataFromLogDTOs(batchData);
+    const writeResult = await this.writePreparedSyncData('data.prepare.logDTOBatch', records);
+    const successCount = writeResult ? writeResult.inserted : 0;
+    const droppedCount = writeResult ? writeResult.dropped : 0;
+    const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
+    FTInnerLogger.d(TAG,
+      `Batch log DTO processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+
+    if (successCount > 0 && !isSilence) {
+      this.syncTaskManager.executeSyncPoll();
     }
   }
 
@@ -974,14 +1480,11 @@ class FTTrackInner {
     }
     const dbManager = FTDBManager.getInstance(this.context);
     const updateOrInsertByUuid = this.shouldUpdateOrInsertByUuid(records);
-    return await SDKDedicatedPoolManager.getInstance().runDbWrite(source, async (dbLaneWaitMs?: number) => {
-      return await dbManager.writeSyncDataAtomically(source, records, {
-        applyCachePolicy: useDatabaseCachePolicy,
-        reInsert: false,
-        dbLaneWaitMs: dbLaneWaitMs || 0,
-        forceTransaction: forceTransaction || updateOrInsertByUuid || useDatabaseCachePolicy,
-        updateOrInsertByUuid
-      });
+    return await dbManager.writeSyncDataAtomically(source, records, {
+      applyCachePolicy: useDatabaseCachePolicy,
+      reInsert: false,
+      forceTransaction: forceTransaction || updateOrInsertByUuid || useDatabaseCachePolicy,
+      updateOrInsertByUuid
     });
   }
 
@@ -1012,8 +1515,35 @@ class FTTrackInner {
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
       const normalized = error instanceof Error ? error : new Error(String(error));
+      try {
+        const spooled = await this.appendFailedWriteToSpool(source, cacheDecision.records);
+        if (spooled > 0) {
+          FTInnerLogger.w(TAG, `DB write failed, spooled ${spooled} record(s) for replay: ${normalized.message}`);
+          return {
+            source,
+            requested: records.length,
+            inserted: 0,
+            updated: 0,
+            dropped: cacheDecision.dropped,
+            duplicateSkipped: 0,
+            deletedOld: cacheDecision.deletedOld,
+            success: false,
+            errorMessage: `spooled after DB write failure: ${normalized.message}`
+          };
+        }
+      } catch (spoolError) {
+        FTInnerLogger.e(TAG, `Failed to spool ${cacheDecision.records.length} record(s): ${spoolError as string}`);
+      }
       throw normalized;
     }
+  }
+
+  private async appendFailedWriteToSpool(source: string, records: SyncData[]): Promise<number> {
+    if (!this.context) {
+      return 0;
+    }
+    FTDBSpoolManager.getInstance().init(this.context);
+    return await FTDBSpoolManager.getInstance().appendSyncData(source, records);
   }
 
   /**
@@ -1044,6 +1574,28 @@ class FTTrackInner {
     );
   }
 
+  private syncDataBackgroundWithErrorSampledRecords(
+    dataTypeForContent: DataType,
+    dataTypeForStorage: string,
+    time: number,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    callBack: RunnerCompleteCallBack | null = null
+  ): void {
+    this.submitRumWorkerDraftRecordTask(
+      'data.prepare.errorSampled',
+      dataTypeForContent,
+      dataTypeForStorage,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      true
+    );
+  }
+
   /**
    * Track data async processing (background)
    */
@@ -1061,6 +1613,18 @@ class FTTrackInner {
     this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
   }
 
+  private syncDataBackgroundRecords(
+    dataType: DataType,
+    time: number,
+    measurement: string,
+    tags: SDKStringRecord,
+    fields: SDKStringRecord,
+    callBack: RunnerCompleteCallBack | null = null
+  ): void {
+    const taskName = `data.prepare:${measurement}`;
+    this.submitRumWorkerDraftRecordTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+  }
+
   public rumInputFromWorker(
     source: string,
     input: SDKLineProtocolInputDTO,
@@ -1074,16 +1638,14 @@ class FTTrackInner {
     }
 
     const dataType = this.dataTypeFromWorkerString(input.dataType, DataType.RUM_APP);
-    const tags = this.stringRecordToMap(input.tags || {});
-    const fields = this.stringRecordToMap(input.fields || {});
-    this.submitRumWorkerDraftTask(
+    this.submitRumWorkerDraftRecordTask(
       source,
       dataType,
       input.customDataType,
       input.time,
       input.measurement,
-      tags,
-      fields,
+      input.tags || {},
+      input.fields || {},
       callBack,
       false,
       input.uuid
@@ -1417,6 +1979,13 @@ class FTTrackInner {
     FTInnerLogger.i(TAG, "Shutting down FTTrackInner");
 
     try {
+      this.flushRumWorkerEventBatch('rum.shutdown');
+      if (this.rumWorkerEventFlushTimer !== null) {
+        clearTimeout(this.rumWorkerEventFlushTimer);
+        this.rumWorkerEventFlushTimer = null;
+      }
+      this.pendingRumWorkerEvents = [];
+      this.pendingRumWorkerCallbacks.clear();
       this.trackLogManager.shutdown();
       this.syncTaskManager.stop();
       // SessionReplay functionality has been migrated to independent library
