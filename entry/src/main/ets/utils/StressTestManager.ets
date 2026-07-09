@@ -626,7 +626,6 @@ export class StressTestManager {
       FTLogger.batchLog(batchLogs);
       this.currentStats.logsGenerated += batchLogs.length;
       this.currentStats.logBatchesGenerated += 1;
-      DemoLogger.i(TAG, `Submitted log batch: tag=${tag}, size=${batchLogs.length}, totalGenerated=${this.logCounter}`);
       this.sampleCapabilityIfDue('log-batch');
     } catch (error) {
       this.recordErrorMessage(`batchLog failed: ${error}`);
@@ -704,8 +703,10 @@ export class StressTestManager {
         }
       }, config.logIntervalMs);
       this.logIntervalIds.push(intervalId);
+    }
+    if (config.logThreadCount > 0) {
       DemoLogger.i(TAG,
-        `Log timer ${threadIndex} started: interval=${config.logIntervalMs}ms, batchSize=${config.logBatchSize}, total=${config.logTotalCount > 0 ? config.logTotalCount : 'unlimited'}`);
+        `Log timers started: count=${config.logThreadCount}, interval=${config.logIntervalMs}ms, batchSize=${config.logBatchSize}, total=${config.logTotalCount > 0 ? config.logTotalCount : 'unlimited'}`);
     }
   }
 
@@ -837,7 +838,10 @@ export class StressTestManager {
         }
       }, config.actionIntervalMs);
       this.actionIntervalIds.push(intervalId);
-      DemoLogger.i(TAG, `Action timer ${threadIndex} started: interval=${config.actionIntervalMs}ms`);
+    }
+    if (config.actionThreadCount > 0) {
+      DemoLogger.i(TAG,
+        `Action timers started: count=${config.actionThreadCount}, interval=${config.actionIntervalMs}ms`);
     }
   }
 
@@ -874,7 +878,10 @@ export class StressTestManager {
         });
       }, config.resourceIntervalMs);
       this.resourceIntervalIds.push(intervalId);
-      DemoLogger.i(TAG, `Resource timer ${threadIndex} started: interval=${config.resourceIntervalMs}ms`);
+    }
+    if (config.resourceThreadCount > 0) {
+      DemoLogger.i(TAG,
+        `Resource timers started: count=${config.resourceThreadCount}, interval=${config.resourceIntervalMs}ms`);
     }
   }
 
@@ -988,9 +995,7 @@ export class StressTestManager {
     const request = new rcp.Request(url, 'GET');
     const response = await session.fetch(request);
 
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      DemoLogger.i(TAG, `Real resource from timer ${threadIndex}, index ${resourceIndex} successful: ${response.statusCode}`);
-    } else {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`real request returned status=${response.statusCode}`);
     }
   }
