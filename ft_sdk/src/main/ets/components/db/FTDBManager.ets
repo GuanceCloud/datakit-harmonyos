@@ -1208,8 +1208,11 @@ export class FTDBManager extends DBManager {
     cleanupTime: number,
     costTime: number
   ): void {
-    const hasRisk = !result.success || result.dropped > 0 || result.deletedOld > 0 || result.errorMessage.length > 0;
-    const isSlow = costTime >= DB_WRITE_SLOW_COST_MS || dbLaneWaitTime >= DB_WRITE_SLOW_QUEUE_WAIT_MS;
+    const hasRisk = !result.success || result.dropped > 0 || result.deletedOld > 0 ||
+      result.duplicateSkipped > 0 || result.errorMessage.length > 0;
+    const shouldTraceSlow = label !== 'DB-WRITE-DRAFTS';
+    const isSlow = shouldTraceSlow &&
+      (costTime >= DB_WRITE_SLOW_COST_MS || dbLaneWaitTime >= DB_WRITE_SLOW_QUEUE_WAIT_MS);
     if (!hasRisk && !isSlow) {
       return;
     }

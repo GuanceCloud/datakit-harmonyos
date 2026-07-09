@@ -93,7 +93,6 @@ export interface DataUploadWorkerCapabilities {
     duration: number
   ): Promise<DataUploadDbMaintenanceResult>;
   executeHttp(dataType: DataType, pkgId: string, body: string): Promise<DataUploadHttpResult>;
-  shouldDiscardData(dataType: DataType): Promise<boolean>;
   getCurrentTimeMs(): number;
   getRandom(): number;
   generateUUID(): string;

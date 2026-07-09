@@ -802,8 +802,6 @@ class FTTrackInner {
     try {
       const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
       const affected = this.getWriteAffectedCount(writeResult);
-      FTInnerLogger.d(TAG,
-        `Log worker drafts written: insertedOrUpdated=${affected}, requested=${drafts.length}`);
       if (affected > 0 && !isSilence) {
         this.syncTaskManager.executeSyncPoll();
       }
@@ -1256,8 +1254,6 @@ class FTTrackInner {
    * Batch LogBean sync processing - called by TrackLogManager
    */
   batchLogBeanSync(batchData: BaseContentBean[], isSilence: boolean): void {
-    FTInnerLogger.d(TAG, `FTTrackInner.batchLogBeanSync entry: size=${batchData?.length || 0}, isSilence=${isSilence}`);
-
     if (!batchData || batchData.length === 0) {
       return;
     }
@@ -1273,8 +1269,6 @@ class FTTrackInner {
   }
 
   batchLogDTOSync(batchData: SDKLogDTO[], isSilence: boolean): void {
-    FTInnerLogger.d(TAG, `FTTrackInner.batchLogDTOSync entry: size=${batchData?.length || 0}, isSilence=${isSilence}`);
-
     if (!batchData || batchData.length === 0) {
       return;
     }
@@ -1313,8 +1307,10 @@ class FTTrackInner {
     const successCount = writeResult ? writeResult.inserted : 0;
     const droppedCount = writeResult ? writeResult.dropped : 0;
     const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
-    FTInnerLogger.d(TAG,
-      `Batch log processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+    if (droppedCount > 0 || duplicateCount > 0) {
+      FTInnerLogger.w(TAG,
+        `Batch log processing partial: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+    }
 
     if (successCount > 0 && !isSilence) {
       this.syncTaskManager.executeSyncPoll();
@@ -1327,8 +1323,10 @@ class FTTrackInner {
     const successCount = writeResult ? writeResult.inserted : 0;
     const droppedCount = writeResult ? writeResult.dropped : 0;
     const duplicateCount = writeResult ? writeResult.duplicateSkipped : 0;
-    FTInnerLogger.d(TAG,
-      `Batch log DTO processing completed: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+    if (droppedCount > 0 || duplicateCount > 0) {
+      FTInnerLogger.w(TAG,
+        `Batch log DTO processing partial: inserted=${successCount}/${batchData.length}, dropped=${droppedCount}, duplicate=${duplicateCount}`);
+    }
 
     if (successCount > 0 && !isSilence) {
       this.syncTaskManager.executeSyncPoll();

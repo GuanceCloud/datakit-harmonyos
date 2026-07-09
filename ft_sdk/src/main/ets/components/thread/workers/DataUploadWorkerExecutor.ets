@@ -309,13 +309,6 @@ export class DataUploadWorkerExecutor {
         deduplicatedDataList.length} duplicate record(s) for ${dataType}`);
       }
 
-      const shouldDiscardData = await capabilities.shouldDiscardData(dataType);
-      if (shouldDiscardData) {
-        this.addComputeTime(state, capabilities, computeStartTime);
-        FTInnerLogger.w(TAG, `<FT-UPLOAD-LANE> [SKIP] type=${dataType} reason=cache-limit`);
-        break;
-      }
-
       const seqNumber = this.getSeqNumber(dataType);
       const pkgId = this.generatePackageId(capabilities, seqNumber, deduplicatedDataList.length);
       const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
@@ -337,7 +330,7 @@ export class DataUploadWorkerExecutor {
       this.addComputeTime(state, capabilities, markStartTime);
 
       try {
-        this.printUploadData(body);
+        this.printUploadData(dataType, pkgId, deduplicatedDataList.length, body);
         const result = await this.uploadBatch(capabilities, state, dataType, pkgId, body, deduplicatedDataList);
         processedPages++;
 
@@ -753,8 +746,9 @@ export class DataUploadWorkerExecutor {
     }
   }
 
-  private printUploadData(body: string): void {
-    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========== UPLOAD BODY PREVIEW ==========`);
+  private printUploadData(dataType: DataType, pkgId: string, rows: number, body: string): void {
+    FTInnerLogger.d(TAG,
+      `<FT-BATCH-UPLOAD> ========== UPLOAD BODY PREVIEW（type=${dataType} rows=${rows} pkg=${pkgId}） ==========`);
     FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD>\n${body}`);
     FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========================================`);
   }

@@ -204,10 +204,6 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     };
   }
 
-  async shouldDiscardData(dataType: DataType): Promise<boolean> {
-    return syncTaskRuntime.getCachePolicy().shouldDiscardData(dataType);
-  }
-
   getCurrentTimeMs(): number {
     return syncTaskRuntime.getCurrentTimeMs();
   }

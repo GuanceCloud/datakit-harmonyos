@@ -20,6 +20,8 @@ import {
 } from '../thread/SDKWorkerProtocol';
 
 const TAG = "TrackLogManager";
+const LOG_HOST_MAILBOX_BATCH_SIZE = 64;
+const LOG_HOST_MAILBOX_BATCH_DELAY_MS = 16;
 
 /**
  * Queue status interface
@@ -71,6 +73,8 @@ export class TrackLogManager {
   private filteredCount: number = 0;
   private logConfig: FTLoggerConfig | null = null;
   private mailboxHandlerRegistered: boolean = false;
+  private pendingLogDTOs: SDKLogDTO[] = [];
+  private pendingFlushTimer: number | null = null;
 
   private constructor() {
   }
@@ -98,6 +102,8 @@ export class TrackLogManager {
     this.acceptedCount = 0;
     this.droppedCount = 0;
     this.filteredCount = 0;
+    this.pendingLogDTOs = [];
+    this.clearPendingFlushTimer();
   }
 
   /**
@@ -132,7 +138,7 @@ export class TrackLogManager {
     }
 
     this.acceptedCount++;
-    this.postLogDTO(this.toLogDTO(logBean, isSilence));
+    this.enqueueLogDTO(this.toLogDTO(logBean, isSilence));
   }
 
   /**
@@ -146,6 +152,7 @@ export class TrackLogManager {
     }
 
     let accepted = 0;
+    const batchDTOs: SDKLogDTO[] = [];
     for (let i = 0; i < logBeans.length; i++) {
       this.submittedCount++;
       const logBean = logBeans[i];
@@ -155,10 +162,13 @@ export class TrackLogManager {
       }
       accepted++;
       this.acceptedCount++;
-      this.postLogDTO(this.toLogDTO(logBean, isSilence));
+      batchDTOs.push(this.toLogDTO(logBean, isSilence));
     }
 
-    FTInnerLogger.d(TAG, `Batch logged: accepted=${accepted}, requested=${logBeans.length}`);
+    if (accepted > 0) {
+      this.flushPendingLogDTOs(true);
+      this.postLogDTOs(batchDTOs, true);
+    }
   }
 
   /**
@@ -167,7 +177,7 @@ export class TrackLogManager {
   public getQueueStatus(): QueueStatus {
     return {
       queueSize: 0,
-      bufferSize: this.getLogMailboxPending(),
+      bufferSize: this.pendingLogDTOs.length + this.getLogMailboxPending(),
       isProcessing: false,
       submittedCount: this.submittedCount,
       acceptedCount: this.acceptedCount,
@@ -181,6 +191,7 @@ export class TrackLogManager {
    */
   public forceFlush(_isSilence: boolean = false): void {
     this.ensureMailboxHandler();
+    this.flushPendingLogDTOs(true);
     TrackLogManager.logWorkerCommandSequence++;
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.LOG_CONSUMER);
     const flushPayload: LogWorkerFlushRequestPayload = {};
@@ -248,13 +259,50 @@ export class TrackLogManager {
     return true;
   }
 
-  private postLogDTO(logDTO: SDKLogDTO): void {
+  private enqueueLogDTO(logDTO: SDKLogDTO): void {
+    this.pendingLogDTOs.push(logDTO);
+    if (this.pendingLogDTOs.length >= LOG_HOST_MAILBOX_BATCH_SIZE) {
+      this.flushPendingLogDTOs(true);
+      return;
+    }
+    this.schedulePendingFlush();
+  }
+
+  private schedulePendingFlush(): void {
+    if (this.pendingFlushTimer !== null) {
+      return;
+    }
+    this.pendingFlushTimer = setTimeout(() => {
+      this.pendingFlushTimer = null;
+      this.flushPendingLogDTOs(true);
+    }, LOG_HOST_MAILBOX_BATCH_DELAY_MS) as number;
+  }
+
+  private flushPendingLogDTOs(forceFlush: boolean): void {
+    this.clearPendingFlushTimer();
+    while (this.pendingLogDTOs.length > 0) {
+      const batch = this.pendingLogDTOs.splice(0, LOG_HOST_MAILBOX_BATCH_SIZE);
+      this.postLogDTOs(batch, forceFlush);
+    }
+  }
+
+  private clearPendingFlushTimer(): void {
+    if (this.pendingFlushTimer !== null) {
+      clearTimeout(this.pendingFlushTimer);
+      this.pendingFlushTimer = null;
+    }
+  }
+
+  private postLogDTOs(logDTOs: SDKLogDTO[], forceFlush: boolean): void {
+    if (!logDTOs || logDTOs.length === 0) {
+      return;
+    }
     this.ensureMailboxHandler();
     TrackLogManager.logWorkerCommandSequence++;
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.LOG_CONSUMER);
     const requestPayload: LogWorkerEnqueueRequestPayload = {
-      logs: [logDTO],
-      forceFlush: true
+      logs: logDTOs,
+      forceFlush
     };
 
     const posted = SDKDedicatedPoolManager.getInstance().postCommand({
@@ -266,8 +314,8 @@ export class TrackLogManager {
       payload: requestPayload as Object as SDKWorkerPayload
     });
     if (!posted) {
-      this.droppedCount++;
-      this.acceptedCount = Math.max(0, this.acceptedCount - 1);
+      this.droppedCount += logDTOs.length;
+      this.acceptedCount = Math.max(0, this.acceptedCount - logDTOs.length);
       FTInnerLogger.w(TAG, '<FT-LOG-LANE> LogWorker mailbox post failed');
     }
   }
@@ -372,6 +420,7 @@ export class TrackLogManager {
    */
   public shutdown(): void {
     FTInnerLogger.i(TAG, "Shutting down TrackLogManager");
+    this.flushPendingLogDTOs(true);
     if (this.mailboxHandlerRegistered) {
       SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(SDKDedicatedPoolType.LOG_CONSUMER, null);
       this.mailboxHandlerRegistered = false;
