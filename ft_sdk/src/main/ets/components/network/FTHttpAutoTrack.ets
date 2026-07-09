@@ -9,6 +9,7 @@ import { FTTraceContext, FTTraceRequestContext } from '../trace/FTTraceHeaderHan
 import { TraceType } from '../trace/TraceType';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { ResourceParams } from '../rum/bean/ResourceParams';
+import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import { FTTraceHandler } from '../trace/FTTraceHandler';
@@ -32,6 +33,7 @@ import {
 } from './FTHttpAutoTrackShared';
 
 const TAG = "FTHttpAutoTrack";
+const MS_TO_NS = 1000000;
 
 function createGeneratedResourceId(): string {
   const headers: Record<string, string> = {};
@@ -107,6 +109,53 @@ interface TimeInfoStructure {
   bodyStartTime?: number;
   bodyEndTime?: number;
   totalTime?: number;
+}
+
+function readPositiveMetric(metrics: Map<string, number>, key: string): number {
+  const value = metrics.get(key);
+  return value !== undefined && value > 0 ? value : 0;
+}
+
+function createRCPNetStatusBean(metrics: Map<string, number>, fallbackLoadNs: number): NetStatusBean {
+  const netStatusBean = new NetStatusBean();
+  const dnsTime = readPositiveMetric(metrics, 'resourceDNS');
+  const tcpTime = readPositiveMetric(metrics, 'resourceTCP');
+  const sslTime = readPositiveMetric(metrics, 'resourceSSL');
+  const ttfbTime = readPositiveMetric(metrics, 'resourceTTFB');
+  const responseTime = readPositiveMetric(metrics, 'resourceTrans');
+  const firstByteTime = readPositiveMetric(metrics, 'resourceFirstByte');
+  const downloadTime = readPositiveMetric(metrics, 'resourceDownloadTime');
+  const loadTime = readPositiveMetric(metrics, 'resourceLoad');
+
+  if (dnsTime > 0) {
+    netStatusBean.setDNSStartTime(0);
+    netStatusBean.setDNSTime(dnsTime);
+  }
+  if (tcpTime > 0) {
+    netStatusBean.setConnectStartTime(dnsTime);
+    netStatusBean.setTcpTime(tcpTime);
+  }
+  if (sslTime > 0) {
+    netStatusBean.setSslStartTime(dnsTime + tcpTime);
+    netStatusBean.setSSLTime(sslTime);
+  }
+  if (ttfbTime > 0) {
+    netStatusBean.setTTFB(ttfbTime);
+  }
+  if (responseTime > 0) {
+    netStatusBean.setResponseTime(responseTime);
+  }
+  if (firstByteTime > 0) {
+    netStatusBean.setFirstByteStartTime(dnsTime + tcpTime + sslTime);
+    netStatusBean.setFirstByteTime(firstByteTime);
+  }
+  if (downloadTime > 0) {
+    const downloadStartTime = dnsTime + tcpTime + sslTime + (ttfbTime > 0 ? ttfbTime : firstByteTime);
+    netStatusBean.setDownloadTimeStart(downloadStartTime);
+    netStatusBean.setDownloadTime(downloadTime);
+  }
+  netStatusBean.setHoleRequestTime(loadTime > 0 ? loadTime : fallbackLoadNs);
+  return netStatusBean;
 }
 
 /**
@@ -206,6 +255,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     try {
       const response = await next.handle(context);
       const responseTime = Date.now() - startTime;
+      const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
+      let netStatusBean = createRCPNetStatusBean(new Map<string, number>(), fallbackLoadNs);
 
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
@@ -244,7 +295,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (response.timeInfo) {
         const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
         const performanceMetrics: Map<string, number> = new Map();
-        const MS_TO_NS = 1000000;
 
         if (timeInfoObj.nameLookupTimeMs !== undefined && typeof timeInfoObj.nameLookupTimeMs === 'number') {
           performanceMetrics.set('resourceDNS', timeInfoObj.nameLookupTimeMs * MS_TO_NS);
@@ -367,9 +417,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
             resourceParams.addProperty(key, metricValue);
           }
         }
+        netStatusBean = createRCPNetStatusBean(performanceMetrics, fallbackLoadNs);
         FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(performanceMetrics)}`);
       } else {
-        const metricValue: PerformanceMetricValue = { value: responseTime * 1000000 };
+        const metricValue: PerformanceMetricValue = { value: fallbackLoadNs };
         resourceParams.addProperty('resourceLoad', metricValue);
       }
 
@@ -379,6 +430,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       );
 
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+      FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
       const fallbackActionId = this.resourceActionMap.get(resourceId);
       FTRUMInnerManager.getInstance().stopResource(resourceId, fallbackActionId);
       if (fallbackActionId) {
@@ -389,6 +441,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       const responseTime = Date.now() - startTime;
+      const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
+      const netStatusBean = createRCPNetStatusBean(new Map<string, number>(), fallbackLoadNs);
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
       resourceParams.setResourceMethod(method);
@@ -397,7 +451,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       resourceParams.setRequestErrorMsg(error.message || 'Unknown error');
       resourceParams.setRequestErrorStack((error.stack && error.stack.length > 0) ? error.stack : String(error));
       resourceParams.setResourceStatus(0);
-      const metricValue: PerformanceMetricValue = { value: Math.max(responseTime, 1) * 1000000 };
+      const metricValue: PerformanceMetricValue = { value: fallbackLoadNs };
       resourceParams.addProperty('resourceLoad', metricValue);
 
       FTInnerLogger.e(
@@ -406,6 +460,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       );
 
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+      FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
       const fallbackActionId = this.resourceActionMap.get(resourceId);
       FTRUMInnerManager.getInstance().stopResource(resourceId, fallbackActionId);
       if (fallbackActionId) {

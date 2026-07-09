@@ -680,6 +680,9 @@ function processRumResourceCommand(
     if (command.netStatus) {
       applyResourceNetStatus(resource, command.netStatus);
     }
+    if (commandType === 'add' && resource.endTime <= 0) {
+      resource.endTime = resource.eventTime > 0 ? resource.eventTime : Date.now() * 1000000;
+    }
     tryCreateRumResourceDraft(resource, state, syncDrafts);
     return;
   }
@@ -900,7 +903,7 @@ function tryCreateRumResourceDraft(
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[]
 ): void {
-  if (!resource.contentSet || !resource.netStateSet || resource.isProcessing) {
+  if (!resource.contentSet || !resource.netStateSet || resource.endTime <= 0 || resource.isProcessing) {
     return;
   }
   resource.isProcessing = true;

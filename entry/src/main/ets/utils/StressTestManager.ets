@@ -993,11 +993,7 @@ export class StressTestManager {
       `${realApiUrl}${separator}tag=${STRESS_TEST_LOG_TAG}&stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
     const session = this.getRealResourceSession();
     const request = new rcp.Request(url, 'GET');
-    const response = await session.fetch(request);
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`real request returned status=${response.statusCode}`);
-    }
+    await session.fetch(request);
   }
 
   private getRealResourceSession(): rcp.Session {
