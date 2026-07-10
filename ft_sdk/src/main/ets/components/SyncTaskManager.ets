@@ -186,12 +186,12 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
 
     if (dataType === DataType.RUM_WEBVIEW) {
       FTInnerLogger.i(TAG,
-        `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] ========== Uploading WebView data to server ==========`);
+        `[WEBVIEW-UPLOAD] ========== Uploading WebView data to server ==========`);
       FTInnerLogger.i(TAG,
-        `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] Body length: ${body.length}, Record count: ${body.split('\n').length}`);
-      FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] Model: ${model}, pkgId: ${pkgId}`);
+        `[WEBVIEW-UPLOAD] Body length: ${body.length}, Record count: ${body.split('\n').length}`);
+      FTInnerLogger.i(TAG, `[WEBVIEW-UPLOAD] Model: ${model}, pkgId: ${pkgId}`);
       if (body.includes(`${Constants.KEY_RUM_VIEW_IS_WEB_VIEW}=true`)) {
-        FTInnerLogger.i(TAG, `<FT-BATCH-UPLOAD> [WEBVIEW-UPLOAD] WebView data confirmed in body`);
+        FTInnerLogger.i(TAG, `[WEBVIEW-UPLOAD] WebView data confirmed in body`);
       }
     }
 
@@ -304,11 +304,6 @@ export class SyncTaskManager {
   private uploadRescheduleDelay = 0;
   private uploadTimer = -1;
   private uploadTaskSequence = 0;
-  private uploadCurrentPollRows = 0;
-  private uploadCurrentTaskName = "";
-  private uploadStartTraced = false;
-  private lastUploadRescheduleTraceKey = "";
-  private skippedUploadRescheduleTraceCount = 0;
   private isStop = false;
   private autoSync = false;
   private syncSleepTime = 0;
@@ -383,11 +378,11 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
+    FTInnerLogger.d(TAG, "******************* Sync Poll Ready *******************>>>");
   }
 
   private scheduleUpload(delay: number = 0): void {
     if (this.isStop) {
-      this.traceUploadLane(`[SKIP] schedule stopped`);
       return;
     }
 
@@ -400,14 +395,12 @@ export class SyncTaskManager {
       } else {
         this.uploadRescheduleDelay = normalizedDelay;
       }
-      this.traceUploadRescheduleIfNeeded(normalizedDelay);
       return;
     }
 
     this.uploadScheduled = true;
     this.uploadScheduledDelay = normalizedDelay;
     this.uploadScheduledAt = syncTaskRuntime.getCurrentTimeMs();
-    this.resetUploadRescheduleTrace();
 
     this.clearUploadTimer();
     this.uploadTimer = syncTaskRuntime.setTimer(() => {
@@ -415,32 +408,9 @@ export class SyncTaskManager {
       this.executeScheduledUpload(taskName);
     }, normalizedDelay);
 
-    this.traceUploadLane(
-      `[SCHEDULE] delay=${normalizedDelay}ms running=${this.uploadRunning} scheduled=${this.uploadScheduled}`
-    );
-  }
-
-  private traceUploadRescheduleIfNeeded(delay: number): void {
-    const uploadStatus = this.getUploadLaneStatus();
-    const traceKey =
-      `${uploadStatus.isRunning}:${uploadStatus.isScheduled}:${uploadStatus.rescheduleDelay}`;
-    if (traceKey === this.lastUploadRescheduleTraceKey) {
-      this.skippedUploadRescheduleTraceCount++;
-      return;
+    if (normalizedDelay > 0) {
+      FTInnerLogger.d(TAG, "******************* Sync Poll Waiting *******************>>>");
     }
-
-    const skippedPart = this.skippedUploadRescheduleTraceCount > 0 ?
-      ` skipped=${this.skippedUploadRescheduleTraceCount}` : "";
-    this.lastUploadRescheduleTraceKey = traceKey;
-    this.skippedUploadRescheduleTraceCount = 0;
-    this.traceUploadLane(
-      `[RESCHEDULE] delay=${delay}ms nextDelay=${uploadStatus.rescheduleDelay}ms running=${uploadStatus.isRunning} scheduled=${uploadStatus.isScheduled}${skippedPart}`
-    );
-  }
-
-  private resetUploadRescheduleTrace(): void {
-    this.lastUploadRescheduleTraceKey = "";
-    this.skippedUploadRescheduleTraceCount = 0;
   }
 
   private clearUploadTimer(): void {
@@ -458,9 +428,6 @@ export class SyncTaskManager {
     this.uploadScheduledDelay = 0;
     this.uploadScheduledAt = 0;
     this.uploadRescheduleDelay = 0;
-    this.uploadCurrentPollRows = 0;
-    this.uploadCurrentTaskName = "";
-    this.uploadStartTraced = false;
   }
 
   private async executeScheduledUpload(taskName: string): Promise<void> {
@@ -469,85 +436,29 @@ export class SyncTaskManager {
     this.uploadScheduledDelay = 0;
 
     if (this.isStop) {
-      this.traceUploadLane(`[SKIP] execute scheduled stopped name=${taskName}`);
       return;
     }
 
-    this.traceUploadLane(`[RUN] name=${taskName}`);
+    FTInnerLogger.d(TAG, "******************* Sync Poll Running *******************>>>");
     this.uploadRunning = true;
     this.running = true;
 
-    this.uploadCurrentPollRows = 0;
-    this.uploadCurrentTaskName = taskName;
-    this.uploadStartTraced = false;
-
-    const startTime = syncTaskRuntime.getCurrentTimeMs();
-    let result = 'success';
-    let errorMessage = '';
-    let consumeResult: DataUploadConsumeResult = {
-      consumedRows: 0,
-      hasMoreData: false,
-      errorCount: this.errorCount
-    };
-
     try {
-      consumeResult = await this.executeDataUploadWorkerConsume(taskName);
-      this.uploadCurrentPollRows = consumeResult.consumedRows;
+      const consumeResult = await this.executeDataUploadWorkerConsume(taskName);
       this.errorCount = consumeResult.errorCount;
       if (consumeResult.hasMoreData && !this.isStop) {
         this.scheduleUpload(0);
       }
     } catch (error) {
-      result = 'failed';
-      errorMessage = String(error);
       this.uploadRunning = false;
       this.running = false;
-      this.uploadCurrentPollRows = 0;
-      this.uploadCurrentTaskName = "";
-      this.uploadStartTraced = false;
-      FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FAILED] execute name=${taskName} error=${error as string}`);
+      FTInnerLogger.e(TAG, `Sync Poll Failed: name=${taskName}, error=${error as string}`);
     } finally {
-      const costTime = Math.max(0, syncTaskRuntime.getCurrentTimeMs() - startTime);
       const shouldReschedule = this.uploadNeedReschedule;
       const nextDelay = this.uploadRescheduleDelay;
       this.uploadRunning = false;
       this.running = false;
-      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-      const uploadedRows = this.uploadCurrentPollRows;
-      const uploadMetrics = consumeResult.metrics;
-      const schedulerWaitTime = 0;
-      const schedulerComputeTime = 0;
-      const schedulerExecuteTime = 0;
-      const poolWaitTime = 0;
-      const poolExecuteTime = 0;
-      const uploadComputeTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.computeMs) : 0;
-      const uploadWorkerExecuteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.executeMs) :
-        Math.max(0, costTime - uploadComputeTime);
-      const uploadDbTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbMs) : 0;
-      const uploadDbErrorSampledTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbErrorSampledMs) : 0;
-      const uploadDbHasDataTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbHasDataMs) : 0;
-      const uploadDbQueryTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbQueryMs) : 0;
-      const uploadDbDeleteTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbDeleteMs) : 0;
-      const uploadDbInsertTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbInsertMs) : 0;
-      const uploadDbWriteQueueWaitTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.dbWriteQueueWaitMs) : 0;
-      const uploadHttpTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.httpMs) : 0;
-      const uploadSleepTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.sleepMs) : 0;
-      const uploadWorkerTotalTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.totalMs) : costTime;
-      const uploadWorkerUnaccountedTime = uploadMetrics ? this.normalizeMetricTime(uploadMetrics.unaccountedMs) :
-        Math.max(0, uploadWorkerTotalTime - uploadComputeTime - uploadWorkerExecuteTime);
-      const waitTime = schedulerWaitTime + poolWaitTime;
-      const computeTime = schedulerComputeTime + uploadComputeTime;
-      const executeTime = Math.max(0, costTime - waitTime - computeTime);
-      const overheadTime = Math.max(0, executeTime - uploadWorkerExecuteTime - uploadWorkerUnaccountedTime);
-      const unaccountedTime = Math.max(0, costTime - waitTime - computeTime - executeTime);
-      this.uploadCurrentPollRows = 0;
-      this.uploadCurrentTaskName = "";
-      this.uploadStartTraced = false;
-      if (result !== 'success' || uploadedRows >= 0 || shouldReschedule) {
-        this.traceUploadLane(
-          `[CONSUMED] name=${taskName} result=${result}${errorPart} rows=${uploadedRows} wait=${waitTime}ms compute=${computeTime}ms execute=${executeTime}ms total=${costTime}ms cost=${costTime}ms schedulerWait=${schedulerWaitTime}ms schedulerCompute=${schedulerComputeTime}ms schedulerExecute=${schedulerExecuteTime}ms poolWait=${poolWaitTime}ms poolExecute=${poolExecuteTime}ms workerTotal=${uploadWorkerTotalTime}ms workerCompute=${uploadComputeTime}ms workerExecute=${uploadWorkerExecuteTime}ms db=${uploadDbTime}ms dbErrorSampled=${uploadDbErrorSampledTime}ms dbHasData=${uploadDbHasDataTime}ms dbQuery=${uploadDbQueryTime}ms dbDelete=${uploadDbDeleteTime}ms dbInsert=${uploadDbInsertTime}ms dbWriteQueue=${uploadDbWriteQueueWaitTime}ms http=${uploadHttpTime}ms sleep=${uploadSleepTime}ms workerUnaccounted=${uploadWorkerUnaccountedTime}ms overhead=${overheadTime}ms unaccounted=${unaccountedTime}ms needReschedule=${shouldReschedule} nextDelay=${nextDelay}ms`
-        );
-      }
+      FTInnerLogger.d(TAG, "******************* Sync Poll Finish *******************>>>");
       this.uploadNeedReschedule = false;
       this.uploadRescheduleDelay = 0;
       if (shouldReschedule && !this.isStop) {
@@ -581,20 +492,12 @@ export class SyncTaskManager {
     );
   }
 
-  private normalizeMetricTime(value: number | undefined): number {
-    if (typeof value !== 'number' || value <= 0) {
-      return 0;
-    }
-    return value;
-  }
-
   /**
    * Execute data synchronization polling
    * Ensures only one upload task runs at a time to prevent concurrent duplicate uploads
    */
   public executePoll(withSleep: boolean = false): void {
     if (this.isStop) {
-      this.traceUploadLane(`[SKIP] executePoll stopped`);
       return;
     }
 
@@ -695,14 +598,6 @@ export class SyncTaskManager {
       scheduledAt: this.uploadScheduledAt,
       rescheduleDelay: this.uploadRescheduleDelay
     };
-  }
-
-  private traceUploadLane(message: string): void {
-    FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> ${message}`);
-  }
-
-  private traceUploadLaneDebug(message: string): void {
-    FTInnerLogger.d(TAG, `<FT-UPLOAD-LANE> ${message}`);
   }
 
   /**

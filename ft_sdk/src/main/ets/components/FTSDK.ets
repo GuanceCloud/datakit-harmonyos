@@ -758,15 +758,14 @@ export class FTSDK {
         return;
       }
 
-      FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> [FLUSH] requested`);
+      FTInnerLogger.d(TAG, "flushSyncData requested");
       FTTrackInner.getInstance().flushPendingWorkerDataBeforeUpload().then(() => {
-        FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> [FLUSH] worker-drained scheduling upload`);
+        FTInnerLogger.d(TAG, "flushSyncData worker queues drained, scheduling sync poll");
         SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
       }).catch((error: Error) => {
-        FTInnerLogger.e(TAG, `<FT-UPLOAD-LANE> [FLUSH] worker-drain failed scheduling upload: ${error.message}`);
+        FTInnerLogger.e(TAG, `flushSyncData worker queue drain failed, scheduling sync poll: ${error.message}`);
         SyncTaskManager.getInstance().executePoll(false);
       });
-      FTInnerLogger.d(TAG, "flushSyncData triggered");
     } catch (error) {
       FTInnerLogger.e(TAG, `flushSyncData failed: ${error}`);
     }

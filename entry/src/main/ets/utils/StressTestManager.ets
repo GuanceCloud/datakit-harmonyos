@@ -37,7 +37,7 @@ const CAPABILITY_UI_TICK_INTERVAL_MS = 50;
 const CAPABILITY_UI_LIGHT_JANK_MS = 16;
 const CAPABILITY_UI_MODERATE_JANK_MS = 50;
 const CAPABILITY_UI_STRONG_JANK_MS = 100;
-const FINAL_UPLOAD_FLUSH_DELAYS_MS: number[] = [0, 500, 1500, 3000];
+const FINAL_UPLOAD_FLUSH_DELAY_MS = 0;
 const CAPABILITY_VM_HEAP_FALLBACK_LIMIT_MB = 256;
 const CAPABILITY_VM_HEAP_SAFE_WATERMARK = 0.80;
 const CAPABILITY_RESERVED_HEAP_MB = 25;
@@ -352,7 +352,7 @@ export class StressTestManager {
   private actionIntervalIds: number[] = [];
   private resourceIntervalIds: number[] = [];
   private exceptionIntervalIds: number[] = [];
-  private finalUploadFlushTimerIds: number[] = [];
+  private finalUploadFlushTimerId: number | null = null;
   private productionSliceTimerIds: number[] = [];
 
   private isRunning: boolean = false;
@@ -509,7 +509,7 @@ export class StressTestManager {
     this.startTime = Date.now();
     this.durationSeconds = normalizedConfig.durationSeconds;
     this.closeRealResourceSession();
-    this.clearFinalUploadFlushTimers();
+    this.clearFinalUploadFlushTimer();
     this.currentConfig = normalizedConfig;
     this.lastReport = null;
     this.logCounter = 0;
@@ -1977,7 +1977,7 @@ export class StressTestManager {
     if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
       FTLogger.flush();
     }
-    this.scheduleFinalUploadFlushes(stopReason);
+    this.scheduleFinalUploadFlush(stopReason);
     const capabilityReport = this.stopCapabilitySampling();
 
     this.currentStats.isRunning = false;
@@ -1999,16 +1999,12 @@ export class StressTestManager {
     return this.lastReport;
   }
 
-  private scheduleFinalUploadFlushes(stopReason: StressStopReason): void {
-    this.clearFinalUploadFlushTimers();
-    for (let i = 0; i < FINAL_UPLOAD_FLUSH_DELAYS_MS.length; i++) {
-      const delayMs = FINAL_UPLOAD_FLUSH_DELAYS_MS[i];
-      const timerId = setTimeout((): void => {
-        this.removeFinalUploadFlushTimer(timerId);
-        this.triggerFinalUploadFlush(stopReason, delayMs);
-      }, delayMs);
-      this.finalUploadFlushTimerIds.push(timerId);
-    }
+  private scheduleFinalUploadFlush(stopReason: StressStopReason): void {
+    this.clearFinalUploadFlushTimer();
+    this.finalUploadFlushTimerId = setTimeout((): void => {
+      this.finalUploadFlushTimerId = null;
+      this.triggerFinalUploadFlush(stopReason, FINAL_UPLOAD_FLUSH_DELAY_MS);
+    }, FINAL_UPLOAD_FLUSH_DELAY_MS);
   }
 
   private triggerFinalUploadFlush(stopReason: StressStopReason, delayMs: number): void {
@@ -2025,21 +2021,11 @@ export class StressTestManager {
     }
   }
 
-  private clearFinalUploadFlushTimers(): void {
-    for (let i = 0; i < this.finalUploadFlushTimerIds.length; i++) {
-      clearTimeout(this.finalUploadFlushTimerIds[i]);
+  private clearFinalUploadFlushTimer(): void {
+    if (this.finalUploadFlushTimerId !== null) {
+      clearTimeout(this.finalUploadFlushTimerId);
+      this.finalUploadFlushTimerId = null;
     }
-    this.finalUploadFlushTimerIds = [];
-  }
-
-  private removeFinalUploadFlushTimer(timerId: number): void {
-    const nextTimers: number[] = [];
-    for (let i = 0; i < this.finalUploadFlushTimerIds.length; i++) {
-      if (this.finalUploadFlushTimerIds[i] !== timerId) {
-        nextTimers.push(this.finalUploadFlushTimerIds[i]);
-      }
-    }
-    this.finalUploadFlushTimerIds = nextTimers;
   }
 
   private scheduleProductionSlice(callback: () => void): void {

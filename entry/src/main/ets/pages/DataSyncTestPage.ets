@@ -302,7 +302,7 @@ export struct DataSyncTestPage {
       
       this.appendResult('✅ Generated 10 logs + 10 actions\n');
       this.appendResult('Expected upload: type=rum_app rows=10 and type=log rows=10\n');
-      this.appendResult('Filter logs: <FT-UPLOAD-LANE> [BATCH]\n');
+      this.appendResult('Filter logs: Sync Data Count and Sync Success / Sync Fail\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {
@@ -342,7 +342,7 @@ export struct DataSyncTestPage {
       
       this.appendResult('✅ Generated 100 logs + 100 actions\n');
       this.appendResult('Expected upload: type=rum_app and type=log batches; larger data may upload across multiple polls\n');
-      this.appendResult('Filter logs: <FT-UPLOAD-LANE> [BATCH] and lane=upload\n');
+      this.appendResult('Filter logs: Sync Poll, Sync Data Count, and Sync Success / Sync Fail\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {
@@ -401,8 +401,8 @@ export struct DataSyncTestPage {
       if (!this.autoSyncEnabled) {
         this.appendResult('💡 Auto sync is disabled, this manual sync is necessary\n');
       }
-      this.appendResult('Check logs: <FT-SDK-SCHEDULER> [LANE] lane=upload\n');
-      this.appendResult('Check logs: <FT-UPLOAD-LANE> [BATCH] type=rum_app / type=log\n\n');
+      this.appendResult('Check logs: Sync Poll Running / Sync Poll Finish\n');
+      this.appendResult('Check logs: Sync Data Count and pkg_id:... Sync Success / Sync Fail\n\n');
       
       // Delay the data info update
       Promise.resolve().then(() => {

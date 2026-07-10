@@ -8,7 +8,6 @@ import { Utils } from '../utils/Utils';
 
 const TAG = 'ANRDetectManager';
 const WATCHER_NAME = 'ft_sdk_anr_monitor';
-const ANR_LANE_TRACE_PREFIX = '<FT-ANR-LANE>';
 
 interface ErrorPropertyValue {
   value: string | number;
@@ -541,7 +540,7 @@ export class ANRDetectManager {
       .catch((error: Error) => {
         const costTime = Math.max(0, Date.now() - startTime);
         this.traceANRLane(`[CONSUMED] name=${traceName} result=failed error=${error.message} cost=${costTime}ms action=report-anr-error`);
-        FTInnerLogger.e(TAG, `${ANR_LANE_TRACE_PREFIX} Failed to record ANR task: name=${traceName}, error=${error.message}`);
+        FTInnerLogger.e(TAG, `Failed to record ANR task: name=${traceName}, error=${error.message}`);
       });
   }
 
@@ -551,7 +550,7 @@ export class ANRDetectManager {
   }
 
   private traceANRLane(message: string): void {
-    FTInnerLogger.i(TAG, `${ANR_LANE_TRACE_PREFIX} ${message}`);
+    FTInnerLogger.d(TAG, `ANR task diagnostics: ${message}`);
   }
 
   /**

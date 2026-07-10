@@ -23,8 +23,6 @@ enum UploadBatchResult {
 }
 
 interface DataUploadConsumeState {
-  taskName: string;
-  startTraced: boolean;
   consumedRows: number;
   startedAt: number;
   metrics: DataUploadConsumeMetrics;
@@ -69,8 +67,6 @@ export class DataUploadWorkerExecutor {
   ): Promise<DataUploadConsumeResult> {
     const consumeOptions = this.sanitizeConsumeOptions(options);
     const state: DataUploadConsumeState = {
-      taskName: consumeOptions.taskName,
-      startTraced: false,
       consumedRows: 0,
       startedAt: capabilities.getCurrentTimeMs(),
       metrics: this.createMetrics()
@@ -100,7 +96,7 @@ export class DataUploadWorkerExecutor {
         hasMoreData = result.hasMoreData || hasMoreData;
       }
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${error as string}`);
+      FTInnerLogger.e(TAG, `Sync Fail: ${error as string}`);
     }
 
     return this.createResult(state, capabilities, hasMoreData);
@@ -269,7 +265,7 @@ export class DataUploadWorkerExecutor {
         DataUploadWorkerExecutor.ONE_MINUTE_DURATION_NS
       );
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> errorSampledConsume failed: ${dataType}, error: ${error as string}`);
+      FTInnerLogger.e(TAG, `errorSampledConsume failed: ${dataType}, error: ${error as string}`);
       return undefined;
     }
   }
@@ -289,23 +285,17 @@ export class DataUploadWorkerExecutor {
       const queryStartTime = capabilities.getCurrentTimeMs();
       const cacheDataList = await this.queryFromData(capabilities, dataType, options.pageSize);
       this.addDbQueryTime(state, capabilities, queryStartTime);
-      this.traceUploadLane(`[QUERY] type=${dataType} rows=${cacheDataList.length} pageSize=${options.pageSize}`);
       lastQueryWasFull = cacheDataList.length >= options.pageSize;
 
       const computeStartTime = capabilities.getCurrentTimeMs();
       const deduplicatedDataList = this.deduplicateData(dataType, cacheDataList);
       if (deduplicatedDataList.length === 0) {
         this.addComputeTime(state, capabilities, computeStartTime);
-        if (cacheDataList.length > 0) {
-          this.traceUploadLane(
-            `[SKIP] type=${dataType} rows=${cacheDataList.length} reason=all-deduplicated`
-          );
-        }
         break;
       }
 
       if (deduplicatedDataList.length < cacheDataList.length) {
-        FTInnerLogger.w(TAG, `<FT-BATCH-UPLOAD> Deduplication filtered out ${cacheDataList.length -
+        FTInnerLogger.w(TAG, `Deduplication filtered out ${cacheDataList.length -
         deduplicatedDataList.length} duplicate record(s) for ${dataType}`);
       }
 
@@ -318,14 +308,12 @@ export class DataUploadWorkerExecutor {
       if (body.trim().length === 0) {
         await this.deleteAndReduceCache(capabilities, state, dataType, deduplicatedDataList);
         processedPages++;
-        this.traceUploadLane(`[SKIP] type=${dataType} rows=${deduplicatedDataList.length} reason=empty-body`);
         if (cacheDataList.length < options.pageSize) {
           break;
         }
         continue;
       }
 
-      this.traceUploadStartIfNeeded(state, dataType, deduplicatedDataList.length);
       state.consumedRows += deduplicatedDataList.length;
       const markStartTime = capabilities.getCurrentTimeMs();
       this.markDataAsUploading(dataType, deduplicatedDataList);
@@ -353,7 +341,7 @@ export class DataUploadWorkerExecutor {
         this.unmarkDataAsUploading(dataType, deduplicatedDataList);
         this.addComputeTime(state, capabilities, unmarkStartTime);
         const retryCount = this.incrementErrorCount(dataType);
-        FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Sync Fail: ${dataType}, error: ${error as string}`);
+        FTInnerLogger.e(TAG, `Sync Fail: ${dataType}, error: ${error as string}`);
 
         const delayTime = this.getNormalBackoffMs(retryCount);
         await this.sleepWithMetrics(capabilities, state, delayTime);
@@ -390,7 +378,7 @@ export class DataUploadWorkerExecutor {
       if (!httpMeasured) {
         this.addHttpTime(state, capabilities, httpStartTime);
       }
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Network request failed: ${error as string}`);
+      FTInnerLogger.e(TAG, `Network request failed: ${error as string}`);
       result = {
         code: NetCodeStatus.UNKNOWN_EXCEPTION_CODE,
         message: (error as Error).message || "",
@@ -398,7 +386,7 @@ export class DataUploadWorkerExecutor {
       };
     }
 
-    return await this.handleUploadResponse(capabilities, state, dataType, pkgId, result, dataList, body);
+    return await this.handleUploadResponse(capabilities, state, dataType, pkgId, result, dataList);
   }
 
   private async handleUploadResponse(
@@ -407,13 +395,11 @@ export class DataUploadWorkerExecutor {
     dataType: DataType,
     pkgId: string,
     result: DataUploadHttpResult,
-    dataList: DataUploadRow[],
-    body: string
+    dataList: DataUploadRow[]
   ): Promise<UploadBatchResult> {
     const code = result.code;
     const response = result.message;
     const errorCode = result.errorCode;
-    const model = result.model || "";
 
     if (this.isIgnoredClientError(code)) {
       const markStartTime = capabilities.getCurrentTimeMs();
@@ -425,9 +411,6 @@ export class DataUploadWorkerExecutor {
       const delayTime = this.getIgnoredClientBackoffMs(ignoredCount);
       FTInnerLogger.e(TAG,
         `pkg_id:${pkgId} Sync Fail (Ignore)-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
-      this.traceUploadLane(
-        `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete ignoredBackoff=${delayTime}ms ignoredCount=${ignoredCount} pkg=${pkgId}`
-      );
       await this.sleepWithMetrics(capabilities, state, delayTime);
       return UploadBatchResult.DELETE_WITH_IGNORED_BACKOFF;
     }
@@ -449,10 +432,6 @@ export class DataUploadWorkerExecutor {
         FTInnerLogger.e(TAG,
           `pkg_id:${pkgId} Sync Fail (Ignore)-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
       }
-      this.traceUploadLane(
-        `[BATCH] type=${dataType} model=${model} code=${code} rows=${dataList.length} action=delete backoff=0ms ` +
-          `response=${this.abbreviateForLog(response, 200)} firstLine=${this.getFirstLineForLog(body, 500)} pkg=${pkgId}`
-      );
       return UploadBatchResult.DELETE_NO_BACKOFF;
     }
 
@@ -466,8 +445,6 @@ export class DataUploadWorkerExecutor {
       const delayTime = this.getNormalBackoffMs(retryCount);
       FTInnerLogger.e(TAG,
         `pkg_id:${pkgId} ${retryCount}:Sync Fail-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
-      FTInnerLogger.w(TAG,
-        `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=reinsert retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
       await this.sleepWithMetrics(capabilities, state, delayTime);
       return UploadBatchResult.RETRY_BACKOFF;
     }
@@ -479,8 +456,6 @@ export class DataUploadWorkerExecutor {
     const delayTime = this.getNormalBackoffMs(retryCount);
     FTInnerLogger.e(TAG,
       `pkg_id:${pkgId} ${retryCount}:Sync Fail-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
-    FTInnerLogger.w(TAG,
-      `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=retry retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
     await this.sleepWithMetrics(capabilities, state, delayTime);
     return UploadBatchResult.RETRY_BACKOFF;
   }
@@ -495,15 +470,6 @@ export class DataUploadWorkerExecutor {
       default:
         return DataUploadWorkerExecutor.UPLOAD_MAX_PAGES_LOG;
     }
-  }
-
-  private getFirstLineForLog(body: string, limit: number): string {
-    if (!body || body.length === 0) {
-      return "";
-    }
-    const newlineIndex = body.indexOf('\n');
-    const firstLine = newlineIndex >= 0 ? body.substring(0, newlineIndex) : body;
-    return this.abbreviateForLog(firstLine, limit);
   }
 
   private abbreviateForLog(value: string, limit: number): string {
@@ -666,7 +632,7 @@ export class DataUploadWorkerExecutor {
 
       return null;
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Error extracting unique ID: ${error as string}`);
+      FTInnerLogger.e(TAG, `Error extracting unique ID: ${error as string}`);
       return null;
     }
   }
@@ -703,7 +669,7 @@ export class DataUploadWorkerExecutor {
     }
 
     FTInnerLogger.w(TAG,
-      `<FT-BATCH-UPLOAD> [DEDUP] Warning: Cannot extract unique ID for data, using data string hash as fallback`);
+      `[DEDUP] Warning: Cannot extract unique ID for data, using data string hash as fallback`);
     return `${dataType}:hash=${this.hashString(data.dataString)}`;
   }
 
@@ -743,7 +709,7 @@ export class DataUploadWorkerExecutor {
 
     if (this.uploadingDataIds.size > Constants.MAX_SET_SIZE_UPLOAD) {
       FTInnerLogger.w(TAG,
-        `<FT-BATCH-UPLOAD> uploadingDataIds size (${this.uploadingDataIds.size}) exceeds limit, clearing to prevent memory leak`);
+        `uploadingDataIds size (${this.uploadingDataIds.size}) exceeds limit, clearing to prevent memory leak`);
       this.uploadingDataIds.clear();
     }
   }
@@ -756,16 +722,16 @@ export class DataUploadWorkerExecutor {
     try {
       return await capabilities.queryRows(dataType, pageSize);
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Query data failed: ${dataType}, error: ${error as string}`);
+      FTInnerLogger.e(TAG, `Query data failed: ${dataType}, error: ${error as string}`);
       return [];
     }
   }
 
   private printUploadData(dataType: DataType, pkgId: string, rows: number, body: string): void {
     FTInnerLogger.d(TAG,
-      `<FT-BATCH-UPLOAD> ========== UPLOAD BODY PREVIEW（type=${dataType} rows=${rows} pkg=${pkgId}） ==========`);
-    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD>\n${body}`);
-    FTInnerLogger.d(TAG, `<FT-BATCH-UPLOAD> ========================================`);
+      `========== UPLOAD BODY PREVIEW ==========`);
+    FTInnerLogger.d(TAG, body);
+    FTInnerLogger.d(TAG, `========================================`);
   }
 
   private async deleteAndReduceCache(
@@ -790,7 +756,7 @@ export class DataUploadWorkerExecutor {
       this.addDbDeleteTime(state, capabilities, deleteStartTime);
       this.addDbWriteQueueWait(state, result);
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Delete uploaded data failed: ${error as string}`);
+      FTInnerLogger.e(TAG, `Delete uploaded data failed: ${error as string}`);
     }
   }
 
@@ -826,7 +792,7 @@ export class DataUploadWorkerExecutor {
       this.addDbInsertTime(state, capabilities, insertStartTime);
       this.addDbWriteQueueWait(state, result);
     } catch (error) {
-      FTInnerLogger.e(TAG, `<FT-BATCH-UPLOAD> Reinsert data failed: ${error as string}`);
+      FTInnerLogger.e(TAG, `Reinsert data failed: ${error as string}`);
     }
   }
 
@@ -911,22 +877,6 @@ export class DataUploadWorkerExecutor {
     return line;
   }
 
-  private traceUploadLane(message: string): void {
-    FTInnerLogger.i(TAG, `<FT-UPLOAD-LANE> ${message}`);
-  }
-
-  private traceUploadLaneDebug(message: string): void {
-    FTInnerLogger.d(TAG, `<FT-UPLOAD-LANE> ${message}`);
-  }
-
-  private traceUploadStartIfNeeded(state: DataUploadConsumeState, dataType: DataType, rows: number): void {
-    if (state.startTraced) {
-      return;
-    }
-    state.startTraced = true;
-    const taskName = state.taskName && state.taskName.length > 0 ? state.taskName : "upload.poll";
-    this.traceUploadLane(`[START] name=${taskName} firstType=${dataType} rows=${rows}`);
-  }
 }
 
 class IDGenerator {

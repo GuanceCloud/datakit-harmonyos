@@ -205,7 +205,7 @@ export class TrackLogManager {
       payload: flushPayload as Object as SDKWorkerPayload
     });
     if (!posted) {
-      FTInnerLogger.w(TAG, '<FT-LOG-LANE> LogWorker flush mailbox post failed');
+      FTInnerLogger.w(TAG, 'LogWorker flush mailbox post failed');
     }
   }
 
@@ -316,14 +316,14 @@ export class TrackLogManager {
     if (!posted) {
       this.droppedCount += logDTOs.length;
       this.acceptedCount = Math.max(0, this.acceptedCount - logDTOs.length);
-      FTInnerLogger.w(TAG, '<FT-LOG-LANE> LogWorker mailbox post failed');
+      FTInnerLogger.w(TAG, 'LogWorker mailbox post failed');
     }
   }
 
   private handleLogMailboxResponse(response: SDKWorkerResponse): void {
     if (!response || !response.ok || !response.payload) {
       const errorMessage = response ? response.errorMessage || 'empty response' : 'empty response';
-      FTInnerLogger.w(TAG, `<FT-LOG-LANE> LogWorker mailbox failed: ${errorMessage}`);
+      FTInnerLogger.w(TAG, `LogWorker mailbox failed: ${errorMessage}`);
       return;
     }
 

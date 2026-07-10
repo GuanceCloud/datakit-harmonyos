@@ -5,7 +5,6 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 
 const TAG = Constants.LOG_TAG_PREFIX + "FTTraceManager";
-const CUSTOM_LANE_TRACE_PREFIX = "<FT-CUSTOM-LANE>";
 const TRACE_CLEANUP_INTERVAL_MS = 300000;
 
 interface TraceContextGenerationResult {
@@ -404,7 +403,7 @@ export class FTTraceManager {
   }
 
   private traceCustomLane(message: string): void {
-    FTInnerLogger.i(TAG, `${CUSTOM_LANE_TRACE_PREFIX} ${message}`);
+    FTInnerLogger.d(TAG, `Trace handler diagnostics: ${message}`);
   }
   
   /**

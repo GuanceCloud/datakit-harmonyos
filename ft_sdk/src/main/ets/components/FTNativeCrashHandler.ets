@@ -9,7 +9,6 @@ import {
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
 
 const TAG = "FTNativeCrashHandler";
-const CRASH_FILE_TRACE_PREFIX = "<FT-CRASH-FILE-LANE>";
 
 export interface NativeCrashData extends FTNativeCrashData {
 }
@@ -274,7 +273,7 @@ export class FTNativeCrashHandler {
   }
 
   private traceCrashFileLane(message: string): void {
-    FTInnerLogger.i(TAG, `${CRASH_FILE_TRACE_PREFIX} ${message}`);
+    FTInnerLogger.d(TAG, `Native crash task diagnostics: ${message}`);
   }
 
   private getTextSize(value: string | null | undefined): number {
