@@ -38,8 +38,9 @@ import { FTDBTaskPoolSyncDraftDTO } from './db/FTDBTaskPoolExecutor';
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
 const TAG = "FTTrackInner";
-const RUM_WORKER_EVENT_BATCH_SIZE = 64;
-const RUM_WORKER_EVENT_BATCH_DELAY_MS = 16;
+/** Host-side RUM queue is only a bounded transport coalescer. */
+const RUM_WORKER_TRANSPORT_BATCH_SIZE = 64;
+const RUM_WORKER_TRANSPORT_BATCH_DELAY_MS = 16;
 
 enum WriteCacheCategory {
   LOG = 'log',
@@ -194,12 +195,21 @@ class FTTrackInner {
     draftUuid?: string
   ): void {
     try {
-      const uuid = draftUuid && draftUuid.length > 0 ? draftUuid : this.createRumSyncDataUuid(measurement, tags);
-      const lineContext = dataType === DataType.RUM_APP ? this.getWorkerLineProtocolContextSnapshot() : null;
+      const suppliedUuid = draftUuid && draftUuid.length > 0 ? draftUuid : undefined;
+      const lineContext = dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW ?
+        this.getWorkerLineProtocolContextSnapshot() : null;
       const contextSynced = lineContext !== null ?
         this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER) : false;
       const rumEvent = lineContext === null ?
-        this.createPreparedRumWorkerEventDTO(dataType, customDataType, measurement, tags, fields, time, uuid) :
+        this.createPreparedRumWorkerEventDTO(
+          dataType,
+          customDataType,
+          measurement,
+          tags,
+          fields,
+          time,
+          suppliedUuid || this.createRumSyncDataUuid(measurement, tags)
+        ) :
         this.createRawRumWorkerEventDTO(
           dataType,
           customDataType,
@@ -207,7 +217,7 @@ class FTTrackInner {
           tags,
           fields,
           time,
-          uuid,
+          suppliedUuid,
           lineContext,
           !contextSynced
         );
@@ -241,12 +251,21 @@ class FTTrackInner {
     draftUuid?: string
   ): void {
     try {
-      const uuid = draftUuid && draftUuid.length > 0 ? draftUuid : this.createRumSyncDataUuidFromRecord(measurement, tags);
-      const lineContext = dataType === DataType.RUM_APP ? this.getWorkerLineProtocolContextSnapshot() : null;
+      const suppliedUuid = draftUuid && draftUuid.length > 0 ? draftUuid : undefined;
+      const lineContext = dataType === DataType.RUM_APP || dataType === DataType.RUM_WEBVIEW ?
+        this.getWorkerLineProtocolContextSnapshot() : null;
       const contextSynced = lineContext !== null ?
         this.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER) : false;
       const rumEvent = lineContext === null ?
-        this.createPreparedRumWorkerEventDTOFromRecords(dataType, customDataType, measurement, tags, fields, time, uuid) :
+        this.createPreparedRumWorkerEventDTOFromRecords(
+          dataType,
+          customDataType,
+          measurement,
+          tags,
+          fields,
+          time,
+          suppliedUuid || this.createRumSyncDataUuidFromRecord(measurement, tags)
+        ) :
         this.createRawRumWorkerEventDTOFromRecords(
           dataType,
           customDataType,
@@ -254,7 +273,7 @@ class FTTrackInner {
           tags,
           fields,
           time,
-          uuid,
+          suppliedUuid,
           lineContext,
           !contextSynced
         );
@@ -336,7 +355,7 @@ class FTTrackInner {
       measurement,
       rumEvent
     });
-    if (this.pendingRumWorkerEvents.length >= RUM_WORKER_EVENT_BATCH_SIZE) {
+    if (this.pendingRumWorkerEvents.length >= RUM_WORKER_TRANSPORT_BATCH_SIZE) {
       this.flushRumWorkerEventBatch(source);
       return;
     }
@@ -350,7 +369,7 @@ class FTTrackInner {
     this.rumWorkerEventFlushTimer = setTimeout(() => {
       this.rumWorkerEventFlushTimer = null;
       this.flushRumWorkerEventBatch(source);
-    }, RUM_WORKER_EVENT_BATCH_DELAY_MS) as number;
+    }, RUM_WORKER_TRANSPORT_BATCH_DELAY_MS) as number;
   }
 
   private flushRumWorkerEventBatch(source: string = 'rum.worker.batch'): void {
@@ -362,7 +381,7 @@ class FTTrackInner {
       return;
     }
 
-    const batchSize = Math.min(RUM_WORKER_EVENT_BATCH_SIZE, this.pendingRumWorkerEvents.length);
+    const batchSize = Math.min(RUM_WORKER_TRANSPORT_BATCH_SIZE, this.pendingRumWorkerEvents.length);
     const batch = this.pendingRumWorkerEvents.splice(0, batchSize);
     const events: SDKRumEventDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
@@ -541,7 +560,7 @@ class FTTrackInner {
     tags: Map<string, string>,
     fields: Map<string, string>,
     time: number,
-    uuid: string,
+    uuid: string | undefined,
     lineContext: SDKLineProtocolContextDTO,
     attachLineContext: boolean
   ): SDKRumEventDTO {
@@ -567,7 +586,7 @@ class FTTrackInner {
     tags: SDKStringRecord,
     fields: SDKStringRecord,
     time: number,
-    uuid: string,
+    uuid: string | undefined,
     lineContext: SDKLineProtocolContextDTO,
     attachLineContext: boolean
   ): SDKRumEventDTO {
@@ -594,27 +613,22 @@ class FTTrackInner {
     tags: SDKStringRecord,
     fields: SDKStringRecord,
     time: number,
-    uuid: string,
+    uuid: string | undefined,
     integerCompatible: boolean
   ): SDKRumEventDTO {
-    return {
-      eventType: this.resolveRumWorkerEventType(measurement, fields),
-      name: this.resolveRumWorkerEventName(measurement, tags, fields),
+    const event: SDKRumEventDTO = {
       time,
       dataType: dataType.toString(),
       customDataType,
       measurement,
-      uuid,
       integerCompatible,
-      viewId: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_ID),
-      viewName: this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_NAME),
-      actionId: this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_ID),
-      actionName: this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_NAME),
-      resourceId: this.resolveRumWorkerResourceId(tags),
-      sessionId: this.readStringRecordValue(tags, Constants.KEY_RUM_SESSION_ID),
       tags,
       fields
     };
+    if (uuid && uuid.length > 0) {
+      event.uuid = uuid;
+    }
+    return event;
   }
 
   private mapToStringRecord(map: Map<string, string>): SDKStringRecord {
@@ -937,53 +951,6 @@ class FTTrackInner {
     return fallback;
   }
 
-  private resolveRumWorkerEventType(measurement: string, fields: SDKStringRecord): string {
-    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
-      const isActive = this.readStringRecordValue(fields, Constants.KEY_RUM_VIEW_IS_ACTIVE);
-      return isActive === 'false' ? 'view.stop' : 'view.start';
-    }
-    if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
-      return 'action.add';
-    }
-    if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
-      return 'resource.complete';
-    }
-    return measurement || '';
-  }
-
-  private resolveRumWorkerEventName(
-    measurement: string,
-    tags: SDKStringRecord,
-    fields: SDKStringRecord
-  ): string {
-    if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
-      return this.readStringRecordValue(tags, Constants.KEY_RUM_VIEW_NAME) || measurement;
-    }
-    if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
-      return this.readStringRecordValue(tags, Constants.KEY_RUM_ACTION_NAME) || measurement;
-    }
-    if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
-      return this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL) || measurement;
-    }
-    if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
-      return this.readStringRecordValue(tags, Constants.KEY_RUM_ERROR_TYPE) ||
-        this.readStringRecordValue(fields, Constants.KEY_RUM_ERROR_MESSAGE) ||
-        measurement;
-    }
-    return measurement || '';
-  }
-
-  private resolveRumWorkerResourceId(tags: SDKStringRecord): string | undefined {
-    const method = this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_METHOD);
-    const url = this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL);
-    if (method && url) {
-      return `${method}:${url}`;
-    }
-    return url ||
-      this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_TRACE_ID) ||
-      this.readStringRecordValue(tags, Constants.KEY_RUM_RESOURCE_URL_PATH);
-  }
-
   private readStringRecordValue(record: SDKStringRecord, key: string): string | undefined {
     if (!record) {
       return undefined;
@@ -1291,34 +1258,14 @@ class FTTrackInner {
     FTInnerLogger.d(TAG, `TAG ========== rumWebView() called ==========`);
     FTInnerLogger.d(TAG, `TAG Measurement: ${measurement},Time: ${time}, Collect type: ${collectType}`);
 
-    const formattedTags = new Map<string, string>();
-    tags.forEach((value, key) => {
-      // Convert number values that might be JSON strings
-      if (typeof value === 'string' && value.startsWith('"') && value.endsWith('"')) {
-        formattedTags.set(key, value); // Already a JSON string
-      } else {
-        formattedTags.set(key, value);
-      }
-    });
-
-    const formattedFields = new Map<string, string>();
-    fields.forEach((value, key) => {
-      // Convert number values that might be JSON strings
-      if (typeof value === 'string' && value.startsWith('"') && value.endsWith('"')) {
-        formattedFields.set(key, value); // Already a JSON string
-      } else {
-        formattedFields.set(key, value);
-      }
-    });
-
-    // Check if session should be collected (aligned with rum() method)
-    const sessionId = formattedTags.get('session_id');
+    // Host only applies the sampling decision. WebView tag/field/package
+    // normalization is finalized inside EVENT_CONSUMER.
+    const sessionId = tags.get(Constants.KEY_RUM_SESSION_ID);
     FTInnerLogger.d(TAG, `TAG Session ID: ${sessionId}`);
 
     if (sessionId && this.dataHelper.checkSessionWillCollect(sessionId)) {
       FTInnerLogger.d(TAG, `TAG Session will collect, calling syncDataBackground`);
-      // Call syncDataBackground with RUM_WEBVIEW data type
-      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, formattedTags, formattedFields, null);
+      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null);
     } else {
       const willCollect = sessionId ? this.dataHelper.checkSessionWillCollect(sessionId) : false;
       FTInnerLogger.w(TAG,

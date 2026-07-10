@@ -92,6 +92,7 @@ export interface SDKWorkerErrorPayload {
 
 export type SDKStringRecord = Record<string, string>;
 export type SDKNumberRecord = Record<string, number>;
+export type SDKPropertyRecord = Record<string, object>;
 
 export interface SDKLogDTO {
   measurement: string;
@@ -117,8 +118,9 @@ export interface SDKLineProtocolContextDTO {
 }
 
 export interface SDKRumEventDTO {
-  eventType: string;
-  name: string;
+  /** Optional raw hints. EVENT_CONSUMER derives the canonical values. */
+  eventType?: string;
+  name?: string;
   time: number;
   dataType?: string;
   customDataType?: string;
@@ -143,6 +145,8 @@ export interface SDKRumCounterUpdateDTO {
   actionId?: string;
   updateView?: boolean;
   flushMaxKeys?: number;
+  /** Worker-side compaction count; Host submissions normally omit it. */
+  count?: number;
 }
 
 export interface SDKRumCounterUpdateBatchDTO {
@@ -176,7 +180,7 @@ export interface SDKRumResourceParamsDTO {
   resourceType: string;
   requestErrorStack: string;
   requestErrorMsg: string;
-  property: SDKStringRecord;
+  property: SDKPropertyRecord;
   traceId?: string;
   spanId?: string;
 }
@@ -224,7 +228,7 @@ export interface SDKRumErrorCommandDTO {
   errorType: string;
   errorSource: string;
   appState: string;
-  property: SDKStringRecord;
+  property: SDKPropertyRecord;
   time: number;
   customDataType?: string;
   counterFlushMaxEvents?: number;

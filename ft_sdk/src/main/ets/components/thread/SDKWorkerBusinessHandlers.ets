@@ -4,6 +4,7 @@ import {
   SDKLineProtocolContextDTO,
   SDKLineProtocolInputDTO,
   SDKLogDTO,
+  SDKPropertyRecord,
   SDKRumCompletedActionBatchDTO,
   SDKRumCompletedActionDTO,
   SDKRumCounterDeltaDTO,
@@ -55,6 +56,7 @@ import {
 
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
+const RUM_WORKER_DEDUP_CAPACITY = 2048;
 
 export interface SDKWorkerRuntimeState {
   pool: SDKDedicatedPoolType;
@@ -70,6 +72,8 @@ export interface SDKWorkerRuntimeState {
   rumCounterPendingEventCount: number;
   rumCounterNeedsActionCloseCheck: boolean;
   rumCounterNeedsRumDataGenerate: boolean;
+  rumDedupKeys: SDKStringRecord;
+  rumDedupOrder: string[];
   rumResources: Record<string, SDKRumWorkerResourceState | null>;
   logQueue: SDKLogDTO[];
   logBatchBuffer: SDKLogDTO[];
@@ -296,6 +300,8 @@ export function createSDKWorkerRuntimeStateWithBackend(
     rumCounterPendingEventCount: 0,
     rumCounterNeedsActionCloseCheck: false,
     rumCounterNeedsRumDataGenerate: false,
+    rumDedupKeys: {},
+    rumDedupOrder: [],
     rumResources: {},
     logQueue: [],
     logBatchBuffer: [],
@@ -451,6 +457,8 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.rumCounterPendingEventCount = 0;
   state.rumCounterNeedsActionCloseCheck = false;
   state.rumCounterNeedsRumDataGenerate = false;
+  state.rumDedupKeys = {};
+  state.rumDedupOrder = [];
   state.rumResources = {};
   state.logQueue = [];
   state.logBatchBuffer = [];
@@ -507,7 +515,7 @@ function handleRumCommand(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): 
 }
 
 function handleRumCommandBatch(batch: SDKRumEventBatchDTO, state: SDKWorkerRuntimeState): SDKWorkerPayload {
-  const events = batch && batch.events ? batch.events : [];
+  const events = sortRumEventsByTime(batch && batch.events ? batch.events : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let eventType = '';
   for (let i = 0; i < events.length; i++) {
@@ -540,34 +548,48 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
     throw new Error('RUM event payload is required');
   }
 
+  const finalizedEvent = finalizeRumEvent(event);
+  const eventType = finalizedEvent.eventType || '';
+  const dedupKey = createRumEventDedupKey(finalizedEvent);
+  if (rememberRumDedupKey(dedupKey, state)) {
+    return createRumCommandResultPayload(eventType, [], state);
+  }
+
   state.eventSequence++;
-  const eventType = event.eventType || '';
   if (eventType === 'view.start' || eventType === 'view.init') {
-    state.activeViewId = event.viewId || '';
-    state.activeViewName = event.viewName || event.name || '';
+    state.activeViewId = finalizedEvent.viewId || '';
+    state.activeViewName = finalizedEvent.viewName || finalizedEvent.name || '';
   } else if (eventType === 'view.stop') {
     state.activeViewId = '';
     state.activeViewName = '';
   } else if (eventType === 'action.start' || eventType === 'action.add') {
-    state.activeActionId = event.actionId || '';
-    state.activeActionName = event.actionName || event.name || '';
+    state.activeActionId = finalizedEvent.actionId || '';
+    state.activeActionName = finalizedEvent.actionName || finalizedEvent.name || '';
   } else if (eventType === 'action.complete') {
     // Completed actions are one-shot RUM events and must not become the active action.
   } else if (eventType === 'action.stop' || eventType === 'action.close') {
     state.activeActionId = '';
     state.activeActionName = '';
-  } else if (eventType === 'resource.start' && event.resourceId) {
-      state.activeResources[event.resourceId] = event.name || event.resourceId;
-  } else if ((eventType === 'resource.stop' || eventType === 'resource.complete') && event.resourceId) {
-    state.activeResources[event.resourceId] = '';
+  } else if (eventType === 'resource.start' && finalizedEvent.resourceId) {
+      state.activeResources[finalizedEvent.resourceId] = finalizedEvent.name || finalizedEvent.resourceId;
+  } else if ((eventType === 'resource.stop' || eventType === 'resource.complete') && finalizedEvent.resourceId) {
+    state.activeResources[finalizedEvent.resourceId] = '';
   }
 
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
-  if (event.measurement && event.uuid) {
-    syncDrafts.push(createRumDraft(event, state));
+  if (finalizedEvent.measurement && finalizedEvent.uuid) {
+    syncDrafts.push(createRumDraft(finalizedEvent, state));
   }
 
-  const payload: SDKRumCommandResultPayload = {
+  return createRumCommandResultPayload(eventType, syncDrafts, state);
+}
+
+function createRumCommandResultPayload(
+  eventType: string,
+  syncDrafts: SDKSyncDataDraftDTO[],
+  state: SDKWorkerRuntimeState
+): SDKRumCommandResultPayload {
+  return {
     sequence: state.eventSequence,
     eventType,
     activeViewId: state.activeViewId,
@@ -577,15 +599,198 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
   };
-  return payload;
+}
+
+function sortRumEventsByTime(events: SDKRumEventDTO[]): SDKRumEventDTO[] {
+  const sorted: SDKRumEventDTO[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if (!event) {
+      continue;
+    }
+    let insertAt = sorted.length;
+    while (insertAt > 0 && getRumEventTime(sorted[insertAt - 1]) > getRumEventTime(event)) {
+      insertAt--;
+    }
+    sorted.splice(insertAt, 0, event);
+  }
+  return sorted;
+}
+
+function getRumEventTime(event: SDKRumEventDTO): number {
+  return event && event.time > 0 ? event.time : 0;
+}
+
+function finalizeRumEvent(event: SDKRumEventDTO): SDKRumEventDTO {
+  const tags = copyStringRecord(event.tags || {});
+  const fields = copyStringRecord(event.fields || {});
+  const measurement = event.measurement || '';
+  const viewId = readWorkerEventValue(tags, fields, Constants.KEY_RUM_VIEW_ID) || event.viewId || '';
+  const viewName = readWorkerEventValue(tags, fields, Constants.KEY_RUM_VIEW_NAME) || event.viewName || '';
+  const actionId = readWorkerEventValue(tags, fields, Constants.KEY_RUM_ACTION_ID) || event.actionId || '';
+  const actionName = readWorkerEventValue(tags, fields, Constants.KEY_RUM_ACTION_NAME) || event.actionName || '';
+  const sessionId = readWorkerEventValue(tags, fields, Constants.KEY_RUM_SESSION_ID) || event.sessionId || '';
+  const eventType = deriveRumEventType(measurement, fields, event.eventType || '');
+  const name = deriveRumEventName(measurement, tags, fields, event.name || '');
+  const resourceId = deriveRumResourceId(tags, fields, event.resourceId || '');
+  let uuid = event.uuid || readWorkerEventValue(tags, fields, Constants.KEY_SDK_DATA_FLAG);
+  if ((!uuid || uuid.length === 0) && measurement.length > 0) {
+    uuid = measurement === Constants.FT_MEASUREMENT_RUM_VIEW && viewId.length > 0 ?
+      viewId.substring(0, Math.min(16, viewId.length)) : generateWorkerUuid();
+  }
+
+  return {
+    eventType,
+    name,
+    time: event.time,
+    dataType: event.dataType,
+    customDataType: event.customDataType,
+    measurement,
+    uuid,
+    integerCompatible: event.integerCompatible,
+    lineContext: event.lineContext,
+    lineProtocolPrepared: event.lineProtocolPrepared,
+    viewId,
+    viewName,
+    actionId,
+    actionName,
+    resourceId,
+    sessionId,
+    tags,
+    fields
+  };
+}
+
+function deriveRumEventType(measurement: string, fields: SDKStringRecord, fallback: string): string {
+  if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+    return readWorkerRecordValue(fields, Constants.KEY_RUM_VIEW_IS_ACTIVE) === 'false' ? 'view.stop' : 'view.start';
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+    return 'action.add';
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+    return 'resource.complete';
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+    return 'rum.error';
+  }
+  return fallback || measurement;
+}
+
+function deriveRumEventName(
+  measurement: string,
+  tags: SDKStringRecord,
+  fields: SDKStringRecord,
+  fallback: string
+): string {
+  if (measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+    return readWorkerEventValue(tags, fields, Constants.KEY_RUM_VIEW_NAME) || fallback || measurement;
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+    return readWorkerEventValue(tags, fields, Constants.KEY_RUM_ACTION_NAME) || fallback || measurement;
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+    return readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_URL) || fallback || measurement;
+  }
+  if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+    return readWorkerEventValue(tags, fields, Constants.KEY_RUM_ERROR_TYPE) ||
+      readWorkerEventValue(tags, fields, Constants.KEY_RUM_ERROR_MESSAGE) || fallback || measurement;
+  }
+  return fallback || measurement;
+}
+
+function deriveRumResourceId(tags: SDKStringRecord, fields: SDKStringRecord, fallback: string): string {
+  const method = readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_METHOD);
+  const url = readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_URL);
+  if (method.length > 0 && url.length > 0) {
+    return `${method}:${url}`;
+  }
+  return fallback || url ||
+    readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_TRACE_ID) ||
+    readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_SPAN_ID) ||
+    readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_URL_PATH);
+}
+
+function readWorkerEventValue(tags: SDKStringRecord, fields: SDKStringRecord, key: string): string {
+  return normalizeWorkerScalar(readWorkerRecordValue(tags, key) || readWorkerRecordValue(fields, key));
+}
+
+function readWorkerRecordValue(record: SDKStringRecord, key: string): string {
+  if (!record) {
+    return '';
+  }
+  const value = record[key];
+  return value !== undefined && value !== null ? String(value) : '';
+}
+
+function normalizeWorkerScalar(value: string): string {
+  if (!value || value.length < 2) {
+    return value || '';
+  }
+  const first = value.charAt(0);
+  const last = value.charAt(value.length - 1);
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return value.substring(1, value.length - 1);
+  }
+  return value;
+}
+
+function createRumEventDedupKey(event: SDKRumEventDTO): string {
+  if (!event) {
+    return '';
+  }
+  if (event.dataType === 'rum_webview' && event.measurement === Constants.FT_MEASUREMENT_RUM_VIEW) {
+    // Browser view updates may be intentionally identical and must all be forwarded.
+    return '';
+  }
+  if (event.dataType === 'rum_webview' && event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION &&
+    event.actionId && event.actionId.length > 0) {
+    return `event|webview.action|${event.actionId}`;
+  }
+  return `event|${event.eventType || ''}|${event.dataType || ''}|${event.measurement || ''}|${event.time || 0}|${
+    event.viewId || ''}|${event.actionId || ''}|${event.resourceId || ''}|${event.name || ''}|${
+    createStableStringRecordKey(event.tags || {})}|${createStableStringRecordKey(event.fields || {})}`;
+}
+
+function createStableStringRecordKey(record: SDKStringRecord): string {
+  const keys = Object.keys(record).sort();
+  const parts: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    parts.push(`${key}=${record[key]}`);
+  }
+  return parts.join('&');
+}
+
+function rememberRumDedupKey(key: string, state: SDKWorkerRuntimeState): boolean {
+  if (!key || key.length === 0) {
+    return false;
+  }
+  if (state.rumDedupKeys[key] === '1') {
+    return true;
+  }
+  state.rumDedupKeys[key] = '1';
+  state.rumDedupOrder.push(key);
+  while (state.rumDedupOrder.length > RUM_WORKER_DEDUP_CAPACITY) {
+    const expired = state.rumDedupOrder.shift();
+    if (expired) {
+      state.rumDedupKeys[expired] = '';
+    }
+  }
+  return false;
 }
 
 function createRumDraft(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): SDKSyncDataDraftDTO {
   const lineContext = event.lineContext || state.lineContext;
   const shouldPrepareInWorker: boolean =
-    event.lineProtocolPrepared !== true && lineContext !== null && lineContext !== undefined && event.dataType === 'rum_app';
-  const prepared: PreparedWorkerLineRecords = shouldPrepareInWorker ?
-    prepareRumAppLineRecords(event, lineContext as SDKLineProtocolContextDTO) : createPassthroughLineRecords(event);
+    event.lineProtocolPrepared !== true && lineContext !== null && lineContext !== undefined &&
+      (event.dataType === 'rum_app' || event.dataType === 'rum_webview');
+  let prepared = createPassthroughLineRecords(event);
+  if (shouldPrepareInWorker && event.dataType === 'rum_webview') {
+    prepared = prepareRumWebViewLineRecords(event, lineContext as SDKLineProtocolContextDTO);
+  } else if (shouldPrepareInWorker) {
+    prepared = prepareRumAppLineRecords(event, lineContext as SDKLineProtocolContextDTO);
+  }
   return {
     dataType: event.dataType || '',
     customDataType: event.customDataType,
@@ -635,16 +840,91 @@ function prepareRumAppLineRecords(
   };
 }
 
+function prepareRumWebViewLineRecords(
+  event: SDKRumEventDTO,
+  lineContext: SDKLineProtocolContextDTO
+): PreparedWorkerLineRecords {
+  const inputTags = event.tags || {};
+  const tags: SDKStringRecord = {};
+  const fields = copyStringRecord(event.fields || {});
+  const webviewService = inputTags[Constants.KEY_SERVICE] || '';
+  const webviewSdkVersion = inputTags[Constants.KEY_SDK_VERSION] || '';
+
+  tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
+  mergeStringRecords(tags, lineContext.dynamicBaseTags);
+  mergeStringRecords(tags, lineContext.dynamicRumTags);
+  mergeStringRecords(tags, inputTags);
+
+  const rumTagKeys = Object.keys(lineContext.rumTags);
+  for (let i = 0; i < rumTagKeys.length; i++) {
+    const key = rumTagKeys[i];
+    if (key === Constants.KEY_SERVICE || key === Constants.KEY_SDK_VERSION) {
+      continue;
+    }
+    const value = lineContext.rumTags[key];
+    tags[key] = key === Constants.KEY_SDK_PACKAGE_INFO ?
+      appendWebSdkVersion(value, webviewSdkVersion) : value;
+  }
+
+  if (webviewService.length > 0) {
+    tags[Constants.KEY_SERVICE] = webviewService;
+  }
+  if (webviewSdkVersion.length > 0) {
+    tags[Constants.KEY_SDK_VERSION] = webviewSdkVersion;
+  }
+  if (tags[Constants.KEY_SDK_PACKAGE_INFO]) {
+    tags[Constants.KEY_SDK_PACKAGE_INFO] = appendWebSdkVersion(
+      tags[Constants.KEY_SDK_PACKAGE_INFO],
+      webviewSdkVersion
+    );
+  }
+  tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
+  return {
+    tags,
+    fields,
+    integerCompatible: lineContext.integerCompatible === true
+  };
+}
+
+function appendWebSdkVersion(packageInfo: string, webSdkVersion: string): string {
+  if (!packageInfo || packageInfo.length === 0) {
+    return packageInfo || '';
+  }
+  let normalized = packageInfo.trim();
+  if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
+    (normalized.startsWith("'") && normalized.endsWith("'"))) {
+    normalized = normalized.substring(1, normalized.length - 1);
+  }
+  if (normalized.includes(`"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`)) {
+    return normalized;
+  }
+  try {
+    const parsed = JSON.parse(normalized) as SDKStringRecord;
+    parsed[Constants.KEY_RUM_SDK_PACKAGE_WEB] = webSdkVersion || '';
+    return JSON.stringify(parsed);
+  } catch (_) {
+    if (normalized.startsWith('{') && normalized.endsWith('}')) {
+      return normalized.substring(0, 1) +
+        `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webSdkVersion || ''}",` +
+        normalized.substring(1);
+    }
+  }
+  return normalized;
+}
+
 function handleRumErrorCommandBatch(
   batch: SDKRumErrorCommandBatchDTO,
   state: SDKWorkerRuntimeState
 ): SDKWorkerPayload {
-  const commands = batch && batch.commands ? batch.commands : [];
+  const commands = sortRumErrorCommands(batch && batch.commands ? batch.commands : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let flushMaxEvents = 256;
   for (let i = 0; i < commands.length; i++) {
     const command = commands[i];
     if (!command) {
+      continue;
+    }
+    if (rememberRumDedupKey(createRumErrorDedupKey(command), state)) {
       continue;
     }
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
@@ -700,7 +980,7 @@ function processRumErrorCommand(
   const fields: SDKStringRecord = {};
   fields[Constants.KEY_RUM_ERROR_MESSAGE] = command.message || '';
   fields[Constants.KEY_RUM_ERROR_STACK] = command.log || '';
-  mergeStringRecords(fields, command.property || {});
+  mergeStringRecords(fields, normalizeRumPropertyRecord(command.property || {}));
 
   const event: SDKRumEventDTO = {
     eventType: 'rum.error',
@@ -722,16 +1002,42 @@ function processRumErrorCommand(
   applyRumErrorDelta(state, context.viewId, context.actionId);
 }
 
+function sortRumErrorCommands(commands: SDKRumErrorCommandDTO[]): SDKRumErrorCommandDTO[] {
+  const sorted: SDKRumErrorCommandDTO[] = [];
+  for (let i = 0; i < commands.length; i++) {
+    const command = commands[i];
+    if (!command) {
+      continue;
+    }
+    let insertAt = sorted.length;
+    while (insertAt > 0 && (sorted[insertAt - 1].time || 0) > (command.time || 0)) {
+      insertAt--;
+    }
+    sorted.splice(insertAt, 0, command);
+  }
+  return sorted;
+}
+
+function createRumErrorDedupKey(command: SDKRumErrorCommandDTO): string {
+  const context = command.context;
+  return `error|${command.time || 0}|${command.errorType || ''}|${command.message || ''}|${
+    command.log || ''}|${context ? context.sessionId : ''}|${context ? context.viewId : ''}|${
+    context ? context.actionId : ''}|${createStableStringRecordKey(normalizeRumPropertyRecord(command.property || {}))}`;
+}
+
 function handleRumResourceCommandBatch(
   batch: SDKRumResourceCommandBatchDTO,
   state: SDKWorkerRuntimeState
 ): SDKWorkerPayload {
-  const commands = batch && batch.commands ? batch.commands : [];
+  const commands = sortRumResourceCommands(batch && batch.commands ? batch.commands : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let flushMaxEvents = 256;
   for (let i = 0; i < commands.length; i++) {
     const command = commands[i];
     if (!command) {
+      continue;
+    }
+    if (rememberRumDedupKey(createRumResourceCommandDedupKey(command), state)) {
       continue;
     }
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
@@ -757,6 +1063,64 @@ function handleRumResourceCommandBatch(
     payload.needsRumDataGenerate = flushPayload.needsRumDataGenerate;
   }
   return payload as Object as SDKWorkerPayload;
+}
+
+function sortRumResourceCommands(commands: SDKRumResourceCommandDTO[]): SDKRumResourceCommandDTO[] {
+  const sorted: SDKRumResourceCommandDTO[] = [];
+  for (let i = 0; i < commands.length; i++) {
+    const command = commands[i];
+    if (!command) {
+      continue;
+    }
+    let insertAt = sorted.length;
+    while (insertAt > 0 && getRumResourceCommandTime(sorted[insertAt - 1]) > getRumResourceCommandTime(command)) {
+      insertAt--;
+    }
+    sorted.splice(insertAt, 0, command);
+  }
+  return sorted;
+}
+
+function getRumResourceCommandTime(command: SDKRumResourceCommandDTO): number {
+  if (command.eventTime && command.eventTime > 0) {
+    return command.eventTime;
+  }
+  if (command.startTime && command.startTime > 0) {
+    return command.startTime;
+  }
+  if (command.endTime && command.endTime > 0) {
+    return command.endTime;
+  }
+  return 0;
+}
+
+function createRumResourceCommandDedupKey(command: SDKRumResourceCommandDTO): string {
+  const context = command.context;
+  const params = command.params;
+  const netStatus = command.netStatus;
+  return `resource|${command.resourceId || ''}|${command.commandType || ''}|${getRumResourceCommandTime(command)}|${
+    command.startTime || 0}|${command.endTime || 0}|${command.fallbackActionId || ''}|${command.shouldCollect}|${
+    command.customDataType || ''}|${context ? context.sessionId : ''}|${context ? context.viewId : ''}|${
+    context ? context.actionId : ''}|${params ? createRumResourceParamsDedupKey(params) : ''}|${
+    netStatus ? createRumResourceNetStatusDedupKey(netStatus) : ''}`;
+}
+
+function createRumResourceParamsDedupKey(params: SDKRumResourceParamsDTO): string {
+  return `${params.url || ''}|${params.resourceMethod || ''}|${params.resourceStatus || 0}|${
+    params.responseContentLength || 0}|${params.resourceType || ''}|${params.responseConnection || ''}|${
+    params.responseContentType || ''}|${params.responseContentEncoding || ''}|${params.traceId || ''}|${
+    params.spanId || ''}|requestHeader=${hashUploadString(params.requestHeader || '')}|responseHeader=${
+    hashUploadString(params.responseHeader || '')}|responseBody=${hashUploadString(params.responseBody || '')}|${
+    params.requestErrorMsg || ''}|${params.requestErrorStack || ''}|${
+    createStableStringRecordKey(normalizeRumPropertyRecord(params.property || {}))}`;
+}
+
+function createRumResourceNetStatusDedupKey(netStatus: SDKRumResourceNetStatusDTO): string {
+  return `${netStatus.dnsTime || 0}|${netStatus.dnsStartTime || 0}|${netStatus.tcpTime || 0}|${
+    netStatus.tcpStartTime || 0}|${netStatus.sslTime || 0}|${netStatus.sslStartTime || 0}|${
+    netStatus.ttfbTime || 0}|${netStatus.responseTime || 0}|${netStatus.firstByteTime || 0}|${
+    netStatus.firstByteStartTime || 0}|${netStatus.downloadTime || 0}|${netStatus.downloadStartTime || 0}|${
+    netStatus.holeRequestTime || 0}|${netStatus.resourceHostIP || ''}`;
 }
 
 function processRumResourceCommand(
@@ -937,12 +1301,13 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   resource.contentSet = true;
 }
 
-function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, property: SDKStringRecord): void {
-  const dnsTime = readPositiveNumber(property, 'resourceDNS');
-  const tcpTime = readPositiveNumber(property, 'resourceTCP');
-  const sslTime = readPositiveNumber(property, 'resourceSSL');
-  const ttfbTime = readPositiveNumber(property, 'resourceTTFB');
-  const downloadTime = readPositiveNumber(property, 'resourceDownloadTime');
+function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, property: SDKPropertyRecord): void {
+  const normalized = normalizeRumPropertyRecord(property || {});
+  const dnsTime = readPositiveNumber(normalized, 'resourceDNS');
+  const tcpTime = readPositiveNumber(normalized, 'resourceTCP');
+  const sslTime = readPositiveNumber(normalized, 'resourceSSL');
+  const ttfbTime = readPositiveNumber(normalized, 'resourceTTFB');
+  const downloadTime = readPositiveNumber(normalized, 'resourceDownloadTime');
 
   if (dnsTime > 0) {
     resource.resourceDNS = dnsTime;
@@ -959,11 +1324,11 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
   if (ttfbTime > 0) {
     resource.resourceTTFB = ttfbTime;
   }
-  const transTime = readPositiveNumber(property, 'resourceTrans');
+  const transTime = readPositiveNumber(normalized, 'resourceTrans');
   if (transTime > 0) {
     resource.resourceTrans = transTime;
   }
-  const firstByteTime = readPositiveNumber(property, 'resourceFirstByte');
+  const firstByteTime = readPositiveNumber(normalized, 'resourceFirstByte');
   if (firstByteTime > 0) {
     resource.resourceFirstByte = firstByteTime;
     resource.resourceFirstByteStart = dnsTime + tcpTime + sslTime;
@@ -972,18 +1337,18 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
     resource.resourceDownloadTime = downloadTime;
     resource.resourceDownloadTimeStart = dnsTime + tcpTime + sslTime + ttfbTime;
   }
-  const loadTime = readPositiveNumber(property, 'resourceLoad');
+  const loadTime = readPositiveNumber(normalized, 'resourceLoad');
   if (loadTime > 0) {
     resource.resourceLoad = loadTime;
   }
 
-  const keys = Object.keys(property);
+  const keys = Object.keys(normalized);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     if (isResourceMetricProperty(key)) {
       continue;
     }
-    resource.properties[key] = property[key];
+    resource.properties[key] = normalized[key];
   }
 }
 
@@ -1317,6 +1682,22 @@ function handleRumCompletedActionBatch(
   return createCompletedActionPayload(actions, state) as Object as SDKWorkerPayload;
 }
 
+function sortCompletedActionsByTime(actions: SDKRumCompletedActionDTO[]): SDKRumCompletedActionDTO[] {
+  const sorted: SDKRumCompletedActionDTO[] = [];
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i];
+    if (!action) {
+      continue;
+    }
+    let insertAt = sorted.length;
+    while (insertAt > 0 && (sorted[insertAt - 1].time || 0) > (action.time || 0)) {
+      insertAt--;
+    }
+    sorted.splice(insertAt, 0, action);
+  }
+  return sorted;
+}
+
 function createCompletedActionPayload(
   actions: SDKRumCompletedActionDTO[],
   state: SDKWorkerRuntimeState
@@ -1324,9 +1705,13 @@ function createCompletedActionPayload(
   const records: SDKLineProtocolInputDTO[] = [];
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let flushMaxEvents = 256;
-  for (let i = 0; i < actions.length; i++) {
-    const action = actions[i];
+  const sortedActions = sortCompletedActionsByTime(actions);
+  for (let i = 0; i < sortedActions.length; i++) {
+    const action = sortedActions[i];
     if (!action) {
+      continue;
+    }
+    if (rememberRumDedupKey(`action|${action.actionId || ''}`, state)) {
       continue;
     }
     if (action.counterFlushMaxEvents && action.counterFlushMaxEvents > 0) {
@@ -1359,6 +1744,7 @@ function appendCompletedActionDraft(
   }
 
   state.eventSequence++;
+  const uuid = action.uuid && action.uuid.length > 0 ? action.uuid : generateWorkerUuid();
   const lineContext = state.lineContext;
   const tags: SDKStringRecord = {};
   if (lineContext) {
@@ -1368,7 +1754,7 @@ function appendCompletedActionDraft(
   } else {
     mergeStringRecords(tags, action.dynamicTags || {});
   }
-  tags[Constants.KEY_SDK_DATA_FLAG] = action.uuid || '';
+  tags[Constants.KEY_SDK_DATA_FLAG] = uuid;
   tags[Constants.KEY_RUM_VIEW_ID] = action.viewId || '';
   tags[Constants.KEY_RUM_VIEW_NAME] = action.viewName || '';
   tags[Constants.KEY_RUM_SESSION_ID] = action.sessionId || '';
@@ -1396,7 +1782,7 @@ function appendCompletedActionDraft(
     tags,
     fields,
     time: action.time || 0,
-    uuid: action.uuid || ''
+    uuid
   };
   records.push(record);
   syncDrafts.push({
@@ -1411,10 +1797,10 @@ function appendCompletedActionDraft(
   }
 }
 
-function appendViewActionCounterDelta(state: SDKWorkerRuntimeState, viewId: string): void {
+function appendViewActionCounterDelta(state: SDKWorkerRuntimeState, viewId: string, count: number = 1): void {
   const delta = getOrCreateRumCounterDelta(state, viewId, '');
-  delta.viewActionDelta += viewId.length > 0 ? 1 : 0;
-  state.rumCounterPendingEventCount++;
+  delta.viewActionDelta += viewId.length > 0 ? count : 0;
+  state.rumCounterPendingEventCount += count;
 }
 
 function handleRumCounterUpdate(
@@ -1429,7 +1815,7 @@ function handleRumCounterUpdateBatch(
   batch: SDKRumCounterUpdateBatchDTO,
   state: SDKWorkerRuntimeState
 ): SDKWorkerPayload {
-  const updates = batch && batch.updates ? batch.updates : [];
+  const updates = compactRumCounterUpdates(batch && batch.updates ? batch.updates : []);
   let flushMaxKeys = 256;
   for (let i = 0; i < updates.length; i++) {
     const update = updates[i];
@@ -1444,6 +1830,48 @@ function handleRumCounterUpdateBatch(
   return createRumCounterUpdateResultPayload(state, flushMaxKeys) as Object as SDKWorkerPayload;
 }
 
+function compactRumCounterUpdates(updates: SDKRumCounterUpdateDTO[]): SDKRumCounterUpdateDTO[] {
+  const aggregates: Record<string, SDKRumCounterUpdateDTO> = {};
+  for (let i = 0; i < updates.length; i++) {
+    const update = updates[i];
+    if (!update || !update.updateType) {
+      continue;
+    }
+    const key = `${update.updateType}|${update.viewId || ''}|${update.actionId || ''}|${
+      update.updateView === false ? '0' : '1'}`;
+    const existing = aggregates[key];
+    if (existing) {
+      existing.count = normalizeRumCounterUpdateCount(existing.count) + normalizeRumCounterUpdateCount(update.count);
+      if (update.flushMaxKeys && update.flushMaxKeys > 0) {
+        existing.flushMaxKeys = existing.flushMaxKeys && existing.flushMaxKeys > 0 ?
+          Math.min(existing.flushMaxKeys, update.flushMaxKeys) : update.flushMaxKeys;
+      }
+      continue;
+    }
+    aggregates[key] = {
+      updateType: update.updateType,
+      viewId: update.viewId || '',
+      actionId: update.actionId || '',
+      updateView: update.updateView,
+      flushMaxKeys: update.flushMaxKeys,
+      count: normalizeRumCounterUpdateCount(update.count)
+    };
+  }
+  const result: SDKRumCounterUpdateDTO[] = [];
+  const keys = Object.keys(aggregates).sort();
+  for (let i = 0; i < keys.length; i++) {
+    result.push(aggregates[keys[i]]);
+  }
+  return result;
+}
+
+function normalizeRumCounterUpdateCount(count: number | undefined): number {
+  if (count === undefined || count !== count || count <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.floor(count));
+}
+
 function applyRumCounterUpdate(
   update: SDKRumCounterUpdateDTO,
   state: SDKWorkerRuntimeState
@@ -1456,52 +1884,53 @@ function applyRumCounterUpdate(
   const viewId = update.viewId || '';
   const actionId = update.actionId || '';
   const updateView = update.updateView !== false;
+  const count = normalizeRumCounterUpdateCount(update.count);
   if (updateType === 'view.action') {
-    appendViewActionCounterDelta(state, viewId);
+    appendViewActionCounterDelta(state, viewId, count);
   } else if (updateType === 'rum.error') {
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
-    delta.viewErrorDelta += viewId.length > 0 ? 1 : 0;
-    delta.actionErrorDelta += actionId.length > 0 ? 1 : 0;
+    delta.viewErrorDelta += viewId.length > 0 ? count : 0;
+    delta.actionErrorDelta += actionId.length > 0 ? count : 0;
     state.rumCounterNeedsActionCloseCheck = true;
-    state.rumCounterPendingEventCount++;
+    state.rumCounterPendingEventCount += count;
   } else if (updateType === 'resource.complete') {
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
     if (viewId.length > 0) {
-      delta.viewResourceDelta += 1;
-      delta.viewPendingDelta -= 1;
-      delta.viewUpdateTimeDelta += 1;
+      delta.viewResourceDelta += count;
+      delta.viewPendingDelta -= count;
+      delta.viewUpdateTimeDelta += count;
     }
     if (actionId.length > 0) {
-      delta.actionResourceDelta += 1;
-      delta.actionPendingDelta -= 1;
+      delta.actionResourceDelta += count;
+      delta.actionPendingDelta -= count;
     }
     state.rumCounterNeedsActionCloseCheck = true;
-    state.rumCounterPendingEventCount++;
+    state.rumCounterPendingEventCount += count;
   } else if (updateType === 'resource.pending.increase') {
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
-    delta.viewPendingDelta += viewId.length > 0 ? 1 : 0;
-    delta.actionPendingDelta += actionId.length > 0 ? 1 : 0;
-    state.rumCounterPendingEventCount++;
+    delta.viewPendingDelta += viewId.length > 0 ? count : 0;
+    delta.actionPendingDelta += actionId.length > 0 ? count : 0;
+    state.rumCounterPendingEventCount += count;
   } else if (updateType === 'resource.pending.decrease') {
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
-    delta.viewPendingDelta -= updateView && viewId.length > 0 ? 1 : 0;
-    delta.actionPendingDelta -= actionId.length > 0 ? 1 : 0;
-    state.rumCounterPendingEventCount++;
+    delta.viewPendingDelta -= updateView && viewId.length > 0 ? count : 0;
+    delta.actionPendingDelta -= actionId.length > 0 ? count : 0;
+    state.rumCounterPendingEventCount += count;
   } else if (updateType === 'long_task.view') {
     const delta = getOrCreateRumCounterDelta(state, viewId, '');
     if (viewId.length > 0) {
-      delta.viewLongTaskDelta += 1;
-      delta.viewUpdateTimeDelta += 1;
+      delta.viewLongTaskDelta += count;
+      delta.viewUpdateTimeDelta += count;
     }
     state.rumCounterNeedsActionCloseCheck = true;
     state.rumCounterNeedsRumDataGenerate = true;
-    state.rumCounterPendingEventCount++;
+    state.rumCounterPendingEventCount += count;
   } else if (updateType === 'long_task.action') {
     const delta = getOrCreateRumCounterDelta(state, '', actionId);
-    delta.actionLongTaskDelta += actionId.length > 0 ? 1 : 0;
+    delta.actionLongTaskDelta += actionId.length > 0 ? count : 0;
     state.rumCounterNeedsActionCloseCheck = true;
     state.rumCounterNeedsRumDataGenerate = true;
-    state.rumCounterPendingEventCount++;
+    state.rumCounterPendingEventCount += count;
   } else {
     throw new Error(`Unsupported RUM counter update type: ${updateType}`);
   }
@@ -1535,14 +1964,7 @@ function handleRumCounterFlush(state: SDKWorkerRuntimeState): SDKWorkerPayload {
 }
 
 function createRumCounterFlushPayload(state: SDKWorkerRuntimeState): SDKRumCounterFlushResultDTO {
-  const deltas: SDKRumCounterDeltaDTO[] = [];
-  const keys = Object.keys(state.rumCounterDeltas);
-  for (let i = 0; i < keys.length; i++) {
-    const delta = state.rumCounterDeltas[keys[i]];
-    if (delta) {
-      deltas.push(delta);
-    }
-  }
+  const deltas = finalizeRumCounterDeltas(state.rumCounterDeltas);
 
   const payload: SDKRumCounterFlushResultDTO = {
     deltas,
@@ -1555,6 +1977,83 @@ function createRumCounterFlushPayload(state: SDKWorkerRuntimeState): SDKRumCount
   state.rumCounterNeedsActionCloseCheck = false;
   state.rumCounterNeedsRumDataGenerate = false;
   return payload;
+}
+
+function finalizeRumCounterDeltas(
+  pending: Record<string, SDKRumCounterDeltaDTO>
+): SDKRumCounterDeltaDTO[] {
+  const views: Record<string, SDKRumCounterDeltaDTO> = {};
+  const actions: Record<string, SDKRumCounterDeltaDTO> = {};
+  const pendingKeys = Object.keys(pending).sort();
+  for (let i = 0; i < pendingKeys.length; i++) {
+    const delta = pending[pendingKeys[i]];
+    if (!delta) {
+      continue;
+    }
+    if (delta.viewId && delta.viewId.length > 0) {
+      const view = getOrCreateFinalCounterDelta(views, delta.viewId, true);
+      view.viewActionDelta += normalizePositiveCounterDelta(delta.viewActionDelta);
+      view.viewErrorDelta += normalizePositiveCounterDelta(delta.viewErrorDelta);
+      view.viewLongTaskDelta += normalizePositiveCounterDelta(delta.viewLongTaskDelta);
+      view.viewResourceDelta += normalizePositiveCounterDelta(delta.viewResourceDelta);
+      view.viewPendingDelta += normalizeSignedCounterDelta(delta.viewPendingDelta);
+      view.viewUpdateTimeDelta += normalizePositiveCounterDelta(delta.viewUpdateTimeDelta);
+    }
+    if (delta.actionId && delta.actionId.length > 0) {
+      const action = getOrCreateFinalCounterDelta(actions, delta.actionId, false);
+      action.actionErrorDelta += normalizePositiveCounterDelta(delta.actionErrorDelta);
+      action.actionLongTaskDelta += normalizePositiveCounterDelta(delta.actionLongTaskDelta);
+      action.actionResourceDelta += normalizePositiveCounterDelta(delta.actionResourceDelta);
+      action.actionPendingDelta += normalizeSignedCounterDelta(delta.actionPendingDelta);
+    }
+  }
+
+  const result: SDKRumCounterDeltaDTO[] = [];
+  appendFinalCounterDeltas(result, views);
+  appendFinalCounterDeltas(result, actions);
+  return result;
+}
+
+function getOrCreateFinalCounterDelta(
+  aggregates: Record<string, SDKRumCounterDeltaDTO>,
+  id: string,
+  isView: boolean
+): SDKRumCounterDeltaDTO {
+  let delta = aggregates[id];
+  if (!delta) {
+    delta = createEmptyRumCounterDelta(isView ? id : '', isView ? '' : id);
+    aggregates[id] = delta;
+  }
+  return delta;
+}
+
+function appendFinalCounterDeltas(
+  target: SDKRumCounterDeltaDTO[],
+  aggregates: Record<string, SDKRumCounterDeltaDTO>
+): void {
+  const keys = Object.keys(aggregates).sort();
+  for (let i = 0; i < keys.length; i++) {
+    const delta = aggregates[keys[i]];
+    if (hasFinalCounterDelta(delta)) {
+      target.push(delta);
+    }
+  }
+}
+
+function hasFinalCounterDelta(delta: SDKRumCounterDeltaDTO): boolean {
+  return delta.viewErrorDelta !== 0 || delta.actionErrorDelta !== 0 ||
+    delta.viewLongTaskDelta !== 0 || delta.actionLongTaskDelta !== 0 ||
+    delta.viewResourceDelta !== 0 || delta.actionResourceDelta !== 0 ||
+    delta.viewPendingDelta !== 0 || delta.actionPendingDelta !== 0 ||
+    delta.viewActionDelta !== 0 || delta.viewUpdateTimeDelta !== 0;
+}
+
+function normalizePositiveCounterDelta(delta: number): number {
+  return delta === delta ? Math.max(0, Math.floor(delta)) : 0;
+}
+
+function normalizeSignedCounterDelta(delta: number): number {
+  return delta === delta ? Math.floor(delta) : 0;
 }
 
 function handleLogEnqueue(payload: SDKLogEnqueuePayload, state: SDKWorkerRuntimeState): SDKWorkerPayload {
@@ -2776,6 +3275,22 @@ function copyActionPropertiesToFields(properties: Record<string, object>, fields
   }
 }
 
+function normalizeRumPropertyRecord(properties: SDKPropertyRecord): SDKStringRecord {
+  const normalized: SDKStringRecord = {};
+  if (!properties) {
+    return normalized;
+  }
+  const keys = Object.keys(properties);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = properties[key];
+    if (value !== null && value !== undefined) {
+      normalized[key] = stringifyActionPropertyValue(value);
+    }
+  }
+  return normalized;
+}
+
 function stringifyActionPropertyValue(value: object): string {
   let normalized = value;
   if (typeof normalized === 'object' && normalized !== null) {
@@ -2809,23 +3324,27 @@ function getOrCreateRumCounterDelta(
   const key = `${viewId || 'none'}|${actionId || 'none'}`;
   let delta = state.rumCounterDeltas[key];
   if (!delta) {
-    delta = {
-      viewId: viewId || '',
-      actionId: actionId || '',
-      viewErrorDelta: 0,
-      actionErrorDelta: 0,
-      viewLongTaskDelta: 0,
-      actionLongTaskDelta: 0,
-      viewResourceDelta: 0,
-      actionResourceDelta: 0,
-      viewPendingDelta: 0,
-      actionPendingDelta: 0,
-      viewActionDelta: 0,
-      viewUpdateTimeDelta: 0
-    };
+    delta = createEmptyRumCounterDelta(viewId || '', actionId || '');
     state.rumCounterDeltas[key] = delta;
   }
   return delta;
+}
+
+function createEmptyRumCounterDelta(viewId: string, actionId: string): SDKRumCounterDeltaDTO {
+  return {
+    viewId,
+    actionId,
+    viewErrorDelta: 0,
+    actionErrorDelta: 0,
+    viewLongTaskDelta: 0,
+    actionLongTaskDelta: 0,
+    viewResourceDelta: 0,
+    actionResourceDelta: 0,
+    viewPendingDelta: 0,
+    actionPendingDelta: 0,
+    viewActionDelta: 0,
+    viewUpdateTimeDelta: 0
+  };
 }
 
 function getActiveResourceCount(state: SDKWorkerRuntimeState): number {

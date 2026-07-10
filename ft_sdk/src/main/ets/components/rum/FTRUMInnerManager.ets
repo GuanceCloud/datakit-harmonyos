@@ -33,6 +33,7 @@ import {
   SDKRumResourceParamsDTO,
   SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
+  SDKPropertyRecord,
   SDKStringRecord,
   SDKTaskPriority,
   SDKWorkerCommand,
@@ -228,15 +229,10 @@ export class FTRUMInnerManager {
   // Action management constants
   private static readonly ACTION_FREQUENCY_LIMIT = 100000; // 100ms frequency limit (microseconds)
   private static readonly ACTION_COUNTER_FLUSH_MAX_EVENTS = 256;
-  private static readonly ACTION_WORKER_BATCH_SIZE = 64;
-  private static readonly ACTION_WORKER_BATCH_DELAY_MS = 16;
-  private static readonly RUM_COUNTER_UPDATE_BATCH_SIZE = 64;
-  private static readonly RUM_COUNTER_UPDATE_BATCH_DELAY_MS = 16;
+  /** All Host RUM queues use the same thin transport micro-batch boundary. */
+  private static readonly RUM_TRANSPORT_BATCH_SIZE = 64;
+  private static readonly RUM_TRANSPORT_BATCH_DELAY_MS = 16;
   private static readonly RUM_COUNTER_FLUSH_MAX_EVENTS = 256;
-  private static readonly RESOURCE_WORKER_BATCH_SIZE = 64;
-  private static readonly RESOURCE_WORKER_BATCH_DELAY_MS = 16;
-  private static readonly ERROR_WORKER_BATCH_SIZE = 64;
-  private static readonly ERROR_WORKER_BATCH_DELAY_MS = 16;
   private static readonly ACTION_TIMEOUT = 5000000; // 5 seconds timeout (microseconds)
   private static rumEventTraceSequence: number = 0;
 
@@ -360,23 +356,6 @@ export class FTRUMInnerManager {
     // Do NOT call checkSessionKeep here because sampleRate may not be set yet
   }
 
-  private toRumCounterDeltaDTO(delta: SDKRumCounterDeltaDTO): FTDBTaskPoolRumCounterDeltaDTO {
-    return {
-      viewId: delta.viewId,
-      actionId: delta.actionId,
-      viewErrorDelta: delta.viewErrorDelta,
-      actionErrorDelta: delta.actionErrorDelta,
-      viewLongTaskDelta: delta.viewLongTaskDelta,
-      actionLongTaskDelta: delta.actionLongTaskDelta,
-      viewResourceDelta: delta.viewResourceDelta,
-      actionResourceDelta: delta.actionResourceDelta,
-      viewPendingDelta: delta.viewPendingDelta,
-      actionPendingDelta: delta.actionPendingDelta,
-      viewActionDelta: delta.viewActionDelta,
-      viewUpdateTimeDelta: delta.viewUpdateTimeDelta
-    };
-  }
-
   private submitRumCounterUpdateTask(update: SDKRumCounterUpdateDTO): void {
     if (!this.context || !update || !update.updateType) {
       return;
@@ -391,7 +370,7 @@ export class FTRUMInnerManager {
     };
 
     this.pendingRumCounterUpdates.push(payload);
-    if (this.pendingRumCounterUpdates.length >= FTRUMInnerManager.RUM_COUNTER_UPDATE_BATCH_SIZE) {
+    if (this.pendingRumCounterUpdates.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushRumCounterUpdateBatch(`rum.counter.${update.updateType}`);
     } else {
       this.scheduleRumCounterUpdateBatchFlush(`rum.counter.${update.updateType}`);
@@ -406,7 +385,7 @@ export class FTRUMInnerManager {
     this.rumCounterUpdateFlushTimer = setTimeout(() => {
       this.rumCounterUpdateFlushTimer = null;
       this.flushRumCounterUpdateBatch(traceBaseName);
-    }, FTRUMInnerManager.RUM_COUNTER_UPDATE_BATCH_DELAY_MS) as number;
+    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
   }
 
   private flushRumCounterUpdateBatch(traceBaseName: string = 'rum.counter.batch', drainAll: boolean = false): void {
@@ -421,7 +400,7 @@ export class FTRUMInnerManager {
     let shouldContinue = true;
     while (this.pendingRumCounterUpdates.length > 0 && shouldContinue) {
       const batchSize = Math.min(
-        FTRUMInnerManager.RUM_COUNTER_UPDATE_BATCH_SIZE,
+        FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
         this.pendingRumCounterUpdates.length
       );
       const updates = this.pendingRumCounterUpdates.splice(0, batchSize);
@@ -523,17 +502,8 @@ export class FTRUMInnerManager {
         return;
       }
 
-      const taskPoolDeltas: FTDBTaskPoolRumCounterDeltaDTO[] = [];
-      for (let i = 0; i < deltas.length; i++) {
-        const delta = deltas[i];
-        if (this.hasRumCounterDelta(delta)) {
-          taskPoolDeltas.push(this.toRumCounterDeltaDTO(delta));
-        }
-      }
-      if (taskPoolDeltas.length === 0) {
-        return;
-      }
-
+      // EVENT_CONSUMER returns finalized, zero-filtered View/Action deltas.
+      const taskPoolDeltas = deltas as Object as FTDBTaskPoolRumCounterDeltaDTO[];
       await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, taskPoolDeltas);
       if (payload.needsActionCloseCheck === true) {
         this.checkActionClose();
@@ -544,19 +514,6 @@ export class FTRUMInnerManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `RUM counter worker delta apply failed: ${error}`);
     }
-  }
-
-  private hasRumCounterDelta(delta: SDKRumCounterDeltaDTO): boolean {
-    return delta.viewActionDelta !== 0 ||
-      delta.viewErrorDelta !== 0 ||
-      delta.actionErrorDelta !== 0 ||
-      delta.viewResourceDelta !== 0 ||
-      delta.actionResourceDelta !== 0 ||
-      delta.viewLongTaskDelta !== 0 ||
-      delta.actionLongTaskDelta !== 0 ||
-      delta.viewPendingDelta !== 0 ||
-      delta.actionPendingDelta !== 0 ||
-      delta.viewUpdateTimeDelta !== 0;
   }
 
   private submitCompletedActionWorkerInput(actionBean: ActionBean, traceBaseName: string): void {
@@ -634,7 +591,7 @@ export class FTRUMInnerManager {
       actionName,
       payload
     });
-    if (this.pendingCompletedActions.length >= FTRUMInnerManager.ACTION_WORKER_BATCH_SIZE) {
+    if (this.pendingCompletedActions.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushCompletedActionWorkerBatch(traceBaseName);
       return;
     }
@@ -648,7 +605,7 @@ export class FTRUMInnerManager {
     this.completedActionFlushTimer = setTimeout(() => {
       this.completedActionFlushTimer = null;
       this.flushCompletedActionWorkerBatch(traceBaseName);
-    }, FTRUMInnerManager.ACTION_WORKER_BATCH_DELAY_MS) as number;
+    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
   }
 
   private flushCompletedActionWorkerBatch(traceBaseName: string = 'rum.completedAction.batch'): void {
@@ -662,7 +619,7 @@ export class FTRUMInnerManager {
 
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
     const batchSize = Math.min(
-      FTRUMInnerManager.ACTION_WORKER_BATCH_SIZE,
+      FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingCompletedActions.length
     );
     const batch = this.pendingCompletedActions.splice(0, batchSize);
@@ -715,7 +672,7 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-      uuid: Utils.generateUUID(),
+      uuid: '',
       time: actionBean.getStartTime(),
       actionId: actionBean.getId(),
       actionName: actionBean.getActionName(),
@@ -1781,7 +1738,7 @@ export class FTRUMInnerManager {
       const payload: SDKRumCompletedActionDTO = {
         dataType: DataType.RUM_APP.toString(),
         measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-        uuid: Utils.generateUUID(),
+        uuid: '',
         time: actualStartTime,
         actionId,
         actionName,
@@ -1853,7 +1810,7 @@ export class FTRUMInnerManager {
     this.pendingResourceCommands.push({
       payload: command
     });
-    if (this.pendingResourceCommands.length >= FTRUMInnerManager.RESOURCE_WORKER_BATCH_SIZE) {
+    if (this.pendingResourceCommands.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushResourceWorkerCommandBatch(traceBaseName);
       return;
     }
@@ -1867,7 +1824,7 @@ export class FTRUMInnerManager {
     this.resourceCommandFlushTimer = setTimeout(() => {
       this.resourceCommandFlushTimer = null;
       this.flushResourceWorkerCommandBatch(traceBaseName);
-    }, FTRUMInnerManager.RESOURCE_WORKER_BATCH_DELAY_MS) as number;
+    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
   }
 
   private flushResourceWorkerCommandBatch(traceBaseName: string = 'rum.resource.batch'): void {
@@ -1880,7 +1837,7 @@ export class FTRUMInnerManager {
     }
 
     const batchSize = Math.min(
-      FTRUMInnerManager.RESOURCE_WORKER_BATCH_SIZE,
+      FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingResourceCommands.length
     );
     const batch = this.pendingResourceCommands.splice(0, batchSize);
@@ -1977,25 +1934,17 @@ export class FTRUMInnerManager {
     };
   }
 
-  private resourcePropertyToRecord(property: Map<string, object>): SDKStringRecord {
-    const record: SDKStringRecord = {};
+  private resourcePropertyToRecord(property: Map<string, object>): SDKPropertyRecord {
+    const record: SDKPropertyRecord = {};
     if (!property || property.size === 0) {
       return record;
     }
     property.forEach((value: object, key: string) => {
-      record[key] = this.resourcePropertyValueToString(value);
+      if (value !== null && value !== undefined) {
+        record[key] = this.toRumPropertyTransferValue(value);
+      }
     });
     return record;
-  }
-
-  private resourcePropertyValueToString(value: object): string {
-    if (value === null || value === undefined) {
-      return '';
-    }
-    if (typeof value === 'object' && value['value'] !== undefined) {
-      return String(value['value']);
-    }
-    return String(value);
   }
 
   private getResourceCustomDataType(collectType: CollectType): string | undefined {
@@ -2049,7 +1998,7 @@ export class FTRUMInnerManager {
     this.pendingErrorCommands.push({
       payload: command
     });
-    if (this.pendingErrorCommands.length >= FTRUMInnerManager.ERROR_WORKER_BATCH_SIZE) {
+    if (this.pendingErrorCommands.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushErrorWorkerCommandBatch(traceBaseName);
       return;
     }
@@ -2063,7 +2012,7 @@ export class FTRUMInnerManager {
     this.errorCommandFlushTimer = setTimeout(() => {
       this.errorCommandFlushTimer = null;
       this.flushErrorWorkerCommandBatch(traceBaseName);
-    }, FTRUMInnerManager.ERROR_WORKER_BATCH_DELAY_MS) as number;
+    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
   }
 
   private flushErrorWorkerCommandBatch(traceBaseName: string = 'rum.error.batch'): void {
@@ -2076,7 +2025,7 @@ export class FTRUMInnerManager {
     }
 
     const batchSize = Math.min(
-      FTRUMInnerManager.ERROR_WORKER_BATCH_SIZE,
+      FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingErrorCommands.length
     );
     const batch = this.pendingErrorCommands.splice(0, batchSize);
@@ -2107,8 +2056,8 @@ export class FTRUMInnerManager {
     }
   }
 
-  private errorPropertyToRecord(property: Record<string, object> | null): SDKStringRecord {
-    const record: SDKStringRecord = {};
+  private errorPropertyToRecord(property: Record<string, object> | null): SDKPropertyRecord {
+    const record: SDKPropertyRecord = {};
     if (property === null || property === undefined) {
       return record;
     }
@@ -2119,18 +2068,29 @@ export class FTRUMInnerManager {
       if (value === null || value === undefined) {
         continue;
       }
-      if (typeof value === 'object') {
-        const wrapper = value as PropertyWrapper;
-        if (wrapper.value !== undefined && wrapper.value !== null) {
-          record[key] = String(wrapper.value);
-        } else {
-          record[key] = String(value);
-        }
-      } else {
-        record[key] = String(value);
-      }
+      record[key] = this.toRumPropertyTransferValue(value);
     }
     return record;
+  }
+
+  /** Strip ArkTS class prototypes at the Worker transfer boundary only. */
+  private toRumPropertyTransferValue(value: object): object {
+    try {
+      const json = JSON.stringify(value);
+      if (json && json.length > 0) {
+        const cloned = JSON.parse(json) as object;
+        if (typeof cloned === 'object' && cloned !== null) {
+          return cloned;
+        }
+        const primitiveWrapper = new Object() as PropertyWrapper;
+        primitiveWrapper.value = String(cloned);
+        return primitiveWrapper;
+      }
+    } catch (_) {
+    }
+    const fallbackWrapper = new Object() as PropertyWrapper;
+    fallbackWrapper.value = String(value);
+    return fallbackWrapper;
   }
 
   private increaseErrorMemoryCount(context: SDKRumResourceContextDTO): void {

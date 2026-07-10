@@ -4,10 +4,21 @@ import {
 } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
+  SDKLineProtocolContextDTO,
   SDKLineProtocolInputDTO,
+  SDKPropertyRecord,
   SDKRumCompletedActionDTO,
+  SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
+  SDKRumErrorCommandBatchDTO,
+  SDKRumErrorCommandDTO,
+  SDKRumEventBatchDTO,
   SDKRumEventDTO,
+  SDKRumResourceCommandBatchDTO,
+  SDKRumResourceCommandDTO,
+  SDKRumResourceContextDTO,
+  SDKRumResourceNetStatusDTO,
+  SDKRumResourceParamsDTO,
   SDKStringRecord,
   SDKUploadCommitPageDTO,
   SDKUploadCommitPageResultDTO,
@@ -45,8 +56,28 @@ interface SDKLineProtocolRecordsTestPayload {
 }
 
 interface SDKCompletedActionPropertyTestValue {
-  value?: string;
+  value?: string | number;
   nested?: string;
+}
+
+function createRumWorkerLineContext(): SDKLineProtocolContextDTO {
+  const context = new Object() as SDKLineProtocolContextDTO;
+  context.basePublicTags = new Object() as SDKStringRecord;
+  context.logTags = new Object() as SDKStringRecord;
+  context.rumTags = new Object() as SDKStringRecord;
+  context.rumTags['service'] = 'native-service';
+  context.rumTags['sdk_version'] = 'native-version';
+  context.rumTags['sdk_pkg_info'] = '{"agent":"1.0.0","native":"1.0.0"}';
+  context.dynamicBaseTags = new Object() as SDKStringRecord;
+  context.dynamicBaseTags['env'] = 'worker-test';
+  context.dynamicLogTags = new Object() as SDKStringRecord;
+  context.dynamicRumTags = new Object() as SDKStringRecord;
+  context.dynamicRumTags['custom_key'] = 'worker-value';
+  context.rumStaticFields = new Object() as SDKStringRecord;
+  context.rumStaticFields['session_sample_rate'] = '1';
+  context.logLinkRumData = false;
+  context.integerCompatible = false;
+  return context;
 }
 
 function getPayloadString(payload: SDKWorkerPayload | undefined, key: string): string {
@@ -274,6 +305,147 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
     });
 
+    it('eventRumBatchShouldDeriveSortAndDeduplicateRawEventsInWorker', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-raw-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const viewId = 'view-1234567890abcdef-extra';
+      const viewEvent = new Object() as SDKRumEventDTO;
+      viewEvent.time = 300;
+      viewEvent.dataType = 'rum_app';
+      viewEvent.measurement = 'view';
+      viewEvent.tags = new Object() as SDKStringRecord;
+      viewEvent.tags['session_id'] = 'session-raw';
+      viewEvent.tags['view_id'] = viewId;
+      viewEvent.tags['view_name'] = 'RawView';
+      viewEvent.fields = new Object() as SDKStringRecord;
+      viewEvent.fields['is_active'] = 'true';
+      viewEvent.fields['duration'] = '30';
+      const actionEvent = new Object() as SDKRumEventDTO;
+      actionEvent.time = 100;
+      actionEvent.dataType = 'rum_app';
+      actionEvent.measurement = 'action';
+      actionEvent.tags = new Object() as SDKStringRecord;
+      actionEvent.tags['session_id'] = 'session-raw';
+      actionEvent.tags['view_id'] = viewId;
+      actionEvent.tags['action_id'] = 'action-raw';
+      actionEvent.tags['action_name'] = 'tap';
+      actionEvent.fields = new Object() as SDKStringRecord;
+      actionEvent.fields['duration'] = '10';
+      const batch: SDKRumEventBatchDTO = {
+        events: [viewEvent, actionEvent, viewEvent]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-raw-batch',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      expect(getPayloadString(response.payload, 'activeViewId')).assertEqual(viewId);
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(2);
+      const first = drafts[0] as Record<string, object>;
+      const second = drafts[1] as Record<string, object>;
+      expect(String(first['dataString']).startsWith('action,')).assertTrue();
+      expect(String(second['dataString']).startsWith('view,')).assertTrue();
+      expect(String(second['uuid'])).assertEqual(viewId.substring(0, 16));
+      expect(String(second['dataString']).includes('env=worker-test')).assertTrue();
+
+      const duplicateResponse = await executeWorkerCommandForUnit({
+        id: 'rum-raw-duplicate',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: viewEvent as Object as SDKWorkerPayload
+      });
+      expect(getPayloadArray(duplicateResponse.payload, 'syncDrafts').length).assertEqual(0);
+    });
+
+    it('eventRumWorkerShouldFullyFormatRawWebViewData', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-webview-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const webViewEvent = new Object() as SDKRumEventDTO;
+      webViewEvent.time = 400;
+      webViewEvent.dataType = 'rum_webview';
+      webViewEvent.measurement = 'view';
+      webViewEvent.tags = new Object() as SDKStringRecord;
+      webViewEvent.tags['session_id'] = 'web-session';
+      webViewEvent.tags['view_id'] = 'web-view-1234567890';
+      webViewEvent.tags['view_name'] = 'WebView';
+      webViewEvent.tags['service'] = 'browser';
+      webViewEvent.tags['sdk_version'] = '2.3.4';
+      webViewEvent.fields = new Object() as SDKStringRecord;
+      webViewEvent.fields['duration'] = '42';
+      webViewEvent.fields['is_active'] = 'true';
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-webview-raw',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: webViewEvent as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('service=browser')).assertTrue();
+      expect(line.includes('sdk_version=2.3.4')).assertTrue();
+      expect(line.includes('env=worker-test')).assertTrue();
+      expect(line.includes('custom_key=worker-value')).assertTrue();
+      expect(line.includes('"web":"2.3.4"')).assertTrue();
+      expect(line.includes('duration=42i')).assertTrue();
+
+      const repeatedView = await executeWorkerCommandForUnit({
+        id: 'rum-webview-repeat-view',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: webViewEvent as Object as SDKWorkerPayload
+      });
+      expect(getPayloadArray(repeatedView.payload, 'syncDrafts').length).assertEqual(1);
+
+      const webViewAction = new Object() as SDKRumEventDTO;
+      webViewAction.time = 500;
+      webViewAction.dataType = 'rum_webview';
+      webViewAction.measurement = 'action';
+      webViewAction.tags = new Object() as SDKStringRecord;
+      webViewAction.tags['session_id'] = 'web-session';
+      webViewAction.tags['view_id'] = 'web-view-1234567890';
+      webViewAction.fields = new Object() as SDKStringRecord;
+      webViewAction.fields['action_id'] = '"web-action"';
+      webViewAction.fields['action_name'] = '"click"';
+      const actionBatch: SDKRumEventBatchDTO = { events: [webViewAction, webViewAction] };
+      const actionResponse = await executeWorkerCommandForUnit({
+        id: 'rum-webview-action-dedup',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: actionBatch as Object as SDKWorkerPayload
+      });
+      expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('web-action');
+      expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(1);
+    });
+
     it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
       const updates: SDKRumCounterUpdateDTO[] = [
         {
@@ -316,18 +488,59 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(flushResponse.payload, 'needsActionCloseCheck')).assertEqual('true');
       const deltas = getPayloadArray(flushResponse.payload, 'deltas');
       expect(deltas.length).assertEqual(2);
-      let resourceJoined = '';
-      let viewActionDelta = '';
+      let viewFinalized = '';
+      let actionFinalized = '';
       for (let i = 0; i < deltas.length; i++) {
         const delta = deltas[i] as Record<string, object>;
         if (String(delta['actionId']) === 'action-1') {
-          resourceJoined = `${String(delta['viewResourceDelta'])},${String(delta['viewPendingDelta'])},${String(delta['actionResourceDelta'])},${String(delta['actionPendingDelta'])}`;
-        } else {
-          viewActionDelta = String(delta['viewActionDelta']);
+          actionFinalized = `${String(delta['viewResourceDelta'])},${String(delta['actionResourceDelta'])},${String(delta['actionPendingDelta'])}`;
+        } else if (String(delta['viewId']) === 'view-1') {
+          viewFinalized = `${String(delta['viewResourceDelta'])},${String(delta['viewPendingDelta'])},${String(delta['viewActionDelta'])}`;
         }
       }
-      expect(resourceJoined).assertEqual('1,0,1,0');
-      expect(viewActionDelta).assertEqual('1');
+      expect(viewFinalized).assertEqual('1,0,1');
+      expect(actionFinalized).assertEqual('0,1,0');
+    });
+
+    it('eventRumCounterBatchShouldCompactAndFinalizeByViewAndAction', 0, async () => {
+      const updates: SDKRumCounterUpdateDTO[] = [];
+      for (let i = 0; i < 2; i++) {
+        updates.push({ updateType: 'resource.pending.increase', viewId: 'view-final', actionId: 'action-final' });
+        updates.push({ updateType: 'resource.complete', viewId: 'view-final', actionId: 'action-final' });
+        updates.push({ updateType: 'view.action', viewId: 'view-final' });
+      }
+      const batch: SDKRumCounterUpdateBatchDTO = { updates };
+      const updateResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-compact',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      expect(updateResponse.ok).assertTrue();
+      expect(getPayloadString(updateResponse.payload, 'pendingCount')).assertEqual('6');
+
+      const flushResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-finalize',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      const deltas = getPayloadArray(flushResponse.payload, 'deltas');
+      expect(deltas.length).assertEqual(2);
+      const view = deltas[0] as Record<string, object>;
+      const action = deltas[1] as Record<string, object>;
+      expect(String(view['viewId'])).assertEqual('view-final');
+      expect(String(view['actionId'])).assertEqual('');
+      expect(String(view['viewResourceDelta'])).assertEqual('2');
+      expect(String(view['viewPendingDelta'])).assertEqual('0');
+      expect(String(view['viewActionDelta'])).assertEqual('2');
+      expect(String(action['viewId'])).assertEqual('');
+      expect(String(action['actionId'])).assertEqual('action-final');
+      expect(String(action['actionResourceDelta'])).assertEqual('2');
+      expect(String(action['actionPendingDelta'])).assertEqual('0');
     });
 
     it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
@@ -391,6 +604,153 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(completeResponse.ok).assertTrue();
       expect(getPayloadString(completeResponse.payload, 'activeResourceCount')).assertEqual('0');
+    });
+
+    it('eventRumWorkerShouldNormalizeAndDeduplicateRawErrorProperties', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-error-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'error-session',
+        viewId: 'error-view',
+        viewName: 'ErrorView',
+        viewReferrer: 'root',
+        actionId: 'error-action',
+        actionName: 'tap'
+      };
+      const errorProperty = new Object() as SDKPropertyRecord;
+      const customError = new Object() as SDKCompletedActionPropertyTestValue;
+      customError.value = 'normalized';
+      errorProperty['custom_error'] = customError;
+      const customNested = new Object() as SDKCompletedActionPropertyTestValue;
+      customNested.nested = 'yes';
+      errorProperty['custom_nested'] = customNested;
+      const errorCommand = new Object() as SDKRumErrorCommandDTO;
+      errorCommand.context = context;
+      errorCommand.log = 'stack-line';
+      errorCommand.message = 'worker-error';
+      errorCommand.errorType = 'TypeError';
+      errorCommand.errorSource = 'logger';
+      errorCommand.appState = 'run';
+      errorCommand.property = errorProperty;
+      errorCommand.time = 500;
+      const batch: SDKRumErrorCommandBatchDTO = {
+        commands: [errorCommand, errorCommand]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-error-batch',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('error_type=TypeError')).assertTrue();
+      expect(line.includes('custom_error="normalized"')).assertTrue();
+      expect(line.includes('custom_nested=')).assertTrue();
+      expect(line.includes('stack-line')).assertTrue();
+    });
+
+    it('eventRumWorkerShouldSortMergeAndNormalizeResourceCommands', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-resource-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'resource-session',
+        viewId: 'resource-view',
+        viewName: 'ResourceView',
+        viewReferrer: 'root',
+        actionId: 'resource-action',
+        actionName: 'load'
+      };
+      const resourceProperty = new Object() as SDKPropertyRecord;
+      const resourceDNS = new Object() as SDKCompletedActionPropertyTestValue;
+      resourceDNS.value = 12;
+      resourceProperty['resourceDNS'] = resourceDNS;
+      const customResource = new Object() as SDKCompletedActionPropertyTestValue;
+      customResource.value = 'normalized';
+      resourceProperty['custom_resource'] = customResource;
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/users/123/profile?from=test',
+        requestHeader: 'accept: application/json',
+        responseHeader: 'content-type: application/json',
+        responseConnection: 'keep-alive',
+        responseContentType: 'application/json',
+        responseContentEncoding: 'gzip',
+        responseContentLength: 128,
+        resourceMethod: 'GET',
+        responseBody: '{}',
+        resourceStatus: 200,
+        resourceType: 'network',
+        requestErrorStack: '',
+        requestErrorMsg: '',
+        property: resourceProperty
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 12,
+        dnsStartTime: 1,
+        tcpTime: 13,
+        tcpStartTime: 13,
+        sslTime: 14,
+        sslStartTime: 26,
+        ttfbTime: 15,
+        responseTime: 16,
+        firstByteTime: 17,
+        firstByteStartTime: 40,
+        downloadTime: 18,
+        downloadStartTime: 57,
+        holeRequestTime: 50,
+        resourceHostIP: '127.0.0.1'
+      };
+      const start: SDKRumResourceCommandDTO = {
+        commandType: 'start', resourceId: 'resource-worker', context, startTime: 10
+      };
+      const content: SDKRumResourceCommandDTO = {
+        commandType: 'setContent', resourceId: 'resource-worker', context, params, eventTime: 20
+      };
+      const network: SDKRumResourceCommandDTO = {
+        commandType: 'setNetState', resourceId: 'resource-worker', context, netStatus, eventTime: 30
+      };
+      const stop: SDKRumResourceCommandDTO = {
+        commandType: 'stop', resourceId: 'resource-worker', context, endTime: 40
+      };
+      const batch: SDKRumResourceCommandBatchDTO = {
+        commands: [stop, network, content, content, start]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-resource-batch',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.startsWith('resource,')).assertTrue();
+      expect(line.includes('resource_url_host=example.com')).assertTrue();
+      expect(line.includes('resource_url_path_group=/users/?/profile')).assertTrue();
+      expect(line.includes('custom_resource="normalized"')).assertTrue();
+      expect(line.includes('resource_dns=12i')).assertTrue();
+      expect(line.includes('duration=50i')).assertTrue();
     });
 
     it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {

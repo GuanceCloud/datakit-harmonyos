@@ -1738,29 +1738,6 @@ function appendPendingCounterAssignment(assignments: string[], column: string, d
   }
 }
 
-function getOrCreateCounterDelta(
-  aggregates: Record<string, FTDBTaskPoolRumCounterDeltaDTO>,
-  id: string
-): FTDBTaskPoolRumCounterDeltaDTO {
-  if (!aggregates[id]) {
-    aggregates[id] = {
-      viewId: id,
-      actionId: id,
-      viewErrorDelta: 0,
-      actionErrorDelta: 0,
-      viewLongTaskDelta: 0,
-      actionLongTaskDelta: 0,
-      viewResourceDelta: 0,
-      actionResourceDelta: 0,
-      viewPendingDelta: 0,
-      actionPendingDelta: 0,
-      viewActionDelta: 0,
-      viewUpdateTimeDelta: 0
-    };
-  }
-  return aggregates[id];
-}
-
 async function applyRumCounterDeltasInTaskPool(
   rdbStore: relationalStore.RdbStore,
   deltas: FTDBTaskPoolRumCounterDeltaDTO[],
@@ -1769,34 +1746,16 @@ async function applyRumCounterDeltasInTaskPool(
   if (deltas.length === 0) {
     return 0;
   }
-  const viewAggregates: Record<string, FTDBTaskPoolRumCounterDeltaDTO> = {};
-  const actionAggregates: Record<string, FTDBTaskPoolRumCounterDeltaDTO> = {};
-  for (let i = 0; i < deltas.length; i++) {
-    const delta = deltas[i];
-    if (delta.viewId && delta.viewId.length > 0) {
-      const aggregate = getOrCreateCounterDelta(viewAggregates, delta.viewId);
-      aggregate.viewActionDelta += Math.max(0, Math.floor(delta.viewActionDelta));
-      aggregate.viewErrorDelta += Math.max(0, Math.floor(delta.viewErrorDelta));
-      aggregate.viewLongTaskDelta += Math.max(0, Math.floor(delta.viewLongTaskDelta));
-      aggregate.viewResourceDelta += Math.max(0, Math.floor(delta.viewResourceDelta));
-      aggregate.viewPendingDelta += Math.floor(delta.viewPendingDelta);
-      aggregate.viewUpdateTimeDelta += Math.max(0, Math.floor(delta.viewUpdateTimeDelta));
-    }
-    if (delta.actionId && delta.actionId.length > 0) {
-      const aggregate = getOrCreateCounterDelta(actionAggregates, delta.actionId);
-      aggregate.actionErrorDelta += Math.max(0, Math.floor(delta.actionErrorDelta));
-      aggregate.actionLongTaskDelta += Math.max(0, Math.floor(delta.actionLongTaskDelta));
-      aggregate.actionResourceDelta += Math.max(0, Math.floor(delta.actionResourceDelta));
-      aggregate.actionPendingDelta += Math.floor(delta.actionPendingDelta);
-    }
-  }
-
   let affected = 0;
   rdbStore.beginTransaction();
   try {
-    const viewIds = Object.keys(viewAggregates);
-    for (let i = 0; i < viewIds.length; i++) {
-      const aggregate = viewAggregates[viewIds[i]];
+    // EVENT_CONSUMER finalizes one deterministic delta per View/Action ID.
+    // This lane only applies the already-normalized DB mutation.
+    for (let i = 0; i < deltas.length; i++) {
+      const aggregate = deltas[i];
+      if (!aggregate.viewId || aggregate.viewId.length === 0) {
+        continue;
+      }
       const assignments: string[] = [];
       appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ACTION_COUNT, aggregate.viewActionDelta);
       appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ERROR_COUNT, aggregate.viewErrorDelta);
@@ -1816,9 +1775,11 @@ async function applyRumCounterDeltasInTaskPool(
       }
     }
 
-    const actionIds = Object.keys(actionAggregates);
-    for (let i = 0; i < actionIds.length; i++) {
-      const aggregate = actionAggregates[actionIds[i]];
+    for (let i = 0; i < deltas.length; i++) {
+      const aggregate = deltas[i];
+      if (!aggregate.actionId || aggregate.actionId.length === 0) {
+        continue;
+      }
       const assignments: string[] = [];
       appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_ERROR_COUNT, aggregate.actionErrorDelta);
       appendPositiveCounterAssignment(assignments, FTSQL.RUM_COLUMN_LONG_TASK_COUNT, aggregate.actionLongTaskDelta);
