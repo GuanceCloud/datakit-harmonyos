@@ -20,6 +20,8 @@ const TAG = "SDKDedicatedPoolManager";
 const DEFAULT_WORKER_COMMAND_TIMEOUT_MS = 3000;
 const DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS = 60000;
 const DATA_UPLOAD_HTTP_HARD_TIMEOUT_MS = 135000;
+const ANR_PARSE_COMMAND_TIMEOUT_MS = 15000;
+const BACKGROUND_METRICS_COMMAND_TIMEOUT_MS = 5000;
 const DEDICATED_LANE_WORKER_COUNT = 1;
 const POOL_QUEUE_COMPACT_THRESHOLD = 64;
 
@@ -267,6 +269,8 @@ export class SDKDedicatedPoolManager {
       SDKDedicatedPoolType.EVENT_CONSUMER,
       SDKDedicatedPoolType.LOG_CONSUMER,
       SDKDedicatedPoolType.DATA_PROCESS,
+      SDKDedicatedPoolType.ANR,
+      SDKDedicatedPoolType.BACKGROUND,
       SDKDedicatedPoolType.DATA_UPLOAD
     ];
     const tasks: Promise<SDKWorkerResponse>[] = [];
@@ -633,6 +637,18 @@ export class SDKDedicatedPoolManager {
   }
 
   private getWorkerCommandTimeoutMs(request: SDKWorkerRequest): number {
+    if (request.command === SDKWorkerCommand.ANR_PARSE_EVENT) {
+      return Math.max(
+        SDKDedicatedPoolManager.workerCommandTimeoutMs,
+        ANR_PARSE_COMMAND_TIMEOUT_MS
+      );
+    }
+    if (request.command === SDKWorkerCommand.BACKGROUND_COLLECT_METRICS) {
+      return Math.max(
+        SDKDedicatedPoolManager.workerCommandTimeoutMs,
+        BACKGROUND_METRICS_COMMAND_TIMEOUT_MS
+      );
+    }
     if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE) {
       return Math.max(
         SDKDedicatedPoolManager.workerCommandTimeoutMs,

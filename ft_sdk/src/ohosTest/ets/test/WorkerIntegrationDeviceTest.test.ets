@@ -1,6 +1,16 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
-import { SDKDedicatedPoolType, SDKWorkerResponse } from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import {
+  SDKANRParseRequestDTO,
+  SDKANRParseResultDTO,
+  SDKBackgroundMetricsRequestDTO,
+  SDKBackgroundMetricsResultDTO,
+  SDKDedicatedPoolType,
+  SDKTaskPriority,
+  SDKWorkerCommand,
+  SDKWorkerPayload,
+  SDKWorkerResponse
+} from '../../../main/ets/components/thread/SDKWorkerProtocol';
 
 function getPayloadString(response: SDKWorkerResponse, key: string): string {
   const payload = response.payload as Record<string, object>;
@@ -8,16 +18,24 @@ function getPayloadString(response: SDKWorkerResponse, key: string): string {
   return value === undefined || value === null ? '' : String(value);
 }
 
+interface DeviceANRTestParams {
+  freeze_type: string;
+  foreground: boolean;
+  stack_trace: string;
+}
+
 export default function workerIntegrationDeviceTest() {
   describe('WorkerIntegrationDeviceTest', () => {
     it('shouldLoadDedicatedWorkersFromHarPaths', 0, async () => {
       const responses = await SdkInternalTestAccess.probeDedicatedWorkers();
-      expect(responses.length).assertEqual(4);
+      expect(responses.length).assertEqual(6);
 
       const expectedPools: string[] = [
         SDKDedicatedPoolType.EVENT_CONSUMER,
         SDKDedicatedPoolType.LOG_CONSUMER,
         SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.ANR,
+        SDKDedicatedPoolType.BACKGROUND,
         SDKDedicatedPoolType.DATA_UPLOAD
       ];
       const seen: Record<string, boolean> = {};
@@ -42,6 +60,54 @@ export default function workerIntegrationDeviceTest() {
         expect(poolStatus.backend).assertEqual('thread-worker');
         expect(poolStatus.workerPath.length > 0).assertTrue();
       }
+    });
+
+    it('shouldExecuteAnrAndBackgroundProductionCommandsInThreadWorkers', 0, async () => {
+      const anrParams: DeviceANRTestParams = {
+        freeze_type: 'THREAD_BLOCK_6S',
+        foreground: true,
+        stack_trace: 'main thread blocked'
+      };
+      const anrPayload: SDKANRParseRequestDTO = {
+        eventName: 'APP_FREEZE',
+        params: anrParams as Object,
+        dateline: 123456,
+        systemLogDirs: []
+      };
+      const anrResponse = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
+        id: 'device-anr-parse',
+        pool: SDKDedicatedPoolType.ANR,
+        command: SDKWorkerCommand.ANR_PARSE_EVENT,
+        priority: SDKTaskPriority.CRITICAL,
+        createdAt: Date.now(),
+        payload: anrPayload as Object as SDKWorkerPayload
+      });
+      expect(anrResponse.ok).assertTrue();
+      const anrResult = anrResponse.payload as Object as SDKANRParseResultDTO;
+      expect(anrResult.stackTrace.includes('main thread blocked')).assertTrue();
+      expect(anrResult.foreground).assertTrue();
+
+      const metricsPayload: SDKBackgroundMetricsRequestDTO = {
+        collectCpu: true,
+        collectMemory: true,
+        collectBattery: true,
+        cpuCacheMs: 5000,
+        memoryCacheMs: 3000
+      };
+      const metricsResponse = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
+        id: 'device-background-metrics',
+        pool: SDKDedicatedPoolType.BACKGROUND,
+        command: SDKWorkerCommand.BACKGROUND_COLLECT_METRICS,
+        priority: SDKTaskPriority.BACKGROUND,
+        createdAt: Date.now(),
+        payload: metricsPayload as Object as SDKWorkerPayload
+      });
+      expect(metricsResponse.ok).assertTrue();
+      const metrics = metricsResponse.payload as Object as SDKBackgroundMetricsResultDTO;
+      expect(metrics.collectedAt > 0).assertTrue();
+      expect(metrics.cpuTickCount >= -1).assertTrue();
+      expect(metrics.memoryUsageMB >= -1).assertTrue();
+      expect(metrics.batteryCurrent === metrics.batteryCurrent).assertTrue();
     });
   });
 }

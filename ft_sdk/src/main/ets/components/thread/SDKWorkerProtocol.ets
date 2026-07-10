@@ -69,6 +69,8 @@ export enum SDKWorkerCommand {
   LOG_FLUSH = 'log.flush',
   DATA_CREATE_LINE_PROTOCOL = 'data.createLineProtocol',
   DATA_PARSE_CRASH_TEXT = 'data.parseCrashText',
+  ANR_PARSE_EVENT = 'anr.parseEvent',
+  BACKGROUND_COLLECT_METRICS = 'background.collectMetrics',
   UPLOAD_SCHEDULE = 'upload.schedule',
   UPLOAD_CONSUME = 'upload.consume',
   UPLOAD_EXECUTE_PAGE = 'upload.executePage',
@@ -328,6 +330,47 @@ export interface SDKCrashFileDTO {
   tags: SDKStringRecord;
   fields: SDKStringRecord;
   uuid: string;
+}
+
+export interface SDKANRParseRequestDTO {
+  eventName: string;
+  params: Object;
+  dateline: number;
+  /** Internal test seam. Production requests use the Worker defaults. */
+  systemLogDirs?: string[];
+  maxFileBytes?: number;
+  maxFilesPerDirectory?: number;
+  maxExternalFiles?: number;
+  maxOutputLength?: number;
+}
+
+export interface SDKANRParseResultDTO {
+  stackTrace: string;
+  message: string;
+  dateline: number;
+  foreground: boolean;
+  freezeType: string;
+  properties: SDKStringRecord;
+  missingStack: boolean;
+  filesRead: number;
+  truncatedFiles: number;
+}
+
+export interface SDKBackgroundMetricsRequestDTO {
+  collectCpu: boolean;
+  collectMemory: boolean;
+  collectBattery: boolean;
+  cpuCacheMs: number;
+  memoryCacheMs: number;
+}
+
+export interface SDKBackgroundMetricsResultDTO {
+  cpuTickCount: number;
+  memoryUsageMB: number;
+  batteryCurrent: number;
+  collectedAt: number;
+  cpuFromCache: boolean;
+  memoryFromCache: boolean;
 }
 
 export interface SDKUploadRowDTO {

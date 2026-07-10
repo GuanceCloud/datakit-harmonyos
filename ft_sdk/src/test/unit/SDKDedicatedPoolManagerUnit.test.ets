@@ -4,6 +4,7 @@ import {
 } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
+  SDKANRParseRequestDTO,
   SDKLineProtocolContextDTO,
   SDKLineProtocolInputDTO,
   SDKPropertyRecord,
@@ -50,6 +51,11 @@ import {
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from '../../main/ets/components/thread/workers/DataUploadLimits';
+import { parseANREventInWorker } from '../../main/ets/components/thread/workers/ANRWorkerOperations';
+import {
+  parseProcStatCpuTicks,
+  parseProcStatusMemoryMB
+} from '../../main/ets/components/thread/workers/BackgroundWorkerOperations';
 
 interface SDKLineProtocolRecordsTestPayload {
   records: SDKLineProtocolInputDTO[];
@@ -58,6 +64,26 @@ interface SDKLineProtocolRecordsTestPayload {
 interface SDKCompletedActionPropertyTestValue {
   value?: string | number;
   nested?: string;
+}
+
+interface SDKANRTestFrame {
+  file: string;
+  line: number;
+  column: number;
+  symbol: string;
+}
+
+interface SDKANRTestThread {
+  thread_name: string;
+  tid: number;
+  frames: SDKANRTestFrame[];
+}
+
+interface SDKANRTestParams {
+  freeze_type: string;
+  foreground: boolean;
+  process_name: string;
+  threads: SDKANRTestThread[];
 }
 
 function createRumWorkerLineContext(): SDKLineProtocolContextDTO {
@@ -221,6 +247,48 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(status[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency).assertEqual(1);
       expect(status[SDKDedicatedPoolType.ANR].maxConcurrency).assertEqual(1);
       expect(status[SDKDedicatedPoolType.BACKGROUND].maxConcurrency).assertEqual(1);
+    });
+
+    it('anrWorkerShouldFormatSerializableFreezePayloadWithoutHostFileIo', 0, () => {
+      const frame: SDKANRTestFrame = {
+        file: 'Index.ets',
+        line: 12,
+        column: 3,
+        symbol: 'onClick'
+      };
+      const thread: SDKANRTestThread = {
+        thread_name: 'main',
+        tid: 1,
+        frames: [frame]
+      };
+      const params: SDKANRTestParams = {
+        freeze_type: 'THREAD_BLOCK_6S',
+        foreground: true,
+        process_name: 'demo',
+        threads: [thread]
+      };
+      const payload: SDKANRParseRequestDTO = {
+        eventName: 'APP_FREEZE',
+        params: params as Object,
+        dateline: 9988,
+        systemLogDirs: []
+      };
+
+      const result = parseANREventInWorker(payload);
+      expect(result.stackTrace.includes('App freeze detected: APP_FREEZE')).assertTrue();
+      expect(result.stackTrace.includes('onClick (Index.ets:12:3)')).assertTrue();
+      expect(result.properties['freeze_type']).assertEqual('THREAD_BLOCK_6S');
+      expect(result.foreground).assertTrue();
+      expect(result.dateline).assertEqual(9988);
+      expect(result.filesRead).assertEqual(0);
+    });
+
+    it('backgroundWorkerShouldParseProcMetricsDeterministically', 0, () => {
+      const stat = '123 (demo process) S 1 2 3 4 5 6 7 8 9 10 120 30 0 0';
+      expect(parseProcStatCpuTicks(stat)).assertEqual(150);
+      expect(parseProcStatusMemoryMB('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20);
+      expect(parseProcStatCpuTicks('invalid')).assertEqual(-1);
+      expect(parseProcStatusMemoryMB('VmSize: 10 kB')).assertEqual(-1);
     });
 
     it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {

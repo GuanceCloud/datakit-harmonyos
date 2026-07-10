@@ -7,7 +7,7 @@ import {
   SDKDedicatedPoolManager,
   SDKDedicatedPoolManagerStatus
 } from '../../thread/SDKDedicatedPoolManager';
-import { SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
+import { SDKWorkerRequest, SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
 import { FTExceptionHandlerRuntime } from '../runtime/FTExceptionHandlerRuntime';
 import { FTNativeCrashHandlerRuntime } from '../runtime/FTNativeCrashHandlerRuntime';
 import {
@@ -39,6 +39,10 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static probeDedicatedWorkers(): Promise<SDKWorkerResponse[]> {
     return SDKDedicatedPoolManager.getInstance().probeDedicatedWorkers();
+  }
+
+  public static executeDedicatedWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().executeCommand(request);
   }
 
   public static setExceptionHandlerRuntime(runtime: FTExceptionHandlerRuntime): void {
