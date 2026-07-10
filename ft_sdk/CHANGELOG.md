@@ -6,11 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.14-alpha07] - 2026-07-09
-- Added `FTInnerLogFileConfig` and `FTSDKConfig.setEnableInnerLogFile(...)` to persist SDK internal logs to rotating local files for troubleshooting.
-- Added `SDKLogLevel` and `FTSDKConfig.setSdkLogLevel(...)` to filter SDK internal debug logs by severity.
-- Updated `FTSDK.flushSyncData()` to flush pending RUM and Log worker queues into the local sync cache before scheduling an upload task.
-- Added a serialized DB TaskPool lane for database writes, upload commits, cache maintenance, and RUM counter updates to improve data consistency under high concurrency.
-- Added Android-aligned `syncDataBackground` debug logs for confirmed RUM sync-cache inserts and View updates, including each record UUID.
+- Updated the internal thread-pool and serialized DB task processing to improve data consistency under high concurrency.
+- Added configurable SDK debugging through `FTSDKConfig.setSdkLogLevel(...)` and `FTSDKConfig.setEnableInnerLogFile(...)`.
 
 ## [0.1.14-alpha06] - 2026-05-14
 - Added `FTTraceConfig.setTraceHeaderHandler(...)` for custom Trace context generation after the SDK generates default Trace Headers.
