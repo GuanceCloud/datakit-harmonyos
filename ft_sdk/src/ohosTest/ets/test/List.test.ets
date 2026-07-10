@@ -14,6 +14,7 @@ import ftExceptionHandlerDeviceTest from './FTExceptionHandlerDeviceTest.test';
 import ftNativeCrashHandlerDeviceTest from './FTNativeCrashHandlerDeviceTest.test';
 import ftSDKLifecycleDeviceTest from './FTSDKLifecycleDeviceTest.test';
 import ftDBManagerDeviceTest from './FTDBManagerDeviceTest.test';
+import ftDBSpoolDeviceTest from './FTDBSpoolDeviceTest.test';
 import configTest from './ConfigTest.test';
 import logGlobalContextTest from './LogGlobalContextTest.test';
 import logTest from './LogTest.test';
@@ -38,6 +39,7 @@ export default function testsuite() {
   dataModifierTest();
   dataSyncTest();
   ftDBManagerDeviceTest();
+  ftDBSpoolDeviceTest();
   logTest();
   logGlobalContextTest();
   rcpAutoTrackDeviceTest();

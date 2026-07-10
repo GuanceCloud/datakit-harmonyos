@@ -33,7 +33,6 @@ import {
 import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
 import { FTDBCachePolicy } from './db/FTDBCachePolicy';
-import { FTDBSpoolManager } from './db/FTDBSpoolManager';
 import { FTDBTaskPoolSyncDraftDTO } from './db/FTDBTaskPoolExecutor';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
@@ -1589,36 +1588,8 @@ class FTTrackInner {
       return this.mergeCachePolicyDecision(writeResult, records.length, cacheDecision);
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
-      const normalized = error instanceof Error ? error : new Error(String(error));
-      try {
-        const spooled = await this.appendFailedWriteToSpool(source, cacheDecision.records);
-        if (spooled > 0) {
-          FTInnerLogger.w(TAG, `DB write failed, spooled ${spooled} record(s) for replay: ${normalized.message}`);
-          return {
-            source,
-            requested: records.length,
-            inserted: 0,
-            updated: 0,
-            dropped: cacheDecision.dropped,
-            duplicateSkipped: 0,
-            deletedOld: cacheDecision.deletedOld,
-            success: false,
-            errorMessage: `spooled after DB write failure: ${normalized.message}`
-          };
-        }
-      } catch (spoolError) {
-        FTInnerLogger.e(TAG, `Failed to spool ${cacheDecision.records.length} record(s): ${spoolError as string}`);
-      }
-      throw normalized;
+      throw error instanceof Error ? error : new Error(String(error));
     }
-  }
-
-  private async appendFailedWriteToSpool(source: string, records: SyncData[]): Promise<number> {
-    if (!this.context) {
-      return 0;
-    }
-    FTDBSpoolManager.getInstance().init(this.context);
-    return await FTDBSpoolManager.getInstance().appendSyncData(source, records);
   }
 
   /**

@@ -993,6 +993,23 @@ async function writeSyncDataBody(
   delta: FTDBTaskPoolCountDelta,
   timing: FTDBTaskPoolTiming
 ): Promise<void> {
+  if (options.updateOrInsertByUuid) {
+    const upsertRows = deduplicateRowsForUpsert(records, result);
+    const rowsToInsert: SyncDataJSON[] = [];
+    for (let i = 0; i < upsertRows.length; i++) {
+      const updated = await updatePreparedSyncDataByUuid(rdbStore, upsertRows[i], timing);
+      if (updated > 0) {
+        result.updated += updated;
+      } else {
+        rowsToInsert.push(upsertRows[i]);
+      }
+    }
+    const allowedInserts = options.applyCachePolicy ?
+      await applyWriteCachePolicy(rdbStore, rowsToInsert, policy, result, delta, timing) : rowsToInsert;
+    await insertPreparedSyncData(rdbStore, allowedInserts, result, delta, timing, !options.reInsert);
+    return;
+  }
+
   let dataToWrite = records;
   if (options.applyCachePolicy) {
     dataToWrite = await applyWriteCachePolicy(rdbStore, records, policy, result, delta, timing);
@@ -1000,18 +1017,31 @@ async function writeSyncDataBody(
   if (dataToWrite.length === 0) {
     return;
   }
-  if (options.updateOrInsertByUuid) {
-    for (let i = 0; i < dataToWrite.length; i++) {
-      const updated = await updatePreparedSyncDataByUuid(rdbStore, dataToWrite[i], timing);
-      if (updated > 0) {
-        result.updated += updated;
-      } else {
-        await insertPreparedSyncData(rdbStore, [dataToWrite[i]], result, delta, timing, !options.reInsert);
-      }
-    }
-    return;
-  }
   await insertPreparedSyncData(rdbStore, dataToWrite, result, delta, timing, !options.reInsert);
+}
+
+function deduplicateRowsForUpsert(
+  records: SyncDataJSON[],
+  result: FTDBTaskPoolWriteResult
+): SyncDataJSON[] {
+  const rows: SyncDataJSON[] = [];
+  const indexes: Record<string, number> = {};
+  for (let i = 0; i < records.length; i++) {
+    const row = records[i];
+    if (!row.uuid || row.uuid.length === 0) {
+      rows.push(row);
+      continue;
+    }
+    const existingIndex = indexes[row.uuid];
+    if (existingIndex !== undefined) {
+      rows[existingIndex] = row;
+      result.duplicateSkipped++;
+      continue;
+    }
+    indexes[row.uuid] = rows.length;
+    rows.push(row);
+  }
+  return rows;
 }
 
 async function writeSyncDataInTaskPool(
@@ -1032,6 +1062,10 @@ async function writeSyncDataInTaskPool(
       rdbStore.beginTransaction();
     }
     await writeSyncDataBody(rdbStore, records, options, policy, result, delta, timing);
+    const resolvedRecords = result.inserted + result.updated + result.dropped + result.duplicateSkipped;
+    if (result.success && resolvedRecords < result.requested) {
+      throw new Error(`Incomplete DB write: resolved=${resolvedRecords}, requested=${result.requested}`);
+    }
     if (shouldTransaction) {
       rdbStore.commit();
     }
@@ -1041,6 +1075,14 @@ async function writeSyncDataInTaskPool(
     }
     result.success = false;
     result.errorMessage = String(error);
+    result.inserted = 0;
+    result.updated = 0;
+    result.dropped = 0;
+    result.duplicateSkipped = 0;
+    result.deletedOld = 0;
+    // Cache deltas were computed inside the transaction and must not escape a rollback.
+    delta.log = 0;
+    delta.rum = 0;
   }
 
   return {

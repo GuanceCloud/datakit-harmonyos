@@ -186,8 +186,9 @@ export class FTSDK {
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
-      FTDBSpoolManager.getInstance().init(context);
-      FTDBSpoolManager.getInstance().replay(context, "sdk.init").catch((error: Error) => {
+      const spoolManager = FTDBSpoolManager.getInstance();
+      spoolManager.init(context);
+      spoolManager.replay(context, "sdk.init").catch((error: Error) => {
         FTInnerLogger.e(TAG, `DB spool replay on init failed: ${error.message}`);
       });
       UserDataManager.getInstance().init(context);
@@ -739,6 +740,7 @@ export class FTSDK {
       }
 
       await FTDBManager.getInstance(context).delete();
+      await FTDBSpoolManager.getInstance().clear();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {

@@ -11,6 +11,7 @@ import cachePolicyUnitTest from './unit/CachePolicyUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
+import ftDBSpoolUnitTest from './unit/FTDBSpoolUnit.test';
 import ftSDKExtensionBridgeUnitTest from './unit/FTSDKExtensionBridgeUnit.test';
 import httpTest from './unit/HttpTest.test';
 import httpAutoTrackAxiosUnitTest from './unit/HttpAutoTrackAxiosUnit.test';
@@ -44,6 +45,7 @@ export default function testsuite() {
   samplingUnitTest();
   sdkDedicatedPoolManagerUnitTest();
   ftExceptionHandlerUnitTest();
+  ftDBSpoolUnitTest();
   cachePolicyUnitTest();
   syncTaskManagerUnitTest();
   userDataUnitTest();

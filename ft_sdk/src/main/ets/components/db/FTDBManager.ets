@@ -13,7 +13,7 @@ import {
   FTDBTaskPoolWriteResponse
 } from './FTDBTaskPoolExecutor';
 import * as FTSQL from './FTSQL';
-import { SyncData } from './bean/SyncData';
+import { SyncData, SyncDataJSON } from './bean/SyncData';
 import { ViewBean } from './bean/ViewBean';
 import { ActionBean } from './bean/ActionBean';
 import { DBCacheDiscard, DataType } from '../enum/Enums';
@@ -49,6 +49,12 @@ export interface SyncDataWriteOptions {
   dbLaneWaitMs?: number;
   forceTransaction?: boolean;
   updateOrInsertByUuid?: boolean;
+  /** Replay must not recursively spool the same inflight batch on DB failure. */
+  skipFailureFallback?: boolean;
+}
+
+export interface SyncDataWriteFailureFallback {
+  appendSyncDataJSON(source: string, records: SyncDataJSON[]): Promise<number>;
 }
 
 export interface SyncDataWriteResult {
@@ -101,9 +107,11 @@ export class RUMCounterDelta {
  */
 export class FTDBManager extends DBManager {
   private static instance: FTDBManager | null = null;
+  private static forcedSyncDataWriteFailureCount: number = 0;
   private databaseHelper: DatabaseHelper | null = null;
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
+  private syncDataWriteFailureFallback: SyncDataWriteFailureFallback | null = null;
 
   // Deduplication cache, updated only from the DB write section.
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
@@ -118,7 +126,12 @@ export class FTDBManager extends DBManager {
 
   public static resetInstanceInternal(): void {
     FTDBManager.instance = null;
+    FTDBManager.forcedSyncDataWriteFailureCount = 0;
     DatabaseHelper.resetInstanceInternal();
+  }
+
+  public static forceNextSyncDataWriteFailureInternal(): void {
+    FTDBManager.forcedSyncDataWriteFailureCount++;
   }
 
   /**
@@ -133,6 +146,10 @@ export class FTDBManager extends DBManager {
       FTDBManager.instance.databaseHelper = DatabaseHelper.getInstance(context);
     }
     return FTDBManager.instance;
+  }
+
+  public setSyncDataWriteFailureFallback(fallback: SyncDataWriteFailureFallback | null): void {
+    this.syncDataWriteFailureFallback = fallback;
   }
 
   /**
@@ -1049,6 +1066,12 @@ export class FTDBManager extends DBManager {
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const dataToWrite = this.filterTaskPoolDuplicates(dataList, reInsert, updateOrInsertByUuid, result);
+    if (FTDBManager.consumeForcedSyncDataWriteFailure()) {
+      result.success = false;
+      result.errorMessage = 'Forced sync-data DB write failure';
+      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+      return result;
+    }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
 
     try {
@@ -1073,9 +1096,12 @@ export class FTDBManager extends DBManager {
         result.updated = taskPoolResult.updated;
         result.dropped += taskPoolResult.dropped;
         result.deletedOld += taskPoolResult.deletedOld;
+        result.duplicateSkipped += taskPoolResult.duplicateSkipped;
         result.errorMessage = taskPoolResult.errorMessage;
-        this.applyTaskPoolCountDelta(taskPoolResponse);
-        if (result.inserted + result.updated > 0) {
+        if (result.success) {
+          this.applyTaskPoolCountDelta(taskPoolResponse);
+        }
+        if (result.success && result.inserted + result.updated > 0) {
           this.markTaskPoolDataAsInserted(dataToWrite, reInsert);
         }
       }
@@ -1118,6 +1144,10 @@ export class FTDBManager extends DBManager {
       );
     }
 
+    if (!result.success) {
+      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+    }
+
     return result;
   }
 
@@ -1130,6 +1160,17 @@ export class FTDBManager extends DBManager {
     const requested = drafts ? drafts.length : 0;
     const result = this.createSyncDataWriteResult(source, requested);
     if (!drafts || drafts.length === 0) {
+      return result;
+    }
+    if (FTDBManager.consumeForcedSyncDataWriteFailure()) {
+      result.success = false;
+      result.errorMessage = 'Forced sync-data draft DB write failure';
+      await this.persistFailedSyncData(
+        source,
+        this.syncDraftsToSyncDataJSON(drafts, fallbackDataType),
+        options,
+        result
+      );
       return result;
     }
 
@@ -1163,7 +1204,9 @@ export class FTDBManager extends DBManager {
       result.deletedOld += taskPoolResult.deletedOld;
       result.duplicateSkipped += taskPoolResult.duplicateSkipped;
       result.errorMessage = taskPoolResult.errorMessage;
-      this.applyTaskPoolCountDelta(taskPoolResponse);
+      if (result.success) {
+        this.applyTaskPoolCountDelta(taskPoolResponse);
+      }
     } catch (error) {
       result.success = false;
       result.errorMessage = String(error);
@@ -1191,7 +1234,102 @@ export class FTDBManager extends DBManager {
       );
     }
 
+    if (!result.success) {
+      await this.persistFailedSyncData(
+        source,
+        this.syncDraftsToSyncDataJSON(drafts, fallbackDataType),
+        options,
+        result
+      );
+    }
+
     return result;
+  }
+
+  private async persistFailedSyncData(
+    source: string,
+    records: SyncDataJSON[],
+    options: SyncDataWriteOptions,
+    result: SyncDataWriteResult
+  ): Promise<void> {
+    if (options.skipFailureFallback === true || records.length === 0) {
+      return;
+    }
+    if (!this.syncDataWriteFailureFallback) {
+      const message = `${result.errorMessage || 'DB write failed'}; sync-data fallback is not initialized`;
+      result.errorMessage = message;
+      FTInnerLogger.e(TAG, message);
+      return;
+    }
+    try {
+      const spooled = await this.syncDataWriteFailureFallback.appendSyncDataJSON(source, records);
+      if (spooled !== records.length) {
+        result.errorMessage = `${result.errorMessage || 'DB write failed'}; fallback persisted ${spooled}/${records.length}`;
+        FTInnerLogger.e(TAG, result.errorMessage);
+        return;
+      }
+      result.errorMessage = `${result.errorMessage || 'DB write failed'}; spooled ${spooled} record(s)`;
+    } catch (error) {
+      result.errorMessage = `${result.errorMessage || 'DB write failed'}; fallback failed: ${String(error)}`;
+      FTInnerLogger.e(TAG, result.errorMessage);
+    }
+  }
+
+  private toSyncDataJSONList(records: SyncData[]): SyncDataJSON[] {
+    const rows: SyncDataJSON[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (record && record.isValid()) {
+        rows.push(record.toJSON());
+      }
+    }
+    return rows;
+  }
+
+  private syncDraftsToSyncDataJSON(
+    drafts: FTDBTaskPoolSyncDraftDTO[],
+    fallbackDataType: DataType
+  ): SyncDataJSON[] {
+    const rows: SyncDataJSON[] = [];
+    for (let i = 0; i < drafts.length; i++) {
+      const draft = drafts[i];
+      if (!draft || !draft.dataString || !draft.uuid || draft.time <= 0) {
+        continue;
+      }
+      const row: SyncDataJSON = {
+        id: 0,
+        dataType: this.toDataType(draft.dataType, fallbackDataType),
+        dataString: draft.dataString,
+        uuid: draft.uuid,
+        time: draft.time
+      };
+      if (draft.customDataType && draft.customDataType.length > 0) {
+        row.customDataTypeString = draft.customDataType;
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  private toDataType(value: string, fallback: DataType): DataType {
+    if (value === DataType.RUM_APP.toString()) {
+      return DataType.RUM_APP;
+    }
+    if (value === DataType.RUM_WEBVIEW.toString()) {
+      return DataType.RUM_WEBVIEW;
+    }
+    if (value === DataType.LOG.toString()) {
+      return DataType.LOG;
+    }
+    return fallback;
+  }
+
+  private static consumeForcedSyncDataWriteFailure(): boolean {
+    if (FTDBManager.forcedSyncDataWriteFailureCount <= 0) {
+      return false;
+    }
+    FTDBManager.forcedSyncDataWriteFailureCount--;
+    return true;
   }
 
   private traceSyncDataWriteIfNeeded(
