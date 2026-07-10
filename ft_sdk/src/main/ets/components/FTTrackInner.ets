@@ -726,6 +726,8 @@ class FTTrackInner {
     const result = this.getWriteAffectedCount(writeResult) > 0;
     const firstUuid = normalizedDrafts[0].uuid;
 
+    this.logCompletedRumDraftWrites(measurement, dataType, normalizedDrafts, writeResult);
+
     if (result && customDataType && customDataType.length > 0) {
       FTInnerLogger.d(TAG,
         `[FT-ERROR-SAMPLING] Successfully stored data as ${customDataType}: uuid=${firstUuid}, measurement=${measurement}`);
@@ -743,6 +745,45 @@ class FTTrackInner {
     if (result) {
       this.syncTaskManager.executeSyncPoll();
     }
+  }
+
+  private logCompletedRumDraftWrites(
+    fallbackMeasurement: string,
+    fallbackDataType: DataType,
+    drafts: SDKSyncDataDraftDTO[],
+    writeResult: SyncDataWriteResult | null
+  ): void {
+    if (!writeResult || !writeResult.success || drafts.length === 0) {
+      return;
+    }
+
+    if (writeResult.inserted === drafts.length) {
+      for (const draft of drafts) {
+        const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
+        const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
+        FTInnerLogger.d(TAG,
+          `syncDataBackground:${measurement} ${dataType.toString()}:insert=true,uuid=${draft.uuid}`);
+      }
+      return;
+    }
+
+    if (writeResult.updated === drafts.length) {
+      for (const draft of drafts) {
+        const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
+        const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
+        FTInnerLogger.d(TAG,
+          `syncDataBackground:${measurement},${dataType.toString()} update,uuid=${draft.uuid}`);
+      }
+    }
+  }
+
+  private getDraftMeasurement(draft: SDKSyncDataDraftDTO, fallbackMeasurement: string): string {
+    const dataString = draft.dataString;
+    const separatorIndex = dataString.indexOf(',');
+    if (separatorIndex > 0) {
+      return dataString.substring(0, separatorIndex);
+    }
+    return fallbackMeasurement;
   }
 
   public getWorkerLineProtocolContextSnapshot(): SDKLineProtocolContextDTO | null {
