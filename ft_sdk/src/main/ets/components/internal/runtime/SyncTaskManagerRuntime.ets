@@ -1,6 +1,5 @@
 import { Context } from '@kit.AbilityKit';
 import preferences from '@ohos.data.preferences';
-import { FTSDKConfig } from '../../Configs';
 import { SyncData } from '../../db/bean/SyncData';
 import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
 import {
@@ -9,7 +8,8 @@ import {
   FTDBTaskPoolUploadCommitResponse
 } from '../../db/FTDBTaskPoolExecutor';
 import { DataType } from '../../enum/Enums';
-import { FTUploadTaskPoolExecutor } from '../../http/FTUploadTaskPoolExecutor';
+import { SDKDedicatedPoolManager } from '../../thread/SDKDedicatedPoolManager';
+import { SDKWorkerRequest, SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
 import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
@@ -59,41 +59,11 @@ export interface SyncTaskCachePolicy {
   getRumCount(): number;
 }
 
-export interface SyncTaskHttpResult {
-  getCode(): number;
-  getMessage(): string;
-  getErrorCode(): string;
-}
-
-class TaskPoolSyncTaskHttpResult implements SyncTaskHttpResult {
-  private readonly code: number;
-  private readonly message: string;
-  private readonly errorCode: string;
-
-  constructor(code: number, message: string, errorCode: string) {
-    this.code = code;
-    this.message = message;
-    this.errorCode = errorCode;
-  }
-
-  getCode(): number {
-    return this.code;
-  }
-
-  getMessage(): string {
-    return this.message;
-  }
-
-  getErrorCode(): string {
-    return this.errorCode;
-  }
-}
-
 export interface SyncTaskManagerRuntime {
   getDbTaskPool(): SyncTaskDbTaskPool;
   getCachePolicy(): SyncTaskCachePolicy;
   getPreferences(context: Context, name: string): SyncTaskPreferences;
-  executeHttp(config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult>;
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse>;
   getCurrentTimeMs(): number;
   getRandom(): number;
   generateUUID(): string;
@@ -165,19 +135,8 @@ export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
     return preferences.getPreferencesSync(context, { name }) as SyncTaskPreferences;
   }
 
-  async executeHttp(config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult> {
-    const response = await FTUploadTaskPoolExecutor.execute({
-      config: {
-        datakitUrl: config.getDatakitUrl(),
-        datawayUrl: config.getDatawayUrl(),
-        clientToken: config.getClientToken()
-      },
-      model,
-      body,
-      pkgId,
-      deviceTimeMs: this.getCurrentTimeMs()
-    });
-    return new TaskPoolSyncTaskHttpResult(response.code, response.message, response.errorCode);
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().executeCommand(request);
   }
 
   getCurrentTimeMs(): number {

@@ -19,6 +19,7 @@ import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 const TAG = "SDKDedicatedPoolManager";
 const DEFAULT_WORKER_COMMAND_TIMEOUT_MS = 3000;
 const DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS = 60000;
+const DATA_UPLOAD_HTTP_HARD_TIMEOUT_MS = 135000;
 const DEDICATED_LANE_WORKER_COUNT = 1;
 const POOL_QUEUE_COMPACT_THRESHOLD = 64;
 
@@ -385,8 +386,11 @@ export class SDKDedicatedPoolManager {
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_UPLOAD, this.createPool({
       pool: SDKDedicatedPoolType.DATA_UPLOAD,
-      workerCount: coreWorkers,
-      maxConcurrency: coreWorkers,
+      // Upload round/checkpoint state is intentionally single-owner. Keeping
+      // one Worker slot also guarantees that start/execute/commit/finish for a
+      // round cannot be dispatched to different runtime states.
+      workerCount: DEDICATED_LANE_WORKER_COUNT,
+      maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_UPLOAD)
     }));
@@ -629,6 +633,12 @@ export class SDKDedicatedPoolManager {
   }
 
   private getWorkerCommandTimeoutMs(request: SDKWorkerRequest): number {
+    if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE) {
+      return Math.max(
+        SDKDedicatedPoolManager.workerCommandTimeoutMs,
+        DATA_UPLOAD_HTTP_HARD_TIMEOUT_MS
+      );
+    }
     if (request.command === SDKWorkerCommand.UPLOAD_CONSUME) {
       return Math.max(
         SDKDedicatedPoolManager.workerCommandTimeoutMs,

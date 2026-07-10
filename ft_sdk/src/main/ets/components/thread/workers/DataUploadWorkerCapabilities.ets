@@ -1,10 +1,11 @@
 import { DataType } from '../../enum/Enums';
+import { SDKUploadHttpConfigDTO, SDKWorkerRequest, SDKWorkerResponse } from '../SDKWorkerProtocol';
 
 /**
- * Serializable upload row used by DataUploadWorker.
+ * Serializable upload row exchanged with DataUploadWorker.
  *
- * Keep this model free of SDK classes so the same executor can run through
- * the DATA_UPLOAD scheduler while DB I/O is delegated to DB TaskPool DTOs.
+ * Keep this model free of SDK classes so CPU work can cross the DATA_UPLOAD
+ * worker boundary while DB I/O remains delegated to DB TaskPool DTOs.
  */
 export interface DataUploadRow {
   id: number;
@@ -13,13 +14,6 @@ export interface DataUploadRow {
   uuid: string;
   time: number;
   customDataType?: string;
-}
-
-export interface DataUploadHttpResult {
-  code: number;
-  message: string;
-  errorCode: string;
-  model?: string;
 }
 
 export interface DataUploadConsumeOptions {
@@ -70,12 +64,13 @@ export enum DataUploadDbCommitAction {
 }
 
 /**
- * Worker-safe capability boundary for the real upload consumer.
+ * Host orchestration boundary for the upload consumer.
  *
- * Implementations must not expose Context, RdbStore, FTSDKConfig, SyncData,
- * callbacks, or other non-serializable SDK objects to the executor.
+ * DB methods stay TaskPool-backed. HTTPS configuration crosses into the
+ * DataUploadWorker only as serializable strings and timeout values.
  */
 export interface DataUploadWorkerCapabilities {
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse>;
   isStopped(): boolean;
   hasData(dataType: DataType): Promise<boolean>;
   queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]>;
@@ -92,7 +87,7 @@ export interface DataUploadWorkerCapabilities {
     now: number,
     duration: number
   ): Promise<DataUploadDbMaintenanceResult>;
-  executeHttp(dataType: DataType, pkgId: string, body: string): Promise<DataUploadHttpResult>;
+  getHttpConfig(dataType: DataType): SDKUploadHttpConfigDTO;
   getCurrentTimeMs(): number;
   getRandom(): number;
   generateUUID(): string;

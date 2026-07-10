@@ -114,6 +114,12 @@ interface SDKWorkerDrainBarrierPayload {
   source: string;
 }
 
+interface RumDraftWriteLogGroup {
+  measurement: string;
+  dataType: string;
+  count: number;
+}
+
 /**
  * Data Tracking Core Class
  * Responsible for data collection, storage, and sync triggering
@@ -757,24 +763,54 @@ class FTTrackInner {
       return;
     }
 
-    if (writeResult.inserted === drafts.length) {
-      for (const draft of drafts) {
-        const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
-        const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
-        FTInnerLogger.d(TAG,
-          `syncDataBackground:${measurement} ${dataType.toString()}:insert=true,uuid=${draft.uuid}`);
+    const groups = this.buildRumDraftWriteLogGroups(fallbackMeasurement, fallbackDataType, drafts);
+    const uuidSample = this.buildRumDraftUuidSample(drafts, 3);
+    FTInnerLogger.d(TAG,
+      `syncDataBackground:batch requested=${writeResult.requested},inserted=${writeResult.inserted},` +
+        `updated=${writeResult.updated},dropped=${writeResult.dropped},duplicate=${writeResult.duplicateSkipped},` +
+        `groups=${groups},uuid_sample=${uuidSample}`);
+  }
+
+  private buildRumDraftWriteLogGroups(
+    fallbackMeasurement: string,
+    fallbackDataType: DataType,
+    drafts: SDKSyncDataDraftDTO[]
+  ): string {
+    const groups: RumDraftWriteLogGroup[] = [];
+    for (let i = 0; i < drafts.length; i++) {
+      const draft = drafts[i];
+      const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
+      const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType).toString();
+      let matchedIndex = -1;
+      for (let j = 0; j < groups.length; j++) {
+        if (groups[j].measurement === measurement && groups[j].dataType === dataType) {
+          matchedIndex = j;
+          break;
+        }
       }
-      return;
+      if (matchedIndex >= 0) {
+        groups[matchedIndex].count++;
+      } else {
+        groups.push({ measurement, dataType, count: 1 });
+      }
     }
 
-    if (writeResult.updated === drafts.length) {
-      for (const draft of drafts) {
-        const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
-        const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
-        FTInnerLogger.d(TAG,
-          `syncDataBackground:${measurement},${dataType.toString()} update,uuid=${draft.uuid}`);
+    const parts: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      parts.push(`${groups[i].measurement}/${groups[i].dataType}:${groups[i].count}`);
+    }
+    return parts.join('|');
+  }
+
+  private buildRumDraftUuidSample(drafts: SDKSyncDataDraftDTO[], maxCount: number): string {
+    const samples: string[] = [];
+    const count = Math.min(Math.max(0, maxCount), drafts.length);
+    for (let i = 0; i < count; i++) {
+      if (drafts[i].uuid && drafts[i].uuid.length > 0) {
+        samples.push(drafts[i].uuid);
       }
     }
+    return samples.join('|');
   }
 
   private getDraftMeasurement(draft: SDKSyncDataDraftDTO, fallbackMeasurement: string): string {

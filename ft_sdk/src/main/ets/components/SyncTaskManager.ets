@@ -20,10 +20,10 @@ import {
   DataUploadDbCommitAction,
   DataUploadDbMaintenanceResult,
   DataUploadDbWriteResult,
-  DataUploadHttpResult,
   DataUploadRow,
   DataUploadWorkerCapabilities
 } from './thread/workers/DataUploadWorkerCapabilities';
+import { SDKUploadHttpConfigDTO, SDKWorkerRequest, SDKWorkerResponse } from './thread/SDKWorkerProtocol';
 
 /**
  * Configuration record interface for FTDBCachePolicy
@@ -88,6 +88,10 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
 
   isStopped(): boolean {
     return this.stopProvider();
+  }
+
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    return syncTaskRuntime.executeUploadWorkerCommand(request);
   }
 
   async hasData(dataType: DataType): Promise<boolean> {
@@ -166,7 +170,7 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     };
   }
 
-  async executeHttp(dataType: DataType, pkgId: string, body: string): Promise<DataUploadHttpResult> {
+  getHttpConfig(dataType: DataType): SDKUploadHttpConfigDTO {
     const config = this.configProvider();
     if (!config) {
       throw new Error("SDK config not initialized");
@@ -184,23 +188,15 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
         break;
     }
 
-    if (dataType === DataType.RUM_WEBVIEW) {
-      FTInnerLogger.i(TAG,
-        `[WEBVIEW-UPLOAD] ========== Uploading WebView data to server ==========`);
-      FTInnerLogger.i(TAG,
-        `[WEBVIEW-UPLOAD] Body length: ${body.length}, Record count: ${body.split('\n').length}`);
-      FTInnerLogger.i(TAG, `[WEBVIEW-UPLOAD] Model: ${model}, pkgId: ${pkgId}`);
-      if (body.includes(`${Constants.KEY_RUM_VIEW_IS_WEB_VIEW}=true`)) {
-        FTInnerLogger.i(TAG, `[WEBVIEW-UPLOAD] WebView data confirmed in body`);
-      }
-    }
-
-    const result = await syncTaskRuntime.executeHttp(config, model, body, pkgId);
     return {
-      code: result.getCode(),
-      message: result.getMessage(),
-      errorCode: result.getErrorCode(),
-      model
+      datakitUrl: config.getDatakitUrl(),
+      datawayUrl: config.getDatawayUrl(),
+      clientToken: config.getClientToken(),
+      model,
+      deviceTimeMs: this.getCurrentTimeMs(),
+      connectTimeoutMs: 60000,
+      readTimeoutMs: 60000,
+      softTimeoutMs: 125000
     };
   }
 

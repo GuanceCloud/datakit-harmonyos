@@ -71,6 +71,9 @@ export enum SDKWorkerCommand {
   DATA_PARSE_CRASH_TEXT = 'data.parseCrashText',
   UPLOAD_SCHEDULE = 'upload.schedule',
   UPLOAD_CONSUME = 'upload.consume',
+  UPLOAD_EXECUTE_PAGE = 'upload.executePage',
+  UPLOAD_COMMIT_PAGE = 'upload.commitPage',
+  UPLOAD_CONSUME_FINISH = 'upload.consumeFinish',
   UPLOAD_ROUND_FINISH = 'upload.roundFinish',
   UPLOAD_FORMAT_BODY = 'upload.formatBody'
 }
@@ -329,12 +332,139 @@ export interface SDKUploadRowDTO {
   dataString: string;
   uuid: string;
   time: number;
+  customDataType?: string;
 }
 
 export interface SDKUploadPageDTO {
   dataType: string;
   rows: SDKUploadRowDTO[];
   packageId: string;
+}
+
+export enum SDKUploadPageOutcome {
+  EMPTY_BODY = 'empty-body',
+  HTTP = 'http'
+}
+
+export enum SDKUploadDbActionDTO {
+  NONE = 'none',
+  DELETE = 'delete',
+  REINSERT = 'reinsert'
+}
+
+export interface SDKUploadRoundStartDTO {
+  ownerId: string;
+  taskName: string;
+  pageSize: number;
+  syncSleepTime: number;
+  checkpoint?: SDKUploadCheckpointDTO;
+}
+
+export interface SDKUploadRoundStartResultDTO {
+  accepted: boolean;
+  roundId: string;
+  pageSize: number;
+  syncSleepTime: number;
+  checkpoint: SDKUploadCheckpointDTO;
+}
+
+export interface SDKUploadCheckpointDTO {
+  ownerId: string;
+  version: number;
+  rumSequence: number;
+  logSequence: number;
+  processId: number;
+  errorCounts: SDKNumberRecord;
+  ignoredErrorCounts: SDKNumberRecord;
+}
+
+export interface SDKUploadHttpConfigDTO {
+  datakitUrl: string;
+  datawayUrl: string;
+  clientToken: string;
+  model: string;
+  deviceTimeMs: number;
+  connectTimeoutMs: number;
+  readTimeoutMs: number;
+  softTimeoutMs: number;
+}
+
+export interface SDKUploadHttpRequestDTO extends SDKUploadHttpConfigDTO {
+  body: string;
+  packageId: string;
+}
+
+export interface SDKUploadHttpResultDTO {
+  code: number;
+  message: string;
+  errorCode: string;
+  elapsedMs: number;
+  softTimedOut: boolean;
+}
+
+export interface SDKUploadExecutePageDTO {
+  roundId: string;
+  dataType: string;
+  rows: SDKUploadRowDTO[];
+  httpConfig: SDKUploadHttpConfigDTO;
+}
+
+export interface SDKUploadExecutePageResultDTO {
+  roundId: string;
+  attemptId: string;
+  dataType: string;
+  rows: SDKUploadRowDTO[];
+  queriedRows: number;
+  acceptedRows: number;
+  duplicateRows: number;
+  packageId: string;
+  bodyLength: number;
+  bodyPreview: string;
+  shouldUpload: boolean;
+  outcome: SDKUploadPageOutcome;
+  httpResult: SDKUploadHttpResultDTO;
+  dbAction: SDKUploadDbActionDTO;
+  reInsertRows: SDKUploadRowDTO[];
+  reduceCount: number;
+  delayMs: number;
+  shouldContinueDataType: boolean;
+  roundHasMoreData: boolean;
+  retryCount: number;
+  ignoredClientError: boolean;
+  successfulResponse: boolean;
+  errorCount: number;
+  computeMs: number;
+  checkpointAfterCommit: SDKUploadCheckpointDTO;
+}
+
+export interface SDKUploadCommitPageDTO {
+  roundId: string;
+  attemptId: string;
+  dbSucceeded: boolean;
+}
+
+export interface SDKUploadCommitPageResultDTO {
+  roundId: string;
+  dataType: string;
+  delayMs: number;
+  shouldContinueDataType: boolean;
+  roundHasMoreData: boolean;
+  errorCount: number;
+  consumedRows: number;
+  checkpoint: SDKUploadCheckpointDTO;
+}
+
+export interface SDKUploadRoundFinishDTO {
+  roundId: string;
+}
+
+export interface SDKUploadRoundResultDTO {
+  roundId: string;
+  consumedRows: number;
+  hasMoreData: boolean;
+  errorCount: number;
+  computeMs: number;
+  checkpoint: SDKUploadCheckpointDTO;
 }
 
 export interface SDKHttpRequestDTO {

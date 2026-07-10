@@ -15,11 +15,25 @@ import {
   SyncTaskCachePolicy,
   SyncTaskConfigRecord,
   SyncTaskDbTaskPool,
-  SyncTaskHttpResult,
   SyncTaskManagerRuntime,
   SyncTaskPreferences
 } from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
+import {
+  createSDKWorkerRuntimeStateWithBackend,
+  handleSDKDataUploadWorkerRequest,
+  handleSDKWorkerRequest,
+  SDKUploadWorkerHttpExecutor,
+  SDKWorkerRuntimeState
+} from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
+import {
+  SDKDedicatedPoolType,
+  SDKUploadHttpRequestDTO,
+  SDKUploadHttpResultDTO,
+  SDKWorkerCommand,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../main/ets/components/thread/SDKWorkerProtocol';
 
 const TEST_URL = 'http://localhost';
 
@@ -294,10 +308,12 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   }
 }
 
-class FakeHttpResult implements SyncTaskHttpResult {
-  private code: number;
-  private message: string;
-  private errorCode: string;
+class FakeHttpResult implements SDKUploadHttpResultDTO {
+  code: number;
+  message: string;
+  errorCode: string;
+  elapsedMs: number = 1;
+  softTimedOut: boolean = false;
 
   constructor(code: number, message: string = 'message', errorCode: string = '') {
     this.code = code;
@@ -305,20 +321,9 @@ class FakeHttpResult implements SyncTaskHttpResult {
     this.errorCode = errorCode;
   }
 
-  getCode(): number {
-    return this.code;
-  }
-
-  getMessage(): string {
-    return this.message;
-  }
-
-  getErrorCode(): string {
-    return this.errorCode;
-  }
 }
 
-class FakeRuntime implements SyncTaskManagerRuntime {
+class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor {
   cachePolicy: FakeCachePolicy = new FakeCachePolicy();
   dbTaskPool: FakeDbTaskPool = new FakeDbTaskPool();
   preferences: FakePreferences = new FakePreferences();
@@ -340,6 +345,12 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
   throwSleep: boolean = false;
+  uploadWorkerCommands: string[] = [];
+  uploadWorkerState: SDKWorkerRuntimeState = createSDKWorkerRuntimeStateWithBackend(
+    SDKDedicatedPoolType.DATA_UPLOAD,
+    'DataUploadUnitWorker',
+    'unit-worker'
+  );
 
   getDbTaskPool(): SyncTaskDbTaskPool {
     return this.dbTaskPool;
@@ -357,13 +368,13 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     return this.preferences;
   }
 
-  async executeHttp(_config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult> {
+  async execute(request: SDKUploadHttpRequestDTO): Promise<SDKUploadHttpResultDTO> {
     this.executeHttpCount++;
-    this.httpModels.push(model);
-    this.httpBodies.push(body);
-    this.lastHttpModel = model;
-    this.lastHttpBody = body;
-    this.lastHttpPkgId = pkgId;
+    this.httpModels.push(request.model);
+    this.httpBodies.push(request.body);
+    this.lastHttpModel = request.model;
+    this.lastHttpBody = request.body;
+    this.lastHttpPkgId = request.packageId;
     if (this.throwExecuteHttp) {
       throw new Error('http failed');
     }
@@ -374,6 +385,14 @@ class FakeRuntime implements SyncTaskManagerRuntime {
       return this.httpResults.shift() as FakeHttpResult;
     }
     return new FakeHttpResult(200, 'ok', '');
+  }
+
+  async executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    this.uploadWorkerCommands.push(request.command);
+    if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE) {
+      return await handleSDKDataUploadWorkerRequest(request, this.uploadWorkerState, this);
+    }
+    return handleSDKWorkerRequest(request, this.uploadWorkerState);
   }
 
   getCurrentTimeMs(): number {
@@ -392,10 +411,19 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     return `runtime-uuid-${this.uuidIndex}`;
   }
 
-  setTimer(callback: () => void, _interval: number): number {
+  setTimer(callback: () => void, interval: number): number {
     this.timerId++;
-    this.timerCallbacks.set(this.timerId, callback);
-    return this.timerId;
+    const id = this.timerId;
+    this.timerCallbacks.set(id, callback);
+    if (interval === 0) {
+      Promise.resolve().then(() => {
+        const scheduled = this.timerCallbacks.get(id);
+        if (scheduled) {
+          scheduled();
+        }
+      });
+    }
+    return id;
   }
 
   clearTimer(timerId: number): void {
@@ -747,7 +775,32 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpBody.includes('log-local-format')).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME_FINISH)).assertTrue();
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('uploadLaneShouldNotCommitWorkerCheckpointWhenDbCommitFails', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.throwDelete = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-db-failure',
+          'df_rum_harmonyos_log,sdk_data_id=log-db-failure value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
+      expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
+      expect(runtime.cachePolicy.logDelta).assertEqual(0);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
     });
 
     it('uploadLaneShouldDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {
@@ -902,7 +955,9 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpPkgId.split('.').length).assertEqual(4);
       expect(runtime.lastHttpBody.includes(`${runtime.lastHttpPkgId}.log-1`)).assertTrue();
       expect(db.deleteCount > 0).assertTrue();
-      expect(runtime.cachePolicy.logDelta).assertEqual(-1);
+      // Both records were already persisted. Cache discard policy applies when
+      // inserting data and must not suppress an existing upload row.
+      expect(runtime.cachePolicy.logDelta).assertEqual(-2);
 
       const deleteCountAfterSuccess = db.deleteCount;
       const insertCountAfterSuccess = db.insertCount;

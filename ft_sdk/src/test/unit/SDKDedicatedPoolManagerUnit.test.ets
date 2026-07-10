@@ -9,7 +9,18 @@ import {
   SDKRumCounterUpdateDTO,
   SDKRumEventDTO,
   SDKStringRecord,
+  SDKUploadCommitPageDTO,
+  SDKUploadCommitPageResultDTO,
+  SDKUploadDbActionDTO,
+  SDKUploadExecutePageDTO,
+  SDKUploadExecutePageResultDTO,
+  SDKUploadHttpRequestDTO,
+  SDKUploadHttpResultDTO,
   SDKUploadPageDTO,
+  SDKUploadRoundFinishDTO,
+  SDKUploadRoundResultDTO,
+  SDKUploadRoundStartDTO,
+  SDKUploadRoundStartResultDTO,
   SDKUploadRowDTO,
   SDKWorkerCommand,
   SDKWorkerPayload,
@@ -18,7 +29,9 @@ import {
 } from '../../main/ets/components/thread/SDKWorkerProtocol';
 import {
   createSDKWorkerRuntimeStateWithBackend,
+  handleSDKDataUploadWorkerRequest,
   handleSDKWorkerRequest,
+  SDKUploadWorkerHttpExecutor,
   SDKWorkerRuntimeState
 } from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
 
@@ -62,6 +75,26 @@ async function executeWorkerCommandForUnit(request: SDKWorkerRequest): Promise<S
   return handleSDKWorkerRequest(request, state);
 }
 
+class RetryUploadHttpExecutor implements SDKUploadWorkerHttpExecutor {
+  lastRequest: SDKUploadHttpRequestDTO | null = null;
+  private readonly responseCode: number;
+
+  constructor(responseCode: number = 500) {
+    this.responseCode = responseCode;
+  }
+
+  async execute(request: SDKUploadHttpRequestDTO): Promise<SDKUploadHttpResultDTO> {
+    this.lastRequest = request;
+    return {
+      code: this.responseCode,
+      message: this.responseCode === 200 ? 'ok' : 'retry',
+      errorCode: String(this.responseCode),
+      elapsedMs: 3,
+      softTimedOut: false
+    };
+  }
+}
+
 export default function sdkDedicatedPoolManagerUnitTest() {
   describe('SDKDedicatedPoolManagerUnit', () => {
     let manager: SDKDedicatedPoolManager;
@@ -81,6 +114,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(workerCount).assertEqual(1);
       const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_PROCESS];
       expect(status.workerCount).assertEqual(workerCount);
+    });
+
+    it('dataUploadCommandShouldUseOneStateOwnerWorker', 0, async () => {
+      const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_UPLOAD];
+      expect(status.workerCount).assertEqual(1);
+      expect(status.maxConcurrency).assertEqual(1);
     });
 
     it('workerProtocolShouldRejectNonSerializablePayload', 0, async () => {
@@ -430,6 +469,217 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const body = getPayloadString(response.payload, 'body');
       expect(body.includes('pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldOwnDedupPackagingPaginationAndRetryState', 0, async () => {
+      const startPayload: SDKUploadRoundStartDTO = {
+        ownerId: 'unit-upload-owner',
+        taskName: 'unit-upload-round',
+        pageSize: 2,
+        syncSleepTime: 10
+      };
+      const startResponse = await executeWorkerCommandForUnit({
+        id: 'upload-round-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      });
+      expect(startResponse.ok).assertTrue();
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+
+      const row: SDKUploadRowDTO = {
+        id: 1,
+        dataType: 'log',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-uuid message=\"hello\" 123',
+        uuid: 'retry-uuid',
+        time: 123
+      };
+      const duplicate: SDKUploadRowDTO = {
+        id: 2,
+        dataType: 'log',
+        dataString: row.dataString,
+        uuid: row.uuid,
+        time: row.time
+      };
+      const executePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows: [row, duplicate],
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const httpExecutor = new RetryUploadHttpExecutor();
+      const executeResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'upload-execute-page',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, unitWorkerStates[SDKDedicatedPoolType.DATA_UPLOAD], httpExecutor);
+      expect(executeResponse.ok).assertTrue();
+      const executed = executeResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(executed.acceptedRows).assertEqual(1);
+      expect(executed.duplicateRows).assertEqual(1);
+      expect(executed.shouldUpload).assertTrue();
+      expect(executed.bodyLength > 0).assertTrue();
+      expect(executed.bodyPreview.includes(`${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(httpExecutor.lastRequest !== null).assertTrue();
+      expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.includes(
+        `${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(executed.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
+      expect(executed.reInsertRows.length).assertEqual(1);
+      expect(executed.retryCount).assertEqual(1);
+      expect(executed.delayMs).assertEqual(500);
+      expect(executed.shouldContinueDataType).assertFalse();
+      expect(executed.roundHasMoreData).assertTrue();
+      expect(executed.checkpointAfterCommit.version).assertEqual(1);
+
+      const commitPayload: SDKUploadCommitPageDTO = {
+        roundId: start.roundId,
+        attemptId: executed.attemptId,
+        dbSucceeded: true
+      };
+      const commitResponse = await executeWorkerCommandForUnit({
+        id: 'upload-commit-page',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: commitPayload as Object as SDKWorkerPayload
+      });
+      expect(commitResponse.ok).assertTrue();
+      const committed = commitResponse.payload as Object as SDKUploadCommitPageResultDTO;
+      expect(committed.checkpoint.version).assertEqual(1);
+      expect(committed.errorCount).assertEqual(1);
+      expect(committed.delayMs).assertEqual(500);
+      expect(committed.shouldContinueDataType).assertFalse();
+      expect(committed.roundHasMoreData).assertTrue();
+
+      const finishPayload: SDKUploadRoundFinishDTO = { roundId: start.roundId };
+      const finishResponse = await executeWorkerCommandForUnit({
+        id: 'upload-consume-finish',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME_FINISH,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: finishPayload as Object as SDKWorkerPayload
+      });
+      expect(finishResponse.ok).assertTrue();
+      const finished = finishResponse.payload as Object as SDKUploadRoundResultDTO;
+      expect(finished.consumedRows).assertEqual(1);
+      expect(finished.hasMoreData).assertTrue();
+      expect(finished.errorCount).assertEqual(1);
+    });
+
+    it('dataUploadWorkerShouldRestoreHostCheckpointAfterAckWindowRestart', 0, async () => {
+      const firstState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'DataUploadFirstWorker', 'unit-worker');
+      const ownerId = 'checkpoint-owner';
+      const firstStartPayload: SDKUploadRoundStartDTO = {
+        ownerId,
+        taskName: 'checkpoint-first',
+        pageSize: 1,
+        syncSleepTime: 0
+      };
+      const firstStartResponse = handleSDKWorkerRequest({
+        id: 'checkpoint-first-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: firstStartPayload as Object as SDKWorkerPayload
+      }, firstState);
+      const firstStart = firstStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const firstExecutePayload: SDKUploadExecutePageDTO = {
+        roundId: firstStart.roundId,
+        dataType: 'log',
+        rows: [{
+          id: 11,
+          dataType: 'log',
+          dataString: 'df_rum_harmonyos_log,sdk_data_id=checkpoint-one value=1i 100',
+          uuid: 'checkpoint-one',
+          time: 100
+        }],
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const successExecutor = new RetryUploadHttpExecutor(200);
+      const firstExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'checkpoint-first-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: firstExecutePayload as Object as SDKWorkerPayload
+      }, firstState, successExecutor);
+      const firstExecuted = firstExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(firstExecuted.checkpointAfterCommit.version).assertEqual(1);
+      expect(firstExecuted.checkpointAfterCommit.logSequence).assertEqual(1);
+      expect(firstState.uploadCheckpointVersion).assertEqual(0);
+
+      // Simulate DB success followed by Worker loss before UPLOAD_COMMIT_PAGE.
+      // The Host retained checkpoint must seed the replacement Worker.
+      const replacementState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'DataUploadReplacementWorker', 'unit-worker');
+      const replacementStartPayload: SDKUploadRoundStartDTO = {
+        ownerId,
+        taskName: 'checkpoint-replacement',
+        pageSize: 1,
+        syncSleepTime: 0,
+        checkpoint: firstExecuted.checkpointAfterCommit
+      };
+      const replacementStartResponse = handleSDKWorkerRequest({
+        id: 'checkpoint-replacement-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: replacementStartPayload as Object as SDKWorkerPayload
+      }, replacementState);
+      const replacementStart = replacementStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      expect(replacementStart.checkpoint.version).assertEqual(1);
+      expect(replacementStart.checkpoint.logSequence).assertEqual(1);
+      expect(replacementStart.checkpoint.processId).assertEqual(firstExecuted.checkpointAfterCommit.processId);
+
+      firstExecutePayload.roundId = replacementStart.roundId;
+      firstExecutePayload.rows = [{
+        id: 12,
+        dataType: 'log',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=checkpoint-two value=1i 101',
+        uuid: 'checkpoint-two',
+        time: 101
+      }];
+      const replacementExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'checkpoint-replacement-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: firstExecutePayload as Object as SDKWorkerPayload
+      }, replacementState, successExecutor);
+      const replacementExecuted = replacementExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(replacementExecuted.packageId.startsWith('1.')).assertTrue();
+      expect(replacementExecuted.checkpointAfterCommit.version).assertEqual(2);
+      expect(replacementExecuted.checkpointAfterCommit.logSequence).assertEqual(2);
     });
   });
 }
