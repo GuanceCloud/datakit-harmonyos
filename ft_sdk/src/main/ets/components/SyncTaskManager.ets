@@ -23,7 +23,17 @@ import {
   DataUploadRow,
   DataUploadWorkerCapabilities
 } from './thread/workers/DataUploadWorkerCapabilities';
-import { SDKUploadHttpConfigDTO, SDKWorkerRequest, SDKWorkerResponse } from './thread/SDKWorkerProtocol';
+import {
+  SDKUploadHttpConfigDTO,
+  SDKUploadHttpResultDTO,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from './thread/SDKWorkerProtocol';
+import {
+  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_RETRY_COUNT
+} from './thread/workers/DataUploadLimits';
 
 /**
  * Configuration record interface for FTDBCachePolicy
@@ -65,7 +75,14 @@ function normalizeUploadPageSize(pageSize: number): number {
   if (pageSize !== pageSize || pageSize <= 0) {
     return 1;
   }
-  return Math.max(1, Math.floor(pageSize));
+  return Math.min(DATA_UPLOAD_MAX_PAGE_SIZE, Math.max(1, Math.floor(pageSize)));
+}
+
+function normalizeUploadRetryCount(retryCount: number): number {
+  if (retryCount !== retryCount || retryCount <= 0) {
+    return 0;
+  }
+  return Math.min(DATA_UPLOAD_MAX_RETRY_COUNT, Math.floor(retryCount));
 }
 
 class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
@@ -91,6 +108,15 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
   }
 
   executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    const fault = syncTaskRuntime.consumeUploadWorkerCommandFailure?.(request) || '';
+    if (fault.length > 0) {
+      const response: SDKWorkerResponse = {
+        id: request.id,
+        ok: false,
+        errorMessage: fault
+      };
+      return Promise.resolve(response);
+    }
     return syncTaskRuntime.executeUploadWorkerCommand(request);
   }
 
@@ -126,6 +152,10 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     reInsertRows: DataUploadRow[],
     reduceCount: number
   ): Promise<DataUploadDbWriteResult> {
+    const fault = syncTaskRuntime.consumeUploadDbCommitFailure?.() || '';
+    if (fault.length > 0) {
+      throw new Error(fault);
+    }
     const context = this.contextProvider();
     if (!context || (!rows || rows.length === 0)) {
       return this.createDbWriteResult(0, 0);
@@ -198,6 +228,10 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       readTimeoutMs: 60000,
       softTimeoutMs: 125000
     };
+  }
+
+  takeInjectedHttpResult(): SDKUploadHttpResultDTO | undefined {
+    return syncTaskRuntime.takeInjectedUploadHttpResult?.();
   }
 
   getCurrentTimeMs(): number {
@@ -285,7 +319,9 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
 export class SyncTaskManager {
   public static readonly SYNC_SLEEP_MAX_TIME_MS = 5000;
   public static readonly SYNC_SLEEP_MINI_TIME_MS = 0;
-  public static readonly MAX_ERROR_COUNT = 5;
+  public static readonly MAX_ERROR_COUNT = DATA_UPLOAD_MAX_RETRY_COUNT;
+  public static readonly MAX_PAGE_SIZE = DATA_UPLOAD_MAX_PAGE_SIZE;
+  public static readonly MAX_BODY_BYTES = DATA_UPLOAD_MAX_BODY_BYTES;
   private static instance: SyncTaskManager | null = null;
   private static SLEEP_TIME = 2000; // 2 seconds - upload interval (reduced from 3s to further improve upload speed)
   private static readonly PREFERENCES_NAME = 'ft_sdk_sync_task';
@@ -343,8 +379,8 @@ export class SyncTaskManager {
     this.sdkConfig = config;
 
     // Update configuration values (do not require context)
-    this.dataSyncMaxRetryCount = config.getDataSyncRetryCount?.() || 3;
-    this.pageSize = config.getPageSize?.() || 50;
+    this.dataSyncMaxRetryCount = normalizeUploadRetryCount(config.getDataSyncRetryCount());
+    this.pageSize = normalizeUploadPageSize(config.getPageSize());
     this.autoSync = config.isAutoSyncEnabled?.() || false;
     this.syncSleepTime = config.getSyncSleepTime?.() || 0;
 
@@ -473,6 +509,7 @@ export class SyncTaskManager {
     return {
       taskName: taskName && taskName.length > 0 ? taskName : 'upload.poll',
       pageSize: normalizeUploadPageSize(this.pageSize),
+      maxRetryCount: this.dataSyncMaxRetryCount,
       syncSleepTime: Math.max(0, this.syncSleepTime),
       errorTimeLine: this.errorTimeLine,
       stopped: this.isStop

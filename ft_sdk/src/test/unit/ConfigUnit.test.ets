@@ -223,6 +223,9 @@ export default function configUnitTest() {
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncSleepTime(-1).getSyncSleepTime())
         .assertEqual(SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS);
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(-1).getDataSyncRetryCount()).assertEqual(0);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(2.9).getDataSyncRetryCount()).assertEqual(2);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncPageSize(1_000_000).getPageSize())
+        .assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
     });
 
     it('rumConfigShouldExposeDocumentedDefaults', 0, () => {

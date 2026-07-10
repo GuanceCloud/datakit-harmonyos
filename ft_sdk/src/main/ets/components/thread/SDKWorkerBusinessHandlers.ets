@@ -47,6 +47,11 @@ import {
 } from './SDKWorkerProtocol';
 import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
+import {
+  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_RETRY_COUNT
+} from './workers/DataUploadLimits';
 
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
@@ -77,6 +82,7 @@ export interface SDKWorkerRuntimeState {
   uploadOwnerId: string;
   uploadRoundId: string;
   uploadRoundPageSize: number;
+  uploadRoundMaxRetryCount: number;
   uploadRoundSyncSleepTime: number;
   uploadRoundProcessedPages: Record<string, number>;
   uploadRoundHasMoreData: boolean;
@@ -302,6 +308,7 @@ export function createSDKWorkerRuntimeStateWithBackend(
     uploadOwnerId: '',
     uploadRoundId: '',
     uploadRoundPageSize: 1,
+    uploadRoundMaxRetryCount: DATA_UPLOAD_MAX_RETRY_COUNT,
     uploadRoundSyncSleepTime: 0,
     uploadRoundProcessedPages: {},
     uploadRoundHasMoreData: false,
@@ -456,6 +463,7 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.uploadOwnerId = '';
   state.uploadRoundId = '';
   state.uploadRoundPageSize = 1;
+  state.uploadRoundMaxRetryCount = DATA_UPLOAD_MAX_RETRY_COUNT;
   state.uploadRoundSyncSleepTime = 0;
   state.uploadRoundProcessedPages = {};
   state.uploadRoundHasMoreData = false;
@@ -1806,6 +1814,7 @@ function handleUploadRoundStart(payload: SDKUploadRoundStartDTO, state: SDKWorke
   state.uploadRoundSequence++;
   state.uploadRoundId = `upload-worker-round-${state.uploadRoundSequence}`;
   state.uploadRoundPageSize = normalizeUploadPageSize(payload.pageSize);
+  state.uploadRoundMaxRetryCount = normalizeUploadMaxRetryCount(payload.maxRetryCount);
   state.uploadRoundSyncSleepTime = Math.max(0, payload.syncSleepTime || 0);
   state.uploadRoundProcessedPages = {};
   state.uploadRoundHasMoreData = false;
@@ -1819,6 +1828,7 @@ function handleUploadRoundStart(payload: SDKUploadRoundStartDTO, state: SDKWorke
     roundId: state.uploadRoundId,
     pageSize: state.uploadRoundPageSize,
     syncSleepTime: state.uploadRoundSyncSleepTime,
+    maxRetryCount: state.uploadRoundMaxRetryCount,
     checkpoint: createUploadCheckpoint(state)
   };
   return result as Object as SDKWorkerPayload;
@@ -1920,8 +1930,9 @@ async function handleUploadExecutePage(
   }
 
   const rows = payload && payload.rows ? payload.rows : [];
-  const acceptedRows = deduplicateUploadRows(payload.dataType, rows, state);
-  if (acceptedRows.length === 0) {
+  const deduplicatedRows = deduplicateUploadRows(payload.dataType, rows, state);
+  const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
+  if (pageRows.length === 0) {
     const computeMs = finishUploadComputeMetric(state, prepareStartedAt);
     const emptyResult: SDKUploadExecutePageResultDTO = {
       roundId: state.uploadRoundId,
@@ -1931,8 +1942,12 @@ async function handleUploadExecutePage(
       queriedRows: rows.length,
       acceptedRows: 0,
       duplicateRows: rows.length,
+      deferredRows: 0,
       packageId: '',
       bodyLength: 0,
+      bodyBytes: 0,
+      bodyLimitReached: false,
+      oversizedRows: 0,
       bodyPreview: '',
       shouldUpload: false,
       outcome: SDKUploadPageOutcome.EMPTY_BODY,
@@ -1944,6 +1959,7 @@ async function handleUploadExecutePage(
       shouldContinueDataType: false,
       roundHasMoreData: state.uploadRoundHasMoreData,
       retryCount: getUploadErrorCount(state, payload.dataType),
+      retryLimitReached: false,
       ignoredClientError: false,
       successfulResponse: false,
       errorCount: getAggregateUploadErrorCount(state),
@@ -1953,15 +1969,19 @@ async function handleUploadExecutePage(
     return emptyResult as Object as SDKWorkerPayload;
   }
 
-  const packageId = createUploadPackageId(payload.dataType, acceptedRows.length, state);
-  const lines: string[] = [];
-  for (let i = 0; i < acceptedRows.length; i++) {
-    const row = acceptedRows[i];
-    if (row.dataString && row.dataString.trim().length > 0) {
-      lines.push(applyPackageId(row.dataString, row.uuid, packageId));
-    }
+  const provisionalPackageId = createUploadPackageId(payload.dataType, pageRows.length, state);
+  let bodySelection = selectUploadRowsForBody(pageRows, provisionalPackageId);
+  let packageId = provisionalPackageId;
+  if (bodySelection.rows.length > 0 && bodySelection.oversizedRows === 0 &&
+    bodySelection.rows.length !== pageRows.length) {
+    const bodyLimitReached = bodySelection.bodyLimitReached;
+    packageId = createUploadPackageId(payload.dataType, bodySelection.rows.length, state);
+    bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
+    bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
   }
-  const body = lines.join('\n');
+  const acceptedRows = bodySelection.rows;
+  const body = bodySelection.lines.join('\n');
+  const deferredRows = Math.max(0, deduplicatedRows.length - acceptedRows.length);
   const shouldUpload = body.length > 0;
   if (shouldUpload) {
     markUploadRows(payload.dataType, acceptedRows, state);
@@ -1983,16 +2003,20 @@ async function handleUploadExecutePage(
       packageId
     };
     const httpStartedAt = Date.now();
-    try {
-      httpResult = await httpExecutor.execute(httpRequest);
-    } catch (error) {
-      httpResult = {
-        code: NetCodeStatus.UNKNOWN_EXCEPTION_CODE,
-        message: error instanceof Error ? error.message : String(error),
-        errorCode: '',
-        elapsedMs: Math.max(0, Date.now() - httpStartedAt),
-        softTimedOut: false
-      };
+    if (payload.injectedHttpResult) {
+      httpResult = copyInjectedUploadHttpResult(payload.injectedHttpResult);
+    } else {
+      try {
+        httpResult = await httpExecutor.execute(httpRequest);
+      } catch (error) {
+        httpResult = {
+          code: NetCodeStatus.UNKNOWN_EXCEPTION_CODE,
+          message: error instanceof Error ? error.message : String(error),
+          errorCode: '',
+          elapsedMs: Math.max(0, Date.now() - httpStartedAt),
+          softTimedOut: false
+        };
+      }
     }
   }
 
@@ -2004,6 +2028,7 @@ async function handleUploadExecutePage(
     rows.length,
     shouldUpload ? SDKUploadPageOutcome.HTTP : SDKUploadPageOutcome.EMPTY_BODY,
     httpResult.code,
+    deferredRows > 0,
     checkpointAfterCommit,
     state
   );
@@ -2029,9 +2054,13 @@ async function handleUploadExecutePage(
     rows: acceptedRows,
     queriedRows: rows.length,
     acceptedRows: acceptedRows.length,
-    duplicateRows: Math.max(0, rows.length - acceptedRows.length),
+    duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+    deferredRows,
     packageId,
     bodyLength: body.length,
+    bodyBytes: bodySelection.bodyBytes,
+    bodyLimitReached: bodySelection.bodyLimitReached,
+    oversizedRows: bodySelection.oversizedRows,
     bodyPreview: abbreviateUploadWorkerText(body, 512),
     shouldUpload,
     outcome: shouldUpload ? SDKUploadPageOutcome.HTTP : SDKUploadPageOutcome.EMPTY_BODY,
@@ -2043,6 +2072,7 @@ async function handleUploadExecutePage(
     shouldContinueDataType: proposal.shouldContinueDataType,
     roundHasMoreData: proposal.roundHasMoreData,
     retryCount: proposal.retryCount,
+    retryLimitReached: proposal.retryLimitReached,
     ignoredClientError: proposal.ignoredClientError,
     successfulResponse: proposal.successfulResponse,
     errorCount: getAggregateErrorCountFromRecord(checkpointAfterCommit.errorCounts),
@@ -2060,6 +2090,7 @@ interface SDKUploadPageProposal {
   shouldContinueDataType: boolean;
   roundHasMoreData: boolean;
   retryCount: number;
+  retryLimitReached: boolean;
   ignoredClientError: boolean;
   successfulResponse: boolean;
   processedPagesAfterCommit: number;
@@ -2071,6 +2102,7 @@ function classifyUploadPageResult(
   queriedRows: number,
   outcome: SDKUploadPageOutcome,
   httpCode: number,
+  hasDeferredRows: boolean,
   checkpoint: SDKUploadCheckpointDTO,
   state: SDKWorkerRuntimeState
 ): SDKUploadPageProposal {
@@ -2079,6 +2111,7 @@ function classifyUploadPageResult(
   let reduceCount = 0;
   let delayMs = 0;
   let retryCount = getCheckpointUploadErrorCount(checkpoint, dataType);
+  let retryLimitReached = false;
   let ignoredClientError = false;
   let successfulResponse = false;
   let stopDataType = false;
@@ -2112,25 +2145,34 @@ function classifyUploadPageResult(
     dbAction = SDKUploadDbActionDTO.REINSERT;
     reInsertRows = createUploadReInsertRows(rows);
     checkpoint.ignoredErrorCounts[dataType] = 0;
-    retryCount = getCheckpointUploadErrorCount(checkpoint, dataType) + 1;
+    retryCount = Math.min(
+      state.uploadRoundMaxRetryCount + 1,
+      getCheckpointUploadErrorCount(checkpoint, dataType) + 1
+    );
     checkpoint.errorCounts[dataType] = retryCount;
-    delayMs = getUploadNormalBackoffMs(retryCount);
+    retryLimitReached = retryCount > state.uploadRoundMaxRetryCount;
+    delayMs = retryLimitReached ? 0 : getUploadNormalBackoffMs(retryCount);
     stopDataType = true;
-    rescheduleRound = true;
+    rescheduleRound = !retryLimitReached;
   } else {
-    retryCount = getCheckpointUploadErrorCount(checkpoint, dataType) + 1;
+    retryCount = Math.min(
+      state.uploadRoundMaxRetryCount + 1,
+      getCheckpointUploadErrorCount(checkpoint, dataType) + 1
+    );
     checkpoint.errorCounts[dataType] = retryCount;
-    delayMs = getUploadNormalBackoffMs(retryCount);
+    retryLimitReached = retryCount > state.uploadRoundMaxRetryCount;
+    delayMs = retryLimitReached ? 0 : getUploadNormalBackoffMs(retryCount);
     stopDataType = true;
-    rescheduleRound = true;
+    rescheduleRound = !retryLimitReached;
   }
 
   const processedPagesAfterCommit = (state.uploadRoundProcessedPages[dataType] || 0) + 1;
   const pageWasFull = queriedRows >= state.uploadRoundPageSize;
+  const pageHasMoreData = pageWasFull || hasDeferredRows;
   const maxPages = getUploadMaxPages(dataType);
-  const shouldContinueDataType = !stopDataType && pageWasFull && processedPagesAfterCommit < maxPages;
+  const shouldContinueDataType = !stopDataType && pageHasMoreData && processedPagesAfterCommit < maxPages;
   let roundHasMoreData = state.uploadRoundHasMoreData;
-  if (rescheduleRound || (!stopDataType && pageWasFull && processedPagesAfterCommit >= maxPages)) {
+  if (rescheduleRound || (!stopDataType && pageHasMoreData && processedPagesAfterCommit >= maxPages)) {
     roundHasMoreData = true;
   }
   if (shouldContinueDataType && delayMs === 0) {
@@ -2144,6 +2186,7 @@ function classifyUploadPageResult(
     shouldContinueDataType,
     roundHasMoreData,
     retryCount,
+    retryLimitReached,
     ignoredClientError,
     successfulResponse,
     processedPagesAfterCommit
@@ -2265,7 +2308,14 @@ function normalizeUploadPageSize(pageSize: number): number {
   if (pageSize !== pageSize || pageSize <= 0) {
     return 1;
   }
-  return Math.max(1, Math.floor(pageSize));
+  return Math.min(DATA_UPLOAD_MAX_PAGE_SIZE, Math.max(1, Math.floor(pageSize)));
+}
+
+function normalizeUploadMaxRetryCount(retryCount: number | undefined): number {
+  if (retryCount === undefined || retryCount !== retryCount) {
+    return DATA_UPLOAD_MAX_RETRY_COUNT;
+  }
+  return Math.min(DATA_UPLOAD_MAX_RETRY_COUNT, Math.max(0, Math.floor(retryCount)));
 }
 
 function finishUploadComputeMetric(state: SDKWorkerRuntimeState, startedAt: number): number {
@@ -2390,6 +2440,86 @@ function unmarkUploadRows(dataType: string, rows: SDKUploadRowDTO[], state: SDKW
   }
 }
 
+interface SDKUploadBodySelection {
+  rows: SDKUploadRowDTO[];
+  lines: string[];
+  bodyBytes: number;
+  bodyLimitReached: boolean;
+  oversizedRows: number;
+}
+
+function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SDKUploadBodySelection {
+  const result: SDKUploadBodySelection = {
+    rows: [],
+    lines: [],
+    bodyBytes: 0,
+    bodyLimitReached: false,
+    oversizedRows: 0
+  };
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const line = row && row.dataString && row.dataString.trim().length > 0 ?
+      applyPackageId(row.dataString, row.uuid, packageId) : '';
+    if (line.length === 0) {
+      result.rows.push(row);
+      continue;
+    }
+    const lineBytes = getUploadUtf8ByteLength(line);
+    if (lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
+      result.bodyLimitReached = true;
+      if (result.rows.length === 0) {
+        // A single poison row can never fit in a request. Consume it through
+        // the EMPTY_BODY delete path so it cannot block the queue forever.
+        result.rows.push(row);
+        result.oversizedRows = 1;
+      }
+      break;
+    }
+    const separatorBytes = result.lines.length > 0 ? 1 : 0;
+    if (result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
+      result.bodyLimitReached = true;
+      break;
+    }
+    result.rows.push(row);
+    result.lines.push(line);
+    result.bodyBytes += separatorBytes + lineBytes;
+  }
+  return result;
+}
+
+function getUploadUtf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x7f) {
+      bytes++;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function copyInjectedUploadHttpResult(result: SDKUploadHttpResultDTO): SDKUploadHttpResultDTO {
+  return {
+    code: result.code,
+    message: result.message || '',
+    errorCode: result.errorCode || '',
+    elapsedMs: Math.max(0, result.elapsedMs || 0),
+    softTimedOut: result.softTimedOut === true
+  };
+}
+
 function createUploadPackageId(dataType: string, rowCount: number, state: SDKWorkerRuntimeState): string {
   if (state.uploadProcessId <= 0) {
     const seed = Date.now() ^ Math.floor(Math.random() * 1000000);
@@ -2469,22 +2599,25 @@ function handleUploadFormatBody(payload: SDKUploadPageDTO): SDKWorkerPayload {
   if (!payload || !payload.rows) {
     throw new Error('Upload page payload is required');
   }
-  const lines: string[] = [];
-  const ids: number[] = [];
+  const uniqueRows: SDKUploadRowDTO[] = [];
   const seen: SDKStringRecord = {};
-  for (let i = 0; i < payload.rows.length; i++) {
+  for (let i = 0; i < payload.rows.length && uniqueRows.length < DATA_UPLOAD_MAX_PAGE_SIZE; i++) {
     const row = payload.rows[i];
     if (!row || !row.dataString || seen[row.uuid]) {
       continue;
     }
     seen[row.uuid] = '1';
-    ids.push(row.id);
-    lines.push(applyPackageId(row.dataString, row.uuid, payload.packageId));
+    uniqueRows.push(row);
+  }
+  const selection = selectUploadRowsForBody(uniqueRows, payload.packageId);
+  const ids: number[] = [];
+  for (let i = 0; i < selection.rows.length; i++) {
+    ids.push(selection.rows[i].id);
   }
   const resultPayload: SDKUploadFormatBodyPayload = {
-    body: lines.join('\n'),
+    body: selection.lines.join('\n'),
     rowIds: ids,
-    acceptedRows: lines.length,
+    acceptedRows: selection.lines.length,
     dataType: payload.dataType
   };
   return resultPayload as Object as SDKWorkerPayload;

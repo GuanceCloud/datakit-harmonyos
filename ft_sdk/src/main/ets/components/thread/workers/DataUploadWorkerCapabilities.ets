@@ -1,5 +1,10 @@
 import { DataType } from '../../enum/Enums';
-import { SDKUploadHttpConfigDTO, SDKWorkerRequest, SDKWorkerResponse } from '../SDKWorkerProtocol';
+import {
+  SDKUploadHttpConfigDTO,
+  SDKUploadHttpResultDTO,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../SDKWorkerProtocol';
 
 /**
  * Serializable upload row exchanged with DataUploadWorker.
@@ -19,6 +24,7 @@ export interface DataUploadRow {
 export interface DataUploadConsumeOptions {
   taskName: string;
   pageSize: number;
+  maxRetryCount: number;
   syncSleepTime: number;
   errorTimeLine: number;
   stopped?: boolean;
@@ -88,6 +94,7 @@ export interface DataUploadWorkerCapabilities {
     duration: number
   ): Promise<DataUploadDbMaintenanceResult>;
   getHttpConfig(dataType: DataType): SDKUploadHttpConfigDTO;
+  takeInjectedHttpResult?(): SDKUploadHttpResultDTO | undefined;
   getCurrentTimeMs(): number;
   getRandom(): number;
   generateUUID(): string;

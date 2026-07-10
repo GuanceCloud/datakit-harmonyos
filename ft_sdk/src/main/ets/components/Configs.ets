@@ -771,7 +771,11 @@ export class FTSDKConfig {
   }
 
   setSyncPageSize(pageSize: SyncPageSize | number): FTSDKConfig {
-    this.pageSize = Math.max(SyncPageSize.MINI, pageSize);
+    const normalized = pageSize !== pageSize ? SyncPageSize.MINI : Math.floor(pageSize);
+    this.pageSize = Math.min(
+      SyncTaskManager.MAX_PAGE_SIZE,
+      Math.max(SyncPageSize.MINI, normalized)
+    );
     return this;
   }
 
@@ -804,7 +808,8 @@ export class FTSDKConfig {
   }
 
   setDataSyncRetryCount(dataSyncRetryCount: number): FTSDKConfig {
-    this.dataSyncRetryCount = Math.max(0, Math.min(SyncTaskManager.MAX_ERROR_COUNT, dataSyncRetryCount));
+    const normalized = dataSyncRetryCount !== dataSyncRetryCount ? 0 : Math.floor(dataSyncRetryCount);
+    this.dataSyncRetryCount = Math.max(0, Math.min(SyncTaskManager.MAX_ERROR_COUNT, normalized));
     return this;
   }
 

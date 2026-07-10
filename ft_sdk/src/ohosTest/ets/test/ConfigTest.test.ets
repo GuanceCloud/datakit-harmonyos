@@ -511,7 +511,7 @@ export default function configTest() {
       const syncTaskManager = SyncTaskManager.getInstance();
 
       // Custom page size
-      const customPageSize = 1000;
+      const customPageSize = 100;
       const config1: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .setSyncPageSize(customPageSize);
       FTSDK.install(config1);
@@ -522,6 +522,11 @@ export default function configTest() {
         .setSyncPageSize(1);
       FTSDK.install(config2);
       expect(syncTaskManager.getPageSize()).assertEqual(SyncPageSize.MINI);
+
+      const config3: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setSyncPageSize(SyncTaskManager.MAX_PAGE_SIZE + 1000);
+      FTSDK.install(config3);
+      expect(syncTaskManager.getPageSize()).assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
 
       console.info('ConfigTest', 'customSyncDataPageSize passed');
     });

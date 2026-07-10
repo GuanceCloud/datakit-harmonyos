@@ -28,6 +28,11 @@ import {
   DataUploadRow,
   DataUploadWorkerCapabilities
 } from './DataUploadWorkerCapabilities';
+import {
+  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_RETRY_COUNT
+} from './DataUploadLimits';
 
 const TAG = 'DataUploadWorker';
 
@@ -76,6 +81,7 @@ export class DataUploadWorkerExecutor {
         ownerId: this.getOwnerId(capabilities),
         taskName: options.taskName || 'upload.poll',
         pageSize: this.normalizePageSize(options.pageSize),
+        maxRetryCount: this.normalizeRetryCount(options.maxRetryCount),
         syncSleepTime: Math.max(0, options.syncSleepTime),
         checkpoint: this.checkpoint === null ? undefined : this.checkpoint
       };
@@ -209,7 +215,8 @@ export class DataUploadWorkerExecutor {
         roundId,
         dataType: dataType.toString(),
         rows: rows as Object as SDKUploadRowDTO[],
-        httpConfig: capabilities.getHttpConfig(dataType)
+        httpConfig: capabilities.getHttpConfig(dataType),
+        injectedHttpResult: rows.length > 0 ? capabilities.takeInjectedHttpResult?.() : undefined
       };
       const executed = await this.executeUploadWorkerCommand(
         capabilities,
@@ -228,7 +235,11 @@ export class DataUploadWorkerExecutor {
 
       if (executed.shouldUpload) {
         this.logPreparedUpload(dataType, executed.packageId, executed.acceptedRows,
-          executed.bodyLength, executed.bodyPreview);
+          executed.bodyLength, executed.bodyBytes, executed.bodyLimitReached, executed.bodyPreview);
+      } else if (executed.oversizedRows > 0) {
+        FTInnerLogger.e(TAG,
+          `Dropped ${executed.oversizedRows} oversized upload row(s): type=${dataType}, maxBodyBytes=${
+            DATA_UPLOAD_MAX_BODY_BYTES}`);
       }
       const dbSucceeded = await this.applyDbDecision(capabilities, dataType, executed, state);
       if (dbSucceeded) {
@@ -385,11 +396,14 @@ export class DataUploadWorkerExecutor {
     packageId: string,
     rows: number,
     bodyLength: number,
+    bodyBytes: number,
+    bodyLimitReached: boolean,
     bodyPreview: string
   ): void {
     FTInnerLogger.d(TAG, '========== UPLOAD BODY PREVIEW ==========');
     FTInnerLogger.d(TAG,
-      `type=${dataType}, pkg_id=${packageId}, rows=${rows}, bodyLength=${bodyLength}`);
+      `type=${dataType}, pkg_id=${packageId}, rows=${rows}, bodyLength=${bodyLength}, bodyBytes=${bodyBytes}, ` +
+        `bodyLimitReached=${bodyLimitReached}`);
     FTInnerLogger.d(TAG, bodyPreview);
     FTInnerLogger.d(TAG, '=========================================');
   }
@@ -416,10 +430,11 @@ export class DataUploadWorkerExecutor {
       return;
     }
     const retryPart = executed.retryCount > 0 ? `${executed.retryCount}:` : '';
+    const retryLimitPart = executed.retryLimitReached ? ' (Retry Limit Reached)' : '';
     const ignorePart = executed.ignoredClientError || executed.dbAction === SDKUploadDbActionDTO.DELETE ?
       ' (Ignore)' : '';
     FTInnerLogger.e(TAG,
-      `pkg_id:${executed.packageId} ${retryPart}Sync Fail${ignorePart}-[code:${httpResult.code},errorCode:${
+      `pkg_id:${executed.packageId} ${retryPart}Sync Fail${ignorePart}${retryLimitPart}-[code:${httpResult.code},errorCode:${
         httpResult.errorCode},response:${response}]`);
   }
 
@@ -444,7 +459,14 @@ export class DataUploadWorkerExecutor {
     if (pageSize !== pageSize || pageSize <= 0) {
       return 1;
     }
-    return Math.max(1, Math.floor(pageSize));
+    return Math.min(DATA_UPLOAD_MAX_PAGE_SIZE, Math.max(1, Math.floor(pageSize)));
+  }
+
+  private normalizeRetryCount(retryCount: number): number {
+    if (retryCount !== retryCount || retryCount <= 0) {
+      return 0;
+    }
+    return Math.min(DATA_UPLOAD_MAX_RETRY_COUNT, Math.floor(retryCount));
   }
 
   private getOwnerId(capabilities: DataUploadWorkerCapabilities): string {

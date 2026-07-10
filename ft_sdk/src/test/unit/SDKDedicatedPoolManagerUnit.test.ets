@@ -34,6 +34,11 @@ import {
   SDKUploadWorkerHttpExecutor,
   SDKWorkerRuntimeState
 } from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
+import {
+  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_RETRY_COUNT
+} from '../../main/ets/components/thread/workers/DataUploadLimits';
 
 interface SDKLineProtocolRecordsTestPayload {
   records: SDKLineProtocolInputDTO[];
@@ -580,6 +585,196 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(finished.consumedRows).assertEqual(1);
       expect(finished.hasMoreData).assertTrue();
       expect(finished.errorCount).assertEqual(1);
+    });
+
+    it('dataUploadWorkerShouldStopAutomaticRetryAfterConfiguredLimit', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'RetryLimitWorker', 'unit-worker');
+      const startPayload: SDKUploadRoundStartDTO = {
+        ownerId: 'retry-limit-owner',
+        taskName: 'retry-limit-first',
+        pageSize: 1,
+        syncSleepTime: 0,
+        maxRetryCount: 1
+      };
+      const firstStartResponse = handleSDKWorkerRequest({
+        id: 'retry-limit-first-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      }, state);
+      const firstStart = firstStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const row: SDKUploadRowDTO = {
+        id: 31,
+        dataType: 'log',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-limit value=1i 100',
+        uuid: 'retry-limit',
+        time: 100
+      };
+      const executePayload: SDKUploadExecutePageDTO = {
+        roundId: firstStart.roundId,
+        dataType: 'log',
+        rows: [row],
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const retryExecutor = new RetryUploadHttpExecutor(500);
+      const firstExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'retry-limit-first-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, state, retryExecutor);
+      const firstExecuted = firstExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(firstExecuted.retryCount).assertEqual(1);
+      expect(firstExecuted.retryLimitReached).assertFalse();
+      expect(firstExecuted.roundHasMoreData).assertTrue();
+      expect(firstExecuted.delayMs).assertEqual(500);
+
+      const firstCommit: SDKUploadCommitPageDTO = {
+        roundId: firstStart.roundId,
+        attemptId: firstExecuted.attemptId,
+        dbSucceeded: true
+      };
+      const firstFinish: SDKUploadRoundFinishDTO = { roundId: firstStart.roundId };
+      handleSDKWorkerRequest({
+        id: 'retry-limit-first-commit',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: firstCommit as Object as SDKWorkerPayload
+      }, state);
+      handleSDKWorkerRequest({
+        id: 'retry-limit-first-finish',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME_FINISH,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: firstFinish as Object as SDKWorkerPayload
+      }, state);
+
+      startPayload.taskName = 'retry-limit-terminal';
+      const terminalStartResponse = handleSDKWorkerRequest({
+        id: 'retry-limit-terminal-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      }, state);
+      const terminalStart = terminalStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      executePayload.roundId = terminalStart.roundId;
+      const terminalExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'retry-limit-terminal-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, state, retryExecutor);
+      const terminal = terminalExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(terminal.retryCount).assertEqual(2);
+      expect(terminal.retryLimitReached).assertTrue();
+      expect(terminal.roundHasMoreData).assertFalse();
+      expect(terminal.delayMs).assertEqual(0);
+      expect(terminal.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
+    });
+
+    it('dataUploadWorkerShouldClampPageAndSplitBodyAtUtf8ByteLimit', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'BodyLimitWorker', 'unit-worker');
+      const startPayload: SDKUploadRoundStartDTO = {
+        ownerId: 'body-limit-owner',
+        taskName: 'body-limit',
+        pageSize: DATA_UPLOAD_MAX_PAGE_SIZE + 1000,
+        syncSleepTime: 0,
+        maxRetryCount: DATA_UPLOAD_MAX_RETRY_COUNT + 100
+      };
+      const startResponse = handleSDKWorkerRequest({
+        id: 'body-limit-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      expect(start.pageSize).assertEqual(DATA_UPLOAD_MAX_PAGE_SIZE);
+      expect(start.maxRetryCount).assertEqual(DATA_UPLOAD_MAX_RETRY_COUNT);
+
+      const largeMessage = 'x'.repeat(Math.floor(DATA_UPLOAD_MAX_BODY_BYTES * 0.6));
+      const rows: SDKUploadRowDTO[] = [{
+        id: 41,
+        dataType: 'log',
+        dataString: `df_rum_harmonyos_log,sdk_data_id=body-limit-one message="${largeMessage}" 100`,
+        uuid: 'body-limit-one',
+        time: 100
+      }, {
+        id: 42,
+        dataType: 'log',
+        dataString: `df_rum_harmonyos_log,sdk_data_id=body-limit-two message="${largeMessage}" 101`,
+        uuid: 'body-limit-two',
+        time: 101
+      }];
+      const executePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows,
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const successExecutor = new RetryUploadHttpExecutor(200);
+      const executeResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'body-limit-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, state, successExecutor);
+      const executed = executeResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(executed.acceptedRows).assertEqual(1);
+      expect(executed.deferredRows).assertEqual(1);
+      expect(executed.bodyLimitReached).assertTrue();
+      expect(executed.bodyBytes <= DATA_UPLOAD_MAX_BODY_BYTES).assertTrue();
+      expect((successExecutor.lastRequest as SDKUploadHttpRequestDTO).body.length > 0).assertTrue();
+
+      const commitPayload: SDKUploadCommitPageDTO = {
+        roundId: start.roundId,
+        attemptId: executed.attemptId,
+        dbSucceeded: true
+      };
+      const commitResponse = handleSDKWorkerRequest({
+        id: 'body-limit-commit',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: commitPayload as Object as SDKWorkerPayload
+      }, state);
+      const committed = commitResponse.payload as Object as SDKUploadCommitPageResultDTO;
+      expect(committed.roundHasMoreData).assertTrue();
     });
 
     it('dataUploadWorkerShouldRestoreHostCheckpointAfterAckWindowRestart', 0, async () => {

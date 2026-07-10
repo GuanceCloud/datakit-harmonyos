@@ -916,8 +916,7 @@ export default function syncTaskManagerUnitTest() {
       const backoffs = getBackoffDurations(runtime);
       expect(backoffs[0]).assertEqual(500);
       expect(backoffs[1]).assertEqual(1000);
-      expect(backoffs[2]).assertEqual(2000);
-      expect(backoffs[3]).assertEqual(4000);
+      expect(backoffs.length).assertEqual(2);
       expect(db.deleteCount).assertEqual(4);
       expect(db.insertCount).assertEqual(4);
       expect(db.insertReInsertFlags[0]).assertTrue();

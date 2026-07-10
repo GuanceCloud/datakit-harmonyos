@@ -9,7 +9,11 @@ import {
 } from '../../db/FTDBTaskPoolExecutor';
 import { DataType } from '../../enum/Enums';
 import { SDKDedicatedPoolManager } from '../../thread/SDKDedicatedPoolManager';
-import { SDKWorkerRequest, SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
+import {
+  SDKUploadHttpResultDTO,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../thread/SDKWorkerProtocol';
 import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
@@ -70,6 +74,10 @@ export interface SyncTaskManagerRuntime {
   setTimer(callback: () => void, interval: number): number;
   clearTimer(timerId: number): void;
   sleep(ms: number): Promise<void>;
+  /** Optional one-shot fault seams used by internal unit/device runtimes. */
+  consumeUploadWorkerCommandFailure?(request: SDKWorkerRequest): string;
+  consumeUploadDbCommitFailure?(): string;
+  takeInjectedUploadHttpResult?(): SDKUploadHttpResultDTO | undefined;
 }
 
 class DefaultSyncTaskDbTaskPool implements SyncTaskDbTaskPool {

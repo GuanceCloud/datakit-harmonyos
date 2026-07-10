@@ -357,6 +357,7 @@ export interface SDKUploadRoundStartDTO {
   taskName: string;
   pageSize: number;
   syncSleepTime: number;
+  maxRetryCount?: number;
   checkpoint?: SDKUploadCheckpointDTO;
 }
 
@@ -365,6 +366,7 @@ export interface SDKUploadRoundStartResultDTO {
   roundId: string;
   pageSize: number;
   syncSleepTime: number;
+  maxRetryCount: number;
   checkpoint: SDKUploadCheckpointDTO;
 }
 
@@ -407,6 +409,8 @@ export interface SDKUploadExecutePageDTO {
   dataType: string;
   rows: SDKUploadRowDTO[];
   httpConfig: SDKUploadHttpConfigDTO;
+  /** Optional one-shot result supplied only by an injected test runtime. */
+  injectedHttpResult?: SDKUploadHttpResultDTO;
 }
 
 export interface SDKUploadExecutePageResultDTO {
@@ -417,8 +421,12 @@ export interface SDKUploadExecutePageResultDTO {
   queriedRows: number;
   acceptedRows: number;
   duplicateRows: number;
+  deferredRows: number;
   packageId: string;
   bodyLength: number;
+  bodyBytes: number;
+  bodyLimitReached: boolean;
+  oversizedRows: number;
   bodyPreview: string;
   shouldUpload: boolean;
   outcome: SDKUploadPageOutcome;
@@ -430,6 +438,7 @@ export interface SDKUploadExecutePageResultDTO {
   shouldContinueDataType: boolean;
   roundHasMoreData: boolean;
   retryCount: number;
+  retryLimitReached: boolean;
   ignoredClientError: boolean;
   successfulResponse: boolean;
   errorCount: number;
