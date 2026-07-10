@@ -227,7 +227,7 @@ export default function configUnitTest() {
 
       expect(rumConfig.getRumAppId()).assertEqual('');
       expect(rumConfig.getSamplingRate()).assertEqual(1.0);
-      expect(rumConfig.getSessionErrorSampleRate()).assertEqual(1.0);
+      expect(rumConfig.getSessionErrorSampleRate()).assertEqual(0.0);
       expect(rumConfig.isEnableTraceUserAction()).assertFalse();
       expect(rumConfig.isEnableTraceUserView()).assertFalse();
       expect(rumConfig.isEnableTraceUserResource()).assertFalse();
@@ -309,6 +309,7 @@ export default function configUnitTest() {
     it('samplingRatesShouldClampBounds', 0, () => {
       expect(new FTRUMConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTRUMConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
+      expect(new FTRUMConfig().setSessionErrorSampleRate().getSessionErrorSampleRate()).assertEqual(0.0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(-1).getSessionErrorSampleRate()).assertEqual(0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(2).getSessionErrorSampleRate()).assertEqual(1);
       expect(new FTLoggerConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);

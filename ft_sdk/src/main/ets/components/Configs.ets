@@ -21,7 +21,7 @@ export interface FTInnerLogFileConfig {
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
-  private sessionErrorSampleRate: number = 1.0; // Error sampling rate, range 0 to 1, default 1.0 for better error tracking
+  private sessionErrorSampleRate: number = 0.0; // Error sampling rate, range 0 to 1, default 0.0
   private rumAppId: string = "";
   private enableTrackAppCrash: boolean = false;
   private enableTrackAppUIBlock: boolean = false;
@@ -69,7 +69,7 @@ export class FTRUMConfig {
    * When the session is not sampled by setSamplingRate,
    * if an error occurs during the session, data within 1 minute before the error can be collected.
    * Range [0,1], 0 means no collection, 1 means full collection.
-   * FTRUMConfig defaults to 1.0 for compatibility; calling this setter without an argument sets 0.0.
+   * Default is 0.0, aligned with Android SDK.
    */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));

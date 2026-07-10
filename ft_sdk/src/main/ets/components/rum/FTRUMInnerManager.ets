@@ -262,7 +262,7 @@ export class FTRUMInnerManager {
   
   // Sampling rate control (aligned with Android: sampleRate and sessionErrorSampleError)
   private sampleRate: number = 1.0;
-  private sessionErrorSampleRate: number = 1.0;
+  private sessionErrorSampleRate: number = 0.0;
   
   // Current active state
   private activeView: ActiveViewBean | null = null;
@@ -1239,7 +1239,7 @@ export class FTRUMInnerManager {
     this.rumAppId = "";
     this.context = null;
     this.sampleRate = 1.0;
-    this.sessionErrorSampleRate = 1.0;
+    this.sessionErrorSampleRate = 0.0;
     this.activeView = null;
     this.activeAction = null;
     this.resourceBeanMap.clear();

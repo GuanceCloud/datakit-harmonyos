@@ -169,7 +169,7 @@ export default function configTest() {
     it('rumSamplingRateShouldClamp', 0, () => {
       const defaultConfig: FTRUMConfig = new FTRUMConfig();
       expect(defaultConfig.getSamplingRate()).assertEqual(1.0);
-      expect(defaultConfig.getSessionErrorSampleRate()).assertEqual(1.0);
+      expect(defaultConfig.getSessionErrorSampleRate()).assertEqual(0.0);
 
       const customConfig: FTRUMConfig = new FTRUMConfig()
         .setSamplingRate(0.25)
@@ -179,6 +179,7 @@ export default function configTest() {
 
       expect(new FTRUMConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTRUMConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
+      expect(new FTRUMConfig().setSessionErrorSampleRate().getSessionErrorSampleRate()).assertEqual(0.0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(-1).getSessionErrorSampleRate()).assertEqual(0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(2).getSessionErrorSampleRate()).assertEqual(1);
 
