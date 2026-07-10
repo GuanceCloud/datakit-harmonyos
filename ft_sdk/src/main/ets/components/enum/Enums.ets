@@ -9,6 +9,20 @@ export enum EnvType {
   LOCAL = "local"
 }
 
+/**
+ * SDK internal log threshold.
+ *
+ * This follows Android SDKLogLevel semantics: setting a level outputs that
+ * level and all more severe levels when FTSDKConfig.setDebug(true) is enabled.
+ */
+export enum SDKLogLevel {
+  V = "V",
+  D = "D",
+  I = "I",
+  W = "W",
+  E = "E"
+}
+
 export enum SyncPageSize {
   MINI = 5,
   MEDIUM = 10,

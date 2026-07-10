@@ -10,6 +10,7 @@ import {
   EnvType,
   LogCacheDiscard,
   RUMCacheDiscard,
+  SDKLogLevel,
   SyncPageSize
 } from '../../main/ets/components/enum/Enums';
 import { Status as LogLevel } from '../../main/ets/components/bean/Status';
@@ -199,6 +200,8 @@ export default function configUnitTest() {
       expect(datawayConfig.getEnv()).assertEqual(EnvType.GRAY.toString());
       expect(datawayConfig.getDatawayUrl()).assertEqual(TEST_FAKE_URL);
       expect(datawayConfig.getClientToken()).assertEqual(TEST_FAKE_CLIENT_TOKEN);
+      expect(datakitConfig.getSdkLogLevel()).assertEqual(SDKLogLevel.V);
+      expect(datakitConfig.setSdkLogLevel(SDKLogLevel.W).getSdkLogLevel()).assertEqual(SDKLogLevel.W);
     });
 
     it('sdkConfigShouldClampBounds', 0, () => {

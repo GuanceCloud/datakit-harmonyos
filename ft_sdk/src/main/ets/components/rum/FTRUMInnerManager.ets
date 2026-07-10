@@ -2147,6 +2147,7 @@ export class FTRUMInnerManager {
    */
   public startResource(resourceId: string, property: Record<string, object> = {}): void {
     try {
+      FTInnerLogger.d(TAG, `startResource: resourceId=${resourceId}`);
       // Refresh session
       this.checkSessionRefresh(true);
 
@@ -2173,6 +2174,7 @@ export class FTRUMInnerManager {
    */
   public stopResource(resourceId: string, fallbackActionId?: string): void {
     try {
+      FTInnerLogger.d(TAG, `stopResource: resourceId=${resourceId}, fallbackActionId=${fallbackActionId || ''}`);
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext(fallbackActionId || '');
       this.updateResourceContextMemoryOnStop(context);
@@ -2363,6 +2365,7 @@ export class FTRUMInnerManager {
    */
   public addResource(resourceId: string, params: ResourceParams, netStatusBean: NetStatusBean): void {
     try {
+      FTInnerLogger.d(TAG, `addResource: resourceId=${resourceId}, url=${params.url}, method=${params.resourceMethod}`);
       const context = this.createCurrentResourceContext();
       this.resourceContextById.set(resourceId, context);
       const collectType = this.checkSessionWillCollect(context.sessionId);
@@ -2437,6 +2440,7 @@ export class FTRUMInnerManager {
    */
   public setNetState(resourceId: string, netStatusBean: NetStatusBean): void {
     try {
+      FTInnerLogger.d(TAG, `setNetState: resourceId=${resourceId}, netStatus=${JSON.stringify(netStatusBean.toJSON())}`);
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext();
       this.resourceContextById.set(resourceId, context);

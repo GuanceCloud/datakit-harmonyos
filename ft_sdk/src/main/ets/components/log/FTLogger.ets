@@ -4,6 +4,7 @@ import { Status } from '../bean/Status';
 import { Utils } from '../utils/Utils';
 import { StringWrapper } from '../utils/StringWrapper';
 import { FTInnerLogFileManager } from './FTInnerLogFileManager';
+import { SDKLogLevel } from '../enum/Enums';
 import hilog from '@ohos.hilog';
 import ftnativecrash from 'libftnativecrash.so';
 
@@ -30,6 +31,7 @@ export class FTInnerLogger {
   private static readonly TAG_PREFIX = "[FT-SDK]";
   private static readonly DOMAIN = 0x0001; // Log domain ID, can be adjusted as needed
   private static DEBUG_ENABLED: boolean = true;
+  private static sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
   private static CRASH_LOG_COLLECTION_ENABLED: boolean = true;
 
   // Enable or disable all SDK logs at runtime (aligned with Android LogUtils.setDebug())
@@ -37,6 +39,10 @@ export class FTInnerLogger {
   // Android: LogUtils.setDebug(false) disables all log levels
   static setDebugEnabled(enabled: boolean): void {
     FTInnerLogger.DEBUG_ENABLED = enabled;
+  }
+
+  static setSDKLogLevel(logLevel: SDKLogLevel): void {
+    FTInnerLogger.sdkLogLevel = logLevel;
   }
 
   // Enable or disable crash log collection
@@ -66,8 +72,31 @@ export class FTInnerLogger {
     }
   }
 
+  private static isLogEnabled(logLevel: SDKLogLevel): boolean {
+    return FTInnerLogger.DEBUG_ENABLED &&
+      FTInnerLogger.getLogLevelPriority(FTInnerLogger.sdkLogLevel) <=
+      FTInnerLogger.getLogLevelPriority(logLevel);
+  }
+
+  private static getLogLevelPriority(logLevel: SDKLogLevel): number {
+    switch (logLevel) {
+      case SDKLogLevel.V:
+        return 0;
+      case SDKLogLevel.D:
+        return 1;
+      case SDKLogLevel.I:
+        return 2;
+      case SDKLogLevel.W:
+        return 3;
+      case SDKLogLevel.E:
+        return 4;
+      default:
+        return 0;
+    }
+  }
+
   static d(tag: string, message: string): void {
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.D)) {
       return;
     }
     const fullMessage = `${message}`;
@@ -77,9 +106,7 @@ export class FTInnerLogger {
   }
 
   static i(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.i() checks mDebug flag
-    // Android: i(tag, message, currentLevel.ordinal() <= SDKLogLevel.I.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.I)) {
       return;
     }
     const fullMessage = `${message}`;
@@ -89,9 +116,7 @@ export class FTInnerLogger {
   }
 
   static w(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.w() checks mDebug flag
-    // Android: w(tag, message, currentLevel.ordinal() <= SDKLogLevel.W.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.W)) {
       return;
     }
     const fullMessage = `${message}`;
@@ -101,9 +126,7 @@ export class FTInnerLogger {
   }
 
   static e(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.e() checks mDebug flag
-    // Android: e(tag, message, currentLevel.ordinal() <= SDKLogLevel.E.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.E)) {
       return;
     }
     const fullMessage = `${message}`;

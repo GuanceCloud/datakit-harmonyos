@@ -159,6 +159,8 @@ export class FTSDK {
    initFTConfig(config: FTSDKConfig): void {
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
+    FTInnerLogger.setSDKLogLevel(config.getSdkLogLevel());
+    FTSDK.logServerUrl(config);
 
     // Get context from Utils (unified context management)
     const context = getFTSDKRuntime().getAbilityContext();
@@ -226,7 +228,12 @@ export class FTSDK {
       // Initialize FTTrackInner log configuration
       if (FTSDK.ftSdk) {
         FTTrackInner.getInstance().initLogConfig(logConfig);
-        FTInnerLogger.d(TAG, `installLogConfig completed: samplingRate=${logConfig.getSamplingRate()}, enableCustomLog=${logConfig.isEnableCustomLog()}`);
+        FTInnerLogger.d(TAG,
+          `installLogConfig completed: serviceName=${logConfig.getServiceName()}, samplingRate=${logConfig.getSamplingRate()}, ` +
+          `enableCustomLog=${logConfig.isEnableCustomLog()}, enableLinkRumData=${logConfig.isEnableLinkRumData()}, ` +
+          `enableConsoleLog=${logConfig.isEnableConsoleLog()}, printCustomLogToConsole=${logConfig.isPrintCustomLogToConsole()}, ` +
+          `logLevelFilters=${logConfig.getLogLevelFilters().join('|')}, logCacheLimitCount=${logConfig.getLogCacheLimitCount()}, ` +
+          `logCacheDiscardStrategy=${logConfig.getLogCacheDiscardStrategy()}`);
       }else{
         FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
       }
@@ -246,7 +253,11 @@ export class FTSDK {
       // 2. Initialize Trace configuration manager
       FTTraceConfigManager.getInstance().initWithConfig(traceConfig);
 
-      FTInnerLogger.d(TAG, `installTraceConfig completed: samplingRate=${traceConfig.getSamplingRate()}, traceType=${traceConfig.getTraceType()}, enableAutoTrace=${traceConfig.isEnableAutoTrace()}`);
+      FTInnerLogger.d(TAG,
+        `installTraceConfig completed: serviceName=${traceConfig.getServiceName()}, samplingRate=${traceConfig.getSamplingRate()}, ` +
+        `traceType=${traceConfig.getTraceType()}, enableAutoTrace=${traceConfig.isEnableAutoTrace()}, ` +
+        `enableLinkRUMData=${traceConfig.isEnableLinkRUMData()}, enableWebTrace=${traceConfig.isEnableWebTrace()}, ` +
+        `customTraceHeaderHandler=${traceConfig.getTraceHeaderHandler() !== null}`);
 
     } catch (error) {
       FTInnerLogger.e(TAG, `installTraceConfig failed: ${error}`);
@@ -276,7 +287,7 @@ export class FTSDK {
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().initRUMConfig(rumConfig);
     } else {
-      FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
+      FTInnerLogger.e(TAG, `installRUMConfig failed: FTSDK.install not call`);
     }
 
     // Register UIAbility lifecycle listener when any UI-bound feature is enabled.
@@ -335,7 +346,31 @@ export class FTSDK {
       FTSDK.tryInitializeUIFeaturesInternal();
     }
 
-    FTInnerLogger.d(TAG, "installRUMConfig completed");
+    FTInnerLogger.d(TAG,
+      `installRUMConfig completed: rumAppId=${rumConfig.getRumAppId()}, samplingRate=${rumConfig.getSamplingRate()}, ` +
+      `sessionErrorSampleRate=${rumConfig.getSessionErrorSampleRate()}, enableTraceUserView=${rumConfig.isEnableTraceUserView()}, ` +
+      `enableTraceUserAction=${rumConfig.isEnableTraceUserAction()}, enableTraceUserResource=${rumConfig.isEnableTraceUserResource()}, ` +
+      `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
+      `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
+      `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+  }
+
+  private static logServerUrl(config: FTSDKConfig): void {
+    if (config.getDatakitUrl().length > 0) {
+      FTInnerLogger.d(TAG, `serverUrl ==>\nDatakit Url:${config.getDatakitUrl()}`);
+      return;
+    }
+
+    FTInnerLogger.d(TAG,
+      `serverUrl ==>\nDataway Url:${config.getDatawayUrl()},clientToken:${FTSDK.maskHalfCharacter(config.getClientToken())}`);
+  }
+
+  private static maskHalfCharacter(value: string): string {
+    let maskedValue = '';
+    for (let index = 0; index < value.length; index++) {
+      maskedValue += index > value.length / 2 ? value.charAt(index) : '*';
+    }
+    return maskedValue;
   }
 
   private static  initRUMGlobalContext(config:FTRUMConfig):void{

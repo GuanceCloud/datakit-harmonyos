@@ -1,5 +1,5 @@
 import { Constants } from "./Constants";
-import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SyncPageSize } from "./enum/Enums";
+import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
 import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
@@ -629,6 +629,8 @@ export class FTSDKConfig {
   private clientToken: string;
   // Whether to enable Debug
   private isDebug: boolean = false;
+  // SDK internal log threshold, aligned with Android SDKLogLevel.
+  private sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
   // Whether to access device ID
   private : boolean = true;
   // Whether to perform auto sync
@@ -706,6 +708,18 @@ export class FTSDKConfig {
   setDebug(debug: boolean): FTSDKConfig {
     this.isDebug = debug;
     return this;
+  }
+
+  /**
+   * Set the SDK internal log threshold. This only takes effect when debug mode is enabled.
+   */
+  setSdkLogLevel(logLevel: SDKLogLevel): FTSDKConfig {
+    this.sdkLogLevel = logLevel;
+    return this;
+  }
+
+  getSdkLogLevel(): SDKLogLevel {
+    return this.sdkLogLevel;
   }
 
   setEnableInnerLogFile(enable: boolean, config?: FTInnerLogFileConfig): FTSDKConfig {

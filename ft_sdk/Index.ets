@@ -79,7 +79,8 @@ export {
   LogCacheDiscard,
   RUMCacheDiscard,
   DBCacheDiscard,
-  DetectFrequency
+  DetectFrequency,
+  SDKLogLevel
 } from './src/main/ets/components/enum/Enums';
 
 // RUM Enums

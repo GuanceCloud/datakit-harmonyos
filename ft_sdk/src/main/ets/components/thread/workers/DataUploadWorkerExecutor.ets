@@ -309,6 +309,8 @@ export class DataUploadWorkerExecutor {
         deduplicatedDataList.length} duplicate record(s) for ${dataType}`);
       }
 
+      FTInnerLogger.d(TAG, `Sync Data Count:${deduplicatedDataList.length}`);
+
       const seqNumber = this.getSeqNumber(dataType);
       const pkgId = this.generatePackageId(capabilities, seqNumber, deduplicatedDataList.length);
       const body = this.formatLineProtocolData(deduplicatedDataList, pkgId);
@@ -421,6 +423,8 @@ export class DataUploadWorkerExecutor {
       this.resetErrorCount(dataType);
       const ignoredCount = this.incrementIgnoredClientErrorCount(dataType);
       const delayTime = this.getIgnoredClientBackoffMs(ignoredCount);
+      FTInnerLogger.e(TAG,
+        `pkg_id:${pkgId} Sync Fail (Ignore)-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
       this.traceUploadLane(
         `[BATCH] type=${dataType} code=${code} rows=${dataList.length} action=delete ignoredBackoff=${delayTime}ms ignoredCount=${ignoredCount} pkg=${pkgId}`
       );
@@ -438,6 +442,13 @@ export class DataUploadWorkerExecutor {
       const advanceStartTime = capabilities.getCurrentTimeMs();
       this.advancePackageGenerator(dataType, code);
       this.addComputeTime(state, capabilities, advanceStartTime);
+      if (code >= 200 && code < 300) {
+        FTInnerLogger.d(TAG,
+          `pkg_id:${pkgId} Sync Success-[code:${code},response:${this.abbreviateForLog(response, 500)}]`);
+      } else {
+        FTInnerLogger.e(TAG,
+          `pkg_id:${pkgId} Sync Fail (Ignore)-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
+      }
       this.traceUploadLane(
         `[BATCH] type=${dataType} model=${model} code=${code} rows=${dataList.length} action=delete backoff=0ms ` +
           `response=${this.abbreviateForLog(response, 200)} firstLine=${this.getFirstLineForLog(body, 500)} pkg=${pkgId}`
@@ -453,6 +464,8 @@ export class DataUploadWorkerExecutor {
       this.resetIgnoredClientErrorCount(dataType);
       const retryCount = this.incrementErrorCount(dataType);
       const delayTime = this.getNormalBackoffMs(retryCount);
+      FTInnerLogger.e(TAG,
+        `pkg_id:${pkgId} ${retryCount}:Sync Fail-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
       FTInnerLogger.w(TAG,
         `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=reinsert retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
       await this.sleepWithMetrics(capabilities, state, delayTime);
@@ -464,6 +477,8 @@ export class DataUploadWorkerExecutor {
     this.addComputeTime(state, capabilities, unmarkStartTime);
     const retryCount = this.incrementErrorCount(dataType);
     const delayTime = this.getNormalBackoffMs(retryCount);
+    FTInnerLogger.e(TAG,
+      `pkg_id:${pkgId} ${retryCount}:Sync Fail-[code:${code},errorCode:${errorCode},response:${this.abbreviateForLog(response, 500)}]`);
     FTInnerLogger.w(TAG,
       `<FT-UPLOAD-LANE> [BATCH] type=${dataType} code=${code} rows=${dataList.length} action=retry retryBackoff=${delayTime}ms retryCount=${retryCount} error=${errorCode} response=${response} pkg=${pkgId}`);
     await this.sleepWithMetrics(capabilities, state, delayTime);
