@@ -54,6 +54,7 @@ import {
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from './workers/DataUploadLimits';
+import { prepareDataUploadPayload } from './workers/DataUploadCompression';
 
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
@@ -2563,6 +2564,10 @@ async function handleUploadExecutePage(
 
   let httpResult = createEmptyUploadHttpResult();
   if (shouldUpload) {
+    const preparedPayload = await prepareDataUploadPayload(
+      body,
+      payload.httpConfig.compressIntakeRequests === true
+    );
     const httpRequest: SDKUploadHttpRequestDTO = {
       datakitUrl: payload.httpConfig.datakitUrl,
       datawayUrl: payload.httpConfig.datawayUrl,
@@ -2572,8 +2577,11 @@ async function handleUploadExecutePage(
       connectTimeoutMs: payload.httpConfig.connectTimeoutMs,
       readTimeoutMs: payload.httpConfig.readTimeoutMs,
       softTimeoutMs: payload.httpConfig.softTimeoutMs,
+      compressIntakeRequests: payload.httpConfig.compressIntakeRequests,
       body,
-      packageId
+      packageId,
+      compressedBody: preparedPayload.compressedBody,
+      contentEncoding: preparedPayload.contentEncoding
     };
     const httpStartedAt = Date.now();
     if (payload.injectedHttpResult) {

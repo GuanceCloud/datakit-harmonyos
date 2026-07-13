@@ -342,6 +342,8 @@ class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor
   lastHttpModel: string = '';
   lastHttpBody: string = '';
   lastHttpPkgId: string = '';
+  lastHttpCompressedBody: ArrayBuffer | undefined = undefined;
+  lastHttpContentEncoding: string = '';
   httpBarrier: Promise<void> | null = null;
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
@@ -376,6 +378,8 @@ class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor
     this.lastHttpModel = request.model;
     this.lastHttpBody = request.body;
     this.lastHttpPkgId = request.packageId;
+    this.lastHttpCompressedBody = request.compressedBody;
+    this.lastHttpContentEncoding = request.contentEncoding ?? '';
     if (this.throwExecuteHttp) {
       throw new Error('http failed');
     }
@@ -776,6 +780,8 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpBody.includes('log-local-format')).assertTrue();
+      expect(runtime.lastHttpContentEncoding).assertEqual('deflate');
+      expect(runtime.lastHttpCompressedBody !== undefined).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();

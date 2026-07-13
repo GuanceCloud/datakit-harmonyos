@@ -1,4 +1,6 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { util } from '@kit.ArkTS';
+import zlib from '@ohos.zlib';
 import {
   SDKDedicatedPoolManager
 } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
@@ -52,6 +54,15 @@ import {
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from '../../main/ets/components/thread/workers/DataUploadLimits';
 import { awaitDataUploadHttpResult } from '../../main/ets/components/thread/workers/DataUploadSoftTimeout';
+import {
+  DataUploadPayloadCompressor,
+  resetDataUploadPayloadCompressorInternal,
+  setDataUploadPayloadCompressorInternal
+} from '../../main/ets/components/thread/workers/DataUploadCompression';
+import {
+  createDataUploadHeaders,
+  getDataUploadRequestBody
+} from '../../main/ets/components/thread/workers/DataUploadHttpRequest';
 import { NetCodeStatus } from '../../main/ets/components/http/HttpEngine';
 import {
   isSDKWorkerExternalSideEffectCommand,
@@ -185,10 +196,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       SDKDedicatedPoolManager.resetInternal();
       manager = SDKDedicatedPoolManager.getInstance();
       resetUnitWorkerStates();
+      resetDataUploadPayloadCompressorInternal();
     });
 
     afterEach(() => {
       SDKDedicatedPoolManager.resetInternal();
+      resetDataUploadPayloadCompressorInternal();
     });
 
     it('dataProcessCommandShouldUseConfiguredWorkerCount', 0, async () => {
@@ -1279,7 +1292,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const timeoutExecutor = new RetryUploadHttpExecutor(NetCodeStatus.FILE_TIMEOUT_CODE, true);
@@ -1318,6 +1332,140 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(state.uploadPendingPage === null).assertTrue();
       expect(committed.roundHasMoreData).assertTrue();
       expect(committed.delayMs >= 500).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldDeflatePayloadBeforeExecutingHttpRequest', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'DeflateUploadWorker', 'unit-worker');
+      const startResponse = handleSDKWorkerRequest({
+        id: 'deflate-upload-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId: 'deflate-upload-owner',
+          taskName: 'deflate-upload-round',
+          pageSize: 1,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const httpExecutor = new RetryUploadHttpExecutor(200);
+      const executeResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'deflate-upload-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: [{
+            id: 81,
+            dataType: 'log',
+            dataString: 'df_rum_harmonyos_log,sdk_data_id=deflate message="deflate-测试" 100',
+            uuid: 'deflate-upload',
+            time: 100
+          }],
+          httpConfig: {
+            datakitUrl: 'https://localhost',
+            datawayUrl: '',
+            clientToken: '',
+            model: 'logging_v1',
+            deviceTimeMs: 100,
+            connectTimeoutMs: 60_000,
+            readTimeoutMs: 60_000,
+            softTimeoutMs: 125_000,
+            compressIntakeRequests: true
+          }
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, state, httpExecutor);
+      const executed = executeResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      const sentRequest = httpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(executeResponse.ok).assertTrue();
+      expect(executed.successfulResponse).assertTrue();
+      expect(sentRequest.contentEncoding).assertEqual('deflate');
+      expect(sentRequest.compressedBody !== undefined).assertTrue();
+
+      const compressedBody = sentRequest.compressedBody as ArrayBuffer;
+      const uploadHeaders = createDataUploadHeaders(sentRequest);
+      const uploadBody = getDataUploadRequestBody(sentRequest);
+      expect(uploadHeaders['Content-Encoding']).assertEqual('deflate');
+      expect(uploadBody === compressedBody).assertTrue();
+      const originalBytes = util.TextEncoder.create('utf-8').encodeInto(sentRequest.body);
+      const restoredBody = new ArrayBuffer(originalBytes.byteLength);
+      const zip = await zlib.createZip();
+      const result = await zip.uncompress(restoredBody, compressedBody, compressedBody.byteLength);
+      expect(result.status).assertEqual(zlib.ReturnStatus.OK);
+      expect(result.destLen).assertEqual(originalBytes.byteLength);
+      const decodedBody = util.TextDecoder.create('utf-8').decodeWithStream(
+        new Uint8Array(restoredBody, 0, result.destLen), { stream: false });
+      expect(decodedBody).assertEqual(sentRequest.body);
+    });
+
+    it('dataUploadWorkerShouldFallbackToPlaintextWhenDeflateFails', 0, async () => {
+      class FailingPayloadCompressor implements DataUploadPayloadCompressor {
+        async compress(_body: string): Promise<ArrayBuffer> {
+          throw new Error('deflate unavailable');
+        }
+      }
+
+      setDataUploadPayloadCompressorInternal(new FailingPayloadCompressor());
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'PlaintextFallbackUploadWorker', 'unit-worker');
+      const startResponse = handleSDKWorkerRequest({
+        id: 'plaintext-fallback-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId: 'plaintext-fallback-owner',
+          taskName: 'plaintext-fallback-round',
+          pageSize: 1,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const httpExecutor = new RetryUploadHttpExecutor(200);
+      await handleSDKDataUploadWorkerRequest({
+        id: 'plaintext-fallback-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: [{
+            id: 82,
+            dataType: 'log',
+            dataString: 'df_rum_harmonyos_log,sdk_data_id=fallback value=1i 100',
+            uuid: 'plaintext-fallback',
+            time: 100
+          }],
+          httpConfig: {
+            datakitUrl: 'https://localhost',
+            datawayUrl: '',
+            clientToken: '',
+            model: 'logging_v1',
+            deviceTimeMs: 100,
+            connectTimeoutMs: 60_000,
+            readTimeoutMs: 60_000,
+            softTimeoutMs: 125_000,
+            compressIntakeRequests: true
+          }
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, state, httpExecutor);
+      const sentRequest = httpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(sentRequest.compressedBody === undefined).assertTrue();
+      expect(sentRequest.contentEncoding === undefined).assertTrue();
+      expect(sentRequest.body.includes('plaintext-fallback')).assertTrue();
+      expect(createDataUploadHeaders(sentRequest)['Content-Encoding'] === undefined).assertTrue();
+      expect(getDataUploadRequestBody(sentRequest)).assertEqual(sentRequest.body);
     });
 
     it('dataUploadWorkerShouldOwnDedupPackagingPaginationAndRetryState', 0, async () => {
@@ -1364,7 +1512,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const httpExecutor = new RetryUploadHttpExecutor();
@@ -1469,7 +1618,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const retryExecutor = new RetryUploadHttpExecutor(500);
@@ -1585,7 +1735,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const successExecutor = new RetryUploadHttpExecutor(200);
@@ -1661,7 +1812,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const httpExecutor = new RetryUploadHttpExecutor(200);
@@ -1723,7 +1875,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           deviceTimeMs: 100,
           connectTimeoutMs: 60_000,
           readTimeoutMs: 60_000,
-          softTimeoutMs: 125_000
+          softTimeoutMs: 125_000,
+          compressIntakeRequests: false
         }
       };
       const successExecutor = new RetryUploadHttpExecutor(200);

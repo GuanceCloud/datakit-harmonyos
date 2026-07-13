@@ -635,6 +635,8 @@ export class FTSDKConfig {
   private : boolean = true;
   // Whether to perform auto sync
   private autoSync: boolean = true;
+  // Whether intake requests are sent with zlib-wrapped deflate compression.
+  private compressIntakeRequests: boolean = true;
   // Data sync page size
   private pageSize: number = SyncPageSize.MEDIUM;
   // Data sync sleep time
@@ -768,6 +770,19 @@ export class FTSDKConfig {
 
   isAutoSyncEnabled(): boolean {
     return this.autoSync;
+  }
+
+  /**
+   * Enable or disable deflate compression for data intake requests.
+   * Compression is enabled by default, matching the Android SDK behavior.
+   */
+  setCompressIntakeRequests(compressIntakeRequests: boolean): FTSDKConfig {
+    this.compressIntakeRequests = compressIntakeRequests;
+    return this;
+  }
+
+  isCompressIntakeRequests(): boolean {
+    return this.compressIntakeRequests;
   }
 
   setSyncPageSize(pageSize: SyncPageSize | number): FTSDKConfig {

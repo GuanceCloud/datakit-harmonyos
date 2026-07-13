@@ -456,11 +456,17 @@ export interface SDKUploadHttpConfigDTO {
   connectTimeoutMs: number;
   readTimeoutMs: number;
   softTimeoutMs: number;
+  /** Whether the body should be compressed before the HTTP request is sent. */
+  compressIntakeRequests: boolean;
 }
 
 export interface SDKUploadHttpRequestDTO extends SDKUploadHttpConfigDTO {
   body: string;
   packageId: string;
+  /** Set only when deflate compression completed successfully. */
+  compressedBody?: ArrayBuffer;
+  /** Set only when the matching Content-Encoding header must be sent. */
+  contentEncoding?: string;
 }
 
 export interface SDKUploadHttpResultDTO {

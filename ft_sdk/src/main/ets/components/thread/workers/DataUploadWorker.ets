@@ -12,10 +12,9 @@ import {
   SDKUploadHttpResultDTO,
   SDKWorkerRequest
 } from '../SDKWorkerProtocol';
-import { Constants } from '../../Constants';
 import { NetCodeStatus } from '../../http/HttpEngine';
-import BuildProfile from '../../../../../../BuildProfile';
 import { awaitDataUploadHttpResult } from './DataUploadSoftTimeout';
+import { createDataUploadHeaders, getDataUploadRequestBody } from './DataUploadHttpRequest';
 
 const UPLOAD_CONNECT_TIMEOUT_MAX_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MAX_MS = 60_000;
@@ -55,10 +54,11 @@ async function executeUploadHttpInWorker(request: SDKUploadHttpRequestDTO): Prom
       method: http.RequestMethod.POST,
       connectTimeout: normalizeUploadTimeout(request.connectTimeoutMs, UPLOAD_CONNECT_TIMEOUT_MAX_MS),
       readTimeout: normalizeUploadTimeout(request.readTimeoutMs, UPLOAD_READ_TIMEOUT_MAX_MS),
-      header: createUploadHeaders(request)
+      header: createDataUploadHeaders(request)
     };
-    if (request.body && request.body.length > 0) {
-      requestOptions.extraData = request.body;
+    const requestBody = getDataUploadRequestBody(request);
+    if (requestBody !== undefined) {
+      requestOptions.extraData = requestBody;
     }
 
     const requestTask: Promise<SDKUploadHttpResultDTO> = httpRequest
@@ -95,18 +95,6 @@ async function executeUploadHttpInWorker(request: SDKUploadHttpRequestDTO): Prom
   } finally {
     destroyUploadHttpRequest(httpRequest);
   }
-}
-
-function createUploadHeaders(request: SDKUploadHttpRequestDTO): Record<string, string> {
-  const headers: Record<string, string> = {};
-  headers['User-Agent'] = `${Constants.USER_AGENT};agent_${BuildProfile.HAR_VERSION}`;
-  headers['charset'] = 'UTF-8';
-  headers[Constants.SYNC_DATA_CONTENT_TYPE_HEADER] = 'text/plain';
-  headers['Date'] = new Date().toUTCString();
-  headers[Constants.SYNC_DATA_TRACE_HEADER] =
-    Constants.SYNC_DATA_TRACE_HEADER_FORMAT.replace('%s', request.packageId);
-  headers[Constants.SYNC_DATA_DEVICE_TIME] = String(request.deviceTimeMs);
-  return headers;
 }
 
 function createUploadUrl(request: SDKUploadHttpRequestDTO): string {

@@ -301,7 +301,8 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       deviceTimeMs: this.getCurrentTimeMs(),
       connectTimeoutMs: 60000,
       readTimeoutMs: 60000,
-      softTimeoutMs: 125000
+      softTimeoutMs: 125000,
+      compressIntakeRequests: config.isCompressIntakeRequests()
     };
   }
 

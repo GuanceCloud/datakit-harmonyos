@@ -202,6 +202,8 @@ export default function configUnitTest() {
       expect(datawayConfig.getClientToken()).assertEqual(TEST_FAKE_CLIENT_TOKEN);
       expect(datakitConfig.getSdkLogLevel()).assertEqual(SDKLogLevel.V);
       expect(datakitConfig.setSdkLogLevel(SDKLogLevel.W).getSdkLogLevel()).assertEqual(SDKLogLevel.W);
+      expect(datakitConfig.isCompressIntakeRequests()).assertTrue();
+      expect(datakitConfig.setCompressIntakeRequests(false).isCompressIntakeRequests()).assertFalse();
     });
 
     it('sdkConfigShouldClampBounds', 0, () => {
