@@ -458,6 +458,20 @@ export interface SDKUploadHttpConfigDTO {
   softTimeoutMs: number;
   /** Whether the body should be compressed before the HTTP request is sent. */
   compressIntakeRequests: boolean;
+  /** Optional per-request NetworkKit proxy configuration. */
+  proxy?: SDKUploadHttpProxyDTO;
+  /** Optional NetworkKit custom DNS servers, capped to three values by FTSDKConfig. */
+  dnsServers?: string[];
+  /** Optional NetworkKit DNS-over-HTTPS endpoint. */
+  dnsOverHttps?: string;
+}
+
+export interface SDKUploadHttpProxyDTO {
+  host: string;
+  port: number;
+  exclusionList: string[];
+  username?: string;
+  password?: string;
 }
 
 export interface SDKUploadHttpRequestDTO extends SDKUploadHttpConfigDTO {

@@ -15,6 +15,7 @@ import {
 import { NetCodeStatus } from '../../http/HttpEngine';
 import { awaitDataUploadHttpResult } from './DataUploadSoftTimeout';
 import { createDataUploadHeaders, getDataUploadRequestBody } from './DataUploadHttpRequest';
+import { createDataUploadNetworkOptions } from './DataUploadNetworkOptions';
 
 const UPLOAD_CONNECT_TIMEOUT_MAX_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MAX_MS = 60_000;
@@ -50,12 +51,10 @@ async function executeUploadHttpInWorker(request: SDKUploadHttpRequestDTO): Prom
   const httpRequest = http.createHttp();
   const softTimeoutMs = normalizeUploadTimeout(request.softTimeoutMs, UPLOAD_SOFT_TIMEOUT_MAX_MS);
   try {
-    const requestOptions: http.HttpRequestOptions = {
-      method: http.RequestMethod.POST,
-      connectTimeout: normalizeUploadTimeout(request.connectTimeoutMs, UPLOAD_CONNECT_TIMEOUT_MAX_MS),
-      readTimeout: normalizeUploadTimeout(request.readTimeoutMs, UPLOAD_READ_TIMEOUT_MAX_MS),
-      header: createDataUploadHeaders(request)
-    };
+    const requestOptions = createDataUploadNetworkOptions(request);
+    requestOptions.connectTimeout = normalizeUploadTimeout(request.connectTimeoutMs, UPLOAD_CONNECT_TIMEOUT_MAX_MS);
+    requestOptions.readTimeout = normalizeUploadTimeout(request.readTimeoutMs, UPLOAD_READ_TIMEOUT_MAX_MS);
+    requestOptions.header = createDataUploadHeaders(request);
     const requestBody = getDataUploadRequestBody(request);
     if (requestBody !== undefined) {
       requestOptions.extraData = requestBody;

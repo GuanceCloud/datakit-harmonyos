@@ -11,6 +11,33 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
 
+/**
+ * HTTP proxy settings for SDK upload requests.
+ * `exclusionList` follows NetworkKit semantics and bypasses the proxy for matching hosts.
+ */
+export interface FTProxyConfig {
+  host: string;
+  port: number;
+  exclusionList?: Array<string>;
+  username?: string;
+  password?: string;
+}
+
+/** Static credentials used when the configured upload proxy requires authentication. */
+export interface FTProxyAuthenticator {
+  username: string;
+  password: string;
+}
+
+/**
+ * Custom DNS settings for SDK upload requests.
+ * NetworkKit accepts up to three DNS server addresses and an HTTPS DoH endpoint.
+ */
+export interface FTDnsConfig {
+  servers?: Array<string>;
+  overHttpsUrl?: string;
+}
+
 export interface FTInnerLogFileConfig {
   singleFileMaxSize?: number;
   totalFileMaxSize?: number;
@@ -637,6 +664,10 @@ export class FTSDKConfig {
   private autoSync: boolean = true;
   // Whether intake requests are sent with zlib-wrapped deflate compression.
   private compressIntakeRequests: boolean = true;
+  // Optional network routing settings used only by SDK upload requests.
+  private proxy: FTProxyConfig | null = null;
+  private proxyAuthenticator: FTProxyAuthenticator | null = null;
+  private dns: FTDnsConfig | null = null;
   // Data sync page size
   private pageSize: number = SyncPageSize.MEDIUM;
   // Data sync sleep time
@@ -783,6 +814,88 @@ export class FTSDKConfig {
 
   isCompressIntakeRequests(): boolean {
     return this.compressIntakeRequests;
+  }
+
+  /** Set the HTTP proxy used by SDK upload requests. */
+  setProxy(proxy: FTProxyConfig | null): FTSDKConfig {
+    this.proxy = proxy === null ? null : {
+      host: proxy.host,
+      port: proxy.port,
+      exclusionList: proxy.exclusionList ? proxy.exclusionList.slice() : [],
+      username: proxy.username,
+      password: proxy.password
+    };
+    return this;
+  }
+
+  getProxy(): FTProxyConfig | null {
+    if (this.proxy === null) {
+      return null;
+    }
+    return {
+      host: this.proxy.host,
+      port: this.proxy.port,
+      exclusionList: this.proxy.exclusionList ? this.proxy.exclusionList.slice() : [],
+      username: this.proxy.username,
+      password: this.proxy.password
+    };
+  }
+
+  /**
+   * Set static credentials for the configured upload proxy.
+   * NetworkKit does not expose an OkHttp-style authentication callback, so credentials are supplied per request.
+   */
+  setProxyAuthenticator(authenticator: FTProxyAuthenticator | null): FTSDKConfig {
+    this.proxyAuthenticator = authenticator === null ? null : {
+      username: authenticator.username,
+      password: authenticator.password
+    };
+    return this;
+  }
+
+  getProxyAuthenticator(): FTProxyAuthenticator | null {
+    if (this.proxyAuthenticator === null) {
+      return null;
+    }
+    return {
+      username: this.proxyAuthenticator.username,
+      password: this.proxyAuthenticator.password
+    };
+  }
+
+  /**
+   * Set the DNS servers or DNS-over-HTTPS endpoint used by SDK upload requests.
+   * Empty server values are ignored and only the first three are passed to NetworkKit.
+   */
+  setDns(dns: FTDnsConfig | null): FTSDKConfig {
+    if (dns === null) {
+      this.dns = null;
+      return this;
+    }
+    const servers: Array<string> = [];
+    if (dns.servers) {
+      for (let i = 0; i < dns.servers.length && servers.length < 3; i++) {
+        const server = dns.servers[i].trim();
+        if (server.length > 0) {
+          servers.push(server);
+        }
+      }
+    }
+    this.dns = {
+      servers,
+      overHttpsUrl: dns.overHttpsUrl ? dns.overHttpsUrl.trim() : ''
+    };
+    return this;
+  }
+
+  getDns(): FTDnsConfig | null {
+    if (this.dns === null) {
+      return null;
+    }
+    return {
+      servers: this.dns.servers ? this.dns.servers.slice() : [],
+      overHttpsUrl: this.dns.overHttpsUrl
+    };
   }
 
   /**

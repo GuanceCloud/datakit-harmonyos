@@ -26,6 +26,7 @@ import {
 } from './thread/workers/DataUploadWorkerCapabilities';
 import {
   SDKUploadHttpConfigDTO,
+  SDKUploadHttpProxyDTO,
   SDKUploadHttpResultDTO,
   SDKWorkerRequest,
   SDKWorkerResponse
@@ -293,6 +294,17 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
         break;
     }
 
+    const proxy = config.getProxy();
+    const proxyAuthenticator = config.getProxyAuthenticator();
+    const dns = config.getDns();
+    const uploadProxy: SDKUploadHttpProxyDTO | undefined = proxy === null ? undefined : {
+      host: proxy.host,
+      port: proxy.port,
+      exclusionList: proxy.exclusionList ? proxy.exclusionList.slice() : [],
+      username: proxyAuthenticator === null ? proxy.username : proxyAuthenticator.username,
+      password: proxyAuthenticator === null ? proxy.password : proxyAuthenticator.password
+    };
+
     return {
       datakitUrl: config.getDatakitUrl(),
       datawayUrl: config.getDatawayUrl(),
@@ -302,7 +314,10 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       connectTimeoutMs: 60000,
       readTimeoutMs: 60000,
       softTimeoutMs: 125000,
-      compressIntakeRequests: config.isCompressIntakeRequests()
+      compressIntakeRequests: config.isCompressIntakeRequests(),
+      proxy: uploadProxy,
+      dnsServers: dns === null || !dns.servers || dns.servers.length === 0 ? undefined : dns.servers.slice(),
+      dnsOverHttps: dns === null || !dns.overHttpsUrl ? undefined : dns.overHttpsUrl
     };
   }
 

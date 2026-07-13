@@ -207,6 +207,45 @@ export default function configUnitTest() {
       expect(datakitConfig.setCompressIntakeRequests(false).isCompressIntakeRequests()).assertFalse();
     });
 
+    it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {
+      const configuredProxy = {
+        host: 'proxy.example.com',
+        port: 8080,
+        exclusionList: ['localhost']
+      };
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setProxy(configuredProxy)
+        .setProxyAuthenticator({ username: 'proxy-user', password: 'proxy-password' })
+        .setDns({
+          servers: [' 1.1.1.1 ', '', '8.8.8.8', '9.9.9.9', '208.67.222.222'],
+          overHttpsUrl: ' https://dns.example.com/dns-query '
+        });
+      configuredProxy.exclusionList[0] = 'mutated-host';
+
+      const proxy = config.getProxy();
+      const authenticator = config.getProxyAuthenticator();
+      const dns = config.getDns();
+      expect(proxy !== null).assertTrue();
+      expect(authenticator !== null).assertTrue();
+      expect(dns !== null).assertTrue();
+      if (proxy !== null && authenticator !== null && dns !== null) {
+        expect(proxy.host).assertEqual('proxy.example.com');
+        expect(proxy.port).assertEqual(8080);
+        expect((proxy.exclusionList as string[])[0]).assertEqual('localhost');
+        expect(authenticator.username).assertEqual('proxy-user');
+        expect(authenticator.password).assertEqual('proxy-password');
+        expect((dns.servers as string[]).length).assertEqual(3);
+        expect((dns.servers as string[])[0]).assertEqual('1.1.1.1');
+        expect((dns.servers as string[])[2]).assertEqual('9.9.9.9');
+        expect(dns.overHttpsUrl).assertEqual('https://dns.example.com/dns-query');
+      }
+
+      config.setProxy(null).setProxyAuthenticator(null).setDns(null);
+      expect(config.getProxy() === null).assertTrue();
+      expect(config.getProxyAuthenticator() === null).assertTrue();
+      expect(config.getDns() === null).assertTrue();
+    });
+
     it('sdkConfigShouldClampBounds', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .setSyncPageSize(SyncPageSize.MINI)

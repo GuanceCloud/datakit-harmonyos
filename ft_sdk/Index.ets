@@ -32,6 +32,9 @@ export {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTProxyConfig,
+  FTProxyAuthenticator,
+  FTDnsConfig,
   FTInnerLogFileConfig,
   LogGlobalContextDictionary,
   LogGlobalContextValue

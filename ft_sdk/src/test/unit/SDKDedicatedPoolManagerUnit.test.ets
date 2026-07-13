@@ -63,6 +63,7 @@ import {
   createDataUploadHeaders,
   getDataUploadRequestBody
 } from '../../main/ets/components/thread/workers/DataUploadHttpRequest';
+import { createDataUploadNetworkOptions } from '../../main/ets/components/thread/workers/DataUploadNetworkOptions';
 import { NetCodeStatus } from '../../main/ets/components/http/HttpEngine';
 import {
   isSDKWorkerExternalSideEffectCommand,
@@ -1403,6 +1404,48 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const decodedBody = util.TextDecoder.create('utf-8').decodeWithStream(
         new Uint8Array(restoredBody, 0, result.destLen), { stream: false });
       expect(decodedBody).assertEqual(sentRequest.body);
+    });
+
+    it('dataUploadWorkerShouldApplyProxyAndDnsOptionsToNetworkKitRequest', 0, () => {
+      const request: SDKUploadHttpRequestDTO = {
+        datakitUrl: 'https://localhost',
+        datawayUrl: '',
+        clientToken: '',
+        model: 'logging_v1',
+        deviceTimeMs: 100,
+        connectTimeoutMs: 10_000,
+        readTimeoutMs: 20_000,
+        softTimeoutMs: 30_000,
+        compressIntakeRequests: false,
+        proxy: {
+          host: 'proxy.example.com',
+          port: 8080,
+          exclusionList: ['localhost'],
+          username: 'proxy-user',
+          password: 'proxy-password'
+        },
+        dnsServers: ['1.1.1.1', '8.8.8.8', '9.9.9.9', '208.67.222.222'],
+        dnsOverHttps: 'https://dns.example.com/dns-query',
+        body: 'upload-body',
+        packageId: 'network-options'
+      };
+
+      const options = createDataUploadNetworkOptions(request);
+      const proxy = options.usingProxy as Object as {
+        host: string;
+        port: number;
+        exclusionList: string[];
+        username?: string;
+        password?: string;
+      };
+      expect(proxy.host).assertEqual('proxy.example.com');
+      expect(proxy.port).assertEqual(8080);
+      expect(proxy.exclusionList[0]).assertEqual('localhost');
+      expect(proxy.username).assertEqual('proxy-user');
+      expect(proxy.password).assertEqual('proxy-password');
+      expect((options.dnsServers as string[]).length).assertEqual(3);
+      expect((options.dnsServers as string[])[2]).assertEqual('9.9.9.9');
+      expect(options.dnsOverHttps).assertEqual('https://dns.example.com/dns-query');
     });
 
     it('dataUploadWorkerShouldFallbackToPlaintextWhenDeflateFails', 0, async () => {
