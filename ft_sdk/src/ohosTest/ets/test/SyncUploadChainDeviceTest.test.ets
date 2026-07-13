@@ -5,6 +5,7 @@ import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType, SyncPageSize } from '../../../main/ets/components/enum/Enums';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
+import { NetCodeStatus } from '../../../main/ets/components/http/HttpEngine';
 import { DefaultSyncTaskManagerRuntime } from '../../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { WaitUtils } from './helpers/WaitUtils';
@@ -63,6 +64,16 @@ class DeviceUploadRuntime extends DefaultSyncTaskManagerRuntime {
       errorCode: `injected-${code}`,
       elapsedMs: 1,
       softTimedOut: false
+    });
+  }
+
+  injectSoftTimeout(): void {
+    this.injectedHttpResults.push({
+      code: NetCodeStatus.FILE_TIMEOUT_CODE,
+      message: 'injected soft timeout',
+      errorCode: String(NetCodeStatus.FILE_TIMEOUT_CODE),
+      elapsedMs: 1,
+      softTimedOut: true
     });
   }
 
@@ -373,6 +384,39 @@ export default function syncUploadChainDeviceTest() {
       expect(recoveredPayload.length > 0).assertTrue();
       expect(recovered).assertTrue();
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('softTimeoutShouldKeepRowsUntilRetrySucceeds', 0, async () => {
+      syncTaskManager.init(
+        FTSDKConfig.builder(TEST_HOST)
+          .setAutoSync(false)
+          .setSyncPageSize(SyncPageSize.MINI)
+          .setDataSyncRetryCount(0),
+        context
+      );
+      const original = createLogSyncData('soft-timeout-preserve', TEST_NOW_NS + 15);
+      const originalUuid = original.getUuid();
+      await dbManager.insertFtOperation(original);
+      runtime.injectSoftTimeout();
+
+      syncTaskManager.executePoll(false);
+      const timeoutHandled = await waitForUploadIdle(syncTaskManager, 5000);
+      const retainedRows = await dbManager.queryFtOperation([DataType.LOG], 10);
+
+      expect(timeoutHandled).assertTrue();
+      expect(retainedRows.length).assertEqual(1);
+      expect(retainedRows[0].getDataString().includes('soft-timeout-preserve')).assertTrue();
+      expect(retainedRows[0].getUuid() !== originalUuid).assertTrue();
+      expect(syncTaskManager.getStatus().errorCount).assertEqual(1);
+
+      collector.setResponse(200, '');
+      syncTaskManager.executePoll(false);
+      const recovered = await waitUntil(async () => {
+        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+      }, 5000);
+
+      expect(recovered).assertTrue();
+      expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
     });
 
     it('ignoredClientBackoffShouldCapAtEightSecondsAndStayIsolatedByDataType', 0, async () => {

@@ -15,6 +15,7 @@ import {
 import { Constants } from '../../Constants';
 import { NetCodeStatus } from '../../http/HttpEngine';
 import BuildProfile from '../../../../../../BuildProfile';
+import { awaitDataUploadHttpResult } from './DataUploadSoftTimeout';
 
 const UPLOAD_CONNECT_TIMEOUT_MAX_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MAX_MS = 60_000;
@@ -49,7 +50,6 @@ async function executeUploadHttpInWorker(request: SDKUploadHttpRequestDTO): Prom
   const startedAt = Date.now();
   const httpRequest = http.createHttp();
   const softTimeoutMs = normalizeUploadTimeout(request.softTimeoutMs, UPLOAD_SOFT_TIMEOUT_MAX_MS);
-  let timeoutId = -1;
   try {
     const requestOptions: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,
@@ -76,31 +76,23 @@ async function executeUploadHttpInWorker(request: SDKUploadHttpRequestDTO): Prom
       .catch((error: Error) => {
         return createUploadHttpErrorResult(error, startedAt, false);
       });
-    const timeoutTask = new Promise<SDKUploadHttpResultDTO>((resolve: Function) => {
-      timeoutId = setTimeout(() => {
-        destroyUploadHttpRequest(httpRequest);
-        resolve({
+    return await awaitDataUploadHttpResult(
+      requestTask,
+      softTimeoutMs,
+      () => destroyUploadHttpRequest(httpRequest),
+      () => {
+        return {
           code: NetCodeStatus.FILE_TIMEOUT_CODE,
           message: `Request soft timeout after ${softTimeoutMs}ms`,
           errorCode: String(NetCodeStatus.FILE_TIMEOUT_CODE),
           elapsedMs: Math.max(0, Date.now() - startedAt),
           softTimedOut: true
-        });
-      }, softTimeoutMs) as number;
-    });
-    const tasks: Promise<SDKUploadHttpResultDTO>[] = [requestTask, timeoutTask];
-    const result = await Promise.race(tasks);
-    if (timeoutId >= 0) {
-      clearTimeout(timeoutId);
-      timeoutId = -1;
-    }
-    return result;
+        };
+      }
+    );
   } catch (error) {
     return createUploadHttpErrorResult(error, startedAt, false);
   } finally {
-    if (timeoutId >= 0) {
-      clearTimeout(timeoutId);
-    }
     destroyUploadHttpRequest(httpRequest);
   }
 }

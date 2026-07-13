@@ -9,6 +9,7 @@
         "./src/main/ets/components/thread/workers/CrashFileWorker.ets",
         "./src/main/ets/components/thread/workers/ANRWorker.ets",
         "./src/main/ets/components/thread/workers/BackgroundWorker.ets",
+        "./src/main/ets/components/thread/workers/NativeCrashLogWorker.ets",
         "./src/main/ets/components/thread/workers/DataUploadWorker.ets"
       ]
     }

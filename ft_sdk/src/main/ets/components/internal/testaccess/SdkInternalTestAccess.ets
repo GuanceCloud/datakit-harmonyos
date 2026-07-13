@@ -49,6 +49,14 @@ export class SdkInternalTestAccess extends FTSDK {
     return SDKDedicatedPoolManager.getInstance().executeCommand(request);
   }
 
+  /** Internal device-test seam for unresolved mailbox replay verification. */
+  public static postDedicatedWorkerCommandAndWait(
+    request: SDKWorkerRequest,
+    timeoutMs: number
+  ): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().postCommandAndWait(request, timeoutMs);
+  }
+
   public static failNextDedicatedMailboxPosts(count: number = 1): void {
     SDKDedicatedPoolManager.getInstance().failNextMailboxPostsInternal(count);
   }

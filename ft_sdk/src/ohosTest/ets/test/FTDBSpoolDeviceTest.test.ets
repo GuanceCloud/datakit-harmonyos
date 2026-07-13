@@ -117,6 +117,46 @@ export default function ftDBSpoolDeviceTest() {
       expect(await pathExists(paths.inflightPath)).assertFalse();
     });
 
+    it('ackTokenFaultShouldRetainInflightForIdempotentReplay', 0, async () => {
+      const row = createLogSyncData('ack-token-fault', TEST_NOW_NS + 15);
+      const paths = createPaths(spoolManager);
+      await spoolManager.appendSyncData('device.ack-token-fault', [row]);
+
+      const prepared = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths);
+      const preparedRows: SyncData[] = [];
+      for (let i = 0; i < prepared.records.length; i++) {
+        preparedRows.push(SyncData.fromJSON(prepared.records[i].data));
+      }
+      const committedBeforeAck = await dbManager.writeSyncDataAtomically(
+        'device.ack-token-fault-before-ack',
+        preparedRows,
+        {
+          applyCachePolicy: true,
+          reInsert: false,
+          forceTransaction: true,
+          updateOrInsertByUuid: true,
+          skipFailureFallback: true
+        }
+      );
+      expect(committedBeforeAck.success).assertTrue();
+
+      let ackRejected = false;
+      try {
+        await FTDBSpoolTaskPoolExecutor.ackReplay(paths, `${prepared.batchToken}-stale`);
+      } catch (_) {
+        ackRejected = true;
+      }
+      expect(ackRejected).assertTrue();
+      expect(await pathExists(paths.inflightPath)).assertTrue();
+      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+
+      const replayed = await spoolManager.replay(context, 'device.ack-token-fault-retry');
+      expect(replayed).assertEqual(1);
+      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(spoolManager.getStatus().pendingRecords).assertEqual(0);
+      expect(await pathExists(paths.inflightPath)).assertFalse();
+    });
+
     it('replayShouldAdvanceByUtf8ByteCursorWithoutDuplicates', 0, async () => {
       const rows: SyncData[] = [
         createLogSyncData('字节游标-一', TEST_NOW_NS + 21),

@@ -51,6 +51,8 @@ import {
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from '../../main/ets/components/thread/workers/DataUploadLimits';
+import { awaitDataUploadHttpResult } from '../../main/ets/components/thread/workers/DataUploadSoftTimeout';
+import { NetCodeStatus } from '../../main/ets/components/http/HttpEngine';
 import {
   isSDKWorkerExternalSideEffectCommand,
   isSDKWorkerInFlightReplaySafe,
@@ -156,9 +158,11 @@ async function getRumWorkerSnapshotForUnit(id: string): Promise<SDKWorkerRespons
 class RetryUploadHttpExecutor implements SDKUploadWorkerHttpExecutor {
   lastRequest: SDKUploadHttpRequestDTO | null = null;
   private readonly responseCode: number;
+  private readonly softTimedOut: boolean;
 
-  constructor(responseCode: number = 500) {
+  constructor(responseCode: number = 500, softTimedOut: boolean = false) {
     this.responseCode = responseCode;
+    this.softTimedOut = softTimedOut;
   }
 
   async execute(request: SDKUploadHttpRequestDTO): Promise<SDKUploadHttpResultDTO> {
@@ -168,7 +172,7 @@ class RetryUploadHttpExecutor implements SDKUploadWorkerHttpExecutor {
       message: this.responseCode === 200 ? 'ok' : 'retry',
       errorCode: String(this.responseCode),
       elapsedMs: 3,
-      softTimedOut: false
+      softTimedOut: this.softTimedOut
     };
   }
 }
@@ -1211,6 +1215,109 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const body = getPayloadString(response.payload, 'body');
       expect(body.includes('pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
+    });
+
+    it('dataUploadSoftTimeoutShouldDestroyStalledWorkerRequest', 0, async () => {
+      let destroyCount = 0;
+      const stalledRequest = new Promise<SDKUploadHttpResultDTO>((_resolve: (value: SDKUploadHttpResultDTO) => void) => {
+      });
+      const result = await awaitDataUploadHttpResult(
+        stalledRequest,
+        20,
+        () => {
+          destroyCount++;
+        },
+        () => {
+          return {
+            code: NetCodeStatus.FILE_TIMEOUT_CODE,
+            message: 'injected soft timeout',
+            errorCode: String(NetCodeStatus.FILE_TIMEOUT_CODE),
+            elapsedMs: 20,
+            softTimedOut: true
+          };
+        }
+      );
+
+      expect(destroyCount).assertEqual(1);
+      expect(result.code).assertEqual(NetCodeStatus.FILE_TIMEOUT_CODE);
+      expect(result.softTimedOut).assertTrue();
+    });
+
+    it('dataUploadWorkerSoftTimeoutShouldRetryWithoutAcknowledgingFailedDbCommit', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'SoftTimeoutWorker', 'unit-worker');
+      const startPayload: SDKUploadRoundStartDTO = {
+        ownerId: 'soft-timeout-owner',
+        taskName: 'soft-timeout-round',
+        pageSize: 1,
+        syncSleepTime: 0
+      };
+      const startResponse = handleSDKWorkerRequest({
+        id: 'soft-timeout-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const executePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows: [{
+          id: 61,
+          dataType: 'log',
+          dataString: 'df_rum_harmonyos_log,sdk_data_id=soft-timeout value=1i 100',
+          uuid: 'soft-timeout',
+          time: 100
+        }],
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const timeoutExecutor = new RetryUploadHttpExecutor(NetCodeStatus.FILE_TIMEOUT_CODE, true);
+      const executeResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'soft-timeout-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, state, timeoutExecutor);
+      const executed = executeResponse.payload as Object as SDKUploadExecutePageResultDTO;
+
+      expect(executed.httpResult.softTimedOut).assertTrue();
+      expect(executed.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
+      expect(executed.reInsertRows.length).assertEqual(1);
+      expect(executed.retryCount).assertEqual(1);
+      expect(state.uploadCheckpointVersion).assertEqual(0);
+      expect(state.uploadPendingPage !== null).assertTrue();
+
+      const commitResponse = handleSDKWorkerRequest({
+        id: 'soft-timeout-db-failed',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          attemptId: executed.attemptId,
+          dbSucceeded: false
+        } as SDKUploadCommitPageDTO as Object as SDKWorkerPayload
+      }, state);
+      const committed = commitResponse.payload as Object as SDKUploadCommitPageResultDTO;
+
+      expect(state.uploadCheckpointVersion).assertEqual(0);
+      expect(state.uploadPendingPage === null).assertTrue();
+      expect(committed.roundHasMoreData).assertTrue();
+      expect(committed.delayMs >= 500).assertTrue();
     });
 
     it('dataUploadWorkerShouldOwnDedupPackagingPaginationAndRetryState', 0, async () => {

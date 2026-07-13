@@ -110,5 +110,38 @@ export default function workerIntegrationDeviceTest() {
       expect(metrics.memoryUsageMB >= -1).assertTrue();
       expect(metrics.batteryCurrent === metrics.batteryCurrent).assertTrue();
     });
+
+    it('workerRestartShouldReplayPendingMailboxPingExactlyOnce', 0, async () => {
+      const pool = SDKDedicatedPoolType.EVENT_CONSUMER;
+      const warmup = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
+        id: 'device-worker-replay-warmup',
+        pool,
+        command: SDKWorkerCommand.PING,
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        payload: null
+      });
+      expect(warmup.ok).assertTrue();
+
+      const requestId = `device-worker-replay-ping-${Date.now()}`;
+      const pendingResponse = SdkInternalTestAccess.postDedicatedWorkerCommandAndWait({
+        id: requestId,
+        pool,
+        command: SDKWorkerCommand.PING,
+        priority: SDKTaskPriority.NORMAL,
+        createdAt: Date.now(),
+        payload: null
+      }, 8000);
+      const restarted = SdkInternalTestAccess.restartDedicatedWorker(pool);
+      const response = await pendingResponse;
+      const status = SdkInternalTestAccess.getDedicatedPoolStatus().pools[pool];
+
+      expect(restarted).assertTrue();
+      expect(response.ok).assertTrue();
+      expect(response.id).assertEqual(requestId);
+      expect(status.restartCount >= 1).assertTrue();
+      expect(status.mailboxReplayCount >= 1).assertTrue();
+      expect(status.mailboxReplayPending).assertEqual(0);
+    });
   });
 }

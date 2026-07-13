@@ -3129,7 +3129,8 @@ function encodeUploadNumber(value: number, base: number): string {
 }
 
 function isRetryableUploadCode(code: number): boolean {
-  return code >= 500 || code === NetCodeStatus.NETWORK_EXCEPTION_CODE || code === NetCodeStatus.UNKNOWN_EXCEPTION_CODE;
+  return code >= 500 || code === NetCodeStatus.NETWORK_EXCEPTION_CODE ||
+    code === NetCodeStatus.FILE_TIMEOUT_CODE || code === NetCodeStatus.UNKNOWN_EXCEPTION_CODE;
 }
 
 function getUploadErrorCount(state: SDKWorkerRuntimeState, dataType: string): number {
