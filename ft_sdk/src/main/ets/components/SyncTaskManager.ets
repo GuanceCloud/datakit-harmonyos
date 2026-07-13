@@ -413,8 +413,12 @@ export class SyncTaskManager {
   public static readonly MAX_ERROR_COUNT = DATA_UPLOAD_MAX_RETRY_COUNT;
   public static readonly MAX_PAGE_SIZE = DATA_UPLOAD_MAX_PAGE_SIZE;
   public static readonly MAX_BODY_BYTES = DATA_UPLOAD_MAX_BODY_BYTES;
+  /**
+   * Delay automatic upload triggers so records produced close together are
+   * uploaded in a single batch. Kept aligned with Android's SLEEP_TIME.
+   */
+  public static readonly AUTO_SYNC_DELAY_MS = 10_000;
   private static instance: SyncTaskManager | null = null;
-  private static SLEEP_TIME = 2000; // 2 seconds - upload interval (reduced from 3s to further improve upload speed)
   private static readonly PREFERENCES_NAME = 'ft_sdk_sync_task';
   private static readonly KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
   private errorCount = 0;
@@ -524,11 +528,10 @@ export class SyncTaskManager {
     const taskName = this.nextUploadTaskName();
     if (this.uploadScheduled || this.uploadRunning) {
       this.uploadNeedReschedule = true;
-      if (this.uploadRescheduleDelay > 0) {
-        this.uploadRescheduleDelay = Math.min(this.uploadRescheduleDelay, normalizedDelay);
-      } else {
-        this.uploadRescheduleDelay = normalizedDelay;
-      }
+      // Match Android's DataUploadThreadPool: a trigger received while work is
+      // already waiting or running is consumed by an immediate follow-up task.
+      // In particular, this must not start a second 10-second wait.
+      this.uploadRescheduleDelay = 0;
       return;
     }
 
@@ -636,19 +639,20 @@ export class SyncTaskManager {
       return;
     }
 
-    this.scheduleUpload(withSleep ? SyncTaskManager.SLEEP_TIME : 0);
+    this.scheduleUpload(withSleep ? SyncTaskManager.AUTO_SYNC_DELAY_MS : 0);
   }
 
   /**
    * Trigger polling synchronization
-   * Auto sync only submits upload work when stored data is available.
+   * Auto sync submits a delayed upload poll so data produced in the next
+   * aggregation window can be uploaded together.
    */
   public executeSyncPoll(): void {
     if (!this.autoSync || this.isStop) {
       return;
     }
 
-    this.scheduleUpload(0);
+    this.executePoll(true);
   }
 
   /**

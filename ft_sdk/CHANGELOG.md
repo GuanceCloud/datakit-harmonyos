@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `FTSDK.setAutoSync(...)` to enable or disable automatic cached-data upload after SDK initialization.
 - Added `FTSDKConfig.setCustomSyncPageSize(...)` for custom upload page sizes; predefined sizes remain available through `setSyncPageSize(...)`.
 - Added upload-only network routing configuration through `FTSDKConfig.setProxy(...)`, `setProxyAuthenticator(...)`, and `setDns(...)`.
+- Changed automatic cached-data uploads to use a 10-second aggregation window, aligned with the Android SDK; manual `flushSyncData()` continues to request an immediate poll.
 - Updated the internal thread-pool and serialized DB task processing to improve data consistency under high concurrency.
 - Added configurable SDK debugging through `FTSDKConfig.setSdkLogLevel(...)` and `FTSDKConfig.setEnableInnerLogFile(...)`.
 

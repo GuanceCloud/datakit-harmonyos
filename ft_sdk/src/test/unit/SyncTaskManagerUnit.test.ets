@@ -443,7 +443,15 @@ class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor
   }
 }
 
-async function runScheduledUpload(_runtime: FakeRuntime): Promise<void> {
+async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
+  const initialUploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+  if (initialUploadStatus.isScheduled && initialUploadStatus.scheduledDelay > 0) {
+    const delayedUpload = runtime.timerCallbacks.get(runtime.timerId);
+    if (delayedUpload) {
+      delayedUpload();
+    }
+  }
+
   for (let i = 0; i < 200; i++) {
     await Promise.resolve();
     const uploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
@@ -555,7 +563,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('executeSyncPollShouldSkipUploadLaneWhenDbIsEmpty', 0, async () => {
+    it('executeSyncPollShouldScheduleTenSecondAggregationWhenDbIsEmpty', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
       const db = runtime.dbTaskPool as FakeDbTaskPool;
@@ -564,7 +572,9 @@ export default function syncTaskManagerUnitTest() {
       manager.executeSyncPoll();
       await flushPromises();
 
-      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+      const uploadStatus = manager.getStatus().uploadLaneStatus;
+      expect(uploadStatus.isScheduled).assertTrue();
+      expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
     });
 
     it('executeSyncPollShouldRunUploadLaneWhenDbHasData', 0, async () => {
@@ -579,10 +589,39 @@ export default function syncTaskManagerUnitTest() {
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
       manager.executeSyncPoll();
+      expect(manager.getStatus().uploadLaneStatus.scheduledDelay)
+        .assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
       await runScheduledUpload(runtime);
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('executeSyncPollShouldAggregateRepeatedTriggersWithinOneTenSecondWindow', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-aggregate', 'df_rum_harmonyos_log,sdk_data_id=log-aggregate value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+
+      const uploadStatus = manager.getStatus().uploadLaneStatus;
+      expect(uploadStatus.isScheduled).assertTrue();
+      expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
+      expect(uploadStatus.needReschedule).assertTrue();
+      expect(runtime.timerCallbacks.size).assertEqual(2);
+
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
