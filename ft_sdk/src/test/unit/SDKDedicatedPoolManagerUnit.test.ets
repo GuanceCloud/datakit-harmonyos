@@ -57,6 +57,7 @@ import {
   isSDKWorkerMailboxReplaySafe
 } from '../../main/ets/components/thread/SDKWorkerReplayPolicy';
 import { parseANREventInWorker } from '../../main/ets/components/thread/workers/ANRWorkerOperations';
+import { normalizeANRParamsForWorker } from '../../main/ets/components/monitor/ANRDetectManager';
 import {
   parseProcStatCpuTicks,
   parseProcStatusMemoryMB
@@ -310,6 +311,58 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(result.foreground).assertTrue();
       expect(result.dateline).assertEqual(9988);
       expect(result.filesRead).assertEqual(0);
+    });
+
+    it('anrHostEnvelopeShouldWhitelistAndBoundMergedParams', 0, () => {
+      const sources: Array<Record<string, Object>> = [];
+      for (let sourceIndex = 0; sourceIndex < 12; sourceIndex++) {
+        const frames: Object[] = [];
+        for (let frameIndex = 0; frameIndex < 140; frameIndex++) {
+          const frame = new Object() as Record<string, Object>;
+          frame['file'] = `Index-${frameIndex}.ets`;
+          frame['line'] = frameIndex;
+          frame['symbol'] = 'x'.repeat(5000);
+          frame['ignored'] = 'must-not-cross-worker-mailbox';
+          frames.push(frame);
+        }
+        const threads: Object[] = [];
+        for (let threadIndex = 0; threadIndex < 20; threadIndex++) {
+          const thread = new Object() as Record<string, Object>;
+          thread['thread_name'] = `thread-${threadIndex}`;
+          thread['tid'] = threadIndex;
+          thread['frames'] = frames;
+          thread['ignored'] = 'must-not-cross-worker-mailbox';
+          threads.push(thread);
+        }
+        const hilog: Object[] = [];
+        for (let lineIndex = 0; lineIndex < 60; lineIndex++) {
+          hilog.push('h'.repeat(3000));
+        }
+        const source = new Object() as Record<string, Object>;
+        source['freeze_type'] = `freeze-${sourceIndex}`;
+        source['stack_trace'] = 's'.repeat(70 * 1024);
+        source['hilog'] = hilog;
+        source['threads'] = threads;
+        source['unknown_payload'] = 'must-not-cross-worker-mailbox';
+        sources.push(source);
+      }
+
+      const normalized = normalizeANRParamsForWorker(sources);
+      const normalizedThreads = normalized['threads'] as Object[];
+      const firstThread = normalizedThreads[0] as Record<string, Object>;
+      const normalizedFrames = firstThread['frames'] as Object[];
+      const firstFrame = normalizedFrames[0] as Record<string, Object>;
+      const normalizedHilog = normalized['hilog'] as Object[];
+
+      expect(String(normalized['freeze_type'])).assertEqual('freeze-11');
+      expect(String(normalized['stack_trace']).length).assertEqual(64 * 1024);
+      expect(normalizedHilog.length).assertEqual(50);
+      expect(String(normalizedHilog[0]).length).assertEqual(2048);
+      expect(normalizedThreads.length).assertEqual(16);
+      expect(normalizedFrames.length).assertEqual(128);
+      expect(String(firstFrame['symbol']).length).assertEqual(4096);
+      expect(firstFrame['ignored'] === undefined).assertTrue();
+      expect(normalized['unknown_payload'] === undefined).assertTrue();
     });
 
     it('backgroundWorkerShouldParseProcMetricsDeterministically', 0, () => {
@@ -880,6 +933,201 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
     });
 
+    it('eventRumResourceAndCounterReplayShouldSurviveFreshWorkerState', 0, () => {
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'restart-session',
+        viewId: 'restart-view',
+        viewName: 'RestartView',
+        viewReferrer: 'root',
+        actionId: 'restart-action',
+        actionName: 'load'
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://restart.test/resource',
+        requestHeader: '',
+        responseHeader: 'content-type: text/plain',
+        responseConnection: '',
+        responseContentType: 'text/plain',
+        responseContentEncoding: '',
+        responseContentLength: 2,
+        resourceMethod: 'GET',
+        responseBody: 'ok',
+        resourceStatus: 200,
+        resourceType: 'network',
+        requestErrorStack: '',
+        requestErrorMsg: '',
+        property: new Object() as SDKPropertyRecord
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 1,
+        dnsStartTime: 0,
+        tcpTime: 1,
+        tcpStartTime: 1,
+        sslTime: 1,
+        sslStartTime: 2,
+        ttfbTime: 1,
+        responseTime: 2,
+        firstByteTime: 1,
+        firstByteStartTime: 3,
+        downloadTime: 1,
+        downloadStartTime: 4,
+        holeRequestTime: 5,
+        resourceHostIP: '127.0.0.1'
+      };
+      const firstBatch: SDKRumResourceCommandBatchDTO = {
+        commands: [{
+          commandType: 'start',
+          resourceId: 'restart-resource',
+          draftUuid: 'restart-resource-draft',
+          errorDraftUuid: 'restart-error-draft',
+          context,
+          startTime: 10
+        }, {
+          commandType: 'setContent',
+          resourceId: 'restart-resource',
+          draftUuid: 'restart-resource-draft',
+          errorDraftUuid: 'restart-error-draft',
+          context,
+          params,
+          eventTime: 20
+        }]
+      };
+      const secondBatch: SDKRumResourceCommandBatchDTO = {
+        commands: [{
+          commandType: 'stop',
+          resourceId: 'restart-resource',
+          draftUuid: 'restart-resource-draft',
+          errorDraftUuid: 'restart-error-draft',
+          context,
+          endTime: 30
+        }, {
+          commandType: 'setNetState',
+          resourceId: 'restart-resource',
+          draftUuid: 'restart-resource-draft',
+          errorDraftUuid: 'restart-error-draft',
+          context,
+          netStatus,
+          eventTime: 30
+        }]
+      };
+
+      const runLifecycle = (state: SDKWorkerRuntimeState, suffix: string): SDKWorkerResponse[] => {
+        handleSDKWorkerRequest({
+          id: `restart-context-${suffix}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+          priority: 7,
+          createdAt: 1,
+          payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+        }, state);
+        handleSDKWorkerRequest({
+          id: `restart-first-${suffix}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+          priority: 7,
+          createdAt: 2,
+          payload: firstBatch as Object as SDKWorkerPayload
+        }, state);
+        const completed = handleSDKWorkerRequest({
+          id: `restart-second-${suffix}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+          priority: 7,
+          createdAt: 3,
+          payload: secondBatch as Object as SDKWorkerPayload
+        }, state);
+        const flushed = handleSDKWorkerRequest({
+          id: `restart-flush-${suffix}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+          priority: 7,
+          createdAt: 4
+        }, state);
+        return [completed, flushed];
+      };
+
+      const originalState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'OriginalEventWorker', 'unit-worker');
+      const restartedState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'RestartedEventWorker', 'unit-worker');
+      const original = runLifecycle(originalState, 'original');
+      const restarted = runLifecycle(restartedState, 'restarted');
+      const originalDrafts = getPayloadArray(original[0].payload, 'syncDrafts');
+      const restartedDrafts = getPayloadArray(restarted[0].payload, 'syncDrafts');
+      const originalDeltas = getPayloadArray(original[1].payload, 'deltas');
+      const restartedDeltas = getPayloadArray(restarted[1].payload, 'deltas');
+
+      expect(originalDrafts.length).assertEqual(1);
+      expect(restartedDrafts.length).assertEqual(1);
+      expect(String((originalDrafts[0] as Record<string, Object>)['uuid'])).assertEqual('restart-resource-draft');
+      expect(String((restartedDrafts[0] as Record<string, Object>)['uuid'])).assertEqual('restart-resource-draft');
+      expect(String((originalDrafts[0] as Record<string, Object>)['dataString'])).assertEqual(
+        String((restartedDrafts[0] as Record<string, Object>)['dataString']));
+      expect(JSON.stringify(originalDeltas)).assertEqual(JSON.stringify(restartedDeltas));
+      expect(originalState.rumResources.size).assertEqual(0);
+      expect(restartedState.rumResources.size).assertEqual(0);
+
+      const checkpointRestoredState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'CheckpointRestoredEventWorker', 'unit-worker');
+      handleSDKWorkerRequest({
+        id: 'restart-context-checkpoint',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: 1,
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      }, checkpointRestoredState);
+      const stateOnlyStart: SDKRumResourceCommandBatchDTO = {
+        commands: [firstBatch.commands[0]],
+        stateRecoveryOnly: true
+      };
+      handleSDKWorkerRequest({
+        id: 'restart-state-only-start',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: 2,
+        payload: stateOnlyStart as Object as SDKWorkerPayload
+      }, checkpointRestoredState);
+      const stateOnlyFlush = handleSDKWorkerRequest({
+        id: 'restart-state-only-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: 3
+      }, checkpointRestoredState);
+      const completionBatch: SDKRumResourceCommandBatchDTO = {
+        commands: [firstBatch.commands[1], secondBatch.commands[0], secondBatch.commands[1]]
+      };
+      const checkpointCompletion = handleSDKWorkerRequest({
+        id: 'restart-checkpoint-completion',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: 4,
+        payload: completionBatch as Object as SDKWorkerPayload
+      }, checkpointRestoredState);
+      const checkpointFlush = handleSDKWorkerRequest({
+        id: 'restart-checkpoint-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: 5
+      }, checkpointRestoredState);
+      const stateOnlyDeltas = getPayloadArray(stateOnlyFlush.payload, 'deltas');
+      const checkpointDrafts = getPayloadArray(checkpointCompletion.payload, 'syncDrafts');
+      const checkpointCompletedIds = getPayloadArray(checkpointCompletion.payload, 'completedResourceIds');
+      const checkpointDeltas = getPayloadArray(checkpointFlush.payload, 'deltas');
+      const checkpointViewDelta = checkpointDeltas[0] as Record<string, Object>;
+
+      expect(stateOnlyDeltas.length).assertEqual(0);
+      expect(checkpointDrafts.length).assertEqual(1);
+      expect(String(checkpointCompletedIds[0])).assertEqual('restart-resource');
+      expect(Number(checkpointViewDelta['viewResourceDelta'])).assertEqual(1);
+      expect(Number(checkpointViewDelta['viewPendingDelta'])).assertEqual(-1);
+      expect(checkpointRestoredState.rumResources.size).assertEqual(0);
+    });
+
     it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {
       const customText: SDKCompletedActionPropertyTestValue = { value: 'fast' };
       const customJson: SDKCompletedActionPropertyTestValue = { nested: 'yes' };
@@ -1262,6 +1510,71 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }, state);
       const committed = commitResponse.payload as Object as SDKUploadCommitPageResultDTO;
       expect(committed.roundHasMoreData).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldDeferOversizedRowWithoutDbDelete', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'OversizedRowWorker', 'unit-worker');
+      const startPayload: SDKUploadRoundStartDTO = {
+        ownerId: 'oversized-owner',
+        taskName: 'oversized-row',
+        pageSize: 1,
+        syncSleepTime: 0
+      };
+      const startResponse = handleSDKWorkerRequest({
+        id: 'oversized-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: startPayload as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const row: SDKUploadRowDTO = {
+        id: 51,
+        dataType: 'log',
+        dataString: `df_rum_harmonyos_log,sdk_data_id=oversized message="${
+          'x'.repeat(DATA_UPLOAD_MAX_BODY_BYTES + 1024)}" 100`,
+        uuid: 'oversized',
+        time: 100
+      };
+      const executePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows: [row],
+        queryHasMore: true,
+        transportLimitReached: true,
+        httpConfig: {
+          datakitUrl: 'https://localhost',
+          datawayUrl: '',
+          clientToken: '',
+          model: 'logging_v1',
+          deviceTimeMs: 100,
+          connectTimeoutMs: 60_000,
+          readTimeoutMs: 60_000,
+          softTimeoutMs: 125_000
+        }
+      };
+      const httpExecutor = new RetryUploadHttpExecutor(200);
+      const response = await handleSDKDataUploadWorkerRequest({
+        id: 'oversized-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: executePayload as Object as SDKWorkerPayload
+      }, state, httpExecutor);
+      const result = response.payload as Object as SDKUploadExecutePageResultDTO;
+
+      expect(result.acceptedRows).assertEqual(0);
+      expect(result.rows.length).assertEqual(0);
+      expect(result.attemptId.length).assertEqual(0);
+      expect(result.dbAction).assertEqual(SDKUploadDbActionDTO.NONE);
+      expect(result.oversizedRows).assertEqual(1);
+      expect(result.transportLimitReached).assertTrue();
+      expect(result.roundHasMoreData).assertTrue();
+      expect(result.delayMs >= 500).assertTrue();
+      expect(httpExecutor.lastRequest === null).assertTrue();
     });
 
     it('dataUploadWorkerShouldRestoreHostCheckpointAfterAckWindowRestart', 0, async () => {

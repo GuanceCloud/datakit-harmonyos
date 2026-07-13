@@ -67,6 +67,8 @@ export interface SyncDataWriteResult {
   duplicateSkipped: number;
   deletedOld: number;
   errorMessage: string;
+  /** Number of rows durably accepted by the active/inflight fallback spool. */
+  fallbackPersisted?: number;
 }
 
 enum SyncDataCacheCategory {
@@ -1263,6 +1265,7 @@ export class FTDBManager extends DBManager {
     }
     try {
       const spooled = await this.syncDataWriteFailureFallback.appendSyncDataJSON(source, records);
+      result.fallbackPersisted = spooled;
       if (spooled !== records.length) {
         result.errorMessage = `${result.errorMessage || 'DB write failed'}; fallback persisted ${spooled}/${records.length}`;
         FTInnerLogger.e(TAG, result.errorMessage);

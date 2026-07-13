@@ -207,6 +207,9 @@ export interface SDKRumResourceNetStatusDTO {
 export interface SDKRumResourceCommandDTO {
   commandType: string;
   resourceId: string;
+  /** Stable Host-generated IDs keep Resource replay idempotent across restarts. */
+  draftUuid?: string;
+  errorDraftUuid?: string;
   context?: SDKRumResourceContextDTO;
   params?: SDKRumResourceParamsDTO;
   netStatus?: SDKRumResourceNetStatusDTO;
@@ -221,9 +224,13 @@ export interface SDKRumResourceCommandDTO {
 
 export interface SDKRumResourceCommandBatchDTO {
   commands: SDKRumResourceCommandDTO[];
+  /** Rebuilds volatile Resource state after restart without reapplying committed Counter deltas. */
+  stateRecoveryOnly?: boolean;
 }
 
 export interface SDKRumErrorCommandDTO {
+  /** Stable Host-generated ID keeps Error replay idempotent across restarts. */
+  uuid?: string;
   context: SDKRumResourceContextDTO;
   log: string;
   message: string;
@@ -455,6 +462,9 @@ export interface SDKUploadExecutePageDTO {
   roundId: string;
   dataType: string;
   rows: SDKUploadRowDTO[];
+  /** More rows remain in DB or were deferred by the Host transport byte cap. */
+  queryHasMore?: boolean;
+  transportLimitReached?: boolean;
   httpConfig: SDKUploadHttpConfigDTO;
   /** Optional one-shot result supplied only by an injected test runtime. */
   injectedHttpResult?: SDKUploadHttpResultDTO;
@@ -474,6 +484,7 @@ export interface SDKUploadExecutePageResultDTO {
   bodyBytes: number;
   bodyLimitReached: boolean;
   oversizedRows: number;
+  transportLimitReached: boolean;
   bodyPreview: string;
   shouldUpload: boolean;
   outcome: SDKUploadPageOutcome;

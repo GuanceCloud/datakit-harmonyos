@@ -16,6 +16,7 @@ enum FTDBTaskPoolCommand {
   INIT = 'init',
   HAS_SYNC_DATA = 'hasSyncData',
   QUERY_SYNC_DATA = 'querySyncData',
+  QUERY_UPLOAD_DATA = 'queryUploadData',
   WRITE_SYNC_DATA = 'writeSyncData',
   WRITE_SYNC_DRAFTS = 'writeSyncDrafts',
   DELETE_SYNC_ROWS = 'deleteSyncRows',
@@ -152,6 +153,7 @@ interface FTDBTaskPoolRequest {
   source?: string;
   dataTypes?: string[];
   limit?: number;
+  maxBytes?: number;
   newestFirst?: boolean;
   records?: SyncDataJSON[];
   options?: FTDBTaskPoolWriteOptions;
@@ -188,6 +190,9 @@ interface FTDBTaskPoolResponse {
   value?: boolean;
   count?: number;
   rows?: SyncDataJSON[];
+  hasMore?: boolean;
+  byteCount?: number;
+  byteLimitReached?: boolean;
   write?: FTDBTaskPoolWriteResponse;
   uploadCommit?: FTDBTaskPoolUploadCommitResponse;
   maintenance?: FTDBTaskPoolMaintenanceResponse;
@@ -216,6 +221,13 @@ interface FTDBTaskPoolTiming {
   insertMs: number;
   sizeCheckMs: number;
   cleanupMs: number;
+}
+
+interface FTDBTaskPoolUploadPageResult {
+  rows: SyncDataJSON[];
+  hasMore: boolean;
+  byteCount: number;
+  byteLimitReached: boolean;
 }
 
 interface FTDBTaskPoolCountDelta {
@@ -254,6 +266,21 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
             request.newestFirst === true
           )
         } as FTDBTaskPoolResponse as Object;
+      case FTDBTaskPoolCommand.QUERY_UPLOAD_DATA: {
+        const uploadPage = await queryUploadDataInTaskPool(
+          rdbStore,
+          request.dataTypes || [],
+          normalizeLimit(request.limit),
+          normalizeByteLimit(request.maxBytes)
+        );
+        return {
+          ok: true,
+          rows: uploadPage.rows,
+          hasMore: uploadPage.hasMore,
+          byteCount: uploadPage.byteCount,
+          byteLimitReached: uploadPage.byteLimitReached
+        } as FTDBTaskPoolResponse as Object;
+      }
       case FTDBTaskPoolCommand.WRITE_SYNC_DATA:
         return {
           ok: true,
@@ -485,6 +512,13 @@ function normalizeLimit(limit?: number): number {
   return Math.max(1, Math.floor(limit));
 }
 
+function normalizeByteLimit(maxBytes?: number): number {
+  if (typeof maxBytes !== 'number' || maxBytes !== maxBytes || maxBytes <= 0) {
+    return 1024 * 1024;
+  }
+  return Math.max(1024, Math.floor(maxBytes));
+}
+
 function defaultWriteOptions(): FTDBTaskPoolWriteOptions {
   return {
     applyCachePolicy: false,
@@ -708,6 +742,90 @@ async function querySyncDataInTaskPool(
     resultSet.close();
   }
   return rows;
+}
+
+async function queryUploadDataInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  dataTypes: string[],
+  limit: number,
+  maxBytes: number
+): Promise<FTDBTaskPoolUploadPageResult> {
+  const predicates = buildTypePredicates(dataTypes);
+  predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
+  // Read one extra row inside TaskPool to detect count-based pagination without
+  // transporting it back to the Host.
+  predicates.limitAs(limit + 1);
+  const result: FTDBTaskPoolUploadPageResult = {
+    rows: [],
+    hasMore: false,
+    byteCount: 0,
+    byteLimitReached: false
+  };
+  const resultSet = await rdbStore.query(predicates, [
+    FTSQL.RECORD_COLUMN_ID,
+    FTSQL.RECORD_COLUMN_DATA_UUID,
+    FTSQL.RECORD_COLUMN_DATA_TYPE,
+    FTSQL.RECORD_COLUMN_DATA,
+    FTSQL.RECORD_COLUMN_TM
+  ]);
+  try {
+    while (resultSet.goToNextRow()) {
+      if (result.rows.length >= limit) {
+        result.hasMore = true;
+        break;
+      }
+      const storedType = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_TYPE));
+      const row: SyncDataJSON = {
+        id: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_ID)),
+        uuid: resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_UUID)),
+        dataType: dataTypeToEnum(storedType),
+        dataString: resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA)),
+        time: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_TM))
+      };
+      if (storedType !== row.dataType.toString()) {
+        row.customDataTypeString = storedType;
+      }
+      const rowBytes = estimateUploadRowBytes(row, storedType);
+      if (result.byteCount + rowBytes > maxBytes) {
+        result.hasMore = true;
+        result.byteLimitReached = true;
+        break;
+      }
+      result.rows.push(row);
+      result.byteCount += rowBytes;
+    }
+  } finally {
+    resultSet.close();
+  }
+  return result;
+}
+
+function estimateUploadRowBytes(row: SyncDataJSON, storedType: string): number {
+  return getUtf8ByteLength(row.dataString || '') + getUtf8ByteLength(row.uuid || '') +
+    getUtf8ByteLength(storedType || '') + 64;
+}
+
+function getUtf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x7f) {
+      bytes++;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }
 
 async function queryTotalCountInTaskPool(
@@ -1301,13 +1419,20 @@ async function uploadCommitInTaskPool(
     rdbStore.beginTransaction();
     if (action === 'delete') {
       deletedRows = await deleteSyncRowsBodyInTaskPool(rdbStore, records);
-      addCountDelta(delta, getCacheCategoryForTypeString(dataType), -Math.max(0, reduceCount));
+      if (deletedRows !== records.length) {
+        throw new Error(`Upload delete affected ${deletedRows}/${records.length} accepted rows`);
+      }
+      addCountDelta(delta, getCacheCategoryForTypeString(dataType),
+        -Math.min(deletedRows, Math.max(0, reduceCount)));
     } else if (action === 'reinsert') {
       deletedRows = await deleteSyncRowsBodyInTaskPool(rdbStore, records);
+      if (deletedRows !== records.length) {
+        throw new Error(`Upload retry delete affected ${deletedRows}/${records.length} accepted rows`);
+      }
       const result = createWriteResult('uploadCommit.reinsert', reInsertRecords.length);
       await insertPreparedSyncData(rdbStore, reInsertRecords, result, delta, createTiming(), false);
       insertedRows = result.inserted;
-      if (!result.success) {
+      if (!result.success || insertedRows !== reInsertRecords.length) {
         throw new Error(result.errorMessage || 'upload commit reinsert failed');
       }
     } else {

@@ -5,6 +5,7 @@ import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
 import {
   FTDBTaskPoolExecutor,
   FTDBTaskPoolMaintenanceResponse,
+  FTDBTaskPoolUploadPage,
   FTDBTaskPoolUploadCommitResponse
 } from '../../db/FTDBTaskPoolExecutor';
 import { DataType } from '../../enum/Enums';
@@ -32,6 +33,12 @@ export interface SyncTaskPreferences {
 export interface SyncTaskDbTaskPool {
   hasSyncData(context: Context, dataTypes: string[]): Promise<boolean>;
   querySyncData(context: Context, dataTypes: string[], limit: number, newestFirst?: boolean): Promise<SyncData[]>;
+  queryUploadData?(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage>;
   deleteSyncRows(context: Context, rows: SyncData[]): Promise<number>;
   uploadCommit(
     context: Context,
@@ -92,6 +99,15 @@ class DefaultSyncTaskDbTaskPool implements SyncTaskDbTaskPool {
     newestFirst?: boolean
   ): Promise<SyncData[]> {
     return await FTDBTaskPoolExecutor.querySyncData(context, dataTypes, limit, newestFirst === true);
+  }
+
+  async queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage> {
+    return await FTDBTaskPoolExecutor.queryUploadData(context, dataTypes, limit, maxBytes);
   }
 
   async deleteSyncRows(context: Context, rows: SyncData[]): Promise<number> {

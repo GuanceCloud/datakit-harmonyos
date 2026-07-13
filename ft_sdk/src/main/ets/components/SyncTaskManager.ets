@@ -20,6 +20,7 @@ import {
   DataUploadDbCommitAction,
   DataUploadDbMaintenanceResult,
   DataUploadDbWriteResult,
+  DataUploadQueryPage,
   DataUploadRow,
   DataUploadWorkerCapabilities
 } from './thread/workers/DataUploadWorkerCapabilities';
@@ -31,8 +32,10 @@ import {
 } from './thread/SDKWorkerProtocol';
 import {
   DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_DB_PAGE_BYTES,
   DATA_UPLOAD_MAX_PAGE_SIZE,
-  DATA_UPLOAD_MAX_RETRY_COUNT
+  DATA_UPLOAD_MAX_RETRY_COUNT,
+  DATA_UPLOAD_MAX_TRANSPORT_BYTES
 } from './thread/workers/DataUploadLimits';
 
 /**
@@ -128,21 +131,88 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     return await this.dbTaskPoolProvider().hasSyncData(context, [dataType.toString()]);
   }
 
-  async queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]> {
+  async queryRows(dataType: DataType, pageSize: number): Promise<DataUploadQueryPage> {
     const context = this.contextProvider();
     if (!context) {
-      return [];
+      return this.emptyUploadQueryPage();
     }
-    const rows = await this.dbTaskPoolProvider().querySyncData(
-      context,
-      [dataType.toString()],
-      normalizeUploadPageSize(pageSize)
-    );
+    const dbTaskPool = this.dbTaskPoolProvider();
+    const normalizedPageSize = normalizeUploadPageSize(pageSize);
+    let rows: SyncData[] = [];
+    let hasMore = false;
+    let byteLimitReached = false;
+    if (dbTaskPool.queryUploadData) {
+      const page = await dbTaskPool.queryUploadData(
+        context,
+        [dataType.toString()],
+        normalizedPageSize,
+        DATA_UPLOAD_MAX_DB_PAGE_BYTES
+      );
+      rows = page.rows;
+      hasMore = page.hasMore;
+      byteLimitReached = page.byteLimitReached;
+    } else {
+      // Unit/custom runtimes retain compatibility while the production DB path
+      // uses the byte-capped TaskPool query above.
+      rows = await dbTaskPool.querySyncData(context, [dataType.toString()], normalizedPageSize);
+      hasMore = rows.length >= normalizedPageSize;
+    }
     const result: DataUploadRow[] = [];
-    for (const row of rows) {
-      result.push(this.toUploadRow(row));
+    let transportBytes = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const uploadRow = this.toUploadRow(rows[i]);
+      const rowBytes = this.estimateUploadTransportRowBytes(uploadRow);
+      if (transportBytes + rowBytes > DATA_UPLOAD_MAX_TRANSPORT_BYTES) {
+        hasMore = true;
+        byteLimitReached = true;
+        break;
+      }
+      result.push(uploadRow);
+      transportBytes += rowBytes;
     }
-    return result;
+    return {
+      rows: result,
+      hasMore,
+      transportBytes,
+      byteLimitReached
+    };
+  }
+
+  private emptyUploadQueryPage(): DataUploadQueryPage {
+    return {
+      rows: [],
+      hasMore: false,
+      transportBytes: 0,
+      byteLimitReached: false
+    };
+  }
+
+  private estimateUploadTransportRowBytes(row: DataUploadRow): number {
+    return this.getUtf8ByteLength(row.dataString || '') + this.getUtf8ByteLength(row.uuid || '') +
+      this.getUtf8ByteLength(row.dataType || '') + this.getUtf8ByteLength(row.customDataType || '') + 64;
+  }
+
+  private getUtf8ByteLength(value: string): number {
+    let bytes = 0;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code <= 0x7f) {
+        bytes++;
+      } else if (code <= 0x7ff) {
+        bytes += 2;
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+        const next = value.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4;
+          i++;
+        } else {
+          bytes += 3;
+        }
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
   }
 
   async commitUpload(
@@ -168,6 +238,11 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       this.toSyncDataList(reInsertRows || []),
       reduceCount
     );
+    const expectedAffectedRows = action === DataUploadDbCommitAction.REINSERT ?
+      rows.length + (reInsertRows || []).length : rows.length;
+    if (response.affectedRows < expectedAffectedRows) {
+      throw new Error(`Upload DB commit affected ${response.affectedRows}/${expectedAffectedRows} expected row operations`);
+    }
     this.applyCacheCountDelta(response.logCountDelta, response.rumCountDelta);
     return this.createDbWriteResult(response.affectedRows, response.dbLaneWaitMs);
   }

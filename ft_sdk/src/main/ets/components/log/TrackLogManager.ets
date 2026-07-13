@@ -167,7 +167,9 @@ export class TrackLogManager {
 
     if (accepted > 0) {
       this.flushPendingLogDTOs(true);
-      this.postLogDTOs(batchDTOs, true);
+      for (let offset = 0; offset < batchDTOs.length; offset += LOG_HOST_MAILBOX_BATCH_SIZE) {
+        this.postLogDTOs(batchDTOs.slice(offset, offset + LOG_HOST_MAILBOX_BATCH_SIZE), true);
+      }
     }
   }
 

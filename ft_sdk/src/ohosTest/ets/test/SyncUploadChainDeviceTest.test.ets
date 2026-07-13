@@ -18,7 +18,8 @@ import {
 } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import {
   DATA_UPLOAD_MAX_BODY_BYTES,
-  DATA_UPLOAD_MAX_PAGE_SIZE
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_TRANSPORT_BYTES
 } from '../../../main/ets/components/thread/workers/DataUploadLimits';
 
 const TEST_HOST = 'http://127.0.0.1:1';
@@ -597,6 +598,7 @@ export default function syncUploadChainDeviceTest() {
       expect(requests.length > 0).assertTrue();
       expect(syncTaskManager.getPageSize()).assertEqual(DATA_UPLOAD_MAX_PAGE_SIZE);
       expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_BODY_BYTES).assertTrue();
+      expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_TRANSPORT_BYTES).assertTrue();
       expect(countBodyLines(requests[0].bodyString) < DATA_UPLOAD_MAX_PAGE_SIZE).assertTrue();
       expect(watchdog.samples >= 5).assertTrue();
       expect(watchdog.maxDelayMs <= 750).assertTrue();

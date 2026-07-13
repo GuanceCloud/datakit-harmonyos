@@ -11,7 +11,7 @@ import FTTrackInner from "./FTTrackInner";
 import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
 import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
 import { TrackLogManager } from "./log/TrackLogManager";
-import { FTInnerLogger } from "./log/FTLogger";
+import { FTInnerLogger, FTLogger } from "./log/FTLogger";
 import { FTInnerLogFileManager } from "./log/FTInnerLogFileManager";
 import { UserDataManager } from "./rum/UserDataManager";
 import { FTNetworkListener } from "./utils/FTNetworkListener";
@@ -51,6 +51,7 @@ export class FTSDK {
 
   protected static resetInternalState(): void {
     FTInnerLogFileManager.getInstance().shutdown(false);
+    FTLogger.resetBatchStateInternal();
     FTSDK.ftSdk = null;
     FTSDK.anrDetectManager = null;
     FTSDK.rumConfig = null;
@@ -441,6 +442,7 @@ export class FTSDK {
 
     // Release RUM manager state to avoid timers and context references surviving SDK shutdown.
     FTRUMInnerManager.shutdownInternal();
+    FTLogger.resetBatchStateInternal();
 
     // Release network listener (similar to Android)
     FTNetworkListener.release();

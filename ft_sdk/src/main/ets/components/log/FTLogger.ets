@@ -142,8 +142,18 @@ export class FTInnerLogger {
  */
 const TAG = "FTLogger";
 
+interface PendingPublicLogBatch {
+  logs: LogEntry[];
+  cursor: number;
+}
+
 export class FTLogger {
   private static trackLogManager: TrackLogManager | null = null;
+  private static readonly PUBLIC_BATCH_SLICE_SIZE = 64;
+  private static readonly PUBLIC_BATCH_SLICE_DELAY_MS = 16;
+  private static pendingPublicLogBatches: PendingPublicLogBatch[] = [];
+  private static publicBatchDrainTimer: number | null = null;
+  private static publicBatchFlushRequested: boolean = false;
   
   /**
    * Initialize log manager
@@ -153,12 +163,36 @@ export class FTLogger {
       FTLogger.trackLogManager = TrackLogManager.getInstance();
     }
   }
+
+  public static resetBatchStateInternal(): void {
+    if (FTLogger.publicBatchDrainTimer !== null) {
+      clearTimeout(FTLogger.publicBatchDrainTimer);
+      FTLogger.publicBatchDrainTimer = null;
+    }
+    FTLogger.pendingPublicLogBatches = [];
+    FTLogger.publicBatchFlushRequested = false;
+  }
+
+  private static enqueueBehindPendingBatch(tag: string, message: string, level: string): boolean {
+    if (FTLogger.pendingPublicLogBatches.length === 0) {
+      return false;
+    }
+    FTLogger.pendingPublicLogBatches.push({
+      logs: [{ tag, message, level, timestampMs: Utils.getCurrentTimestamp() }],
+      cursor: 0
+    });
+    FTLogger.schedulePublicBatchDrain();
+    return true;
+  }
   
   /**
    * Debug level log
    */
   static d(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'd')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -176,6 +210,9 @@ export class FTLogger {
    */
   static i(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'i')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -193,6 +230,9 @@ export class FTLogger {
    */
   static w(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'w')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -210,6 +250,9 @@ export class FTLogger {
    */
   static e(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'e')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -227,39 +270,89 @@ export class FTLogger {
    */
   static batchLog(logs: Array<LogEntry>): void {
     FTLogger.initTrackLogManager();
-    
+    if (!logs || logs.length === 0) {
+      return;
+    }
+    // A shallow membership snapshot preserves the caller-visible batch while
+    // expensive bean creation, filtering and serialization are time-sliced.
+    FTLogger.pendingPublicLogBatches.push({ logs: logs.slice(), cursor: 0 });
+    FTLogger.schedulePublicBatchDrain();
+  }
+
+  private static schedulePublicBatchDrain(): void {
+    if (FTLogger.publicBatchDrainTimer !== null) {
+      return;
+    }
+    FTLogger.publicBatchDrainTimer = setTimeout(() => {
+      FTLogger.publicBatchDrainTimer = null;
+      FTLogger.drainPublicBatchSlice();
+    }, FTLogger.PUBLIC_BATCH_SLICE_DELAY_MS) as number;
+  }
+
+  private static drainPublicBatchSlice(): void {
+    const pending = FTLogger.pendingPublicLogBatches[0];
+    if (!pending) {
+      if (FTLogger.publicBatchFlushRequested) {
+        FTLogger.publicBatchFlushRequested = false;
+        FTLogger.trackLogManager?.forceFlush();
+      }
+      return;
+    }
     try {
       const logBeans: LogBean[] = [];
-      
-      for (const log of logs) {
-        const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
-        const logBean = new LogBean(log.message, timestampMs);
-        
-        switch (log.level.toLowerCase()) {
-          case 'd':
-            logBean.setStatus(Status.DEBUG.name);
-            break;
-          case 'i':
-            logBean.setStatus(Status.INFO.name);
-            break;
-          case 'w':
-            logBean.setStatus(Status.WARN.name);
-            break;
-          case 'e':
-            logBean.setStatus(Status.ERROR.name);
-            break;
-          default:
-            logBean.setStatus(Status.INFO.name);
-        }
-        
-        logBean.addTag("tag", new StringWrapper(log.tag));
-        logBeans.push(logBean);
+      const end = Math.min(pending.logs.length, pending.cursor + FTLogger.PUBLIC_BATCH_SLICE_SIZE);
+      for (let i = pending.cursor; i < end; i++) {
+        logBeans.push(FTLogger.createPublicLogBean(pending.logs[i]));
       }
-      
-      FTLogger.trackLogManager?.trackLogBatch(logBeans);
+      pending.cursor = end;
+      if (logBeans.length > 0) {
+        FTLogger.trackLogManager?.trackLogBatch(logBeans);
+      }
+      if (pending.cursor >= pending.logs.length) {
+        FTLogger.pendingPublicLogBatches.shift();
+      }
     } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to enqueue batch logs: ${(error as Error).message}`);
+      FTInnerLogger.e(TAG, `Failed to enqueue batch logs: ${error instanceof Error ? error.message : String(error)}`);
+      FTLogger.pendingPublicLogBatches.shift();
     }
+    if (FTLogger.pendingPublicLogBatches.length > 0) {
+      FTLogger.schedulePublicBatchDrain();
+    } else if (FTLogger.publicBatchFlushRequested) {
+      FTLogger.publicBatchFlushRequested = false;
+      FTLogger.trackLogManager?.forceFlush();
+    }
+  }
+
+  private static createPublicLogBean(log: LogEntry): LogBean {
+    const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
+    const logBean = new LogBean(log.message, timestampMs);
+    switch (log.level.toLowerCase()) {
+      case 'd':
+        logBean.setStatus(Status.DEBUG.name);
+        break;
+      case 'i':
+        logBean.setStatus(Status.INFO.name);
+        break;
+      case 'w':
+        logBean.setStatus(Status.WARN.name);
+        break;
+      case 'e':
+        logBean.setStatus(Status.ERROR.name);
+        break;
+      default:
+        logBean.setStatus(Status.INFO.name);
+    }
+    logBean.addTag("tag", new StringWrapper(log.tag));
+    return logBean;
+  }
+
+  private static getPendingPublicLogCount(): number {
+    let count = 0;
+    for (let i = 0; i < FTLogger.pendingPublicLogBatches.length; i++) {
+      const pending = FTLogger.pendingPublicLogBatches[i];
+      count += Math.max(0, pending.logs.length - pending.cursor);
+    }
+    return count;
   }
   
   /**
@@ -267,7 +360,12 @@ export class FTLogger {
    */
   static flush(): void {
     FTLogger.initTrackLogManager();
-    FTLogger.trackLogManager?.forceFlush();
+    if (FTLogger.pendingPublicLogBatches.length > 0) {
+      FTLogger.publicBatchFlushRequested = true;
+      FTLogger.schedulePublicBatchDrain();
+    } else {
+      FTLogger.trackLogManager?.forceFlush();
+    }
   }
   
   /**
@@ -286,8 +384,9 @@ export class FTLogger {
     if (queueStatus) {
       const result = new Map<string, number | boolean>();
       result.set('queueSize', queueStatus.queueSize || 0);
-      result.set('bufferSize', queueStatus.bufferSize || 0);
-      result.set('isProcessing', queueStatus.isProcessing || false);
+      const publicPending = FTLogger.getPendingPublicLogCount();
+      result.set('bufferSize', (queueStatus.bufferSize || 0) + publicPending);
+      result.set('isProcessing', (queueStatus.isProcessing || false) || publicPending > 0);
       return result;
     }
     

@@ -40,6 +40,49 @@ class PublicLogEntry implements LogEntry {
   }
 }
 
+class LogMainLoopDelayWatchdog {
+  public maxDelayMs: number = 0;
+  public samples: number = 0;
+  private running: boolean = false;
+  private timerId: number = -1;
+  private expectedAt: number = 0;
+  private readonly intervalMs: number;
+
+  constructor(intervalMs: number = 10) {
+    this.intervalMs = intervalMs;
+  }
+
+  start(): void {
+    if (this.running) {
+      return;
+    }
+    this.running = true;
+    this.expectedAt = Date.now() + this.intervalMs;
+    this.scheduleNext();
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timerId >= 0) {
+      clearTimeout(this.timerId);
+      this.timerId = -1;
+    }
+  }
+
+  private scheduleNext(): void {
+    this.timerId = setTimeout(() => {
+      if (!this.running) {
+        return;
+      }
+      const now = Date.now();
+      this.maxDelayMs = Math.max(this.maxDelayMs, Math.max(0, now - this.expectedAt));
+      this.samples++;
+      this.expectedAt = now + this.intervalMs;
+      this.scheduleNext();
+    }, this.intervalMs) as number;
+  }
+}
+
 export default function logTest() {
   describe('LogTest', () => {
     beforeAll(() => {
@@ -200,6 +243,34 @@ export default function logTest() {
       expect(lines.includes('status=warn')).assertTrue();
       expect(lines.includes('status=error')).assertTrue();
       expect(lines.includes('batch_default_message')).assertTrue();
+    });
+
+    it('batchLogTenThousandShouldYieldToMainLoopInBoundedSlices', 0, async () => {
+      FTSDK.installLogConfig(new FTLoggerConfig()
+        .setEnableCustomLog(true)
+        .setSamplingRate(0));
+      const logs: LogEntry[] = [];
+      for (let i = 0; i < 10_000; i++) {
+        logs.push(new PublicLogEntry('batch-main-loop', `batch-main-loop-${i}`, 'i'));
+      }
+
+      const watchdog = new LogMainLoopDelayWatchdog(10);
+      watchdog.start();
+      const callStartedAt = Date.now();
+      FTLogger.batchLog(logs);
+      const callElapsedMs = Date.now() - callStartedAt;
+      const drained = await WaitUtils.waitUntil(async () => {
+        const status = FTLogger.getStatus();
+        return Number(status.get('bufferSize') || 0) === 0;
+      }, 8000, 20);
+      await WaitUtils.delay(100);
+      watchdog.stop();
+
+      expect(callElapsedMs <= 250).assertTrue();
+      expect(drained).assertTrue();
+      expect(watchdog.samples >= 20).assertTrue();
+      expect(watchdog.maxDelayMs <= 750).assertTrue();
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
     it('printCustomLogShouldWriteOutput', 0, async () => {

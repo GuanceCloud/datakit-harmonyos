@@ -25,11 +25,13 @@ import {
   DataUploadConsumeResult,
   DataUploadDbCommitAction,
   DataUploadDbMaintenanceResult,
+  DataUploadQueryPage,
   DataUploadRow,
   DataUploadWorkerCapabilities
 } from './DataUploadWorkerCapabilities';
 import {
   DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from './DataUploadLimits';
@@ -210,11 +212,14 @@ export class DataUploadWorkerExecutor {
   ): Promise<void> {
     let shouldContinue = true;
     while (shouldContinue && !capabilities.isStopped()) {
-      const rows = await this.queryRows(capabilities, dataType, pageSize, state);
+      const queryPage = await this.queryRows(capabilities, dataType, pageSize, state);
+      const rows = queryPage.rows;
       const executeRequest: SDKUploadExecutePageDTO = {
         roundId,
         dataType: dataType.toString(),
         rows: rows as Object as SDKUploadRowDTO[],
+        queryHasMore: queryPage.hasMore,
+        transportLimitReached: queryPage.byteLimitReached,
         httpConfig: capabilities.getHttpConfig(dataType),
         injectedHttpResult: rows.length > 0 ? capabilities.takeInjectedHttpResult?.() : undefined
       };
@@ -230,6 +235,10 @@ export class DataUploadWorkerExecutor {
           `Deduplication filtered out ${executed.duplicateRows} duplicate record(s) for ${dataType}`);
       }
       if (!executed.rows || executed.rows.length === 0 || executed.attemptId.length === 0) {
+        state.hasMoreData = state.hasMoreData || executed.roundHasMoreData;
+        if (executed.delayMs > 0) {
+          await this.sleep(capabilities, Math.max(DATA_UPLOAD_LIMIT_RETRY_DELAY_MS, executed.delayMs), state);
+        }
         return;
       }
 
@@ -238,7 +247,7 @@ export class DataUploadWorkerExecutor {
           executed.bodyLength, executed.bodyBytes, executed.bodyLimitReached, executed.bodyPreview);
       } else if (executed.oversizedRows > 0) {
         FTInnerLogger.e(TAG,
-          `Dropped ${executed.oversizedRows} oversized upload row(s): type=${dataType}, maxBodyBytes=${
+          `Deferred ${executed.oversizedRows} oversized upload row(s) in DB: type=${dataType}, maxBodyBytes=${
             DATA_UPLOAD_MAX_BODY_BYTES}`);
       }
       const dbSucceeded = await this.applyDbDecision(capabilities, dataType, executed, state);
@@ -276,13 +285,18 @@ export class DataUploadWorkerExecutor {
     dataType: DataType,
     pageSize: number,
     state: DataUploadConsumeState
-  ): Promise<DataUploadRow[]> {
+  ): Promise<DataUploadQueryPage> {
     const startedAt = capabilities.getCurrentTimeMs();
     try {
       return await capabilities.queryRows(dataType, pageSize);
     } catch (error) {
       FTInnerLogger.e(TAG, `Query data failed: ${dataType}, error: ${error as string}`);
-      return [];
+      return {
+        rows: [],
+        hasMore: false,
+        transportBytes: 0,
+        byteLimitReached: false
+      };
     } finally {
       const elapsed = this.elapsed(capabilities, startedAt);
       state.metrics.dbMs += elapsed;
@@ -311,6 +325,11 @@ export class DataUploadWorkerExecutor {
         executed.reduceCount
       );
       state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
+      const expectedAffectedRows = action === DataUploadDbCommitAction.REINSERT ?
+        executed.rows.length + executed.reInsertRows.length : executed.rows.length;
+      if (result.affectedRows < expectedAffectedRows) {
+        throw new Error(`Upload DB commit affected ${result.affectedRows}/${expectedAffectedRows} expected row operations`);
+      }
       return true;
     } catch (error) {
       FTInnerLogger.e(TAG,

@@ -173,6 +173,7 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   throwInit: boolean = false;
   throwQuery: boolean = false;
   throwDelete: boolean = false;
+  deleteAffectedRowsOverride: number = -1;
   throwInsert: boolean = false;
   throwHasData: boolean = false;
   throwUpdateDataType: boolean = false;
@@ -259,7 +260,7 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
     if (this.throwDelete) {
       throw new Error('delete failed');
     }
-    return list.length;
+    return this.deleteAffectedRowsOverride >= 0 ? this.deleteAffectedRowsOverride : list.length;
   }
 
   async insertSyncRows(list: SyncData[], reInsert?: boolean): Promise<boolean> {
@@ -790,6 +791,27 @@ export default function syncTaskManagerUnitTest() {
       queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-db-failure',
           'df_rum_harmonyos_log,sdk_data_id=log-db-failure value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
+      expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
+      expect(runtime.cachePolicy.logDelta).assertEqual(0);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
+    });
+
+    it('uploadLaneShouldNotAckWhenDbCommitAffectsFewerAcceptedRows', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.deleteAffectedRowsOverride = 0;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-partial-db-commit',
+          'df_rum_harmonyos_log,sdk_data_id=log-partial-db-commit value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
 

@@ -69,6 +69,7 @@ interface SDKLineProtocolDraftsResponsePayload {
 
 interface SDKRumCommandResponsePayload {
   syncDrafts?: SDKSyncDataDraftDTO[];
+  completedResourceIds?: string[];
   deltas?: SDKRumCounterDeltaDTO[];
   needsActionCloseCheck?: boolean;
   needsRumDataGenerate?: boolean;
@@ -109,6 +110,10 @@ interface PendingRumWorkerEventCommand {
   rumEvent: SDKRumEventDTO;
 }
 
+interface PendingDirectRumWorkerRequest {
+  request: SDKWorkerRequest;
+}
+
 interface SDKWorkerDrainBarrierPayload {
   probe: boolean;
   source: string;
@@ -134,7 +139,10 @@ class FTTrackInner {
   private trackLogManager: TrackLogManager;
   private pendingRumWorkerCallbacks: Map<string, PendingRumWorkerCallback> = new Map();
   private pendingRumWorkerEvents: PendingRumWorkerEventCommand[] = [];
+  private pendingDirectRumWorkerRequests: PendingDirectRumWorkerRequest[] = [];
   private rumWorkerEventFlushTimer: number | null = null;
+  private directRumWorkerRetryTimer: number | null = null;
+  private rumSemanticResponseTail: Promise<void> = Promise.resolve();
   private workerLineProtocolContextSnapshot: SDKLineProtocolContextDTO | null = null;
   private workerLineProtocolContextVersion: number = 0;
   private syncedLineContextVersionByPool: Map<SDKDedicatedPoolType, number> = new Map();
@@ -333,11 +341,35 @@ class FTTrackInner {
     }
     const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
     if (!posted) {
-      this.pendingRumWorkerCallbacks.delete(workerRequest.id);
       FTInnerLogger.e(TAG, `RUM worker mailbox post failed: ${traceName}`);
-      if (callbackOnFinish && callBack) {
-        callBack.onComplete();
+      this.pendingDirectRumWorkerRequests.push({ request: workerRequest });
+      this.scheduleDirectRumWorkerRetry();
+    }
+  }
+
+  private scheduleDirectRumWorkerRetry(): void {
+    if (this.directRumWorkerRetryTimer !== null) {
+      return;
+    }
+    this.directRumWorkerRetryTimer = setTimeout(() => {
+      this.directRumWorkerRetryTimer = null;
+      this.flushDirectRumWorkerRequests();
+    }, RUM_WORKER_TRANSPORT_BATCH_DELAY_MS) as number;
+  }
+
+  private flushDirectRumWorkerRequests(): void {
+    let sent = 0;
+    while (this.pendingDirectRumWorkerRequests.length > 0 && sent < RUM_WORKER_TRANSPORT_BATCH_SIZE) {
+      const pending = this.pendingDirectRumWorkerRequests[0];
+      if (!SDKDedicatedPoolManager.getInstance().postCommand(pending.request)) {
+        this.scheduleDirectRumWorkerRetry();
+        return;
       }
+      this.pendingDirectRumWorkerRequests.shift();
+      sent++;
+    }
+    if (this.pendingDirectRumWorkerRequests.length > 0) {
+      this.scheduleDirectRumWorkerRetry();
     }
   }
 
@@ -382,7 +414,7 @@ class FTTrackInner {
     }
 
     const batchSize = Math.min(RUM_WORKER_TRANSPORT_BATCH_SIZE, this.pendingRumWorkerEvents.length);
-    const batch = this.pendingRumWorkerEvents.splice(0, batchSize);
+    const batch = this.pendingRumWorkerEvents.slice(0, batchSize);
     const events: SDKRumEventDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
       events.push(batch[i].rumEvent);
@@ -402,13 +434,17 @@ class FTTrackInner {
     });
     if (!posted) {
       FTInnerLogger.e(TAG, `RUM worker mailbox batch post failed: size=${batch.length}`);
+      this.scheduleRumWorkerEventBatchFlush(source);
+      return;
     }
+    this.pendingRumWorkerEvents.splice(0, batchSize);
     if (this.pendingRumWorkerEvents.length > 0) {
       this.scheduleRumWorkerEventBatchFlush(source);
     }
   }
 
   public async flushPendingWorkerDataBeforeUpload(timeoutMs: number = 10000): Promise<void> {
+    this.flushDirectRumWorkerRequests();
     this.flushAllRumWorkerEventBatches('upload.beforeQuery');
     FTRUMInnerManager.getInstance().flushPendingWorkerCommandsBeforeUpload();
     this.trackLogManager.forceFlush(false);
@@ -419,7 +455,11 @@ class FTTrackInner {
 
   private flushAllRumWorkerEventBatches(source: string): void {
     while (this.pendingRumWorkerEvents.length > 0) {
+      const before = this.pendingRumWorkerEvents.length;
       this.flushRumWorkerEventBatch(source);
+      if (this.pendingRumWorkerEvents.length >= before) {
+        break;
+      }
     }
   }
 
@@ -482,7 +522,8 @@ class FTTrackInner {
     const logStatus = status.pools[SDKDedicatedPoolType.LOG_CONSUMER];
     const eventPending = eventStatus ? eventStatus.mailboxPending : 0;
     const logPending = logStatus ? logStatus.mailboxPending : 0;
-    return eventPending === 0 && logPending === 0 && this.pendingWorkerDbWriteCount === 0;
+    return eventPending === 0 && logPending === 0 && this.pendingWorkerDbWriteCount === 0 &&
+      this.pendingRumWorkerEvents.length === 0 && this.pendingDirectRumWorkerRequests.length === 0;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -644,9 +685,21 @@ class FTTrackInner {
     return record;
   }
 
-  private handleEventMailboxResponse(response: SDKWorkerResponse): void {
+  private enqueueEventMailboxResponse(response: SDKWorkerResponse): void {
+    const run = async (): Promise<void> => {
+      await this.handleEventMailboxResponse(response);
+    };
+    this.rumSemanticResponseTail = this.rumSemanticResponseTail.then(run, run);
+  }
+
+  private async handleEventMailboxResponse(response: SDKWorkerResponse): Promise<void> {
+    const rumManager = FTRUMInnerManager.getInstance();
+    if (!rumManager.markRumSemanticWorkerResponse(response.id)) {
+      FTInnerLogger.d(TAG, `Skip duplicate committed EVENT mailbox response: id=${response.id}`);
+      return;
+    }
     if (this.isRumCounterMailboxResponse(response)) {
-      FTRUMInnerManager.getInstance().handleRumCounterMailboxResponse(response);
+      await rumManager.handleRumCounterMailboxResponse(response);
       return;
     }
 
@@ -666,37 +719,55 @@ class FTTrackInner {
     }
 
     const payload = response.payload as Object as SDKRumCommandResponsePayload;
+    let countersApplied = true;
     if (payload.deltas && payload.deltas.length > 0) {
-      FTRUMInnerManager.getInstance().handleRumCounterDeltas(
-        payload.deltas,
-        payload.needsActionCloseCheck,
-        payload.needsRumDataGenerate
-      );
+      countersApplied = await rumManager.handleRumCounterMailboxPayload({
+        deltas: payload.deltas,
+        needsActionCloseCheck: payload.needsActionCloseCheck,
+        needsRumDataGenerate: payload.needsRumDataGenerate
+      });
     }
     const drafts = payload.syncDrafts || [];
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
+      if (countersApplied) {
+        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumSemanticHostApplied(response.id);
+        if (payload.deltas && payload.deltas.length > 0) {
+          rumManager.acknowledgeRumSemanticThrough(response.id);
+        }
+      }
       return;
     }
 
     const source = callback ? callback.source : 'event.mailbox.rumWorkerDraft';
     const fallbackDataType = callback ? callback.dataType : this.resolveFallbackDataTypeFromDrafts(drafts);
     this.pendingWorkerDbWriteCount++;
-    this.handleRumDraftWrite(
-      source,
-      fallbackDataType,
-      callback ? callback.customDataType : undefined,
-      callback ? callback.measurement : 'event.mailbox',
-      drafts,
-      callback ? callback.callBack : null,
-      callback ? callback.callbackOnFinish : false
-    ).then(() => {
-      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
-    }).catch((error: Error) => {
-      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
-      FTInnerLogger.e(TAG, `EVENT mailbox draft write failed: id=${response.id}, error=${error.message}`);
+    let draftsCommitted = false;
+    try {
+      draftsCommitted = await this.handleRumDraftWrite(
+        source,
+        fallbackDataType,
+        callback ? callback.customDataType : undefined,
+        callback ? callback.measurement : 'event.mailbox',
+        drafts,
+        callback ? callback.callBack : null,
+        callback ? callback.callbackOnFinish : false
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `EVENT mailbox draft write failed: id=${response.id}, error=${message}`);
       this.completeRumWorkerCallback(callback, false);
-    });
+    } finally {
+      this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
+    }
+    if (draftsCommitted && countersApplied) {
+      rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+      rumManager.markRumSemanticHostApplied(response.id);
+      if (payload.deltas && payload.deltas.length > 0) {
+        rumManager.acknowledgeRumSemanticThrough(response.id);
+      }
+    }
   }
 
   private isRumCounterMailboxResponse(response: SDKWorkerResponse): boolean {
@@ -732,13 +803,13 @@ class FTTrackInner {
     drafts: SDKSyncDataDraftDTO[],
     callBack: RunnerCompleteCallBack | null,
     callbackOnFinish: boolean
-  ): Promise<void> {
+  ): Promise<boolean> {
     const normalizedDrafts = drafts || [];
     if (normalizedDrafts.length === 0) {
       if (callbackOnFinish && callBack) {
         callBack.onComplete();
       }
-      return;
+      return true;
     }
 
     const writeResult = await this.writeWorkerDraftsToDb(source, normalizedDrafts, dataType);
@@ -764,6 +835,8 @@ class FTTrackInner {
     if (result) {
       this.syncTaskManager.executeSyncPoll();
     }
+    return writeResult !== null && (writeResult.success ||
+      (writeResult.fallbackPersisted || 0) >= writeResult.requested);
   }
 
   private logCompletedRumDraftWrites(
@@ -931,7 +1004,8 @@ class FTTrackInner {
       return false;
     }
     for (const draft of drafts) {
-      if (!draft || !draft.dataString || !draft.dataString.startsWith(`${Constants.FT_MEASUREMENT_RUM_VIEW},`)) {
+      if (!draft || !draft.uuid || draft.uuid.length === 0 ||
+        (draft.dataType !== DataType.RUM_APP.toString() && draft.dataType !== DataType.RUM_WEBVIEW.toString())) {
         return false;
       }
     }
@@ -1015,7 +1089,13 @@ class FTTrackInner {
     SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
       SDKDedicatedPoolType.EVENT_CONSUMER,
       (response: SDKWorkerResponse) => {
-        this.handleEventMailboxResponse(response);
+        this.enqueueEventMailboxResponse(response);
+      }
+    );
+    SDKDedicatedPoolManager.getInstance().setWorkerRecoveryHandler(
+      SDKDedicatedPoolType.EVENT_CONSUMER,
+      (_restartCount: number) => {
+        FTRUMInnerManager.getInstance().replayRumSemanticStateAfterWorkerRestart();
       }
     );
     this.dataHelper.initBaseConfig(config);
@@ -1977,8 +2057,14 @@ class FTTrackInner {
         clearTimeout(this.rumWorkerEventFlushTimer);
         this.rumWorkerEventFlushTimer = null;
       }
+      if (this.directRumWorkerRetryTimer !== null) {
+        clearTimeout(this.directRumWorkerRetryTimer);
+        this.directRumWorkerRetryTimer = null;
+      }
       this.pendingRumWorkerEvents = [];
+      this.pendingDirectRumWorkerRequests = [];
       this.pendingRumWorkerCallbacks.clear();
+      SDKDedicatedPoolManager.getInstance().setWorkerRecoveryHandler(SDKDedicatedPoolType.EVENT_CONSUMER, null);
       this.trackLogManager.shutdown();
       this.syncTaskManager.stop();
       // SessionReplay functionality has been migrated to independent library

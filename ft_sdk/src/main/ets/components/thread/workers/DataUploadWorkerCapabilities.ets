@@ -21,6 +21,13 @@ export interface DataUploadRow {
   customDataType?: string;
 }
 
+export interface DataUploadQueryPage {
+  rows: DataUploadRow[];
+  hasMore: boolean;
+  transportBytes: number;
+  byteLimitReached: boolean;
+}
+
 export interface DataUploadConsumeOptions {
   taskName: string;
   pageSize: number;
@@ -79,7 +86,7 @@ export interface DataUploadWorkerCapabilities {
   executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse>;
   isStopped(): boolean;
   hasData(dataType: DataType): Promise<boolean>;
-  queryRows(dataType: DataType, pageSize: number): Promise<DataUploadRow[]>;
+  queryRows(dataType: DataType, pageSize: number): Promise<DataUploadQueryPage>;
   commitUpload(
     dataType: DataType,
     action: DataUploadDbCommitAction,

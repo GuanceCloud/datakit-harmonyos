@@ -67,6 +67,7 @@ export interface SDKDedicatedPoolManagerStatus {
 }
 
 export type SDKMailboxResponseHandler = (response: SDKWorkerResponse) => void;
+export type SDKWorkerRecoveryHandler = (restartCount: number) => void;
 
 interface SDKPoolConfig {
   pool: SDKDedicatedPoolType;
@@ -160,8 +161,10 @@ export class SDKDedicatedPoolManager {
   private static workerCommandTimeoutMs: number = DEFAULT_WORKER_COMMAND_TIMEOUT_MS;
   private pools: Map<SDKDedicatedPoolType, DedicatedPoolState> = new Map();
   private mailboxResponseHandlers: Map<SDKDedicatedPoolType, SDKMailboxResponseHandler> = new Map();
+  private workerRecoveryHandlers: Map<SDKDedicatedPoolType, SDKWorkerRecoveryHandler> = new Map();
   private mailboxAwaiters: Map<string, SDKThreadWorkerMailboxAwaiter> = new Map();
   private nextTaskId: number = 0;
+  private forcedMailboxPostFailureCount: number = 0;
 
   private constructor() {
     this.initializePools();
@@ -228,6 +231,13 @@ export class SDKDedicatedPoolManager {
     try {
       this.assertMailboxRequestEnvelope(request);
       const state = this.getPool(request.pool);
+      if (this.forcedMailboxPostFailureCount > 0) {
+        this.forcedMailboxPostFailureCount--;
+        state.failedTasks++;
+        state.mailboxFailedTasks++;
+        state.lastError = `Injected mailbox post failure: ${request.pool}/${request.command}`;
+        return false;
+      }
       if (state.isShutdown) {
         state.failedTasks++;
         state.mailboxFailedTasks++;
@@ -292,6 +302,34 @@ export class SDKDedicatedPoolManager {
     } else {
       this.mailboxResponseHandlers.delete(pool);
     }
+  }
+
+  /**
+   * Registers a Host-owned semantic recovery hook. The hook runs after line
+   * context restoration and before unresolved mailbox messages are replayed.
+   */
+  public setWorkerRecoveryHandler(pool: SDKDedicatedPoolType, handler: SDKWorkerRecoveryHandler | null): void {
+    if (handler) {
+      this.workerRecoveryHandlers.set(pool, handler);
+    } else {
+      this.workerRecoveryHandlers.delete(pool);
+    }
+  }
+
+  /** Internal deterministic seam for mailbox loss regression tests. */
+  public failNextMailboxPostsInternal(count: number = 1): void {
+    this.forcedMailboxPostFailureCount = Math.max(0, Math.floor(count));
+  }
+
+  /** Terminates one production Worker and exercises the normal replay path. */
+  public restartWorkerInternal(pool: SDKDedicatedPoolType): boolean {
+    const state = this.getPool(pool);
+    const slot = this.findMailboxWorkerSlot(state);
+    if (!slot || !slot.workerInstance || state.isShutdown) {
+      return false;
+    }
+    this.handleThreadWorkerFailure(state, slot, `Injected Worker restart: ${pool}`);
+    return slot.workerInstance !== null;
   }
 
   public probeDedicatedWorkers(): Promise<SDKWorkerResponse[]> {
@@ -360,6 +398,7 @@ export class SDKDedicatedPoolManager {
       awaiter.reject(new Error('SDK dedicated pool has been shut down'));
     });
     this.mailboxAwaiters.clear();
+    this.workerRecoveryHandlers.clear();
     this.pools.forEach((state) => {
       state.isShutdown = true;
       for (let i = state.queueHeadIndex; i < state.queue.length; i++) {
@@ -731,16 +770,32 @@ export class SDKDedicatedPoolManager {
       return;
     }
     state.recoveryResponseIds.clear();
-    let pendingLineContext = false;
-    for (let i = 0; i < state.mailboxReplayOrder.length; i++) {
-      const pending = state.mailboxReplayEntries.get(state.mailboxReplayOrder[i]);
+    // Snapshot before a semantic recovery hook posts new requests. Those new
+    // requests have already been delivered and must not be replayed twice.
+    const replayOrder = state.mailboxReplayOrder.slice();
+    let pendingLineContextId = '';
+    for (let i = 0; i < replayOrder.length; i++) {
+      const pending = state.mailboxReplayEntries.get(replayOrder[i]);
       if (pending && pending.request.command === SDKWorkerCommand.LINE_CONTEXT_UPDATE) {
-        pendingLineContext = true;
+        pendingLineContextId = replayOrder[i];
         break;
       }
     }
 
-    if (!pendingLineContext && state.lineContextCheckpoint) {
+    if (pendingLineContextId.length > 0) {
+      const pending = state.mailboxReplayEntries.get(pendingLineContextId);
+      if (pending) {
+        try {
+          workerInstance.postMessage(pending.request);
+          pending.replayCount++;
+          clearTimeout(pending.timeoutId);
+          pending.timeoutId = this.scheduleMailboxReplayTimeout(state, pendingLineContextId, pending.request);
+          state.mailboxReplayCount++;
+        } catch (error) {
+          state.lastError = error instanceof Error ? error.message : String(error);
+        }
+      }
+    } else if (state.lineContextCheckpoint) {
       const checkpoint = state.lineContextCheckpoint;
       const recoveryId = this.nextInternalTaskId(state.pool, 'line-context-recovery');
       const recoveryRequest: SDKWorkerRequest = {
@@ -761,10 +816,21 @@ export class SDKDedicatedPoolManager {
       }
     }
 
+    const recoveryHandler = this.workerRecoveryHandlers.get(state.pool);
+    if (recoveryHandler) {
+      try {
+        recoveryHandler(state.restartCount);
+      } catch (error) {
+        state.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
     const failedIds: string[] = [];
-    const replayOrder = state.mailboxReplayOrder.slice();
     for (let i = 0; i < replayOrder.length; i++) {
       const requestId = replayOrder[i];
+      if (requestId === pendingLineContextId) {
+        continue;
+      }
       const entry = state.mailboxReplayEntries.get(requestId);
       if (!entry) {
         continue;

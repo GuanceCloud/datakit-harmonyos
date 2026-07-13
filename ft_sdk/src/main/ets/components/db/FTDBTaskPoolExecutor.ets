@@ -9,6 +9,7 @@ enum FTDBTaskPoolCommand {
   INIT = 'init',
   HAS_SYNC_DATA = 'hasSyncData',
   QUERY_SYNC_DATA = 'querySyncData',
+  QUERY_UPLOAD_DATA = 'queryUploadData',
   WRITE_SYNC_DATA = 'writeSyncData',
   WRITE_SYNC_DRAFTS = 'writeSyncDrafts',
   DELETE_SYNC_ROWS = 'deleteSyncRows',
@@ -110,6 +111,13 @@ export interface FTDBTaskPoolMaintenanceResponse {
   dbLaneWaitMs: number;
 }
 
+export interface FTDBTaskPoolUploadPage {
+  rows: SyncData[];
+  hasMore: boolean;
+  byteCount: number;
+  byteLimitReached: boolean;
+}
+
 export interface FTDBTaskPoolRumCounterDeltaDTO {
   viewId: string;
   actionId: string;
@@ -145,6 +153,7 @@ interface FTDBTaskPoolRequest {
   source?: string;
   dataTypes?: string[];
   limit?: number;
+  maxBytes?: number;
   newestFirst?: boolean;
   records?: SyncDataJSON[];
   drafts?: FTDBTaskPoolSyncDraftDTO[];
@@ -181,6 +190,9 @@ interface FTDBTaskPoolResponse {
   value?: boolean;
   count?: number;
   rows?: SyncDataJSON[];
+  hasMore?: boolean;
+  byteCount?: number;
+  byteLimitReached?: boolean;
   write?: FTDBTaskPoolWriteResponse;
   uploadCommit?: FTDBTaskPoolUploadCommitResponse;
   maintenance?: FTDBTaskPoolMaintenanceResponse;
@@ -238,6 +250,31 @@ export class FTDBTaskPoolExecutor {
       result.push(SyncData.fromJSON(rows[i]));
     }
     return result;
+  }
+
+  public static async queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.QUERY_UPLOAD_DATA,
+      dataTypes,
+      limit,
+      maxBytes
+    });
+    const storedRows = response.rows || [];
+    const rows: SyncData[] = [];
+    for (let i = 0; i < storedRows.length; i++) {
+      rows.push(SyncData.fromJSON(storedRows[i]));
+    }
+    return {
+      rows,
+      hasMore: response.hasMore === true,
+      byteCount: Math.max(0, response.byteCount || 0),
+      byteLimitReached: response.byteLimitReached === true
+    };
   }
 
   public static async writeSyncData(

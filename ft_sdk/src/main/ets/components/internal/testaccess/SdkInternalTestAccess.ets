@@ -7,7 +7,11 @@ import {
   SDKDedicatedPoolManager,
   SDKDedicatedPoolManagerStatus
 } from '../../thread/SDKDedicatedPoolManager';
-import { SDKWorkerRequest, SDKWorkerResponse } from '../../thread/SDKWorkerProtocol';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../thread/SDKWorkerProtocol';
 import { FTExceptionHandlerRuntime } from '../runtime/FTExceptionHandlerRuntime';
 import { FTNativeCrashHandlerRuntime } from '../runtime/FTNativeCrashHandlerRuntime';
 import {
@@ -43,6 +47,14 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static executeDedicatedWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
     return SDKDedicatedPoolManager.getInstance().executeCommand(request);
+  }
+
+  public static failNextDedicatedMailboxPosts(count: number = 1): void {
+    SDKDedicatedPoolManager.getInstance().failNextMailboxPostsInternal(count);
+  }
+
+  public static restartDedicatedWorker(pool: SDKDedicatedPoolType): boolean {
+    return SDKDedicatedPoolManager.getInstance().restartWorkerInternal(pool);
   }
 
   public static setExceptionHandlerRuntime(runtime: FTExceptionHandlerRuntime): void {

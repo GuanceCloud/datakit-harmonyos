@@ -50,6 +50,7 @@ import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
 import {
   DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from './workers/DataUploadLimits';
@@ -146,6 +147,7 @@ interface SDKRumCommandResultPayload {
   activeActionName: string;
   activeResourceCount: number;
   syncDrafts: SDKSyncDataDraftDTO[];
+  completedResourceIds?: string[];
   deltas?: SDKRumCounterDeltaDTO[];
   needsActionCloseCheck?: boolean;
   needsRumDataGenerate?: boolean;
@@ -234,6 +236,8 @@ interface SDKUploadPendingPageState {
 
 interface SDKRumWorkerResourceState {
   resourceId: string;
+  draftUuid: string;
+  errorDraftUuid: string;
   startTime: number;
   endTime: number;
   eventTime: number;
@@ -997,7 +1001,7 @@ function processRumErrorCommand(
     dataType: 'rum_app',
     customDataType: command.customDataType,
     measurement: Constants.FT_MEASUREMENT_RUM_ERROR,
-    uuid: generateWorkerUuid(),
+    uuid: command.uuid || generateWorkerUuid(),
     viewId: context.viewId,
     viewName: context.viewName,
     actionId: context.actionId,
@@ -1039,6 +1043,8 @@ function handleRumResourceCommandBatch(
 ): SDKWorkerPayload {
   const commands = sortRumResourceCommands(batch && batch.commands ? batch.commands : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
+  const completedResourceIds: string[] = [];
+  const stateRecoveryOnly = batch && batch.stateRecoveryOnly === true;
   let flushMaxEvents = 256;
   for (let i = 0; i < commands.length; i++) {
     const command = commands[i];
@@ -1051,7 +1057,9 @@ function handleRumResourceCommandBatch(
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
       flushMaxEvents = command.counterFlushMaxEvents;
     }
-    processRumResourceCommand(command, state, syncDrafts);
+    if (processRumResourceCommand(command, state, syncDrafts, stateRecoveryOnly)) {
+      completedResourceIds.push(command.resourceId);
+    }
   }
 
   const payload: SDKRumCommandResultPayload = {
@@ -1062,7 +1070,8 @@ function handleRumResourceCommandBatch(
     activeActionId: state.activeActionId,
     activeActionName: state.activeActionName,
     activeResourceCount: getActiveResourceCount(state),
-    syncDrafts
+    syncDrafts,
+    completedResourceIds
   };
   if (state.rumCounterPendingEventCount >= flushMaxEvents) {
     const flushPayload = createRumCounterFlushPayload(state);
@@ -1134,15 +1143,22 @@ function createRumResourceNetStatusDedupKey(netStatus: SDKRumResourceNetStatusDT
 function processRumResourceCommand(
   command: SDKRumResourceCommandDTO,
   state: SDKWorkerRuntimeState,
-  syncDrafts: SDKSyncDataDraftDTO[]
-): void {
+  syncDrafts: SDKSyncDataDraftDTO[],
+  stateRecoveryOnly: boolean = false
+): boolean {
   const commandType = command.commandType || '';
   const resourceId = command.resourceId || '';
   if (resourceId.length === 0) {
-    return;
+    return false;
   }
 
   const resource = getOrCreateRumResourceState(resourceId, command, state);
+  if (command.draftUuid && command.draftUuid.length > 0) {
+    resource.draftUuid = command.draftUuid;
+  }
+  if (command.errorDraftUuid && command.errorDraftUuid.length > 0) {
+    resource.errorDraftUuid = command.errorDraftUuid;
+  }
   if (command.context) {
     mergeResourceContext(resource, command.context);
   }
@@ -1158,8 +1174,10 @@ function processRumResourceCommand(
 
   if (commandType === 'start') {
     resource.startTime = command.startTime && command.startTime > 0 ? command.startTime : resource.startTime;
-    appendResourcePendingIncreaseDelta(state, resource.context.viewId, resource.context.actionId);
-    return;
+    if (!stateRecoveryOnly) {
+      appendResourcePendingIncreaseDelta(state, resource.context.viewId, resource.context.actionId);
+    }
+    return false;
   }
 
   if (commandType === 'stop') {
@@ -1167,9 +1185,10 @@ function processRumResourceCommand(
     if (resource.context.actionId.length === 0 && command.fallbackActionId && command.fallbackActionId.length > 0) {
       resource.context.actionId = command.fallbackActionId;
     }
-    applyResourceCompleteDelta(state, resource.context.viewId, resource.context.actionId);
-    tryCreateRumResourceDraft(resource, state, syncDrafts);
-    return;
+    if (!stateRecoveryOnly) {
+      applyResourceCompleteDelta(state, resource.context.viewId, resource.context.actionId);
+    }
+    return tryCreateRumResourceDraft(resource, state, syncDrafts);
   }
 
   if (commandType === 'setContent' || commandType === 'add') {
@@ -1182,16 +1201,16 @@ function processRumResourceCommand(
     if (commandType === 'add' && resource.endTime <= 0) {
       resource.endTime = resource.eventTime > 0 ? resource.eventTime : Date.now() * 1000000;
     }
-    tryCreateRumResourceDraft(resource, state, syncDrafts);
-    return;
+    return tryCreateRumResourceDraft(resource, state, syncDrafts);
   }
 
   if (commandType === 'setNetState') {
     if (command.netStatus) {
       applyResourceNetStatus(resource, command.netStatus);
     }
-    tryCreateRumResourceDraft(resource, state, syncDrafts);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts);
   }
+  return false;
 }
 
 function getOrCreateRumResourceState(
@@ -1213,6 +1232,8 @@ function getOrCreateRumResourceState(
   };
   const resource: SDKRumWorkerResourceState = {
     resourceId,
+    draftUuid: command.draftUuid || generateWorkerUuid(),
+    errorDraftUuid: command.errorDraftUuid || generateWorkerUuid(),
     startTime: command.startTime && command.startTime > 0 ? command.startTime : 0,
     endTime: command.endTime && command.endTime > 0 ? command.endTime : -1,
     eventTime: command.eventTime && command.eventTime > 0 ? command.eventTime : 0,
@@ -1402,9 +1423,9 @@ function tryCreateRumResourceDraft(
   resource: SDKRumWorkerResourceState,
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[]
-): void {
+): boolean {
   if (!resource.contentSet || !resource.netStateSet || resource.endTime <= 0 || resource.isProcessing) {
-    return;
+    return false;
   }
   resource.isProcessing = true;
   state.eventSequence++;
@@ -1419,6 +1440,7 @@ function tryCreateRumResourceDraft(
     applyRumErrorDelta(state, resource.context.viewId, resource.context.actionId);
   }
   state.rumResources.delete(resource.resourceId);
+  return true;
 }
 
 function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEventDTO {
@@ -1431,7 +1453,7 @@ function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEven
     dataType: 'rum_app',
     customDataType: resource.customDataType,
     measurement: Constants.FT_MEASUREMENT_RUM_RESOURCE,
-    uuid: generateWorkerUuid(),
+    uuid: resource.draftUuid,
     viewId: resource.context.viewId,
     viewName: resource.context.viewName,
     actionId: resource.context.actionId,
@@ -1477,7 +1499,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
     dataType: 'rum_app',
     customDataType: resource.customDataType,
     measurement: Constants.FT_MEASUREMENT_RUM_ERROR,
-    uuid: generateWorkerUuid(),
+    uuid: resource.errorDraftUuid,
     viewId: resource.context.viewId,
     viewName: resource.context.viewName,
     actionId: resource.context.actionId,
@@ -2440,6 +2462,10 @@ async function handleUploadExecutePage(
   const deduplicatedRows = deduplicateUploadRows(payload.dataType, rows, state);
   const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
   if (pageRows.length === 0) {
+    const queryHasMore = payload.queryHasMore === true;
+    if (queryHasMore) {
+      state.uploadRoundHasMoreData = true;
+    }
     const computeMs = finishUploadComputeMetric(state, prepareStartedAt);
     const emptyResult: SDKUploadExecutePageResultDTO = {
       roundId: state.uploadRoundId,
@@ -2449,12 +2475,13 @@ async function handleUploadExecutePage(
       queriedRows: rows.length,
       acceptedRows: 0,
       duplicateRows: rows.length,
-      deferredRows: 0,
+      deferredRows: queryHasMore ? 1 : 0,
       packageId: '',
       bodyLength: 0,
       bodyBytes: 0,
       bodyLimitReached: false,
       oversizedRows: 0,
+      transportLimitReached: payload.transportLimitReached === true,
       bodyPreview: '',
       shouldUpload: false,
       outcome: SDKUploadPageOutcome.EMPTY_BODY,
@@ -2462,7 +2489,7 @@ async function handleUploadExecutePage(
       dbAction: SDKUploadDbActionDTO.NONE,
       reInsertRows: [],
       reduceCount: 0,
-      delayMs: 0,
+      delayMs: queryHasMore ? DATA_UPLOAD_LIMIT_RETRY_DELAY_MS : 0,
       shouldContinueDataType: false,
       roundHasMoreData: state.uploadRoundHasMoreData,
       retryCount: getUploadErrorCount(state, payload.dataType),
@@ -2488,7 +2515,46 @@ async function handleUploadExecutePage(
   }
   const acceptedRows = bodySelection.rows;
   const body = bodySelection.lines.join('\n');
-  const deferredRows = Math.max(0, deduplicatedRows.length - acceptedRows.length);
+  const deferredRows = Math.max(0, deduplicatedRows.length - acceptedRows.length) +
+    (payload.queryHasMore === true ? 1 : 0);
+  if (acceptedRows.length === 0 && bodySelection.oversizedRows > 0) {
+    state.uploadRoundHasMoreData = true;
+    const computeMs = finishUploadComputeMetric(state, prepareStartedAt);
+    const deferredResult: SDKUploadExecutePageResultDTO = {
+      roundId: state.uploadRoundId,
+      attemptId: '',
+      dataType: payload.dataType,
+      rows: [],
+      queriedRows: rows.length,
+      acceptedRows: 0,
+      duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+      deferredRows,
+      packageId,
+      bodyLength: 0,
+      bodyBytes: 0,
+      bodyLimitReached: true,
+      oversizedRows: bodySelection.oversizedRows,
+      transportLimitReached: payload.transportLimitReached === true,
+      bodyPreview: '',
+      shouldUpload: false,
+      outcome: SDKUploadPageOutcome.EMPTY_BODY,
+      httpResult: createEmptyUploadHttpResult(),
+      dbAction: SDKUploadDbActionDTO.NONE,
+      reInsertRows: [],
+      reduceCount: 0,
+      delayMs: DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
+      shouldContinueDataType: false,
+      roundHasMoreData: true,
+      retryCount: getUploadErrorCount(state, payload.dataType),
+      retryLimitReached: false,
+      ignoredClientError: false,
+      successfulResponse: false,
+      errorCount: getAggregateUploadErrorCount(state),
+      computeMs,
+      checkpointAfterCommit: createUploadCheckpoint(state)
+    };
+    return deferredResult as Object as SDKWorkerPayload;
+  }
   const shouldUpload = body.length > 0;
   if (shouldUpload) {
     markUploadRows(payload.dataType, acceptedRows, state);
@@ -2568,6 +2634,7 @@ async function handleUploadExecutePage(
     bodyBytes: bodySelection.bodyBytes,
     bodyLimitReached: bodySelection.bodyLimitReached,
     oversizedRows: bodySelection.oversizedRows,
+    transportLimitReached: payload.transportLimitReached === true,
     bodyPreview: abbreviateUploadWorkerText(body, 512),
     shouldUpload,
     outcome: shouldUpload ? SDKUploadPageOutcome.HTTP : SDKUploadPageOutcome.EMPTY_BODY,
@@ -2975,9 +3042,9 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
     if (lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
       result.bodyLimitReached = true;
       if (result.rows.length === 0) {
-        // A single poison row can never fit in a request. Consume it through
-        // the EMPTY_BODY delete path so it cannot block the queue forever.
-        result.rows.push(row);
+        // Never delete a row merely because a local limit rejected it. It
+        // remains in DB and is retried with bounded delay until a real HTTP +
+        // DB commit accepts it or an explicit data policy handles it.
         result.oversizedRows = 1;
       }
       break;

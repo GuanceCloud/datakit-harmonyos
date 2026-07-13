@@ -204,6 +204,20 @@ interface PendingRumErrorWorkerCommand {
   payload: SDKRumErrorCommandDTO;
 }
 
+interface RumSemanticJournalEntry {
+  sequence: number;
+  request: SDKWorkerRequest;
+  workerAcknowledged: boolean;
+  hostApplied: boolean;
+  commitBarrier: boolean;
+  semanticCommitted: boolean;
+}
+
+interface RumResourceDraftIds {
+  resourceUuid: string;
+  errorUuid: string;
+}
+
 
 
 const TAG = "FTRUMInnerManager";
@@ -285,6 +299,7 @@ export class FTRUMInnerManager {
   private completedActionFlushTimer: number | null = null;
   private resourceCommandFlushTimer: number | null = null;
   private errorCommandFlushTimer: number | null = null;
+  private rumSemanticReplayTimer: number | null = null;
   private pendingRumCounterUpdates: SDKRumCounterUpdateDTO[] = [];
   private pendingCompletedActions: PendingCompletedActionWorkerCommand[] = [];
   private pendingResourceCommands: PendingRumResourceWorkerCommand[] = [];
@@ -292,6 +307,19 @@ export class FTRUMInnerManager {
   private resourceContextById: Map<string, SDKRumResourceContextDTO> = new Map();
   private resourceContentSubmittedIds: Set<string> = new Set();
   private resourceStoppedIds: Set<string> = new Set();
+  /**
+   * Commands that own volatile Resource/Counter state remain journaled until a
+   * counter-flush barrier is applied to DB. A Worker response alone is not a
+   * semantic commit.
+   */
+  private rumSemanticJournal: RumSemanticJournalEntry[] = [];
+  private rumSemanticJournalByRequestId: Map<string, RumSemanticJournalEntry> = new Map();
+  private rumSemanticSequence: number = 0;
+  private committedRumSemanticResponseIds: Map<string, boolean> = new Map();
+  private committedRumSemanticResponseOrder: string[] = [];
+  private resourceDraftIdsById: Map<string, RumResourceDraftIds> = new Map();
+  private completedRumResourceIds: Set<string> = new Set();
+  private static readonly RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY: number = 2048;
   
   // Frequency protection
   private lastActionTime: number = 0;
@@ -356,6 +384,228 @@ export class FTRUMInnerManager {
     // Do NOT call checkSessionKeep here because sampleRate may not be set yet
   }
 
+  private registerRumSemanticRequest(request: SDKWorkerRequest): void {
+    if (this.rumSemanticJournalByRequestId.has(request.id)) {
+      return;
+    }
+    this.rumSemanticSequence++;
+    const entry: RumSemanticJournalEntry = {
+      sequence: this.rumSemanticSequence,
+      request,
+      workerAcknowledged: false,
+      hostApplied: false,
+      commitBarrier: false,
+      semanticCommitted: false
+    };
+    this.rumSemanticJournal.push(entry);
+    this.rumSemanticJournalByRequestId.set(request.id, entry);
+  }
+
+  /** Called by the EVENT mailbox response router before asynchronous DB work. */
+  public markRumSemanticWorkerResponse(requestId: string): boolean {
+    if (this.committedRumSemanticResponseIds.has(requestId)) {
+      return false;
+    }
+    const entry = this.rumSemanticJournalByRequestId.get(requestId);
+    if (entry) {
+      entry.workerAcknowledged = true;
+      return !entry.hostApplied;
+    }
+    return true;
+  }
+
+  /** Marks all Host-side effects for this Worker response as durable. */
+  public markRumSemanticHostApplied(requestId: string): void {
+    const entry = this.rumSemanticJournalByRequestId.get(requestId);
+    if (entry) {
+      entry.hostApplied = true;
+    }
+  }
+
+  public markRumResourcesCompleted(resourceIds: string[]): void {
+    for (let i = 0; i < resourceIds.length; i++) {
+      const resourceId = resourceIds[i];
+      if (resourceId && resourceId.length > 0) {
+        this.completedRumResourceIds.add(resourceId);
+      }
+    }
+  }
+
+  /**
+   * Commits all semantic state up to a counter-flush barrier. EVENT responses
+   * are serialized by FTTrackInner, so earlier Resource drafts have completed
+   * their DB write before this method is called.
+   */
+  public acknowledgeRumSemanticThrough(requestId: string): void {
+    const barrier = this.rumSemanticJournalByRequestId.get(requestId);
+    if (!barrier) {
+      return;
+    }
+    barrier.commitBarrier = true;
+    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (!entry.hostApplied) {
+        break;
+      }
+      entry.semanticCommitted = true;
+      if (entry.request.id === requestId) {
+        break;
+      }
+    }
+    this.pruneCommittedRumSemanticPrefix();
+  }
+
+  private pruneCommittedRumSemanticPrefix(): void {
+    const retained: RumSemanticJournalEntry[] = [];
+    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (entry.semanticCommitted && !this.shouldRetainResourceStateCheckpoint(entry)) {
+        this.rumSemanticJournalByRequestId.delete(entry.request.id);
+        this.rememberCommittedRumSemanticResponse(entry.request.id);
+      } else {
+        retained.push(entry);
+      }
+    }
+    this.rumSemanticJournal = retained;
+    this.cleanupCommittedResourceDraftIds();
+  }
+
+  private shouldRetainResourceStateCheckpoint(entry: RumSemanticJournalEntry): boolean {
+    if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !entry.request.payload) {
+      return false;
+    }
+    const batch = entry.request.payload as Object as SDKRumResourceCommandBatchDTO;
+    const commands = batch.commands || [];
+    for (let i = 0; i < commands.length; i++) {
+      const resourceId = commands[i].resourceId;
+      if (resourceId && resourceId.length > 0 && !this.completedRumResourceIds.has(resourceId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private rememberCommittedRumSemanticResponse(requestId: string): void {
+    if (!requestId || this.committedRumSemanticResponseIds.has(requestId)) {
+      return;
+    }
+    this.committedRumSemanticResponseIds.set(requestId, true);
+    this.committedRumSemanticResponseOrder.push(requestId);
+    while (this.committedRumSemanticResponseOrder.length >
+      FTRUMInnerManager.RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY) {
+      const oldest = this.committedRumSemanticResponseOrder.shift();
+      if (oldest) {
+        this.committedRumSemanticResponseIds.delete(oldest);
+      }
+    }
+  }
+
+  private cleanupCommittedResourceDraftIds(): void {
+    const resourceIds = Array.from(this.resourceDraftIdsById.keys());
+    for (let i = 0; i < resourceIds.length; i++) {
+      const resourceId = resourceIds[i];
+      const workerCompleted = this.completedRumResourceIds.has(resourceId);
+      if ((!workerCompleted && (!this.resourceContentSubmittedIds.has(resourceId) ||
+        !this.resourceStoppedIds.has(resourceId))) || this.hasPendingOrJournaledResource(resourceId)) {
+        continue;
+      }
+      this.resourceDraftIdsById.delete(resourceId);
+      this.resourceContentSubmittedIds.delete(resourceId);
+      this.resourceStoppedIds.delete(resourceId);
+      this.resourceContextById.delete(resourceId);
+      this.completedRumResourceIds.delete(resourceId);
+    }
+  }
+
+  private hasPendingOrJournaledResource(resourceId: string): boolean {
+    for (let i = 0; i < this.pendingResourceCommands.length; i++) {
+      if (this.pendingResourceCommands[i].payload.resourceId === resourceId) {
+        return true;
+      }
+    }
+    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !entry.request.payload) {
+        continue;
+      }
+      const batch = entry.request.payload as Object as SDKRumResourceCommandBatchDTO;
+      const commands = batch.commands || [];
+      for (let j = 0; j < commands.length; j++) {
+        if (commands[j].resourceId === resourceId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Restores acknowledged Resource/Counter commands into a fresh Worker. */
+  public replayRumSemanticStateAfterWorkerRestart(): void {
+    let retryNeeded = false;
+    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (!entry.workerAcknowledged) {
+        // The pool manager owns replay for unresolved mailbox messages.
+        continue;
+      }
+      if (entry.semanticCommitted && !this.shouldRetainResourceStateCheckpoint(entry)) {
+        continue;
+      }
+      const recoveryRequest = entry.semanticCommitted ?
+        this.createResourceStateRecoveryRequest(entry.request) : entry.request;
+      const posted = SDKDedicatedPoolManager.getInstance().postCommand(recoveryRequest);
+      if (posted) {
+        entry.workerAcknowledged = false;
+      } else {
+        retryNeeded = true;
+      }
+    }
+    if (retryNeeded) {
+      this.scheduleRumSemanticReplay();
+    }
+  }
+
+  private createResourceStateRecoveryRequest(request: SDKWorkerRequest): SDKWorkerRequest {
+    if (request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !request.payload) {
+      return request;
+    }
+    const original = request.payload as Object as SDKRumResourceCommandBatchDTO;
+    const recoveryPayload: SDKRumResourceCommandBatchDTO = {
+      commands: original.commands || [],
+      stateRecoveryOnly: true
+    };
+    return {
+      id: request.id,
+      pool: request.pool,
+      command: request.command,
+      priority: request.priority,
+      createdAt: request.createdAt,
+      payload: recoveryPayload as Object as SDKWorkerPayload
+    };
+  }
+
+  private scheduleRumSemanticReplay(): void {
+    if (this.rumSemanticReplayTimer !== null) {
+      return;
+    }
+    this.rumSemanticReplayTimer = setTimeout(() => {
+      this.rumSemanticReplayTimer = null;
+      this.replayRumSemanticStateAfterWorkerRestart();
+    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+  }
+
+  private getOrCreateResourceDraftIds(resourceId: string): RumResourceDraftIds {
+    let ids = this.resourceDraftIdsById.get(resourceId);
+    if (!ids) {
+      ids = {
+        resourceUuid: Utils.generateUUID(),
+        errorUuid: Utils.generateUUID()
+      };
+      this.resourceDraftIdsById.set(resourceId, ids);
+    }
+    return ids;
+  }
+
   private submitRumCounterUpdateTask(update: SDKRumCounterUpdateDTO): void {
     if (!this.context || !update || !update.updateType) {
       return;
@@ -403,7 +653,7 @@ export class FTRUMInnerManager {
         FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
         this.pendingRumCounterUpdates.length
       );
-      const updates = this.pendingRumCounterUpdates.splice(0, batchSize);
+      const updates = this.pendingRumCounterUpdates.slice(0, batchSize);
       const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
       const batchPayload: SDKRumCounterUpdateBatchDTO = {
         updates
@@ -420,7 +670,12 @@ export class FTRUMInnerManager {
       const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
       if (!posted) {
         FTInnerLogger.e(TAG, `RUM counter worker mailbox batch post failed: size=${updates.length}`);
+        this.scheduleRumCounterUpdateBatchFlush(traceBaseName);
+        break;
       }
+      this.pendingRumCounterUpdates.splice(0, batchSize);
+      this.registerRumSemanticRequest(workerRequest);
+      this.scheduleRumCounterFlush();
       shouldContinue = drainAll;
     }
     if (this.pendingRumCounterUpdates.length > 0) {
@@ -446,7 +701,10 @@ export class FTRUMInnerManager {
     const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
     if (!posted) {
       FTInnerLogger.e(TAG, 'RUM counter flush worker mailbox post failed');
+      this.scheduleRumCounterFlush(FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS);
+      return;
     }
+    this.registerRumSemanticRequest(workerRequest);
   }
 
   private scheduleRumCounterFlush(delayMs: number = 1000): void {
@@ -462,23 +720,30 @@ export class FTRUMInnerManager {
     }, delayMs) as number;
   }
 
-  public handleRumCounterMailboxResponse(response: SDKWorkerResponse): void {
+  public async handleRumCounterMailboxResponse(response: SDKWorkerResponse): Promise<boolean> {
     if (!response.ok) {
       FTInnerLogger.e(TAG, `RUM counter mailbox failed: id=${response.id}, error=${response.errorMessage || 'unknown'}`);
-      return;
+      return false;
     }
     if (!response.payload) {
-      return;
+      return false;
     }
     const payload = response.payload as Object as SDKRumCounterMailboxPayload;
-    this.handleRumCounterMailboxPayload(payload);
+    const applied = await this.handleRumCounterMailboxPayload(payload);
+    if (applied) {
+      this.markRumSemanticHostApplied(response.id);
+      if (this.isRumCounterFlushBarrier(response, payload)) {
+        this.acknowledgeRumSemanticThrough(response.id);
+      }
+    }
+    return applied;
   }
 
-  public handleRumCounterMailboxPayload(payload: SDKRumCounterMailboxPayload): void {
+  public async handleRumCounterMailboxPayload(payload: SDKRumCounterMailboxPayload): Promise<boolean> {
     if (!payload || !payload.deltas || payload.deltas.length === 0) {
-      return;
+      return true;
     }
-    this.applyRumCounterDeltasFromWorker(payload);
+    return await this.applyRumCounterDeltasFromWorker(payload);
   }
 
   public handleRumCounterDeltas(
@@ -494,12 +759,17 @@ export class FTRUMInnerManager {
     this.handleRumCounterMailboxPayload(payload);
   }
 
-  private async applyRumCounterDeltasFromWorker(payload: SDKRumCounterMailboxPayload): Promise<void> {
+  private isRumCounterFlushBarrier(response: SDKWorkerResponse, payload: SDKRumCounterMailboxPayload): boolean {
+    return response.id.indexOf(`${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:`) === 0 ||
+      !!(payload.deltas && payload.deltas.length > 0);
+  }
+
+  private async applyRumCounterDeltasFromWorker(payload: SDKRumCounterMailboxPayload): Promise<boolean> {
     try {
       const context = this.context;
       const deltas = payload.deltas || [];
       if (!context || deltas.length === 0) {
-        return;
+        return context !== null;
       }
 
       // EVENT_CONSUMER returns finalized, zero-filtered View/Action deltas.
@@ -511,8 +781,10 @@ export class FTRUMInnerManager {
       if (payload.needsRumDataGenerate === true) {
         this.generateRumData();
       }
+      return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `RUM counter worker delta apply failed: ${error}`);
+      return false;
     }
   }
 
@@ -622,7 +894,7 @@ export class FTRUMInnerManager {
       FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingCompletedActions.length
     );
-    const batch = this.pendingCompletedActions.splice(0, batchSize);
+    const batch = this.pendingCompletedActions.slice(0, batchSize);
     const actions: SDKRumCompletedActionDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
       actions.push(batch[i].payload);
@@ -644,11 +916,12 @@ export class FTRUMInnerManager {
     const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
     if (!posted) {
       FTInnerLogger.e(TAG, `Completed action worker mailbox batch post failed: size=${batch.length}`);
-      for (let i = 0; i < batch.length; i++) {
-        this.insertedActionIds.delete(batch[i].actionId);
-        this.processedActionIds.delete(batch[i].actionId);
-      }
+      this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
+      return;
     }
+    this.pendingCompletedActions.splice(0, batchSize);
+    this.registerRumSemanticRequest(workerRequest);
+    this.scheduleRumCounterFlush();
     if (this.pendingCompletedActions.length > 0) {
       this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
     }
@@ -656,13 +929,25 @@ export class FTRUMInnerManager {
 
   public flushPendingWorkerCommandsBeforeUpload(): void {
     while (this.pendingErrorCommands.length > 0) {
+      const before = this.pendingErrorCommands.length;
       this.flushErrorWorkerCommandBatch('upload.beforeQuery.error');
+      if (this.pendingErrorCommands.length >= before) {
+        break;
+      }
     }
     while (this.pendingResourceCommands.length > 0) {
+      const before = this.pendingResourceCommands.length;
       this.flushResourceWorkerCommandBatch('upload.beforeQuery.resource');
+      if (this.pendingResourceCommands.length >= before) {
+        break;
+      }
     }
     while (this.pendingCompletedActions.length > 0) {
+      const before = this.pendingCompletedActions.length;
       this.flushCompletedActionWorkerBatch('upload.beforeQuery.action');
+      if (this.pendingCompletedActions.length >= before) {
+        break;
+      }
     }
     this.flushRumCounterUpdateBatch('upload.beforeQuery.counterUpdate', true);
     this.submitRumCounterFlushTask();
@@ -672,7 +957,7 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-      uuid: '',
+      uuid: Utils.generateUUID(),
       time: actionBean.getStartTime(),
       actionId: actionBean.getId(),
       actionName: actionBean.getActionName(),
@@ -1184,6 +1469,10 @@ export class FTRUMInnerManager {
       clearTimeout(this.errorCommandFlushTimer);
       this.errorCommandFlushTimer = null;
     }
+    if (this.rumSemanticReplayTimer !== null) {
+      clearTimeout(this.rumSemanticReplayTimer);
+      this.rumSemanticReplayTimer = null;
+    }
     this.pendingRumCounterUpdates = [];
     this.pendingCompletedActions = [];
     this.pendingResourceCommands = [];
@@ -1191,6 +1480,13 @@ export class FTRUMInnerManager {
     this.resourceContextById.clear();
     this.resourceContentSubmittedIds.clear();
     this.resourceStoppedIds.clear();
+    this.rumSemanticJournal = [];
+    this.rumSemanticJournalByRequestId.clear();
+    this.rumSemanticSequence = 0;
+    this.committedRumSemanticResponseIds.clear();
+    this.committedRumSemanticResponseOrder = [];
+    this.resourceDraftIdsById.clear();
+    this.completedRumResourceIds.clear();
 
     this.sessionId = Utils.generateUUID();
     this.rumAppId = "";
@@ -1738,7 +2034,7 @@ export class FTRUMInnerManager {
       const payload: SDKRumCompletedActionDTO = {
         dataType: DataType.RUM_APP.toString(),
         measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-        uuid: '',
+        uuid: Utils.generateUUID(),
         time: actualStartTime,
         actionId,
         actionName,
@@ -1806,6 +2102,9 @@ export class FTRUMInnerManager {
     if (!this.context || !command || !command.resourceId) {
       return;
     }
+    const draftIds = this.getOrCreateResourceDraftIds(command.resourceId);
+    command.draftUuid = draftIds.resourceUuid;
+    command.errorDraftUuid = draftIds.errorUuid;
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
     this.pendingResourceCommands.push({
       payload: command
@@ -1840,7 +2139,7 @@ export class FTRUMInnerManager {
       FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingResourceCommands.length
     );
-    const batch = this.pendingResourceCommands.splice(0, batchSize);
+    const batch = this.pendingResourceCommands.slice(0, batchSize);
     const commands: SDKRumResourceCommandDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
       commands.push(batch[i].payload);
@@ -1862,7 +2161,12 @@ export class FTRUMInnerManager {
     const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
     if (!posted) {
       FTInnerLogger.e(TAG, `RUM resource worker mailbox batch post failed: size=${batch.length}`);
+      this.scheduleResourceWorkerCommandBatchFlush(traceBaseName);
+      return;
     }
+    this.pendingResourceCommands.splice(0, batchSize);
+    this.registerRumSemanticRequest(workerRequest);
+    this.scheduleRumCounterFlush();
     if (this.pendingResourceCommands.length > 0) {
       this.scheduleResourceWorkerCommandBatchFlush(traceBaseName);
     }
@@ -1986,13 +2290,14 @@ export class FTRUMInnerManager {
       return;
     }
     this.resourceContextById.delete(resourceId);
-    this.resourceContentSubmittedIds.delete(resourceId);
-    this.resourceStoppedIds.delete(resourceId);
   }
 
   private submitErrorWorkerCommand(command: SDKRumErrorCommandDTO, traceBaseName: string): void {
     if (!this.context || !command || !command.context || !command.context.sessionId) {
       return;
+    }
+    if (!command.uuid || command.uuid.length === 0) {
+      command.uuid = Utils.generateUUID();
     }
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
     this.pendingErrorCommands.push({
@@ -2028,7 +2333,7 @@ export class FTRUMInnerManager {
       FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingErrorCommands.length
     );
-    const batch = this.pendingErrorCommands.splice(0, batchSize);
+    const batch = this.pendingErrorCommands.slice(0, batchSize);
     const commands: SDKRumErrorCommandDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
       commands.push(batch[i].payload);
@@ -2050,7 +2355,12 @@ export class FTRUMInnerManager {
     const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
     if (!posted) {
       FTInnerLogger.e(TAG, `RUM error worker mailbox batch post failed: size=${batch.length}`);
+      this.scheduleErrorWorkerCommandBatchFlush(traceBaseName);
+      return;
     }
+    this.pendingErrorCommands.splice(0, batchSize);
+    this.registerRumSemanticRequest(workerRequest);
+    this.scheduleRumCounterFlush();
     if (this.pendingErrorCommands.length > 0) {
       this.scheduleErrorWorkerCommandBatchFlush(traceBaseName);
     }
@@ -2114,6 +2424,8 @@ export class FTRUMInnerManager {
       const context = this.createCurrentResourceContext();
       this.resourceContentSubmittedIds.delete(resourceId);
       this.resourceStoppedIds.delete(resourceId);
+      this.completedRumResourceIds.delete(resourceId);
+      this.resourceDraftIdsById.delete(resourceId);
       this.resourceContextById.set(resourceId, context);
       this.updateResourceContextMemoryOnStart(context);
       this.submitResourceWorkerCommand({
@@ -3440,6 +3752,10 @@ export class FTRUMInnerManager {
         clearTimeout(this.errorCommandFlushTimer);
         this.errorCommandFlushTimer = null;
       }
+      if (this.rumSemanticReplayTimer !== null) {
+        clearTimeout(this.rumSemanticReplayTimer);
+        this.rumSemanticReplayTimer = null;
+      }
       this.flushErrorWorkerCommandBatch('rum.shutdown');
       this.flushResourceWorkerCommandBatch('rum.shutdown');
       this.flushCompletedActionWorkerBatch('rum.shutdown');
@@ -3449,6 +3765,12 @@ export class FTRUMInnerManager {
       this.resourceContextById.clear();
       this.resourceContentSubmittedIds.clear();
       this.resourceStoppedIds.clear();
+      this.rumSemanticJournal = [];
+      this.rumSemanticJournalByRequestId.clear();
+      this.committedRumSemanticResponseIds.clear();
+      this.committedRumSemanticResponseOrder = [];
+      this.resourceDraftIdsById.clear();
+      this.completedRumResourceIds.clear();
 
       this.context = null;
       this.userData = null;
