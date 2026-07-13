@@ -785,7 +785,20 @@ export class FTSDKConfig {
     return this.compressIntakeRequests;
   }
 
-  setSyncPageSize(pageSize: SyncPageSize | number): FTSDKConfig {
+  /**
+   * Set a predefined number of rows uploaded per request.
+   * For a value other than 5, 10, or 50, use {@link setCustomSyncPageSize}.
+   */
+  setSyncPageSize(pageSize: SyncPageSize): FTSDKConfig {
+    this.pageSize = pageSize;
+    return this;
+  }
+
+  /**
+   * Set a custom number of rows uploaded per request.
+   * Values are rounded down and constrained to the supported range of 5 to 500 rows.
+   */
+  setCustomSyncPageSize(pageSize: number): FTSDKConfig {
     const normalized = pageSize !== pageSize ? SyncPageSize.MINI : Math.floor(pageSize);
     this.pageSize = Math.min(
       SyncTaskManager.MAX_PAGE_SIZE,

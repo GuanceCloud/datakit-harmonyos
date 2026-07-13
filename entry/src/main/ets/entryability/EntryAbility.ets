@@ -319,7 +319,7 @@ export default class EntryAbility extends UIAbility {
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
         .setAutoSync(this.resolveAutoSyncEnabled())
-        .setSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
+        .setCustomSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
       DemoLogger.i(LOG_TAG, "SDK install completed");

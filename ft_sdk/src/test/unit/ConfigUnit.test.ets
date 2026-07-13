@@ -209,7 +209,7 @@ export default function configUnitTest() {
 
     it('sdkConfigShouldClampBounds', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(1)
+        .setSyncPageSize(SyncPageSize.MINI)
         .setSyncSleepTime(10000)
         .setDataSyncRetryCount(100)
         .enableLimitWithDbSize(1)
@@ -227,7 +227,11 @@ export default function configUnitTest() {
         .assertEqual(SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS);
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(-1).getDataSyncRetryCount()).assertEqual(0);
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(2.9).getDataSyncRetryCount()).assertEqual(2);
-      expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncPageSize(1_000_000).getPageSize())
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(1).getPageSize())
+        .assertEqual(SyncPageSize.MINI);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(123.9).getPageSize())
+        .assertEqual(123);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(1_000_000).getPageSize())
         .assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
     });
 

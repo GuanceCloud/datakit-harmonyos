@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.14-alpha07] - 2026-07-09
 - Added `FTSDKConfig.setCompressIntakeRequests(...)`; data intake requests now use zlib-wrapped `deflate` compression by default and safely fall back to plaintext when compression is unavailable.
 - Added `FTSDK.setAutoSync(...)` to enable or disable automatic cached-data upload after SDK initialization.
+- Added `FTSDKConfig.setCustomSyncPageSize(...)` for custom upload page sizes; predefined sizes remain available through `setSyncPageSize(...)`.
 - Updated the internal thread-pool and serialized DB task processing to improve data consistency under high concurrency.
 - Added configurable SDK debugging through `FTSDKConfig.setSdkLogLevel(...)` and `FTSDKConfig.setEnableInnerLogFile(...)`.
 

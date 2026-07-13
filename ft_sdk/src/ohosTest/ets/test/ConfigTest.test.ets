@@ -513,18 +513,18 @@ export default function configTest() {
       // Custom page size
       const customPageSize = 100;
       const config1: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(customPageSize);
+        .setCustomSyncPageSize(customPageSize);
       FTSDK.install(config1);
       expect(syncTaskManager.getPageSize()).assertEqual(customPageSize);
 
       // Minimum value should be SyncPageSize.MINI
       const config2: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(1);
+        .setCustomSyncPageSize(1);
       FTSDK.install(config2);
       expect(syncTaskManager.getPageSize()).assertEqual(SyncPageSize.MINI);
 
       const config3: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(SyncTaskManager.MAX_PAGE_SIZE + 1000);
+        .setCustomSyncPageSize(SyncTaskManager.MAX_PAGE_SIZE + 1000);
       FTSDK.install(config3);
       expect(syncTaskManager.getPageSize()).assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
 

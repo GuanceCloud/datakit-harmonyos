@@ -617,7 +617,7 @@ export default function syncUploadChainDeviceTest() {
       syncTaskManager.init(
         FTSDKConfig.builder(TEST_HOST)
           .setAutoSync(false)
-          .setSyncPageSize(DATA_UPLOAD_MAX_PAGE_SIZE + 10_000)
+          .setCustomSyncPageSize(DATA_UPLOAD_MAX_PAGE_SIZE + 10_000)
           .setDataSyncRetryCount(0),
         context
       );
