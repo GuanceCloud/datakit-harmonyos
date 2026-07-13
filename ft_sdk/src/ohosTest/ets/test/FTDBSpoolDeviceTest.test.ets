@@ -116,5 +116,88 @@ export default function ftDBSpoolDeviceTest() {
       expect(spoolManager.getStatus().pendingRecords).assertEqual(0);
       expect(await pathExists(paths.inflightPath)).assertFalse();
     });
+
+    it('replayShouldAdvanceByUtf8ByteCursorWithoutDuplicates', 0, async () => {
+      const rows: SyncData[] = [
+        createLogSyncData('字节游标-一', TEST_NOW_NS + 21),
+        createLogSyncData('字节游标-二', TEST_NOW_NS + 22),
+        createLogSyncData('字节游标-三', TEST_NOW_NS + 23),
+        createLogSyncData('字节游标-四', TEST_NOW_NS + 24),
+        createLogSyncData('字节游标-五', TEST_NOW_NS + 25)
+      ];
+      const paths = createPaths(spoolManager);
+      expect(await spoolManager.appendSyncData('device.byte-cursor', rows)).assertEqual(5);
+
+      const first = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths, 0, 2);
+      expect(first.pageStartByteOffset).assertEqual(0);
+      expect(first.records.length).assertEqual(2);
+      expect(first.nextByteOffset > 0).assertTrue();
+      expect(first.nextByteOffset < first.inflightBytes).assertTrue();
+      expect(first.hasMoreRecords).assertTrue();
+
+      const second = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths, first.nextByteOffset, 2);
+      expect(second.pageStartByteOffset).assertEqual(first.nextByteOffset);
+      expect(second.records.length).assertEqual(2);
+      expect(second.nextByteOffset > first.nextByteOffset).assertTrue();
+      expect(second.hasMoreRecords).assertTrue();
+
+      const third = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths, second.nextByteOffset, 2);
+      expect(third.pageStartByteOffset).assertEqual(second.nextByteOffset);
+      expect(third.records.length).assertEqual(1);
+      expect(third.nextByteOffset).assertEqual(third.inflightBytes);
+      expect(third.hasMoreRecords).assertFalse();
+
+      const replayedUuids: string[] = [];
+      const pages = [first, second, third];
+      for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        for (let rowIndex = 0; rowIndex < pages[pageIndex].records.length; rowIndex++) {
+          replayedUuids.push(pages[pageIndex].records[rowIndex].data.uuid);
+        }
+      }
+      expect(replayedUuids.length).assertEqual(5);
+      expect(new Set(replayedUuids).size).assertEqual(5);
+
+      await FTDBSpoolTaskPoolExecutor.ackReplay(paths, first.batchToken);
+    });
+
+    it('capacityShouldIncludeInflightAndReleaseAfterAck', 0, async () => {
+      const first = createLogSyncData('capacity-row', TEST_NOW_NS + 31);
+      const second = createLogSyncData('capacity-row', TEST_NOW_NS + 32);
+      const paths = createPaths(spoolManager);
+
+      const appended = await FTDBSpoolTaskPoolExecutor.append(
+        paths,
+        'device.capacity',
+        0,
+        [first.toJSON()]
+      );
+      expect(appended.appendedRecords).assertEqual(1);
+      expect(appended.pendingBytes > 0).assertTrue();
+
+      const prepared = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths, 0, 1);
+      const testCapacity = appended.pendingBytes + 1;
+      const rejected = await FTDBSpoolTaskPoolExecutor.append(
+        paths,
+        'device.capacity',
+        1,
+        [second.toJSON()],
+        testCapacity
+      );
+      expect(rejected.appendedRecords).assertEqual(0);
+      expect(rejected.rejectedRecords).assertEqual(1);
+      expect(rejected.pendingBytes).assertEqual(appended.pendingBytes);
+
+      await FTDBSpoolTaskPoolExecutor.ackReplay(paths, prepared.batchToken);
+      const retried = await FTDBSpoolTaskPoolExecutor.append(
+        paths,
+        'device.capacity',
+        2,
+        [second.toJSON()],
+        testCapacity
+      );
+      expect(retried.appendedRecords).assertEqual(1);
+      expect(retried.rejectedRecords).assertEqual(0);
+      expect(retried.pendingBytes <= testCapacity).assertTrue();
+    });
   });
 }

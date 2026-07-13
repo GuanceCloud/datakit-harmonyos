@@ -6,6 +6,10 @@ import {
   FTDBSpoolRecordDTO,
   FTDBSpoolTaskPoolExecutor
 } from './FTDBSpoolTaskPoolExecutor';
+import {
+  FT_DB_SPOOL_MAX_BYTES,
+  FT_DB_SPOOL_REPLAY_PAGE_RECORDS
+} from './FTDBSpoolLimits';
 import { SyncData, SyncDataJSON } from './bean/SyncData';
 
 export interface FTDBSpoolStatus {
@@ -14,6 +18,9 @@ export interface FTDBSpoolStatus {
   activePath: string;
   inflightPath: string;
   pendingRecords: number;
+  pendingBytes: number;
+  capacityBytes: number;
+  rejectedRecords: number;
   lastError: string;
 }
 
@@ -34,7 +41,6 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
   private static readonly INFLIGHT_FILE_NAME = 'sync_data_spool.inflight.ndjson';
   private static readonly LEGACY_FILE_NAME = 'sync_data_spool.ndjson';
   private static readonly MAX_REPLAY_BATCHES_PER_CALL = 3;
-  private static readonly REPLAY_PAGE_SIZE = 256;
 
   private initialized: boolean = false;
   private paths: FTDBSpoolPaths = {
@@ -47,6 +53,8 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
   private replayTail: Promise<void> = Promise.resolve();
   private nextSeq: number = 0;
   private pendingRecords: number = 0;
+  private pendingBytes: number = 0;
+  private rejectedRecords: number = 0;
   private lastError: string = '';
 
   private constructor() {
@@ -97,11 +105,30 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
     const seqStart = this.nextSeq;
     this.nextSeq += records.length;
     try {
-      const response = await FTDBSpoolTaskPoolExecutor.append(this.paths, source, seqStart, records);
-      this.pendingRecords = response.pendingRecords;
+      const response = await FTDBSpoolTaskPoolExecutor.append(
+        this.paths,
+        source,
+        seqStart,
+        records,
+        FT_DB_SPOOL_MAX_BYTES
+      );
+      if (response.pendingRecordsKnown) {
+        this.pendingRecords = response.pendingRecords;
+      } else {
+        this.pendingRecords += response.appendedRecords;
+      }
+      this.pendingBytes = response.pendingBytes;
+      this.rejectedRecords += response.rejectedRecords;
       if (response.appendedRecords > 0) {
         FTInnerLogger.w(TAG,
-          `Spooled ${response.appendedRecords} sync record(s) from ${source}; pending=${this.pendingRecords}`);
+          `Spooled ${response.appendedRecords} sync record(s) from ${source}; pending=${this.pendingRecords}, ` +
+            `bytes=${this.pendingBytes}/${FT_DB_SPOOL_MAX_BYTES}`);
+      }
+      if (response.rejectedRecords > 0) {
+        this.recordError(
+          `Spool capacity rejected ${response.rejectedRecords} record(s) from ${source}; ` +
+            `bytes=${this.pendingBytes}/${FT_DB_SPOOL_MAX_BYTES}`
+        );
       }
       return response.appendedRecords;
     } catch (error) {
@@ -126,7 +153,9 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
       try {
         const response = await FTDBSpoolTaskPoolExecutor.clear(this.paths);
         this.pendingRecords = response.pendingRecords;
+        this.pendingBytes = response.pendingBytes;
         this.nextSeq = 0;
+        this.rejectedRecords = 0;
         this.lastError = '';
       } catch (error) {
         this.recordError(`spool.clear failed: ${this.toErrorMessage(error)}`);
@@ -142,6 +171,9 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
       activePath: this.paths.activePath,
       inflightPath: this.paths.inflightPath,
       pendingRecords: this.pendingRecords,
+      pendingBytes: this.pendingBytes,
+      capacityBytes: FT_DB_SPOOL_MAX_BYTES,
+      rejectedRecords: this.rejectedRecords,
       lastError: this.lastError
     };
   }
@@ -150,6 +182,7 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
     try {
       const response = await FTDBSpoolTaskPoolExecutor.init(this.paths);
       this.pendingRecords = response.pendingRecords;
+      this.pendingBytes = response.pendingBytes;
       this.nextSeq = Math.max(this.nextSeq, response.pendingRecords);
     } catch (error) {
       this.recordError(`spool.init failed: ${this.toErrorMessage(error)}`);
@@ -181,16 +214,19 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
     await this.awaitInitialized();
     let replayedRecords = 0;
     for (let batchIndex = 0; batchIndex < FTDBSpoolManager.MAX_REPLAY_BATCHES_PER_CALL; batchIndex++) {
-      let recordOffset = 0;
+      let byteOffset = 0;
       let batchToken = '';
       let batchFinished = false;
       while (!batchFinished) {
         const prepared = await FTDBSpoolTaskPoolExecutor.prepareReplay(
           this.paths,
-          recordOffset,
-          FTDBSpoolManager.REPLAY_PAGE_SIZE
+          byteOffset,
+          FT_DB_SPOOL_REPLAY_PAGE_RECORDS
         );
-        this.pendingRecords = prepared.pendingRecords;
+        if (prepared.pendingRecordsKnown) {
+          this.pendingRecords = prepared.pendingRecords;
+        }
+        this.pendingBytes = prepared.pendingBytes;
         if (!prepared.batchToken) {
           return replayedRecords;
         }
@@ -199,7 +235,7 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
           return replayedRecords;
         }
         batchToken = prepared.batchToken;
-        if (recordOffset === 0 && prepared.skippedRecords > 0) {
+        if (prepared.skippedRecords > 0) {
           this.recordError(`spool replay skipped ${prepared.skippedRecords} corrupt record(s)`);
         }
 
@@ -223,20 +259,21 @@ export class FTDBSpoolManager implements SyncDataWriteFailureFallback {
           replayedRecords += rows.length;
           FTInnerLogger.i(TAG,
             `Replayed Spool page rows=${rows.length}, inserted=${result.inserted}, updated=${result.updated}, ` +
-              `dropped=${result.dropped}, offset=${recordOffset}`);
+              `dropped=${result.dropped}, byteRange=${byteOffset}-${prepared.nextByteOffset}`);
         }
 
         if (prepared.hasMoreRecords) {
-          if (prepared.nextRecordOffset <= recordOffset) {
-            this.recordError(`spool replay offset did not advance: offset=${recordOffset}`);
+          if (prepared.nextByteOffset <= byteOffset) {
+            this.recordError(`spool replay byte cursor did not advance: offset=${byteOffset}`);
             return replayedRecords;
           }
-          recordOffset = prepared.nextRecordOffset;
+          byteOffset = prepared.nextByteOffset;
           continue;
         }
 
         const acknowledged = await FTDBSpoolTaskPoolExecutor.ackReplay(this.paths, batchToken);
         this.pendingRecords = acknowledged.pendingRecords;
+        this.pendingBytes = acknowledged.pendingBytes;
         batchFinished = true;
       }
     }

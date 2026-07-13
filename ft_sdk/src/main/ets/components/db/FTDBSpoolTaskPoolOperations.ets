@@ -1,6 +1,11 @@
 import { fileIo } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { SyncDataJSON } from './bean/SyncData';
+import {
+  FT_DB_SPOOL_MAX_BYTES,
+  FT_DB_SPOOL_MAX_RECORD_BYTES,
+  FT_DB_SPOOL_REPLAY_PAGE_BYTES
+} from './FTDBSpoolLimits';
 
 enum FTDBSpoolTaskPoolCommand {
   INIT = 'init',
@@ -20,8 +25,9 @@ interface FTDBSpoolTaskPoolRequest {
   seqStart?: number;
   records?: SyncDataJSON[];
   batchToken?: string;
-  recordOffset?: number;
+  byteOffset?: number;
   recordLimit?: number;
+  maxCapacityBytes?: number;
 }
 
 interface FTDBSpoolRecordDTO {
@@ -34,12 +40,18 @@ interface FTDBSpoolRecordDTO {
 interface FTDBSpoolTaskPoolResponse {
   ok: boolean;
   appendedRecords: number;
+  rejectedRecords: number;
   pendingRecords: number;
+  pendingRecordsKnown: boolean;
+  pendingBytes: number;
+  capacityBytes: number;
   batchToken: string;
   batchFileRecords: number;
   skippedRecords: number;
   records: FTDBSpoolRecordDTO[];
-  nextRecordOffset: number;
+  pageStartByteOffset: number;
+  nextByteOffset: number;
+  inflightBytes: number;
   hasMoreRecords: boolean;
   errorMessage: string;
 }
@@ -48,7 +60,8 @@ interface FTDBSpoolParseResult {
   records: FTDBSpoolRecordDTO[];
   fileRecords: number;
   skippedRecords: number;
-  validRecords: number;
+  nextByteOffset: number;
+  fileSize: number;
 }
 
 const SPOOL_READ_CHUNK_SIZE = 64 * 1024;
@@ -84,8 +97,13 @@ async function appendSpoolRecords(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   await ensureSpoolDirectory(request.spoolDir);
   const now = Date.now();
   const seqStart = Math.max(0, request.seqStart || 0);
-  let text = '';
+  const capacityBytes = normalizeCapacityBytes(request.maxCapacityBytes);
+  const pendingBytesBeforeAppend = await countAllPendingBytes(request);
+  let availableBytes = Math.max(0, capacityBytes - pendingBytesBeforeAppend);
+  const encoder = util.TextEncoder.create('utf-8');
+  const acceptedLines: string[] = [];
   let appendedRecords = 0;
+  let rejectedRecords = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!isValidSyncDataJSON(row)) {
@@ -97,7 +115,14 @@ async function appendSpoolRecords(request: FTDBSpoolTaskPoolRequest): Promise<Ob
       createdAt: now,
       data: row
     };
-    text += `${JSON.stringify(record)}\n`;
+    const line = `${JSON.stringify(record)}\n`;
+    const lineBytes = encoder.encodeInto(line).byteLength;
+    if (lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES || lineBytes > availableBytes) {
+      rejectedRecords++;
+      continue;
+    }
+    acceptedLines.push(line);
+    availableBytes -= lineBytes;
     appendedRecords++;
   }
   if (appendedRecords > 0) {
@@ -106,13 +131,17 @@ async function appendSpoolRecords(request: FTDBSpoolTaskPoolRequest): Promise<Ob
       fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.APPEND
     );
     try {
-      await fileIo.write(file.fd, text);
+      await fileIo.write(file.fd, acceptedLines.join(''));
     } finally {
       await fileIo.close(file);
     }
   }
-  const response = await createPendingResponse(request);
+  const response = createSuccessResponse();
   response.appendedRecords = appendedRecords;
+  response.rejectedRecords = rejectedRecords;
+  response.pendingRecordsKnown = false;
+  response.pendingBytes = await countAllPendingBytes(request);
+  response.capacityBytes = capacityBytes;
   return response as Object;
 }
 
@@ -130,17 +159,21 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
     return await createPendingResponse(request);
   }
 
-  const recordOffset = Math.max(0, request.recordOffset || 0);
+  const byteOffset = Math.max(0, request.byteOffset || 0);
   const recordLimit = Math.max(1, request.recordLimit || 256);
-  const parseResult = readSpoolRecordsChunked(request.inflightPath, recordOffset, recordLimit);
+  const parseResult = readSpoolRecordsPage(request.inflightPath, byteOffset, recordLimit);
   const response = createSuccessResponse();
   response.records = parseResult.records;
   response.batchFileRecords = parseResult.fileRecords;
   response.skippedRecords = parseResult.skippedRecords;
-  response.nextRecordOffset = recordOffset + parseResult.records.length;
-  response.hasMoreRecords = response.nextRecordOffset < parseResult.validRecords;
+  response.pageStartByteOffset = byteOffset;
+  response.nextByteOffset = parseResult.nextByteOffset;
+  response.inflightBytes = parseResult.fileSize;
+  response.hasMoreRecords = response.nextByteOffset < parseResult.fileSize;
   response.batchToken = await getFileToken(request.inflightPath);
-  response.pendingRecords = await countAllPendingRecords(request);
+  response.pendingRecordsKnown = false;
+  response.pendingBytes = await countAllPendingBytes(request);
+  response.capacityBytes = FT_DB_SPOOL_MAX_BYTES;
   return response as Object;
 }
 
@@ -148,6 +181,7 @@ async function ackSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Object
   const response = createSuccessResponse();
   if (!(await pathExists(request.inflightPath))) {
     response.pendingRecords = await countAllPendingRecords(request);
+    response.pendingBytes = await countAllPendingBytes(request);
     return response as Object;
   }
   const actualToken = await getFileToken(request.inflightPath);
@@ -158,6 +192,7 @@ async function ackSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Object
   }
   await fileIo.unlink(request.inflightPath);
   response.pendingRecords = await countAllPendingRecords(request);
+  response.pendingBytes = await countAllPendingBytes(request);
   return response as Object;
 }
 
@@ -171,6 +206,8 @@ async function clearSpoolFiles(request: FTDBSpoolTaskPoolRequest): Promise<Objec
 async function createPendingResponse(request: FTDBSpoolTaskPoolRequest): Promise<FTDBSpoolTaskPoolResponse> {
   const response = createSuccessResponse();
   response.pendingRecords = await countAllPendingRecords(request);
+  response.pendingBytes = await countAllPendingBytes(request);
+  response.capacityBytes = normalizeCapacityBytes(request.maxCapacityBytes);
   return response;
 }
 
@@ -178,12 +215,18 @@ function createSuccessResponse(): FTDBSpoolTaskPoolResponse {
   return {
     ok: true,
     appendedRecords: 0,
+    rejectedRecords: 0,
     pendingRecords: 0,
+    pendingRecordsKnown: true,
+    pendingBytes: 0,
+    capacityBytes: FT_DB_SPOOL_MAX_BYTES,
     batchToken: '',
     batchFileRecords: 0,
     skippedRecords: 0,
     records: [],
-    nextRecordOffset: 0,
+    pageStartByteOffset: 0,
+    nextByteOffset: 0,
+    inflightBytes: 0,
     hasMoreRecords: false,
     errorMessage: ''
   };
@@ -196,47 +239,76 @@ function createErrorResponse(message: string): FTDBSpoolTaskPoolResponse {
   return response;
 }
 
-function readSpoolRecordsChunked(
+function readSpoolRecordsPage(
   path: string,
-  recordOffset: number,
+  byteOffset: number,
   recordLimit: number
 ): FTDBSpoolParseResult {
   const result: FTDBSpoolParseResult = {
     records: [],
     fileRecords: 0,
     skippedRecords: 0,
-    validRecords: 0
+    nextByteOffset: byteOffset,
+    fileSize: 0
   };
   const stat = fileIo.statSync(path);
+  result.fileSize = stat.size;
   if (stat.size <= 0) {
     return result;
   }
+  if (byteOffset > stat.size) {
+    throw new Error(`Spool byte cursor exceeds inflight size: cursor=${byteOffset}, size=${stat.size}`);
+  }
   const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
   const decoder = util.TextDecoder.create('utf-8');
-  let carry = '';
-  let totalRead = 0;
+  const lineParts: Uint8Array[] = [];
+  let lineBytes = 0;
+  let oversizedLine = false;
+  let absoluteOffset = byteOffset;
   try {
-    while (totalRead < stat.size) {
-      const readSize = Math.min(SPOOL_READ_CHUNK_SIZE, stat.size - totalRead);
-      const buffer = new ArrayBuffer(readSize);
-      const readLen = fileIo.readSync(file.fd, buffer);
+    validateByteCursor(file.fd, byteOffset);
+    while (absoluteOffset < stat.size && result.records.length < recordLimit) {
+      const readSize = Math.min(SPOOL_READ_CHUNK_SIZE, stat.size - absoluteOffset);
+      const data = new ArrayBuffer(readSize);
+      const readLen = fileIo.readSync(file.fd, data);
       if (readLen <= 0) {
         break;
       }
-      totalRead += readLen;
-      const chunk = decoder.decodeWithStream(new Uint8Array(buffer.slice(0, readLen)), {
-        stream: totalRead < stat.size
-      });
-      carry += chunk;
-      let newlineIndex = carry.indexOf('\n');
-      while (newlineIndex >= 0) {
-        parseSpoolLine(carry.substring(0, newlineIndex), result, recordOffset, recordLimit);
-        carry = carry.substring(newlineIndex + 1);
-        newlineIndex = carry.indexOf('\n');
+      const bytes = new Uint8Array(data, 0, readLen);
+      let segmentStart = 0;
+      for (let i = 0; i < bytes.length; i++) {
+        if (bytes[i] !== 10) {
+          continue;
+        }
+        appendLinePart(bytes, segmentStart, i, lineParts, lineBytes, oversizedLine);
+        lineBytes += i - segmentStart;
+        if (lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES) {
+          oversizedLine = true;
+        }
+        parseSpoolLineBytes(lineParts, lineBytes, oversizedLine, decoder, result);
+        lineParts.length = 0;
+        lineBytes = 0;
+        oversizedLine = false;
+        result.nextByteOffset = absoluteOffset + i + 1;
+        segmentStart = i + 1;
+        if (result.records.length >= recordLimit ||
+          result.nextByteOffset - byteOffset >= FT_DB_SPOOL_REPLAY_PAGE_BYTES) {
+          return result;
+        }
       }
+      if (segmentStart < bytes.length) {
+        appendLinePart(bytes, segmentStart, bytes.length, lineParts, lineBytes, oversizedLine);
+        lineBytes += bytes.length - segmentStart;
+        if (lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES) {
+          oversizedLine = true;
+          lineParts.length = 0;
+        }
+      }
+      absoluteOffset += readLen;
     }
-    if (carry.trim().length > 0) {
-      parseSpoolLine(carry, result, recordOffset, recordLimit);
+    if (absoluteOffset >= stat.size && (lineBytes > 0 || oversizedLine)) {
+      parseSpoolLineBytes(lineParts, lineBytes, oversizedLine, decoder, result);
+      result.nextByteOffset = stat.size;
     }
     return result;
   } finally {
@@ -244,25 +316,50 @@ function readSpoolRecordsChunked(
   }
 }
 
-function parseSpoolLine(
-  line: string,
-  result: FTDBSpoolParseResult,
-  recordOffset: number,
-  recordLimit: number
+function appendLinePart(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  lineParts: Uint8Array[],
+  currentLineBytes: number,
+  oversizedLine: boolean
 ): void {
+  if (oversizedLine || end <= start || currentLineBytes + end - start > FT_DB_SPOOL_MAX_RECORD_BYTES) {
+    return;
+  }
+  lineParts.push(bytes.slice(start, end));
+}
+
+function parseSpoolLineBytes(
+  lineParts: Uint8Array[],
+  lineBytes: number,
+  oversizedLine: boolean,
+  decoder: util.TextDecoder,
+  result: FTDBSpoolParseResult
+): void {
+  if (lineBytes === 0) {
+    return;
+  }
+  result.fileRecords++;
+  if (oversizedLine || lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES) {
+    result.skippedRecords++;
+    return;
+  }
+  const joined = new Uint8Array(lineBytes);
+  let targetOffset = 0;
+  for (let i = 0; i < lineParts.length; i++) {
+    joined.set(lineParts[i], targetOffset);
+    targetOffset += lineParts[i].byteLength;
+  }
+  const line = decoder.decodeWithStream(joined, { stream: false });
   const trimmed = line.trim();
   if (trimmed.length === 0) {
     return;
   }
-  result.fileRecords++;
   try {
     const record = JSON.parse(trimmed) as FTDBSpoolRecordDTO;
     if (record && isValidSyncDataJSON(record.data)) {
-      const validIndex = result.validRecords;
-      result.validRecords++;
-      if (validIndex >= recordOffset && result.records.length < recordLimit) {
-        result.records.push(record);
-      }
+      result.records.push(record);
     } else {
       result.skippedRecords++;
     }
@@ -271,10 +368,42 @@ function parseSpoolLine(
   }
 }
 
+function validateByteCursor(fd: number, byteOffset: number): void {
+  if (byteOffset <= 0) {
+    fileIo.lseek(fd, 0, fileIo.WhenceType.SEEK_SET);
+    return;
+  }
+  fileIo.lseek(fd, byteOffset - 1, fileIo.WhenceType.SEEK_SET);
+  const previousByte = new ArrayBuffer(1);
+  const readLen = fileIo.readSync(fd, previousByte);
+  if (readLen !== 1 || new Uint8Array(previousByte)[0] !== 10) {
+    throw new Error(`Spool byte cursor is not positioned after a newline: cursor=${byteOffset}`);
+  }
+  fileIo.lseek(fd, byteOffset, fileIo.WhenceType.SEEK_SET);
+}
+
 async function countAllPendingRecords(request: FTDBSpoolTaskPoolRequest): Promise<number> {
   return countFileRecords(request.activePath) +
     countFileRecords(request.inflightPath) +
     countFileRecords(request.legacyPath);
+}
+
+async function countAllPendingBytes(request: FTDBSpoolTaskPoolRequest): Promise<number> {
+  return await getFileSize(request.activePath) +
+    await getFileSize(request.inflightPath) +
+    await getFileSize(request.legacyPath);
+}
+
+async function getFileSize(path: string): Promise<number> {
+  try {
+    if (!(await pathExists(path))) {
+      return 0;
+    }
+    const stat = await fileIo.stat(path);
+    return Math.max(0, stat.size);
+  } catch (_) {
+    return 0;
+  }
 }
 
 function countFileRecords(path: string): number {
@@ -359,6 +488,13 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (_) {
     return false;
   }
+}
+
+function normalizeCapacityBytes(value: number | undefined): number {
+  if (value === undefined || value !== value || value <= 0) {
+    return FT_DB_SPOOL_MAX_BYTES;
+  }
+  return Math.min(FT_DB_SPOOL_MAX_BYTES, Math.max(1, Math.floor(value)));
 }
 
 function isValidSyncDataJSON(data: SyncDataJSON | undefined): boolean {

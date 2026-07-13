@@ -1,6 +1,7 @@
 import taskpool from '@ohos.taskpool';
 import { SyncDataJSON } from './bean/SyncData';
 import { runFTDBSpoolTaskPoolExecute } from './FTDBSpoolTaskPoolOperations';
+import { FT_DB_SPOOL_MAX_BYTES } from './FTDBSpoolLimits';
 
 enum FTDBSpoolTaskPoolCommand {
   INIT = 'init',
@@ -30,19 +31,26 @@ interface FTDBSpoolTaskPoolRequest extends FTDBSpoolPaths {
   seqStart?: number;
   records?: SyncDataJSON[];
   batchToken?: string;
-  recordOffset?: number;
+  byteOffset?: number;
   recordLimit?: number;
+  maxCapacityBytes?: number;
 }
 
 export interface FTDBSpoolTaskPoolResponse {
   ok: boolean;
   appendedRecords: number;
+  rejectedRecords: number;
   pendingRecords: number;
+  pendingRecordsKnown: boolean;
+  pendingBytes: number;
+  capacityBytes: number;
   batchToken: string;
   batchFileRecords: number;
   skippedRecords: number;
   records: FTDBSpoolRecordDTO[];
-  nextRecordOffset: number;
+  pageStartByteOffset: number;
+  nextByteOffset: number;
+  inflightBytes: number;
   hasMoreRecords: boolean;
   errorMessage: string;
 }
@@ -60,22 +68,24 @@ export class FTDBSpoolTaskPoolExecutor {
     paths: FTDBSpoolPaths,
     source: string,
     seqStart: number,
-    records: SyncDataJSON[]
+    records: SyncDataJSON[],
+    maxCapacityBytes: number = FT_DB_SPOOL_MAX_BYTES
   ): Promise<FTDBSpoolTaskPoolResponse> {
     const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.APPEND, paths);
     request.source = source;
     request.seqStart = seqStart;
     request.records = records;
+    request.maxCapacityBytes = Math.max(1, Math.floor(maxCapacityBytes));
     return await FTDBSpoolTaskPoolExecutor.execute(request);
   }
 
   public static async prepareReplay(
     paths: FTDBSpoolPaths,
-    recordOffset: number = 0,
+    byteOffset: number = 0,
     recordLimit: number = 256
   ): Promise<FTDBSpoolTaskPoolResponse> {
     const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.PREPARE_REPLAY, paths);
-    request.recordOffset = Math.max(0, Math.floor(recordOffset));
+    request.byteOffset = Math.max(0, Math.floor(byteOffset));
     request.recordLimit = Math.max(1, Math.floor(recordLimit));
     return await FTDBSpoolTaskPoolExecutor.execute(request);
   }
