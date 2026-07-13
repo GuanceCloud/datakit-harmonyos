@@ -794,6 +794,26 @@ export class FTSDK {
   }
 
   /**
+   * Enable or disable automatic upload of cached data after SDK initialization.
+   * Manual calls to {@link flushSyncData} remain available while auto sync is disabled.
+   * Aligned with Android: FTSdk.setAutoSync(boolean).
+   */
+  static setAutoSync(autoSync: boolean): void {
+    try {
+      if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+        FTInnerLogger.w(TAG, 'SDK not initialized, cannot set auto sync');
+        return;
+      }
+
+      FTSDK.ftSdk.ftSDKConfig.setAutoSync(autoSync);
+      SyncTaskManager.getInstance().setAutoSync(autoSync);
+      FTInnerLogger.d(TAG, `setAutoSync completed: enabled=${autoSync}`);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `setAutoSync failed: ${error}`);
+    }
+  }
+
+  /**
    * Check if view tracking is enabled
    * Returns true if RUM is enabled and view tracking is enabled
    * Aligned with Android: FTRUMConfigManager.isRumEnable() && config.isEnableTraceUserView()

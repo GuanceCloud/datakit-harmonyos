@@ -26,6 +26,7 @@ import { TrackLogManager } from '../../main/ets/components/log/TrackLogManager';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
+import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import {
@@ -228,6 +229,28 @@ export default function configUnitTest() {
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(2.9).getDataSyncRetryCount()).assertEqual(2);
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncPageSize(1_000_000).getPageSize())
         .assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
+    });
+
+    it('sdkShouldExposeRuntimeAutoSyncToggle', 0, () => {
+      SyncInternalTestAccess.resetState();
+      const config = FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false);
+      const syncTaskManager = SyncTaskManager.getInstance();
+      syncTaskManager.init(config);
+
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(config, createFakeContext());
+
+      FTSDK.setAutoSync(true);
+      expect(config.isAutoSyncEnabled()).assertTrue();
+      expect(syncTaskManager.isAutoSyncEnabled()).assertTrue();
+
+      FTSDK.setAutoSync(false);
+      expect(config.isAutoSyncEnabled()).assertFalse();
+      expect(syncTaskManager.isAutoSyncEnabled()).assertFalse();
+
+      syncTaskManager.stop();
+      SyncInternalTestAccess.resetState();
     });
 
     it('rumConfigShouldExposeDocumentedDefaults', 0, () => {
