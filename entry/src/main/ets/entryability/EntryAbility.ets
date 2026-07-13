@@ -318,8 +318,13 @@ export default class EntryAbility extends UIAbility {
         })
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
+        // Upload defaults are explicit in the demo so the active SDK behavior
+        // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(this.resolveAutoSyncEnabled())
-        .setCustomSyncPageSize(100) // Increased from 30 to 100 for faster upload speed and better throughput
+        .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
+        .setDataSyncRetryCount(5) // Default: retry failed uploads up to 5 times
+        .setSyncSleepTime(0) // Default: no extra delay between upload requests
+        .setCompressIntakeRequests(true) // Default: zlib-wrapped deflate for intake requests
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
       DemoLogger.i(LOG_TAG, "SDK install completed");
