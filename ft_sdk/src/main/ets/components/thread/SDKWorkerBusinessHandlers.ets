@@ -67,14 +67,14 @@ export interface SDKWorkerRuntimeState {
   activeViewName: string;
   activeActionId: string;
   activeActionName: string;
-  activeResources: SDKStringRecord;
+  activeResources: Map<string, string>;
   rumCounterDeltas: Record<string, SDKRumCounterDeltaDTO>;
   rumCounterPendingEventCount: number;
   rumCounterNeedsActionCloseCheck: boolean;
   rumCounterNeedsRumDataGenerate: boolean;
-  rumDedupKeys: SDKStringRecord;
+  rumDedupKeys: Map<string, boolean>;
   rumDedupOrder: string[];
-  rumResources: Record<string, SDKRumWorkerResourceState | null>;
+  rumResources: Map<string, SDKRumWorkerResourceState>;
   logQueue: SDKLogDTO[];
   logBatchBuffer: SDKLogDTO[];
   uploadIsScheduled: boolean;
@@ -125,6 +125,10 @@ interface SDKWorkerSnapshotPayload {
   activeActionId: string;
   activeActionName: string;
   activeResourceCount: number;
+  activeResourceStateKeyCount: number;
+  rumResourceStateKeyCount: number;
+  rumDedupStateKeyCount: number;
+  rumCounterStateKeyCount: number;
   logQueueSize: number;
   logBatchBufferSize: number;
   uploadIsScheduled: boolean;
@@ -295,14 +299,14 @@ export function createSDKWorkerRuntimeStateWithBackend(
     activeViewName: '',
     activeActionId: '',
     activeActionName: '',
-    activeResources: {},
+    activeResources: new Map<string, string>(),
     rumCounterDeltas: {},
     rumCounterPendingEventCount: 0,
     rumCounterNeedsActionCloseCheck: false,
     rumCounterNeedsRumDataGenerate: false,
-    rumDedupKeys: {},
+    rumDedupKeys: new Map<string, boolean>(),
     rumDedupOrder: [],
-    rumResources: {},
+    rumResources: new Map<string, SDKRumWorkerResourceState>(),
     logQueue: [],
     logBatchBuffer: [],
     uploadIsScheduled: false,
@@ -452,14 +456,14 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.activeViewName = '';
   state.activeActionId = '';
   state.activeActionName = '';
-  state.activeResources = {};
+  state.activeResources.clear();
   state.rumCounterDeltas = {};
   state.rumCounterPendingEventCount = 0;
   state.rumCounterNeedsActionCloseCheck = false;
   state.rumCounterNeedsRumDataGenerate = false;
-  state.rumDedupKeys = {};
+  state.rumDedupKeys.clear();
   state.rumDedupOrder = [];
-  state.rumResources = {};
+  state.rumResources.clear();
   state.logQueue = [];
   state.logBatchBuffer = [];
   state.uploadIsScheduled = false;
@@ -499,6 +503,10 @@ function getStateSnapshot(state: SDKWorkerRuntimeState): SDKWorkerPayload {
     activeActionId: state.activeActionId,
     activeActionName: state.activeActionName,
     activeResourceCount: getActiveResourceCount(state),
+    activeResourceStateKeyCount: state.activeResources.size,
+    rumResourceStateKeyCount: state.rumResources.size,
+    rumDedupStateKeyCount: state.rumDedupKeys.size,
+    rumCounterStateKeyCount: Object.keys(state.rumCounterDeltas).length,
     logQueueSize: state.logQueue.length,
     logBatchBufferSize: state.logBatchBuffer.length,
     uploadIsScheduled: state.uploadIsScheduled,
@@ -571,9 +579,9 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
     state.activeActionId = '';
     state.activeActionName = '';
   } else if (eventType === 'resource.start' && finalizedEvent.resourceId) {
-      state.activeResources[finalizedEvent.resourceId] = finalizedEvent.name || finalizedEvent.resourceId;
+    state.activeResources.set(finalizedEvent.resourceId, finalizedEvent.name || finalizedEvent.resourceId);
   } else if ((eventType === 'resource.stop' || eventType === 'resource.complete') && finalizedEvent.resourceId) {
-    state.activeResources[finalizedEvent.resourceId] = '';
+    state.activeResources.delete(finalizedEvent.resourceId);
   }
 
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
@@ -766,15 +774,15 @@ function rememberRumDedupKey(key: string, state: SDKWorkerRuntimeState): boolean
   if (!key || key.length === 0) {
     return false;
   }
-  if (state.rumDedupKeys[key] === '1') {
+  if (state.rumDedupKeys.has(key)) {
     return true;
   }
-  state.rumDedupKeys[key] = '1';
+  state.rumDedupKeys.set(key, true);
   state.rumDedupOrder.push(key);
   while (state.rumDedupOrder.length > RUM_WORKER_DEDUP_CAPACITY) {
     const expired = state.rumDedupOrder.shift();
     if (expired) {
-      state.rumDedupKeys[expired] = '';
+      state.rumDedupKeys.delete(expired);
     }
   }
   return false;
@@ -1191,8 +1199,8 @@ function getOrCreateRumResourceState(
   command: SDKRumResourceCommandDTO,
   state: SDKWorkerRuntimeState
 ): SDKRumWorkerResourceState {
-  const existing = state.rumResources[resourceId];
-  if (existing !== null && existing !== undefined) {
+  const existing = state.rumResources.get(resourceId);
+  if (existing !== undefined) {
     return existing;
   }
   const fallbackContext: SDKRumResourceContextDTO = {
@@ -1249,7 +1257,7 @@ function getOrCreateRumResourceState(
     shouldCollect: command.shouldCollect !== false,
     customDataType: command.customDataType
   };
-  state.rumResources[resourceId] = resource;
+  state.rumResources.set(resourceId, resource);
   return resource;
 }
 
@@ -1410,7 +1418,7 @@ function tryCreateRumResourceDraft(
     syncDrafts.push(createRumDraft(errorEvent, state));
     applyRumErrorDelta(state, resource.context.viewId, resource.context.actionId);
   }
-  state.rumResources[resource.resourceId] = null;
+  state.rumResources.delete(resource.resourceId);
 }
 
 function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEventDTO {
@@ -3348,13 +3356,5 @@ function createEmptyRumCounterDelta(viewId: string, actionId: string): SDKRumCou
 }
 
 function getActiveResourceCount(state: SDKWorkerRuntimeState): number {
-  let count = 0;
-  const keys = Object.keys(state.activeResources);
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i];
-    if (state.activeResources[key].length > 0) {
-      count++;
-    }
-  }
-  return count;
+  return state.activeResources.size;
 }

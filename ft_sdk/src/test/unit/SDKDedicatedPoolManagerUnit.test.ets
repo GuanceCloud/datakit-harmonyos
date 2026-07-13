@@ -51,6 +51,11 @@ import {
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from '../../main/ets/components/thread/workers/DataUploadLimits';
+import {
+  isSDKWorkerExternalSideEffectCommand,
+  isSDKWorkerInFlightReplaySafe,
+  isSDKWorkerMailboxReplaySafe
+} from '../../main/ets/components/thread/SDKWorkerReplayPolicy';
 import { parseANREventInWorker } from '../../main/ets/components/thread/workers/ANRWorkerOperations';
 import {
   parseProcStatCpuTicks,
@@ -137,6 +142,16 @@ async function executeWorkerCommandForUnit(request: SDKWorkerRequest): Promise<S
   return handleSDKWorkerRequest(request, state);
 }
 
+async function getRumWorkerSnapshotForUnit(id: string): Promise<SDKWorkerResponse> {
+  return executeWorkerCommandForUnit({
+    id,
+    pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+    command: SDKWorkerCommand.EVENT_RUM_SNAPSHOT,
+    priority: 7,
+    createdAt: Date.now()
+  });
+}
+
 class RetryUploadHttpExecutor implements SDKUploadWorkerHttpExecutor {
   lastRequest: SDKUploadHttpRequestDTO | null = null;
   private readonly responseCode: number;
@@ -182,6 +197,20 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_UPLOAD];
       expect(status.workerCount).assertEqual(1);
       expect(status.maxConcurrency).assertEqual(1);
+      expect(status.commandReplayCount).assertEqual(0);
+      expect(status.mailboxReplayCount).assertEqual(0);
+      expect(status.mailboxReplayPending).assertEqual(0);
+      expect(status.mailboxReplayDropped).assertEqual(0);
+    });
+
+    it('workerReplayPolicyShouldExcludeUploadSideEffects', 0, () => {
+      expect(isSDKWorkerInFlightReplaySafe(SDKWorkerCommand.EVENT_RUM_COMMAND)).assertTrue();
+      expect(isSDKWorkerMailboxReplaySafe(SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH)).assertTrue();
+      expect(isSDKWorkerInFlightReplaySafe(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertFalse();
+      expect(isSDKWorkerMailboxReplaySafe(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertFalse();
+      expect(isSDKWorkerExternalSideEffectCommand(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
+      expect(isSDKWorkerExternalSideEffectCommand(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();
+      expect(isSDKWorkerExternalSideEffectCommand(SDKWorkerCommand.EVENT_RUM_COMMAND)).assertFalse();
     });
 
     it('workerProtocolShouldRejectNonSerializablePayload', 0, async () => {
@@ -568,6 +597,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }
       expect(viewFinalized).assertEqual('1,0,1');
       expect(actionFinalized).assertEqual('0,1,0');
+      const snapshot = await getRumWorkerSnapshotForUnit('rum-counter-state-key-snapshot');
+      expect(getPayloadString(snapshot.payload, 'rumCounterStateKeyCount')).assertEqual('0');
     });
 
     it('eventRumCounterBatchShouldCompactAndFinalizeByViewAndAction', 0, async () => {
@@ -672,6 +703,32 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(completeResponse.ok).assertTrue();
       expect(getPayloadString(completeResponse.payload, 'activeResourceCount')).assertEqual('0');
+      const snapshot = await getRumWorkerSnapshotForUnit('rum-resource-state-key-snapshot');
+      expect(getPayloadString(snapshot.payload, 'activeResourceStateKeyCount')).assertEqual('0');
+    });
+
+    it('eventRumWorkerShouldBoundDedupStateWithoutStaleKeys', 0, async () => {
+      const events: SDKRumEventDTO[] = [];
+      for (let i = 0; i < 2050; i++) {
+        events.push({
+          eventType: 'dedup.capacity',
+          time: i + 1,
+          name: `event-${i}`
+        });
+      }
+      const batch: SDKRumEventBatchDTO = { events };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-dedup-capacity',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      expect(response.ok).assertTrue();
+
+      const snapshot = await getRumWorkerSnapshotForUnit('rum-dedup-capacity-snapshot');
+      expect(getPayloadString(snapshot.payload, 'rumDedupStateKeyCount')).assertEqual('2048');
     });
 
     it('eventRumWorkerShouldNormalizeAndDeduplicateRawErrorProperties', 0, async () => {
@@ -819,6 +876,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('custom_resource="normalized"')).assertTrue();
       expect(line.includes('resource_dns=12i')).assertTrue();
       expect(line.includes('duration=50i')).assertTrue();
+      const snapshot = await getRumWorkerSnapshotForUnit('rum-resource-command-state-key-snapshot');
+      expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
     });
 
     it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {
