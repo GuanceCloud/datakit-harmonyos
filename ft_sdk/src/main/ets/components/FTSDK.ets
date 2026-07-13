@@ -212,6 +212,7 @@ export class FTSDK {
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
       FTRUMInnerManager.getInstance().initContext(context);
+      this.refreshRandomDeviceUUIDContext(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
     }
@@ -544,6 +545,23 @@ export class FTSDK {
     hashMap.set(Constants.KEY_SDK_PACKAGE_INFO, new String(pkgJson));
     hashMap.set(Constants.KEY_SDK_VERSION, new String(BuildProfile.HAR_VERSION));
 
+  }
+
+  /**
+   * Privacy-mode UUID is restored asynchronously. Refresh the dynamic tag once
+   * it is available so data created after restoration uses the persisted value.
+   */
+  private refreshRandomDeviceUUIDContext(config: FTSDKConfig): void {
+    if (config.isAccessODIDEnabled()) {
+      return;
+    }
+    DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
+      const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
+      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    }).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Failed to refresh random device UUID context: ${error.message}`);
+    });
   }
 
   private static getNativeCrashVersion(): string {

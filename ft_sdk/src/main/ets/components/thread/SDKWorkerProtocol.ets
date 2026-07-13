@@ -15,6 +15,7 @@ export enum SDKDedicatedPoolType {
   CRASH_FILE = 'crash-file',
   ANR = 'anr',
   BACKGROUND = 'background',
+  NATIVE_CRASH_LOG = 'native-crash-log',
   DATA_UPLOAD = 'data-upload'
 }
 
@@ -71,6 +72,7 @@ export enum SDKWorkerCommand {
   DATA_PARSE_CRASH_TEXT = 'data.parseCrashText',
   ANR_PARSE_EVENT = 'anr.parseEvent',
   BACKGROUND_COLLECT_METRICS = 'background.collectMetrics',
+  NATIVE_CRASH_LOG_APPEND = 'nativeCrashLog.append',
   UPLOAD_SCHEDULE = 'upload.schedule',
   UPLOAD_CONSUME = 'upload.consume',
   UPLOAD_EXECUTE_PAGE = 'upload.executePage',
@@ -105,6 +107,17 @@ export interface SDKLogDTO {
   tags: SDKStringRecord;
   fields: SDKStringRecord;
   isSilence?: boolean;
+}
+
+/** A bounded, best-effort diagnostic record written by the native crash worker. */
+export interface SDKNativeCrashLogDTO {
+  level: string;
+  tag: string;
+  message: string;
+}
+
+export interface SDKNativeCrashLogBatchDTO {
+  logs: SDKNativeCrashLogDTO[];
 }
 
 export interface SDKLineProtocolContextDTO {

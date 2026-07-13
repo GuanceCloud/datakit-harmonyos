@@ -420,6 +420,7 @@ export class SyncTaskManager {
   private context: Context | null = null;
   private errorTimeLine: number = -1; // Error time line in nanoseconds
   private preferencesStore: SyncTaskPreferences | null = null;
+  private preferencesInitPromise: Promise<void> | null = null;
   private uploadWorkerExecutor = new DataUploadWorkerExecutor();
   private constructor() {
   }
@@ -467,15 +468,10 @@ export class SyncTaskManager {
     if (context) {
       this.context = context;
 
-      // Initialize preferences for errorTimeLine storage
-      try {
-        this.preferencesStore = syncTaskRuntime.getPreferences(context, SyncTaskManager.PREFERENCES_NAME);
-        this.loadErrorTimeLineFromFileCache();
-
-        FTInnerLogger.d(TAG, `Loaded errorTimeLine from cache: ${this.errorTimeLine}`);
-      } catch (error) {
-        FTInnerLogger.e(TAG, `Failed to initialize preferences: ${error as string}`);
-        this.errorTimeLine = -1;
+      // Open Preferences asynchronously. setErrorTimeLine keeps the memory
+      // value authoritative until the cached value can be merged safely.
+      if (this.preferencesInitPromise === null) {
+        this.preferencesInitPromise = this.initializePreferences(context);
       }
 
       // Initialize RUM data cleanup manager
@@ -486,6 +482,21 @@ export class SyncTaskManager {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
     FTInnerLogger.d(TAG, "******************* Sync Poll Ready *******************>>>");
+  }
+
+  private async initializePreferences(context: Context): Promise<void> {
+    try {
+      this.preferencesStore = await syncTaskRuntime.getPreferences(context, SyncTaskManager.PREFERENCES_NAME);
+      const cachedErrorTimeLine = await this.getErrorTimeLineFromFileCache();
+      if (cachedErrorTimeLine > this.errorTimeLine) {
+        this.errorTimeLine = cachedErrorTimeLine;
+      } else if (this.errorTimeLine > cachedErrorTimeLine) {
+        await this.saveErrorWithFileCache(this.errorTimeLine);
+      }
+      FTInnerLogger.d(TAG, `Loaded errorTimeLine from cache: ${this.errorTimeLine}`);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to initialize preferences: ${error as string}`);
+    }
   }
 
   private scheduleUpload(delay: number = 0): void {
@@ -675,7 +686,8 @@ export class SyncTaskManager {
   }
 
   private async loadErrorTimeLineFromFileCache(): Promise<void> {
-    this.errorTimeLine = await this.getErrorTimeLineFromFileCache();
+    const cachedErrorTimeLine = await this.getErrorTimeLineFromFileCache();
+    this.errorTimeLine = Math.max(this.errorTimeLine, cachedErrorTimeLine);
   }
 
   /**
@@ -687,6 +699,9 @@ export class SyncTaskManager {
     // First check in-memory value
     if (this.errorTimeLine > 0) {
       return this.errorTimeLine;
+    }
+    if (this.preferencesInitPromise) {
+      await this.preferencesInitPromise;
     }
     // Then check preferences cache
     return await this.getErrorTimeLineFromFileCache();

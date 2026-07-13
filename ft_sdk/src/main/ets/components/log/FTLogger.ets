@@ -6,7 +6,15 @@ import { StringWrapper } from '../utils/StringWrapper';
 import { FTInnerLogFileManager } from './FTInnerLogFileManager';
 import { SDKLogLevel } from '../enum/Enums';
 import hilog from '@ohos.hilog';
-import ftnativecrash from 'libftnativecrash.so';
+import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKNativeCrashLogBatchDTO,
+  SDKNativeCrashLogDTO,
+  SDKTaskPriority,
+  SDKWorkerCommand,
+  SDKWorkerResponse
+} from '../thread/SDKWorkerProtocol';
 
 /**
  * Log entry interface
@@ -33,6 +41,13 @@ export class FTInnerLogger {
   private static DEBUG_ENABLED: boolean = true;
   private static sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
   private static CRASH_LOG_COLLECTION_ENABLED: boolean = true;
+  private static readonly CRASH_LOG_BATCH_SIZE = 32;
+  private static readonly CRASH_LOG_MAX_PENDING = 256;
+  private static readonly CRASH_LOG_DRAIN_DELAY_MS = 16;
+  private static pendingCrashLogs: SDKNativeCrashLogDTO[] = [];
+  private static crashLogDrainTimer: number | null = null;
+  private static crashLogCommandSequence: number = 0;
+  private static crashLogResponseHandlerRegistered: boolean = false;
 
   // Enable or disable all SDK logs at runtime (aligned with Android LogUtils.setDebug())
   // When disabled, all log levels (d, i, w, e) will be suppressed
@@ -48,19 +63,79 @@ export class FTInnerLogger {
   // Enable or disable crash log collection
   static setCrashLogCollectionEnabled(enabled: boolean): void {
     FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED = enabled;
+    if (!enabled) {
+      FTInnerLogger.pendingCrashLogs = [];
+      if (FTInnerLogger.crashLogDrainTimer !== null) {
+        clearTimeout(FTInnerLogger.crashLogDrainTimer);
+        FTInnerLogger.crashLogDrainTimer = null;
+      }
+    }
   }
 
-  // Helper method to add log to crash buffer
+  // A diagnostic crash context must never synchronously cross NAPI on the caller.
+  // Keep only the newest bounded records while the dedicated worker is unavailable.
   private static addToCrashBuffer(level: string, tag: string, message: string): void {
     if (!FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED) {
       return;
     }
-    try {
-      const fullTag = `${FTInnerLogger.TAG_PREFIX}_${tag}`;
-      ftnativecrash.addLog(level, fullTag, message);
-    } catch (error) {
-      // Silently fail if native module is not available
+    if (FTInnerLogger.pendingCrashLogs.length >= FTInnerLogger.CRASH_LOG_MAX_PENDING) {
+      FTInnerLogger.pendingCrashLogs.shift();
     }
+    FTInnerLogger.pendingCrashLogs.push({
+      level,
+      tag: `${FTInnerLogger.TAG_PREFIX}_${tag}`,
+      message
+    });
+    FTInnerLogger.scheduleCrashLogDrain();
+  }
+
+  private static scheduleCrashLogDrain(): void {
+    if (FTInnerLogger.crashLogDrainTimer !== null || FTInnerLogger.pendingCrashLogs.length === 0) {
+      return;
+    }
+    FTInnerLogger.crashLogDrainTimer = setTimeout(() => {
+      FTInnerLogger.crashLogDrainTimer = null;
+      FTInnerLogger.drainCrashLogBatch();
+    }, FTInnerLogger.CRASH_LOG_DRAIN_DELAY_MS) as number;
+  }
+
+  private static drainCrashLogBatch(): void {
+    if (FTInnerLogger.pendingCrashLogs.length === 0 || !FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED) {
+      return;
+    }
+    const logs = FTInnerLogger.pendingCrashLogs.splice(0, FTInnerLogger.CRASH_LOG_BATCH_SIZE);
+    FTInnerLogger.ensureCrashLogResponseHandler();
+    FTInnerLogger.crashLogCommandSequence++;
+    const payload: SDKNativeCrashLogBatchDTO = { logs };
+    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+      id: `nativeCrashLog.append.${FTInnerLogger.crashLogCommandSequence}.${Date.now()}`,
+      pool: SDKDedicatedPoolType.NATIVE_CRASH_LOG,
+      command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
+      priority: SDKTaskPriority.LOW,
+      createdAt: Date.now(),
+      payload: payload as Object
+    });
+    if (!posted) {
+      FTInnerLogger.pendingCrashLogs = logs.concat(FTInnerLogger.pendingCrashLogs);
+      while (FTInnerLogger.pendingCrashLogs.length > FTInnerLogger.CRASH_LOG_MAX_PENDING) {
+        FTInnerLogger.pendingCrashLogs.pop();
+      }
+    }
+    FTInnerLogger.scheduleCrashLogDrain();
+  }
+
+  private static ensureCrashLogResponseHandler(): void {
+    if (FTInnerLogger.crashLogResponseHandlerRegistered) {
+      return;
+    }
+    SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
+      SDKDedicatedPoolType.NATIVE_CRASH_LOG,
+      (_response: SDKWorkerResponse) => {
+        // Worker restart/replay is managed by SDKDedicatedPoolManager. Do not log
+        // failures here because that would recursively enqueue crash diagnostics.
+      }
+    );
+    FTInnerLogger.crashLogResponseHandlerRegistered = true;
   }
 
   private static addToLogFile(level: string, tag: string, message: string): void {
@@ -143,7 +218,7 @@ export class FTInnerLogger {
 const TAG = "FTLogger";
 
 interface PendingPublicLogBatch {
-  logs: LogEntry[];
+  logs: ReadonlyArray<LogEntry>;
   cursor: number;
 }
 
@@ -273,9 +348,9 @@ export class FTLogger {
     if (!logs || logs.length === 0) {
       return;
     }
-    // A shallow membership snapshot preserves the caller-visible batch while
-    // expensive bean creation, filtering and serialization are time-sliced.
-    FTLogger.pendingPublicLogBatches.push({ logs: logs.slice(), cursor: 0 });
+    // Keep only a source reference and a cursor. Copying a huge input array on
+    // the caller thread is itself an O(N) ANR vector; conversion remains sliced.
+    FTLogger.pendingPublicLogBatches.push({ logs, cursor: 0 });
     FTLogger.schedulePublicBatchDrain();
   }
 

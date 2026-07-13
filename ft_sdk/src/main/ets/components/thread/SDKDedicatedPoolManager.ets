@@ -339,6 +339,7 @@ export class SDKDedicatedPoolManager {
       SDKDedicatedPoolType.DATA_PROCESS,
       SDKDedicatedPoolType.ANR,
       SDKDedicatedPoolType.BACKGROUND,
+      SDKDedicatedPoolType.NATIVE_CRASH_LOG,
       SDKDedicatedPoolType.DATA_UPLOAD
     ];
     const tasks: Promise<SDKWorkerResponse>[] = [];
@@ -463,6 +464,13 @@ export class SDKDedicatedPoolManager {
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.BACKGROUND)
+    }));
+    this.pools.set(SDKDedicatedPoolType.NATIVE_CRASH_LOG, this.createPool({
+      pool: SDKDedicatedPoolType.NATIVE_CRASH_LOG,
+      workerCount: DEDICATED_LANE_WORKER_COUNT,
+      maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      backend: 'thread-worker-pending',
+      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.NATIVE_CRASH_LOG)
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_UPLOAD, this.createPool({
       pool: SDKDedicatedPoolType.DATA_UPLOAD,

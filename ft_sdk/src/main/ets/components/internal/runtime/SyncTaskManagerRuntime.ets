@@ -73,7 +73,7 @@ export interface SyncTaskCachePolicy {
 export interface SyncTaskManagerRuntime {
   getDbTaskPool(): SyncTaskDbTaskPool;
   getCachePolicy(): SyncTaskCachePolicy;
-  getPreferences(context: Context, name: string): SyncTaskPreferences;
+  getPreferences(context: Context, name: string): Promise<SyncTaskPreferences>;
   executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse>;
   getCurrentTimeMs(): number;
   getRandom(): number;
@@ -155,8 +155,8 @@ export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
     return FTDBCachePolicy.getInstance();
   }
 
-  getPreferences(context: Context, name: string): SyncTaskPreferences {
-    return preferences.getPreferencesSync(context, { name }) as SyncTaskPreferences;
+  async getPreferences(context: Context, name: string): Promise<SyncTaskPreferences> {
+    return await preferences.getPreferences(context, { name }) as SyncTaskPreferences;
   }
 
   executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {

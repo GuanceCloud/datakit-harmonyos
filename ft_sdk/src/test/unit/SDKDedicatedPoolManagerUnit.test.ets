@@ -255,7 +255,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const pools: SDKDedicatedPoolType[] = [
         SDKDedicatedPoolType.CRASH_FILE,
         SDKDedicatedPoolType.ANR,
-        SDKDedicatedPoolType.BACKGROUND
+        SDKDedicatedPoolType.BACKGROUND,
+        SDKDedicatedPoolType.NATIVE_CRASH_LOG
       ];
 
       for (const pool of pools) {
@@ -277,6 +278,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(status[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency).assertEqual(1);
       expect(status[SDKDedicatedPoolType.ANR].maxConcurrency).assertEqual(1);
       expect(status[SDKDedicatedPoolType.BACKGROUND].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.NATIVE_CRASH_LOG].maxConcurrency).assertEqual(1);
     });
 
     it('anrWorkerShouldFormatSerializableFreezePayloadWithoutHostFileIo', 0, () => {

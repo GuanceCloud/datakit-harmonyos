@@ -361,7 +361,7 @@ class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor
     return this.cachePolicy;
   }
 
-  getPreferences(_context: Context, _name: string): SyncTaskPreferences {
+  async getPreferences(_context: Context, _name: string): Promise<SyncTaskPreferences> {
     this.getPreferencesCount++;
     if (this.throwPreferences) {
       throw new Error('preferences failed');

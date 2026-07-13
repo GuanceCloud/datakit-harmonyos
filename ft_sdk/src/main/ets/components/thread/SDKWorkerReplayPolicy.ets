@@ -30,6 +30,7 @@ export function isSDKWorkerInFlightReplaySafe(command: string): boolean {
     case SDKWorkerCommand.DATA_PARSE_CRASH_TEXT:
     case SDKWorkerCommand.ANR_PARSE_EVENT:
     case SDKWorkerCommand.BACKGROUND_COLLECT_METRICS:
+    case SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND:
     case SDKWorkerCommand.UPLOAD_FORMAT_BODY:
       return true;
     default:
@@ -55,6 +56,7 @@ export function isSDKWorkerMailboxReplaySafe(command: string): boolean {
     case SDKWorkerCommand.EVENT_RUM_SNAPSHOT:
     case SDKWorkerCommand.LOG_ENQUEUE:
     case SDKWorkerCommand.LOG_FLUSH:
+    case SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND:
       return true;
     default:
       return false;

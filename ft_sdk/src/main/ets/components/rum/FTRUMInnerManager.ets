@@ -373,6 +373,8 @@ export class FTRUMInnerManager {
   private static readonly KEY_SESSION_ID = 'ft.rum.session.id';
   private preferencesStore: preferences.Preferences | null = null;
   private preferencesInitialized: boolean = false;
+  private preferencesInitPromise: Promise<void> | null = null;
+  private rumContextPersistChain: Promise<void> = Promise.resolve();
 
 
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
@@ -1514,6 +1516,8 @@ export class FTRUMInnerManager {
     this.sessionRefreshLock = Promise.resolve();
     this.preferencesStore = null;
     this.preferencesInitialized = false;
+    this.preferencesInitPromise = null;
+    this.rumContextPersistChain = Promise.resolve();
   }
   
   /**
@@ -1540,12 +1544,14 @@ export class FTRUMInnerManager {
       return;
     }
 
-    try {
-      this.preferencesStore = preferences.getPreferencesSync(this.context, { name: FTRUMInnerManager.PREFERENCES_NAME })
-    } catch (error) {
+    const context = this.context;
+    this.preferencesInitPromise = preferences.getPreferences(context, {
+      name: FTRUMInnerManager.PREFERENCES_NAME
+    }).then((store: preferences.Preferences) => {
+      this.preferencesStore = store;
+    }).catch((error: Error) => {
       FTInnerLogger.e(TAG, `Failed to initialize RUM context preferences: ${error.message}`);
-
-    }
+    });
   }
 
   /**
@@ -1570,30 +1576,37 @@ export class FTRUMInnerManager {
    * context at crash time - we must have already saved it during normal operation.
    */
   public async saveRumContextAsync(): Promise<void> {
-    if (!this.preferencesStore) {
-      FTInnerLogger.w(TAG, "Preferences store not available, skipping RUM context save");
-      return;
-    }
-
     const viewId = this.activeView?.getId() || '';
     const viewName = this.activeView?.getViewName() || '';
     const viewReferrer = this.activeView?.getViewReferrer() || '';
     const sessionId = this.sessionId;
+    const snapshot: RUMContext = { viewId, viewName, viewReferrer, sessionId };
 
-    try {
+    if (!this.preferencesStore && this.preferencesInitPromise) {
+      await this.preferencesInitPromise;
+    }
+    const store = this.preferencesStore;
+    if (!store) {
+      FTInnerLogger.w(TAG, "Preferences store not available, skipping RUM context save");
+      return;
+    }
+
+    const persist = async (): Promise<void> => {
       // Use put() followed by flush() to ensure data is written immediately
       // This is critical for crash reporting - we need the data saved before the crash handler runs
-      await this.preferencesStore.put(FTRUMInnerManager.KEY_VIEW_ID, viewId);
-      await this.preferencesStore.put(FTRUMInnerManager.KEY_VIEW_NAME, viewName);
-      await this.preferencesStore.put(FTRUMInnerManager.KEY_VIEW_REFERRER, viewReferrer);
-      await this.preferencesStore.put(FTRUMInnerManager.KEY_SESSION_ID, sessionId);
-      await this.preferencesStore.flush();
-
-      FTInnerLogger.d(TAG, `RUM context saved: viewId=${viewId}, viewName=${viewName}, sessionId=${sessionId}`);
-    } catch (error) {
+      await store.put(FTRUMInnerManager.KEY_VIEW_ID, snapshot.viewId);
+      await store.put(FTRUMInnerManager.KEY_VIEW_NAME, snapshot.viewName);
+      await store.put(FTRUMInnerManager.KEY_VIEW_REFERRER, snapshot.viewReferrer);
+      await store.put(FTRUMInnerManager.KEY_SESSION_ID, snapshot.sessionId);
+      await store.flush();
+      FTInnerLogger.d(TAG,
+        `RUM context saved: viewId=${snapshot.viewId}, viewName=${snapshot.viewName}, sessionId=${snapshot.sessionId}`);
+    };
+    this.rumContextPersistChain = this.rumContextPersistChain.then(persist).catch((error: Error) => {
       const errorMsg = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `Failed to save RUM context: ${errorMsg}`);
-    }
+    });
+    await this.rumContextPersistChain;
   }
 
   /**
@@ -1608,6 +1621,9 @@ export class FTRUMInnerManager {
       sessionId: ''
     };
 
+    if (!this.preferencesStore && this.preferencesInitPromise) {
+      await this.preferencesInitPromise;
+    }
     if (!this.preferencesStore) {
       FTInnerLogger.w(TAG, "Preferences store not available, returning empty RUM context");
       return defaultContext;
@@ -1633,12 +1649,24 @@ export class FTRUMInnerManager {
    * Clear saved RUM context from preferences (after crash report is sent)
    */
   public clearSavedRumContext(): void {
+    this.clearSavedRumContextWhenReady();
+  }
+
+  private async clearSavedRumContextWhenReady(): Promise<void> {
+    if (!this.preferencesStore && this.preferencesInitPromise) {
+      await this.preferencesInitPromise;
+    }
     if (!this.preferencesStore) {
       FTInnerLogger.w(TAG, "Preferences store not available, skipping RUM context clear");
       return;
     }
-
-    this.clearSavedRumContextAsync(this.preferencesStore);
+    const store = this.preferencesStore;
+    this.rumContextPersistChain = this.rumContextPersistChain.then(async () => {
+      await this.clearSavedRumContextAsync(store);
+    }).catch((error: Error) => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `Failed to clear saved RUM context: ${errorMessage}`);
+    });
   }
 
   private async clearSavedRumContextAsync(store: preferences.Preferences): Promise<void> {

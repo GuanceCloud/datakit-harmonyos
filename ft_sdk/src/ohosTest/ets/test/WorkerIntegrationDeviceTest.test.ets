@@ -28,7 +28,7 @@ export default function workerIntegrationDeviceTest() {
   describe('WorkerIntegrationDeviceTest', () => {
     it('shouldLoadDedicatedWorkersFromHarPaths', 0, async () => {
       const responses = await SdkInternalTestAccess.probeDedicatedWorkers();
-      expect(responses.length).assertEqual(6);
+      expect(responses.length).assertEqual(7);
 
       const expectedPools: string[] = [
         SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -36,6 +36,7 @@ export default function workerIntegrationDeviceTest() {
         SDKDedicatedPoolType.DATA_PROCESS,
         SDKDedicatedPoolType.ANR,
         SDKDedicatedPoolType.BACKGROUND,
+        SDKDedicatedPoolType.NATIVE_CRASH_LOG,
         SDKDedicatedPoolType.DATA_UPLOAD
       ];
       const seen: Record<string, boolean> = {};

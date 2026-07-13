@@ -26,6 +26,8 @@ export class SDKWorkerPathResolver {
     `${WORKER_BASE_SOURCE_PATH}/ANRWorker.ets`;
   public static readonly BACKGROUND_SOURCE_PATH =
     `${WORKER_BASE_SOURCE_PATH}/BackgroundWorker.ets`;
+  public static readonly NATIVE_CRASH_LOG_SOURCE_PATH =
+    `${WORKER_BASE_SOURCE_PATH}/NativeCrashLogWorker.ets`;
   public static readonly DATA_UPLOAD_SOURCE_PATH =
     `${WORKER_BASE_SOURCE_PATH}/DataUploadWorker.ets`;
 
@@ -43,6 +45,8 @@ export class SDKWorkerPathResolver {
         return SDKWorkerPathResolver.createInfo(pool, 'ANRWorker');
       case SDKDedicatedPoolType.BACKGROUND:
         return SDKWorkerPathResolver.createInfo(pool, 'BackgroundWorker');
+      case SDKDedicatedPoolType.NATIVE_CRASH_LOG:
+        return SDKWorkerPathResolver.createInfo(pool, 'NativeCrashLogWorker');
       case SDKDedicatedPoolType.DATA_UPLOAD:
       default:
         return SDKWorkerPathResolver.createInfo(pool, 'DataUploadWorker');
@@ -57,6 +61,7 @@ export class SDKWorkerPathResolver {
       SDKWorkerPathResolver.CRASH_FILE_SOURCE_PATH,
       SDKWorkerPathResolver.ANR_SOURCE_PATH,
       SDKWorkerPathResolver.BACKGROUND_SOURCE_PATH,
+      SDKWorkerPathResolver.NATIVE_CRASH_LOG_SOURCE_PATH,
       SDKWorkerPathResolver.DATA_UPLOAD_SOURCE_PATH
     ];
   }
