@@ -46,13 +46,13 @@ export class FTMonitorManager {
     this.isTVDevice = false;
 
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)) {
-      FTInnerLogger.d(TAG, 'CPU monitoring delegated to BackgroundWorker with 5s cache');
+      FTInnerLogger.d(TAG, 'CPU monitoring delegated to DataProcessWorker with 5s cache');
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-      FTInnerLogger.d(TAG, 'Memory monitoring delegated to BackgroundWorker with 3s cache');
+      FTInnerLogger.d(TAG, 'Memory monitoring delegated to DataProcessWorker with 3s cache');
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)) {
-      FTInnerLogger.d(TAG, 'Battery monitoring delegated to BackgroundWorker');
+      FTInnerLogger.d(TAG, 'Battery monitoring delegated to DataProcessWorker');
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
       try {
@@ -229,7 +229,7 @@ class MonitorRunnable {
     };
     const request: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.BACKGROUND_COLLECT_METRICS}:${Date.now()}:${MonitorRunnable.commandSequence}`,
-      pool: SDKDedicatedPoolType.BACKGROUND,
+      pool: SDKDedicatedPoolType.DATA_PROCESS,
       command: SDKWorkerCommand.BACKGROUND_COLLECT_METRICS,
       priority: SDKTaskPriority.BACKGROUND,
       createdAt: Date.now(),
@@ -238,7 +238,7 @@ class MonitorRunnable {
     try {
       const response = await SDKDedicatedPoolManager.getInstance().executeCommand(request);
       if (!response.ok || !response.payload) {
-        throw new Error(response.errorMessage || 'BackgroundWorker returned an empty metrics response');
+        throw new Error(response.errorMessage || 'DataProcessWorker returned an empty metrics response');
       }
       if (!this.isRunning) {
         return;

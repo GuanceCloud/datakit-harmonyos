@@ -29,6 +29,8 @@ const DATA_UPLOAD_WORKER_COMMAND_TIMEOUT_MS = 60000;
 const DATA_UPLOAD_HTTP_HARD_TIMEOUT_MS = 135000;
 const ANR_PARSE_COMMAND_TIMEOUT_MS = 15000;
 const BACKGROUND_METRICS_COMMAND_TIMEOUT_MS = 5000;
+const CRASH_WORKER_IDLE_TIMEOUT_MS = 120_000;
+const ANR_WORKER_IDLE_TIMEOUT_MS = 90_000;
 const DEDICATED_LANE_WORKER_COUNT = 1;
 const POOL_QUEUE_COMPACT_THRESHOLD = 64;
 
@@ -59,6 +61,8 @@ export interface SDKDedicatedPoolStatus {
   mailboxReplayCount: number;
   mailboxReplayPending: number;
   mailboxReplayDropped: number;
+  idleTimeoutMs: number;
+  idleRecycleCount: number;
   isShutdown: boolean;
 }
 
@@ -73,6 +77,7 @@ interface SDKPoolConfig {
   pool: SDKDedicatedPoolType;
   workerCount: number;
   maxConcurrency: number;
+  idleTimeoutMs: number;
   backend: string;
   workerInfo: SDKWorkerPathInfo;
 }
@@ -145,6 +150,8 @@ interface DedicatedPoolState extends SDKPoolConfig {
   mailboxReplayOrder: string[];
   lineContextCheckpoint: SDKWorkerRequest | null;
   recoveryResponseIds: Map<string, boolean>;
+  idleTimerId: number | null;
+  idleRecycleCount: number;
   isShutdown: boolean;
 }
 
@@ -197,6 +204,7 @@ export class SDKDedicatedPoolManager {
     if (state.isShutdown) {
       return Promise.reject(new Error(`SDK dedicated pool has been shut down: ${request.pool}`));
     }
+    this.clearWorkerIdleTimer(state);
     assertSDKWorkerRequestSerializable(request);
 
     return new Promise<SDKWorkerResponse>((resolve, reject) => {
@@ -231,6 +239,7 @@ export class SDKDedicatedPoolManager {
     try {
       this.assertMailboxRequestEnvelope(request);
       const state = this.getPool(request.pool);
+      this.clearWorkerIdleTimer(state);
       if (this.forcedMailboxPostFailureCount > 0) {
         this.forcedMailboxPostFailureCount--;
         state.failedTasks++;
@@ -337,9 +346,8 @@ export class SDKDedicatedPoolManager {
       SDKDedicatedPoolType.EVENT_CONSUMER,
       SDKDedicatedPoolType.LOG_CONSUMER,
       SDKDedicatedPoolType.DATA_PROCESS,
+      SDKDedicatedPoolType.CRASH,
       SDKDedicatedPoolType.ANR,
-      SDKDedicatedPoolType.BACKGROUND,
-      SDKDedicatedPoolType.NATIVE_CRASH_LOG,
       SDKDedicatedPoolType.DATA_UPLOAD
     ];
     const tasks: Promise<SDKWorkerResponse>[] = [];
@@ -382,6 +390,14 @@ export class SDKDedicatedPoolManager {
     this.processPool(state);
   }
 
+  /** Internal deterministic seam for idle-reclamation device tests. */
+  public configurePoolIdleTimeoutInternal(pool: SDKDedicatedPoolType, idleTimeoutMs: number): void {
+    const state = this.getPool(pool);
+    this.clearWorkerIdleTimer(state);
+    state.idleTimeoutMs = Math.max(0, Math.floor(idleTimeoutMs));
+    this.scheduleWorkerIdleTermination(state);
+  }
+
   public getStatus(): SDKDedicatedPoolManagerStatus {
     const pools: Record<string, SDKDedicatedPoolStatus> = {};
     this.pools.forEach((state, pool) => {
@@ -415,6 +431,7 @@ export class SDKDedicatedPoolManager {
       state.mailboxReplayOrder = [];
       state.lineContextCheckpoint = null;
       state.recoveryResponseIds.clear();
+      this.clearWorkerIdleTimer(state);
       for (let i = 0; i < state.workerSlots.length; i++) {
         this.terminateWorkerSlot(state.workerSlots[i]);
       }
@@ -427,6 +444,7 @@ export class SDKDedicatedPoolManager {
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
       workerCount: DEDICATED_LANE_WORKER_COUNT,
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      idleTimeoutMs: 0,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.EVENT_CONSUMER)
     }));
@@ -434,6 +452,7 @@ export class SDKDedicatedPoolManager {
       pool: SDKDedicatedPoolType.LOG_CONSUMER,
       workerCount: DEDICATED_LANE_WORKER_COUNT,
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      idleTimeoutMs: 0,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.LOG_CONSUMER)
     }));
@@ -441,36 +460,25 @@ export class SDKDedicatedPoolManager {
       pool: SDKDedicatedPoolType.DATA_PROCESS,
       workerCount: coreWorkers,
       maxConcurrency: coreWorkers,
+      idleTimeoutMs: 0,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_PROCESS)
     }));
-    this.pools.set(SDKDedicatedPoolType.CRASH_FILE, this.createPool({
-      pool: SDKDedicatedPoolType.CRASH_FILE,
+    this.pools.set(SDKDedicatedPoolType.CRASH, this.createPool({
+      pool: SDKDedicatedPoolType.CRASH,
       workerCount: DEDICATED_LANE_WORKER_COUNT,
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      idleTimeoutMs: CRASH_WORKER_IDLE_TIMEOUT_MS,
       backend: 'thread-worker-pending',
-      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.CRASH_FILE)
+      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.CRASH)
     }));
     this.pools.set(SDKDedicatedPoolType.ANR, this.createPool({
       pool: SDKDedicatedPoolType.ANR,
       workerCount: DEDICATED_LANE_WORKER_COUNT,
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      idleTimeoutMs: ANR_WORKER_IDLE_TIMEOUT_MS,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.ANR)
-    }));
-    this.pools.set(SDKDedicatedPoolType.BACKGROUND, this.createPool({
-      pool: SDKDedicatedPoolType.BACKGROUND,
-      workerCount: DEDICATED_LANE_WORKER_COUNT,
-      maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
-      backend: 'thread-worker-pending',
-      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.BACKGROUND)
-    }));
-    this.pools.set(SDKDedicatedPoolType.NATIVE_CRASH_LOG, this.createPool({
-      pool: SDKDedicatedPoolType.NATIVE_CRASH_LOG,
-      workerCount: DEDICATED_LANE_WORKER_COUNT,
-      maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
-      backend: 'thread-worker-pending',
-      workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.NATIVE_CRASH_LOG)
     }));
     this.pools.set(SDKDedicatedPoolType.DATA_UPLOAD, this.createPool({
       pool: SDKDedicatedPoolType.DATA_UPLOAD,
@@ -479,6 +487,7 @@ export class SDKDedicatedPoolManager {
       // round cannot be dispatched to different runtime states.
       workerCount: DEDICATED_LANE_WORKER_COUNT,
       maxConcurrency: DEDICATED_LANE_WORKER_COUNT,
+      idleTimeoutMs: 0,
       backend: 'thread-worker-pending',
       workerInfo: SDKWorkerPathResolver.getWorkerInfo(SDKDedicatedPoolType.DATA_UPLOAD)
     }));
@@ -489,6 +498,7 @@ export class SDKDedicatedPoolManager {
       pool: config.pool,
       workerCount: Math.max(1, config.workerCount),
       maxConcurrency: this.normalizePoolMaxConcurrency(config, config.maxConcurrency),
+      idleTimeoutMs: Math.max(0, Math.floor(config.idleTimeoutMs || 0)),
       backend: config.backend,
       workerInfo: config.workerInfo,
       queue: [],
@@ -514,6 +524,8 @@ export class SDKDedicatedPoolManager {
       mailboxReplayOrder: [],
       lineContextCheckpoint: null,
       recoveryResponseIds: new Map(),
+      idleTimerId: null,
+      idleRecycleCount: 0,
       isShutdown: false
     };
   }
@@ -525,6 +537,7 @@ export class SDKDedicatedPoolManager {
         pool,
         workerCount: 1,
         maxConcurrency: 1,
+        idleTimeoutMs: 0,
         backend: 'thread-worker-pending',
         workerInfo: SDKWorkerPathResolver.getWorkerInfo(pool)
       });
@@ -597,6 +610,7 @@ export class SDKDedicatedPoolManager {
       state.totalCostTime += Math.max(0, Date.now() - startTime);
       state.running = Math.max(0, state.running - 1);
       this.processPool(state);
+      this.scheduleWorkerIdleTermination(state);
     }
   }
 
@@ -953,6 +967,7 @@ export class SDKDedicatedPoolManager {
   }
 
   private ensureThreadWorkers(state: DedicatedPoolState): void {
+    this.clearWorkerIdleTimer(state);
     if (state.workerSlots.length > 0 && this.isActiveThreadWorkerBackend(state.backend)) {
       return;
     }
@@ -1079,6 +1094,7 @@ export class SDKDedicatedPoolManager {
       awaiter.resolve(response);
     }
     this.resetWorkerRestartCountIfRecovered(state);
+    this.scheduleWorkerIdleTermination(state);
   }
 
   private resetWorkerRestartCountIfRecovered(state: DedicatedPoolState): void {
@@ -1095,6 +1111,7 @@ export class SDKDedicatedPoolManager {
     slot: SDKThreadWorkerSlot,
     message: string
   ): void {
+    this.clearWorkerIdleTimer(state);
     state.lastError = message;
     const pending = slot.pending;
     slot.busy = false;
@@ -1158,6 +1175,48 @@ export class SDKDedicatedPoolManager {
     }
   }
 
+  private scheduleWorkerIdleTermination(state: DedicatedPoolState): void {
+    if (state.idleTimeoutMs <= 0 || state.idleTimerId !== null || !this.canRecycleIdleWorker(state)) {
+      return;
+    }
+    state.idleTimerId = setTimeout(() => {
+      state.idleTimerId = null;
+      if (!this.canRecycleIdleWorker(state)) {
+        return;
+      }
+      for (let i = 0; i < state.workerSlots.length; i++) {
+        this.terminateWorkerSlot(state.workerSlots[i]);
+      }
+      state.workerSlots = [];
+      state.workerInitAttempted = false;
+      state.backend = 'thread-worker-idle';
+      state.idleRecycleCount++;
+    }, state.idleTimeoutMs) as number;
+  }
+
+  private canRecycleIdleWorker(state: DedicatedPoolState): boolean {
+    if (state.isShutdown || !this.hasActiveWorker(state) || state.running > 0 ||
+      this.getPendingQueueLength(state) > 0 || state.mailboxReplayEntries.size > 0 ||
+      state.recoveryResponseIds.size > 0) {
+      return false;
+    }
+    for (let i = 0; i < state.workerSlots.length; i++) {
+      const slot = state.workerSlots[i];
+      if (slot.busy || slot.pending !== null) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private clearWorkerIdleTimer(state: DedicatedPoolState): void {
+    if (state.idleTimerId === null) {
+      return;
+    }
+    clearTimeout(state.idleTimerId);
+    state.idleTimerId = null;
+  }
+
   private getPoolStatus(state: DedicatedPoolState): SDKDedicatedPoolStatus {
     const processed = state.completedTasks + state.failedTasks;
     const hostQueuePending = this.getPendingQueueLength(state);
@@ -1192,6 +1251,8 @@ export class SDKDedicatedPoolManager {
       mailboxReplayCount: state.mailboxReplayCount,
       mailboxReplayPending: state.mailboxReplayEntries.size,
       mailboxReplayDropped: state.mailboxReplayDropped,
+      idleTimeoutMs: state.idleTimeoutMs,
+      idleRecycleCount: state.idleRecycleCount,
       isShutdown: state.isShutdown
     };
   }

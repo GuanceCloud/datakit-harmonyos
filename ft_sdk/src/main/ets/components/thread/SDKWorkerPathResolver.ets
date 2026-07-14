@@ -20,14 +20,10 @@ export class SDKWorkerPathResolver {
     `${WORKER_BASE_SOURCE_PATH}/LogConsumerWorker.ets`;
   public static readonly DATA_PROCESS_SOURCE_PATH =
     `${WORKER_BASE_SOURCE_PATH}/DataProcessWorker.ets`;
-  public static readonly CRASH_FILE_SOURCE_PATH =
-    `${WORKER_BASE_SOURCE_PATH}/CrashFileWorker.ets`;
+  public static readonly CRASH_SOURCE_PATH =
+    `${WORKER_BASE_SOURCE_PATH}/CrashWorker.ets`;
   public static readonly ANR_SOURCE_PATH =
     `${WORKER_BASE_SOURCE_PATH}/ANRWorker.ets`;
-  public static readonly BACKGROUND_SOURCE_PATH =
-    `${WORKER_BASE_SOURCE_PATH}/BackgroundWorker.ets`;
-  public static readonly NATIVE_CRASH_LOG_SOURCE_PATH =
-    `${WORKER_BASE_SOURCE_PATH}/NativeCrashLogWorker.ets`;
   public static readonly DATA_UPLOAD_SOURCE_PATH =
     `${WORKER_BASE_SOURCE_PATH}/DataUploadWorker.ets`;
 
@@ -39,14 +35,10 @@ export class SDKWorkerPathResolver {
         return SDKWorkerPathResolver.createInfo(pool, 'LogConsumerWorker');
       case SDKDedicatedPoolType.DATA_PROCESS:
         return SDKWorkerPathResolver.createInfo(pool, 'DataProcessWorker');
-      case SDKDedicatedPoolType.CRASH_FILE:
-        return SDKWorkerPathResolver.createInfo(pool, 'CrashFileWorker');
+      case SDKDedicatedPoolType.CRASH:
+        return SDKWorkerPathResolver.createInfo(pool, 'CrashWorker');
       case SDKDedicatedPoolType.ANR:
         return SDKWorkerPathResolver.createInfo(pool, 'ANRWorker');
-      case SDKDedicatedPoolType.BACKGROUND:
-        return SDKWorkerPathResolver.createInfo(pool, 'BackgroundWorker');
-      case SDKDedicatedPoolType.NATIVE_CRASH_LOG:
-        return SDKWorkerPathResolver.createInfo(pool, 'NativeCrashLogWorker');
       case SDKDedicatedPoolType.DATA_UPLOAD:
       default:
         return SDKWorkerPathResolver.createInfo(pool, 'DataUploadWorker');
@@ -58,10 +50,8 @@ export class SDKWorkerPathResolver {
       SDKWorkerPathResolver.EVENT_CONSUMER_SOURCE_PATH,
       SDKWorkerPathResolver.LOG_CONSUMER_SOURCE_PATH,
       SDKWorkerPathResolver.DATA_PROCESS_SOURCE_PATH,
-      SDKWorkerPathResolver.CRASH_FILE_SOURCE_PATH,
+      SDKWorkerPathResolver.CRASH_SOURCE_PATH,
       SDKWorkerPathResolver.ANR_SOURCE_PATH,
-      SDKWorkerPathResolver.BACKGROUND_SOURCE_PATH,
-      SDKWorkerPathResolver.NATIVE_CRASH_LOG_SOURCE_PATH,
       SDKWorkerPathResolver.DATA_UPLOAD_SOURCE_PATH
     ];
   }

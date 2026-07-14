@@ -442,6 +442,26 @@ export default function configUnitTest() {
       expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppANR(true))).assertTrue();
     });
 
+    it('rumCrashSwitchShouldControlNativeDiagnosticLogCollection', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      runtime.uiContext = new FakeUIContext() as Object as UIContext;
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL), createFakeContext());
+
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
+
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
+
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTrackAppCrash(true));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertTrue();
+
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
+    });
+
     it('installRumShouldApplySideEffects', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       runtime.uiContext = new FakeUIContext() as Object as UIContext;

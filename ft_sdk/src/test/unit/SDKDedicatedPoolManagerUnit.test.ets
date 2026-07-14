@@ -288,12 +288,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(response.payload, 'backend').length > 0).assertTrue();
     });
 
-    it('extraWorkerPoolsShouldReturnIndependentPingPayloads', 0, async () => {
+    it('specializedWorkerPoolsShouldReturnIndependentPingPayloads', 0, async () => {
       const pools: SDKDedicatedPoolType[] = [
-        SDKDedicatedPoolType.CRASH_FILE,
-        SDKDedicatedPoolType.ANR,
-        SDKDedicatedPoolType.BACKGROUND,
-        SDKDedicatedPoolType.NATIVE_CRASH_LOG
+        SDKDedicatedPoolType.CRASH,
+        SDKDedicatedPoolType.ANR
       ];
 
       for (const pool of pools) {
@@ -312,10 +310,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }
 
       const status = manager.getStatus().pools;
-      expect(status[SDKDedicatedPoolType.CRASH_FILE].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.CRASH].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.CRASH].idleTimeoutMs).assertEqual(120000);
       expect(status[SDKDedicatedPoolType.ANR].maxConcurrency).assertEqual(1);
-      expect(status[SDKDedicatedPoolType.BACKGROUND].maxConcurrency).assertEqual(1);
-      expect(status[SDKDedicatedPoolType.NATIVE_CRASH_LOG].maxConcurrency).assertEqual(1);
+      expect(status[SDKDedicatedPoolType.ANR].idleTimeoutMs).assertEqual(90000);
+      expect(status[SDKDedicatedPoolType.ANR].idleRecycleCount).assertEqual(0);
+      expect(status[SDKDedicatedPoolType.DATA_PROCESS].idleTimeoutMs).assertEqual(0);
     });
 
     it('anrWorkerShouldFormatSerializableFreezePayloadWithoutHostFileIo', 0, () => {

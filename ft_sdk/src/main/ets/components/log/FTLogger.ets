@@ -40,7 +40,7 @@ export class FTInnerLogger {
   private static readonly DOMAIN = 0x0001; // Log domain ID, can be adjusted as needed
   private static DEBUG_ENABLED: boolean = true;
   private static sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
-  private static CRASH_LOG_COLLECTION_ENABLED: boolean = true;
+  private static CRASH_LOG_COLLECTION_ENABLED: boolean = false;
   private static readonly CRASH_LOG_BATCH_SIZE = 32;
   private static readonly CRASH_LOG_MAX_PENDING = 256;
   private static readonly CRASH_LOG_DRAIN_DELAY_MS = 16;
@@ -70,6 +70,10 @@ export class FTInnerLogger {
         FTInnerLogger.crashLogDrainTimer = null;
       }
     }
+  }
+
+  static isCrashLogCollectionEnabledInternal(): boolean {
+    return FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED;
   }
 
   // A diagnostic crash context must never synchronously cross NAPI on the caller.
@@ -109,7 +113,7 @@ export class FTInnerLogger {
     const payload: SDKNativeCrashLogBatchDTO = { logs };
     const posted = SDKDedicatedPoolManager.getInstance().postCommand({
       id: `nativeCrashLog.append.${FTInnerLogger.crashLogCommandSequence}.${Date.now()}`,
-      pool: SDKDedicatedPoolType.NATIVE_CRASH_LOG,
+      pool: SDKDedicatedPoolType.CRASH,
       command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
       priority: SDKTaskPriority.LOW,
       createdAt: Date.now(),
@@ -129,7 +133,7 @@ export class FTInnerLogger {
       return;
     }
     SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
-      SDKDedicatedPoolType.NATIVE_CRASH_LOG,
+      SDKDedicatedPoolType.CRASH,
       (_response: SDKWorkerResponse) => {
         // Worker restart/replay is managed by SDKDedicatedPoolManager. Do not log
         // failures here because that would recursively enqueue crash diagnostics.
