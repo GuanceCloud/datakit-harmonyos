@@ -31,6 +31,15 @@ import {
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
 const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequential';
+// Local-only defaults for manually validating SDK upload proxy and custom DNS.
+// They can be overridden through launch parameters. Keep the test disabled by
+// default so a normal Demo launch always uses its configured DataKit/DataWay URL.
+const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
+const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
+const NETWORK_ROUTE_TEST_HOST = '10.100.64.213';
+const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
+const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
+const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -39,6 +48,8 @@ export const KEY_DATAKIT_URL = "datakitUrl";
 export const KEY_DATAWAY_URL = "datawayUrl";
 export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
+export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
+export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
 
 export const KEY_APP_ID = "appId";
 
@@ -49,6 +60,8 @@ interface RuntimeConfig {
   traceUrl: string;
   clientToken: string;
   autoSync: string;
+  networkRouteTestEnabled: string;
+  networkRouteTestMode: string;
   appId: string;
 }
 
@@ -70,7 +83,13 @@ interface RuntimeConfig {
  * 5. Set trace test request URL:
  * --ps traceUrl http\://10.0.0.1\:8000/api/user
  *
- * 6. Full example:
+ * 6. Enable the local proxy route test:
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode proxy
+ *
+ * 7. Enable the local custom DNS route test:
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns
+ *
+ * 8. Full example:
  * --ps datakitUrl http\://10.0.0.1\:9529 --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id
  *
  * Behavior:
@@ -87,6 +106,8 @@ export default class EntryAbility extends UIAbility {
     traceUrl: "",
     clientToken: "",
     autoSync: "",
+    networkRouteTestEnabled: "",
+    networkRouteTestMode: "",
     appId: ""
   };
 
@@ -129,6 +150,8 @@ export default class EntryAbility extends UIAbility {
 
   private async loadRuntimeConfig(want: Want): Promise<RuntimeConfig> {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
+    const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
+    const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
     const runtimeConfig: RuntimeConfig = {
       datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
       datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
@@ -136,6 +159,12 @@ export default class EntryAbility extends UIAbility {
       traceUrl: (want.parameters?.[KEY_TRACE_URL] as string | null | undefined) ?? "",
       clientToken: (want.parameters?.[KEY_CLIENT_TOKEN] as string | null | undefined) ?? "",
       autoSync: autoSyncParam === undefined || autoSyncParam === null ? "" : String(autoSyncParam),
+      networkRouteTestEnabled: networkRouteTestEnabledParam === undefined || networkRouteTestEnabledParam === null
+        ? ""
+        : String(networkRouteTestEnabledParam),
+      networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
+        ? ""
+        : String(networkRouteTestModeParam),
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
@@ -147,7 +176,7 @@ export default class EntryAbility extends UIAbility {
 
       DemoLogger.i(
         LOG_TAG,
-        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}`);
+        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
       return runtimeConfig;
     }
 
@@ -157,6 +186,18 @@ export default class EntryAbility extends UIAbility {
     runtimeConfig.webViewUrl = await this.resolveRuntimeValue(preferencesStore, KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl, "");
     runtimeConfig.traceUrl = await this.resolveRuntimeValue(preferencesStore, KEY_TRACE_URL, runtimeConfig.traceUrl, "");
     runtimeConfig.clientToken = await this.resolveRuntimeValue(preferencesStore, KEY_CLIENT_TOKEN, runtimeConfig.clientToken, "");
+    runtimeConfig.networkRouteTestEnabled = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_NETWORK_ROUTE_TEST_ENABLED,
+      runtimeConfig.networkRouteTestEnabled,
+      ""
+    );
+    runtimeConfig.networkRouteTestMode = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_NETWORK_ROUTE_TEST_MODE,
+      runtimeConfig.networkRouteTestMode,
+      ""
+    );
     runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
 
     await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
@@ -164,7 +205,7 @@ export default class EntryAbility extends UIAbility {
 
     DemoLogger.i(
       LOG_TAG,
-      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}`);
+      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
 
     return runtimeConfig;
   }
@@ -197,6 +238,8 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl);
     AppStorage.setOrCreate(KEY_TRACE_URL, runtimeConfig.traceUrl);
     AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
+    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
+    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
     AppStorage.setOrCreate(KEY_APP_ID, runtimeConfig.appId);
   }
 
@@ -214,6 +257,8 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl);
     await preferencesStore.put(KEY_TRACE_URL, runtimeConfig.traceUrl);
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
+    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
+    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
   }
@@ -221,6 +266,19 @@ export default class EntryAbility extends UIAbility {
   private resolveAutoSyncEnabled(): boolean {
     const value = this.runtimeConfig.autoSync.trim().toLowerCase();
     return value !== 'false' && value !== '0' && value !== 'off';
+  }
+
+  private isNetworkRouteTestEnabled(): boolean {
+    const value = this.runtimeConfig.networkRouteTestEnabled.trim().toLowerCase();
+    if (value.length === 0) {
+      return DEFAULT_NETWORK_ROUTE_TEST_ENABLED;
+    }
+    return value === 'true' || value === '1' || value === 'on';
+  }
+
+  private resolveNetworkRouteTestMode(): 'proxy' | 'dns' {
+    const value = this.runtimeConfig.networkRouteTestMode.trim().toLowerCase();
+    return value === 'dns' || value === 'proxy' ? value : DEFAULT_NETWORK_ROUTE_TEST_MODE;
   }
 
   /**
@@ -292,10 +350,18 @@ export default class EntryAbility extends UIAbility {
       const datawayUrl = this.runtimeConfig.datawayUrl.trim();
       const clientToken = this.runtimeConfig.clientToken.trim();
       const appId = this.runtimeConfig.appId.trim();
+      const networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
+      const networkRouteTestMode = this.resolveNetworkRouteTestMode();
 
       // Create SDK configuration
       let sdkConfig: FTSDKConfig;
-      if (datawayUrl.length > 0) {
+      if (networkRouteTestEnabled) {
+        const uploadUrl = networkRouteTestMode === 'dns'
+          ? `http://${NETWORK_ROUTE_TEST_DNS_HOSTNAME}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`
+          : `http://${NETWORK_ROUTE_TEST_HOST}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`;
+        sdkConfig = FTSDKConfig.builder(uploadUrl);
+        DemoLogger.i(LOG_TAG, `Network route test enabled: mode=${networkRouteTestMode}, uploadUrl=${uploadUrl}`);
+      } else if (datawayUrl.length > 0) {
         if (clientToken.length === 0) {
           DemoLogger.w(LOG_TAG, "SDK initialization skipped: clientToken is required when datawayUrl is set");
           return;
@@ -320,11 +386,21 @@ export default class EntryAbility extends UIAbility {
         .setServiceName('HarmonyOS-Test-App')
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
-        .setAutoSync(this.resolveAutoSyncEnabled())
+        .setAutoSync(networkRouteTestEnabled ? false : this.resolveAutoSyncEnabled())
         .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
-        .setDataSyncRetryCount(5) // Default: retry failed uploads up to 5 times
+        .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
         .setSyncSleepTime(0) // Default: no extra delay between upload requests
-        .setCompressIntakeRequests(true) // Default: zlib-wrapped deflate for intake requests
+        .setCompressIntakeRequests(!networkRouteTestEnabled) // Disable only so manual tests can read the marker
+      if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
+        sdkConfig = sdkConfig.setProxy({
+          host: NETWORK_ROUTE_TEST_HOST,
+          port: NETWORK_ROUTE_TEST_PROXY_PORT
+        });
+      } else if (networkRouteTestEnabled && networkRouteTestMode === 'dns') {
+        sdkConfig = sdkConfig.setDns({
+          servers: [NETWORK_ROUTE_TEST_HOST]
+        });
+      }
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
       DemoLogger.i(LOG_TAG, "SDK install completed");
