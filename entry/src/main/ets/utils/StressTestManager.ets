@@ -21,6 +21,7 @@ import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
+import { StressLogTimestampSequencer } from './StressLogTimestampSequencer';
 
 const TAG = "StressTestManager";
 const STRESS_TEST_LOG_TAG = "stress_test";
@@ -386,6 +387,7 @@ export class StressTestManager {
   private logBatchRunning: boolean = false;
   private errorBatchRunning: boolean = false;
   private longTaskBatchRunning: boolean = false;
+  private readonly logTimestampSequencer: StressLogTimestampSequencer = new StressLogTimestampSequencer();
 
   private logCounter: number = 0;
   private actionCounter: number = 0;
@@ -513,6 +515,7 @@ export class StressTestManager {
     this.currentConfig = normalizedConfig;
     this.lastReport = null;
     this.logCounter = 0;
+    this.logTimestampSequencer.reset();
     this.actionCounter = 0;
     this.resourceCounter = 0;
     this.errorCounter = 0;
@@ -610,7 +613,7 @@ export class StressTestManager {
   private sendLogBatchChunk(batchSize: number, tag: string): void {
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
     const batchLogs: LogEntry[] = [];
-    const batchTimestampMs = Date.now();
+    const chunkTimestampMs = Date.now();
 
     for (let i = 0; i < normalizedBatchSize; i++) {
       const logIndex = this.logCounter++;
@@ -618,7 +621,7 @@ export class StressTestManager {
         tag,
         message: this.createBatchLogMessage(logIndex),
         level: 'i',
-        timestampMs: batchTimestampMs + i
+        timestampMs: this.logTimestampSequencer.next(chunkTimestampMs)
       });
     }
 
