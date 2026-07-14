@@ -2,6 +2,7 @@ import { FTRUMConfig } from '../../Configs';
 import { FTExceptionHandler } from '../../FTExceptionHandler';
 import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 import { FTSDK } from '../../FTSDK';
+import { FTInnerLogger } from '../../log/FTLogger';
 import ftnativecrash from 'libftnativecrash.so';
 import {
   SDKDedicatedPoolManager,
@@ -63,6 +64,14 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static restartDedicatedWorker(pool: SDKDedicatedPoolType): boolean {
     return SDKDedicatedPoolManager.getInstance().restartWorkerInternal(pool);
+  }
+
+  public static configureDedicatedWorkerIdleTimeout(pool: SDKDedicatedPoolType, idleTimeoutMs: number): void {
+    SDKDedicatedPoolManager.getInstance().configurePoolIdleTimeoutInternal(pool, idleTimeoutMs);
+  }
+
+  public static isNativeCrashLogCollectionEnabled(): boolean {
+    return FTInnerLogger.isCrashLogCollectionEnabledInternal();
   }
 
   public static setExceptionHandlerRuntime(runtime: FTExceptionHandlerRuntime): void {

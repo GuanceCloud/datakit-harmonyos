@@ -933,8 +933,8 @@ export struct DBCacheLimitTestPage {
         taskCostMs: 0
       },
       {
-        label: 'Inner Log File Lane No-op Serial',
-        poolType: SDKDedicatedPoolType.BACKGROUND,
+        label: 'Crash Lane No-op Serial',
+        poolType: SDKDedicatedPoolType.CRASH,
         taskCount: SINGLE_LANE_BENCH_TASK_COUNT,
         taskCostMs: 0
       },
@@ -1122,8 +1122,9 @@ export struct DBCacheLimitTestPage {
         SDKDedicatedPoolType.LOG_CONSUMER,
         SDKDedicatedPoolType.EVENT_CONSUMER,
         SDKDedicatedPoolType.DATA_PROCESS,
+        SDKDedicatedPoolType.CRASH,
+        SDKDedicatedPoolType.ANR,
         SDKDedicatedPoolType.DATA_UPLOAD,
-        SDKDedicatedPoolType.BACKGROUND
       ];
       for (const poolType of poolTypes) {
         const lane = poolStatus.pools[poolType];
@@ -1147,7 +1148,6 @@ export struct DBCacheLimitTestPage {
       const eventLane = poolStatus.pools[SDKDedicatedPoolType.EVENT_CONSUMER];
       const dataProcessLane = poolStatus.pools[SDKDedicatedPoolType.DATA_PROCESS];
       const uploadLane = poolStatus.pools[SDKDedicatedPoolType.DATA_UPLOAD];
-      const innerLogLane = poolStatus.pools[SDKDedicatedPoolType.BACKGROUND];
       const logProcessRate = this.estimateLogProcessRate(logLane);
       const eventRate = this.estimateLaneRate(eventLane, 1, DEFAULT_EVENT_COST_MS);
       const dataProcessRate = this.estimateLaneRate(dataProcessLane, 2, DEFAULT_DATA_PROCESS_COST_MS);
@@ -1156,7 +1156,7 @@ export struct DBCacheLimitTestPage {
         syncStatus.pageSize * (SDK_UPLOAD_MAX_PAGES_RUM_APP + SDK_UPLOAD_MAX_PAGES_RUM_WEBVIEW + SDK_UPLOAD_MAX_PAGES_LOG);
       const uploadPollRate = this.estimateUploadPollRate(uploadLane);
       const uploadRowsPerSecond = uploadRowsPerPoll * uploadPollRate;
-      const innerLogBatchRate = this.estimateInnerLogFileRate(innerLogLane);
+      const innerLogBatchRate = this.estimateInnerLogFileRate(undefined);
 
       this.appendResult(`Log Producer: queueGuard<=${Constants.MAX_QUEUE_SIZE_LOG}, flush=${SDK_LOG_FLUSH_BATCH_SIZE}/${SDK_LOG_PROCESS_COALESCE_MS}ms, theoreticalDrain~${this.formatRateValue(logProcessRate)} log/s before data-process bottleneck\n`);
       this.appendResult(`RUM Event Lane: maxRunning=${this.getLaneMaxConcurrency(eventLane, 1)}, eventAvg=${this.formatLaneCost(eventLane, DEFAULT_EVENT_COST_MS)}, theoreticalEvent~${this.formatRateValue(eventRate)} event/s\n`);

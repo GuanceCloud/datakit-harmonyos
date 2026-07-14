@@ -10,7 +10,7 @@ let cachedCpuAt = 0;
 let cachedMemoryUsageMB = -1;
 let cachedMemoryAt = 0;
 
-/** Runs only inside BackgroundWorker. */
+/** Runs only inside the DataProcessWorker background-metrics command. */
 export function collectBackgroundMetricsInWorker(
   payload: SDKBackgroundMetricsRequestDTO
 ): SDKBackgroundMetricsResultDTO {

@@ -275,6 +275,9 @@ export default function logTest() {
 
     it('printCustomLogShouldWriteOutput', 0, async () => {
       const canObserveInternalLogs = SdkInternalTestAccess.clearNativeCrashLogsForTest();
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTrackAppCrash(true));
       FTSDK.installLogConfig(new FTLoggerConfig()
         .setEnableCustomLog(true)
         .setPrintCustomLogToConsole(true));

@@ -269,7 +269,7 @@ export default function ftNativeCrashHandlerDeviceTest() {
 
       await runtime.nativeModule.emitCrash(createNativeCrashData());
 
-      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus().pools[SDKDedicatedPoolType.CRASH_FILE];
+      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus().pools[SDKDedicatedPoolType.CRASH];
       expect(poolStatus.completedTasks).assertEqual(1);
       expect(runtime.rumManager.addErrorCount).assertEqual(1);
       expect(runtime.rumManager.lastMessage).assertEqual('Native Crash: NativeCrash');

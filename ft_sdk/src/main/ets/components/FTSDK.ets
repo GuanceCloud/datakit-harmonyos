@@ -51,6 +51,7 @@ export class FTSDK {
 
   protected static resetInternalState(): void {
     FTInnerLogFileManager.getInstance().shutdown(false);
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
     FTLogger.resetBatchStateInternal();
     FTSDK.ftSdk = null;
     FTSDK.anrDetectManager = null;
@@ -270,6 +271,9 @@ export class FTSDK {
   static installRUMConfig(rumConfig: FTRUMConfig): void {
     // Save rumConfig reference for later use (e.g., ActionTracker initialization)
     FTSDK.rumConfig = rumConfig;
+    FTInnerLogger.setCrashLogCollectionEnabled(
+      rumConfig.getRumAppId().length > 0 && rumConfig.isEnableTrackAppCrash()
+    );
     FTSDK.updateNativePackageInfo();
     FTSDK.pendingUIFeatureInit = FTSDK.requiresUIFeaturesInternal(rumConfig);
     FTSDK.uiFeaturesInitialized = false;
@@ -433,6 +437,7 @@ export class FTSDK {
 
 
   static shutDown() {
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
     // Unregister UIAbility lifecycle listener
     try {
       FTAbilityLifecycleListener.getInstance().unregister();
