@@ -1,6 +1,4 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import { util } from '@kit.ArkTS';
-import zlib from '@ohos.zlib';
 import {
   SDKDedicatedPoolManager
 } from '../../main/ets/components/thread/SDKDedicatedPoolManager';
@@ -28,6 +26,7 @@ import {
   SDKUploadDbActionDTO,
   SDKUploadExecutePageDTO,
   SDKUploadExecutePageResultDTO,
+  SDKUploadHttpProxyDTO,
   SDKUploadHttpRequestDTO,
   SDKUploadHttpResultDTO,
   SDKUploadPageDTO,
@@ -186,6 +185,26 @@ class RetryUploadHttpExecutor implements SDKUploadWorkerHttpExecutor {
       elapsedMs: 3,
       softTimedOut: this.softTimedOut
     };
+  }
+}
+
+/**
+ * Keeps the upload protocol unit tests independent of the device zlib service.
+ * Native zlib output is verified by the device test suite; these tests only
+ * assert that a successfully prepared binary payload is carried to HTTP.
+ */
+class FixedPayloadCompressor implements DataUploadPayloadCompressor {
+  lastBody: string = '';
+
+  async compress(body: string): Promise<ArrayBuffer> {
+    this.lastBody = body;
+    const payload = new ArrayBuffer(4);
+    const bytes = new Uint8Array(payload);
+    bytes[0] = 0x78;
+    bytes[1] = 0x9c;
+    bytes[2] = 0x01;
+    bytes[3] = 0x00;
+    return payload;
   }
 }
 
@@ -1353,6 +1372,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }, state);
       const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
       const httpExecutor = new RetryUploadHttpExecutor(200);
+      const compressor = new FixedPayloadCompressor();
+      setDataUploadPayloadCompressorInternal(compressor);
       const executeResponse = await handleSDKDataUploadWorkerRequest({
         id: 'deflate-upload-execute',
         pool: SDKDedicatedPoolType.DATA_UPLOAD,
@@ -1387,6 +1408,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
       expect(executeResponse.ok).assertTrue();
       expect(executed.successfulResponse).assertTrue();
+      expect(compressor.lastBody).assertEqual(sentRequest.body);
       expect(sentRequest.contentEncoding).assertEqual('deflate');
       expect(sentRequest.compressedBody !== undefined).assertTrue();
 
@@ -1395,15 +1417,9 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const uploadBody = getDataUploadRequestBody(sentRequest);
       expect(uploadHeaders['Content-Encoding']).assertEqual('deflate');
       expect(uploadBody === compressedBody).assertTrue();
-      const originalBytes = util.TextEncoder.create('utf-8').encodeInto(sentRequest.body);
-      const restoredBody = new ArrayBuffer(originalBytes.byteLength);
-      const zip = await zlib.createZip();
-      const result = await zip.uncompress(restoredBody, compressedBody, compressedBody.byteLength);
-      expect(result.status).assertEqual(zlib.ReturnStatus.OK);
-      expect(result.destLen).assertEqual(originalBytes.byteLength);
-      const decodedBody = util.TextDecoder.create('utf-8').decodeWithStream(
-        new Uint8Array(restoredBody, 0, result.destLen), { stream: false });
-      expect(decodedBody).assertEqual(sentRequest.body);
+      expect(compressedBody.byteLength).assertEqual(4);
+      expect(new Uint8Array(compressedBody)[0]).assertEqual(0x78);
+      expect(new Uint8Array(compressedBody)[1]).assertEqual(0x9c);
     });
 
     it('dataUploadWorkerShouldApplyProxyAndDnsOptionsToNetworkKitRequest', 0, () => {
@@ -1431,13 +1447,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       };
 
       const options = createDataUploadNetworkOptions(request);
-      const proxy = options.usingProxy as Object as {
-        host: string;
-        port: number;
-        exclusionList: string[];
-        username?: string;
-        password?: string;
-      };
+      const proxy = options.usingProxy as Object as SDKUploadHttpProxyDTO;
       expect(proxy.host).assertEqual('proxy.example.com');
       expect(proxy.port).assertEqual(8080);
       expect(proxy.exclusionList[0]).assertEqual('localhost');
@@ -1506,7 +1516,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
       expect(sentRequest.compressedBody === undefined).assertTrue();
       expect(sentRequest.contentEncoding === undefined).assertTrue();
-      expect(sentRequest.body.includes('plaintext-fallback')).assertTrue();
+      expect(sentRequest.body.includes('sdk_data_id=fallback')).assertTrue();
       expect(createDataUploadHeaders(sentRequest)['Content-Encoding'] === undefined).assertTrue();
       expect(getDataUploadRequestBody(sentRequest)).assertEqual(sentRequest.body);
     });

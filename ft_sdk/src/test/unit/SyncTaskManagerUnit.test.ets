@@ -34,11 +34,28 @@ import {
   SDKWorkerRequest,
   SDKWorkerResponse
 } from '../../main/ets/components/thread/SDKWorkerProtocol';
+import {
+  DataUploadPayloadCompressor,
+  resetDataUploadPayloadCompressorInternal,
+  setDataUploadPayloadCompressorInternal
+} from '../../main/ets/components/thread/workers/DataUploadCompression';
 
 const TEST_URL = 'http://localhost';
 
 function createContext(): Context {
   return new Object() as Context;
+}
+
+class FixedPayloadCompressor implements DataUploadPayloadCompressor {
+  async compress(_body: string): Promise<ArrayBuffer> {
+    const payload = new ArrayBuffer(4);
+    const bytes = new Uint8Array(payload);
+    bytes[0] = 0x78;
+    bytes[1] = 0x9c;
+    bytes[2] = 0x01;
+    bytes[3] = 0x00;
+    return payload;
+  }
 }
 
 function createConfig(autoSync: boolean = true): FTSDKConfig {
@@ -541,6 +558,7 @@ export default function syncTaskManagerUnitTest() {
       manager.stop();
       SyncInternalTestAccess.resetRuntime();
       SyncInternalTestAccess.resetState();
+      resetDataUploadPayloadCompressorInternal();
     });
 
     it('executePollShouldRunUploadBranches', 0, async () => {
@@ -808,6 +826,7 @@ export default function syncTaskManagerUnitTest() {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
+      setDataUploadPayloadCompressorInternal(new FixedPayloadCompressor());
 
       queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-local-format', 'df_rum_harmonyos_log,sdk_data_id=log-local-format value=1i 100')

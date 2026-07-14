@@ -2,7 +2,15 @@ import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context, common } from '@kit.AbilityKit';
 import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '../../main/ets/components/Configs';
+import {
+  FTDnsConfig,
+  FTLoggerConfig,
+  FTProxyAuthenticator,
+  FTProxyConfig,
+  FTRUMConfig,
+  FTSDKConfig,
+  FTTraceConfig
+} from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
 import {
   DataType,
@@ -208,19 +216,25 @@ export default function configUnitTest() {
     });
 
     it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {
-      const configuredProxy = {
+      const configuredProxyExclusionList: string[] = ['localhost'];
+      const configuredProxy: FTProxyConfig = {
         host: 'proxy.example.com',
         port: 8080,
-        exclusionList: ['localhost']
+        exclusionList: configuredProxyExclusionList
+      };
+      const configuredAuthenticator: FTProxyAuthenticator = {
+        username: 'proxy-user',
+        password: 'proxy-password'
+      };
+      const configuredDns: FTDnsConfig = {
+        servers: [' 1.1.1.1 ', '', '8.8.8.8', '9.9.9.9', '208.67.222.222'],
+        overHttpsUrl: ' https://dns.example.com/dns-query '
       };
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .setProxy(configuredProxy)
-        .setProxyAuthenticator({ username: 'proxy-user', password: 'proxy-password' })
-        .setDns({
-          servers: [' 1.1.1.1 ', '', '8.8.8.8', '9.9.9.9', '208.67.222.222'],
-          overHttpsUrl: ' https://dns.example.com/dns-query '
-        });
-      configuredProxy.exclusionList[0] = 'mutated-host';
+        .setProxyAuthenticator(configuredAuthenticator)
+        .setDns(configuredDns);
+      configuredProxyExclusionList[0] = 'mutated-host';
 
       const proxy = config.getProxy();
       const authenticator = config.getProxyAuthenticator();

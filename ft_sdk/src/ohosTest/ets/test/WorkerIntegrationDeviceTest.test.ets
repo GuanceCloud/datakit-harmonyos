@@ -1,4 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
+import { util } from '@kit.ArkTS';
+import zlib from '@ohos.zlib';
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import {
   SDKANRParseRequestDTO,
@@ -11,6 +13,7 @@ import {
   SDKWorkerPayload,
   SDKWorkerResponse
 } from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import { prepareDataUploadPayload } from '../../../main/ets/components/thread/workers/DataUploadCompression';
 
 function getPayloadString(response: SDKWorkerResponse, key: string): string {
   const payload = response.payload as Record<string, object>;
@@ -26,6 +29,26 @@ interface DeviceANRTestParams {
 
 export default function workerIntegrationDeviceTest() {
   describe('WorkerIntegrationDeviceTest', () => {
+    it('dataUploadCompressionShouldDeflateAndRoundTripOnDevice', 0, async () => {
+      const body = 'df_rum_harmonyos_log,sdk_data_id=device-deflate value=1i 100';
+      const prepared = await prepareDataUploadPayload(body, true);
+
+      expect(prepared.contentEncoding).assertEqual('deflate');
+      expect(prepared.compressedBody !== undefined).assertTrue();
+      const compressedBody = prepared.compressedBody as ArrayBuffer;
+      const originalBytes = util.TextEncoder.create('utf-8').encodeInto(body);
+      const restoredBody = new ArrayBuffer(originalBytes.byteLength);
+      const zip = zlib.createZipSync();
+      const result = await zip.uncompress(restoredBody, compressedBody, compressedBody.byteLength);
+
+      expect(result.status).assertEqual(zlib.ReturnStatus.OK);
+      expect(result.destLen).assertEqual(originalBytes.byteLength);
+      const restoredBytes = new Uint8Array(restoredBody, 0, result.destLen);
+      for (let i = 0; i < originalBytes.byteLength; i++) {
+        expect(restoredBytes[i]).assertEqual(originalBytes[i]);
+      }
+    });
+
     it('shouldLoadDedicatedWorkersFromHarPaths', 0, async () => {
       const responses = await SdkInternalTestAccess.probeDedicatedWorkers();
       expect(responses.length).assertEqual(7);
