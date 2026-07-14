@@ -18,7 +18,10 @@ import {
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
 import { FTInnerLogger } from "../log/FTLogger";
-import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolManager,
+  SDKWorkerMailboxPostResult
+} from '../thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
   SDKRumCompletedActionBatchDTO,
@@ -543,7 +546,6 @@ export class FTRUMInnerManager {
 
   /** Restores acknowledged Resource/Counter commands into a fresh Worker. */
   public replayRumSemanticStateAfterWorkerRestart(): void {
-    let retryNeeded = false;
     for (let i = 0; i < this.rumSemanticJournal.length; i++) {
       const entry = this.rumSemanticJournal[i];
       if (!entry.workerAcknowledged) {
@@ -555,15 +557,19 @@ export class FTRUMInnerManager {
       }
       const recoveryRequest = entry.semanticCommitted ?
         this.createResourceStateRecoveryRequest(entry.request) : entry.request;
-      const posted = SDKDedicatedPoolManager.getInstance().postCommand(recoveryRequest);
-      if (posted) {
+      const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(recoveryRequest);
+      if (postResult.posted) {
         entry.workerAcknowledged = false;
       } else {
-        retryNeeded = true;
+        if (postResult.shouldRetry) {
+          this.scheduleRumSemanticReplay(postResult.retryDelayMs);
+        } else {
+          this.degradeAcknowledgedRumSemanticRecovery(this.describeEventWorkerCircuit(postResult));
+        }
+        // A failed post represents a pool-wide transport failure. Do not burn
+        // through the whole journal and open the circuit in one Host turn.
+        break;
       }
-    }
-    if (retryNeeded) {
-      this.scheduleRumSemanticReplay();
     }
   }
 
@@ -586,14 +592,14 @@ export class FTRUMInnerManager {
     };
   }
 
-  private scheduleRumSemanticReplay(): void {
+  private scheduleRumSemanticReplay(delayMs: number): void {
     if (this.rumSemanticReplayTimer !== null) {
       return;
     }
     this.rumSemanticReplayTimer = setTimeout(() => {
       this.rumSemanticReplayTimer = null;
       this.replayRumSemanticStateAfterWorkerRestart();
-    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private getOrCreateResourceDraftIds(resourceId: string): RumResourceDraftIds {
@@ -630,14 +636,17 @@ export class FTRUMInnerManager {
     this.scheduleRumCounterFlush();
   }
 
-  private scheduleRumCounterUpdateBatchFlush(traceBaseName: string): void {
+  private scheduleRumCounterUpdateBatchFlush(
+    traceBaseName: string,
+    delayMs: number = FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS
+  ): void {
     if (!this.context || this.rumCounterUpdateFlushTimer !== null) {
       return;
     }
     this.rumCounterUpdateFlushTimer = setTimeout(() => {
       this.rumCounterUpdateFlushTimer = null;
       this.flushRumCounterUpdateBatch(traceBaseName);
-    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushRumCounterUpdateBatch(traceBaseName: string = 'rum.counter.batch', drainAll: boolean = false): void {
@@ -669,10 +678,14 @@ export class FTRUMInnerManager {
         payload: batchPayload as Object as SDKWorkerPayload
       };
 
-      const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-      if (!posted) {
+      const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+      if (!postResult.posted) {
         FTInnerLogger.e(TAG, `RUM counter worker mailbox batch post failed: size=${updates.length}`);
-        this.scheduleRumCounterUpdateBatchFlush(traceBaseName);
+        if (postResult.shouldRetry) {
+          this.scheduleRumCounterUpdateBatchFlush(traceBaseName, postResult.retryDelayMs);
+        } else {
+          this.degradePendingRumCounterUpdates(this.describeEventWorkerCircuit(postResult));
+        }
         break;
       }
       this.pendingRumCounterUpdates.splice(0, batchSize);
@@ -700,10 +713,15 @@ export class FTRUMInnerManager {
       createdAt: Date.now()
     };
 
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-    if (!posted) {
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, 'RUM counter flush worker mailbox post failed');
-      this.scheduleRumCounterFlush(FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS);
+      if (postResult.shouldRetry) {
+        this.scheduleRumCounterFlush(postResult.retryDelayMs);
+      } else {
+        FTInnerLogger.w(TAG,
+          `RUM counter flush degraded: ${this.describeEventWorkerCircuit(postResult)}`);
+      }
       return;
     }
     this.registerRumSemanticRequest(workerRequest);
@@ -872,14 +890,17 @@ export class FTRUMInnerManager {
     this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
   }
 
-  private scheduleCompletedActionWorkerBatchFlush(traceBaseName: string): void {
+  private scheduleCompletedActionWorkerBatchFlush(
+    traceBaseName: string,
+    delayMs: number = FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS
+  ): void {
     if (this.completedActionFlushTimer !== null) {
       return;
     }
     this.completedActionFlushTimer = setTimeout(() => {
       this.completedActionFlushTimer = null;
       this.flushCompletedActionWorkerBatch(traceBaseName);
-    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushCompletedActionWorkerBatch(traceBaseName: string = 'rum.completedAction.batch'): void {
@@ -915,10 +936,14 @@ export class FTRUMInnerManager {
       payload: payload as Object as SDKWorkerPayload
     };
 
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-    if (!posted) {
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, `Completed action worker mailbox batch post failed: size=${batch.length}`);
-      this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
+      if (postResult.shouldRetry) {
+        this.scheduleCompletedActionWorkerBatchFlush(traceBaseName, postResult.retryDelayMs);
+      } else {
+        this.degradePendingCompletedActions(this.describeEventWorkerCircuit(postResult));
+      }
       return;
     }
     this.pendingCompletedActions.splice(0, batchSize);
@@ -2144,14 +2169,17 @@ export class FTRUMInnerManager {
     this.scheduleResourceWorkerCommandBatchFlush(traceBaseName);
   }
 
-  private scheduleResourceWorkerCommandBatchFlush(traceBaseName: string): void {
+  private scheduleResourceWorkerCommandBatchFlush(
+    traceBaseName: string,
+    delayMs: number = FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS
+  ): void {
     if (this.resourceCommandFlushTimer !== null) {
       return;
     }
     this.resourceCommandFlushTimer = setTimeout(() => {
       this.resourceCommandFlushTimer = null;
       this.flushResourceWorkerCommandBatch(traceBaseName);
-    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushResourceWorkerCommandBatch(traceBaseName: string = 'rum.resource.batch'): void {
@@ -2186,10 +2214,14 @@ export class FTRUMInnerManager {
       payload: payload as Object as SDKWorkerPayload
     };
 
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-    if (!posted) {
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, `RUM resource worker mailbox batch post failed: size=${batch.length}`);
-      this.scheduleResourceWorkerCommandBatchFlush(traceBaseName);
+      if (postResult.shouldRetry) {
+        this.scheduleResourceWorkerCommandBatchFlush(traceBaseName, postResult.retryDelayMs);
+      } else {
+        this.degradePendingResourceCommands(this.describeEventWorkerCircuit(postResult));
+      }
       return;
     }
     this.pendingResourceCommands.splice(0, batchSize);
@@ -2338,14 +2370,17 @@ export class FTRUMInnerManager {
     this.scheduleErrorWorkerCommandBatchFlush(traceBaseName);
   }
 
-  private scheduleErrorWorkerCommandBatchFlush(traceBaseName: string): void {
+  private scheduleErrorWorkerCommandBatchFlush(
+    traceBaseName: string,
+    delayMs: number = FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS
+  ): void {
     if (this.errorCommandFlushTimer !== null) {
       return;
     }
     this.errorCommandFlushTimer = setTimeout(() => {
       this.errorCommandFlushTimer = null;
       this.flushErrorWorkerCommandBatch(traceBaseName);
-    }, FTRUMInnerManager.RUM_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushErrorWorkerCommandBatch(traceBaseName: string = 'rum.error.batch'): void {
@@ -2380,10 +2415,14 @@ export class FTRUMInnerManager {
       payload: payload as Object as SDKWorkerPayload
     };
 
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-    if (!posted) {
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, `RUM error worker mailbox batch post failed: size=${batch.length}`);
-      this.scheduleErrorWorkerCommandBatchFlush(traceBaseName);
+      if (postResult.shouldRetry) {
+        this.scheduleErrorWorkerCommandBatchFlush(traceBaseName, postResult.retryDelayMs);
+      } else {
+        this.degradePendingErrorCommands(this.describeEventWorkerCircuit(postResult));
+      }
       return;
     }
     this.pendingErrorCommands.splice(0, batchSize);
@@ -2392,6 +2431,88 @@ export class FTRUMInnerManager {
     if (this.pendingErrorCommands.length > 0) {
       this.scheduleErrorWorkerCommandBatchFlush(traceBaseName);
     }
+  }
+
+  private degradePendingRumCounterUpdates(reason: string): void {
+    if (this.rumCounterUpdateFlushTimer !== null) {
+      clearTimeout(this.rumCounterUpdateFlushTimer);
+      this.rumCounterUpdateFlushTimer = null;
+    }
+    const dropped = this.pendingRumCounterUpdates.length;
+    this.pendingRumCounterUpdates = [];
+    FTInnerLogger.w(TAG, `RUM counter transport degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private degradePendingCompletedActions(reason: string): void {
+    if (this.completedActionFlushTimer !== null) {
+      clearTimeout(this.completedActionFlushTimer);
+      this.completedActionFlushTimer = null;
+    }
+    const dropped = this.pendingCompletedActions.length;
+    for (let i = 0; i < this.pendingCompletedActions.length; i++) {
+      const actionId = this.pendingCompletedActions[i].actionId;
+      this.insertedActionIds.delete(actionId);
+      this.processedActionIds.delete(actionId);
+    }
+    this.pendingCompletedActions = [];
+    FTInnerLogger.w(TAG, `Completed action transport degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private degradePendingResourceCommands(reason: string): void {
+    if (this.resourceCommandFlushTimer !== null) {
+      clearTimeout(this.resourceCommandFlushTimer);
+      this.resourceCommandFlushTimer = null;
+    }
+    const dropped = this.pendingResourceCommands.length;
+    const resourceIds: string[] = [];
+    for (let i = 0; i < this.pendingResourceCommands.length; i++) {
+      const resourceId = this.pendingResourceCommands[i].payload.resourceId;
+      if (resourceId && resourceId.length > 0) {
+        resourceIds.push(resourceId);
+        this.resourceDraftIdsById.delete(resourceId);
+      }
+    }
+    this.pendingResourceCommands = [];
+    for (let i = 0; i < resourceIds.length; i++) {
+      this.cleanupResourceContextIfComplete(resourceIds[i]);
+    }
+    FTInnerLogger.w(TAG, `RUM resource transport degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private degradePendingErrorCommands(reason: string): void {
+    if (this.errorCommandFlushTimer !== null) {
+      clearTimeout(this.errorCommandFlushTimer);
+      this.errorCommandFlushTimer = null;
+    }
+    const dropped = this.pendingErrorCommands.length;
+    this.pendingErrorCommands = [];
+    FTInnerLogger.w(TAG, `RUM error transport degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private degradeAcknowledgedRumSemanticRecovery(reason: string): void {
+    if (this.rumSemanticReplayTimer !== null) {
+      clearTimeout(this.rumSemanticReplayTimer);
+      this.rumSemanticReplayTimer = null;
+    }
+    const retained: RumSemanticJournalEntry[] = [];
+    let dropped = 0;
+    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (entry.workerAcknowledged) {
+        this.rumSemanticJournalByRequestId.delete(entry.request.id);
+        this.rememberCommittedRumSemanticResponse(entry.request.id);
+        dropped++;
+      } else {
+        retained.push(entry);
+      }
+    }
+    this.rumSemanticJournal = retained;
+    this.cleanupCommittedResourceDraftIds();
+    FTInnerLogger.w(TAG, `RUM semantic recovery degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private describeEventWorkerCircuit(result: SDKWorkerMailboxPostResult): string {
+    return `circuitOpen=${result.circuitOpen}, failures=${result.consecutiveFailures}`;
   }
 
   private errorPropertyToRecord(property: Record<string, object> | null): SDKPropertyRecord {

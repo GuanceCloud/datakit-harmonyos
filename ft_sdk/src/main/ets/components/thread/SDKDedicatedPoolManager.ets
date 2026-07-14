@@ -21,6 +21,11 @@ import {
   SDK_WORKER_MAX_MESSAGE_REPLAY_ATTEMPTS,
   SDK_WORKER_MAX_RESTART_ATTEMPTS
 } from './SDKWorkerReplayPolicy';
+import {
+  SDKWorkerRetryCircuit,
+  SDKWorkerRetryDecision,
+  SDKWorkerRetryState
+} from './SDKWorkerRetryPolicy';
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 
 const TAG = "SDKDedicatedPoolManager";
@@ -68,6 +73,11 @@ export interface SDKDedicatedPoolStatus {
 
 export interface SDKDedicatedPoolManagerStatus {
   pools: Record<string, SDKDedicatedPoolStatus>;
+}
+
+export interface SDKWorkerMailboxPostResult extends SDKWorkerRetryDecision {
+  posted: boolean;
+  skippedByCircuit: boolean;
 }
 
 export type SDKMailboxResponseHandler = (response: SDKWorkerResponse) => void;
@@ -170,6 +180,7 @@ export class SDKDedicatedPoolManager {
   private mailboxResponseHandlers: Map<SDKDedicatedPoolType, SDKMailboxResponseHandler> = new Map();
   private workerRecoveryHandlers: Map<SDKDedicatedPoolType, SDKWorkerRecoveryHandler> = new Map();
   private mailboxAwaiters: Map<string, SDKThreadWorkerMailboxAwaiter> = new Map();
+  private mailboxRetryCircuits: Map<SDKDedicatedPoolType, SDKWorkerRetryCircuit> = new Map();
   private nextTaskId: number = 0;
   private forcedMailboxPostFailureCount: number = 0;
 
@@ -205,8 +216,6 @@ export class SDKDedicatedPoolManager {
       return Promise.reject(new Error(`SDK dedicated pool has been shut down: ${request.pool}`));
     }
     this.clearWorkerIdleTimer(state);
-    assertSDKWorkerRequestSerializable(request);
-
     return new Promise<SDKWorkerResponse>((resolve, reject) => {
       const task: QueuedPoolTask = {
         createdAt: Date.now(),
@@ -273,6 +282,44 @@ export class SDKDedicatedPoolManager {
       state.lastError = normalized.message;
       return false;
     }
+  }
+
+  /**
+   * Posts through a pool-scoped exponential retry circuit. Callers use the
+   * returned delay only after a synchronous post failure and own the explicit
+   * data degradation when shouldRetry becomes false.
+   */
+  public postCommandWithRetryPolicy(request: SDKWorkerRequest): SDKWorkerMailboxPostResult {
+    const circuit = this.getMailboxRetryCircuit(request.pool);
+    const nowMs = Date.now();
+    if (!circuit.beginAttempt(nowMs)) {
+      const state = circuit.getState(nowMs);
+      const circuitCoolingDown = state.openUntilMs > nowMs;
+      const retryDelayMs = circuitCoolingDown ? 0 :
+        Math.max(1, state.nextAttemptAtMs > nowMs ? state.nextAttemptAtMs - nowMs : 1);
+      return this.createMailboxPostResult(false, true, {
+        shouldRetry: !circuitCoolingDown,
+        retryDelayMs,
+        circuitOpen: state.circuitOpen,
+        consecutiveFailures: state.consecutiveFailures
+      });
+    }
+
+    const posted = this.postCommand(request);
+    if (posted) {
+      circuit.recordSuccess();
+      return this.createMailboxPostResult(true, false, {
+        shouldRetry: false,
+        retryDelayMs: 0,
+        circuitOpen: false,
+        consecutiveFailures: 0
+      });
+    }
+    return this.createMailboxPostResult(false, false, circuit.recordFailure(nowMs));
+  }
+
+  public getMailboxRetryState(pool: SDKDedicatedPoolType): SDKWorkerRetryState {
+    return this.getMailboxRetryCircuit(pool).getState();
   }
 
   public postCommandAndWait(request: SDKWorkerRequest, timeoutMs: number): Promise<SDKWorkerResponse> {
@@ -415,6 +462,7 @@ export class SDKDedicatedPoolManager {
       awaiter.reject(new Error('SDK dedicated pool has been shut down'));
     });
     this.mailboxAwaiters.clear();
+    this.mailboxRetryCircuits.clear();
     this.workerRecoveryHandlers.clear();
     this.pools.forEach((state) => {
       state.isShutdown = true;
@@ -1254,6 +1302,30 @@ export class SDKDedicatedPoolManager {
       idleTimeoutMs: state.idleTimeoutMs,
       idleRecycleCount: state.idleRecycleCount,
       isShutdown: state.isShutdown
+    };
+  }
+
+  private getMailboxRetryCircuit(pool: SDKDedicatedPoolType): SDKWorkerRetryCircuit {
+    let circuit = this.mailboxRetryCircuits.get(pool);
+    if (!circuit) {
+      circuit = new SDKWorkerRetryCircuit();
+      this.mailboxRetryCircuits.set(pool, circuit);
+    }
+    return circuit;
+  }
+
+  private createMailboxPostResult(
+    posted: boolean,
+    skippedByCircuit: boolean,
+    decision: SDKWorkerRetryDecision
+  ): SDKWorkerMailboxPostResult {
+    return {
+      posted,
+      skippedByCircuit,
+      shouldRetry: decision.shouldRetry,
+      retryDelayMs: decision.retryDelayMs,
+      circuitOpen: decision.circuitOpen,
+      consecutiveFailures: decision.consecutiveFailures
     };
   }
 

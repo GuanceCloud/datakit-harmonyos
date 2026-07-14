@@ -20,6 +20,7 @@ import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
 import sdkDedicatedPoolManagerUnitTest from './unit/SDKDedicatedPoolManagerUnit.test';
+import sdkWorkerRetryPolicyUnitTest from './unit/SDKWorkerRetryPolicyUnit.test';
 import syncDataHelperUnitTest from './unit/SyncDataHelperUnit.test';
 import syncTaskManagerUnitTest from './unit/SyncTaskManagerUnit.test';
 import traceHeaderUnitTest from './unit/TraceHeaderUnit.test';
@@ -44,6 +45,7 @@ export default function testsuite() {
   // Small high-risk internal guardrails retained to prevent regressions.
   samplingUnitTest();
   sdkDedicatedPoolManagerUnitTest();
+  sdkWorkerRetryPolicyUnitTest();
   ftExceptionHandlerUnitTest();
   ftDBSpoolUnitTest();
   cachePolicyUnitTest();

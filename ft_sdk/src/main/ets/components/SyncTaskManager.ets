@@ -33,7 +33,6 @@ import {
 } from './thread/SDKWorkerProtocol';
 import {
   DATA_UPLOAD_MAX_BODY_BYTES,
-  DATA_UPLOAD_MAX_DB_PAGE_BYTES,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT,
   DATA_UPLOAD_MAX_TRANSPORT_BYTES
@@ -139,43 +138,20 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     }
     const dbTaskPool = this.dbTaskPoolProvider();
     const normalizedPageSize = normalizeUploadPageSize(pageSize);
-    let rows: SyncData[] = [];
-    let hasMore = false;
-    let byteLimitReached = false;
-    if (dbTaskPool.queryUploadData) {
-      const page = await dbTaskPool.queryUploadData(
-        context,
-        [dataType.toString()],
-        normalizedPageSize,
-        DATA_UPLOAD_MAX_DB_PAGE_BYTES
-      );
-      rows = page.rows;
-      hasMore = page.hasMore;
-      byteLimitReached = page.byteLimitReached;
-    } else {
-      // Unit/custom runtimes retain compatibility while the production DB path
-      // uses the byte-capped TaskPool query above.
-      rows = await dbTaskPool.querySyncData(context, [dataType.toString()], normalizedPageSize);
-      hasMore = rows.length >= normalizedPageSize;
-    }
-    const result: DataUploadRow[] = [];
-    let transportBytes = 0;
-    for (let i = 0; i < rows.length; i++) {
-      const uploadRow = this.toUploadRow(rows[i]);
-      const rowBytes = this.estimateUploadTransportRowBytes(uploadRow);
-      if (transportBytes + rowBytes > DATA_UPLOAD_MAX_TRANSPORT_BYTES) {
-        hasMore = true;
-        byteLimitReached = true;
-        break;
-      }
-      result.push(uploadRow);
-      transportBytes += rowBytes;
-    }
+    // Production and injected runtimes return the final serializable upload DTO
+    // page. Row projection, UTF-8 accounting and transport-byte clipping all
+    // execute inside DB TaskPool instead of scanning the page on the Host.
+    const page = await dbTaskPool.queryUploadData(
+      context,
+      [dataType.toString()],
+      normalizedPageSize,
+      DATA_UPLOAD_MAX_TRANSPORT_BYTES
+    );
     return {
-      rows: result,
-      hasMore,
-      transportBytes,
-      byteLimitReached
+      rows: page.rows,
+      hasMore: page.hasMore,
+      transportBytes: page.transportBytes,
+      byteLimitReached: page.byteLimitReached
     };
   }
 
@@ -186,34 +162,6 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       transportBytes: 0,
       byteLimitReached: false
     };
-  }
-
-  private estimateUploadTransportRowBytes(row: DataUploadRow): number {
-    return this.getUtf8ByteLength(row.dataString || '') + this.getUtf8ByteLength(row.uuid || '') +
-      this.getUtf8ByteLength(row.dataType || '') + this.getUtf8ByteLength(row.customDataType || '') + 64;
-  }
-
-  private getUtf8ByteLength(value: string): number {
-    let bytes = 0;
-    for (let i = 0; i < value.length; i++) {
-      const code = value.charCodeAt(i);
-      if (code <= 0x7f) {
-        bytes++;
-      } else if (code <= 0x7ff) {
-        bytes += 2;
-      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
-        const next = value.charCodeAt(i + 1);
-        if (next >= 0xdc00 && next <= 0xdfff) {
-          bytes += 4;
-          i++;
-        } else {
-          bytes += 3;
-        }
-      } else {
-        bytes += 3;
-      }
-    }
-    return bytes;
   }
 
   async commitUpload(
@@ -346,21 +294,6 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       affectedRows: Math.max(0, affectedRows),
       dbLaneWaitMs: Math.max(0, dbLaneWaitMs)
     };
-  }
-
-  private toUploadRow(data: SyncData): DataUploadRow {
-    const row: DataUploadRow = {
-      id: data.getId(),
-      dataType: data.getDataType().toString(),
-      dataString: data.getDataString(),
-      uuid: data.getUuid(),
-      time: data.getTime()
-    };
-    const customDataType = data.getCustomDataTypeString();
-    if (customDataType && customDataType.length > 0) {
-      row.customDataType = customDataType;
-    }
-    return row;
   }
 
   private toSyncDataList(rows: DataUploadRow[]): SyncData[] {

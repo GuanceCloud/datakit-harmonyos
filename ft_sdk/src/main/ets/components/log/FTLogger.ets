@@ -93,14 +93,14 @@ export class FTInnerLogger {
     FTInnerLogger.scheduleCrashLogDrain();
   }
 
-  private static scheduleCrashLogDrain(): void {
+  private static scheduleCrashLogDrain(delayMs: number = FTInnerLogger.CRASH_LOG_DRAIN_DELAY_MS): void {
     if (FTInnerLogger.crashLogDrainTimer !== null || FTInnerLogger.pendingCrashLogs.length === 0) {
       return;
     }
     FTInnerLogger.crashLogDrainTimer = setTimeout(() => {
       FTInnerLogger.crashLogDrainTimer = null;
       FTInnerLogger.drainCrashLogBatch();
-    }, FTInnerLogger.CRASH_LOG_DRAIN_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private static drainCrashLogBatch(): void {
@@ -111,7 +111,7 @@ export class FTInnerLogger {
     FTInnerLogger.ensureCrashLogResponseHandler();
     FTInnerLogger.crashLogCommandSequence++;
     const payload: SDKNativeCrashLogBatchDTO = { logs };
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy({
       id: `nativeCrashLog.append.${FTInnerLogger.crashLogCommandSequence}.${Date.now()}`,
       pool: SDKDedicatedPoolType.CRASH,
       command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
@@ -119,11 +119,22 @@ export class FTInnerLogger {
       createdAt: Date.now(),
       payload: payload as Object
     });
-    if (!posted) {
+    if (!postResult.posted) {
       FTInnerLogger.pendingCrashLogs = logs.concat(FTInnerLogger.pendingCrashLogs);
       while (FTInnerLogger.pendingCrashLogs.length > FTInnerLogger.CRASH_LOG_MAX_PENDING) {
         FTInnerLogger.pendingCrashLogs.pop();
       }
+      if (postResult.shouldRetry) {
+        FTInnerLogger.scheduleCrashLogDrain(postResult.retryDelayMs);
+      } else {
+        const dropped = FTInnerLogger.pendingCrashLogs.length;
+        FTInnerLogger.pendingCrashLogs = [];
+        // Avoid FTInnerLogger here: logging through it would recursively append
+        // another native-crash diagnostic while this transport is degraded.
+        hilog.warn(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}FTInnerLogger`,
+          `Native crash log Worker circuit open; dropped ${dropped} buffered diagnostics`);
+      }
+      return;
     }
     FTInnerLogger.scheduleCrashLogDrain();
   }
