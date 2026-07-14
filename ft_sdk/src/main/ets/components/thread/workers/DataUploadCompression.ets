@@ -16,7 +16,7 @@ class ZlibDeflatePayloadCompressor implements DataUploadPayloadCompressor {
     const source = new ArrayBuffer(sourceBytes.byteLength);
     new Uint8Array(source).set(sourceBytes);
 
-    const zip = await zlib.createZip();
+    const zip = zlib.createZipSync();
     const destinationLength = await zip.compressBound(sourceBytes.byteLength);
     if (destinationLength <= 0) {
       throw new Error(`Invalid deflate destination length: ${destinationLength}`);

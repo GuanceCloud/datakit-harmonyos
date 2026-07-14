@@ -144,6 +144,15 @@ export struct DataSyncTestPage {
             this.testFlushSyncData();
           })
 
+        Button('Test Proxy / DNS Upload (One Log)')
+          .width('90%')
+          .height(50)
+          .backgroundColor('#673AB7')
+          .enabled(!this.isRunning)
+          .onClick(() => {
+            this.testNetworkRouteUpload();
+          })
+
         Text('Note: When autoSync is disabled, use flushSyncData() to manually trigger data synchronization')
           .fontSize(12)
           .fontColor(Color.Gray)
@@ -380,6 +389,45 @@ export struct DataSyncTestPage {
       }
     } catch (error) {
       this.appendResult(`❌ Failed to toggle auto sync: ${error}\n`);
+    }
+  }
+
+  /**
+   * Write one traceable log and immediately flush it for manual proxy/DNS verification.
+   * Auto sync must be disabled first so the 10-second aggregation window does not
+   * make the route test timing ambiguous.
+   */
+  private testNetworkRouteUpload(): void {
+    if (this.autoSyncEnabled) {
+      this.appendResult('⚠️ Disable Auto Sync before running the Proxy / DNS upload test.\n\n');
+      return;
+    }
+
+    this.isRunning = true;
+    const marker = `network-route-${Date.now()}`;
+    this.appendResult('=== Proxy / DNS Upload Test ===\n');
+    this.appendResult(`Marker: ${marker}\n`);
+
+    try {
+      FTLogger.logBackground(marker, Status.INFO);
+      FTSDK.flushSyncData();
+      this.appendResult('✅ One log written and flushSyncData() triggered\n');
+      this.appendResult(`Check HiLog and the mock server for marker: ${marker}\n\n`);
+
+      Promise.resolve().then(() => {
+        return new Promise<void>((resolve) => {
+          setTimeout(() => {
+            this.updateDataInfo();
+            this.appendResult(`After test - DB Size: ${this.dbSize}\n`);
+            this.appendResult(`Upload Lane: ${this.uploadLaneSummary}\n`);
+            this.isRunning = false;
+            resolve();
+          }, 2000);
+        });
+      });
+    } catch (error) {
+      this.appendResult(`❌ Proxy / DNS upload test failed: ${error}\n`);
+      this.isRunning = false;
     }
   }
 
