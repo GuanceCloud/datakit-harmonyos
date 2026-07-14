@@ -33,7 +33,7 @@ export interface SyncTaskPreferences {
 export interface SyncTaskDbTaskPool {
   hasSyncData(context: Context, dataTypes: string[]): Promise<boolean>;
   querySyncData(context: Context, dataTypes: string[], limit: number, newestFirst?: boolean): Promise<SyncData[]>;
-  queryUploadData?(
+  queryUploadData(
     context: Context,
     dataTypes: string[],
     limit: number,

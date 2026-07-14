@@ -4,6 +4,7 @@ import { SyncData, SyncDataJSON } from './bean/SyncData';
 import { ActionBean, ActionBeanJSON } from './bean/ActionBean';
 import { ViewBean, ViewBeanJSON } from './bean/ViewBean';
 import { runFTDBTaskPoolExecute } from './FTDBTaskPoolOperations';
+import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 
 enum FTDBTaskPoolCommand {
   INIT = 'init',
@@ -112,9 +113,9 @@ export interface FTDBTaskPoolMaintenanceResponse {
 }
 
 export interface FTDBTaskPoolUploadPage {
-  rows: SyncData[];
+  rows: SDKUploadRowDTO[];
   hasMore: boolean;
-  byteCount: number;
+  transportBytes: number;
   byteLimitReached: boolean;
 }
 
@@ -190,6 +191,7 @@ interface FTDBTaskPoolResponse {
   value?: boolean;
   count?: number;
   rows?: SyncDataJSON[];
+  uploadRows?: SDKUploadRowDTO[];
   hasMore?: boolean;
   byteCount?: number;
   byteLimitReached?: boolean;
@@ -264,15 +266,10 @@ export class FTDBTaskPoolExecutor {
       limit,
       maxBytes
     });
-    const storedRows = response.rows || [];
-    const rows: SyncData[] = [];
-    for (let i = 0; i < storedRows.length; i++) {
-      rows.push(SyncData.fromJSON(storedRows[i]));
-    }
     return {
-      rows,
+      rows: response.uploadRows || [],
       hasMore: response.hasMore === true,
-      byteCount: Math.max(0, response.byteCount || 0),
+      transportBytes: Math.max(0, response.byteCount || 0),
       byteLimitReached: response.byteLimitReached === true
     };
   }

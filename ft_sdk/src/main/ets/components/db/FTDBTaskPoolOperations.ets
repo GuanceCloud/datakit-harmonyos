@@ -7,6 +7,7 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
+import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -190,6 +191,7 @@ interface FTDBTaskPoolResponse {
   value?: boolean;
   count?: number;
   rows?: SyncDataJSON[];
+  uploadRows?: SDKUploadRowDTO[];
   hasMore?: boolean;
   byteCount?: number;
   byteLimitReached?: boolean;
@@ -224,7 +226,7 @@ interface FTDBTaskPoolTiming {
 }
 
 interface FTDBTaskPoolUploadPageResult {
-  rows: SyncDataJSON[];
+  rows: SDKUploadRowDTO[];
   hasMore: boolean;
   byteCount: number;
   byteLimitReached: boolean;
@@ -275,7 +277,7 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
         );
         return {
           ok: true,
-          rows: uploadPage.rows,
+          uploadRows: uploadPage.rows,
           hasMore: uploadPage.hasMore,
           byteCount: uploadPage.byteCount,
           byteLimitReached: uploadPage.byteLimitReached
@@ -775,17 +777,18 @@ async function queryUploadDataInTaskPool(
         break;
       }
       const storedType = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_TYPE));
-      const row: SyncDataJSON = {
+      const normalizedType = dataTypeToEnum(storedType).toString();
+      const row: SDKUploadRowDTO = {
         id: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_ID)),
         uuid: resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_UUID)),
-        dataType: dataTypeToEnum(storedType),
+        dataType: normalizedType,
         dataString: resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA)),
         time: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_TM))
       };
-      if (storedType !== row.dataType.toString()) {
-        row.customDataTypeString = storedType;
+      if (storedType !== normalizedType) {
+        row.customDataType = storedType;
       }
-      const rowBytes = estimateUploadRowBytes(row, storedType);
+      const rowBytes = estimateUploadTransportRowBytes(row);
       if (result.byteCount + rowBytes > maxBytes) {
         result.hasMore = true;
         result.byteLimitReached = true;
@@ -800,9 +803,9 @@ async function queryUploadDataInTaskPool(
   return result;
 }
 
-function estimateUploadRowBytes(row: SyncDataJSON, storedType: string): number {
+function estimateUploadTransportRowBytes(row: SDKUploadRowDTO): number {
   return getUtf8ByteLength(row.dataString || '') + getUtf8ByteLength(row.uuid || '') +
-    getUtf8ByteLength(storedType || '') + 64;
+    getUtf8ByteLength(row.dataType || '') + getUtf8ByteLength(row.customDataType || '') + 64;
 }
 
 function getUtf8ByteLength(value: string): number {

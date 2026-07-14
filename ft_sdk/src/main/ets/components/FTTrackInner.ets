@@ -13,7 +13,10 @@ import { PreparedLineProtocolContent, SyncDataHelper } from './SyncDataHelper';
 import { SyncTaskManager } from './SyncTaskManager';
 import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
-import { SDKDedicatedPoolManager } from './thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolManager,
+  SDKWorkerMailboxPostResult
+} from './thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
   SDKLineProtocolContextDTO,
@@ -339,37 +342,46 @@ class FTTrackInner {
         callbackOnFinish
       });
     }
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand(workerRequest);
-    if (!posted) {
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, `RUM worker mailbox post failed: ${traceName}`);
       this.pendingDirectRumWorkerRequests.push({ request: workerRequest });
-      this.scheduleDirectRumWorkerRetry();
+      if (postResult.shouldRetry) {
+        this.scheduleDirectRumWorkerRetry(postResult.retryDelayMs);
+      } else {
+        this.degradePendingRumWorkerTransport(this.describeRumWorkerCircuit(postResult));
+      }
     }
   }
 
-  private scheduleDirectRumWorkerRetry(): void {
+  private scheduleDirectRumWorkerRetry(delayMs: number): void {
     if (this.directRumWorkerRetryTimer !== null) {
       return;
     }
     this.directRumWorkerRetryTimer = setTimeout(() => {
       this.directRumWorkerRetryTimer = null;
       this.flushDirectRumWorkerRequests();
-    }, RUM_WORKER_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushDirectRumWorkerRequests(): void {
     let sent = 0;
     while (this.pendingDirectRumWorkerRequests.length > 0 && sent < RUM_WORKER_TRANSPORT_BATCH_SIZE) {
       const pending = this.pendingDirectRumWorkerRequests[0];
-      if (!SDKDedicatedPoolManager.getInstance().postCommand(pending.request)) {
-        this.scheduleDirectRumWorkerRetry();
+      const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(pending.request);
+      if (!postResult.posted) {
+        if (postResult.shouldRetry) {
+          this.scheduleDirectRumWorkerRetry(postResult.retryDelayMs);
+        } else {
+          this.degradePendingRumWorkerTransport(this.describeRumWorkerCircuit(postResult));
+        }
         return;
       }
       this.pendingDirectRumWorkerRequests.shift();
       sent++;
     }
     if (this.pendingDirectRumWorkerRequests.length > 0) {
-      this.scheduleDirectRumWorkerRetry();
+      this.scheduleDirectRumWorkerRetry(RUM_WORKER_TRANSPORT_BATCH_DELAY_MS);
     }
   }
 
@@ -394,14 +406,17 @@ class FTTrackInner {
     this.scheduleRumWorkerEventBatchFlush(source);
   }
 
-  private scheduleRumWorkerEventBatchFlush(source: string): void {
+  private scheduleRumWorkerEventBatchFlush(
+    source: string,
+    delayMs: number = RUM_WORKER_TRANSPORT_BATCH_DELAY_MS
+  ): void {
     if (this.rumWorkerEventFlushTimer !== null) {
       return;
     }
     this.rumWorkerEventFlushTimer = setTimeout(() => {
       this.rumWorkerEventFlushTimer = null;
       this.flushRumWorkerEventBatch(source);
-    }, RUM_WORKER_TRANSPORT_BATCH_DELAY_MS) as number;
+    }, Math.max(1, delayMs)) as number;
   }
 
   private flushRumWorkerEventBatch(source: string = 'rum.worker.batch'): void {
@@ -424,7 +439,7 @@ class FTTrackInner {
     const payload: SDKRumEventBatchDTO = {
       events
     };
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy({
       id: `${SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
       command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
@@ -432,15 +447,48 @@ class FTTrackInner {
       createdAt: Date.now(),
       payload: payload as Object as SDKWorkerPayload
     });
-    if (!posted) {
+    if (!postResult.posted) {
       FTInnerLogger.e(TAG, `RUM worker mailbox batch post failed: size=${batch.length}`);
-      this.scheduleRumWorkerEventBatchFlush(source);
+      if (postResult.shouldRetry) {
+        this.scheduleRumWorkerEventBatchFlush(source, postResult.retryDelayMs);
+      } else {
+        this.degradePendingRumWorkerTransport(this.describeRumWorkerCircuit(postResult));
+      }
       return;
     }
     this.pendingRumWorkerEvents.splice(0, batchSize);
     if (this.pendingRumWorkerEvents.length > 0) {
       this.scheduleRumWorkerEventBatchFlush(source);
     }
+  }
+
+  private degradePendingRumWorkerTransport(reason: string): void {
+    if (this.rumWorkerEventFlushTimer !== null) {
+      clearTimeout(this.rumWorkerEventFlushTimer);
+      this.rumWorkerEventFlushTimer = null;
+    }
+    if (this.directRumWorkerRetryTimer !== null) {
+      clearTimeout(this.directRumWorkerRetryTimer);
+      this.directRumWorkerRetryTimer = null;
+    }
+    const droppedEvents = this.pendingRumWorkerEvents.length;
+    const droppedDirect = this.pendingDirectRumWorkerRequests.length;
+    for (let i = 0; i < this.pendingDirectRumWorkerRequests.length; i++) {
+      const requestId = this.pendingDirectRumWorkerRequests[i].request.id;
+      const callback = this.pendingRumWorkerCallbacks.get(requestId);
+      if (callback) {
+        this.pendingRumWorkerCallbacks.delete(requestId);
+        this.completeRumWorkerCallback(callback, false);
+      }
+    }
+    this.pendingRumWorkerEvents = [];
+    this.pendingDirectRumWorkerRequests = [];
+    FTInnerLogger.w(TAG,
+      `RUM Worker transport degraded: droppedEvents=${droppedEvents}, droppedDirect=${droppedDirect}, ${reason}`);
+  }
+
+  private describeRumWorkerCircuit(result: SDKWorkerMailboxPostResult): string {
+    return `circuitOpen=${result.circuitOpen}, failures=${result.consecutiveFailures}`;
   }
 
   public async flushPendingWorkerDataBeforeUpload(timeoutMs: number = 10000): Promise<void> {
@@ -924,7 +972,7 @@ class FTTrackInner {
     FTTrackInner.lineContextCommandSequence++;
     const payload: SDKWorkerPayload = this.workerLineProtocolContextSnapshot === null ?
       null : this.workerLineProtocolContextSnapshot as Object as SDKWorkerPayload;
-    const posted = SDKDedicatedPoolManager.getInstance().postCommand({
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy({
       id: `${SDKWorkerCommand.LINE_CONTEXT_UPDATE}:${pool}:${currentVersion}:${FTTrackInner.lineContextCommandSequence}`,
       pool,
       command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
@@ -932,11 +980,11 @@ class FTTrackInner {
       createdAt: Date.now(),
       payload
     });
-    if (posted) {
+    if (postResult.posted) {
       this.syncedLineContextVersionByPool.set(pool, currentVersion);
       this.syncedLineContextRestartByPool.set(pool, restartCount);
     }
-    return posted;
+    return postResult.posted;
   }
 
   private refreshWorkerLineProtocolContextSnapshot(): void {

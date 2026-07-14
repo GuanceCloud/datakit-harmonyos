@@ -6,6 +6,7 @@ import { SyncData } from '../../main/ets/components/db/bean/SyncData';
 import { ViewBean } from '../../main/ets/components/db/bean/ViewBean';
 import {
   FTDBTaskPoolMaintenanceResponse,
+  FTDBTaskPoolUploadPage,
   FTDBTaskPoolUploadCommitResponse
 } from '../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { DataType, SyncPageSize } from '../../main/ets/components/enum/Enums';
@@ -28,12 +29,14 @@ import {
 } from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
 import {
   SDKDedicatedPoolType,
+  SDKUploadRowDTO,
   SDKUploadHttpRequestDTO,
   SDKUploadHttpResultDTO,
   SDKWorkerCommand,
   SDKWorkerRequest,
   SDKWorkerResponse
 } from '../../main/ets/components/thread/SDKWorkerProtocol';
+import { DATA_UPLOAD_MAX_TRANSPORT_BYTES } from '../../main/ets/components/thread/workers/DataUploadLimits';
 import {
   DataUploadPayloadCompressor,
   resetDataUploadPayloadCompressorInternal,
@@ -197,6 +200,7 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   throwDeleteExpire: boolean = false;
   lastQueryTypes: string[] = [];
   lastPageSize: number = 0;
+  lastUploadMaxBytes: number = 0;
   lastDeleted: SyncData[] = [];
   lastDeletedIds: number[] = [];
   lastInserted: SyncData[] = [];
@@ -269,6 +273,74 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
       return this.queryQueue.shift() as SyncData[];
     }
     return [];
+  }
+
+  async queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    pageSize: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage> {
+    this.lastUploadMaxBytes = maxBytes;
+    const storedRows = await this.querySyncData(context, dataTypes, pageSize);
+    const rows: SDKUploadRowDTO[] = [];
+    let transportBytes = 0;
+    let byteLimitReached = false;
+    for (let i = 0; i < storedRows.length; i++) {
+      const stored = storedRows[i];
+      const row: SDKUploadRowDTO = {
+        id: stored.getId(),
+        dataType: stored.getDataType().toString(),
+        dataString: stored.getDataString(),
+        uuid: stored.getUuid(),
+        time: stored.getTime()
+      };
+      const customDataType = stored.getCustomDataTypeString();
+      if (customDataType && customDataType.length > 0) {
+        row.customDataType = customDataType;
+      }
+      const rowBytes = this.estimateUploadTransportRowBytes(row);
+      if (transportBytes + rowBytes > maxBytes) {
+        byteLimitReached = true;
+        break;
+      }
+      rows.push(row);
+      transportBytes += rowBytes;
+    }
+    return {
+      rows,
+      hasMore: byteLimitReached || storedRows.length >= pageSize,
+      transportBytes,
+      byteLimitReached
+    };
+  }
+
+  private estimateUploadTransportRowBytes(row: SDKUploadRowDTO): number {
+    return this.getUtf8ByteLength(row.dataString || '') + this.getUtf8ByteLength(row.uuid || '') +
+      this.getUtf8ByteLength(row.dataType || '') + this.getUtf8ByteLength(row.customDataType || '') + 64;
+  }
+
+  private getUtf8ByteLength(value: string): number {
+    let bytes = 0;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code <= 0x7f) {
+        bytes++;
+      } else if (code <= 0x7ff) {
+        bytes += 2;
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+        const next = value.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4;
+          i++;
+        } else {
+          bytes += 3;
+        }
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
   }
 
   async deleteSyncRows(_context: Context, list: SyncData[]): Promise<number> {
@@ -613,6 +685,7 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(db.lastUploadMaxBytes).assertEqual(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
