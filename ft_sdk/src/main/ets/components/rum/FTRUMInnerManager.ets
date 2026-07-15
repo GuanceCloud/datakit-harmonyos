@@ -4299,52 +4299,15 @@ export class FTRUMInnerManager {
   private buildLongTaskFields(duration: number, log: string): LongTaskFields {
     const fields: LongTaskFields = {};
     fields.duration = duration;
-    
-    // Check if log is empty or looks like a description string (not a stack trace)
-    const isStackTrace = log && (
-      log.includes("at ") ||
-      log.includes("Error:") ||
-      log.includes(".ets:") ||
-      log.includes(".ts:") ||
-      log.includes(".js:") ||
-      log.includes("\n") ||
-      log.includes("Stack") ||
-      log.length > 100
-    );
-    
-    if (!log || log.trim().length === 0) {
-      // If log is empty, capture current stack trace
-      try {
-        const error = new Error();
-        if (error.stack) {
-          fields.long_task_stack = error.stack;
-        } else {
-          fields.long_task_stack = "Stack trace not available";
-        }
-      } catch (e) {
-        fields.long_task_stack = "Stack trace capture failed";
-        FTInnerLogger.e(TAG, `Failed to capture stack trace: ${e}`);
-      }
-    } else if (!isStackTrace) {
-      // If log looks like a description string, append stack trace
-      try {
-        const error = new Error();
-        if (error.stack) {
-          const stackLines = error.stack.split('\n');
-          // Remove the first line (Error message) and keep the rest (stack trace)
-          const stackTrace = stackLines.length > 1 ? stackLines.slice(1).join('\n') : error.stack;
-          fields.long_task_stack = `${log}\n\nStack Trace:\n${stackTrace}`;
-        } else {
-          fields.long_task_stack = log;
-        }
-      } catch (e) {
-        fields.long_task_stack = log;
-        FTInnerLogger.e(TAG, `Failed to append stack trace: ${e}, using log as-is`);
-      }
-    } else {
-      // log already looks like a stack trace, use it as-is
-      fields.long_task_stack = log;
-    }
+
+    // `addLongTask` runs on the caller thread. Capturing Error.stack here is both
+    // expensive under high-rate manual reporting and only describes this SDK call
+    // path, not the work that caused the long task. Keep the caller-provided
+    // description or stack unchanged; collectors that can obtain a useful stack
+    // should supply it explicitly.
+    fields.long_task_stack = log && log.trim().length > 0
+      ? log
+      : "Stack trace not provided";
     
     return fields;
   }
