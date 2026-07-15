@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated the internal thread-pool and serialized DB task processing to improve data consistency under high concurrency.
 - Added idle reclamation for the low-frequency ANR Worker (90 seconds) and bursty Crash Worker (120 seconds); Workers are recreated on demand, and Native Crash diagnostic log collection now follows the App Crash tracking switch.
 - Added configurable SDK debugging through `FTSDKConfig.setSdkLogLevel(...)` and `FTSDKConfig.setEnableInnerLogFile(...)`.
+- Changed manually reported long tasks to retain the caller-provided description or stack without capturing a redundant SDK stack for every event.
 
 ## [0.1.14-alpha06] - 2026-05-14
 - Added `FTTraceConfig.setTraceHeaderHandler(...)` for custom Trace context generation after the SDK generates default Trace Headers.
