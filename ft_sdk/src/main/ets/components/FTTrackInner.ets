@@ -72,6 +72,7 @@ interface SDKLineProtocolDraftsResponsePayload {
 
 interface SDKRumCommandResponsePayload {
   syncDrafts?: SDKSyncDataDraftDTO[];
+  errorTimeLine?: number;
   completedResourceIds?: string[];
   deltas?: SDKRumCounterDeltaDTO[];
   needsActionCloseCheck?: boolean;
@@ -799,6 +800,7 @@ class FTTrackInner {
         callback ? callback.customDataType : undefined,
         callback ? callback.measurement : 'event.mailbox',
         drafts,
+        payload.errorTimeLine,
         callback ? callback.callBack : null,
         callback ? callback.callbackOnFinish : false
       );
@@ -849,6 +851,7 @@ class FTTrackInner {
     customDataType: string | undefined,
     measurement: string,
     drafts: SDKSyncDataDraftDTO[],
+    errorTimeLine: number | undefined,
     callBack: RunnerCompleteCallBack | null,
     callbackOnFinish: boolean
   ): Promise<boolean> {
@@ -860,7 +863,7 @@ class FTTrackInner {
       return true;
     }
 
-    const writeResult = await this.writeWorkerDraftsToDb(source, normalizedDrafts, dataType);
+    const writeResult = await this.writeWorkerDraftsToDb(source, normalizedDrafts, dataType, errorTimeLine);
     const result = this.getWriteAffectedCount(writeResult) > 0;
     const firstUuid = normalizedDrafts[0].uuid;
 
@@ -1027,7 +1030,8 @@ class FTTrackInner {
   private async writeWorkerDraftsToDb(
     source: string,
     drafts: SDKSyncDataDraftDTO[],
-    fallbackDataType: DataType
+    fallbackDataType: DataType,
+    lastErrorTimeLine?: number
   ): Promise<SyncDataWriteResult | null> {
     if (!drafts || drafts.length === 0) {
       return null;
@@ -1043,7 +1047,8 @@ class FTTrackInner {
       applyCachePolicy: true,
       reInsert: false,
       forceTransaction: drafts.length > 1,
-      updateOrInsertByUuid: this.shouldUpdateOrInsertByDraftUuid(drafts)
+      updateOrInsertByUuid: this.shouldUpdateOrInsertByDraftUuid(drafts),
+      lastErrorTimeLine
     });
   }
 

@@ -17,6 +17,8 @@ enum FTDBTaskPoolCommand {
   DELETE_SYNC_ROW_IDS = 'deleteSyncRowIds',
   QUERY_TOTAL_COUNT = 'queryTotalCount',
   GET_DB_SIZE = 'getDbSize',
+  GET_LAST_ERROR_TIMELINE = 'getLastErrorTimeLine',
+  UPDATE_LAST_ERROR_TIMELINE = 'updateLastErrorTimeLine',
   DELETE_OLDEST_SYNC_DATA = 'deleteOldestSyncData',
   UPDATE_DATA_TYPE = 'updateDataType',
   DELETE_EXPIRE_CACHE = 'deleteExpireCache',
@@ -62,6 +64,8 @@ export interface FTDBTaskPoolWriteOptions {
   reInsert: boolean;
   forceTransaction: boolean;
   updateOrInsertByUuid: boolean;
+  /** Persisted with this write's transaction when the batch contains RUM errors. */
+  lastErrorTimeLine?: number;
 }
 
 export interface FTDBTaskPoolWriteResult {
@@ -355,6 +359,20 @@ export class FTDBTaskPoolExecutor {
       command: FTDBTaskPoolCommand.GET_DB_SIZE
     });
     return response.count || 0;
+  }
+
+  public static async getLastErrorTimeLine(context: Context): Promise<number> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.GET_LAST_ERROR_TIMELINE
+    });
+    return response.count || -1;
+  }
+
+  public static async updateLastErrorTimeLine(context: Context, errorTimeLine: number): Promise<void> {
+    await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.UPDATE_LAST_ERROR_TIMELINE,
+      errorTimeLine
+    });
   }
 
   public static async deleteOldestSyncData(context: Context, dataTypes: string[], limit: number): Promise<number> {

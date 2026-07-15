@@ -108,13 +108,13 @@ export class DatabaseHelper {
       return false;
     }
 
-    // Check if all three main tables exist
+    // Check if all SDK tables exist
     const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
     const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
     const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+    const hasSdkMetaTable = await this.hasTable(FTSQL.FT_TABLE_SDK_META);
 
-    // All tables must exist
-    return hasViewTable && hasActionTable && hasSyncTable;
+    return hasViewTable && hasActionTable && hasSyncTable && hasSdkMetaTable;
   }
 
   /**
@@ -204,6 +204,10 @@ export class DatabaseHelper {
       // Create RUM action table
       await this.rdbStore.executeSql(FTSQL.FT_TABLE_ACTION_CREATE);
       FTInnerLogger.d(TAG, "Created rum_action table");
+
+      // Create bounded SDK metadata table
+      await this.rdbStore.executeSql(FTSQL.FT_TABLE_SDK_META_CREATE);
+      FTInnerLogger.d(TAG, "Created sdk_meta table");
 
       FTInnerLogger.i(TAG, "All tables created successfully");
     } catch (error) {
@@ -470,6 +474,7 @@ export class DatabaseHelper {
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_ACTION}`);
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_VIEW}`);
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}`);
+      await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_SDK_META}`);
 
       // Recreate tables
       await this.createTables();

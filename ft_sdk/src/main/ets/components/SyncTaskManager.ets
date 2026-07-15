@@ -421,8 +421,8 @@ export class SyncTaskManager {
     if (context) {
       this.context = context;
 
-      // Open Preferences asynchronously. setErrorTimeLine keeps the memory
-      // value authoritative until the cached value can be merged safely.
+      // Read legacy Preferences asynchronously for one-time migration. New
+      // error timelines are committed with their RUM batch in RDB.
       if (this.preferencesInitPromise === null) {
         this.preferencesInitPromise = this.initializePreferences(context);
       }
@@ -438,18 +438,30 @@ export class SyncTaskManager {
   }
 
   private async initializePreferences(context: Context): Promise<void> {
+    let legacyErrorTimeLine = -1;
     try {
       this.preferencesStore = await syncTaskRuntime.getPreferences(context, SyncTaskManager.PREFERENCES_NAME);
-      const cachedErrorTimeLine = await this.getErrorTimeLineFromFileCache();
-      if (cachedErrorTimeLine > this.errorTimeLine) {
-        this.errorTimeLine = cachedErrorTimeLine;
-      } else if (this.errorTimeLine > cachedErrorTimeLine) {
-        await this.saveErrorWithFileCache(this.errorTimeLine);
-      }
-      FTInnerLogger.d(TAG, `Loaded errorTimeLine from cache: ${this.errorTimeLine}`);
+      legacyErrorTimeLine = await this.getErrorTimeLineFromFileCache();
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize preferences: ${error as string}`);
     }
+
+    let databaseErrorTimeLine = -1;
+    try {
+      databaseErrorTimeLine = await syncTaskRuntime.getDbTaskPool().getLastErrorTimeLine(context);
+      // Existing installations may only have the old Preferences value. Copy
+      // that value to the bounded RDB metadata row once; no new Preferences
+      // writes occur after this migration.
+      if (legacyErrorTimeLine > databaseErrorTimeLine) {
+        await syncTaskRuntime.getDbTaskPool().updateLastErrorTimeLine(context, legacyErrorTimeLine);
+        databaseErrorTimeLine = legacyErrorTimeLine;
+      }
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Failed to initialize errorTimeLine RDB metadata: ${error as string}`);
+    }
+
+    this.errorTimeLine = Math.max(this.errorTimeLine, legacyErrorTimeLine, databaseErrorTimeLine);
+    FTInnerLogger.d(TAG, `Loaded errorTimeLine: ${this.errorTimeLine}`);
   }
 
   private scheduleUpload(delay: number = 0): void {
@@ -602,23 +614,6 @@ export class SyncTaskManager {
       if (activeView != null) {
         activeView.setLastErrorTime(errorTimeLine);
       }
-      this.saveErrorWithFileCache(errorTimeLine);
-    }
-  }
-
-  /**
-   * Save error time line to preferences
-   * @param errorTimeLine Error time line in nanoseconds
-   */
-  private async saveErrorWithFileCache(errorTimeLine: number): Promise<void> {
-    try {
-      if (this.preferencesStore) {
-        await this.preferencesStore.put(SyncTaskManager.KEY_ERROR_TIMELINE, errorTimeLine);
-        await this.preferencesStore.flush();
-        FTInnerLogger.d(TAG, `Saved errorTimeLine to cache: ${errorTimeLine}`);
-      }
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to save errorTimeLine to cache: ${error as string}`);
     }
   }
 
@@ -638,11 +633,6 @@ export class SyncTaskManager {
     return -1;
   }
 
-  private async loadErrorTimeLineFromFileCache(): Promise<void> {
-    const cachedErrorTimeLine = await this.getErrorTimeLineFromFileCache();
-    this.errorTimeLine = Math.max(this.errorTimeLine, cachedErrorTimeLine);
-  }
-
   /**
    * Get error time line (public method for testing)
    * Returns the current error time line in nanoseconds, or -1 if not set
@@ -656,8 +646,7 @@ export class SyncTaskManager {
     if (this.preferencesInitPromise) {
       await this.preferencesInitPromise;
     }
-    // Then check preferences cache
-    return await this.getErrorTimeLineFromFileCache();
+    return this.errorTimeLine;
   }
 
   private nextUploadTaskName(): string {
