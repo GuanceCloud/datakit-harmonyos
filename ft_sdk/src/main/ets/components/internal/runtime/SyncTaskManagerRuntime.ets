@@ -1,14 +1,20 @@
 import { Context } from '@kit.AbilityKit';
-import { http } from '@kit.NetworkKit';
 import preferences from '@ohos.data.preferences';
-import { Constants } from '../../Constants';
-import { FTSDKConfig } from '../../Configs';
-import { DataBaseCallBack } from '../../db/base/DataBaseCallBack';
 import { SyncData } from '../../db/bean/SyncData';
 import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
-import { FTDBManager } from '../../db/FTDBManager';
+import {
+  FTDBTaskPoolExecutor,
+  FTDBTaskPoolMaintenanceResponse,
+  FTDBTaskPoolUploadPage,
+  FTDBTaskPoolUploadCommitResponse
+} from '../../db/FTDBTaskPoolExecutor';
 import { DataType } from '../../enum/Enums';
-import { HttpBuilder } from '../../http/HttpBuilder';
+import { SDKDedicatedPoolManager } from '../../thread/SDKDedicatedPoolManager';
+import {
+  SDKUploadHttpResultDTO,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../thread/SDKWorkerProtocol';
 import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
@@ -24,15 +30,33 @@ export interface SyncTaskPreferences {
   get(key: string, defaultValue: number): Promise<number | string | boolean>;
 }
 
-export interface SyncTaskDbManager {
-  hasData(dataTypes: DataType[]): Promise<boolean>;
-  updateDataType(dataType: string, errorTimeLine: number): Promise<number>;
-  deleteExpireCache(dataType: string, now: number, duration: number): Promise<number>;
-  init(): Promise<void>;
-  queryFtOperation(dataTypes: DataType[], pageSize: number): Promise<SyncData[]>;
-  deleteFtOperation(list: SyncData[]): Promise<void>;
-  insertFtOptList(list: SyncData[], reInsert?: boolean): Promise<boolean | void>;
-  executeWithDB(isWrite: boolean, callback: DataBaseCallBack): Promise<void>;
+export interface SyncTaskDbTaskPool {
+  hasSyncData(context: Context, dataTypes: string[]): Promise<boolean>;
+  querySyncData(context: Context, dataTypes: string[], limit: number, newestFirst?: boolean): Promise<SyncData[]>;
+  queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage>;
+  deleteSyncRows(context: Context, rows: SyncData[]): Promise<number>;
+  uploadCommit(
+    context: Context,
+    dataType: string,
+    action: string,
+    records: SyncData[],
+    reInsertRecords: SyncData[],
+    reduceCount: number
+  ): Promise<FTDBTaskPoolUploadCommitResponse>;
+  maintainErrorSampled(
+    context: Context,
+    dataType: string,
+    errorTimeLine: number,
+    now: number,
+    duration: number
+  ): Promise<FTDBTaskPoolMaintenanceResponse>;
+  cleanupExpiredRumView(context: Context, cutoffTime: number): Promise<number>;
+  cleanupExpiredRumAction(context: Context, cutoffTime: number): Promise<number>;
 }
 
 export interface SyncTaskCachePolicy {
@@ -46,48 +70,97 @@ export interface SyncTaskCachePolicy {
   getRumCount(): number;
 }
 
-export interface SyncTaskHttpResult {
-  getCode(): number;
-  getMessage(): string;
-  getErrorCode(): string;
-}
-
 export interface SyncTaskManagerRuntime {
-  getDbManager(context: Context): SyncTaskDbManager | null;
+  getDbTaskPool(): SyncTaskDbTaskPool;
   getCachePolicy(): SyncTaskCachePolicy;
-  getPreferences(context: Context, name: string): SyncTaskPreferences;
-  executeHttp(config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult>;
+  getPreferences(context: Context, name: string): Promise<SyncTaskPreferences>;
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse>;
   getCurrentTimeMs(): number;
   getRandom(): number;
   generateUUID(): string;
   setTimer(callback: () => void, interval: number): number;
   clearTimer(timerId: number): void;
   sleep(ms: number): Promise<void>;
+  /** Optional one-shot fault seams used by internal unit/device runtimes. */
+  consumeUploadWorkerCommandFailure?(request: SDKWorkerRequest): string;
+  consumeUploadDbCommitFailure?(): string;
+  takeInjectedUploadHttpResult?(): SDKUploadHttpResultDTO | undefined;
+}
+
+class DefaultSyncTaskDbTaskPool implements SyncTaskDbTaskPool {
+  async hasSyncData(context: Context, dataTypes: string[]): Promise<boolean> {
+    return await FTDBTaskPoolExecutor.hasSyncData(context, dataTypes);
+  }
+
+  async querySyncData(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    newestFirst?: boolean
+  ): Promise<SyncData[]> {
+    return await FTDBTaskPoolExecutor.querySyncData(context, dataTypes, limit, newestFirst === true);
+  }
+
+  async queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    limit: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage> {
+    return await FTDBTaskPoolExecutor.queryUploadData(context, dataTypes, limit, maxBytes);
+  }
+
+  async deleteSyncRows(context: Context, rows: SyncData[]): Promise<number> {
+    return await FTDBTaskPoolExecutor.deleteSyncRows(context, rows);
+  }
+
+  async uploadCommit(
+    context: Context,
+    dataType: string,
+    action: string,
+    records: SyncData[],
+    reInsertRecords: SyncData[],
+    reduceCount: number
+  ): Promise<FTDBTaskPoolUploadCommitResponse> {
+    return await FTDBTaskPoolExecutor.uploadCommit(context, dataType, action, records, reInsertRecords, reduceCount);
+  }
+
+  async maintainErrorSampled(
+    context: Context,
+    dataType: string,
+    errorTimeLine: number,
+    now: number,
+    duration: number
+  ): Promise<FTDBTaskPoolMaintenanceResponse> {
+    return await FTDBTaskPoolExecutor.maintainErrorSampled(context, dataType, errorTimeLine, now, duration);
+  }
+
+  async cleanupExpiredRumView(context: Context, cutoffTime: number): Promise<number> {
+    return await FTDBTaskPoolExecutor.cleanupExpiredRumView(context, cutoffTime);
+  }
+
+  async cleanupExpiredRumAction(context: Context, cutoffTime: number): Promise<number> {
+    return await FTDBTaskPoolExecutor.cleanupExpiredRumAction(context, cutoffTime);
+  }
 }
 
 export class DefaultSyncTaskManagerRuntime implements SyncTaskManagerRuntime {
-  getDbManager(context: Context): SyncTaskDbManager | null {
-    return FTDBManager.getInstance(context);
+  private readonly dbTaskPool = new DefaultSyncTaskDbTaskPool();
+
+  getDbTaskPool(): SyncTaskDbTaskPool {
+    return this.dbTaskPool;
   }
 
   getCachePolicy(): SyncTaskCachePolicy {
     return FTDBCachePolicy.getInstance();
   }
 
-  getPreferences(context: Context, name: string): SyncTaskPreferences {
-    return preferences.getPreferencesSync(context, { name }) as SyncTaskPreferences;
+  async getPreferences(context: Context, name: string): Promise<SyncTaskPreferences> {
+    return await preferences.getPreferences(context, { name }) as SyncTaskPreferences;
   }
 
-  async executeHttp(config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult> {
-    const xPkgIdValue = Constants.SYNC_DATA_TRACE_HEADER_FORMAT.replace('%s', pkgId);
-    return await HttpBuilder.Builder(config)
-      .addHeadParam(Constants.SYNC_DATA_CONTENT_TYPE_HEADER, 'text/plain')
-      .addHeadParam(Constants.SYNC_DATA_TRACE_HEADER, xPkgIdValue)
-      .addHeadParam(Constants.SYNC_DATA_DEVICE_TIME, this.getCurrentTimeMs().toString())
-      .setModel(model)
-      .setMethod(http.RequestMethod.POST)
-      .setBodyString(body)
-      .executeSync();
+  executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().executeCommand(request);
   }
 
   getCurrentTimeMs(): number {

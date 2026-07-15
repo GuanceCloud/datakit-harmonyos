@@ -30,6 +30,7 @@ export class DeviceUUIDManager {
   private deviceUUID: string = "";
   private randomUUID: string = ""; // Cached random UUID (for privacy mode)
   private isInitialized: boolean = false;
+  private preferencesInitPromise: Promise<void> | null = null;
   // Constants
   private static readonly PREFERENCES_NAME = 'ftSDKDeviceFile';
 
@@ -52,32 +53,24 @@ export class DeviceUUIDManager {
    * Initialize the DeviceUUIDManager with the application context
    * @param context The UIAbilityContext of the application
    */
-  public init(context: common.UIAbilityContext) {
+  public init(context: common.UIAbilityContext): void {
     if (this.isInitialized) {
       return;
     }
+    this.isInitialized = true;
+    this.preferencesInitPromise = this.initializePreferences(context);
+  }
 
+  /** Internal readiness fence used to refresh derived SDK tags after async restore. */
+  public waitForPreferencesReady(): Promise<void> {
+    return this.preferencesInitPromise || Promise.resolve();
+  }
+
+  private async initializePreferences(context: common.UIAbilityContext): Promise<void> {
     try {
-      // Initialize preferences store (aligned with Android SharedPreferences)
-      try {
-        this.preferencesStore =  preferences.getPreferencesSync(context, { name: DeviceUUIDManager.PREFERENCES_NAME });
-      } catch (error) {
-        FTInnerLogger.e(TAG, ` Failed to initialize preferences store: ${error}`);
-      }
-
-      // Pre-load random UUID from preferences if exists (wait for completion)
-      // This ensures getRandomUUID() can return cached value synchronously
-      try {
-        this.loadRandomUUIDFromPreferences();
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        FTInnerLogger.w(TAG, ` Failed to pre-load random UUID: ${errorMsg}`);
-      }
-
-      // Note: initRandomUUID() should be called separately only when enableSystemID is false
-      // It is called from FTSDK.initFTConfig() based on config.isAccessODIDEnabled()
-
-      this.isInitialized = true;
+      const store = await preferences.getPreferences(context, { name: DeviceUUIDManager.PREFERENCES_NAME });
+      this.preferencesStore = store;
+      await this.loadRandomUUIDFromPreferences(store);
     } catch (error) {
       FTInnerLogger.e(TAG, ` Failed to initialize DeviceUUIDManager: ${error}`);
     }
@@ -121,21 +114,25 @@ export class DeviceUUIDManager {
   /**
    * Load random UUID from preferences asynchronously (called during init)
    */
-  private loadRandomUUIDFromPreferences(): void {
-    if (this.preferencesStore) {
-      try {
-        const storedUUID =  this.preferencesStore.getSync(Constants.FT_RANDOM_USER_ID, "");
-        // ValueType can be string, number, boolean, etc. We need to check and convert to string
-        if (storedUUID !== null && storedUUID !== undefined) {
-          const uuidString = typeof storedUUID === 'string' ? storedUUID : String(storedUUID);
-          if (Utils.isNotEmpty(uuidString)) {
-            this.randomUUID = uuidString;
+  private async loadRandomUUIDFromPreferences(store: preferences.Preferences): Promise<void> {
+    try {
+      const storedUUID = await store.get(Constants.FT_RANDOM_USER_ID, "");
+      if (storedUUID !== null && storedUUID !== undefined) {
+        const uuidString = typeof storedUUID === 'string' ? storedUUID : String(storedUUID);
+        if (Utils.isNotEmpty(uuidString)) {
+          this.randomUUID = uuidString;
+          if (this.deviceUUID.startsWith('ft.rd_')) {
+            this.deviceUUID = uuidString;
           }
+          return;
         }
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        FTInnerLogger.e(TAG, ` Failed to load random UUID from preferences: ${errorMsg}`);
       }
+      if (Utils.isNotEmpty(this.randomUUID)) {
+        await this.saveRandomUUIDToPreferences();
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      FTInnerLogger.e(TAG, ` Failed to load random UUID from preferences: ${errorMsg}`);
     }
   }
 

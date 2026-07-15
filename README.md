@@ -63,14 +63,15 @@ import {
   FTLoggerConfig,
   FTTraceConfig,
   EnvType,
+  SDKLogLevel,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want): void {
-    const sdkConfig = new FTSDKConfig('YOUR_DATAKIT_OR_DATAWAY_URL')
-    sdkConfig.setEnv(EnvType.PROD)
-    sdkConfig.setServiceName('your_service_name')
+    const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+      .setEnv(EnvType.PROD)
+      .setServiceName('your_service_name')
 
     FTSDK.install(sdkConfig, this.context)
 
@@ -90,6 +91,18 @@ export default class EntryAbility extends UIAbility {
   }
 }
 ```
+
+## SDK Debug Logs
+
+Enable internal SDK logs in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:
+
+```ts
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDebug(true)
+  .setSdkLogLevel(SDKLogLevel.D)
+```
+
+`V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
 
 ## Package Guide
 

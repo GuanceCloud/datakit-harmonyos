@@ -9,7 +9,7 @@ import { Constants } from '../../Constants';
 /**
  * ViewBean JSON interface
  */
-interface ViewBeanJSON {
+export interface ViewBeanJSON {
   id: string;
   viewName: string;
   viewReferrer: string;

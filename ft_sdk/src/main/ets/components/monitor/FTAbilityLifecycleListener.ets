@@ -20,8 +20,11 @@ import { FTRUMGlobalManager } from '../rum/FTRUMGlobalManager';
 import { FTSDK } from '../FTSDK';
 import { Utils } from '../utils/Utils';
 import { FTAppStartCounter } from './FTAppStartCounter';
+import { FTDBSpoolManager } from '../db/FTDBSpoolManager';
+import { FTDBTaskPoolExecutor } from '../db/FTDBTaskPoolExecutor';
 
 const TAG = "FTAbilityLifecycleListener";
+const BACKGROUND_DB_FLUSH_TIMEOUT_MS = 2500;
 
 /**
  * UIAbility lifecycle listener
@@ -202,7 +205,7 @@ export class FTAbilityLifecycleListener {
           FTInnerLogger.d(TAG, `onWindowStageDestroy: UIAbility lifecycle event`);
           FTSDK.cleanupUIFeatures();
           // Stop view when window stage is destroyed
-          this.stopViewOnLifecycleChange("onWindowStageDestroy");
+          this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
         },
         onAbilityForeground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityForeground: UIAbility lifecycle event`);
@@ -263,7 +266,7 @@ export class FTAbilityLifecycleListener {
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
           // Stop view when ability goes to background (aligned with Android onActivityPaused)
-          this.stopViewOnLifecycleChange("onAbilityBackground");
+          this.flushDbLaneOnLifecycleChange("onAbilityBackground");
           
           // Schedule check for long time sleep (10 seconds)
           // Similar to Android's LifeCircleTraceCallback.onEnterBackground()
@@ -273,7 +276,7 @@ export class FTAbilityLifecycleListener {
         onAbilityDestroy: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
           // Stop view when ability is destroyed (aligned with Android onDestroy)
-          this.stopViewOnLifecycleChange("onAbilityDestroy");
+          this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
         }
       };
 
@@ -364,18 +367,50 @@ export class FTAbilityLifecycleListener {
    * Used in onBackground and onDestroy to ensure view data is processed
    * @param context Context string for logging (e.g., "onAbilityBackground", "onAbilityDestroy")
    */
-  private stopViewOnLifecycleChange(context: string): void {
+  private async stopViewOnLifecycleChange(context: string): Promise<void> {
     try {
       if (FTSDK.isViewTrackingEnabled()) {
         const rumManager = FTRUMGlobalManager.getInstance();
-        rumManager.stopView().then(() => {
-          FTInnerLogger.d(TAG, `stopView called in ${context}`);
-        }).catch((error: Error) => {
-          FTInnerLogger.e(TAG, `Failed to stopView in ${context}: ${String(error)}`);
-        });
+        await rumManager.stopView();
+        FTInnerLogger.d(TAG, `stopView called in ${context}`);
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Error calling stopView in ${context}: ${String(error)}`);
+    }
+  }
+
+  private flushDbLaneOnLifecycleChange(context: string): void {
+    this.flushDbLaneOnLifecycleChangeAsync(context).catch((error: Error) => {
+      FTInnerLogger.e(TAG, `DB lane flush failed in ${context}: ${error.message}`);
+    });
+  }
+
+  private async flushDbLaneOnLifecycleChangeAsync(context: string): Promise<void> {
+    await this.stopViewOnLifecycleChange(context);
+    await this.awaitDbLaneWithTimeout(context);
+
+    const abilityContext = Utils.getAbilityContext();
+    if (abilityContext) {
+      await FTDBSpoolManager.getInstance().replay(abilityContext, context);
+    }
+
+    FTSDK.flushSyncData();
+  }
+
+  private async awaitDbLaneWithTimeout(context: string): Promise<void> {
+    let timedOut = false;
+    const abilityContext = Utils.getAbilityContext();
+    await Promise.race([
+      abilityContext ? FTDBTaskPoolExecutor.awaitIdle(abilityContext) : Promise.resolve(),
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, BACKGROUND_DB_FLUSH_TIMEOUT_MS);
+      })
+    ]);
+    if (timedOut) {
+      FTInnerLogger.w(TAG, `DB lane flush timed out in ${context}`);
     }
   }
   

@@ -64,19 +64,19 @@ export class FTExceptionHandler {
    * @param config RUM configuration
    */
   public initConfig(config: FTRUMConfig): void {
+    const crashTrackingEnabled = config.getRumAppId().length > 0 && config.isEnableTrackAppCrash();
+    FTInnerLogger.setCrashLogCollectionEnabled(crashTrackingEnabled);
     // Initialize JS crash handler (errorManager)
     // Check if RUM is enabled (rumAppId is set) and crash tracking is enabled
     // Aligned with Android: config.isRumEnable() && config.isEnableTrackAppCrash()
-    if (config.getRumAppId().length > 0 &&
-        config.isEnableTrackAppCrash() &&
+    if (crashTrackingEnabled &&
         !this.registerHandled) {
       this.startErrorManager();
       this.registerHandled = true;
     }
 
     // Initialize Native (C++) crash handler through the implicit native module.
-    if (config.getRumAppId().length > 0 &&
-        config.isEnableTrackAppCrash()) {
+    if (crashTrackingEnabled) {
       if (!this.nativeCrashAdapter) {
         this.nativeCrashAdapter = FTExceptionHandler.runtime.createNativeCrashHandler();
       }
@@ -213,6 +213,7 @@ export class FTExceptionHandler {
    * Public method to stop error manager (for memory leak debugging)
    */
   public stop(): void {
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
     this.stopErrorManager();
 
     // Stop native crash adapter
@@ -359,6 +360,7 @@ export class FTExceptionHandler {
    * Aligned with Android: FTExceptionHandler.release()
    */
   public static release(): void {
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
     if (FTExceptionHandler.instance !== null) {
       FTExceptionHandler.instance.stopErrorManager();
 

@@ -2,7 +2,15 @@ import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context, common } from '@kit.AbilityKit';
 import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '../../main/ets/components/Configs';
+import {
+  FTDnsConfig,
+  FTLoggerConfig,
+  FTProxyAuthenticator,
+  FTProxyConfig,
+  FTRUMConfig,
+  FTSDKConfig,
+  FTTraceConfig
+} from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
 import {
   DataType,
@@ -10,6 +18,7 @@ import {
   EnvType,
   LogCacheDiscard,
   RUMCacheDiscard,
+  SDKLogLevel,
   SyncPageSize
 } from '../../main/ets/components/enum/Enums';
 import { Status as LogLevel } from '../../main/ets/components/bean/Status';
@@ -25,6 +34,7 @@ import { TrackLogManager } from '../../main/ets/components/log/TrackLogManager';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
+import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import {
@@ -199,11 +209,60 @@ export default function configUnitTest() {
       expect(datawayConfig.getEnv()).assertEqual(EnvType.GRAY.toString());
       expect(datawayConfig.getDatawayUrl()).assertEqual(TEST_FAKE_URL);
       expect(datawayConfig.getClientToken()).assertEqual(TEST_FAKE_CLIENT_TOKEN);
+      expect(datakitConfig.getSdkLogLevel()).assertEqual(SDKLogLevel.V);
+      expect(datakitConfig.setSdkLogLevel(SDKLogLevel.W).getSdkLogLevel()).assertEqual(SDKLogLevel.W);
+      expect(datakitConfig.isCompressIntakeRequests()).assertTrue();
+      expect(datakitConfig.setCompressIntakeRequests(false).isCompressIntakeRequests()).assertFalse();
+    });
+
+    it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {
+      const configuredProxyExclusionList: string[] = ['localhost'];
+      const configuredProxy: FTProxyConfig = {
+        host: 'proxy.example.com',
+        port: 8080,
+        exclusionList: configuredProxyExclusionList
+      };
+      const configuredAuthenticator: FTProxyAuthenticator = {
+        username: 'proxy-user',
+        password: 'proxy-password'
+      };
+      const configuredDns: FTDnsConfig = {
+        servers: [' 1.1.1.1 ', '', '8.8.8.8', '9.9.9.9', '208.67.222.222'],
+        overHttpsUrl: ' https://dns.example.com/dns-query '
+      };
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setProxy(configuredProxy)
+        .setProxyAuthenticator(configuredAuthenticator)
+        .setDns(configuredDns);
+      configuredProxyExclusionList[0] = 'mutated-host';
+
+      const proxy = config.getProxy();
+      const authenticator = config.getProxyAuthenticator();
+      const dns = config.getDns();
+      expect(proxy !== null).assertTrue();
+      expect(authenticator !== null).assertTrue();
+      expect(dns !== null).assertTrue();
+      if (proxy !== null && authenticator !== null && dns !== null) {
+        expect(proxy.host).assertEqual('proxy.example.com');
+        expect(proxy.port).assertEqual(8080);
+        expect((proxy.exclusionList as string[])[0]).assertEqual('localhost');
+        expect(authenticator.username).assertEqual('proxy-user');
+        expect(authenticator.password).assertEqual('proxy-password');
+        expect((dns.servers as string[]).length).assertEqual(3);
+        expect((dns.servers as string[])[0]).assertEqual('1.1.1.1');
+        expect((dns.servers as string[])[2]).assertEqual('9.9.9.9');
+        expect(dns.overHttpsUrl).assertEqual('https://dns.example.com/dns-query');
+      }
+
+      config.setProxy(null).setProxyAuthenticator(null).setDns(null);
+      expect(config.getProxy() === null).assertTrue();
+      expect(config.getProxyAuthenticator() === null).assertTrue();
+      expect(config.getDns() === null).assertTrue();
     });
 
     it('sdkConfigShouldClampBounds', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(1)
+        .setSyncPageSize(SyncPageSize.MINI)
         .setSyncSleepTime(10000)
         .setDataSyncRetryCount(100)
         .enableLimitWithDbSize(1)
@@ -220,6 +279,35 @@ export default function configUnitTest() {
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setSyncSleepTime(-1).getSyncSleepTime())
         .assertEqual(SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS);
       expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(-1).getDataSyncRetryCount()).assertEqual(0);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setDataSyncRetryCount(2.9).getDataSyncRetryCount()).assertEqual(2);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(1).getPageSize())
+        .assertEqual(SyncPageSize.MINI);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(123.9).getPageSize())
+        .assertEqual(123);
+      expect(FTSDKConfig.builder(TEST_FAKE_URL).setCustomSyncPageSize(1_000_000).getPageSize())
+        .assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
+    });
+
+    it('sdkShouldExposeRuntimeAutoSyncToggle', 0, () => {
+      SyncInternalTestAccess.resetState();
+      const config = FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false);
+      const syncTaskManager = SyncTaskManager.getInstance();
+      syncTaskManager.init(config);
+
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(config, createFakeContext());
+
+      FTSDK.setAutoSync(true);
+      expect(config.isAutoSyncEnabled()).assertTrue();
+      expect(syncTaskManager.isAutoSyncEnabled()).assertTrue();
+
+      FTSDK.setAutoSync(false);
+      expect(config.isAutoSyncEnabled()).assertFalse();
+      expect(syncTaskManager.isAutoSyncEnabled()).assertFalse();
+
+      syncTaskManager.stop();
+      SyncInternalTestAccess.resetState();
     });
 
     it('rumConfigShouldExposeDocumentedDefaults', 0, () => {
@@ -227,7 +315,7 @@ export default function configUnitTest() {
 
       expect(rumConfig.getRumAppId()).assertEqual('');
       expect(rumConfig.getSamplingRate()).assertEqual(1.0);
-      expect(rumConfig.getSessionErrorSampleRate()).assertEqual(1.0);
+      expect(rumConfig.getSessionErrorSampleRate()).assertEqual(0.0);
       expect(rumConfig.isEnableTraceUserAction()).assertFalse();
       expect(rumConfig.isEnableTraceUserView()).assertFalse();
       expect(rumConfig.isEnableTraceUserResource()).assertFalse();
@@ -309,6 +397,7 @@ export default function configUnitTest() {
     it('samplingRatesShouldClampBounds', 0, () => {
       expect(new FTRUMConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTRUMConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
+      expect(new FTRUMConfig().setSessionErrorSampleRate().getSessionErrorSampleRate()).assertEqual(0.0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(-1).getSessionErrorSampleRate()).assertEqual(0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(2).getSessionErrorSampleRate()).assertEqual(1);
       expect(new FTLoggerConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
@@ -351,6 +440,26 @@ export default function configUnitTest() {
       expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTraceUserView(true))).assertTrue();
       expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppCrash(true))).assertTrue();
       expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppANR(true))).assertTrue();
+    });
+
+    it('rumCrashSwitchShouldControlNativeDiagnosticLogCollection', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      runtime.uiContext = new FakeUIContext() as Object as UIContext;
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL), createFakeContext());
+
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
+
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
+
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTrackAppCrash(true));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertTrue();
+
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
     });
 
     it('installRumShouldApplySideEffects', 0, () => {

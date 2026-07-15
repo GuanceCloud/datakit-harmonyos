@@ -2,7 +2,17 @@ import { FTRUMConfig } from '../../Configs';
 import { FTExceptionHandler } from '../../FTExceptionHandler';
 import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 import { FTSDK } from '../../FTSDK';
+import { FTInnerLogger } from '../../log/FTLogger';
 import ftnativecrash from 'libftnativecrash.so';
+import {
+  SDKDedicatedPoolManager,
+  SDKDedicatedPoolManagerStatus
+} from '../../thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../thread/SDKWorkerProtocol';
 import { FTExceptionHandlerRuntime } from '../runtime/FTExceptionHandlerRuntime';
 import { FTNativeCrashHandlerRuntime } from '../runtime/FTNativeCrashHandlerRuntime';
 import {
@@ -26,6 +36,42 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static requiresUIFeatures(config: FTRUMConfig): boolean {
     return SdkInternalTestAccess.requiresUIFeaturesInternal(config);
+  }
+
+  public static getDedicatedPoolStatus(): SDKDedicatedPoolManagerStatus {
+    return SDKDedicatedPoolManager.getInstance().getStatus();
+  }
+
+  public static probeDedicatedWorkers(): Promise<SDKWorkerResponse[]> {
+    return SDKDedicatedPoolManager.getInstance().probeDedicatedWorkers();
+  }
+
+  public static executeDedicatedWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().executeCommand(request);
+  }
+
+  /** Internal device-test seam for unresolved mailbox replay verification. */
+  public static postDedicatedWorkerCommandAndWait(
+    request: SDKWorkerRequest,
+    timeoutMs: number
+  ): Promise<SDKWorkerResponse> {
+    return SDKDedicatedPoolManager.getInstance().postCommandAndWait(request, timeoutMs);
+  }
+
+  public static failNextDedicatedMailboxPosts(count: number = 1): void {
+    SDKDedicatedPoolManager.getInstance().failNextMailboxPostsInternal(count);
+  }
+
+  public static restartDedicatedWorker(pool: SDKDedicatedPoolType): boolean {
+    return SDKDedicatedPoolManager.getInstance().restartWorkerInternal(pool);
+  }
+
+  public static configureDedicatedWorkerIdleTimeout(pool: SDKDedicatedPoolType, idleTimeoutMs: number): void {
+    SDKDedicatedPoolManager.getInstance().configurePoolIdleTimeoutInternal(pool, idleTimeoutMs);
+  }
+
+  public static isNativeCrashLogCollectionEnabled(): boolean {
+    return FTInnerLogger.isCrashLogCollectionEnabledInternal();
   }
 
   public static setExceptionHandlerRuntime(runtime: FTExceptionHandlerRuntime): void {

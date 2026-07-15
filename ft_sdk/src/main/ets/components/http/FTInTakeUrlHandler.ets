@@ -48,7 +48,6 @@ export class FTInTakeUrlHandler {
     /dataway-us1\.guance\.com/i,
     /dataway\.guance\.com/i,
     /static\.guance\.com/i,
-    /dataflux-apm/i,
     /ft-gateway/i
   ];
   
