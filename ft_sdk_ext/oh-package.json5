@@ -1,13 +1,13 @@
 {
   "name": "@guancecloud/ft_sdk_ext",
-  "version": "0.1.14-alpha06",
+  "version": "0.1.14-alpha07",
   "description": "Guance HarmonyOS SDK extensions for newer compiler and platform capabilities.",
   "main": "Index.ets",
   "author": "Guance",
   "license": "Apache-2.0",
   "dependencies": {
     // Keep ft_sdk_ext aligned with the published ft_sdk version it extends.
-    "@guancecloud/ft_sdk": "0.1.14-alpha06"
+    "@guancecloud/ft_sdk": "0.1.14-alpha07"
   },
 
 }
