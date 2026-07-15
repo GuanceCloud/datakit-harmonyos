@@ -31,6 +31,8 @@ export interface SyncTaskPreferences {
 }
 
 export interface SyncTaskDbTaskPool {
+  getLastErrorTimeLine(context: Context): Promise<number>;
+  updateLastErrorTimeLine(context: Context, errorTimeLine: number): Promise<void>;
   hasSyncData(context: Context, dataTypes: string[]): Promise<boolean>;
   querySyncData(context: Context, dataTypes: string[], limit: number, newestFirst?: boolean): Promise<SyncData[]>;
   queryUploadData(
@@ -88,6 +90,14 @@ export interface SyncTaskManagerRuntime {
 }
 
 class DefaultSyncTaskDbTaskPool implements SyncTaskDbTaskPool {
+  async getLastErrorTimeLine(context: Context): Promise<number> {
+    return await FTDBTaskPoolExecutor.getLastErrorTimeLine(context);
+  }
+
+  async updateLastErrorTimeLine(context: Context, errorTimeLine: number): Promise<void> {
+    await FTDBTaskPoolExecutor.updateLastErrorTimeLine(context, errorTimeLine);
+  }
+
   async hasSyncData(context: Context, dataTypes: string[]): Promise<boolean> {
     return await FTDBTaskPoolExecutor.hasSyncData(context, dataTypes);
   }

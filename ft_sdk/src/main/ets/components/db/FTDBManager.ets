@@ -49,6 +49,8 @@ export interface SyncDataWriteOptions {
   dbLaneWaitMs?: number;
   forceTransaction?: boolean;
   updateOrInsertByUuid?: boolean;
+  /** Persisted inside the RUM batch transaction when the batch carries errors. */
+  lastErrorTimeLine?: number;
   /** Replay must not recursively spool the same inflight batch on DB failure. */
   skipFailureFallback?: boolean;
 }
@@ -1082,7 +1084,8 @@ export class FTDBManager extends DBManager {
           applyCachePolicy: options.applyCachePolicy === true,
           reInsert,
           forceTransaction: options.forceTransaction === true || dataToWrite.length > 1,
-          updateOrInsertByUuid
+          updateOrInsertByUuid,
+          lastErrorTimeLine: options.lastErrorTimeLine
         };
         taskPoolResponse = await FTDBTaskPoolExecutor.writeSyncData(
           this.context,
@@ -1187,7 +1190,8 @@ export class FTDBManager extends DBManager {
         applyCachePolicy: options.applyCachePolicy === true,
         reInsert,
         forceTransaction: options.forceTransaction === true || drafts.length > 1,
-        updateOrInsertByUuid
+        updateOrInsertByUuid,
+        lastErrorTimeLine: options.lastErrorTimeLine
       };
       taskPoolResponse = await FTDBTaskPoolExecutor.writeSyncDrafts(
         this.context,

@@ -869,6 +869,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
 
       expect(response.ok).assertTrue();
+      expect(getPayloadString(response.payload, 'errorTimeLine')).assertEqual('500');
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
       expect(drafts.length).assertEqual(1);
       const line = String((drafts[0] as Record<string, object>)['dataString']);

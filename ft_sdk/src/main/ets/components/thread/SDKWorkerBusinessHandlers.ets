@@ -148,6 +148,8 @@ interface SDKRumCommandResultPayload {
   activeActionName: string;
   activeResourceCount: number;
   syncDrafts: SDKSyncDataDraftDTO[];
+  /** Latest error timestamp represented by this RUM draft batch. */
+  errorTimeLine?: number;
   completedResourceIds?: string[];
   deltas?: SDKRumCounterDeltaDTO[];
   needsActionCloseCheck?: boolean;
@@ -531,6 +533,7 @@ function handleRumCommandBatch(batch: SDKRumEventBatchDTO, state: SDKWorkerRunti
   const events = sortRumEventsByTime(batch && batch.events ? batch.events : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let eventType = '';
+  let lastErrorTimeLine = -1;
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
     if (!event) {
@@ -540,6 +543,9 @@ function handleRumCommandBatch(batch: SDKRumEventBatchDTO, state: SDKWorkerRunti
     eventType = payload.eventType;
     for (let j = 0; j < payload.syncDrafts.length; j++) {
       syncDrafts.push(payload.syncDrafts[j]);
+    }
+    if (payload.errorTimeLine !== undefined && payload.errorTimeLine > lastErrorTimeLine) {
+      lastErrorTimeLine = payload.errorTimeLine;
     }
   }
 
@@ -553,6 +559,9 @@ function handleRumCommandBatch(batch: SDKRumEventBatchDTO, state: SDKWorkerRunti
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
   };
+  if (lastErrorTimeLine > 0) {
+    payload.errorTimeLine = lastErrorTimeLine;
+  }
   return payload as Object as SDKWorkerPayload;
 }
 
@@ -594,7 +603,11 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
     syncDrafts.push(createRumDraft(finalizedEvent, state));
   }
 
-  return createRumCommandResultPayload(eventType, syncDrafts, state);
+  const payload = createRumCommandResultPayload(eventType, syncDrafts, state);
+  if (finalizedEvent.measurement === Constants.FT_MEASUREMENT_RUM_ERROR && syncDrafts.length > 0) {
+    payload.errorTimeLine = finalizedEvent.time;
+  }
+  return payload;
 }
 
 function createRumCommandResultPayload(
@@ -932,6 +945,7 @@ function handleRumErrorCommandBatch(
   const commands = sortRumErrorCommands(batch && batch.commands ? batch.commands : []);
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
   let flushMaxEvents = 256;
+  let lastErrorTimeLine = -1;
   for (let i = 0; i < commands.length; i++) {
     const command = commands[i];
     if (!command) {
@@ -943,7 +957,11 @@ function handleRumErrorCommandBatch(
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
       flushMaxEvents = command.counterFlushMaxEvents;
     }
+    const draftCountBefore = syncDrafts.length;
     processRumErrorCommand(command, state, syncDrafts);
+    if (syncDrafts.length > draftCountBefore) {
+      lastErrorTimeLine = Math.max(lastErrorTimeLine, command.time || Date.now());
+    }
   }
 
   const payload: SDKRumCommandResultPayload = {
@@ -956,6 +974,9 @@ function handleRumErrorCommandBatch(
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
   };
+  if (lastErrorTimeLine > 0) {
+    payload.errorTimeLine = lastErrorTimeLine;
+  }
   if (state.rumCounterPendingEventCount >= flushMaxEvents) {
     const flushPayload = createRumCounterFlushPayload(state);
     payload.deltas = flushPayload.deltas;

@@ -24,6 +24,8 @@ enum FTDBTaskPoolCommand {
   DELETE_SYNC_ROW_IDS = 'deleteSyncRowIds',
   QUERY_TOTAL_COUNT = 'queryTotalCount',
   GET_DB_SIZE = 'getDbSize',
+  GET_LAST_ERROR_TIMELINE = 'getLastErrorTimeLine',
+  UPDATE_LAST_ERROR_TIMELINE = 'updateLastErrorTimeLine',
   DELETE_OLDEST_SYNC_DATA = 'deleteOldestSyncData',
   UPDATE_DATA_TYPE = 'updateDataType',
   DELETE_EXPIRE_CACHE = 'deleteExpireCache',
@@ -69,6 +71,8 @@ export interface FTDBTaskPoolWriteOptions {
   reInsert: boolean;
   forceTransaction: boolean;
   updateOrInsertByUuid: boolean;
+  /** Persisted with this write's transaction when the batch contains RUM errors. */
+  lastErrorTimeLine?: number;
 }
 
 export interface FTDBTaskPoolWriteResult {
@@ -313,6 +317,11 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
         return okCountResponse(await queryTotalCountInTaskPool(rdbStore, request.dataTypes || []));
       case FTDBTaskPoolCommand.GET_DB_SIZE:
         return okCountResponse(await getCurrentDbSizeInTaskPool(rdbStore, createTiming()));
+      case FTDBTaskPoolCommand.GET_LAST_ERROR_TIMELINE:
+        return okCountResponse(await getLastErrorTimeLineInTaskPool(rdbStore));
+      case FTDBTaskPoolCommand.UPDATE_LAST_ERROR_TIMELINE:
+        await updateLastErrorTimeLineInTaskPool(rdbStore, request.errorTimeLine || -1);
+        return okResponse();
       case FTDBTaskPoolCommand.DELETE_OLDEST_SYNC_DATA:
         return okCountResponse(
           await deleteOldestSyncDataInTaskPool(rdbStore, request.dataTypes || [], normalizeLimit(request.limit))
@@ -483,6 +492,7 @@ async function openTaskPoolRdbStore(context: Context): Promise<relationalStore.R
   await rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
   await rdbStore.executeSql(FTSQL.FT_TABLE_VIEW_CREATE);
   await rdbStore.executeSql(FTSQL.FT_TABLE_ACTION_CREATE);
+  await rdbStore.executeSql(FTSQL.FT_TABLE_SDK_META_CREATE);
   for (let i = 0; i < FTSQL.CREATE_INDEXES.length; i++) {
     await rdbStore.executeSql(FTSQL.CREATE_INDEXES[i]);
   }
@@ -865,6 +875,50 @@ async function getCurrentDbSizeInTaskPool(
   }
 }
 
+async function getLastErrorTimeLineInTaskPool(rdbStore: relationalStore.RdbStore): Promise<number> {
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_SDK_META);
+  predicates.equalTo(FTSQL.SDK_META_COLUMN_KEY, FTSQL.SDK_META_KEY_LAST_ERROR_TIMELINE);
+  const resultSet = await rdbStore.query(predicates, [FTSQL.SDK_META_COLUMN_VALUE]);
+  try {
+    if (resultSet.goToFirstRow()) {
+      return resultSet.getLong(0);
+    }
+    return -1;
+  } finally {
+    resultSet.close();
+  }
+}
+
+/**
+ * Store only an increasing error timeline. The task-pool DB lane serializes
+ * callers, and this function is invoked before the caller commits its RDB
+ * transaction so the metadata and its RUM batch are atomic.
+ */
+async function updateLastErrorTimeLineInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  errorTimeLine: number
+): Promise<void> {
+  if (errorTimeLine <= 0) {
+    return;
+  }
+  const current = await getLastErrorTimeLineInTaskPool(rdbStore);
+  if (current >= errorTimeLine) {
+    return;
+  }
+
+  const values = {} as relationalStore.ValuesBucket;
+  values[FTSQL.SDK_META_COLUMN_VALUE] = errorTimeLine;
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_SDK_META);
+  predicates.equalTo(FTSQL.SDK_META_COLUMN_KEY, FTSQL.SDK_META_KEY_LAST_ERROR_TIMELINE);
+  if (current > 0) {
+    await rdbStore.update(values, predicates);
+    return;
+  }
+
+  values[FTSQL.SDK_META_COLUMN_KEY] = FTSQL.SDK_META_KEY_LAST_ERROR_TIMELINE;
+  await rdbStore.insert(FTSQL.FT_TABLE_SDK_META, values);
+}
+
 function escapeSqlString(value: string): string {
   return value.replace(/'/g, "''");
 }
@@ -1176,7 +1230,8 @@ async function writeSyncDataInTaskPool(
   const delta = createCountDelta();
   const timing = createTiming();
   const shouldTransaction =
-    options.forceTransaction || options.applyCachePolicy || options.updateOrInsertByUuid || records.length > TRANSACTION_LIMIT_COUNT;
+    options.forceTransaction || options.applyCachePolicy || options.updateOrInsertByUuid ||
+    options.lastErrorTimeLine !== undefined || records.length > TRANSACTION_LIMIT_COUNT;
 
   try {
     if (shouldTransaction) {
@@ -1186,6 +1241,9 @@ async function writeSyncDataInTaskPool(
     const resolvedRecords = result.inserted + result.updated + result.dropped + result.duplicateSkipped;
     if (result.success && resolvedRecords < result.requested) {
       throw new Error(`Incomplete DB write: resolved=${resolvedRecords}, requested=${result.requested}`);
+    }
+    if (result.success && options.lastErrorTimeLine !== undefined) {
+      await updateLastErrorTimeLineInTaskPool(rdbStore, options.lastErrorTimeLine);
     }
     if (shouldTransaction) {
       rdbStore.commit();
@@ -1482,6 +1540,7 @@ async function deleteAllInTaskPool(rdbStore: relationalStore.RdbStore): Promise<
     result.sync = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME));
     result.view = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW));
     result.action = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+    await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_SDK_META));
     rdbStore.commit();
   } catch (error) {
     rdbStore.rollBack();
