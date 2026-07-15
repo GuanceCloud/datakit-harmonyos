@@ -11,12 +11,14 @@ import FTTrackInner from "./FTTrackInner";
 import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
 import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
 import { TrackLogManager } from "./log/TrackLogManager";
-import { FTInnerLogger } from "./log/FTLogger";
+import { FTInnerLogger, FTLogger } from "./log/FTLogger";
+import { FTInnerLogFileManager } from "./log/FTInnerLogFileManager";
 import { UserDataManager } from "./rum/UserDataManager";
 import { FTNetworkListener } from "./utils/FTNetworkListener";
 import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
+import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
 import { FTRUMGlobalManager } from "./rum/FTRUMGlobalManager";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
@@ -48,6 +50,9 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    FTInnerLogFileManager.getInstance().shutdown(false);
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
+    FTLogger.resetBatchStateInternal();
     FTSDK.ftSdk = null;
     FTSDK.anrDetectManager = null;
     FTSDK.rumConfig = null;
@@ -156,18 +161,38 @@ export class FTSDK {
    initFTConfig(config: FTSDKConfig): void {
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
+    FTInnerLogger.setSDKLogLevel(config.getSdkLogLevel());
+    FTSDK.logServerUrl(config);
+
+    // Get context from Utils (unified context management)
+    const context = getFTSDKRuntime().getAbilityContext();
+
+    if (context && config.isEnableInnerLogFile()) {
+      const innerLogFileConfig = config.getInnerLogFileConfig();
+      FTInnerLogFileManager.getInstance().init(
+        context,
+        innerLogFileConfig.singleFileMaxSize,
+        innerLogFileConfig.totalFileMaxSize,
+        innerLogFileConfig.flushBatchSize,
+        innerLogFileConfig.flushIntervalMs
+      );
+    } else {
+      FTInnerLogFileManager.getInstance().shutdown(false);
+    }
 
     // Start network monitoring
     // Monitor network state changes and update network type cache in real time
     FTNetworkListener.getInstance().monitor();
 
-    // Get context from Utils (unified context management)
-    const context = getFTSDKRuntime().getAbilityContext();
-
     // Initialize sync task manager
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
+      const spoolManager = FTDBSpoolManager.getInstance();
+      spoolManager.init(context);
+      spoolManager.replay(context, "sdk.init").catch((error: Error) => {
+        FTInnerLogger.e(TAG, `DB spool replay on init failed: ${error.message}`);
+      });
       UserDataManager.getInstance().init(context);
       DeviceUUIDManager.getInstance().init(context);
 
@@ -188,6 +213,7 @@ export class FTSDK {
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
       FTRUMInnerManager.getInstance().initContext(context);
+      this.refreshRandomDeviceUUIDContext(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
     }
@@ -206,7 +232,12 @@ export class FTSDK {
       // Initialize FTTrackInner log configuration
       if (FTSDK.ftSdk) {
         FTTrackInner.getInstance().initLogConfig(logConfig);
-        FTInnerLogger.d(TAG, `installLogConfig completed: samplingRate=${logConfig.getSamplingRate()}, enableCustomLog=${logConfig.isEnableCustomLog()}`);
+        FTInnerLogger.d(TAG,
+          `installLogConfig completed: serviceName=${logConfig.getServiceName()}, samplingRate=${logConfig.getSamplingRate()}, ` +
+          `enableCustomLog=${logConfig.isEnableCustomLog()}, enableLinkRumData=${logConfig.isEnableLinkRumData()}, ` +
+          `enableConsoleLog=${logConfig.isEnableConsoleLog()}, printCustomLogToConsole=${logConfig.isPrintCustomLogToConsole()}, ` +
+          `logLevelFilters=${logConfig.getLogLevelFilters().join('|')}, logCacheLimitCount=${logConfig.getLogCacheLimitCount()}, ` +
+          `logCacheDiscardStrategy=${logConfig.getLogCacheDiscardStrategy()}`);
       }else{
         FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
       }
@@ -226,7 +257,11 @@ export class FTSDK {
       // 2. Initialize Trace configuration manager
       FTTraceConfigManager.getInstance().initWithConfig(traceConfig);
 
-      FTInnerLogger.d(TAG, `installTraceConfig completed: samplingRate=${traceConfig.getSamplingRate()}, traceType=${traceConfig.getTraceType()}, enableAutoTrace=${traceConfig.isEnableAutoTrace()}`);
+      FTInnerLogger.d(TAG,
+        `installTraceConfig completed: serviceName=${traceConfig.getServiceName()}, samplingRate=${traceConfig.getSamplingRate()}, ` +
+        `traceType=${traceConfig.getTraceType()}, enableAutoTrace=${traceConfig.isEnableAutoTrace()}, ` +
+        `enableLinkRUMData=${traceConfig.isEnableLinkRUMData()}, enableWebTrace=${traceConfig.isEnableWebTrace()}, ` +
+        `customTraceHeaderHandler=${traceConfig.getTraceHeaderHandler() !== null}`);
 
     } catch (error) {
       FTInnerLogger.e(TAG, `installTraceConfig failed: ${error}`);
@@ -236,6 +271,9 @@ export class FTSDK {
   static installRUMConfig(rumConfig: FTRUMConfig): void {
     // Save rumConfig reference for later use (e.g., ActionTracker initialization)
     FTSDK.rumConfig = rumConfig;
+    FTInnerLogger.setCrashLogCollectionEnabled(
+      rumConfig.getRumAppId().length > 0 && rumConfig.isEnableTrackAppCrash()
+    );
     FTSDK.updateNativePackageInfo();
     FTSDK.pendingUIFeatureInit = FTSDK.requiresUIFeaturesInternal(rumConfig);
     FTSDK.uiFeaturesInitialized = false;
@@ -256,7 +294,7 @@ export class FTSDK {
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().initRUMConfig(rumConfig);
     } else {
-      FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
+      FTInnerLogger.e(TAG, `installRUMConfig failed: FTSDK.install not call`);
     }
 
     // Register UIAbility lifecycle listener when any UI-bound feature is enabled.
@@ -315,7 +353,31 @@ export class FTSDK {
       FTSDK.tryInitializeUIFeaturesInternal();
     }
 
-    FTInnerLogger.d(TAG, "installRUMConfig completed");
+    FTInnerLogger.d(TAG,
+      `installRUMConfig completed: rumAppId=${rumConfig.getRumAppId()}, samplingRate=${rumConfig.getSamplingRate()}, ` +
+      `sessionErrorSampleRate=${rumConfig.getSessionErrorSampleRate()}, enableTraceUserView=${rumConfig.isEnableTraceUserView()}, ` +
+      `enableTraceUserAction=${rumConfig.isEnableTraceUserAction()}, enableTraceUserResource=${rumConfig.isEnableTraceUserResource()}, ` +
+      `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
+      `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
+      `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+  }
+
+  private static logServerUrl(config: FTSDKConfig): void {
+    if (config.getDatakitUrl().length > 0) {
+      FTInnerLogger.d(TAG, `serverUrl ==>\nDatakit Url:${config.getDatakitUrl()}`);
+      return;
+    }
+
+    FTInnerLogger.d(TAG,
+      `serverUrl ==>\nDataway Url:${config.getDatawayUrl()},clientToken:${FTSDK.maskHalfCharacter(config.getClientToken())}`);
+  }
+
+  private static maskHalfCharacter(value: string): string {
+    let maskedValue = '';
+    for (let index = 0; index < value.length; index++) {
+      maskedValue += index > value.length / 2 ? value.charAt(index) : '*';
+    }
+    return maskedValue;
   }
 
   private static  initRUMGlobalContext(config:FTRUMConfig):void{
@@ -375,6 +437,7 @@ export class FTSDK {
 
 
   static shutDown() {
+    FTInnerLogger.setCrashLogCollectionEnabled(false);
     // Unregister UIAbility lifecycle listener
     try {
       FTAbilityLifecycleListener.getInstance().unregister();
@@ -385,9 +448,11 @@ export class FTSDK {
 
     // Release RUM manager state to avoid timers and context references surviving SDK shutdown.
     FTRUMInnerManager.shutdownInternal();
+    FTLogger.resetBatchStateInternal();
 
     // Release network listener (similar to Android)
     FTNetworkListener.release();
+    FTInnerLogFileManager.getInstance().shutdown(true);
     FTInnerLogger.d(TAG, "FTSDK shut down, network listener released");
     //todo Clear device configuration
   }
@@ -485,6 +550,23 @@ export class FTSDK {
     hashMap.set(Constants.KEY_SDK_PACKAGE_INFO, new String(pkgJson));
     hashMap.set(Constants.KEY_SDK_VERSION, new String(BuildProfile.HAR_VERSION));
 
+  }
+
+  /**
+   * Privacy-mode UUID is restored asynchronously. Refresh the dynamic tag once
+   * it is available so data created after restoration uses the persisted value.
+   */
+  private refreshRandomDeviceUUIDContext(config: FTSDKConfig): void {
+    if (config.isAccessODIDEnabled()) {
+      return;
+    }
+    DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
+      const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
+      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    }).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Failed to refresh random device UUID context: ${error.message}`);
+    });
   }
 
   private static getNativeCrashVersion(): string {
@@ -683,6 +765,7 @@ export class FTSDK {
       }
 
       await FTDBManager.getInstance(context).delete();
+      await FTDBSpoolManager.getInstance().clear();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {
@@ -702,10 +785,36 @@ export class FTSDK {
         return;
       }
 
-      SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
-      FTInnerLogger.d(TAG, "flushSyncData triggered");
+      FTInnerLogger.d(TAG, "flushSyncData requested");
+      FTTrackInner.getInstance().flushPendingWorkerDataBeforeUpload().then(() => {
+        FTInnerLogger.d(TAG, "flushSyncData worker queues drained, scheduling sync poll");
+        SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
+      }).catch((error: Error) => {
+        FTInnerLogger.e(TAG, `flushSyncData worker queue drain failed, scheduling sync poll: ${error.message}`);
+        SyncTaskManager.getInstance().executePoll(false);
+      });
     } catch (error) {
       FTInnerLogger.e(TAG, `flushSyncData failed: ${error}`);
+    }
+  }
+
+  /**
+   * Enable or disable automatic upload of cached data after SDK initialization.
+   * Manual calls to {@link flushSyncData} remain available while auto sync is disabled.
+   * Aligned with Android: FTSdk.setAutoSync(boolean).
+   */
+  static setAutoSync(autoSync: boolean): void {
+    try {
+      if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+        FTInnerLogger.w(TAG, 'SDK not initialized, cannot set auto sync');
+        return;
+      }
+
+      FTSDK.ftSdk.ftSDKConfig.setAutoSync(autoSync);
+      SyncTaskManager.getInstance().setAutoSync(autoSync);
+      FTInnerLogger.d(TAG, `setAutoSync completed: enabled=${autoSync}`);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `setAutoSync failed: ${error}`);
     }
   }
 

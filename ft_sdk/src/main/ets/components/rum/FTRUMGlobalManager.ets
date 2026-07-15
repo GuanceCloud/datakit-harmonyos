@@ -413,44 +413,7 @@ export class FTRUMGlobalManager {
    */
   public addResource(resourceId: string, params: ResourceParams, netStatusBean: NetStatusBean): void {
     if (this.innerManager) {
-      // Create parameter copy to avoid modifying original object
-      const resourceParams = new ResourceParams();
-      resourceParams.setUrl(params.url);
-      resourceParams.setRequestHeader(params.requestHeader);
-      resourceParams.setResponseHeader(params.responseHeader);
-      resourceParams.setRequestHeaderMap(params.requestHeaderMap);
-      resourceParams.setResponseHeaderMap(params.responseHeaderMap);
-      resourceParams.setResponseConnection(params.responseConnection);
-      resourceParams.setResponseContentType(params.responseContentType);
-      resourceParams.setResponseContentEncoding(params.responseContentEncoding);
-      resourceParams.setResponseContentLength(params.responseContentLength);
-      resourceParams.setResourceMethod(params.resourceMethod);
-      resourceParams.setResponseBody(params.responseBody);
-      resourceParams.setResourceStatus(params.resourceStatus);
-      resourceParams.setRequestErrorStack(params.requestErrorStack);
-      resourceParams.setRequestErrorMsg(params.requestErrorMsg);
-      resourceParams.setProperty(params.property);
-      
-      // Process request headers
-      if (!resourceParams.requestHeader && resourceParams.requestHeaderMap.size > 0) {
-        resourceParams.requestHeader = this.convertHeadersToString(resourceParams.requestHeaderMap);
-      }
-      
-      // Process response headers
-      if (!resourceParams.responseHeader && resourceParams.responseHeaderMap.size > 0) {
-        resourceParams.responseHeader = this.convertHeadersToString(resourceParams.responseHeaderMap);
-      }
-      
-      // Process response content length
-      if (resourceParams.responseContentLength <= 0) {
-        if (resourceParams.responseBody) {
-          resourceParams.responseContentLength = resourceParams.responseBody.length + resourceParams.responseHeader.length;
-        } else {
-          resourceParams.responseContentLength = resourceParams.responseHeader.length;
-        }
-      }
-      
-      this.innerManager.addResource(resourceId, resourceParams, netStatusBean);
+      this.innerManager.addResource(resourceId, params, netStatusBean);
     }
   }
 
@@ -483,7 +446,6 @@ export class FTRUMGlobalManager {
    */
   public addLongTask(log: string, duration: number, property: Record<string, string | number | boolean> = {}): void {
     if (this.innerManager) {
-      FTInnerLogger.d(TAG, ` addLongTask called: log=${log}, duration=${duration}ns, hasProperty=${Object.keys(property).length > 0}`);
       this.innerManager.addLongTask(log, duration, property);
     } else {
       FTInnerLogger.w(TAG, ` addLongTask failed: innerManager not available`);

@@ -21,6 +21,14 @@ import { Utils } from '../utils/Utils';
 
 const TAG = "UserDataManager";
 
+interface UserDataPreferenceSnapshot {
+  explicitlyUnbound: boolean;
+  id: string;
+  name: string;
+  email: string;
+  extJson: string;
+}
+
 /**
  * User data persistence manager for HarmonyOS
  * Manages user ID persistence using preferences
@@ -38,6 +46,9 @@ export class UserDataManager {
   private randomUserId: string = '';
   private userData: UserData | null = null;
   private userDataExplicitlyUnbound: boolean = false;
+  private preferencesInitPromise: Promise<void> | null = null;
+  private userDataGeneration: number = 0;
+  private userDataPersistChain: Promise<void> = Promise.resolve();
 
   private constructor() {
   }
@@ -59,12 +70,24 @@ export class UserDataManager {
   /**
    * Initialize preferences store
    */
-  public init(context: Context) {
+  public init(context: Context): void {
+    if (this.preferencesInitPromise !== null || this.preferencesStore !== null) {
+      return;
+    }
+    const generationAtInit = this.userDataGeneration;
+    this.preferencesInitPromise = this.initializePreferences(context, generationAtInit);
+  }
+
+  private async initializePreferences(context: Context, generationAtInit: number): Promise<void> {
     try {
-      //fixme
-      this.preferencesStore = preferences.getPreferencesSync(context, { name: UserDataManager.PREFERENCES_NAME });
-      this.loadRandomUserId();
-      this.loadUserData();
+      const store = await preferences.getPreferences(context, { name: UserDataManager.PREFERENCES_NAME });
+      this.preferencesStore = store;
+      await this.restoreRandomUserId(store);
+      if (this.userDataGeneration === generationAtInit) {
+        await this.restoreUserData(store, generationAtInit);
+      } else {
+        this.persistUserDataWhenReady();
+      }
     } catch (error) {
       FTInnerLogger.e(TAG, ` Failed to initialize UserDataManager: ${error}`);
     }
@@ -88,7 +111,6 @@ export class UserDataManager {
 
   private saveRandomUserId(): void {
     if (!this.preferencesStore) {
-      FTInnerLogger.e(TAG, " Preferences store not available, cannot save random user ID");
       return;
     }
 
@@ -106,14 +128,10 @@ export class UserDataManager {
   /**
    * Load random user ID from preferences
    */
-  private loadRandomUserId(): void {
-    if (!this.preferencesStore) {
-      FTInnerLogger.e(TAG, " Preferences store not available, cannot load random user ID");
-      return;
-    }
-
+  private async restoreRandomUserId(store: preferences.Preferences): Promise<void> {
     try {
-      const storedRandomUserId = this.preferencesStore.getSync(UserDataManager.KEY_RANDOM_USER_ID, '') as string;
+      const storedValue = await store.get(UserDataManager.KEY_RANDOM_USER_ID, '');
+      const storedRandomUserId = typeof storedValue === 'string' ? storedValue : '';
       if (UserDataManager.isValidRandomUserId(storedRandomUserId)) {
         this.randomUserId = storedRandomUserId;
       } else if (!UserDataManager.isValidRandomUserId(this.randomUserId)) {
@@ -139,17 +157,21 @@ export class UserDataManager {
   /**
    * Load user data from preferences
    */
-  private loadUserData(): void {
-    if (!this.preferencesStore) {
-      FTInnerLogger.e(TAG, " Preferences store not available, cannot load user data");
-      return;
-    }
-
+  private async restoreUserData(store: preferences.Preferences, expectedGeneration: number): Promise<void> {
     try {
-      const id = this.preferencesStore.getSync(UserDataManager.KEY_USER_ID, '') as string;
-      const name = this.preferencesStore.getSync(UserDataManager.KEY_USER_NAME, '') as string;
-      const email = this.preferencesStore.getSync(UserDataManager.KEY_USER_EMAIL, '') as string;
-      const extJson = this.preferencesStore.getSync(UserDataManager.KEY_USER_EXT, '') as string;
+      const idValue = await store.get(UserDataManager.KEY_USER_ID, '');
+      const nameValue = await store.get(UserDataManager.KEY_USER_NAME, '');
+      const emailValue = await store.get(UserDataManager.KEY_USER_EMAIL, '');
+      const extJsonValue = await store.get(UserDataManager.KEY_USER_EXT, '');
+      const id = typeof idValue === 'string' ? idValue : '';
+      const name = typeof nameValue === 'string' ? nameValue : '';
+      const email = typeof emailValue === 'string' ? emailValue : '';
+      const extJson = typeof extJsonValue === 'string' ? extJsonValue : '';
+
+      if (this.userDataGeneration !== expectedGeneration) {
+        this.persistUserDataWhenReady();
+        return;
+      }
 
       if (id || name || email || extJson) {
         this.userData = new UserData();
@@ -173,9 +195,6 @@ export class UserDataManager {
    * Get user data
    */
   public getUserData(): UserData | null {
-    if (!this.userData && this.preferencesStore && !this.userDataExplicitlyUnbound) {
-      this.loadUserData();
-    }
     return this.userData;
   }
 
@@ -185,28 +204,8 @@ export class UserDataManager {
   public bindUserData(userData: UserData): void {
     this.userData = userData;
     this.userDataExplicitlyUnbound = false;
-    if (!this.preferencesStore) {
-      FTInnerLogger.e(TAG, " Preferences store not initialized");
-      return;
-    }
-
-    try {
-      const saveUserData = async () => {
-        try {
-          await this.preferencesStore!.put(UserDataManager.KEY_USER_ID, userData.getId());
-          await this.preferencesStore!.put(UserDataManager.KEY_USER_NAME, userData.getName());
-          await this.preferencesStore!.put(UserDataManager.KEY_USER_EMAIL, userData.getEmail());
-          const extJson = userData.getExtsJsonString();
-          await this.preferencesStore!.put(UserDataManager.KEY_USER_EXT, extJson);
-          await this.preferencesStore!.flush();
-        } catch (error) {
-          FTInnerLogger.e(TAG, ` Failed to bind user data: ${error}`);
-        }
-      };
-      saveUserData();
-    } catch (error) {
-      FTInnerLogger.e(TAG, ` Failed to bind user data: ${error}`);
-    }
+    this.userDataGeneration++;
+    this.persistUserDataWhenReady();
   }
 
   /**
@@ -215,26 +214,67 @@ export class UserDataManager {
   public unbindUserData(): void {
     this.userData = null;
     this.userDataExplicitlyUnbound = true;
-    if (!this.preferencesStore) {
-      FTInnerLogger.e(TAG, " Preferences store not initialized");
+    this.userDataGeneration++;
+    this.persistUserDataWhenReady();
+  }
+
+  private persistUserDataWhenReady(): void {
+    const initPromise = this.preferencesInitPromise;
+    if (this.preferencesStore) {
+      this.enqueueUserDataPersistence();
       return;
     }
+    if (initPromise) {
+      initPromise.then(() => this.enqueueUserDataPersistence());
+    }
+  }
 
+  private enqueueUserDataPersistence(): void {
+    const store = this.preferencesStore;
+    if (!store) {
+      return;
+    }
+    const snapshot = this.createUserDataPreferenceSnapshot();
+    this.userDataPersistChain = this.userDataPersistChain.then(async () => {
+      await this.persistUserDataSnapshot(store, snapshot);
+    }).catch((error: Error) => {
+      FTInnerLogger.e(TAG, ` Failed to persist user data: ${error}`);
+    });
+  }
+
+  private createUserDataPreferenceSnapshot(): UserDataPreferenceSnapshot {
+    const userData = this.userData;
+    if (this.userDataExplicitlyUnbound || userData === null) {
+      return { explicitlyUnbound: true, id: '', name: '', email: '', extJson: '' };
+    }
+    return {
+      explicitlyUnbound: false,
+      id: userData.getId(),
+      name: userData.getName(),
+      email: userData.getEmail(),
+      extJson: userData.getExtsJsonString()
+    };
+  }
+
+  private async persistUserDataSnapshot(
+    store: preferences.Preferences,
+    snapshot: UserDataPreferenceSnapshot
+  ): Promise<void> {
     try {
-      const clearUserData = async () => {
-        try {
-          await this.preferencesStore!.delete(UserDataManager.KEY_USER_ID);
-          await this.preferencesStore!.delete(UserDataManager.KEY_USER_NAME);
-          await this.preferencesStore!.delete(UserDataManager.KEY_USER_EMAIL);
-          await this.preferencesStore!.delete(UserDataManager.KEY_USER_EXT);
-          await this.preferencesStore!.flush();
-        } catch (error) {
-          FTInnerLogger.e(TAG, ` Failed to unbind user data: ${error}`);
-        }
-      };
-      clearUserData();
+      if (snapshot.explicitlyUnbound) {
+        await store.delete(UserDataManager.KEY_USER_ID);
+        await store.delete(UserDataManager.KEY_USER_NAME);
+        await store.delete(UserDataManager.KEY_USER_EMAIL);
+        await store.delete(UserDataManager.KEY_USER_EXT);
+      } else {
+        await store.put(UserDataManager.KEY_USER_ID, snapshot.id);
+        await store.put(UserDataManager.KEY_USER_NAME, snapshot.name);
+        await store.put(UserDataManager.KEY_USER_EMAIL, snapshot.email);
+        await store.put(UserDataManager.KEY_USER_EXT, snapshot.extJson);
+      }
+      await store.flush();
     } catch (error) {
-      FTInnerLogger.e(TAG, ` Failed to unbind user data: ${error}`);
+      FTInnerLogger.e(TAG, ` Failed to persist user data: ${error}`);
     }
   }
 

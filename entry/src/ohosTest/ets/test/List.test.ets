@@ -7,6 +7,7 @@ import uiBlockLongTaskUITest from './UIBlockLongTaskUITest.test';
 import webViewTrackUITest from './WebViewTrackUITest.test';
 import logChainUITest from './LogChainUITest.test';
 import traceAutoTrackUITest from './TraceAutoTrackUITest.test';
+import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
 
 export default function testsuite() {
   abilityTest();
@@ -18,4 +19,5 @@ export default function testsuite() {
   webViewTrackUITest();
   logChainUITest();
   traceAutoTrackUITest();
+  stressLogTimestampSequencerTest();
 }

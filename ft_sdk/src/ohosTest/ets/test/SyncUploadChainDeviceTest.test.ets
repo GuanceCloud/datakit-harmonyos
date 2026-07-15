@@ -5,11 +5,23 @@ import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType, SyncPageSize } from '../../../main/ets/components/enum/Enums';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
+import { NetCodeStatus } from '../../../main/ets/components/http/HttpEngine';
 import { DefaultSyncTaskManagerRuntime } from '../../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { WaitUtils } from './helpers/WaitUtils';
 import { MockCollector } from './helpers/MockCollector';
 import { DBAssert } from './helpers/DBAssert';
+import {
+  SDKUploadExecutePageDTO,
+  SDKUploadHttpResultDTO,
+  SDKWorkerCommand,
+  SDKWorkerRequest
+} from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import {
+  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_MAX_PAGE_SIZE,
+  DATA_UPLOAD_MAX_TRANSPORT_BYTES
+} from '../../../main/ets/components/thread/workers/DataUploadLimits';
 
 const TEST_HOST = 'http://127.0.0.1:1';
 const TEST_NOW_NS = 1700000000000;
@@ -17,6 +29,11 @@ const BACKOFF_SLEEP_TEST_DELAY_MS = 300;
 
 class DeviceUploadRuntime extends DefaultSyncTaskManagerRuntime {
   public backoffSleeps: number[] = [];
+  public injectedDbFailures: number = 0;
+  public injectedWorkerFailureCommand: string = '';
+  public injectedWorkerFailureDataType: string = '';
+  public injectedWorkerFailures: number = 0;
+  public injectedHttpResults: SDKUploadHttpResultDTO[] = [];
 
   sleep(ms: number): Promise<void> {
     if (ms >= 500) {
@@ -38,6 +55,106 @@ class DeviceUploadRuntime extends DefaultSyncTaskManagerRuntime {
       return 0;
     }
     return this.backoffSleeps[0];
+  }
+
+  injectHttpResult(code: number, message: string = 'injected-http-failure'): void {
+    this.injectedHttpResults.push({
+      code,
+      message,
+      errorCode: `injected-${code}`,
+      elapsedMs: 1,
+      softTimedOut: false
+    });
+  }
+
+  injectSoftTimeout(): void {
+    this.injectedHttpResults.push({
+      code: NetCodeStatus.FILE_TIMEOUT_CODE,
+      message: 'injected soft timeout',
+      errorCode: String(NetCodeStatus.FILE_TIMEOUT_CODE),
+      elapsedMs: 1,
+      softTimedOut: true
+    });
+  }
+
+  injectDbCommitFailure(count: number = 1): void {
+    this.injectedDbFailures = Math.max(0, count);
+  }
+
+  injectWorkerCommandFailure(command: SDKWorkerCommand, dataType: string = '', count: number = 1): void {
+    this.injectedWorkerFailureCommand = command;
+    this.injectedWorkerFailureDataType = dataType;
+    this.injectedWorkerFailures = Math.max(0, count);
+  }
+
+  takeInjectedUploadHttpResult(): SDKUploadHttpResultDTO | undefined {
+    return this.injectedHttpResults.length > 0 ? this.injectedHttpResults.shift() : undefined;
+  }
+
+  consumeUploadDbCommitFailure(): string {
+    if (this.injectedDbFailures <= 0) {
+      return '';
+    }
+    this.injectedDbFailures--;
+    return 'Injected upload DB commit failure';
+  }
+
+  consumeUploadWorkerCommandFailure(request: SDKWorkerRequest): string {
+    if (this.injectedWorkerFailures <= 0 || request.command !== this.injectedWorkerFailureCommand) {
+      return '';
+    }
+    if (this.injectedWorkerFailureDataType.length > 0) {
+      const payload = request.payload as Object as SDKUploadExecutePageDTO;
+      if (!payload || payload.dataType !== this.injectedWorkerFailureDataType) {
+        return '';
+      }
+    }
+    this.injectedWorkerFailures--;
+    this.injectedWorkerFailureDataType = '';
+    return `Injected upload Worker command failure: ${request.command}`;
+  }
+}
+
+class MainLoopDelayWatchdog {
+  public maxDelayMs: number = 0;
+  public samples: number = 0;
+  private running: boolean = false;
+  private timerId: number = -1;
+  private expectedAt: number = 0;
+  private readonly intervalMs: number;
+
+  constructor(intervalMs: number = 10) {
+    this.intervalMs = intervalMs;
+  }
+
+  start(): void {
+    if (this.running) {
+      return;
+    }
+    this.running = true;
+    this.expectedAt = Date.now() + this.intervalMs;
+    this.scheduleNext();
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timerId >= 0) {
+      clearTimeout(this.timerId);
+      this.timerId = -1;
+    }
+  }
+
+  private scheduleNext(): void {
+    this.timerId = setTimeout(() => {
+      if (!this.running) {
+        return;
+      }
+      const now = Date.now();
+      this.maxDelayMs = Math.max(this.maxDelayMs, Math.max(0, now - this.expectedAt));
+      this.samples++;
+      this.expectedAt = now + this.intervalMs;
+      this.scheduleNext();
+    }, this.intervalMs) as number;
   }
 }
 
@@ -183,7 +300,7 @@ export default function syncUploadChainDeviceTest() {
       const config = FTSDKConfig.builder(TEST_HOST)
         .setAutoSync(false)
         .setSyncPageSize(SyncPageSize.MINI)
-        .setDataSyncRetryCount(1)
+        .setDataSyncRetryCount(SyncTaskManager.MAX_ERROR_COUNT)
         .setSyncSleepTime(0);
       syncTaskManager = SyncTaskManager.getInstance();
       syncTaskManager.init(config, context);
@@ -267,6 +384,39 @@ export default function syncUploadChainDeviceTest() {
       expect(recoveredPayload.length > 0).assertTrue();
       expect(recovered).assertTrue();
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('softTimeoutShouldKeepRowsUntilRetrySucceeds', 0, async () => {
+      syncTaskManager.init(
+        FTSDKConfig.builder(TEST_HOST)
+          .setAutoSync(false)
+          .setSyncPageSize(SyncPageSize.MINI)
+          .setDataSyncRetryCount(0),
+        context
+      );
+      const original = createLogSyncData('soft-timeout-preserve', TEST_NOW_NS + 15);
+      const originalUuid = original.getUuid();
+      await dbManager.insertFtOperation(original);
+      runtime.injectSoftTimeout();
+
+      syncTaskManager.executePoll(false);
+      const timeoutHandled = await waitForUploadIdle(syncTaskManager, 5000);
+      const retainedRows = await dbManager.queryFtOperation([DataType.LOG], 10);
+
+      expect(timeoutHandled).assertTrue();
+      expect(retainedRows.length).assertEqual(1);
+      expect(retainedRows[0].getDataString().includes('soft-timeout-preserve')).assertTrue();
+      expect(retainedRows[0].getUuid() !== originalUuid).assertTrue();
+      expect(syncTaskManager.getStatus().errorCount).assertEqual(1);
+
+      collector.setResponse(200, '');
+      syncTaskManager.executePoll(false);
+      const recovered = await waitUntil(async () => {
+        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+      }, 5000);
+
+      expect(recovered).assertTrue();
+      expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
     });
 
     it('ignoredClientBackoffShouldCapAtEightSecondsAndStayIsolatedByDataType', 0, async () => {
@@ -399,6 +549,103 @@ export default function syncUploadChainDeviceTest() {
       expect(await dbManager.queryTotalCount([DataType.RUM_APP])).assertEqual(pageSize);
       expect(await dbManager.queryTotalCount([DataType.RUM_WEBVIEW])).assertEqual(pageSize);
       expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(pageSize);
+    });
+
+    it('injectedHttpAndDbFailuresShouldPreserveRowsForManualRecovery', 0, async () => {
+      syncTaskManager.init(
+        FTSDKConfig.builder(TEST_HOST)
+          .setAutoSync(false)
+          .setSyncPageSize(SyncPageSize.MINI)
+          .setDataSyncRetryCount(0),
+        context
+      );
+      await dbManager.insertFtOperation(createLogSyncData('injected-http-row', TEST_NOW_NS + 4000));
+      collector.clearRequests();
+      runtime.injectHttpResult(500);
+
+      syncTaskManager.executePoll(false);
+      const httpFailureIdle = await waitForUploadIdle(syncTaskManager, 5000);
+      expect(httpFailureIdle).assertTrue();
+      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(collector.getRequests().length).assertEqual(0);
+      expect(syncTaskManager.getStatus().errorCount).assertEqual(1);
+
+      collector.setResponse(200, '');
+      syncTaskManager.executePoll(false);
+      const httpRecovered = await waitUntil(async () => {
+        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+      }, 5000);
+      expect(httpRecovered).assertTrue();
+      expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
+
+      await dbManager.insertFtOperation(createLogSyncData('injected-db-row', TEST_NOW_NS + 4001));
+      collector.clearRequests();
+      runtime.injectDbCommitFailure();
+      syncTaskManager.executePoll(false);
+      const dbFaultConsumed = await WaitUtils.waitUntil(async () => {
+        return runtime.injectedDbFailures === 0;
+      }, 4000, 5);
+      expect(dbFaultConsumed).assertTrue();
+      syncTaskManager.stop();
+      await WaitUtils.delay(BACKOFF_SLEEP_TEST_DELAY_MS + 50);
+      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+
+      syncTaskManager.resume();
+      collector.clearRequests();
+      syncTaskManager.executePoll(false);
+      const dbRecovered = await waitUntil(async () => {
+        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+      }, 5000);
+      expect(dbRecovered).assertTrue();
+      expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
+
+      await dbManager.insertFtOperation(createLogSyncData('injected-worker-row', TEST_NOW_NS + 4002));
+      collector.clearRequests();
+      runtime.injectWorkerCommandFailure(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE, DataType.LOG.toString());
+      syncTaskManager.executePoll(false);
+      const workerFaultConsumed = await WaitUtils.waitUntil(async () => {
+        return runtime.injectedWorkerFailures === 0;
+      }, 4000, 5);
+      expect(workerFaultConsumed).assertTrue();
+      syncTaskManager.stop();
+      await WaitUtils.delay(100);
+      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(collector.getRequests().length).assertEqual(0);
+    });
+
+    it('largeUploadPageShouldKeepMainLoopDelayBoundedAndBodyCapped', 0, async () => {
+      syncTaskManager.init(
+        FTSDKConfig.builder(TEST_HOST)
+          .setAutoSync(false)
+          .setCustomSyncPageSize(DATA_UPLOAD_MAX_PAGE_SIZE + 10_000)
+          .setDataSyncRetryCount(0),
+        context
+      );
+      const largeMessage = 'x'.repeat(3000);
+      const records: SyncData[] = [];
+      for (let i = 0; i < DATA_UPLOAD_MAX_PAGE_SIZE + 100; i++) {
+        records.push(createLogSyncData(`main-loop-${i}-${largeMessage}`, TEST_NOW_NS + 5000 + i));
+      }
+      await dbManager.insertFtOptList(records);
+      collector.setResponse(200, '');
+      collector.clearRequests();
+
+      const watchdog = new MainLoopDelayWatchdog(10);
+      watchdog.start();
+      syncTaskManager.executePoll(false);
+      const captured = await waitForRequestCountAndStop(collector, syncTaskManager, 1, 10000);
+      await WaitUtils.delay(120);
+      watchdog.stop();
+
+      const requests = collector.getRequests();
+      expect(captured).assertTrue();
+      expect(requests.length > 0).assertTrue();
+      expect(syncTaskManager.getPageSize()).assertEqual(DATA_UPLOAD_MAX_PAGE_SIZE);
+      expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_BODY_BYTES).assertTrue();
+      expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_TRANSPORT_BYTES).assertTrue();
+      expect(countBodyLines(requests[0].bodyString) < DATA_UPLOAD_MAX_PAGE_SIZE).assertTrue();
+      expect(watchdog.samples >= 5).assertTrue();
+      expect(watchdog.maxDelayMs <= 750).assertTrue();
     });
 
   });

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14-alpha07] - 2026-07-09
+- Added `FTSDKConfig.setCompressIntakeRequests(...)`; data intake requests now use zlib-wrapped `deflate` compression by default and safely fall back to plaintext when compression is unavailable.
+- Added `FTSDK.setAutoSync(...)` to enable or disable automatic cached-data upload after SDK initialization.
+- Added `FTSDKConfig.setCustomSyncPageSize(...)` for custom upload page sizes; predefined sizes remain available through `setSyncPageSize(...)`.
+- Added upload-only network routing configuration through `FTSDKConfig.setProxy(...)`, `setProxyAuthenticator(...)`, and `setDns(...)`.
+- Changed automatic cached-data uploads to use a 10-second aggregation window, aligned with the Android SDK; manual `flushSyncData()` continues to request an immediate poll.
+- Updated the internal thread-pool and serialized DB task processing to improve data consistency under high concurrency.
+- Added idle reclamation for the low-frequency ANR Worker (90 seconds) and bursty Crash Worker (120 seconds); Workers are recreated on demand, and Native Crash diagnostic log collection now follows the App Crash tracking switch.
+- Added configurable SDK debugging through `FTSDKConfig.setSdkLogLevel(...)` and `FTSDKConfig.setEnableInnerLogFile(...)`.
+
 ## [0.1.14-alpha06] - 2026-05-14
 - Added `FTTraceConfig.setTraceHeaderHandler(...)` for custom Trace context generation after the SDK generates default Trace Headers.
 - Moved RUM cache count configuration to `FTRUMConfig.setRumCacheLimitCount(...)`; Log cache count remains on `FTLoggerConfig.setLogCacheLimitCount(...)`.

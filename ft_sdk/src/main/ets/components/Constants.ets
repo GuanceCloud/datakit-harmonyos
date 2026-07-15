@@ -267,9 +267,8 @@ export class Constants {
   static readonly MAX_SET_SIZE_VIEW: number = 1000;
   
   /**
-   * Maximum size for Resource Map (FTRUMInnerManager.resourceBeanMap)
-   * This Map stores resource beans during resource monitoring
-   * Resource data frequency is medium, 1000 is sufficient
+   * Maximum size for auxiliary resource-related maps.
+   * Active RUM resourceBeanMap is not cleared by this limit; it is removed per resource completion.
    */
   static readonly MAX_MAP_SIZE_RESOURCE: number = 1000;
   

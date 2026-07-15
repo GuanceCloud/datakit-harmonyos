@@ -4,7 +4,7 @@
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
 
-interface ActionBeanJSON {
+export interface ActionBeanJSON {
   id: string;
   startTime: number;
   actionDuration: number;
