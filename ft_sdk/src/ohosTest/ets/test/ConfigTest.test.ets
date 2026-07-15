@@ -169,7 +169,7 @@ export default function configTest() {
     it('rumSamplingRateShouldClamp', 0, () => {
       const defaultConfig: FTRUMConfig = new FTRUMConfig();
       expect(defaultConfig.getSamplingRate()).assertEqual(1.0);
-      expect(defaultConfig.getSessionErrorSampleRate()).assertEqual(1.0);
+      expect(defaultConfig.getSessionErrorSampleRate()).assertEqual(0.0);
 
       const customConfig: FTRUMConfig = new FTRUMConfig()
         .setSamplingRate(0.25)
@@ -179,6 +179,7 @@ export default function configTest() {
 
       expect(new FTRUMConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTRUMConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
+      expect(new FTRUMConfig().setSessionErrorSampleRate().getSessionErrorSampleRate()).assertEqual(0.0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(-1).getSessionErrorSampleRate()).assertEqual(0);
       expect(new FTRUMConfig().setSessionErrorSampleRate(2).getSessionErrorSampleRate()).assertEqual(1);
 
@@ -510,17 +511,22 @@ export default function configTest() {
       const syncTaskManager = SyncTaskManager.getInstance();
 
       // Custom page size
-      const customPageSize = 1000;
+      const customPageSize = 100;
       const config1: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(customPageSize);
+        .setCustomSyncPageSize(customPageSize);
       FTSDK.install(config1);
       expect(syncTaskManager.getPageSize()).assertEqual(customPageSize);
 
       // Minimum value should be SyncPageSize.MINI
       const config2: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .setSyncPageSize(1);
+        .setCustomSyncPageSize(1);
       FTSDK.install(config2);
       expect(syncTaskManager.getPageSize()).assertEqual(SyncPageSize.MINI);
+
+      const config3: FTSDKConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setCustomSyncPageSize(SyncTaskManager.MAX_PAGE_SIZE + 1000);
+      FTSDK.install(config3);
+      expect(syncTaskManager.getPageSize()).assertEqual(SyncTaskManager.MAX_PAGE_SIZE);
 
       console.info('ConfigTest', 'customSyncDataPageSize passed');
     });

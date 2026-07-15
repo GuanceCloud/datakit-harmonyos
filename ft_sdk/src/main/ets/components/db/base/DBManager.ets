@@ -9,6 +9,12 @@ import { FTInnerLogger } from '../../log/FTLogger';
 const TAG = "DBManager";
 const LOCK_TAILS: Map<object, Promise<void>> = new Map();
 
+export interface DBOperationTiming {
+  lockWaitMs: number;
+  sizeCheckMs: number;
+  cleanupMs: number;
+}
+
 /**
  * Database management abstract base class
  * Provides basic functionality for database connection management, thread safety, transaction management, etc.
@@ -66,7 +72,13 @@ export abstract class DBManager {
    * @param operationCount Number of operations
    * @param callback Database operation callback
    */
-  protected async getDBWithCount(write: boolean, operationCount: number, callback: DataBaseCallBack): Promise<void> {
+  protected async getDBWithCount(
+    write: boolean,
+    operationCount: number,
+    callback: DataBaseCallBack,
+    timing?: DBOperationTiming,
+    forceTransaction: boolean = false
+  ): Promise<void> {
     const runOperation = async (): Promise<void> => {
       const rdbStore = await this.getDataBaseHelper();
       if (!rdbStore) {
@@ -75,7 +87,7 @@ export abstract class DBManager {
       }
 
       // Auto-determine: use transaction for write operations with count exceeding threshold
-      const useTransaction = write && operationCount > DBManager.TRANSACTION_LIMIT_COUNT;
+      const useTransaction = write && (forceTransaction || operationCount > DBManager.TRANSACTION_LIMIT_COUNT);
       if (useTransaction) {
         // Use transaction
         // FTInnerLogger.d(TAG, ` Using transaction for write operation`);
@@ -86,13 +98,17 @@ export abstract class DBManager {
 
       // Check database size after write operation
       if (write && this.shouldCheckDatabaseSize()) {
-        await this.checkDatabaseSize(rdbStore);
+        await this.checkDatabaseSize(rdbStore, timing);
       }
     };
 
     try {
       if (write) {
-        await synchronized(this.lock, runOperation);
+        await synchronized(this.lock, runOperation, (lockWaitMs: number) => {
+          if (timing) {
+            timing.lockWaitMs += lockWaitMs;
+          }
+        });
       } else {
         await runOperation();
       }
@@ -134,7 +150,7 @@ export abstract class DBManager {
    * Check database size
    * @param rdbStore Database object
    */
-  private async checkDatabaseSize(rdbStore: relationalStore.RdbStore): Promise<void> {
+  private async checkDatabaseSize(rdbStore: relationalStore.RdbStore, timing?: DBOperationTiming): Promise<void> {
     if (rdbStore && this.enableDBSizeLimit()) {
       try {
         // Check if database connection is still valid
@@ -144,14 +160,20 @@ export abstract class DBManager {
         }
         
         // Get database file size (HarmonyOS RDB PRAGMA query)
+        const sizeCheckStartTime = Date.now();
         const resultSet = await rdbStore.querySql("PRAGMA page_count");
         if (resultSet && resultSet.goToFirstRow()) {
           const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
           const pageSize = 4096; // Default page size
           const fileSize = pageCount * pageSize;
+          if (timing) {
+            timing.sizeCheckMs += Math.max(0, Date.now() - sizeCheckStartTime);
+          }
           
           // If exceeding limit, perform cleanup operation
-          this.onDBSizeCacheChange(rdbStore, fileSize);
+          await this.onDBSizeCacheChange(rdbStore, fileSize, timing);
+        } else if (timing) {
+          timing.sizeCheckMs += Math.max(0, Date.now() - sizeCheckStartTime);
         }
         resultSet?.close();
       } catch (error) {
@@ -230,7 +252,11 @@ export abstract class DBManager {
    * @param rdbStore Database object
    * @param fileSize File size
    */
-  protected onDBSizeCacheChange(rdbStore: relationalStore.RdbStore, fileSize: number): void {
+  protected onDBSizeCacheChange(
+    rdbStore: relationalStore.RdbStore,
+    fileSize: number,
+    timing?: DBOperationTiming
+  ): Promise<void> | void {
     // Default implementation is empty, subclasses can override
   }
 
@@ -265,8 +291,13 @@ export abstract class DBManager {
  * HarmonyOS version of synchronized lock implementation
  * Supports both synchronous and asynchronous functions
  */
-async function synchronized(lock: object, fn: (() => void) | (() => Promise<void>)): Promise<void> {
+async function synchronized(
+  lock: object,
+  fn: (() => void) | (() => Promise<void>),
+  onStart?: (waitTime: number) => void
+): Promise<void> {
   const previousTail = LOCK_TAILS.get(lock) ?? Promise.resolve();
+  const waitStartTime = Date.now();
   let releaseCurrent: () => void = () => {};
   const currentTail = new Promise<void>((resolve) => {
     releaseCurrent = resolve;
@@ -275,6 +306,9 @@ async function synchronized(lock: object, fn: (() => void) | (() => Promise<void
   LOCK_TAILS.set(lock, nextTail);
 
   await previousTail.catch(() => {});
+  if (onStart) {
+    onStart(Math.max(0, Date.now() - waitStartTime));
+  }
   try {
     await Promise.resolve(fn());
   } finally {

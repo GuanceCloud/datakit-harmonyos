@@ -167,6 +167,20 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Inner log file test page
+            ListItem() {
+              Button() {
+                Text("Inner Log File Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#546E7A')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/InnerLogFileTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Batch Upload Test
             ListItem() {
               Button() {

@@ -6,8 +6,17 @@ import { FTInnerLogger } from './log/FTLogger';
 import { DataModifier, LineDataModifier, DefaultDataModifier, DefaultLineDataModifier } from './DataModifier';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import { CollectType } from './rum/enum/RUMEnums';
+import { SDKLineProtocolContextDTO } from './thread/SDKWorkerProtocol';
 
 const TAG = "SyncDataHelper";
+
+export interface PreparedLineProtocolContent {
+  measurement: string;
+  tags: Record<string, string>;
+  fields: Record<string, string>;
+  time: number;
+  integerCompatible: boolean;
+}
 
 export class SyncDataHelper {
   private basePublicTags: Map<string, string> = new Map();
@@ -529,6 +538,214 @@ export class SyncDataHelper {
         break;
     }
     return bodyContent;
+  }
+
+  prepareLineProtocolContent(
+    measurement: string,
+    tags: Map<string, string>,
+    fields: Map<string, string>,
+    timeStamp: number,
+    dataType: DataType,
+    uuid: string
+  ): PreparedLineProtocolContent {
+    let mergeTags: Map<string, string> = new Map();
+    mergeTags.set(Constants.KEY_SDK_DATA_FLAG, uuid);
+    if (tags) {
+      tags.forEach((value, key) => mergeTags.set(key, value));
+    }
+
+    switch (dataType) {
+      case DataType.LOG:
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicLogTags, this.logTags);
+        if (this.logConfig !== null && this.logConfig.isEnableLinkRumData()) {
+          this.rumTags.forEach((value, key) => {
+            mergeTags.set(key, value);
+          });
+        }
+        this.applyLineDataModifier(measurement, mergeTags, fields);
+        break;
+      case DataType.RUM_APP:
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.rumTags);
+        this.rumStaticFields.forEach((value, key) => {
+          fields.set(key, value);
+        });
+        this.applyLineDataModifier(measurement, mergeTags, fields);
+        this.rumStaticFields.forEach((value, key) => {
+          fields.set(key, value);
+        });
+        break;
+      case DataType.RUM_WEBVIEW:
+        this.prepareWebViewLineProtocolContent(measurement, mergeTags, fields);
+        break;
+      default:
+        this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.basePublicTags);
+        this.applyLineDataModifier(measurement, mergeTags, fields);
+        break;
+    }
+
+    return {
+      measurement,
+      tags: SyncDataHelper.mapToStringRecord(mergeTags),
+      fields: SyncDataHelper.mapToStringRecord(fields),
+      time: timeStamp,
+      integerCompatible: this.enableDataIntegerCompatible
+    };
+  }
+
+  createWorkerLineProtocolContextSnapshot(): SDKLineProtocolContextDTO | null {
+    if (!(this.lineDataModifier instanceof DefaultLineDataModifier)) {
+      return null;
+    }
+
+    return {
+      basePublicTags: SyncDataHelper.mapToStringRecord(this.basePublicTags),
+      logTags: SyncDataHelper.mapToStringRecord(this.logTags),
+      rumTags: SyncDataHelper.mapToStringRecord(this.rumTags),
+      dynamicBaseTags: SyncDataHelper.mapToStringRecord(this.dynamicBaseTags),
+      dynamicLogTags: SyncDataHelper.mapToStringRecord(this.dynamicLogTags),
+      dynamicRumTags: SyncDataHelper.mapToStringRecord(this.dynamicRumTags),
+      rumStaticFields: SyncDataHelper.mapToStringRecord(this.rumStaticFields),
+      logLinkRumData: this.logConfig !== null && this.logConfig.isEnableLinkRumData(),
+      integerCompatible: this.enableDataIntegerCompatible
+    };
+  }
+
+  private applyLineDataModifier(
+    measurement: string,
+    mergeTags: Map<string, string>,
+    fields: Map<string, string>
+  ): void {
+    const modifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
+    const tagKeys = new Set(mergeTags.keys());
+    mergeTags.clear();
+    fields.clear();
+    modifiedData.forEach((value, key) => {
+      if (tagKeys.has(key)) {
+        mergeTags.set(key, value);
+      } else {
+        fields.set(key, value);
+      }
+    });
+  }
+
+  private prepareWebViewLineProtocolContent(
+    measurement: string,
+    mergeTags: Map<string, string>,
+    fields: Map<string, string>
+  ): void {
+    const webviewService = mergeTags.get(Constants.KEY_SERVICE);
+    const webviewSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
+
+    this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, new Map());
+
+    if (webviewService && webviewService.length > 0) {
+      mergeTags.set(Constants.KEY_SERVICE, webviewService);
+    }
+    if (webviewSDKVersion && webviewSDKVersion.length > 0) {
+      mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
+    }
+
+    const webSDKVersion = (webviewSDKVersion && webviewSDKVersion.length > 0) ? webviewSDKVersion :
+      (mergeTags.get(Constants.KEY_SDK_VERSION) || "");
+
+    this.rumTags.forEach((value, key) => {
+      if (key !== Constants.KEY_SERVICE && key !== Constants.KEY_SDK_VERSION) {
+        if (key === Constants.KEY_SDK_PACKAGE_INFO) {
+          if (value && typeof value === 'string' && value.trim().startsWith('{')) {
+            const hasWebVersion = value.includes(`"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`);
+            if (!hasWebVersion) {
+              const webVersionStr = webSDKVersion || "";
+              const updatedPkgInfo = this.parseAndAppendWebVersion(value, webVersionStr);
+              if (updatedPkgInfo) {
+                mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+              } else {
+                const appendPkgInfo = value.substring(0, 1) +
+                  `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
+                value.substring(1);
+                mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+              }
+            } else {
+              mergeTags.set(key, value);
+            }
+          } else {
+            mergeTags.set(key, value);
+          }
+        } else {
+          mergeTags.set(key, value);
+        }
+      }
+    });
+
+    this.applyLineDataModifier(measurement, mergeTags, fields);
+
+    if (webviewService && webviewService.length > 0) {
+      mergeTags.set(Constants.KEY_SERVICE, webviewService);
+    }
+    if (webviewSDKVersion && webviewSDKVersion.length > 0) {
+      mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
+    }
+
+    if (mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
+      let finalPkgInfo = mergeTags.get(Constants.KEY_SDK_PACKAGE_INFO);
+      if (finalPkgInfo && typeof finalPkgInfo === 'string') {
+        const trimmed = finalPkgInfo.trim();
+        if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+            (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+          finalPkgInfo = trimmed.substring(1, trimmed.length - 1);
+        }
+      }
+
+      if (finalPkgInfo && typeof finalPkgInfo === 'string') {
+        try {
+          const webKeyPattern = `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`;
+          const hasWebVersion = finalPkgInfo.includes(webKeyPattern);
+          const webVersionStr = webSDKVersion || "";
+          if (!hasWebVersion) {
+            const updatedPkgInfo = this.parseAndAppendWebVersion(finalPkgInfo, webVersionStr);
+            if (updatedPkgInfo) {
+              mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+            } else {
+              const jsonStr = finalPkgInfo.trim();
+              if (jsonStr.startsWith('{') && jsonStr.endsWith('}')) {
+                const appendPkgInfo = jsonStr.substring(0, 1) +
+                  `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
+                jsonStr.substring(1);
+                mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
+                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+              }
+            }
+          }
+        } catch (error) {
+          FTInnerLogger.e(TAG, `Error processing sdk_pkg_info: ${error}`);
+        }
+      }
+    }
+  }
+
+  private static mapToStringRecord(map: Map<string, string>): Record<string, string> {
+    const record: Record<string, string> = {};
+    map.forEach((value, key) => {
+      if (value !== null && value !== undefined) {
+        record[key] = String(value);
+      }
+    });
+    return record;
+  }
+
+  public static recordToStringMap(record: Record<string, string>): Map<string, string> {
+    const map = new Map<string, string>();
+    if (!record) {
+      return map;
+    }
+    const keys = Object.keys(record);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      map.set(key, record[key]);
+    }
+    return map;
   }
 
   private mergeDynamicTags(

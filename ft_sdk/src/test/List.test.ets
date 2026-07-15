@@ -11,6 +11,7 @@ import cachePolicyUnitTest from './unit/CachePolicyUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
+import ftDBSpoolUnitTest from './unit/FTDBSpoolUnit.test';
 import ftSDKExtensionBridgeUnitTest from './unit/FTSDKExtensionBridgeUnit.test';
 import httpTest from './unit/HttpTest.test';
 import httpAutoTrackAxiosUnitTest from './unit/HttpAutoTrackAxiosUnit.test';
@@ -18,7 +19,8 @@ import httpAutoTrackRcpConfigUnitTest from './unit/HttpAutoTrackRcpConfigUnit.te
 import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
-import sdkTaskSchedulerUnitTest from './unit/SDKTaskSchedulerUnit.test';
+import sdkDedicatedPoolManagerUnitTest from './unit/SDKDedicatedPoolManagerUnit.test';
+import sdkWorkerRetryPolicyUnitTest from './unit/SDKWorkerRetryPolicyUnit.test';
 import syncDataHelperUnitTest from './unit/SyncDataHelperUnit.test';
 import syncTaskManagerUnitTest from './unit/SyncTaskManagerUnit.test';
 import traceHeaderUnitTest from './unit/TraceHeaderUnit.test';
@@ -42,8 +44,10 @@ export default function testsuite() {
 
   // Small high-risk internal guardrails retained to prevent regressions.
   samplingUnitTest();
-  sdkTaskSchedulerUnitTest();
+  sdkDedicatedPoolManagerUnitTest();
+  sdkWorkerRetryPolicyUnitTest();
   ftExceptionHandlerUnitTest();
+  ftDBSpoolUnitTest();
   cachePolicyUnitTest();
   syncTaskManagerUnitTest();
   userDataUnitTest();

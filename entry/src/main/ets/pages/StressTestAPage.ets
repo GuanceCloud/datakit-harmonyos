@@ -117,6 +117,11 @@ export struct StressTestAPage {
     }
     try {
       this.stressTestManager.recordNavigationSwitch();
+      if (!this.stressTestManager.isNavigationScenarioEnabled()) {
+        DemoLogger.i(TAG, "Navigation target reached, returning to RealAppStressTestPage");
+        this.navigateBack();
+        return;
+      }
       // Use replaceUrl to replace current page instead of pushing to stack
       // This prevents page stack overflow when repeatedly navigating between pages
       router.replaceUrl({ url: 'pages/StressTestBPage' });
@@ -283,6 +288,18 @@ export struct StressTestAPage {
               .textAlign(TextAlign.Center)
 
             Text(`Errors: ${this.stats.errorsGenerated} | LongTasks: ${this.stats.longTasksGenerated}`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`UI Drift: max=${this.stats.uiJankMaxDriftMs}ms | avg=${this.stats.uiJankAvgDriftMs}ms | >=50ms ${this.stats.uiJankOver50Count} | >=100ms ${this.stats.uiJankOver100Count}`)
+              .fontSize(13)
+              .fontColor(this.stats.uiJankOver100Count > 0 ? '#F53F3F' : (this.stats.uiJankOver50Count > 0 ? '#D46B08' : Color.Gray))
+              .width('100%')
+              .textAlign(TextAlign.Center)
+
+            Text(`UI Signal: ${this.stressTestManager.formatUiJankSignal(this.stats.uiJankMaxDriftMs, this.stats.uiJankOver50Count, this.stats.uiJankOver100Count)}`)
               .fontSize(13)
               .fontColor(Color.Gray)
               .width('100%')

@@ -14,6 +14,10 @@ export class DbInternalTestAccess {
     FTDBManager.resetInstanceInternal();
   }
 
+  public static forceNextSyncDataWriteFailure(): void {
+    FTDBManager.forceNextSyncDataWriteFailureInternal();
+  }
+
   public static async simulateNoLockDbShutdown(context: Context): Promise<void> {
     await FTDBManager.getInstance(context).simulateNoLockShutdownForTest();
   }

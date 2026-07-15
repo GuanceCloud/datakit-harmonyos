@@ -3,8 +3,18 @@ import { LogBean } from '../bean/LogBean';
 import { Status } from '../bean/Status';
 import { Utils } from '../utils/Utils';
 import { StringWrapper } from '../utils/StringWrapper';
+import { FTInnerLogFileManager } from './FTInnerLogFileManager';
+import { SDKLogLevel } from '../enum/Enums';
 import hilog from '@ohos.hilog';
-import ftnativecrash from 'libftnativecrash.so';
+import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
+import {
+  SDKDedicatedPoolType,
+  SDKNativeCrashLogBatchDTO,
+  SDKNativeCrashLogDTO,
+  SDKTaskPriority,
+  SDKWorkerCommand,
+  SDKWorkerResponse
+} from '../thread/SDKWorkerProtocol';
 
 /**
  * Log entry interface
@@ -29,7 +39,15 @@ export class FTInnerLogger {
   private static readonly TAG_PREFIX = "[FT-SDK]";
   private static readonly DOMAIN = 0x0001; // Log domain ID, can be adjusted as needed
   private static DEBUG_ENABLED: boolean = true;
-  private static CRASH_LOG_COLLECTION_ENABLED: boolean = true;
+  private static sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
+  private static CRASH_LOG_COLLECTION_ENABLED: boolean = false;
+  private static readonly CRASH_LOG_BATCH_SIZE = 32;
+  private static readonly CRASH_LOG_MAX_PENDING = 256;
+  private static readonly CRASH_LOG_DRAIN_DELAY_MS = 16;
+  private static pendingCrashLogs: SDKNativeCrashLogDTO[] = [];
+  private static crashLogDrainTimer: number | null = null;
+  private static crashLogCommandSequence: number = 0;
+  private static crashLogResponseHandlerRegistered: boolean = false;
 
   // Enable or disable all SDK logs at runtime (aligned with Android LogUtils.setDebug())
   // When disabled, all log levels (d, i, w, e) will be suppressed
@@ -38,63 +56,172 @@ export class FTInnerLogger {
     FTInnerLogger.DEBUG_ENABLED = enabled;
   }
 
+  static setSDKLogLevel(logLevel: SDKLogLevel): void {
+    FTInnerLogger.sdkLogLevel = logLevel;
+  }
+
   // Enable or disable crash log collection
   static setCrashLogCollectionEnabled(enabled: boolean): void {
     FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED = enabled;
+    if (!enabled) {
+      FTInnerLogger.pendingCrashLogs = [];
+      if (FTInnerLogger.crashLogDrainTimer !== null) {
+        clearTimeout(FTInnerLogger.crashLogDrainTimer);
+        FTInnerLogger.crashLogDrainTimer = null;
+      }
+    }
   }
 
-  // Helper method to add log to crash buffer
+  static isCrashLogCollectionEnabledInternal(): boolean {
+    return FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED;
+  }
+
+  // A diagnostic crash context must never synchronously cross NAPI on the caller.
+  // Keep only the newest bounded records while the dedicated worker is unavailable.
   private static addToCrashBuffer(level: string, tag: string, message: string): void {
     if (!FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED) {
       return;
     }
+    if (FTInnerLogger.pendingCrashLogs.length >= FTInnerLogger.CRASH_LOG_MAX_PENDING) {
+      FTInnerLogger.pendingCrashLogs.shift();
+    }
+    FTInnerLogger.pendingCrashLogs.push({
+      level,
+      tag: `${FTInnerLogger.TAG_PREFIX}_${tag}`,
+      message
+    });
+    FTInnerLogger.scheduleCrashLogDrain();
+  }
+
+  private static scheduleCrashLogDrain(delayMs: number = FTInnerLogger.CRASH_LOG_DRAIN_DELAY_MS): void {
+    if (FTInnerLogger.crashLogDrainTimer !== null || FTInnerLogger.pendingCrashLogs.length === 0) {
+      return;
+    }
+    FTInnerLogger.crashLogDrainTimer = setTimeout(() => {
+      FTInnerLogger.crashLogDrainTimer = null;
+      FTInnerLogger.drainCrashLogBatch();
+    }, Math.max(1, delayMs)) as number;
+  }
+
+  private static drainCrashLogBatch(): void {
+    if (FTInnerLogger.pendingCrashLogs.length === 0 || !FTInnerLogger.CRASH_LOG_COLLECTION_ENABLED) {
+      return;
+    }
+    const logs = FTInnerLogger.pendingCrashLogs.splice(0, FTInnerLogger.CRASH_LOG_BATCH_SIZE);
+    FTInnerLogger.ensureCrashLogResponseHandler();
+    FTInnerLogger.crashLogCommandSequence++;
+    const payload: SDKNativeCrashLogBatchDTO = { logs };
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy({
+      id: `nativeCrashLog.append.${FTInnerLogger.crashLogCommandSequence}.${Date.now()}`,
+      pool: SDKDedicatedPoolType.CRASH,
+      command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
+      priority: SDKTaskPriority.LOW,
+      createdAt: Date.now(),
+      payload: payload as Object
+    });
+    if (!postResult.posted) {
+      FTInnerLogger.pendingCrashLogs = logs.concat(FTInnerLogger.pendingCrashLogs);
+      while (FTInnerLogger.pendingCrashLogs.length > FTInnerLogger.CRASH_LOG_MAX_PENDING) {
+        FTInnerLogger.pendingCrashLogs.pop();
+      }
+      if (postResult.shouldRetry) {
+        FTInnerLogger.scheduleCrashLogDrain(postResult.retryDelayMs);
+      } else {
+        const dropped = FTInnerLogger.pendingCrashLogs.length;
+        FTInnerLogger.pendingCrashLogs = [];
+        // Avoid FTInnerLogger here: logging through it would recursively append
+        // another native-crash diagnostic while this transport is degraded.
+        hilog.warn(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}FTInnerLogger`,
+          `Native crash log Worker circuit open; dropped ${dropped} buffered diagnostics`);
+      }
+      return;
+    }
+    FTInnerLogger.scheduleCrashLogDrain();
+  }
+
+  private static ensureCrashLogResponseHandler(): void {
+    if (FTInnerLogger.crashLogResponseHandlerRegistered) {
+      return;
+    }
+    SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
+      SDKDedicatedPoolType.CRASH,
+      (_response: SDKWorkerResponse) => {
+        // Worker restart/replay is managed by SDKDedicatedPoolManager. Do not log
+        // failures here because that would recursively enqueue crash diagnostics.
+      }
+    );
+    FTInnerLogger.crashLogResponseHandlerRegistered = true;
+  }
+
+  private static addToLogFile(level: string, tag: string, message: string): void {
     try {
-      const fullTag = `${FTInnerLogger.TAG_PREFIX}_${tag}`;
-      ftnativecrash.addLog(level, fullTag, message);
+      const fullTag = `${FTInnerLogger.TAG_PREFIX}${tag}`;
+      FTInnerLogFileManager.getInstance().append(level, fullTag, message);
     } catch (error) {
-      // Silently fail if native module is not available
+      // Keep internal logging best-effort and avoid recursive log failures.
+    }
+  }
+
+  private static isLogEnabled(logLevel: SDKLogLevel): boolean {
+    return FTInnerLogger.DEBUG_ENABLED &&
+      FTInnerLogger.getLogLevelPriority(FTInnerLogger.sdkLogLevel) <=
+      FTInnerLogger.getLogLevelPriority(logLevel);
+  }
+
+  private static getLogLevelPriority(logLevel: SDKLogLevel): number {
+    switch (logLevel) {
+      case SDKLogLevel.V:
+        return 0;
+      case SDKLogLevel.D:
+        return 1;
+      case SDKLogLevel.I:
+        return 2;
+      case SDKLogLevel.W:
+        return 3;
+      case SDKLogLevel.E:
+        return 4;
+      default:
+        return 0;
     }
   }
 
   static d(tag: string, message: string): void {
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.D)) {
       return;
     }
     const fullMessage = `${message}`;
     hilog.debug(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("D", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("D", tag, fullMessage);
   }
 
   static i(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.i() checks mDebug flag
-    // Android: i(tag, message, currentLevel.ordinal() <= SDKLogLevel.I.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.I)) {
       return;
     }
     const fullMessage = `${message}`;
     hilog.info(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("I", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("I", tag, fullMessage);
   }
 
   static w(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.w() checks mDebug flag
-    // Android: w(tag, message, currentLevel.ordinal() <= SDKLogLevel.W.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.W)) {
       return;
     }
     const fullMessage = `${message}`;
     hilog.warn(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("W", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("W", tag, fullMessage);
   }
 
   static e(tag: string, message: string): void {
-    // Aligned with Android: LogUtils.e() checks mDebug flag
-    // Android: e(tag, message, currentLevel.ordinal() <= SDKLogLevel.E.ordinal() && mDebug)
-    if (!FTInnerLogger.DEBUG_ENABLED) {
+    if (!FTInnerLogger.isLogEnabled(SDKLogLevel.E)) {
       return;
     }
     const fullMessage = `${message}`;
     hilog.error(FTInnerLogger.DOMAIN, `${FTInnerLogger.TAG_PREFIX}${tag}`, fullMessage);
+    FTInnerLogger.addToLogFile("E", tag, fullMessage);
     FTInnerLogger.addToCrashBuffer("E", tag, fullMessage);
   }
 }
@@ -105,8 +232,18 @@ export class FTInnerLogger {
  */
 const TAG = "FTLogger";
 
+interface PendingPublicLogBatch {
+  logs: ReadonlyArray<LogEntry>;
+  cursor: number;
+}
+
 export class FTLogger {
   private static trackLogManager: TrackLogManager | null = null;
+  private static readonly PUBLIC_BATCH_SLICE_SIZE = 64;
+  private static readonly PUBLIC_BATCH_SLICE_DELAY_MS = 16;
+  private static pendingPublicLogBatches: PendingPublicLogBatch[] = [];
+  private static publicBatchDrainTimer: number | null = null;
+  private static publicBatchFlushRequested: boolean = false;
   
   /**
    * Initialize log manager
@@ -116,12 +253,36 @@ export class FTLogger {
       FTLogger.trackLogManager = TrackLogManager.getInstance();
     }
   }
+
+  public static resetBatchStateInternal(): void {
+    if (FTLogger.publicBatchDrainTimer !== null) {
+      clearTimeout(FTLogger.publicBatchDrainTimer);
+      FTLogger.publicBatchDrainTimer = null;
+    }
+    FTLogger.pendingPublicLogBatches = [];
+    FTLogger.publicBatchFlushRequested = false;
+  }
+
+  private static enqueueBehindPendingBatch(tag: string, message: string, level: string): boolean {
+    if (FTLogger.pendingPublicLogBatches.length === 0) {
+      return false;
+    }
+    FTLogger.pendingPublicLogBatches.push({
+      logs: [{ tag, message, level, timestampMs: Utils.getCurrentTimestamp() }],
+      cursor: 0
+    });
+    FTLogger.schedulePublicBatchDrain();
+    return true;
+  }
   
   /**
    * Debug level log
    */
   static d(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'd')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -139,6 +300,9 @@ export class FTLogger {
    */
   static i(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'i')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -156,6 +320,9 @@ export class FTLogger {
    */
   static w(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'w')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -173,6 +340,9 @@ export class FTLogger {
    */
   static e(tag: string, message: string): void {
     FTLogger.initTrackLogManager();
+    if (FTLogger.enqueueBehindPendingBatch(tag, message, 'e')) {
+      return;
+    }
     
     try {
       const logBean = new LogBean(message, Utils.getCurrentTimestamp());
@@ -190,39 +360,89 @@ export class FTLogger {
    */
   static batchLog(logs: Array<LogEntry>): void {
     FTLogger.initTrackLogManager();
-    
+    if (!logs || logs.length === 0) {
+      return;
+    }
+    // Keep only a source reference and a cursor. Copying a huge input array on
+    // the caller thread is itself an O(N) ANR vector; conversion remains sliced.
+    FTLogger.pendingPublicLogBatches.push({ logs, cursor: 0 });
+    FTLogger.schedulePublicBatchDrain();
+  }
+
+  private static schedulePublicBatchDrain(): void {
+    if (FTLogger.publicBatchDrainTimer !== null) {
+      return;
+    }
+    FTLogger.publicBatchDrainTimer = setTimeout(() => {
+      FTLogger.publicBatchDrainTimer = null;
+      FTLogger.drainPublicBatchSlice();
+    }, FTLogger.PUBLIC_BATCH_SLICE_DELAY_MS) as number;
+  }
+
+  private static drainPublicBatchSlice(): void {
+    const pending = FTLogger.pendingPublicLogBatches[0];
+    if (!pending) {
+      if (FTLogger.publicBatchFlushRequested) {
+        FTLogger.publicBatchFlushRequested = false;
+        FTLogger.trackLogManager?.forceFlush();
+      }
+      return;
+    }
     try {
       const logBeans: LogBean[] = [];
-      
-      for (const log of logs) {
-        const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
-        const logBean = new LogBean(log.message, timestampMs);
-        
-        switch (log.level.toLowerCase()) {
-          case 'd':
-            logBean.setStatus(Status.DEBUG.name);
-            break;
-          case 'i':
-            logBean.setStatus(Status.INFO.name);
-            break;
-          case 'w':
-            logBean.setStatus(Status.WARN.name);
-            break;
-          case 'e':
-            logBean.setStatus(Status.ERROR.name);
-            break;
-          default:
-            logBean.setStatus(Status.INFO.name);
-        }
-        
-        logBean.addTag("tag", new StringWrapper(log.tag));
-        logBeans.push(logBean);
+      const end = Math.min(pending.logs.length, pending.cursor + FTLogger.PUBLIC_BATCH_SLICE_SIZE);
+      for (let i = pending.cursor; i < end; i++) {
+        logBeans.push(FTLogger.createPublicLogBean(pending.logs[i]));
       }
-      
-      FTLogger.trackLogManager?.trackLogBatch(logBeans);
+      pending.cursor = end;
+      if (logBeans.length > 0) {
+        FTLogger.trackLogManager?.trackLogBatch(logBeans);
+      }
+      if (pending.cursor >= pending.logs.length) {
+        FTLogger.pendingPublicLogBatches.shift();
+      }
     } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to enqueue batch logs: ${(error as Error).message}`);
+      FTInnerLogger.e(TAG, `Failed to enqueue batch logs: ${error instanceof Error ? error.message : String(error)}`);
+      FTLogger.pendingPublicLogBatches.shift();
     }
+    if (FTLogger.pendingPublicLogBatches.length > 0) {
+      FTLogger.schedulePublicBatchDrain();
+    } else if (FTLogger.publicBatchFlushRequested) {
+      FTLogger.publicBatchFlushRequested = false;
+      FTLogger.trackLogManager?.forceFlush();
+    }
+  }
+
+  private static createPublicLogBean(log: LogEntry): LogBean {
+    const timestampMs = log.timestampMs === undefined ? Utils.getCurrentTimestamp() : log.timestampMs;
+    const logBean = new LogBean(log.message, timestampMs);
+    switch (log.level.toLowerCase()) {
+      case 'd':
+        logBean.setStatus(Status.DEBUG.name);
+        break;
+      case 'i':
+        logBean.setStatus(Status.INFO.name);
+        break;
+      case 'w':
+        logBean.setStatus(Status.WARN.name);
+        break;
+      case 'e':
+        logBean.setStatus(Status.ERROR.name);
+        break;
+      default:
+        logBean.setStatus(Status.INFO.name);
+    }
+    logBean.addTag("tag", new StringWrapper(log.tag));
+    return logBean;
+  }
+
+  private static getPendingPublicLogCount(): number {
+    let count = 0;
+    for (let i = 0; i < FTLogger.pendingPublicLogBatches.length; i++) {
+      const pending = FTLogger.pendingPublicLogBatches[i];
+      count += Math.max(0, pending.logs.length - pending.cursor);
+    }
+    return count;
   }
   
   /**
@@ -230,7 +450,12 @@ export class FTLogger {
    */
   static flush(): void {
     FTLogger.initTrackLogManager();
-    FTLogger.trackLogManager?.forceFlush();
+    if (FTLogger.pendingPublicLogBatches.length > 0) {
+      FTLogger.publicBatchFlushRequested = true;
+      FTLogger.schedulePublicBatchDrain();
+    } else {
+      FTLogger.trackLogManager?.forceFlush();
+    }
   }
   
   /**
@@ -249,8 +474,9 @@ export class FTLogger {
     if (queueStatus) {
       const result = new Map<string, number | boolean>();
       result.set('queueSize', queueStatus.queueSize || 0);
-      result.set('bufferSize', queueStatus.bufferSize || 0);
-      result.set('isProcessing', queueStatus.isProcessing || false);
+      const publicPending = FTLogger.getPendingPublicLogCount();
+      result.set('bufferSize', (queueStatus.bufferSize || 0) + publicPending);
+      result.set('isProcessing', (queueStatus.isProcessing || false) || publicPending > 0);
       return result;
     }
     

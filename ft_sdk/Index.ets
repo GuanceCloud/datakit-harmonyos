@@ -1,5 +1,5 @@
 /**
- * DataFlux HarmonyOS SDK - Public API Exports
+ *  HarmonyOS SDK - Public API Exports
  * 
  * This file exports all public APIs that should be accessible to SDK users.
  * DO NOT export internal implementation classes or utilities.
@@ -32,6 +32,10 @@ export {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTProxyConfig,
+  FTProxyAuthenticator,
+  FTDnsConfig,
+  FTInnerLogFileConfig,
   LogGlobalContextDictionary,
   LogGlobalContextValue
 } from './src/main/ets/components/Configs';
@@ -78,7 +82,8 @@ export {
   LogCacheDiscard,
   RUMCacheDiscard,
   DBCacheDiscard,
-  DetectFrequency
+  DetectFrequency,
+  SDKLogLevel
 } from './src/main/ets/components/enum/Enums';
 
 // RUM Enums

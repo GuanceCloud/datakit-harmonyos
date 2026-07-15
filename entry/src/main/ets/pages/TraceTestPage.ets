@@ -1186,7 +1186,7 @@ export struct TraceTestPage {
           this.addTestResult("   - Resource data should contain trace_id and span_id");
           this.addTestResult("   - Check logs for: 'Set trace_id and span_id for resource'");
           this.addTestResult("   - Check uploaded RUM data for trace_id and span_id tags");
-          this.addTestResult("   - In DataFlux platform, verify resource measurement has trace_id and span_id");
+          this.addTestResult("   - In platform, verify resource measurement has trace_id and span_id");
           
         } else {
           this.addTestResult(`❌ Request failed: ${response.statusCode}`);
