@@ -144,7 +144,6 @@ export class FTWebViewHandler implements JsReceiver {
   private allowWebViewHost: string[] | null = null;
   // Static Set to track processed webview action IDs to prevent duplicate processing across all instances
   // This ensures that even if the same action is received multiple times, it will only be processed once
-  private static processedWebViewActionIds: Set<string> = new Set();
   // Note: WebView view data deduplication is not needed - WebView may send duplicate views intentionally
   // HarmonyOS SDK should forward all view data from WebView as-is
 
@@ -633,29 +632,8 @@ export class FTWebViewHandler implements JsReceiver {
           const sessionIdValue = FTRUMInnerManager.getInstance().getSessionId();
           const collectType = sessionIdValue ? CollectType.ALL : CollectType.DROP;
 
-          // For action measurement, check for duplicate action_id to prevent duplicate processing
-          if (measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
-            // Get action_id from fields
-            const actionIdValue = fieldsMap.get('action_id');
-            if (actionIdValue) {
-              // Remove quotes if present (JSON string format)
-              const actionId = actionIdValue.startsWith('"') && actionIdValue.endsWith('"')
-                ? actionIdValue.substring(1, actionIdValue.length - 1)
-                : actionIdValue;
-              
-              // Check if already processed using static HashSet (shared across all instances)
-              if (FTWebViewHandler.processedWebViewActionIds.has(actionId)) {
-                FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Duplicate webview action detected, skipping: action_id=${actionId}`);
-                return;
-              }
-              
-              // Add to static HashSet to mark as processed (shared across all instances)
-              FTWebViewHandler.processedWebViewActionIds.add(actionId);
-            }
-          }
-          
-          // Note: WebView view data deduplication is not needed - WebView may send duplicate views intentionally
-          // HarmonyOS SDK should forward all view data from WebView as-is (aligned with Android SDK behavior)
+          // Action-ID de-duplication now runs in EVENT_CONSUMER. Browser view
+          // records remain intentionally non-deduplicated to match Android.
 
           // Call FTTrackInner to sync RUM data
           FTTrackInner.getInstance().rumWebView(time, measurement, tagsMap, fieldsMap, collectType);
@@ -866,4 +844,3 @@ export class FTWebViewHandler implements JsReceiver {
     this.nativeViewName = viewName;
   }
 }
-

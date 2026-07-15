@@ -2,6 +2,7 @@ import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import json from '@ohos.util.json';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTSDKConfig, FTRUMConfig, FTTraceConfig, FTLoggerConfig } from '../../../main/ets/components/Configs';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
@@ -34,6 +35,11 @@ import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
+import {
+  SDKDedicatedPoolType,
+  SDKTaskPriority,
+  SDKWorkerCommand
+} from '../../../main/ets/components/thread/SDKWorkerProtocol';
 
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
@@ -536,6 +542,82 @@ export default function resourceAutoTrackDeviceTest() {
 
       expect(record !== null).assertTrue();
       await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+    });
+
+    it('rumMailboxFailureAndWorkerRestartShouldKeepResourceAndCounterState', 0, async () => {
+      const viewName = 'resource_mailbox_restart_view';
+      const resourceUrl = 'http://device.test/resource-mailbox-restart';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      expect((await DBAssert.waitForViewNamed(viewName, 5000)) !== null).assertTrue();
+
+      SdkInternalTestAccess.failNextDedicatedMailboxPosts(1);
+      const requestHeaders: Record<string, Object> = {};
+      const prepared = FTSDKExtensionBridge.prepareHttpRequest(
+        new ExtensionRequest(resourceUrl, 'GET', requestHeaders),
+        new ExtensionAutoTrackOptions(false, true)
+      );
+      expect(prepared.resourceEnabled).assertTrue();
+
+      await WaitUtils.delay(120);
+      const beforeRestart = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
+        id: `resource-before-restart-${Date.now()}`,
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_SNAPSHOT,
+        priority: SDKTaskPriority.HIGH,
+        createdAt: Date.now()
+      });
+      const beforePayload = beforeRestart.payload as Record<string, Object>;
+      expect(beforeRestart.ok).assertTrue();
+      expect(Number(beforePayload['rumResourceStateKeyCount'] || 0)).assertEqual(1);
+
+      // Let the initial pending-resource Counter cross its DB commit barrier.
+      // Restarting after this point must restore Resource state without adding
+      // the already committed +1 pending delta a second time.
+      const initialCounterCommitted = await WaitUtils.waitUntil(async () => {
+        const view = await DBAssert.waitForViewNamed(viewName, 100);
+        return view !== null && view.getPendingResource() === 1;
+      }, 5000, 50);
+      expect(initialCounterCommitted).assertTrue();
+
+      expect(SdkInternalTestAccess.restartDedicatedWorker(SDKDedicatedPoolType.EVENT_CONSUMER)).assertTrue();
+      await WaitUtils.delay(120);
+      const afterRestart = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
+        id: `resource-after-restart-${Date.now()}`,
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_SNAPSHOT,
+        priority: SDKTaskPriority.HIGH,
+        createdAt: Date.now()
+      });
+      const afterPayload = afterRestart.payload as Record<string, Object>;
+      expect(afterRestart.ok).assertTrue();
+      expect(Number(afterPayload['rumResourceStateKeyCount'] || 0)).assertEqual(1);
+
+      const responseHeaders: Record<string, Object> = {};
+      responseHeaders['content-type'] = 'application/json' as Object;
+      responseHeaders['content-length'] = '11' as Object;
+      const response = new ExtensionResponse(prepared, responseHeaders, 200, '{"ok":true}');
+      expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'resource_status=200',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+      const countersCommitted = await WaitUtils.waitUntil(async () => {
+        const view = await DBAssert.waitForViewNamed(viewName, 100);
+        return view !== null && view.getResourceCount() === 1 && view.getPendingResource() === 0;
+      }, 5000, 50);
+      const matchingRecords = (await DBAssert.querySyncData([DataType.RUM_APP], 100)).filter(item =>
+        item.getDataString().includes(`resource_url=${resourceUrl}`));
+
+      expect(record !== null).assertTrue();
+      expect(countersCommitted).assertTrue();
+      expect(matchingRecords.length).assertEqual(1);
+      expect(SdkInternalTestAccess.getDedicatedPoolStatus().pools[
+        SDKDedicatedPoolType.EVENT_CONSUMER].restartCount >= 1).assertTrue();
     });
 
     it('httpBridgeShouldProcessHeaders', 0, async () => {

@@ -7,12 +7,13 @@ import { Utils } from '../../utils';
 /**
  * SyncData JSON Interface
  */
-interface SyncDataJSON {
+export interface SyncDataJSON {
   id: number;
   dataType: DataType;
   dataString: string;
   uuid: string;
   time: number;
+  customDataTypeString?: string;
 }
 
 /**
@@ -190,6 +191,7 @@ export class SyncData {
     cloned.dataString = this.dataString;
     cloned.uuid = this.uuid;
     cloned.time = this.time;
+    cloned.customDataTypeString = this.customDataTypeString;
     return cloned;
   }
 
@@ -211,7 +213,8 @@ export class SyncData {
       dataType: this.dataType,
       dataString: this.dataString,
       uuid: this.uuid,
-      time: this.time
+      time: this.time,
+      customDataTypeString: this.customDataTypeString
     };
   }
 
@@ -226,6 +229,9 @@ export class SyncData {
     syncData.dataString = json.dataString || "";
     syncData.uuid = json.uuid || "";
     syncData.time = json.time || Date.now();
+    if (json.customDataTypeString && json.customDataTypeString.length > 0) {
+      syncData.customDataTypeString = json.customDataTypeString;
+    }
     return syncData;
   }
 

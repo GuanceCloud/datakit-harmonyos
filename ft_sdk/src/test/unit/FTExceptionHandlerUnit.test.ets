@@ -271,6 +271,7 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.registerCount).assertEqual(0);
       expect(runtime.nativeHandler.initializeCount).assertEqual(0);
       expect(FTExceptionHandler.isErrorManagerEnabled()).assertFalse();
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
     });
 
     it('initConfigShouldRegisterCrashOnce', 0, async () => {
@@ -285,6 +286,7 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.registerCount).assertEqual(1);
       expect(runtime.nativeHandler.initializeCount).assertEqual(2);
       expect(FTExceptionHandler.isErrorManagerEnabled()).assertTrue();
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertTrue();
     });
 
     it('nativeCrashInitShouldHandleFailures', 0, async () => {
@@ -350,6 +352,7 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.unregisterCount).assertEqual(1);
       expect(runtime.nativeHandler.stopWatchingCount).assertEqual(0);
       expect(runtime.nativeHandler.shutdownCount).assertEqual(1);
+      expect(SdkInternalTestAccess.isNativeCrashLogCollectionEnabled()).assertFalse();
 
       FTExceptionHandler.release();
       expect(runtime.nativeHandler.shutdownCount).assertEqual(1);

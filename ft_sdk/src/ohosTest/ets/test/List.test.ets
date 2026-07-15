@@ -14,6 +14,7 @@ import ftExceptionHandlerDeviceTest from './FTExceptionHandlerDeviceTest.test';
 import ftNativeCrashHandlerDeviceTest from './FTNativeCrashHandlerDeviceTest.test';
 import ftSDKLifecycleDeviceTest from './FTSDKLifecycleDeviceTest.test';
 import ftDBManagerDeviceTest from './FTDBManagerDeviceTest.test';
+import ftDBSpoolDeviceTest from './FTDBSpoolDeviceTest.test';
 import configTest from './ConfigTest.test';
 import logGlobalContextTest from './LogGlobalContextTest.test';
 import logTest from './LogTest.test';
@@ -23,6 +24,7 @@ import realBackendSmokeTest from './RealBackendSmokeTest.test';
 import syncUploadChainDeviceTest from './SyncUploadChainDeviceTest.test';
 import userDataManagerPersistenceTest from './UserDataManagerPersistenceTest.test';
 import webViewAutoTrackDeviceTest from './WebViewAutoTrackDeviceTest.test';
+import workerIntegrationDeviceTest from './WorkerIntegrationDeviceTest.test';
 
 export default function testsuite() {
 
@@ -37,6 +39,7 @@ export default function testsuite() {
   dataModifierTest();
   dataSyncTest();
   ftDBManagerDeviceTest();
+  ftDBSpoolDeviceTest();
   logTest();
   logGlobalContextTest();
   rcpAutoTrackDeviceTest();
@@ -44,6 +47,7 @@ export default function testsuite() {
   syncUploadChainDeviceTest();
   userDataManagerPersistenceTest();
   webViewAutoTrackDeviceTest();
+  workerIntegrationDeviceTest();
 
   // Manual real backend smoke. Disabled by default unless explicitly enabled.
   realBackendSmokeTest();

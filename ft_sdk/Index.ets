@@ -32,6 +32,10 @@ export {
   FTRUMConfig,
   FTLoggerConfig,
   FTTraceConfig,
+  FTProxyConfig,
+  FTProxyAuthenticator,
+  FTDnsConfig,
+  FTInnerLogFileConfig,
   LogGlobalContextDictionary,
   LogGlobalContextValue
 } from './src/main/ets/components/Configs';
@@ -78,7 +82,8 @@ export {
   LogCacheDiscard,
   RUMCacheDiscard,
   DBCacheDiscard,
-  DetectFrequency
+  DetectFrequency,
+  SDKLogLevel
 } from './src/main/ets/components/enum/Enums';
 
 // RUM Enums

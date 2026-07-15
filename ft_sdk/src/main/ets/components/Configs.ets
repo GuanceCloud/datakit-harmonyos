@@ -1,5 +1,5 @@
 import { Constants } from "./Constants";
-import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SyncPageSize } from "./enum/Enums";
+import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
 import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
@@ -11,10 +11,44 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
 
+/**
+ * HTTP proxy settings for SDK upload requests.
+ * `exclusionList` follows NetworkKit semantics and bypasses the proxy for matching hosts.
+ */
+export interface FTProxyConfig {
+  host: string;
+  port: number;
+  exclusionList?: Array<string>;
+  username?: string;
+  password?: string;
+}
+
+/** Static credentials used when the configured upload proxy requires authentication. */
+export interface FTProxyAuthenticator {
+  username: string;
+  password: string;
+}
+
+/**
+ * Custom DNS settings for SDK upload requests.
+ * NetworkKit accepts up to three DNS server addresses and an HTTPS DoH endpoint.
+ */
+export interface FTDnsConfig {
+  servers?: Array<string>;
+  overHttpsUrl?: string;
+}
+
+export interface FTInnerLogFileConfig {
+  singleFileMaxSize?: number;
+  totalFileMaxSize?: number;
+  flushBatchSize?: number;
+  flushIntervalMs?: number;
+}
+
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
-  private sessionErrorSampleRate: number = 1.0; // Error sampling rate, range 0 to 1, default 1.0 for better error tracking
+  private sessionErrorSampleRate: number = 0.0; // Error sampling rate, range 0 to 1, default 0.0
   private rumAppId: string = "";
   private enableTrackAppCrash: boolean = false;
   private enableTrackAppUIBlock: boolean = false;
@@ -62,7 +96,7 @@ export class FTRUMConfig {
    * When the session is not sampled by setSamplingRate,
    * if an error occurs during the session, data within 1 minute before the error can be collected.
    * Range [0,1], 0 means no collection, 1 means full collection.
-   * FTRUMConfig defaults to 1.0 for compatibility; calling this setter without an argument sets 0.0.
+   * Default is 0.0, aligned with Android SDK.
    */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));
@@ -622,10 +656,18 @@ export class FTSDKConfig {
   private clientToken: string;
   // Whether to enable Debug
   private isDebug: boolean = false;
+  // SDK internal log threshold, aligned with Android SDKLogLevel.
+  private sdkLogLevel: SDKLogLevel = SDKLogLevel.V;
   // Whether to access device ID
   private : boolean = true;
   // Whether to perform auto sync
   private autoSync: boolean = true;
+  // Whether intake requests are sent with zlib-wrapped deflate compression.
+  private compressIntakeRequests: boolean = true;
+  // Optional network routing settings used only by SDK upload requests.
+  private proxy: FTProxyConfig | null = null;
+  private proxyAuthenticator: FTProxyAuthenticator | null = null;
+  private dns: FTDnsConfig | null = null;
   // Data sync page size
   private pageSize: number = SyncPageSize.MEDIUM;
   // Data sync sleep time
@@ -657,6 +699,8 @@ export class FTSDKConfig {
   private limitWithDbSize: boolean = false;
   private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
+  private enableInnerLogFile: boolean = false;
+  private innerLogFileConfig: FTInnerLogFileConfig = {};
 
   // Constructor
   private constructor(datakitUrl: string = '', datawayUrl: string = '', clientToken: string = '') {
@@ -699,6 +743,44 @@ export class FTSDKConfig {
     return this;
   }
 
+  /**
+   * Set the SDK internal log threshold. This only takes effect when debug mode is enabled.
+   */
+  setSdkLogLevel(logLevel: SDKLogLevel): FTSDKConfig {
+    this.sdkLogLevel = logLevel;
+    return this;
+  }
+
+  getSdkLogLevel(): SDKLogLevel {
+    return this.sdkLogLevel;
+  }
+
+  setEnableInnerLogFile(enable: boolean, config?: FTInnerLogFileConfig): FTSDKConfig {
+    this.enableInnerLogFile = enable;
+    if (config !== undefined) {
+      this.innerLogFileConfig = {
+        singleFileMaxSize: config.singleFileMaxSize,
+        totalFileMaxSize: config.totalFileMaxSize,
+        flushBatchSize: config.flushBatchSize,
+        flushIntervalMs: config.flushIntervalMs
+      };
+    }
+    return this;
+  }
+
+  isEnableInnerLogFile(): boolean {
+    return this.enableInnerLogFile;
+  }
+
+  getInnerLogFileConfig(): FTInnerLogFileConfig {
+    return {
+      singleFileMaxSize: this.innerLogFileConfig.singleFileMaxSize,
+      totalFileMaxSize: this.innerLogFileConfig.totalFileMaxSize,
+      flushBatchSize: this.innerLogFileConfig.flushBatchSize,
+      flushIntervalMs: this.innerLogFileConfig.flushIntervalMs
+    };
+  }
+
   getEnv(): string {
     return this.env;
   }
@@ -721,8 +803,120 @@ export class FTSDKConfig {
     return this.autoSync;
   }
 
-  setSyncPageSize(pageSize: SyncPageSize | number): FTSDKConfig {
-    this.pageSize = Math.max(SyncPageSize.MINI, pageSize);
+  /**
+   * Enable or disable deflate compression for data intake requests.
+   * Compression is enabled by default, matching the Android SDK behavior.
+   */
+  setCompressIntakeRequests(compressIntakeRequests: boolean): FTSDKConfig {
+    this.compressIntakeRequests = compressIntakeRequests;
+    return this;
+  }
+
+  isCompressIntakeRequests(): boolean {
+    return this.compressIntakeRequests;
+  }
+
+  /** Set the HTTP proxy used by SDK upload requests. */
+  setProxy(proxy: FTProxyConfig | null): FTSDKConfig {
+    this.proxy = proxy === null ? null : {
+      host: proxy.host,
+      port: proxy.port,
+      exclusionList: proxy.exclusionList ? proxy.exclusionList.slice() : [],
+      username: proxy.username,
+      password: proxy.password
+    };
+    return this;
+  }
+
+  getProxy(): FTProxyConfig | null {
+    if (this.proxy === null) {
+      return null;
+    }
+    return {
+      host: this.proxy.host,
+      port: this.proxy.port,
+      exclusionList: this.proxy.exclusionList ? this.proxy.exclusionList.slice() : [],
+      username: this.proxy.username,
+      password: this.proxy.password
+    };
+  }
+
+  /**
+   * Set static credentials for the configured upload proxy.
+   * NetworkKit does not expose an OkHttp-style authentication callback, so credentials are supplied per request.
+   */
+  setProxyAuthenticator(authenticator: FTProxyAuthenticator | null): FTSDKConfig {
+    this.proxyAuthenticator = authenticator === null ? null : {
+      username: authenticator.username,
+      password: authenticator.password
+    };
+    return this;
+  }
+
+  getProxyAuthenticator(): FTProxyAuthenticator | null {
+    if (this.proxyAuthenticator === null) {
+      return null;
+    }
+    return {
+      username: this.proxyAuthenticator.username,
+      password: this.proxyAuthenticator.password
+    };
+  }
+
+  /**
+   * Set the DNS servers or DNS-over-HTTPS endpoint used by SDK upload requests.
+   * Empty server values are ignored and only the first three are passed to NetworkKit.
+   */
+  setDns(dns: FTDnsConfig | null): FTSDKConfig {
+    if (dns === null) {
+      this.dns = null;
+      return this;
+    }
+    const servers: Array<string> = [];
+    if (dns.servers) {
+      for (let i = 0; i < dns.servers.length && servers.length < 3; i++) {
+        const server = dns.servers[i].trim();
+        if (server.length > 0) {
+          servers.push(server);
+        }
+      }
+    }
+    this.dns = {
+      servers,
+      overHttpsUrl: dns.overHttpsUrl ? dns.overHttpsUrl.trim() : ''
+    };
+    return this;
+  }
+
+  getDns(): FTDnsConfig | null {
+    if (this.dns === null) {
+      return null;
+    }
+    return {
+      servers: this.dns.servers ? this.dns.servers.slice() : [],
+      overHttpsUrl: this.dns.overHttpsUrl
+    };
+  }
+
+  /**
+   * Set a predefined number of rows uploaded per request.
+   * For a value other than 5, 10, or 50, use {@link setCustomSyncPageSize}.
+   */
+  setSyncPageSize(pageSize: SyncPageSize): FTSDKConfig {
+    this.pageSize = pageSize;
+    return this;
+  }
+
+  /**
+   * Set a custom number of rows uploaded per request.
+   * Values are rounded down and constrained to the supported range of 5 to 500 rows.
+   */
+  setCustomSyncPageSize(pageSize: number): FTSDKConfig {
+    const normalized = pageSize !== pageSize ? SyncPageSize.MINI : Math.floor(pageSize);
+    this.pageSize = Math.min(
+      SyncTaskManager.MAX_PAGE_SIZE,
+      Math.max(SyncPageSize.MINI, normalized)
+    );
     return this;
   }
 
@@ -755,7 +949,8 @@ export class FTSDKConfig {
   }
 
   setDataSyncRetryCount(dataSyncRetryCount: number): FTSDKConfig {
-    this.dataSyncRetryCount = Math.max(0, Math.min(SyncTaskManager.MAX_ERROR_COUNT, dataSyncRetryCount));
+    const normalized = dataSyncRetryCount !== dataSyncRetryCount ? 0 : Math.floor(dataSyncRetryCount);
+    this.dataSyncRetryCount = Math.max(0, Math.min(SyncTaskManager.MAX_ERROR_COUNT, normalized));
     return this;
   }
 

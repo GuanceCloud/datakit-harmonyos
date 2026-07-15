@@ -46,6 +46,7 @@ import {
   FTTraceManager,
   FTTraceRequestContext,
   EnvType,
+  SDKLogLevel,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
 ```
@@ -68,6 +69,7 @@ import {
   FTTraceManager,
   FTTraceRequestContext,
   EnvType,
+  SDKLogLevel,
   TraceType
 } from '@guancecloud/ft_sdk/Index'
 
@@ -96,6 +98,18 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## SDK Debug Logs
+
+Enable internal SDK diagnostics in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:
+
+```ts
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDebug(true)
+  .setSdkLogLevel(SDKLogLevel.D)
+```
+
+`V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry
@@ -103,6 +117,7 @@ export default class EntryAbility extends UIAbility {
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration
+- `SDKLogLevel`: SDK internal log threshold
 - `FTTraceContext`: generated Trace Header and RUM linking ID context
 - `FTTraceHeaderHandler`: custom Trace Header context handler interface
 - `FTTraceRequestContext`: current request context passed to custom Trace Header handlers

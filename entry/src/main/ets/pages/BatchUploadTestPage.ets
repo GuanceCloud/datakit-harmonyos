@@ -17,8 +17,8 @@ export struct BatchUploadTestPage {
   aboutToAppear(): void {
     this.testResults = [];
     this.addTestResult("=== Batch Upload Test Page ===");
-    this.addTestResult("This page tests upload lane batching and single-flight behavior");
-    this.addTestResult("Check HiLog with: <FT-UPLOAD-LANE> or lane=upload");
+    this.addTestResult("This page tests upload batching and single-flight behavior");
+    this.addTestResult("Check HiLog with: Sync Poll, Sync Data Count, and Sync Success / Sync Fail");
   }
 
   private addTestResult(message: string): void {
@@ -129,7 +129,7 @@ export struct BatchUploadTestPage {
       this.addTestResult("✅ Calling FTSDK.flushSyncData() - immediate upload");
       FTSDK.flushSyncData();
       this.addTestResult("✅ Upload triggered, check logs for upload details");
-      this.addTestResult("Filter logs: <FT-UPLOAD-LANE> [BATCH] and <FT-SDK-SCHEDULER> [LANE] lane=upload");
+      this.addTestResult("Filter logs: Sync Poll, Sync Data Count, and Sync Success / Sync Fail");
     } catch (error) {
       this.addTestResult(`❌ Error triggering upload: ${error}`);
     }
@@ -211,10 +211,9 @@ export struct BatchUploadTestPage {
       setTimeout(() => {
         this.addTestResult("=== Test Complete ===");
         this.addTestResult("📋 Check logs for upload details:");
-        this.addTestResult("   - <FT-SDK-SCHEDULER> [LANE] lane=upload");
-        this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=rum_app");
-        this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=log");
-        this.addTestResult("   - <FT-UPLOAD-LANE> [CONSUMED]");
+        this.addTestResult("   - Sync Poll Running / Sync Poll Finish");
+        this.addTestResult("   - Sync Data Count:<count>");
+        this.addTestResult("   - pkg_id:... Sync Success / Sync Fail");
       }, 2000);
     } catch (error) {
       this.addTestResult(`❌ Batch upload test failed: ${error}`);
@@ -299,8 +298,8 @@ export struct BatchUploadTestPage {
       const remainingRows = Math.max(0, testLogCount - firstPollRows);
       const expectedPolls = Math.ceil(testLogCount / currentPageSize);
 
-      this.addTestResult("📋 Expected Upload Lane Pattern:");
-      this.addTestResult(`   - LOG lane prepares ${testLogCount} records`);
+      this.addTestResult("📋 Expected Upload Poll Pattern:");
+      this.addTestResult(`   - LOG upload prepares ${testLogCount} records`);
       this.addTestResult(`   - One upload poll uploads at most 1 LOG page (${firstPollRows} records here)`);
       if (remainingRows > 0) {
         this.addTestResult(`   - Remaining ${remainingRows} records should upload in later poll(s)`);
@@ -308,9 +307,9 @@ export struct BatchUploadTestPage {
       this.addTestResult(`   - Expected upload poll count for LOG: ${expectedPolls}`);
 
       this.addTestResult("📝 Check logs for verification:");
-      this.addTestResult("   - <FT-SDK-SCHEDULER> [LANE] lane=upload");
-      this.addTestResult("   - <FT-UPLOAD-LANE> [BATCH] type=log");
-      this.addTestResult("   - <FT-UPLOAD-LANE> [CONSUMED] needReschedule=...");
+      this.addTestResult("   - Sync Poll Running / Sync Poll Finish");
+      this.addTestResult("   - Sync Data Count:<count>");
+      this.addTestResult("   - pkg_id:... Sync Success / Sync Fail");
       this.addTestResult("");
       this.addTestResult("✅ Expected: upload does not drain unlimited LOG pages in one poll.");
 
@@ -442,23 +441,23 @@ export struct BatchUploadTestPage {
             .fontWeight(FontWeight.Bold)
             .margin({ top: 10, bottom: 10 })
 
-          Text('<FT-UPLOAD-LANE> [SCHEDULE]')
+          Text('Sync Poll Waiting / Sync Poll Running')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('<FT-SDK-SCHEDULER> [LANE] lane=upload')
+          Text('Sync Data Count:<count>')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('<FT-UPLOAD-LANE> [BATCH] type=rum_app')
+          Text('pkg_id:... Sync Success')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('<FT-UPLOAD-LANE> [BATCH] type=log')
+          Text('pkg_id:... Sync Fail')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })
-          Text('<FT-UPLOAD-LANE> [CONSUMED]')
+          Text('pkg_id:... Sync Success / Sync Fail')
             .fontSize(11)
             .fontColor(Color.Blue)
             .margin({ bottom: 3 })

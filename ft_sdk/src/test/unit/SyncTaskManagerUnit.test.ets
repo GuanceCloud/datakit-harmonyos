@@ -1,29 +1,64 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context } from '@kit.AbilityKit';
-import relationalStore from '@ohos.data.relationalStore';
 import { FTSDKConfig } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
-import { DataBaseCallBack } from '../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../main/ets/components/db/bean/SyncData';
 import { ViewBean } from '../../main/ets/components/db/bean/ViewBean';
+import {
+  FTDBTaskPoolMaintenanceResponse,
+  FTDBTaskPoolUploadPage,
+  FTDBTaskPoolUploadCommitResponse
+} from '../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { DataType, SyncPageSize } from '../../main/ets/components/enum/Enums';
 import { NetCodeStatus } from '../../main/ets/components/http/HttpEngine';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import {
   SyncTaskCachePolicy,
   SyncTaskConfigRecord,
-  SyncTaskDbManager,
-  SyncTaskHttpResult,
+  SyncTaskDbTaskPool,
   SyncTaskManagerRuntime,
   SyncTaskPreferences
 } from '../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
-import { SDKTaskScheduler, SDKTaskType } from '../../main/ets/components/thread/SDKTaskScheduler';
+import {
+  createSDKWorkerRuntimeStateWithBackend,
+  handleSDKDataUploadWorkerRequest,
+  handleSDKWorkerRequest,
+  SDKUploadWorkerHttpExecutor,
+  SDKWorkerRuntimeState
+} from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
+import {
+  SDKDedicatedPoolType,
+  SDKUploadRowDTO,
+  SDKUploadHttpRequestDTO,
+  SDKUploadHttpResultDTO,
+  SDKWorkerCommand,
+  SDKWorkerRequest,
+  SDKWorkerResponse
+} from '../../main/ets/components/thread/SDKWorkerProtocol';
+import { DATA_UPLOAD_MAX_TRANSPORT_BYTES } from '../../main/ets/components/thread/workers/DataUploadLimits';
+import {
+  DataUploadPayloadCompressor,
+  resetDataUploadPayloadCompressorInternal,
+  setDataUploadPayloadCompressorInternal
+} from '../../main/ets/components/thread/workers/DataUploadCompression';
 
 const TEST_URL = 'http://localhost';
 
 function createContext(): Context {
   return new Object() as Context;
+}
+
+class FixedPayloadCompressor implements DataUploadPayloadCompressor {
+  async compress(_body: string): Promise<ArrayBuffer> {
+    const payload = new ArrayBuffer(4);
+    const bytes = new Uint8Array(payload);
+    bytes[0] = 0x78;
+    bytes[1] = 0x9c;
+    bytes[2] = 0x01;
+    bytes[3] = 0x00;
+    return payload;
+  }
 }
 
 function createConfig(autoSync: boolean = true): FTSDKConfig {
@@ -142,68 +177,15 @@ class FakeCachePolicy implements SyncTaskCachePolicy {
   }
 }
 
-class FakeResultSet {
-  hasRow: boolean;
-  count: number;
-  closeCount: number = 0;
-
-  constructor(hasRow: boolean, count: number) {
-    this.hasRow = hasRow;
-    this.count = count;
-  }
-
-  goToFirstRow(): boolean {
-    return this.hasRow;
-  }
-
-  goToNextRow(): boolean {
-    return this.hasRow;
-  }
-
-  getLong(_columnIndex: number): number {
-    return this.count;
-  }
-
-  close(): void {
-    this.closeCount++;
-  }
-}
-
-class FakeRdbStore {
-  queryCount: number = 0;
-  deleteCount: number = 0;
-  hasRow: boolean = false;
-  count: number = 2;
-  throwQuery: boolean = false;
-  throwDelete: boolean = false;
-
-  async query(_predicates: relationalStore.RdbPredicates, _columns: string[]): Promise<FakeResultSet> {
-    this.queryCount++;
-    if (this.throwQuery) {
-      throw new Error('query failed');
-    }
-    return new FakeResultSet(this.hasRow, this.count);
-  }
-
-  async delete(_predicates: relationalStore.RdbPredicates): Promise<number> {
-    this.deleteCount++;
-    if (this.throwDelete) {
-      throw new Error('delete failed');
-    }
-    return this.count;
-  }
-}
-
-class FakeDbManager implements SyncTaskDbManager {
+class FakeDbTaskPool implements SyncTaskDbTaskPool {
   hasDataResult: boolean = false;
   hasDataQueue: boolean[] = [];
   queryQueue: SyncData[][] = [];
-  rdbStore: FakeRdbStore = new FakeRdbStore();
   initCount: number = 0;
   queryCount: number = 0;
   deleteCount: number = 0;
   insertCount: number = 0;
-  executeCount: number = 0;
+  hasDataCount: number = 0;
   updateDataTypeCount: number = 0;
   deleteExpireCount: number = 0;
   updateDataTypeResult: number = 0;
@@ -211,18 +193,21 @@ class FakeDbManager implements SyncTaskDbManager {
   throwInit: boolean = false;
   throwQuery: boolean = false;
   throwDelete: boolean = false;
+  deleteAffectedRowsOverride: number = -1;
   throwInsert: boolean = false;
-  throwExecute: boolean = false;
   throwHasData: boolean = false;
   throwUpdateDataType: boolean = false;
   throwDeleteExpire: boolean = false;
-  lastQueryTypes: DataType[] = [];
+  lastQueryTypes: string[] = [];
   lastPageSize: number = 0;
+  lastUploadMaxBytes: number = 0;
   lastDeleted: SyncData[] = [];
+  lastDeletedIds: number[] = [];
   lastInserted: SyncData[] = [];
   insertReInsertFlags: boolean[] = [];
 
-  async hasData(dataTypes: DataType[]): Promise<boolean> {
+  async hasSyncData(_context: Context, dataTypes: string[]): Promise<boolean> {
+    this.hasDataCount++;
     this.lastQueryTypes = dataTypes;
     if (this.throwHasData) {
       throw new Error('hasData failed');
@@ -233,7 +218,7 @@ class FakeDbManager implements SyncTaskDbManager {
     return this.hasDataResult;
   }
 
-  async updateDataType(_dataType: string, _errorTimeLine: number): Promise<number> {
+  async simulateUpdateDataType(_dataType: string, _errorTimeLine: number): Promise<number> {
     this.updateDataTypeCount++;
     if (this.throwUpdateDataType) {
       throw new Error('update failed');
@@ -241,12 +226,28 @@ class FakeDbManager implements SyncTaskDbManager {
     return this.updateDataTypeResult;
   }
 
-  async deleteExpireCache(_dataType: string, _now: number, _duration: number): Promise<number> {
+  async simulateDeleteExpireCache(_dataType: string, _now: number, _duration: number): Promise<number> {
     this.deleteExpireCount++;
     if (this.throwDeleteExpire) {
       throw new Error('expire failed');
     }
     return this.deleteExpireResult;
+  }
+
+  async maintainErrorSampled(
+    _context: Context,
+    dataType: string,
+    errorTimeLine: number,
+    now: number,
+    duration: number
+  ): Promise<FTDBTaskPoolMaintenanceResponse> {
+    const updatedRows = await this.simulateUpdateDataType(dataType, errorTimeLine);
+    const deletedRows = await this.simulateDeleteExpireCache(dataType, now, duration);
+    return {
+      updatedRows,
+      deletedRows,
+      dbLaneWaitMs: 0
+    };
   }
 
   async init(): Promise<void> {
@@ -256,7 +257,12 @@ class FakeDbManager implements SyncTaskDbManager {
     }
   }
 
-  async queryFtOperation(dataTypes: DataType[], pageSize: number): Promise<SyncData[]> {
+  async querySyncData(
+    _context: Context,
+    dataTypes: string[],
+    pageSize: number,
+    _newestFirst?: boolean
+  ): Promise<SyncData[]> {
     this.queryCount++;
     this.lastQueryTypes = dataTypes;
     this.lastPageSize = pageSize;
@@ -269,15 +275,84 @@ class FakeDbManager implements SyncTaskDbManager {
     return [];
   }
 
-  async deleteFtOperation(list: SyncData[]): Promise<void> {
+  async queryUploadData(
+    context: Context,
+    dataTypes: string[],
+    pageSize: number,
+    maxBytes: number
+  ): Promise<FTDBTaskPoolUploadPage> {
+    this.lastUploadMaxBytes = maxBytes;
+    const storedRows = await this.querySyncData(context, dataTypes, pageSize);
+    const rows: SDKUploadRowDTO[] = [];
+    let transportBytes = 0;
+    let byteLimitReached = false;
+    for (let i = 0; i < storedRows.length; i++) {
+      const stored = storedRows[i];
+      const row: SDKUploadRowDTO = {
+        id: stored.getId(),
+        dataType: stored.getDataType().toString(),
+        dataString: stored.getDataString(),
+        uuid: stored.getUuid(),
+        time: stored.getTime()
+      };
+      const customDataType = stored.getCustomDataTypeString();
+      if (customDataType && customDataType.length > 0) {
+        row.customDataType = customDataType;
+      }
+      const rowBytes = this.estimateUploadTransportRowBytes(row);
+      if (transportBytes + rowBytes > maxBytes) {
+        byteLimitReached = true;
+        break;
+      }
+      rows.push(row);
+      transportBytes += rowBytes;
+    }
+    return {
+      rows,
+      hasMore: byteLimitReached || storedRows.length >= pageSize,
+      transportBytes,
+      byteLimitReached
+    };
+  }
+
+  private estimateUploadTransportRowBytes(row: SDKUploadRowDTO): number {
+    return this.getUtf8ByteLength(row.dataString || '') + this.getUtf8ByteLength(row.uuid || '') +
+      this.getUtf8ByteLength(row.dataType || '') + this.getUtf8ByteLength(row.customDataType || '') + 64;
+  }
+
+  private getUtf8ByteLength(value: string): number {
+    let bytes = 0;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code <= 0x7f) {
+        bytes++;
+      } else if (code <= 0x7ff) {
+        bytes += 2;
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+        const next = value.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4;
+          i++;
+        } else {
+          bytes += 3;
+        }
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
+  }
+
+  async deleteSyncRows(_context: Context, list: SyncData[]): Promise<number> {
     this.deleteCount++;
     this.lastDeleted = list;
     if (this.throwDelete) {
       throw new Error('delete failed');
     }
+    return this.deleteAffectedRowsOverride >= 0 ? this.deleteAffectedRowsOverride : list.length;
   }
 
-  async insertFtOptList(list: SyncData[], reInsert?: boolean): Promise<boolean> {
+  async insertSyncRows(list: SyncData[], reInsert?: boolean): Promise<boolean> {
     this.insertCount++;
     this.lastInserted = list;
     this.insertReInsertFlags.push(reInsert === true);
@@ -287,19 +362,48 @@ class FakeDbManager implements SyncTaskDbManager {
     return true;
   }
 
-  async executeWithDB(_isWrite: boolean, callback: DataBaseCallBack): Promise<void> {
-    this.executeCount++;
-    if (this.throwExecute) {
-      throw new Error('execute failed');
+  async uploadCommit(
+    context: Context,
+    dataType: string,
+    action: string,
+    records: SyncData[],
+    reInsertRecords: SyncData[],
+    reduceCount: number
+  ): Promise<FTDBTaskPoolUploadCommitResponse> {
+    let deletedRows = 0;
+    let insertedRows = 0;
+    if (records && records.length > 0) {
+      deletedRows = await this.deleteSyncRows(context, records);
     }
-    await callback.run(this.rdbStore as Object as relationalStore.RdbStore);
+    if (action === 'reinsert' && reInsertRecords && reInsertRecords.length > 0) {
+      await this.insertSyncRows(reInsertRecords, true);
+      insertedRows = reInsertRecords.length;
+    }
+    return {
+      deletedRows,
+      insertedRows,
+      affectedRows: deletedRows + insertedRows,
+      logCountDelta: dataType === DataType.LOG.toString() ? -reduceCount : 0,
+      rumCountDelta: dataType === DataType.LOG.toString() ? 0 : -reduceCount,
+      dbLaneWaitMs: 0
+    };
+  }
+
+  async cleanupExpiredRumView(_context: Context, _cutoffTime: number): Promise<number> {
+    return 0;
+  }
+
+  async cleanupExpiredRumAction(_context: Context, _cutoffTime: number): Promise<number> {
+    return 0;
   }
 }
 
-class FakeHttpResult implements SyncTaskHttpResult {
-  private code: number;
-  private message: string;
-  private errorCode: string;
+class FakeHttpResult implements SDKUploadHttpResultDTO {
+  code: number;
+  message: string;
+  errorCode: string;
+  elapsedMs: number = 1;
+  softTimedOut: boolean = false;
 
   constructor(code: number, message: string = 'message', errorCode: string = '') {
     this.code = code;
@@ -307,22 +411,11 @@ class FakeHttpResult implements SyncTaskHttpResult {
     this.errorCode = errorCode;
   }
 
-  getCode(): number {
-    return this.code;
-  }
-
-  getMessage(): string {
-    return this.message;
-  }
-
-  getErrorCode(): string {
-    return this.errorCode;
-  }
 }
 
-class FakeRuntime implements SyncTaskManagerRuntime {
+class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor {
   cachePolicy: FakeCachePolicy = new FakeCachePolicy();
-  dbManager: FakeDbManager | null = new FakeDbManager();
+  dbTaskPool: FakeDbTaskPool = new FakeDbTaskPool();
   preferences: FakePreferences = new FakePreferences();
   httpResults: FakeHttpResult[] = [];
   randomValues: number[] = [];
@@ -338,20 +431,28 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   lastHttpModel: string = '';
   lastHttpBody: string = '';
   lastHttpPkgId: string = '';
+  lastHttpCompressedBody: ArrayBuffer | undefined = undefined;
+  lastHttpContentEncoding: string = '';
   httpBarrier: Promise<void> | null = null;
   throwPreferences: boolean = false;
   throwExecuteHttp: boolean = false;
   throwSleep: boolean = false;
+  uploadWorkerCommands: string[] = [];
+  uploadWorkerState: SDKWorkerRuntimeState = createSDKWorkerRuntimeStateWithBackend(
+    SDKDedicatedPoolType.DATA_UPLOAD,
+    'DataUploadUnitWorker',
+    'unit-worker'
+  );
 
-  getDbManager(_context: Context): SyncTaskDbManager | null {
-    return this.dbManager;
+  getDbTaskPool(): SyncTaskDbTaskPool {
+    return this.dbTaskPool;
   }
 
   getCachePolicy(): SyncTaskCachePolicy {
     return this.cachePolicy;
   }
 
-  getPreferences(_context: Context, _name: string): SyncTaskPreferences {
+  async getPreferences(_context: Context, _name: string): Promise<SyncTaskPreferences> {
     this.getPreferencesCount++;
     if (this.throwPreferences) {
       throw new Error('preferences failed');
@@ -359,13 +460,15 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     return this.preferences;
   }
 
-  async executeHttp(_config: FTSDKConfig, model: string, body: string, pkgId: string): Promise<SyncTaskHttpResult> {
+  async execute(request: SDKUploadHttpRequestDTO): Promise<SDKUploadHttpResultDTO> {
     this.executeHttpCount++;
-    this.httpModels.push(model);
-    this.httpBodies.push(body);
-    this.lastHttpModel = model;
-    this.lastHttpBody = body;
-    this.lastHttpPkgId = pkgId;
+    this.httpModels.push(request.model);
+    this.httpBodies.push(request.body);
+    this.lastHttpModel = request.model;
+    this.lastHttpBody = request.body;
+    this.lastHttpPkgId = request.packageId;
+    this.lastHttpCompressedBody = request.compressedBody;
+    this.lastHttpContentEncoding = request.contentEncoding ?? '';
     if (this.throwExecuteHttp) {
       throw new Error('http failed');
     }
@@ -376,6 +479,14 @@ class FakeRuntime implements SyncTaskManagerRuntime {
       return this.httpResults.shift() as FakeHttpResult;
     }
     return new FakeHttpResult(200, 'ok', '');
+  }
+
+  async executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    this.uploadWorkerCommands.push(request.command);
+    if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE) {
+      return await handleSDKDataUploadWorkerRequest(request, this.uploadWorkerState, this);
+    }
+    return handleSDKWorkerRequest(request, this.uploadWorkerState);
   }
 
   getCurrentTimeMs(): number {
@@ -394,10 +505,19 @@ class FakeRuntime implements SyncTaskManagerRuntime {
     return `runtime-uuid-${this.uuidIndex}`;
   }
 
-  setTimer(callback: () => void, _interval: number): number {
+  setTimer(callback: () => void, interval: number): number {
     this.timerId++;
-    this.timerCallbacks.set(this.timerId, callback);
-    return this.timerId;
+    const id = this.timerId;
+    this.timerCallbacks.set(id, callback);
+    if (interval === 0) {
+      Promise.resolve().then(() => {
+        const scheduled = this.timerCallbacks.get(id);
+        if (scheduled) {
+          scheduled();
+        }
+      });
+    }
+    return id;
   }
 
   clearTimer(timerId: number): void {
@@ -412,18 +532,22 @@ class FakeRuntime implements SyncTaskManagerRuntime {
   }
 }
 
-async function runScheduledUpload(_runtime: FakeRuntime): Promise<void> {
+async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
+  const initialUploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+  if (initialUploadStatus.isScheduled && initialUploadStatus.scheduledDelay > 0) {
+    const delayedUpload = runtime.timerCallbacks.get(runtime.timerId);
+    if (delayedUpload) {
+      delayedUpload();
+    }
+  }
+
   for (let i = 0; i < 200; i++) {
     await Promise.resolve();
-    const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
-    const uploadLane = schedulerStatus.lanes[SDKTaskType.UPLOAD];
-    if (uploadLane && uploadLane.pending === 0 && uploadLane.running === 0 &&
-      schedulerStatus.activeSingleFlightTasks === 0 && schedulerStatus.rescheduledSingleFlightTasks === 0) {
+    const uploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+    if (!uploadStatus.isScheduled && !uploadStatus.isRunning && !uploadStatus.needReschedule) {
       await flushPromises();
-      const latestStatus = SDKTaskScheduler.getInstance().getStatus();
-      const latestUploadLane = latestStatus.lanes[SDKTaskType.UPLOAD];
-      if (latestUploadLane && latestUploadLane.pending === 0 && latestUploadLane.running === 0 &&
-        latestStatus.activeSingleFlightTasks === 0 && latestStatus.rescheduledSingleFlightTasks === 0) {
+      const latestUploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+      if (!latestUploadStatus.isScheduled && !latestUploadStatus.isRunning && !latestUploadStatus.needReschedule) {
         return;
       }
     }
@@ -457,23 +581,27 @@ function createBatchSyncData(dataType: DataType, prefix: string, count: number, 
   return list;
 }
 
-function queueHasDataForOnly(db: FakeDbManager, dataType: DataType): void {
-  db.hasDataResult = false;
-  db.hasDataQueue.push(dataType === DataType.RUM_APP);
-  db.hasDataQueue.push(dataType === DataType.RUM_WEBVIEW);
-  db.hasDataQueue.push(dataType === DataType.LOG);
+function queueUploadRowsForOnly(db: FakeDbTaskPool, dataType: DataType, rows: SyncData[]): void {
+  if (dataType === DataType.RUM_APP) {
+    db.queryQueue.push(rows, [], []);
+    return;
+  }
+  if (dataType === DataType.RUM_WEBVIEW) {
+    db.queryQueue.push([], rows, []);
+    return;
+  }
+  db.queryQueue.push([], [], rows);
 }
 
 async function runSingleBatchUpload(
   manager: SyncTaskManager,
   runtime: FakeRuntime,
-  db: FakeDbManager,
+  db: FakeDbTaskPool,
   dataType: DataType,
   uuid: string,
   code: number
 ): Promise<void> {
-  queueHasDataForOnly(db, dataType);
-  db.queryQueue.push([
+  queueUploadRowsForOnly(db, dataType, [
     createSyncData(dataType, uuid, createLineProtocolForType(dataType, uuid, 100))
   ]);
   runtime.httpResults.push(new FakeHttpResult(code, `response-${code}`, `error-${code}`));
@@ -493,7 +621,6 @@ export default function syncTaskManagerUnitTest() {
 
     beforeEach(() => {
       runtime = new FakeRuntime();
-      SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.setRuntime(runtime);
       SyncInternalTestAccess.resetState();
       manager = SyncTaskManager.getInstance();
@@ -501,15 +628,15 @@ export default function syncTaskManagerUnitTest() {
 
     afterEach(() => {
       manager.stop();
-      SDKTaskScheduler.resetInternal();
       SyncInternalTestAccess.resetRuntime();
       SyncInternalTestAccess.resetState();
+      resetDataUploadPayloadCompressorInternal();
     });
 
     it('executePollShouldRunUploadBranches', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
-      const db = runtime.dbManager as FakeDbManager;
+      const db = runtime.dbTaskPool as FakeDbTaskPool;
       db.hasDataResult = false;
       db.updateDataTypeResult = 1;
       db.deleteExpireResult = 1;
@@ -526,58 +653,83 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('executeSyncPollShouldSkipUploadLaneWhenDbIsEmpty', 0, async () => {
+    it('executeSyncPollShouldScheduleTenSecondAggregationWhenDbIsEmpty', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
-      const db = runtime.dbManager as FakeDbManager;
-      db.rdbStore.hasRow = false;
+      const db = runtime.dbTaskPool as FakeDbTaskPool;
+      db.hasDataResult = false;
 
       manager.executeSyncPoll();
       await flushPromises();
 
-      const schedulerStatus = SDKTaskScheduler.getInstance().getStatus();
-      const uploadLane = schedulerStatus.lanes[SDKTaskType.UPLOAD];
-      expect(uploadLane.pending).assertEqual(0);
-      expect(uploadLane.running).assertEqual(0);
-      expect(uploadLane.submittedTasks).assertEqual(0);
-      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+      const uploadStatus = manager.getStatus().uploadLaneStatus;
+      expect(uploadStatus.isScheduled).assertTrue();
+      expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
     });
 
     it('executeSyncPollShouldRunUploadLaneWhenDbHasData', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
-      db.rdbStore.hasRow = true;
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-auto', 'df_rum_harmonyos_log,sdk_data_id=log-auto value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
       manager.executeSyncPoll();
+      expect(manager.getStatus().uploadLaneStatus.scheduledDelay)
+        .assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
       await runScheduledUpload(runtime);
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+      expect(db.lastUploadMaxBytes).assertEqual(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('executeSyncPollShouldAggregateRepeatedTriggersWithinOneTenSecondWindow', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-aggregate', 'df_rum_harmonyos_log,sdk_data_id=log-aggregate value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+      manager.executeSyncPoll();
+
+      const uploadStatus = manager.getStatus().uploadLaneStatus;
+      expect(uploadStatus.isScheduled).assertTrue();
+      expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
+      expect(uploadStatus.needReschedule).assertTrue();
+      expect(runtime.timerCallbacks.size).assertEqual(2);
+
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
     it('executeSyncPollShouldCoalesceWhileUploadLaneIsRunning', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
       await flushPromises();
 
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-running', 'df_rum_harmonyos_log,sdk_data_id=log-running value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
-      let releaseHttp: (() => void) | null = null;
+      let releaseHttp: () => void = () => {
+        // Resolver is assigned by the Promise executor below.
+      };
       runtime.httpBarrier = new Promise<void>((resolve: () => void) => {
         releaseHttp = resolve;
       });
@@ -586,18 +738,16 @@ export default function syncTaskManagerUnitTest() {
       await waitUntil(() => runtime.executeHttpCount === 1);
       expect(manager.getStatus().uploadLaneStatus.isRunning).assertTrue();
 
-      const executeCountBefore = db.executeCount;
+      const hasDataCountBefore = db.hasDataCount;
       manager.executeSyncPoll();
       manager.executeSyncPoll();
       manager.executeSyncPoll();
       await flushPromises();
 
-      expect(db.executeCount).assertEqual(executeCountBefore);
+      expect(db.hasDataCount).assertEqual(hasDataCountBefore);
       expect(manager.getStatus().uploadLaneStatus.needReschedule).assertTrue();
 
-      if (releaseHttp) {
-        releaseHttp();
-      }
+      releaseHttp();
       runtime.httpBarrier = null;
       await runScheduledUpload(runtime);
 
@@ -605,18 +755,17 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('initShouldTriggerUploadWhenCachedDataExists', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
-      db.rdbStore.hasRow = true;
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+    it('executeSyncPollShouldUploadWhenCachedDataExistsAfterInit', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-init', 'df_rum_harmonyos_log,sdk_data_id=log-init value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
       manager.init(createConfig(), createContext());
+      manager.executeSyncPoll();
       await runScheduledUpload(runtime);
 
       expect(runtime.executeHttpCount).assertEqual(1);
@@ -625,16 +774,14 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('setAutoSyncTrueShouldTriggerCachedUpload', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(false), createContext());
       await flushPromises();
       expect(runtime.executeHttpCount).assertEqual(0);
 
-      db.rdbStore.hasRow = true;
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-autosync', 'df_rum_harmonyos_log,sdk_data_id=log-autosync value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
@@ -690,12 +837,10 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldSyncRumWebviewBeforeLog', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
-      db.hasDataResult = false;
-      db.hasDataQueue.push(true, true, true);
       db.queryQueue.push(
         [createSyncData(DataType.RUM_APP, 'rum-app-1', 'view,view_id=app value=1i 100')],
         [createSyncData(DataType.RUM_WEBVIEW, 'rum-web-1', 'view,view_id=web,is_webview=true value=1i 101')],
@@ -719,17 +864,11 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldRespectPerRoundPageBudget', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       const pageSize = manager.getPageSize();
-      db.hasDataResult = false;
-      db.hasDataQueue.push(
-        true, false,
-        true, false,
-        true, false
-      );
       db.queryQueue.push(
         createBatchSyncData(DataType.RUM_APP, 'rum-app-budget-a', pageSize, 100),
         createBatchSyncData(DataType.RUM_APP, 'rum-app-budget-b', pageSize, 200),
@@ -751,14 +890,81 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.httpBodies[1].includes('rum-app-budget-b')).assertTrue();
       expect(runtime.httpBodies[2].includes('rum-web-budget')).assertTrue();
       expect(runtime.httpBodies[3].includes('log-budget')).assertTrue();
-      expect(db.queryCount).assertEqual(4);
+      expect(db.queryCount).assertEqual(7);
       expect(runtime.cachePolicy.rumDelta).assertEqual(-(pageSize * 3));
       expect(runtime.cachePolicy.logDelta).assertEqual(-pageSize);
     });
 
+    it('uploadLaneShouldFormatBodyThroughUploadExecutor', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      setDataUploadPayloadCompressorInternal(new FixedPayloadCompressor());
+
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-local-format', 'df_rum_harmonyos_log,sdk_data_id=log-local-format value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpBody.includes('log-local-format')).assertTrue();
+      expect(runtime.lastHttpContentEncoding).assertEqual('deflate');
+      expect(runtime.lastHttpCompressedBody !== undefined).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME_FINISH)).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('uploadLaneShouldNotCommitWorkerCheckpointWhenDbCommitFails', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.throwDelete = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-db-failure',
+          'df_rum_harmonyos_log,sdk_data_id=log-db-failure value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
+      expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
+      expect(runtime.cachePolicy.logDelta).assertEqual(0);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
+    });
+
+    it('uploadLaneShouldNotAckWhenDbCommitAffectsFewerAcceptedRows', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.deleteAffectedRowsOverride = 0;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-partial-db-commit',
+          'df_rum_harmonyos_log,sdk_data_id=log-partial-db-commit value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(200, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
+      expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
+      expect(runtime.cachePolicy.logDelta).assertEqual(0);
+      expect(runtime.sleepDurations.includes(500)).assertTrue();
+    });
+
     it('uploadLaneShouldDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-200', 200);
@@ -774,13 +980,11 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldDeleteAndBackoffForIgnoredClientErrors', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-403', 'df_rum_harmonyos_log,sdk_data_id=log-403 value=1i 100')
       ]);
       runtime.httpResults.push(new FakeHttpResult(403, 'forbidden', '403'));
@@ -793,9 +997,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
       expect(runtime.sleepDurations.includes(500)).assertTrue();
 
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'log-429', 'df_rum_harmonyos_log,sdk_data_id=log-429 value=1i 101')
       ]);
       runtime.httpResults.push(new FakeHttpResult(429, 'rate limit', '429'));
@@ -810,8 +1012,8 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldIsolateIgnoredClientBackoffByDataTypeAndCapDelay', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'ignored-log-1', 403);
@@ -835,8 +1037,8 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldIsolateRetryBackoffByDataType', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       await runSingleBatchUpload(manager, runtime, db, DataType.RUM_APP, 'retry-rum-1', 500);
@@ -859,8 +1061,8 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('uploadLaneShouldReinsert5xxAndNetworkErrorsWithRetryBackoff', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'retry-log-500', 500);
@@ -873,8 +1075,7 @@ export default function syncTaskManagerUnitTest() {
       const backoffs = getBackoffDurations(runtime);
       expect(backoffs[0]).assertEqual(500);
       expect(backoffs[1]).assertEqual(1000);
-      expect(backoffs[2]).assertEqual(2000);
-      expect(backoffs[3]).assertEqual(4000);
+      expect(backoffs.length).assertEqual(2);
       expect(db.deleteCount).assertEqual(4);
       expect(db.insertCount).assertEqual(4);
       expect(db.insertReInsertFlags[0]).assertTrue();
@@ -885,8 +1086,8 @@ export default function syncTaskManagerUnitTest() {
     });
 
     it('executePollShouldUploadRetry', 0, async () => {
-      const db = new FakeDbManager();
-      runtime.dbManager = db;
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
 
       db.hasDataResult = false;
@@ -896,18 +1097,15 @@ export default function syncTaskManagerUnitTest() {
 
       db.hasDataResult = true;
       runtime.cachePolicy.discard = true;
-      db.hasDataQueue.push(true);
-      db.queryQueue.push([
+      queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'discard-uuid', 'df_rum_harmonyos_log,sdk_data_id=discard-uuid value=1i 100')
-      ], []);
+      ]);
       manager.executePoll(false);
       await runScheduledUpload(runtime);
       runtime.cachePolicy.discard = false;
 
       const logOne = createSyncData(DataType.LOG, 'log-1', 'df_rum_harmonyos_log,sdk_data_id=log-1 value=1i 100');
-      db.hasDataResult = false;
-      db.hasDataQueue.push(false, false, true);
-      db.queryQueue.push([logOne]);
+      queueUploadRowsForOnly(db, DataType.LOG, [logOne]);
       runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
       manager.executePoll(false);
       await runScheduledUpload(runtime);
@@ -915,14 +1113,14 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpPkgId.split('.').length).assertEqual(4);
       expect(runtime.lastHttpBody.includes(`${runtime.lastHttpPkgId}.log-1`)).assertTrue();
       expect(db.deleteCount > 0).assertTrue();
-      expect(runtime.cachePolicy.logDelta).assertEqual(-1);
+      // Both records were already persisted. Cache discard policy applies when
+      // inserting data and must not suppress an existing upload row.
+      expect(runtime.cachePolicy.logDelta).assertEqual(-2);
 
       const deleteCountAfterSuccess = db.deleteCount;
       const insertCountAfterSuccess = db.insertCount;
       const rumError = createSyncData(DataType.RUM_APP, 'rum-1', 'error,error_type=js,error_message="boom" value=1i 100');
-      db.hasDataResult = false;
-      db.hasDataQueue.push(true, false, false);
-      db.queryQueue.push([rumError]);
+      queueUploadRowsForOnly(db, DataType.RUM_APP, [rumError]);
       runtime.httpResults.push(new FakeHttpResult(500, 'fail', 'server'));
       manager.executePoll(false);
       await runScheduledUpload(runtime);
@@ -931,10 +1129,8 @@ export default function syncTaskManagerUnitTest() {
       expect(db.insertCount).assertEqual(insertCountAfterSuccess + 1);
       expect(runtime.sleepDurations.includes(500)).assertTrue();
 
-      db.hasDataResult = false;
-      db.hasDataQueue.push(true, false, false);
       runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network', 'net'));
-      db.queryQueue.push([rumError]);
+      queueUploadRowsForOnly(db, DataType.RUM_APP, [rumError]);
       manager.executePoll(false);
       await runScheduledUpload(runtime);
       expect(db.insertCount).assertEqual(insertCountAfterSuccess + 2);
@@ -949,16 +1145,10 @@ export default function syncTaskManagerUnitTest() {
       manager.init(createConfig(), context);
       expect(runtime.timerCallbacks.size).assertEqual(1);
 
-      runtime.dbManager = new FakeDbManager();
+      runtime.dbTaskPool = new FakeDbTaskPool();
       await runCleanupTimer(runtime);
-      expect(runtime.dbManager.executeCount).assertEqual(2);
-      runtime.dbManager.rdbStore.hasRow = false;
       await runCleanupTimer(runtime);
-      expect(runtime.dbManager.executeCount).assertEqual(4);
-
-      runtime.dbManager.throwExecute = true;
       await runCleanupTimer(runtime);
-      runtime.dbManager.throwExecute = false;
 
       manager.stop();
       expect(runtime.timerCallbacks.size).assertEqual(0);

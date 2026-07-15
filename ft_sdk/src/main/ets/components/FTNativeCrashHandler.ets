@@ -7,11 +7,8 @@ import {
   FTNativeCrashData,
   FTNativeCrashHandlerRuntime
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
-import { SDKTaskPriority, SDKTaskRunner, SDKTaskScheduler, SDKTaskType } from './thread/SDKTaskScheduler';
 
 const TAG = "FTNativeCrashHandler";
-const CRASH_FILE_TRACE_PREFIX = "<FT-CRASH-FILE-LANE>";
-const NATIVE_CRASH_FILE_SERIAL_KEY = "native-crash-file";
 
 export interface NativeCrashData extends FTNativeCrashData {
 }
@@ -184,9 +181,7 @@ export class FTNativeCrashHandler {
     FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** ARKTS CALLBACK CALLED ***");
     FTInnerLogger.i(TAG, `<FT-ARKTS-CALLBACK> Crash data received: type=${crashData.crashType}`);
     const crashSnapshot = this.snapshotCrashData(crashData);
-    await this.submitCrashFileTask(`crash.native:${crashSnapshot.crashType || 'unknown'}`, async () => {
-      await this.processNativeCrash(crashSnapshot);
-    }, crashSnapshot);
+    await this.processNativeCrashSafely(`crash.native:${crashSnapshot.crashType || 'unknown'}`, crashSnapshot);
   }
 
   private async processNativeCrash(crashData: NativeCrashData): Promise<void> {
@@ -249,37 +244,27 @@ export class FTNativeCrashHandler {
     }
   }
 
-  private async submitCrashFileTask(name: string, task: SDKTaskRunner, crashData: NativeCrashData): Promise<void> {
+  private async processNativeCrashSafely(name: string, crashData: NativeCrashData): Promise<void> {
     const traceName = this.nextCrashFileTaskName(name);
     this.traceCrashFileLane(
       `[ENQUEUE] name=${traceName} type=${crashData.crashType || 'unknown'} memory=${this.getTextSize(crashData.memoryNearRegisters)} maps=${this.getTextSize(crashData.maps)} hilog=${this.getTextSize(crashData.hilog)} external=${this.getTextSize(crashData.externalLog)}`
     );
-
-    await SDKTaskScheduler.getInstance().submitTaskAndWait({
-      type: SDKTaskType.CRASH_FILE,
-      name: traceName,
-      priority: SDKTaskPriority.HIGH,
-      serialKey: NATIVE_CRASH_FILE_SERIAL_KEY,
-      costHint: 'heavy',
-      run: async () => {
-        const startTime = Date.now();
-        let result = 'success';
-        let errorMessage = '';
-        try {
-          await Promise.resolve(task());
-        } catch (error) {
-          result = 'failed';
-          errorMessage = String(error);
-          throw new Error(errorMessage);
-        } finally {
-          const costTime = Math.max(0, Date.now() - startTime);
-          const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
-          this.traceCrashFileLane(
-            `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-rum-error`
-          );
-        }
-      }
-    });
+    const startTime = Date.now();
+    let result = 'success';
+    let errorMessage = '';
+    try {
+      await this.processNativeCrash(crashData);
+    } catch (error) {
+      result = 'failed';
+      errorMessage = String(error);
+      throw new Error(errorMessage);
+    } finally {
+      const costTime = Math.max(0, Date.now() - startTime);
+      const errorPart = errorMessage.length > 0 ? ` error=${errorMessage}` : '';
+      this.traceCrashFileLane(
+        `[CONSUMED] name=${traceName} result=${result}${errorPart} cost=${costTime}ms action=report-rum-error`
+      );
+    }
   }
 
   private nextCrashFileTaskName(name: string): string {
@@ -288,7 +273,7 @@ export class FTNativeCrashHandler {
   }
 
   private traceCrashFileLane(message: string): void {
-    FTInnerLogger.i(TAG, `${CRASH_FILE_TRACE_PREFIX} ${message}`);
+    FTInnerLogger.d(TAG, `Native crash task diagnostics: ${message}`);
   }
 
   private getTextSize(value: string | null | undefined): number {
