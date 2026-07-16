@@ -734,6 +734,44 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(action['actionPendingDelta'])).assertEqual('0');
     });
 
+    it('eventRumCounterBatchShouldPreserveCoalescedLongTaskCounts', 0, async () => {
+      const batch: SDKRumCounterUpdateBatchDTO = {
+        updates: [
+          { updateType: 'long_task.view', viewId: 'view-long-task', count: 50 },
+          { updateType: 'long_task.action', actionId: 'action-long-task', count: 50 }
+        ]
+      };
+      const updateResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-coalesced-long-task',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      expect(updateResponse.ok).assertTrue();
+      expect(getPayloadString(updateResponse.payload, 'pendingCount')).assertEqual('100');
+
+      const flushResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-coalesced-long-task-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      expect(flushResponse.ok).assertTrue();
+      expect(getPayloadString(flushResponse.payload, 'needsRumDataGenerate')).assertEqual('true');
+      const deltas = getPayloadArray(flushResponse.payload, 'deltas');
+      expect(deltas.length).assertEqual(2);
+      const view = deltas[0] as Record<string, object>;
+      const action = deltas[1] as Record<string, object>;
+      expect(String(view['viewId'])).assertEqual('view-long-task');
+      expect(String(view['viewLongTaskDelta'])).assertEqual('50');
+      expect(String(view['viewUpdateTimeDelta'])).assertEqual('50');
+      expect(String(action['actionId'])).assertEqual('action-long-task');
+      expect(String(action['actionLongTaskDelta'])).assertEqual('50');
+    });
+
     it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
       const actionPayload: SDKRumEventDTO = {
         eventType: 'action.complete',
