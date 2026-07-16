@@ -158,7 +158,7 @@ export interface SDKRumCounterUpdateDTO {
   actionId?: string;
   updateView?: boolean;
   flushMaxKeys?: number;
-  /** Worker-side compaction count; Host submissions normally omit it. */
+  /** Number of coalesced counter changes represented by this update. */
   count?: number;
 }
 

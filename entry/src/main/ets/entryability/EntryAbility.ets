@@ -437,7 +437,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
-        .setEnableTrackAppUIBlock(true)
+        .setEnableTrackAppUIBlock(false)
         .setEnableTraceUserView(true)
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)

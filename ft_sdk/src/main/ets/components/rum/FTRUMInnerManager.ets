@@ -303,7 +303,15 @@ export class FTRUMInnerManager {
   private resourceCommandFlushTimer: number | null = null;
   private errorCommandFlushTimer: number | null = null;
   private rumSemanticReplayTimer: number | null = null;
-  private pendingRumCounterUpdates: SDKRumCounterUpdateDTO[] = [];
+  /**
+   * Coalesce counter updates on the host before they cross the worker boundary.
+   *
+   * A burst of manually reported long tasks normally shares the same active
+   * View/Action. Keeping one accumulated DTO per counter identity avoids
+   * allocating and posting one worker message for every long task while the
+   * worker and RDB still receive the exact final count.
+   */
+  private pendingRumCounterUpdates: Map<string, SDKRumCounterUpdateDTO> = new Map();
   private pendingCompletedActions: PendingCompletedActionWorkerCommand[] = [];
   private pendingResourceCommands: PendingRumResourceWorkerCommand[] = [];
   private pendingErrorCommands: PendingRumErrorWorkerCommand[] = [];
@@ -619,21 +627,48 @@ export class FTRUMInnerManager {
       return;
     }
 
-    const payload: SDKRumCounterUpdateDTO = {
-      updateType: update.updateType,
-      viewId: update.viewId || '',
-      actionId: update.actionId || '',
-      updateView: update.updateView,
-      flushMaxKeys: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
-    };
+    const updateType = update.updateType;
+    const viewId = update.viewId || '';
+    const actionId = update.actionId || '';
+    const updateView = update.updateView !== false;
+    const count = this.normalizeRumCounterUpdateCount(update.count);
+    const key = this.getRumCounterUpdateKey(updateType, viewId, actionId, updateView);
+    const existing = this.pendingRumCounterUpdates.get(key);
+    if (existing) {
+      existing.count = this.normalizeRumCounterUpdateCount(existing.count) + count;
+    } else {
+      this.pendingRumCounterUpdates.set(key, {
+        updateType,
+        viewId,
+        actionId,
+        updateView,
+        flushMaxKeys: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS,
+        count
+      });
+    }
 
-    this.pendingRumCounterUpdates.push(payload);
-    if (this.pendingRumCounterUpdates.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
+    if (this.pendingRumCounterUpdates.size >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushRumCounterUpdateBatch(`rum.counter.${update.updateType}`);
     } else {
       this.scheduleRumCounterUpdateBatchFlush(`rum.counter.${update.updateType}`);
     }
     this.scheduleRumCounterFlush();
+  }
+
+  private getRumCounterUpdateKey(
+    updateType: string,
+    viewId: string,
+    actionId: string,
+    updateView: boolean
+  ): string {
+    return `${updateType}|${viewId}|${actionId}|${updateView ? '1' : '0'}`;
+  }
+
+  private normalizeRumCounterUpdateCount(count: number | undefined): number {
+    if (count === undefined || count !== count || count <= 0) {
+      return 1;
+    }
+    return Math.max(1, Math.floor(count));
   }
 
   private scheduleRumCounterUpdateBatchFlush(
@@ -654,17 +689,22 @@ export class FTRUMInnerManager {
       clearTimeout(this.rumCounterUpdateFlushTimer);
       this.rumCounterUpdateFlushTimer = null;
     }
-    if (!this.context || this.pendingRumCounterUpdates.length === 0) {
+    if (!this.context || this.pendingRumCounterUpdates.size === 0) {
       return;
     }
 
     let shouldContinue = true;
-    while (this.pendingRumCounterUpdates.length > 0 && shouldContinue) {
+    while (this.pendingRumCounterUpdates.size > 0 && shouldContinue) {
       const batchSize = Math.min(
         FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
-        this.pendingRumCounterUpdates.length
+        this.pendingRumCounterUpdates.size
       );
-      const updates = this.pendingRumCounterUpdates.slice(0, batchSize);
+      const pendingEntries = Array.from(this.pendingRumCounterUpdates.entries());
+      const batchEntries = pendingEntries.slice(0, batchSize);
+      const updates: SDKRumCounterUpdateDTO[] = [];
+      for (let i = 0; i < batchEntries.length; i++) {
+        updates.push(batchEntries[i][1]);
+      }
       const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
       const batchPayload: SDKRumCounterUpdateBatchDTO = {
         updates
@@ -688,12 +728,14 @@ export class FTRUMInnerManager {
         }
         break;
       }
-      this.pendingRumCounterUpdates.splice(0, batchSize);
+      for (let i = 0; i < batchEntries.length; i++) {
+        this.pendingRumCounterUpdates.delete(batchEntries[i][0]);
+      }
       this.registerRumSemanticRequest(workerRequest);
       this.scheduleRumCounterFlush();
       shouldContinue = drainAll;
     }
-    if (this.pendingRumCounterUpdates.length > 0) {
+    if (this.pendingRumCounterUpdates.size > 0) {
       this.scheduleRumCounterUpdateBatchFlush(traceBaseName);
     }
   }
@@ -1500,7 +1542,7 @@ export class FTRUMInnerManager {
       clearTimeout(this.rumSemanticReplayTimer);
       this.rumSemanticReplayTimer = null;
     }
-    this.pendingRumCounterUpdates = [];
+    this.pendingRumCounterUpdates.clear();
     this.pendingCompletedActions = [];
     this.pendingResourceCommands = [];
     this.pendingErrorCommands = [];
@@ -2438,9 +2480,18 @@ export class FTRUMInnerManager {
       clearTimeout(this.rumCounterUpdateFlushTimer);
       this.rumCounterUpdateFlushTimer = null;
     }
-    const dropped = this.pendingRumCounterUpdates.length;
-    this.pendingRumCounterUpdates = [];
+    const dropped = this.getPendingRumCounterUpdateCount();
+    this.pendingRumCounterUpdates.clear();
     FTInnerLogger.w(TAG, `RUM counter transport degraded: dropped=${dropped}, ${reason}`);
+  }
+
+  private getPendingRumCounterUpdateCount(): number {
+    let count = 0;
+    const pendingUpdates = Array.from(this.pendingRumCounterUpdates.values());
+    for (let i = 0; i < pendingUpdates.length; i++) {
+      count += this.normalizeRumCounterUpdateCount(pendingUpdates[i].count);
+    }
+    return count;
   }
 
   private degradePendingCompletedActions(reason: string): void {
