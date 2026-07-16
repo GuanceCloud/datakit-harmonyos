@@ -2566,7 +2566,6 @@ export class FTRUMInnerManager {
    */
   public startResource(resourceId: string, property: Record<string, object> = {}): void {
     try {
-      FTInnerLogger.d(TAG, `startResource: resourceId=${resourceId}`);
       // Refresh session
       this.checkSessionRefresh(true);
 
@@ -2595,7 +2594,6 @@ export class FTRUMInnerManager {
    */
   public stopResource(resourceId: string, fallbackActionId?: string): void {
     try {
-      FTInnerLogger.d(TAG, `stopResource: resourceId=${resourceId}, fallbackActionId=${fallbackActionId || ''}`);
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext(fallbackActionId || '');
       this.updateResourceContextMemoryOnStop(context);
@@ -2639,8 +2637,6 @@ export class FTRUMInnerManager {
     const actualProperty = property !== undefined ? property : null;
     const actualCallBack = callBack !== undefined ? callBack : null;
     try {
-      FTInnerLogger.d(TAG, ` Starting error processing: ${message}, type: ${errorType}, state: ${state}`);
-      
       // Refresh session
       this.checkSessionRefresh(true);
       const collectType = this.checkSessionWillCollect(this.sessionId);
@@ -2653,9 +2649,6 @@ export class FTRUMInnerManager {
         return;
       }
       
-      // Debug log for sampling test
-      FTInnerLogger.d(TAG, ` Error will be collected: sessionId=${this.sessionId}, collectType=${collectType}, message=${message}`);
-
 	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
 	        // Exclude the scenario of reporting the last native crash error
 	        // Set error time line for error sampling (aligned with Android)
@@ -2786,7 +2779,6 @@ export class FTRUMInnerManager {
    */
   public addResource(resourceId: string, params: ResourceParams, netStatusBean: NetStatusBean): void {
     try {
-      FTInnerLogger.d(TAG, `addResource: resourceId=${resourceId}, url=${params.url}, method=${params.resourceMethod}`);
       const context = this.createCurrentResourceContext();
       this.resourceContextById.set(resourceId, context);
       const collectType = this.checkSessionWillCollect(context.sessionId);
