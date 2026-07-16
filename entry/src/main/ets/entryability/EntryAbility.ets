@@ -389,7 +389,8 @@ export default class EntryAbility extends UIAbility {
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(networkRouteTestEnabled ? false : this.resolveAutoSyncEnabled())
-        .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
+        // .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
+        .setCustomSyncPageSize(100)
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
         .setSyncSleepTime(0) // Default: no extra delay between upload requests
         .setCompressIntakeRequests(!networkRouteTestEnabled) // Disable only so manual tests can read the marker
