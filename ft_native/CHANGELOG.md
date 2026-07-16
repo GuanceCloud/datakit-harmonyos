@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha03] - 2026-07-16
+- update LICENSE
+
 ## [0.1.0-alpha02] - 2026-03-13
 - The ft_native library is decoupled from ft_sdk and will automatically capture native crashes based on the dependency situation.
 - Improve SDK version logging
