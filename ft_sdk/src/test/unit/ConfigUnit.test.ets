@@ -527,6 +527,25 @@ export default function configUnitTest() {
       expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
     });
 
+    it('rumCacheFastDiscardCheckShouldPreserveDiscardOldestWrites', 0, () => {
+      const cachePolicy = FTDBCachePolicy.getInstance();
+      cachePolicy.setTestLimits(0, 2);
+      cachePolicy.optRumCount(2);
+
+      cachePolicy.updateRumCacheDiscardStrategy(RUMCacheDiscard.DISCARD);
+      expect(cachePolicy.isRumCacheDiscardingAtLimit()).assertTrue();
+
+      cachePolicy.updateRumCacheDiscardStrategy(RUMCacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.isRumCacheDiscardingAtLimit()).assertFalse();
+
+      const sizeConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableLimitWithDbSize(1024)
+        .setDbCacheDiscard(DBCacheDiscard.DISCARD_OLDEST);
+      cachePolicy.initSDKParams(new TestConfigRecord(sizeConfig));
+      cachePolicy.setCurrentDbSize(1024);
+      expect(cachePolicy.isRumCacheDiscardingAtLimit()).assertFalse();
+    });
+
     it('logConfigShouldApplyLogCacheLimit', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);

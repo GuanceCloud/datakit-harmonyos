@@ -1,10 +1,5 @@
 import { SDKWorkerCommand } from './SDKWorkerProtocol';
 
-export const SDK_WORKER_MAX_RESTART_ATTEMPTS = 3;
-export const SDK_WORKER_MAX_MESSAGE_REPLAY_ATTEMPTS = 1;
-// Apply host-side backpressure instead of evicting unresolved messages.
-export const SDK_WORKER_MAILBOX_REPLAY_CAPACITY = 512;
-
 /**
  * Only deterministic commands without external side effects may be retried
  * after the current ThreadWorker is terminated.

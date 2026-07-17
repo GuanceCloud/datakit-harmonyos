@@ -349,8 +349,6 @@ export class FTRUMGlobalManager {
       return;
     }
 
-    FTInnerLogger.d(TAG, ` addCustomError called: message=${errorMessage}, hasStack=${!!errorStack}, hasProperty=${Object.keys(property).length > 0}`);
-    
     const errorPropertyObj = new ErrorProperty();
     const keys = Object.keys(property);
     for (let i = 0; i < keys.length; i++) {
@@ -376,7 +374,6 @@ export class FTRUMGlobalManager {
       const errorMsg = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `addCustomError failed: ${errorMsg}`);
     });
-    FTInnerLogger.d(TAG, ` addCustomError completed: ${errorMessage}`);
   }
 
   /**

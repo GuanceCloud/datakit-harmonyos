@@ -89,7 +89,11 @@ export class FTDBCachePolicy {
     FTInnerLogger.d(TAG, `Reset count initialization: logCount=${this.logCount}, rumCount=${this.rumCount}`);
   }
 
-  private async ensureCountsInitialized(context: Context): Promise<void> {
+  /**
+   * Hydrates the in-memory counters once after SDK startup. Subsequent cache
+   * decisions use deltas from successful writes/deletes rather than COUNT(*).
+   */
+  public async ensureCountsInitialized(context: Context): Promise<void> {
     if (this.enableLimitWithDbSize || this.countsInitialized) {
       return;
     }
@@ -538,6 +542,28 @@ export class FTDBCachePolicy {
       return this.rumCacheDiscardStrategy;
     }
     return this.dbCacheDiscard;
+  }
+
+  /**
+   * Fast, side-effect-free admission check used before creating a DB task.
+   * DISCARD_OLDEST deliberately returns false because it still needs the DB
+   * transaction that evicts old rows and persists the newest draft.
+   */
+  public isCacheDiscardingAtLimit(dataType: DataType): boolean {
+    if (this.enableLimitWithDbSize) {
+      return this.currentDbSize >= this.dbLimitSize && this.dbCacheDiscard === DBCacheDiscard.DISCARD;
+    }
+    if (dataType === DataType.LOG) {
+      return this.logLimitCount > 0 && this.logCount >= this.logLimitCount &&
+        this.logCacheDiscardStrategy === LogCacheDiscard.DISCARD;
+    }
+    return this.rumLimitCount > 0 && this.rumCount >= this.rumLimitCount &&
+      this.rumCacheDiscardStrategy === RUMCacheDiscard.DISCARD;
+  }
+
+  /** Compatibility helper for the EVENT RUM response path. */
+  public isRumCacheDiscardingAtLimit(): boolean {
+    return this.isCacheDiscardingAtLimit(DataType.RUM_APP);
   }
 
   /**

@@ -129,7 +129,7 @@ export struct DBCacheLimitTestPage {
       clearInterval(this.infoTimer);
       this.infoTimer = -1;
     }
-    this.applyPageLoadCacheConfig();
+    // this.applyPageLoadCacheConfig();
     this.updatePolicyInfo();
     this.refreshActualDbCounts(true);
     this.infoTimer = setInterval(() => {

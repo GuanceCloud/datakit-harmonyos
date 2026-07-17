@@ -34,6 +34,14 @@ export interface SDKWorkerResponse {
   metrics?: SDKWorkerTiming;
 }
 
+/**
+ * Each EVENT_CONSUMER Worker starts with this many response credits. The Host
+ * returns one credit only after it has finished the corresponding response,
+ * bounding each Worker-owned Host response lane while the Worker keeps its own
+ * FIFO backlog.
+ */
+export const SDK_EVENT_RESPONSE_SOFT_CREDITS = 5000;
+
 export interface SDKWorkerTiming {
   schedulerWaitMs?: number;
   schedulerComputeMs?: number;
@@ -64,6 +72,8 @@ export enum SDKWorkerCommand {
   EVENT_RUM_COUNTER_UPDATE_BATCH = 'event.rum.counterUpdateBatch',
   EVENT_RUM_COUNTER_FLUSH = 'event.rum.counterFlush',
   EVENT_RUM_SNAPSHOT = 'event.rum.snapshot',
+  /** Host -> EVENT_CONSUMER control message; it deliberately has no response. */
+  EVENT_RUM_RESPONSE_CREDIT = 'event.rum.responseCredit',
   LOG_ENQUEUE = 'log.enqueue',
   LOG_FLUSH = 'log.flush',
   DATA_CREATE_LINE_PROTOCOL = 'data.createLineProtocol',
@@ -158,7 +168,7 @@ export interface SDKRumCounterUpdateDTO {
   actionId?: string;
   updateView?: boolean;
   flushMaxKeys?: number;
-  /** Worker-side compaction count; Host submissions normally omit it. */
+  /** Number of coalesced counter changes represented by this update. */
   count?: number;
 }
 
@@ -168,6 +178,10 @@ export interface SDKRumCounterUpdateBatchDTO {
 
 export interface SDKRumEventBatchDTO {
   events: SDKRumEventDTO[];
+}
+
+export interface SDKWorkerResponseCreditDTO {
+  credits: number;
 }
 
 export interface SDKRumResourceContextDTO {

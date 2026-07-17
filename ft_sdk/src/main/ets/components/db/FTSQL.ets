@@ -18,6 +18,12 @@ export const FT_TABLE_VIEW: string = "rum_view";
 export const FT_TABLE_ACTION: string = "rum_action";
 
 /**
+ * SDK internal metadata table name.
+ * This table only stores a bounded set of SDK state values, not telemetry.
+ */
+export const FT_TABLE_SDK_META: string = "sdk_meta";
+
+/**
  * Record column definitions
  */
 export const RECORD_COLUMN_ID: string = "_id";
@@ -25,6 +31,11 @@ export const RECORD_COLUMN_TM: string = "tm";
 export const RECORD_COLUMN_DATA_UUID: string = "uuid";
 export const RECORD_COLUMN_DATA: string = "data";
 export const RECORD_COLUMN_DATA_TYPE: string = "type";
+
+/** SDK internal metadata column definitions. */
+export const SDK_META_COLUMN_KEY: string = "key";
+export const SDK_META_COLUMN_VALUE: string = "value";
+export const SDK_META_KEY_LAST_ERROR_TIMELINE: string = "last_error_timeline";
 
 /**
  * RUM column definitions
@@ -110,6 +121,16 @@ export const FT_TABLE_ACTION_CREATE: string =
   )`;
 
 /**
+ * SDK internal metadata table creation SQL.
+ * Keys are primary keys so this table remains bounded regardless of runtime.
+ */
+export const FT_TABLE_SDK_META_CREATE: string =
+  `CREATE TABLE IF NOT EXISTS ${FT_TABLE_SDK_META} (
+    ${SDK_META_COLUMN_KEY} TEXT PRIMARY KEY,
+    ${SDK_META_COLUMN_VALUE} BIGINT
+  )`;
+
+/**
  * SQL used to create database indexes
  */
 export const CREATE_INDEXES: string[] = [
@@ -130,11 +151,15 @@ export class FTSQL {
   static readonly FT_SYNC_DATA_FLAT_TABLE_NAME = FT_SYNC_DATA_FLAT_TABLE_NAME;
   static readonly FT_TABLE_VIEW = FT_TABLE_VIEW;
   static readonly FT_TABLE_ACTION = FT_TABLE_ACTION;
+  static readonly FT_TABLE_SDK_META = FT_TABLE_SDK_META;
   static readonly RECORD_COLUMN_ID = RECORD_COLUMN_ID;
   static readonly RECORD_COLUMN_TM = RECORD_COLUMN_TM;
   static readonly RECORD_COLUMN_DATA_UUID = RECORD_COLUMN_DATA_UUID;
   static readonly RECORD_COLUMN_DATA = RECORD_COLUMN_DATA;
   static readonly RECORD_COLUMN_DATA_TYPE = RECORD_COLUMN_DATA_TYPE;
+  static readonly SDK_META_COLUMN_KEY = SDK_META_COLUMN_KEY;
+  static readonly SDK_META_COLUMN_VALUE = SDK_META_COLUMN_VALUE;
+  static readonly SDK_META_KEY_LAST_ERROR_TIMELINE = SDK_META_KEY_LAST_ERROR_TIMELINE;
   static readonly RUM_COLUMN_ID = RUM_COLUMN_ID;
   static readonly RUM_COLUMN_START_TIME = RUM_COLUMN_START_TIME;
   static readonly RUM_COLUMN_IS_CLOSE = RUM_COLUMN_IS_CLOSE;
@@ -159,5 +184,6 @@ export class FTSQL {
   static readonly FT_TABLE_SYNC_CREATE = FT_TABLE_SYNC_CREATE;
   static readonly FT_TABLE_VIEW_CREATE = FT_TABLE_VIEW_CREATE;
   static readonly FT_TABLE_ACTION_CREATE = FT_TABLE_ACTION_CREATE;
+  static readonly FT_TABLE_SDK_META_CREATE = FT_TABLE_SDK_META_CREATE;
   static readonly CREATE_INDEXES = CREATE_INDEXES;
 }

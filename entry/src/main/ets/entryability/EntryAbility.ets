@@ -389,10 +389,11 @@ export default class EntryAbility extends UIAbility {
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(networkRouteTestEnabled ? false : this.resolveAutoSyncEnabled())
-        .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
+        // .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
+        .setCustomSyncPageSize(20)
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
-        .setSyncSleepTime(0) // Default: no extra delay between upload requests
-        .setCompressIntakeRequests(!networkRouteTestEnabled) // Disable only so manual tests can read the marker
+        .setSyncSleepTime(100) // Default: no extra delay between upload requests
+        .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
           host: NETWORK_ROUTE_TEST_HOST,
@@ -436,7 +437,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
-        .setEnableTrackAppUIBlock(true)
+        .setEnableTrackAppUIBlock(false)
         .setEnableTraceUserView(true)
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
