@@ -14,6 +14,7 @@ import {
   SDKUploadRoundStartDTO,
   SDKUploadRoundStartResultDTO,
   SDKUploadRowDTO,
+  SDKTaskPriority,
   SDKWorkerCommand,
   SDKWorkerPayload,
   SDKWorkerRequest,
@@ -366,7 +367,8 @@ export class DataUploadWorkerExecutor {
       id: `${command}:${Date.now()}:${DataUploadWorkerExecutor.commandSequence}`,
       pool: SDKDedicatedPoolType.DATA_UPLOAD,
       command,
-      priority: 5,
+      // Upload work is intentionally the lowest-priority SDK worker traffic.
+      priority: SDKTaskPriority.BACKGROUND,
       createdAt: Date.now(),
       payload
     };

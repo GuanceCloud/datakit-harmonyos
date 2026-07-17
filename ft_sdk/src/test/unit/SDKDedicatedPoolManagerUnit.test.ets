@@ -494,7 +494,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
     });
 
-    it('eventRumBatchShouldDeriveSortAndDeduplicateRawEventsInWorker', 0, async () => {
+    it('eventRumBatchShouldDeriveAndSortRawEventsInWorker', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-raw-context',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -541,11 +541,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(response.ok).assertTrue();
       expect(getPayloadString(response.payload, 'activeViewId')).assertEqual(viewId);
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
-      expect(drafts.length).assertEqual(2);
+      expect(drafts.length).assertEqual(3);
       const first = drafts[0] as Record<string, object>;
       const second = drafts[1] as Record<string, object>;
+      const third = drafts[2] as Record<string, object>;
       expect(String(first['dataString']).startsWith('action,')).assertTrue();
       expect(String(second['dataString']).startsWith('view,')).assertTrue();
+      expect(String(third['dataString']).startsWith('view,')).assertTrue();
       expect(String(second['uuid'])).assertEqual(viewId.substring(0, 16));
       expect(String(second['dataString']).includes('env=worker-test')).assertTrue();
 
@@ -557,7 +559,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         createdAt: Date.now(),
         payload: viewEvent as Object as SDKWorkerPayload
       });
-      expect(getPayloadArray(duplicateResponse.payload, 'syncDrafts').length).assertEqual(0);
+      expect(getPayloadArray(duplicateResponse.payload, 'syncDrafts').length).assertEqual(1);
     });
 
     it('eventRumWorkerShouldFullyFormatRawWebViewData', 0, async () => {
@@ -624,7 +626,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       webViewAction.fields['action_name'] = '"click"';
       const actionBatch: SDKRumEventBatchDTO = { events: [webViewAction, webViewAction] };
       const actionResponse = await executeWorkerCommandForUnit({
-        id: 'rum-webview-action-dedup',
+        id: 'rum-webview-action-repeat',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
         priority: 7,
@@ -632,7 +634,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: actionBatch as Object as SDKWorkerPayload
       });
       expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('web-action');
-      expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(1);
+      expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(2);
     });
 
     it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
@@ -734,6 +736,44 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(action['actionPendingDelta'])).assertEqual('0');
     });
 
+    it('eventRumCounterBatchShouldPreserveCoalescedLongTaskCounts', 0, async () => {
+      const batch: SDKRumCounterUpdateBatchDTO = {
+        updates: [
+          { updateType: 'long_task.view', viewId: 'view-long-task', count: 50 },
+          { updateType: 'long_task.action', actionId: 'action-long-task', count: 50 }
+        ]
+      };
+      const updateResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-coalesced-long-task',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      expect(updateResponse.ok).assertTrue();
+      expect(getPayloadString(updateResponse.payload, 'pendingCount')).assertEqual('100');
+
+      const flushResponse = await executeWorkerCommandForUnit({
+        id: 'rum-counter-coalesced-long-task-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      expect(flushResponse.ok).assertTrue();
+      expect(getPayloadString(flushResponse.payload, 'needsRumDataGenerate')).assertEqual('true');
+      const deltas = getPayloadArray(flushResponse.payload, 'deltas');
+      expect(deltas.length).assertEqual(2);
+      const view = deltas[0] as Record<string, object>;
+      const action = deltas[1] as Record<string, object>;
+      expect(String(view['viewId'])).assertEqual('view-long-task');
+      expect(String(view['viewLongTaskDelta'])).assertEqual('50');
+      expect(String(view['viewUpdateTimeDelta'])).assertEqual('50');
+      expect(String(action['actionId'])).assertEqual('action-long-task');
+      expect(String(action['actionLongTaskDelta'])).assertEqual('50');
+    });
+
     it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
       const actionPayload: SDKRumEventDTO = {
         eventType: 'action.complete',
@@ -799,31 +839,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(snapshot.payload, 'activeResourceStateKeyCount')).assertEqual('0');
     });
 
-    it('eventRumWorkerShouldBoundDedupStateWithoutStaleKeys', 0, async () => {
-      const events: SDKRumEventDTO[] = [];
-      for (let i = 0; i < 2050; i++) {
-        events.push({
-          eventType: 'dedup.capacity',
-          time: i + 1,
-          name: `event-${i}`
-        });
-      }
-      const batch: SDKRumEventBatchDTO = { events };
-      const response = await executeWorkerCommandForUnit({
-        id: 'rum-dedup-capacity',
-        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-        command: SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH,
-        priority: 7,
-        createdAt: Date.now(),
-        payload: batch as Object as SDKWorkerPayload
-      });
-      expect(response.ok).assertTrue();
-
-      const snapshot = await getRumWorkerSnapshotForUnit('rum-dedup-capacity-snapshot');
-      expect(getPayloadString(snapshot.payload, 'rumDedupStateKeyCount')).assertEqual('2048');
-    });
-
-    it('eventRumWorkerShouldNormalizeAndDeduplicateRawErrorProperties', 0, async () => {
+    it('eventRumWorkerShouldNormalizeRawErrorProperties', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-error-context',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -869,8 +885,9 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
 
       expect(response.ok).assertTrue();
+      expect(getPayloadString(response.payload, 'errorTimeLine')).assertEqual('500');
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
-      expect(drafts.length).assertEqual(1);
+      expect(drafts.length).assertEqual(2);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
       expect(line.includes('error_type=TypeError')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();

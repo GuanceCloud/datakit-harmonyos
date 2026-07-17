@@ -157,6 +157,21 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.getDiscardStrategy(DataType.RUM_WEBVIEW)).assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
     });
 
+    it('fastDiscardAdmissionShouldSkipOnlyDiscardAndKeepDiscardOldestWritable', 0, () => {
+      const cachePolicy = FTDBCachePolicy.getInstance();
+      cachePolicy.setTestLimits(2, 2);
+      cachePolicy.optLogCount(2);
+      cachePolicy.optRumCount(2);
+
+      expect(cachePolicy.isCacheDiscardingAtLimit(DataType.LOG)).assertTrue();
+      expect(cachePolicy.isCacheDiscardingAtLimit(DataType.RUM_APP)).assertTrue();
+
+      cachePolicy.updateLogCacheDiscardStrategy(LogCacheDiscard.DISCARD_OLDEST);
+      cachePolicy.updateRumCacheDiscardStrategy(RUMCacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.isCacheDiscardingAtLimit(DataType.LOG)).assertFalse();
+      expect(cachePolicy.isCacheDiscardingAtLimit(DataType.RUM_WEBVIEW)).assertFalse();
+    });
+
     it('dbCachePolicyShouldKeepLegacyDiscardSeparate', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       const config = FTSDKConfig.builder(TEST_FAKE_URL)

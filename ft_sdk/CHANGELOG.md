@@ -3,7 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+
+## [0.1.14] - 2026-07-17
+- Released the stable `ft_sdk` 0.1.14 package, consolidating the capabilities delivered during the 0.1.14 pre-release cycle.
+- Removed high-frequency internal Debug logs from normal Error and Resource collection paths.
 
 ## [0.1.14-alpha07] - 2026-07-09
 - Added `FTSDKConfig.setCompressIntakeRequests(...)`; data intake requests now use zlib-wrapped `deflate` compression by default and safely fall back to plaintext when compression is unavailable.
