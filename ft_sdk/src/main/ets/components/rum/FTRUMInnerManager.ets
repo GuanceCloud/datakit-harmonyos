@@ -210,6 +210,8 @@ interface PendingRumErrorWorkerCommand {
 interface RumSemanticJournalEntry {
   sequence: number;
   request: SDKWorkerRequest;
+  /** Resource IDs represented by this request, captured once at enqueue time. */
+  resourceIds: string[];
   workerAcknowledged: boolean;
   hostApplied: boolean;
   commitBarrier: boolean;
@@ -324,13 +326,37 @@ export class FTRUMInnerManager {
    * semantic commit.
    */
   private rumSemanticJournal: RumSemanticJournalEntry[] = [];
+  /**
+   * The journal is a FIFO with a moving head. Keeping the consumed prefix in
+   * place avoids copying the complete journal every time a flush is confirmed.
+   */
+  private rumSemanticJournalHead: number = 0;
   private rumSemanticJournalByRequestId: Map<string, RumSemanticJournalEntry> = new Map();
   private rumSemanticSequence: number = 0;
   private committedRumSemanticResponseIds: Map<string, boolean> = new Map();
   private committedRumSemanticResponseOrder: string[] = [];
+  private committedRumSemanticResponseOrderHead: number = 0;
   private resourceDraftIdsById: Map<string, RumResourceDraftIds> = new Map();
+  /** Prefix queue used to evict the oldest resource draft state at capacity. */
+  private resourceDraftIdOrder: string[] = [];
+  private resourceDraftIdOrderHead: number = 0;
   private completedRumResourceIds: Set<string> = new Set();
-  private static readonly RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY: number = 2048;
+  /**
+   * One reference is held for every resource command from its pending queue
+   * through its journal entry. This makes the ownership check O(1).
+   */
+  private resourcePendingOrJournalRefCounts: Map<string, number> = new Map();
+  /** A short completed-response window; this is not part of input flow control. */
+  private static readonly RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY: number = 1024;
+  /** Recent action IDs prevent duplicate completion only within this short window. */
+  private static readonly RUM_ACTION_ID_DEDUP_CAPACITY: number = 1024;
+  /** Keep replay state for the newest semantic commands without blocking collection. */
+  private static readonly RUM_SEMANTIC_JOURNAL_HIGH_WATERMARK: number = 5000;
+  /** Keep draft identifiers for the newest resource lifecycles without blocking collection. */
+  private static readonly RUM_RESOURCE_DRAFT_HIGH_WATERMARK: number = 5000;
+  private static readonly RUM_JOURNAL_COMPACTION_MIN_PREFIX: number = 128;
+  private static readonly RUM_STATE_EVICTION_LOG_INTERVAL_MS: number = 10000;
+  private lastRumStateEvictionLogAt: number = 0;
   
   // Frequency protection
   private lastActionTime: number = 0;
@@ -359,10 +385,15 @@ export class FTRUMInnerManager {
   // Set to track processed action IDs to prevent duplicate inserts
   // This ensures that even if an action is queried multiple times, it will only be inserted once
   private processedActionIds: Set<string> = new Set();
+  private processedActionIdOrder: string[] = [];
+  private processedActionIdOrderHead: number = 0;
   
   // Set to track inserted action IDs to prevent duplicate uploads
   // This ensures that even if completed action submission is triggered multiple times, it will only upload once.
   private insertedActionIds: Set<string> = new Set();
+  private insertedActionIdOrder: string[] = [];
+  private insertedActionIdOrderHead: number = 0;
+  private lastRumCounterMailboxFailureLogAt: number = 0;
   
   // Promise-based lock to ensure thread-safe insertion of actions
   // Prevents race condition where multiple threads check and insert the same action simultaneously
@@ -401,10 +432,12 @@ export class FTRUMInnerManager {
     if (this.rumSemanticJournalByRequestId.has(request.id)) {
       return;
     }
+    this.trimRumSemanticJournalForLatest();
     this.rumSemanticSequence++;
     const entry: RumSemanticJournalEntry = {
       sequence: this.rumSemanticSequence,
       request,
+      resourceIds: this.getResourceIdsFromWorkerRequest(request),
       workerAcknowledged: false,
       hostApplied: false,
       commitBarrier: false,
@@ -432,6 +465,11 @@ export class FTRUMInnerManager {
     const entry = this.rumSemanticJournalByRequestId.get(requestId);
     if (entry) {
       entry.hostApplied = true;
+    } else {
+      // The replay state may have been evicted to preserve newer entries. The
+      // response was still applied by the Host, so retain only its bounded
+      // de-duplication marker rather than restoring an old journal entry.
+      this.rememberCommittedRumSemanticResponse(requestId);
     }
   }
 
@@ -440,8 +478,12 @@ export class FTRUMInnerManager {
       const resourceId = resourceIds[i];
       if (resourceId && resourceId.length > 0) {
         this.completedRumResourceIds.add(resourceId);
+        // Only the resources explicitly completed by this worker response are
+        // considered for cleanup. Do not scan every outstanding draft here.
+        this.cleanupCompletedResourceDraftId(resourceId);
       }
     }
+    this.pruneCommittedRumSemanticPrefix();
   }
 
   /**
@@ -455,7 +497,7 @@ export class FTRUMInnerManager {
       return;
     }
     barrier.commitBarrier = true;
-    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+    for (let i = this.rumSemanticJournalHead; i < this.rumSemanticJournal.length; i++) {
       const entry = this.rumSemanticJournal[i];
       if (!entry.hostApplied) {
         break;
@@ -469,28 +511,22 @@ export class FTRUMInnerManager {
   }
 
   private pruneCommittedRumSemanticPrefix(): void {
-    const retained: RumSemanticJournalEntry[] = [];
-    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
-      const entry = this.rumSemanticJournal[i];
-      if (entry.semanticCommitted && !this.shouldRetainResourceStateCheckpoint(entry)) {
-        this.rumSemanticJournalByRequestId.delete(entry.request.id);
-        this.rememberCommittedRumSemanticResponse(entry.request.id);
-      } else {
-        retained.push(entry);
+    while (this.rumSemanticJournalHead < this.rumSemanticJournal.length) {
+      const entry = this.rumSemanticJournal[this.rumSemanticJournalHead];
+      if (!entry.semanticCommitted || this.shouldRetainResourceStateCheckpoint(entry)) {
+        break;
       }
+      this.rumSemanticJournalByRequestId.delete(entry.request.id);
+      this.rememberCommittedRumSemanticResponse(entry.request.id);
+      this.releaseResourceTransportReferences(entry.resourceIds);
+      this.rumSemanticJournalHead++;
     }
-    this.rumSemanticJournal = retained;
-    this.cleanupCommittedResourceDraftIds();
+    this.compactRumSemanticJournalIfNeeded();
   }
 
   private shouldRetainResourceStateCheckpoint(entry: RumSemanticJournalEntry): boolean {
-    if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !entry.request.payload) {
-      return false;
-    }
-    const batch = entry.request.payload as Object as SDKRumResourceCommandBatchDTO;
-    const commands = batch.commands || [];
-    for (let i = 0; i < commands.length; i++) {
-      const resourceId = commands[i].resourceId;
+    for (let i = 0; i < entry.resourceIds.length; i++) {
+      const resourceId = entry.resourceIds[i];
       if (resourceId && resourceId.length > 0 && !this.completedRumResourceIds.has(resourceId)) {
         return true;
       }
@@ -504,22 +540,226 @@ export class FTRUMInnerManager {
     }
     this.committedRumSemanticResponseIds.set(requestId, true);
     this.committedRumSemanticResponseOrder.push(requestId);
-    while (this.committedRumSemanticResponseOrder.length >
+    while (this.committedRumSemanticResponseOrder.length - this.committedRumSemanticResponseOrderHead >
       FTRUMInnerManager.RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY) {
-      const oldest = this.committedRumSemanticResponseOrder.shift();
-      if (oldest) {
-        this.committedRumSemanticResponseIds.delete(oldest);
+      const oldest = this.committedRumSemanticResponseOrder[this.committedRumSemanticResponseOrderHead];
+      this.committedRumSemanticResponseOrderHead++;
+      this.committedRumSemanticResponseIds.delete(oldest);
+    }
+    this.compactCommittedRumSemanticResponseOrder();
+  }
+
+  private compactCommittedRumSemanticResponseOrder(): void {
+    if (this.committedRumSemanticResponseOrderHead === 0) {
+      return;
+    }
+    if (this.committedRumSemanticResponseOrderHead >= this.committedRumSemanticResponseOrder.length) {
+      this.committedRumSemanticResponseOrder = [];
+      this.committedRumSemanticResponseOrderHead = 0;
+      return;
+    }
+    if (this.committedRumSemanticResponseOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
+      this.committedRumSemanticResponseOrderHead * 2 >= this.committedRumSemanticResponseOrder.length) {
+      this.committedRumSemanticResponseOrder =
+        this.committedRumSemanticResponseOrder.slice(this.committedRumSemanticResponseOrderHead);
+      this.committedRumSemanticResponseOrderHead = 0;
+    }
+  }
+
+  private rememberProcessedActionId(actionId: string): void {
+    if (!actionId || this.processedActionIds.has(actionId)) {
+      return;
+    }
+    this.compactProcessedActionIdOrder();
+    while (this.processedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY &&
+      this.processedActionIdOrderHead < this.processedActionIdOrder.length) {
+      const oldest = this.processedActionIdOrder[this.processedActionIdOrderHead];
+      this.processedActionIdOrderHead++;
+      this.processedActionIds.delete(oldest);
+    }
+    this.processedActionIds.add(actionId);
+    this.processedActionIdOrder.push(actionId);
+    this.compactProcessedActionIdOrder();
+  }
+
+  private forgetProcessedActionId(actionId: string): void {
+    this.processedActionIds.delete(actionId);
+    this.compactProcessedActionIdOrder();
+  }
+
+  private compactProcessedActionIdOrder(): void {
+    while (this.processedActionIdOrderHead < this.processedActionIdOrder.length &&
+      !this.processedActionIds.has(this.processedActionIdOrder[this.processedActionIdOrderHead])) {
+      this.processedActionIdOrderHead++;
+    }
+    if (this.processedActionIdOrderHead >= this.processedActionIdOrder.length) {
+      this.processedActionIdOrder = [];
+      this.processedActionIdOrderHead = 0;
+      return;
+    }
+    if (this.processedActionIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
+      this.processedActionIdOrderHead * 2 >= this.processedActionIdOrder.length) {
+      this.processedActionIdOrder = this.processedActionIdOrder.slice(this.processedActionIdOrderHead);
+      this.processedActionIdOrderHead = 0;
+    }
+  }
+
+  private rememberInsertedActionId(actionId: string): void {
+    if (!actionId || this.insertedActionIds.has(actionId)) {
+      return;
+    }
+    this.compactInsertedActionIdOrder();
+    while (this.insertedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY &&
+      this.insertedActionIdOrderHead < this.insertedActionIdOrder.length) {
+      const oldest = this.insertedActionIdOrder[this.insertedActionIdOrderHead];
+      this.insertedActionIdOrderHead++;
+      this.insertedActionIds.delete(oldest);
+    }
+    this.insertedActionIds.add(actionId);
+    this.insertedActionIdOrder.push(actionId);
+    this.compactInsertedActionIdOrder();
+  }
+
+  private forgetInsertedActionId(actionId: string): void {
+    this.insertedActionIds.delete(actionId);
+    this.compactInsertedActionIdOrder();
+  }
+
+  private compactInsertedActionIdOrder(): void {
+    while (this.insertedActionIdOrderHead < this.insertedActionIdOrder.length &&
+      !this.insertedActionIds.has(this.insertedActionIdOrder[this.insertedActionIdOrderHead])) {
+      this.insertedActionIdOrderHead++;
+    }
+    if (this.insertedActionIdOrderHead >= this.insertedActionIdOrder.length) {
+      this.insertedActionIdOrder = [];
+      this.insertedActionIdOrderHead = 0;
+      return;
+    }
+    if (this.insertedActionIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
+      this.insertedActionIdOrderHead * 2 >= this.insertedActionIdOrder.length) {
+      this.insertedActionIdOrder = this.insertedActionIdOrder.slice(this.insertedActionIdOrderHead);
+      this.insertedActionIdOrderHead = 0;
+    }
+  }
+
+  private clearActionIdLedgers(): void {
+    this.processedActionIds.clear();
+    this.processedActionIdOrder = [];
+    this.processedActionIdOrderHead = 0;
+    this.insertedActionIds.clear();
+    this.insertedActionIdOrder = [];
+    this.insertedActionIdOrderHead = 0;
+  }
+
+  private cleanupCompletedResourceDraftId(resourceId: string): void {
+    if (!this.completedRumResourceIds.has(resourceId) ||
+      !this.resourceContentSubmittedIds.has(resourceId) ||
+      !this.resourceStoppedIds.has(resourceId) ||
+      this.hasPendingOrJournaledResource(resourceId)) {
+      return;
+    }
+    this.resourceDraftIdsById.delete(resourceId);
+    this.resourceContentSubmittedIds.delete(resourceId);
+    this.resourceStoppedIds.delete(resourceId);
+    this.resourceContextById.delete(resourceId);
+    this.completedRumResourceIds.delete(resourceId);
+  }
+
+  private hasPendingOrJournaledResource(resourceId: string): boolean {
+    return (this.resourcePendingOrJournalRefCounts.get(resourceId) || 0) > 0;
+  }
+
+  private getResourceIdsFromWorkerRequest(request: SDKWorkerRequest): string[] {
+    if (request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !request.payload) {
+      return [];
+    }
+    const batch = request.payload as Object as SDKRumResourceCommandBatchDTO;
+    const commands = batch.commands || [];
+    const resourceIds: string[] = [];
+    for (let i = 0; i < commands.length; i++) {
+      const resourceId = commands[i].resourceId;
+      if (resourceId && resourceId.length > 0) {
+        resourceIds.push(resourceId);
+      }
+    }
+    return resourceIds;
+  }
+
+  private retainResourceTransportReference(resourceId: string): void {
+    if (!resourceId) {
+      return;
+    }
+    this.resourcePendingOrJournalRefCounts.set(resourceId,
+      (this.resourcePendingOrJournalRefCounts.get(resourceId) || 0) + 1);
+  }
+
+  private releaseResourceTransportReferences(resourceIds: string[]): void {
+    for (let i = 0; i < resourceIds.length; i++) {
+      const resourceId = resourceIds[i];
+      const next = (this.resourcePendingOrJournalRefCounts.get(resourceId) || 0) - 1;
+      if (next > 0) {
+        this.resourcePendingOrJournalRefCounts.set(resourceId, next);
+      } else {
+        this.resourcePendingOrJournalRefCounts.delete(resourceId);
+      }
+      this.cleanupCompletedResourceDraftId(resourceId);
+    }
+  }
+
+  /** Final cleanup for commands deliberately abandoned by the transport. */
+  private discardUncommittedResourceTransportState(resourceIds: string[]): void {
+    for (let i = 0; i < resourceIds.length; i++) {
+      const resourceId = resourceIds[i];
+      if (!resourceId || this.hasPendingOrJournaledResource(resourceId)) {
+        continue;
+      }
+      this.resourceDraftIdsById.delete(resourceId);
+      this.completedRumResourceIds.delete(resourceId);
+      if (this.resourceContentSubmittedIds.has(resourceId) && this.resourceStoppedIds.has(resourceId)) {
+        this.resourceContentSubmittedIds.delete(resourceId);
+        this.resourceStoppedIds.delete(resourceId);
+        this.resourceContextById.delete(resourceId);
       }
     }
   }
 
-  private cleanupCommittedResourceDraftIds(): void {
-    const resourceIds = Array.from(this.resourceDraftIdsById.keys());
-    for (let i = 0; i < resourceIds.length; i++) {
-      const resourceId = resourceIds[i];
-      const workerCompleted = this.completedRumResourceIds.has(resourceId);
-      if ((!workerCompleted && (!this.resourceContentSubmittedIds.has(resourceId) ||
-        !this.resourceStoppedIds.has(resourceId))) || this.hasPendingOrJournaledResource(resourceId)) {
+  private compactRumSemanticJournalIfNeeded(): void {
+    if (this.rumSemanticJournalHead < FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX ||
+      this.rumSemanticJournalHead * 2 < this.rumSemanticJournal.length) {
+      return;
+    }
+    this.rumSemanticJournal = this.rumSemanticJournal.slice(this.rumSemanticJournalHead);
+    this.rumSemanticJournalHead = 0;
+  }
+
+  /**
+   * Bounds only restart/replay state. Evicted entries have already been posted
+   * to the Worker; their first normal response is still accepted and persisted.
+   * New collection is never sampled because this replay ledger is full.
+   */
+  private trimRumSemanticJournalForLatest(): void {
+    let evicted = 0;
+    while (this.rumSemanticJournal.length - this.rumSemanticJournalHead >=
+      FTRUMInnerManager.RUM_SEMANTIC_JOURNAL_HIGH_WATERMARK) {
+      const entry = this.rumSemanticJournal[this.rumSemanticJournalHead];
+      this.rumSemanticJournalByRequestId.delete(entry.request.id);
+      this.releaseResourceTransportReferences(entry.resourceIds);
+      this.rumSemanticJournalHead++;
+      evicted++;
+    }
+    this.compactRumSemanticJournalIfNeeded();
+    if (evicted > 0) {
+      this.logRumStateEviction('journal', evicted);
+    }
+  }
+
+  private trimResourceDraftStateForLatest(): void {
+    let evicted = 0;
+    while (this.resourceDraftIdsById.size >= FTRUMInnerManager.RUM_RESOURCE_DRAFT_HIGH_WATERMARK &&
+      this.resourceDraftIdOrderHead < this.resourceDraftIdOrder.length) {
+      const resourceId = this.resourceDraftIdOrder[this.resourceDraftIdOrderHead];
+      this.resourceDraftIdOrderHead++;
+      if (!this.resourceDraftIdsById.has(resourceId)) {
         continue;
       }
       this.resourceDraftIdsById.delete(resourceId);
@@ -527,34 +767,30 @@ export class FTRUMInnerManager {
       this.resourceStoppedIds.delete(resourceId);
       this.resourceContextById.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
+      evicted++;
+    }
+    if (this.resourceDraftIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
+      this.resourceDraftIdOrderHead * 2 >= this.resourceDraftIdOrder.length) {
+      this.resourceDraftIdOrder = this.resourceDraftIdOrder.slice(this.resourceDraftIdOrderHead);
+      this.resourceDraftIdOrderHead = 0;
+    }
+    if (evicted > 0) {
+      this.logRumStateEviction('resourceDraft', evicted);
     }
   }
 
-  private hasPendingOrJournaledResource(resourceId: string): boolean {
-    for (let i = 0; i < this.pendingResourceCommands.length; i++) {
-      if (this.pendingResourceCommands[i].payload.resourceId === resourceId) {
-        return true;
-      }
+  private logRumStateEviction(kind: string, count: number): void {
+    const now = Date.now();
+    if (now - this.lastRumStateEvictionLogAt < FTRUMInnerManager.RUM_STATE_EVICTION_LOG_INTERVAL_MS) {
+      return;
     }
-    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
-      const entry = this.rumSemanticJournal[i];
-      if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH || !entry.request.payload) {
-        continue;
-      }
-      const batch = entry.request.payload as Object as SDKRumResourceCommandBatchDTO;
-      const commands = batch.commands || [];
-      for (let j = 0; j < commands.length; j++) {
-        if (commands[j].resourceId === resourceId) {
-          return true;
-        }
-      }
-    }
-    return false;
+    this.lastRumStateEvictionLogAt = now;
+    FTInnerLogger.w(TAG, `RUM ${kind} replay state evicted: count=${count}; preserving newest collection`);
   }
 
   /** Restores acknowledged Resource/Counter commands into a fresh Worker. */
   public replayRumSemanticStateAfterWorkerRestart(): void {
-    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+    for (let i = this.rumSemanticJournalHead; i < this.rumSemanticJournal.length; i++) {
       const entry = this.rumSemanticJournal[i];
       if (!entry.workerAcknowledged) {
         // The pool manager owns replay for unresolved mailbox messages.
@@ -579,6 +815,40 @@ export class FTRUMInnerManager {
         break;
       }
     }
+  }
+
+  /**
+   * Settles only requests that exhausted the generic Worker recovery window.
+   * This is intentionally aggregate-driven: the Host must release the related
+   * Resource state, but must not manufacture thousands of failed responses.
+   */
+  public discardRumSemanticRequestsAfterWorkerRecovery(requestIds: string[]): number {
+    if (!requestIds || requestIds.length === 0) {
+      return 0;
+    }
+    const discardedIds = new Set<string>();
+    for (let i = 0; i < requestIds.length; i++) {
+      discardedIds.add(requestIds[i]);
+    }
+    const retained: RumSemanticJournalEntry[] = [];
+    let discarded = 0;
+    for (let i = this.rumSemanticJournalHead; i < this.rumSemanticJournal.length; i++) {
+      const entry = this.rumSemanticJournal[i];
+      if (!discardedIds.has(entry.request.id)) {
+        retained.push(entry);
+        continue;
+      }
+      this.rumSemanticJournalByRequestId.delete(entry.request.id);
+      this.rememberCommittedRumSemanticResponse(entry.request.id);
+      this.releaseResourceTransportReferences(entry.resourceIds);
+      this.discardUncommittedResourceTransportState(entry.resourceIds);
+      discarded++;
+    }
+    if (discarded > 0) {
+      this.rumSemanticJournal = retained;
+      this.rumSemanticJournalHead = 0;
+    }
+    return discarded;
   }
 
   private createResourceStateRecoveryRequest(request: SDKWorkerRequest): SDKWorkerRequest {
@@ -613,11 +883,16 @@ export class FTRUMInnerManager {
   private getOrCreateResourceDraftIds(resourceId: string): RumResourceDraftIds {
     let ids = this.resourceDraftIdsById.get(resourceId);
     if (!ids) {
+      // This is only the Host's replay/idempotency cache. When it reaches its
+      // window, evict the oldest state before recording the newest resource;
+      // never reject the new resource command.
+      this.trimResourceDraftStateForLatest();
       ids = {
         resourceUuid: Utils.generateUUID(),
         errorUuid: Utils.generateUUID()
       };
       this.resourceDraftIdsById.set(resourceId, ids);
+      this.resourceDraftIdOrder.push(resourceId);
     }
     return ids;
   }
@@ -784,7 +1059,7 @@ export class FTRUMInnerManager {
 
   public async handleRumCounterMailboxResponse(response: SDKWorkerResponse): Promise<boolean> {
     if (!response.ok) {
-      FTInnerLogger.e(TAG, `RUM counter mailbox failed: id=${response.id}, error=${response.errorMessage || 'unknown'}`);
+      this.logRumCounterMailboxFailure(response.errorMessage || 'unknown');
       return false;
     }
     if (!response.payload) {
@@ -850,6 +1125,15 @@ export class FTRUMInnerManager {
     }
   }
 
+  private logRumCounterMailboxFailure(errorMessage: string): void {
+    const now = Date.now();
+    if (now - this.lastRumCounterMailboxFailureLogAt < FTRUMInnerManager.RUM_STATE_EVICTION_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastRumCounterMailboxFailureLogAt = now;
+    FTInnerLogger.w(TAG, `RUM counter mailbox failed: ${errorMessage}`);
+  }
+
   private submitCompletedActionWorkerInput(actionBean: ActionBean, traceBaseName: string): void {
     const actionId = actionBean.getId();
     try {
@@ -858,22 +1142,13 @@ export class FTRUMInnerManager {
         return;
       }
 
-      if (this.insertedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `insertedActionIds size (${this.insertedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.insertedActionIds.clear();
-      }
-      if (this.processedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `processedActionIds size (${this.processedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.processedActionIds.clear();
-      }
-
-      this.insertedActionIds.add(actionId);
-      this.processedActionIds.add(actionId);
+      this.rememberInsertedActionId(actionId);
+      this.rememberProcessedActionId(actionId);
       this.submitCompletedActionWorkerRequest(actionBean, traceBaseName);
     } catch (error) {
       FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Error scheduling completed action worker input: ${error}`);
-      this.insertedActionIds.delete(actionId);
-      this.processedActionIds.delete(actionId);
+      this.forgetInsertedActionId(actionId);
+      this.forgetProcessedActionId(actionId);
     }
   }
 
@@ -895,22 +1170,13 @@ export class FTRUMInnerManager {
         return;
       }
 
-      if (this.insertedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `insertedActionIds size (${this.insertedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.insertedActionIds.clear();
-      }
-      if (this.processedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `processedActionIds size (${this.processedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.processedActionIds.clear();
-      }
-
-      this.insertedActionIds.add(actionId);
-      this.processedActionIds.add(actionId);
+      this.rememberInsertedActionId(actionId);
+      this.rememberProcessedActionId(actionId);
       this.postCompletedActionWorkerRequest(actionId, actionName, payload, traceBaseName);
     } catch (error) {
       FTInnerLogger.e(TAG, `[FT-ACTION-DEBUG] Error scheduling completed action DTO: ${error}`);
-      this.insertedActionIds.delete(actionId);
-      this.processedActionIds.delete(actionId);
+      this.forgetInsertedActionId(actionId);
+      this.forgetProcessedActionId(actionId);
     }
   }
 
@@ -1123,13 +1389,8 @@ export class FTRUMInnerManager {
               // Still delete from database even if already processed/inserted
               deleteIds.push(actionId);
             } else {
-              // Check and clean up processedActionIds if it exceeds limit before adding
-              if (this.processedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-                FTInnerLogger.w(TAG, `processedActionIds size (${this.processedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-                this.processedActionIds.clear();
-              }
               // Mark as processed immediately to prevent duplicate processing
-              this.processedActionIds.add(actionId);
+              this.rememberProcessedActionId(actionId);
               unprocessedBeans.push(bean);
               deleteIds.push(actionId);
             }
@@ -1166,7 +1427,7 @@ export class FTRUMInnerManager {
             } catch (error) {
               FTInnerLogger.e(TAG, `Error processing action ${bean.getActionName()}: ${error}`);
               // Remove from processed set if insert failed, so it can be retried
-              this.processedActionIds.delete(bean.getId());
+              this.forgetProcessedActionId(bean.getId());
             }
           }
           
@@ -1550,12 +1811,19 @@ export class FTRUMInnerManager {
     this.resourceContentSubmittedIds.clear();
     this.resourceStoppedIds.clear();
     this.rumSemanticJournal = [];
+    this.rumSemanticJournalHead = 0;
     this.rumSemanticJournalByRequestId.clear();
     this.rumSemanticSequence = 0;
     this.committedRumSemanticResponseIds.clear();
     this.committedRumSemanticResponseOrder = [];
+    this.committedRumSemanticResponseOrderHead = 0;
     this.resourceDraftIdsById.clear();
+    this.resourceDraftIdOrder = [];
+    this.resourceDraftIdOrderHead = 0;
     this.completedRumResourceIds.clear();
+    this.resourcePendingOrJournalRefCounts.clear();
+    this.lastRumStateEvictionLogAt = 0;
+    this.lastRumCounterMailboxFailureLogAt = 0;
 
     this.sessionId = Utils.generateUUID();
     this.rumAppId = "";
@@ -1576,8 +1844,7 @@ export class FTRUMInnerManager {
     this.rumConfig = null;
     this.isGeneratingActionSum = false;
     this.isGeneratingViewSum = false;
-    this.processedActionIds.clear();
-    this.insertedActionIds.clear();
+    this.clearActionIdLedgers();
     this.actionInsertLock = Promise.resolve();
     this.viewOperationLock = Promise.resolve();
     this.sessionRefreshLock = Promise.resolve();
@@ -2193,9 +2460,9 @@ export class FTRUMInnerManager {
     };
   }
 
-  private submitResourceWorkerCommand(command: SDKRumResourceCommandDTO, traceBaseName: string): void {
+  private submitResourceWorkerCommand(command: SDKRumResourceCommandDTO, traceBaseName: string): boolean {
     if (!this.context || !command || !command.resourceId) {
-      return;
+      return false;
     }
     const draftIds = this.getOrCreateResourceDraftIds(command.resourceId);
     command.draftUuid = draftIds.resourceUuid;
@@ -2204,11 +2471,13 @@ export class FTRUMInnerManager {
     this.pendingResourceCommands.push({
       payload: command
     });
+    this.retainResourceTransportReference(command.resourceId);
     if (this.pendingResourceCommands.length >= FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.flushResourceWorkerCommandBatch(traceBaseName);
-      return;
+      return true;
     }
     this.scheduleResourceWorkerCommandBatchFlush(traceBaseName);
+    return true;
   }
 
   private scheduleResourceWorkerCommandBatchFlush(
@@ -2502,8 +2771,8 @@ export class FTRUMInnerManager {
     const dropped = this.pendingCompletedActions.length;
     for (let i = 0; i < this.pendingCompletedActions.length; i++) {
       const actionId = this.pendingCompletedActions[i].actionId;
-      this.insertedActionIds.delete(actionId);
-      this.processedActionIds.delete(actionId);
+      this.forgetInsertedActionId(actionId);
+      this.forgetProcessedActionId(actionId);
     }
     this.pendingCompletedActions = [];
     FTInnerLogger.w(TAG, `Completed action transport degraded: dropped=${dropped}, ${reason}`);
@@ -2520,13 +2789,11 @@ export class FTRUMInnerManager {
       const resourceId = this.pendingResourceCommands[i].payload.resourceId;
       if (resourceId && resourceId.length > 0) {
         resourceIds.push(resourceId);
-        this.resourceDraftIdsById.delete(resourceId);
       }
     }
     this.pendingResourceCommands = [];
-    for (let i = 0; i < resourceIds.length; i++) {
-      this.cleanupResourceContextIfComplete(resourceIds[i]);
-    }
+    this.releaseResourceTransportReferences(resourceIds);
+    this.discardUncommittedResourceTransportState(resourceIds);
     FTInnerLogger.w(TAG, `RUM resource transport degraded: dropped=${dropped}, ${reason}`);
   }
 
@@ -2547,18 +2814,20 @@ export class FTRUMInnerManager {
     }
     const retained: RumSemanticJournalEntry[] = [];
     let dropped = 0;
-    for (let i = 0; i < this.rumSemanticJournal.length; i++) {
+    for (let i = this.rumSemanticJournalHead; i < this.rumSemanticJournal.length; i++) {
       const entry = this.rumSemanticJournal[i];
       if (entry.workerAcknowledged) {
         this.rumSemanticJournalByRequestId.delete(entry.request.id);
         this.rememberCommittedRumSemanticResponse(entry.request.id);
+        this.releaseResourceTransportReferences(entry.resourceIds);
+        this.discardUncommittedResourceTransportState(entry.resourceIds);
         dropped++;
       } else {
         retained.push(entry);
       }
     }
     this.rumSemanticJournal = retained;
-    this.cleanupCommittedResourceDraftIds();
+    this.rumSemanticJournalHead = 0;
     FTInnerLogger.w(TAG, `RUM semantic recovery degraded: dropped=${dropped}, ${reason}`);
   }
 
@@ -3156,23 +3425,11 @@ export class FTRUMInnerManager {
     }, 60000); // Check session every minute
   }
   
-  /**
-   * Clean up Set collections to prevent memory leak
-   * Clear Sets if they exceed MAX_SET_SIZE limit
-   */
+  /** Maintains compact FIFO prefixes for the bounded action de-dup windows. */
   private cleanupSetCollections(): void {
     try {
-      // Clean up processedActionIds
-      if (this.processedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `processedActionIds size (${this.processedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.processedActionIds.clear();
-      }
-      
-      // Clean up insertedActionIds
-      if (this.insertedActionIds.size > Constants.MAX_SET_SIZE_ACTION) {
-        FTInnerLogger.w(TAG, `insertedActionIds size (${this.insertedActionIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.insertedActionIds.clear();
-      }
+      this.compactProcessedActionIdOrder();
+      this.compactInsertedActionIdOrder();
       
       // Clean up preActivityDuration (Map type, use MAX_MAP_SIZE_RESOURCE)
       if (this.preActivityDuration.size > Constants.MAX_MAP_SIZE_RESOURCE) {
@@ -3914,9 +4171,7 @@ export class FTRUMInnerManager {
       this.notSessionErrorCollectArr = [];
       this.preActivityDuration.clear();
       
-      // Clear Set collections to prevent memory leak
-      this.processedActionIds.clear();
-      this.insertedActionIds.clear();
+      this.clearActionIdLedgers();
 
       // Clear rumDataGenerateTimer if exists
       if (this.rumDataGenerateTimer) {
@@ -3958,11 +4213,16 @@ export class FTRUMInnerManager {
       this.resourceContentSubmittedIds.clear();
       this.resourceStoppedIds.clear();
       this.rumSemanticJournal = [];
+      this.rumSemanticJournalHead = 0;
       this.rumSemanticJournalByRequestId.clear();
       this.committedRumSemanticResponseIds.clear();
       this.committedRumSemanticResponseOrder = [];
+      this.committedRumSemanticResponseOrderHead = 0;
       this.resourceDraftIdsById.clear();
+      this.resourceDraftIdOrder = [];
+      this.resourceDraftIdOrderHead = 0;
       this.completedRumResourceIds.clear();
+      this.resourcePendingOrJournalRefCounts.clear();
 
       this.context = null;
       this.userData = null;

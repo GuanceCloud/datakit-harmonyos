@@ -62,6 +62,9 @@ export interface FTDBTaskPoolCachePolicySnapshot {
   dbCacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
+  /** Host-maintained counts; initialized once, not queried for every write. */
+  logCount: number;
+  rumCount: number;
   logDiscardStrategy: string;
   rumDiscardStrategy: string;
 }
@@ -547,6 +550,8 @@ function defaultCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
     dbCacheDiscard: DBCacheDiscard.DISCARD,
     logLimitCount: 0,
     rumLimitCount: 0,
+    logCount: 0,
+    rumCount: 0,
     logDiscardStrategy: DBCacheDiscard.DISCARD,
     rumDiscardStrategy: DBCacheDiscard.DISCARD
   };
@@ -1016,8 +1021,8 @@ async function resolveAllowedInsertCount(
     return 0;
   }
 
-  const currentCount = await queryTotalCountInTaskPool(rdbStore, dataTypes);
   const limit = category === FTDBTaskPoolCacheCategory.LOG ? policy.logLimitCount : policy.rumLimitCount;
+  const currentCount = category === FTDBTaskPoolCacheCategory.LOG ? policy.logCount : policy.rumCount;
   if (limit <= 0 || currentCount + requested <= limit) {
     return requested;
   }
@@ -1030,6 +1035,11 @@ async function resolveAllowedInsertCount(
     const deleted = await deleteOldestSyncDataInTaskPool(rdbStore, dataTypes, overflow, timing);
     result.deletedOld += deleted;
     addDeletedTypesDelta(delta, dataTypes, deleted);
+    if (category === FTDBTaskPoolCacheCategory.LOG) {
+      policy.logCount = Math.max(0, currentCount - deleted);
+    } else {
+      policy.rumCount = Math.max(0, currentCount - deleted);
+    }
     timing.cleanupMs += Math.max(0, Date.now() - cleanupStart);
     return requested;
   }

@@ -2004,6 +2004,14 @@ export class StressTestManager {
 
   private scheduleFinalUploadFlush(stopReason: StressStopReason): void {
     this.clearFinalUploadFlushTimer();
+    const status = SyncTaskManager.getInstance().getStatus();
+    if (status.autoSync) {
+      DemoLogger.i(TAG,
+        `<FT-STRESS-UPLOAD-FLUSH> skipped reason=${stopReason} autoSync=true ` +
+          `running=${status.running} uploadRunning=${status.uploadLaneStatus.isRunning} ` +
+          `uploadScheduled=${status.uploadLaneStatus.isScheduled} needReschedule=${status.uploadLaneStatus.needReschedule}`);
+      return;
+    }
     this.finalUploadFlushTimerId = setTimeout((): void => {
       this.finalUploadFlushTimerId = null;
       this.triggerFinalUploadFlush(stopReason, FINAL_UPLOAD_FLUSH_DELAY_MS);

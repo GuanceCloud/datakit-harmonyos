@@ -15,7 +15,9 @@ import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import {
   SDKDedicatedPoolManager,
-  SDKWorkerMailboxPostResult
+  SDKWorkerMailboxRecoveryDiscard,
+  SDKWorkerMailboxPostResult,
+  SDKWorkerMailboxSource
 } from './thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
@@ -44,6 +46,7 @@ const TAG = "FTTrackInner";
 /** Host-side RUM queue is only a bounded transport coalescer. */
 const RUM_WORKER_TRANSPORT_BATCH_SIZE = 64;
 const RUM_WORKER_TRANSPORT_BATCH_DELAY_MS = 16;
+const RUM_BACKPRESSURE_LOG_INTERVAL_MS = 10000;
 
 enum WriteCacheCategory {
   LOG = 'log',
@@ -118,6 +121,12 @@ interface PendingDirectRumWorkerRequest {
   request: SDKWorkerRequest;
 }
 
+/** Each ThreadWorker owns its own ordered Host response lane. */
+interface RumSemanticResponseLane {
+  tail: Promise<void>;
+  pendingCount: number;
+}
+
 interface SDKWorkerDrainBarrierPayload {
   probe: boolean;
   source: string;
@@ -146,7 +155,11 @@ class FTTrackInner {
   private pendingDirectRumWorkerRequests: PendingDirectRumWorkerRequest[] = [];
   private rumWorkerEventFlushTimer: number | null = null;
   private directRumWorkerRetryTimer: number | null = null;
-  private rumSemanticResponseTail: Promise<void> = Promise.resolve();
+  /** Do not merge responses from different Worker slots into one Promise tail. */
+  private rumSemanticResponseLanes: Map<string, RumSemanticResponseLane> = new Map();
+  private lastRumCacheDiscardLogAt: number = 0;
+  private lastEventMailboxFailureLogAt: number = 0;
+  private lastEventMailboxRecoveryDiscardLogAt: number = 0;
   private workerLineProtocolContextSnapshot: SDKLineProtocolContextDTO | null = null;
   private workerLineProtocolContextVersion: number = 0;
   private syncedLineContextVersionByPool: Map<SDKDedicatedPoolType, number> = new Map();
@@ -572,7 +585,18 @@ class FTTrackInner {
     const eventPending = eventStatus ? eventStatus.mailboxPending : 0;
     const logPending = logStatus ? logStatus.mailboxPending : 0;
     return eventPending === 0 && logPending === 0 && this.pendingWorkerDbWriteCount === 0 &&
-      this.pendingRumWorkerEvents.length === 0 && this.pendingDirectRumWorkerRequests.length === 0;
+      this.pendingRumWorkerEvents.length === 0 && this.pendingDirectRumWorkerRequests.length === 0 &&
+      !this.hasPendingRumSemanticResponses();
+  }
+
+  private hasPendingRumSemanticResponses(): boolean {
+    const lanes = Array.from(this.rumSemanticResponseLanes.values());
+    for (let i = 0; i < lanes.length; i++) {
+      if (lanes[i].pendingCount > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -734,17 +758,54 @@ class FTTrackInner {
     return record;
   }
 
-  private enqueueEventMailboxResponse(response: SDKWorkerResponse): void {
+  private enqueueEventMailboxResponse(
+    response: SDKWorkerResponse,
+    source: SDKWorkerMailboxSource | null
+  ): void {
+    const laneKey = this.getRumSemanticResponseLaneKey(source);
+    const lane = this.getRumSemanticResponseLane(laneKey);
+    lane.pendingCount++;
     const run = async (): Promise<void> => {
-      await this.handleEventMailboxResponse(response);
+      try {
+        await this.handleEventMailboxResponse(response);
+      } finally {
+        lane.pendingCount = Math.max(0, lane.pendingCount - 1);
+        if (source) {
+          SDKDedicatedPoolManager.getInstance().grantEventResponseCredits(source, 1);
+        }
+        this.releaseRumSemanticResponseLane(laneKey, lane);
+      }
     };
-    this.rumSemanticResponseTail = this.rumSemanticResponseTail.then(run, run);
+    lane.tail = lane.tail.then(run, run);
+  }
+
+  private getRumSemanticResponseLaneKey(source: SDKWorkerMailboxSource | null): string {
+    return source ?
+      `${source.pool}:${source.workerSlotIndex}:${source.workerGeneration}` :
+      `${SDKDedicatedPoolType.EVENT_CONSUMER}:unscoped`;
+  }
+
+  private getRumSemanticResponseLane(key: string): RumSemanticResponseLane {
+    let lane = this.rumSemanticResponseLanes.get(key);
+    if (!lane) {
+      lane = {
+        tail: Promise.resolve(),
+        pendingCount: 0
+      };
+      this.rumSemanticResponseLanes.set(key, lane);
+    }
+    return lane;
+  }
+
+  private releaseRumSemanticResponseLane(key: string, lane: RumSemanticResponseLane): void {
+    if (lane.pendingCount === 0 && this.rumSemanticResponseLanes.get(key) === lane) {
+      this.rumSemanticResponseLanes.delete(key);
+    }
   }
 
   private async handleEventMailboxResponse(response: SDKWorkerResponse): Promise<void> {
     const rumManager = FTRUMInnerManager.getInstance();
     if (!rumManager.markRumSemanticWorkerResponse(response.id)) {
-      FTInnerLogger.d(TAG, `Skip duplicate committed EVENT mailbox response: id=${response.id}`);
       return;
     }
     if (this.isRumCounterMailboxResponse(response)) {
@@ -758,7 +819,7 @@ class FTTrackInner {
     }
 
     if (!response.ok) {
-      FTInnerLogger.e(TAG, `EVENT mailbox command failed: id=${response.id}, error=${response.errorMessage || 'unknown'}`);
+      this.logEventMailboxFailure(response.errorMessage || 'unknown');
       this.completeRumWorkerCallback(callback, false);
       return;
     }
@@ -785,6 +846,19 @@ class FTTrackInner {
         if (payload.deltas && payload.deltas.length > 0) {
           rumManager.acknowledgeRumSemanticThrough(response.id);
         }
+      }
+      return;
+    }
+
+    if (await this.shouldSkipRumDraftDbWriteForCacheDiscard()) {
+      this.logRumCacheDiscard(drafts.length);
+      this.completeRumWorkerCallback(callback, true);
+      if (countersApplied) {
+        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumSemanticHostApplied(response.id);
+        // DISCARD is terminal for these drafts. Advance the barrier here so
+        // resource draft/context state is still converged without a DB task.
+        rumManager.acknowledgeRumSemanticThrough(response.id);
       }
       return;
     }
@@ -820,6 +894,40 @@ class FTTrackInner {
     }
   }
 
+  private logEventMailboxFailure(errorMessage: string): void {
+    const now = Date.now();
+    if (now - this.lastEventMailboxFailureLogAt < RUM_BACKPRESSURE_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastEventMailboxFailureLogAt = now;
+    FTInnerLogger.w(TAG, `EVENT mailbox command failed: ${errorMessage}`);
+  }
+
+  /** Settles a recovery-window loss once, without per-request error callbacks. */
+  private handleEventMailboxRecoveryDiscard(discard: SDKWorkerMailboxRecoveryDiscard): void {
+    let callbacksSettled = 0;
+    for (let i = 0; i < discard.requestIds.length; i++) {
+      const requestId = discard.requestIds[i];
+      const callback = this.pendingRumWorkerCallbacks.get(requestId);
+      if (!callback) {
+        continue;
+      }
+      this.pendingRumWorkerCallbacks.delete(requestId);
+      this.completeRumWorkerCallback(callback, false);
+      callbacksSettled++;
+    }
+    const semanticSettled = FTRUMInnerManager.getInstance()
+      .discardRumSemanticRequestsAfterWorkerRecovery(discard.requestIds);
+    const now = Date.now();
+    if (now - this.lastEventMailboxRecoveryDiscardLogAt < RUM_BACKPRESSURE_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastEventMailboxRecoveryDiscardLogAt = now;
+    FTInnerLogger.w(TAG,
+      `EVENT mailbox recovery discarded=${discard.requestIds.length}, semantic=${semanticSettled}, ` +
+        `callbacks=${callbacksSettled}; ${discard.message}`);
+  }
+
   private isRumCounterMailboxResponse(response: SDKWorkerResponse): boolean {
     if (!response || !response.id) {
       return false;
@@ -836,6 +944,35 @@ class FTTrackInner {
     if (result || callback.callbackOnFinish) {
       callback.callBack.onComplete();
     }
+  }
+
+  private async shouldSkipRumDraftDbWriteForCacheDiscard(): Promise<boolean> {
+    return await this.shouldSkipWorkerDraftDbWriteForCacheDiscard(DataType.RUM_APP);
+  }
+
+  private async shouldSkipWorkerDraftDbWriteForCacheDiscard(dataType: DataType): Promise<boolean> {
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    if (this.context) {
+      // This awaits only the one-time counter hydration. It avoids a first
+      // full-cache response creating a DB write task just to discover DISCARD.
+      await cachePolicy.ensureCountsInitialized(this.context);
+    }
+    return cachePolicy.isCacheDiscardingAtLimit(dataType);
+  }
+
+  private logRumCacheDiscard(draftCount: number, details: string = ''): void {
+    this.logWorkerDraftCacheDiscard(DataType.RUM_APP, draftCount, details);
+  }
+
+  private logWorkerDraftCacheDiscard(dataType: DataType, draftCount: number, details: string = ''): void {
+    const now = Date.now();
+    if (now - this.lastRumCacheDiscardLogAt < RUM_BACKPRESSURE_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastRumCacheDiscardLogAt = now;
+    FTInnerLogger.w(TAG,
+      `Worker drafts skipped by cache DISCARD: type=${dataType.toString()}, count=${draftCount}` +
+        `${details.length > 0 ? `, ${details}` : ''}`);
   }
 
   private resolveFallbackDataTypeFromDrafts(drafts: SDKSyncDataDraftDTO[]): DataType {
@@ -873,8 +1010,8 @@ class FTTrackInner {
       FTInnerLogger.d(TAG,
         `[FT-ERROR-SAMPLING] Successfully stored data as ${customDataType}: uuid=${firstUuid}, measurement=${measurement}`);
     } else if (!result && writeResult !== null && writeResult.dropped > 0) {
-      FTInnerLogger.e(TAG,
-        `RUM worker draft write: ${measurement} ${customDataType || dataType.toString()}, uuid: ${firstUuid}, drop by Cache limit`);
+      this.logRumCacheDiscard(normalizedDrafts.length,
+        `${measurement} ${customDataType || dataType.toString()}, uuid=${firstUuid}`);
     }
 
     if (result && callBack) {
@@ -1014,6 +1151,10 @@ class FTTrackInner {
 
   private async writeLogDraftsFromWorkerAsync(drafts: SDKSyncDataDraftDTO[], isSilence: boolean): Promise<void> {
     try {
+      if (await this.shouldSkipWorkerDraftDbWriteForCacheDiscard(DataType.LOG)) {
+        this.logWorkerDraftCacheDiscard(DataType.LOG, drafts.length);
+        return;
+      }
       const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
       const affected = this.getWriteAffectedCount(writeResult);
       if (affected > 0 && !isSilence) {
@@ -1141,14 +1282,20 @@ class FTTrackInner {
     this.context = context;
     SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
       SDKDedicatedPoolType.EVENT_CONSUMER,
-      (response: SDKWorkerResponse) => {
-        this.enqueueEventMailboxResponse(response);
+      (response: SDKWorkerResponse, source: SDKWorkerMailboxSource | null) => {
+        this.enqueueEventMailboxResponse(response, source);
       }
     );
     SDKDedicatedPoolManager.getInstance().setWorkerRecoveryHandler(
       SDKDedicatedPoolType.EVENT_CONSUMER,
       (_restartCount: number) => {
         FTRUMInnerManager.getInstance().replayRumSemanticStateAfterWorkerRestart();
+      }
+    );
+    SDKDedicatedPoolManager.getInstance().setMailboxRecoveryDiscardHandler(
+      SDKDedicatedPoolType.EVENT_CONSUMER,
+      (discard: SDKWorkerMailboxRecoveryDiscard) => {
+        this.handleEventMailboxRecoveryDiscard(discard);
       }
     );
     this.dataHelper.initBaseConfig(config);
@@ -2118,6 +2265,10 @@ class FTTrackInner {
       this.pendingDirectRumWorkerRequests = [];
       this.pendingRumWorkerCallbacks.clear();
       SDKDedicatedPoolManager.getInstance().setWorkerRecoveryHandler(SDKDedicatedPoolType.EVENT_CONSUMER, null);
+      SDKDedicatedPoolManager.getInstance().setMailboxRecoveryDiscardHandler(
+        SDKDedicatedPoolType.EVENT_CONSUMER,
+        null
+      );
       this.trackLogManager.shutdown();
       this.syncTaskManager.stop();
       // SessionReplay functionality has been migrated to independent library
