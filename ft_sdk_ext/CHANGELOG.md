@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-07-17
+- Released the stable `ft_sdk_ext` package, aligned with `ft_sdk` 0.1.14.
+- Provides NetworkKit interceptor integration through the versioned `FTSDKExtensionBridge` contract.
+
 ## [0.1.14-alpha06] - 2026-05-14
 - Migrated NetworkKit interceptor integration to the versioned `FTSDKExtensionBridge` contract from `ft_sdk`.
 - Removed `ft_sdk_ext` dependencies on internal ft_sdk source-tree import paths.
