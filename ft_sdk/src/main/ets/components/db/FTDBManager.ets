@@ -26,6 +26,7 @@ const TAG = "FTDBManager";
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const DB_WRITE_SLOW_COST_MS: number = 100;
 const DB_WRITE_SLOW_QUEUE_WAIT_MS: number = 50;
+const DB_DRAFT_DISCARD_LOG_INTERVAL_MS: number = 10000;
 
 /**
  * Action counts interface
@@ -116,6 +117,7 @@ export class FTDBManager extends DBManager {
   private readonly context: Context;
   private initPromise: Promise<void> | null = null;
   private syncDataWriteFailureFallback: SyncDataWriteFailureFallback | null = null;
+  private lastDraftCacheDiscardLogAt: number = 0;
 
   // Deduplication cache, updated only from the DB write section.
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
@@ -549,6 +551,8 @@ export class FTDBManager extends DBManager {
       dbCacheDiscard: cachePolicy.getDBCacheDiscard(),
       logLimitCount: cachePolicy.getLogLimitCount(),
       rumLimitCount: cachePolicy.getRumLimitCount(),
+      logCount: cachePolicy.getLogCount(),
+      rumCount: cachePolicy.getRumCount(),
       logDiscardStrategy: String(cachePolicy.getDiscardStrategy(DataType.LOG)),
       rumDiscardStrategy: String(cachePolicy.getDiscardStrategy(DataType.RUM_APP))
     };
@@ -765,10 +769,9 @@ export class FTDBManager extends DBManager {
       return 0;
     }
 
-    const currentCount = await this.queryTotalCountLocked(rdbStore, types, timing);
     const countPolicyStartTime = Date.now();
     if (category === SyncDataCacheCategory.LOG) {
-      cachePolicy.syncCountsFromDbInternal(currentCount, undefined);
+      const currentCount = cachePolicy.getLogCount();
       const limit = cachePolicy.getLogLimitCount();
       if (limit <= 0 || currentCount + requested <= limit) {
         this.addWriteComputeTime(timing, countPolicyStartTime);
@@ -789,7 +792,7 @@ export class FTDBManager extends DBManager {
       return Math.max(0, limit - currentCount);
     }
 
-    cachePolicy.syncCountsFromDbInternal(undefined, currentCount);
+    const currentCount = cachePolicy.getRumCount();
     const limit = cachePolicy.getRumLimitCount();
     if (limit <= 0 || currentCount + requested <= limit) {
       this.addWriteComputeTime(timing, countPolicyStartTime);
@@ -1080,6 +1083,9 @@ export class FTDBManager extends DBManager {
 
     try {
       if (dataToWrite.length > 0) {
+        if (options.applyCachePolicy === true) {
+          await FTDBCachePolicy.getInstance().ensureCountsInitialized(this.context);
+        }
         const taskPoolOptions: FTDBTaskPoolWriteOptions = {
           applyCachePolicy: options.applyCachePolicy === true,
           reInsert,
@@ -1092,7 +1098,8 @@ export class FTDBManager extends DBManager {
           source,
           dataToWrite,
           taskPoolOptions,
-          this.createTaskPoolCachePolicySnapshot()
+          () => this.createTaskPoolCachePolicySnapshot(),
+          (response: FTDBTaskPoolWriteResponse): void => this.applyTaskPoolCountDelta(response)
         );
         dbLaneWaitTime = Math.max(dbLaneWaitTime, taskPoolResponse.dbLaneWaitMs || 0);
         const taskPoolResult = taskPoolResponse.result;
@@ -1103,9 +1110,6 @@ export class FTDBManager extends DBManager {
         result.deletedOld += taskPoolResult.deletedOld;
         result.duplicateSkipped += taskPoolResult.duplicateSkipped;
         result.errorMessage = taskPoolResult.errorMessage;
-        if (result.success) {
-          this.applyTaskPoolCountDelta(taskPoolResponse);
-        }
         if (result.success && result.inserted + result.updated > 0) {
           this.markTaskPoolDataAsInserted(dataToWrite, reInsert);
         }
@@ -1186,6 +1190,9 @@ export class FTDBManager extends DBManager {
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
 
     try {
+      if (options.applyCachePolicy === true) {
+        await FTDBCachePolicy.getInstance().ensureCountsInitialized(this.context);
+      }
       const taskPoolOptions: FTDBTaskPoolWriteOptions = {
         applyCachePolicy: options.applyCachePolicy === true,
         reInsert,
@@ -1199,7 +1206,8 @@ export class FTDBManager extends DBManager {
         drafts,
         fallbackDataType.toString(),
         taskPoolOptions,
-        this.createTaskPoolCachePolicySnapshot()
+        () => this.createTaskPoolCachePolicySnapshot(),
+        (response: FTDBTaskPoolWriteResponse): void => this.applyTaskPoolCountDelta(response)
       );
       dbLaneWaitTime = Math.max(dbLaneWaitTime, taskPoolResponse.dbLaneWaitMs || 0);
       const taskPoolResult = taskPoolResponse.result;
@@ -1210,9 +1218,6 @@ export class FTDBManager extends DBManager {
       result.deletedOld += taskPoolResult.deletedOld;
       result.duplicateSkipped += taskPoolResult.duplicateSkipped;
       result.errorMessage = taskPoolResult.errorMessage;
-      if (result.success) {
-        this.applyTaskPoolCountDelta(taskPoolResponse);
-      }
     } catch (error) {
       result.success = false;
       result.errorMessage = String(error);
@@ -1360,6 +1365,17 @@ export class FTDBManager extends DBManager {
       (costTime >= DB_WRITE_SLOW_COST_MS || dbLaneWaitTime >= DB_WRITE_SLOW_QUEUE_WAIT_MS);
     if (!hasRisk && !isSlow) {
       return;
+    }
+
+    const isOnlyDraftCacheDiscard = label === 'DB-WRITE-DRAFTS' && result.dropped > 0 &&
+      result.inserted === 0 && result.updated === 0 && result.deletedOld === 0 &&
+      result.duplicateSkipped === 0 && result.errorMessage.length === 0;
+    if (isOnlyDraftCacheDiscard) {
+      const now = Date.now();
+      if (now - this.lastDraftCacheDiscardLogAt < DB_DRAFT_DISCARD_LOG_INTERVAL_MS) {
+        return;
+      }
+      this.lastDraftCacheDiscardLogAt = now;
     }
 
     const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';

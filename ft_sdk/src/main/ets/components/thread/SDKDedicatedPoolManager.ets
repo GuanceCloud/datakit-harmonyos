@@ -3,6 +3,7 @@ import {
   SDKDedicatedPoolType,
   SDKWorkerErrorPayload,
   SDKWorkerPayload,
+  SDKWorkerResponseCreditDTO,
   SDKWorkerCommand,
   SDKWorkerRequest,
   SDKWorkerResponse,
@@ -16,10 +17,7 @@ import {
 } from './SDKWorkerPathResolver';
 import {
   isSDKWorkerInFlightReplaySafe,
-  isSDKWorkerMailboxReplaySafe,
-  SDK_WORKER_MAILBOX_REPLAY_CAPACITY,
-  SDK_WORKER_MAX_MESSAGE_REPLAY_ATTEMPTS,
-  SDK_WORKER_MAX_RESTART_ATTEMPTS
+  isSDKWorkerMailboxReplaySafe
 } from './SDKWorkerReplayPolicy';
 import {
   SDKWorkerRetryCircuit,
@@ -38,6 +36,13 @@ const CRASH_WORKER_IDLE_TIMEOUT_MS = 120_000;
 const ANR_WORKER_IDLE_TIMEOUT_MS = 90_000;
 const DEDICATED_LANE_WORKER_COUNT = 1;
 const POOL_QUEUE_COMPACT_THRESHOLD = 64;
+const MAX_WORKER_RESTART_ATTEMPTS = 3;
+const MAX_WORKER_MESSAGE_REPLAY_ATTEMPTS = 1;
+/**
+ * Per Worker-pool recovery window. It bounds only Host-side replay copies:
+ * when full, the oldest copy is evicted while new postMessage calls continue.
+ */
+const MAILBOX_REPLAY_CAPACITY = 5000;
 
 export interface SDKDedicatedPoolStatus {
   pool: string;
@@ -80,8 +85,28 @@ export interface SDKWorkerMailboxPostResult extends SDKWorkerRetryDecision {
   skippedByCircuit: boolean;
 }
 
-export type SDKMailboxResponseHandler = (response: SDKWorkerResponse) => void;
+/** A bounded recovery window was exhausted after an actual Worker failure. */
+export interface SDKWorkerMailboxRecoveryDiscard {
+  pool: SDKDedicatedPoolType;
+  requestIds: string[];
+  message: string;
+}
+
+/** Identifies the exact ThreadWorker that emitted a mailbox response. */
+export interface SDKWorkerMailboxSource {
+  pool: SDKDedicatedPoolType;
+  workerSlotIndex: number;
+  workerGeneration: number;
+}
+
+export type SDKMailboxResponseHandler = (
+  response: SDKWorkerResponse,
+  source: SDKWorkerMailboxSource | null
+) => void;
 export type SDKWorkerRecoveryHandler = (restartCount: number) => void;
+export type SDKWorkerMailboxRecoveryDiscardHandler = (
+  discard: SDKWorkerMailboxRecoveryDiscard
+) => void;
 
 interface SDKPoolConfig {
   pool: SDKDedicatedPoolType;
@@ -117,11 +142,11 @@ interface SDKMailboxReplayEntry {
   request: SDKWorkerRequest;
   replayCount: number;
   replaySafe: boolean;
-  timeoutId: number;
 }
 
 interface SDKThreadWorkerSlot {
   index: number;
+  generation: number;
   workerInstance: worker.ThreadWorker | null;
   scriptUrl: string;
   busy: boolean;
@@ -158,6 +183,7 @@ interface DedicatedPoolState extends SDKPoolConfig {
   mailboxReplayDropped: number;
   mailboxReplayEntries: Map<string, SDKMailboxReplayEntry>;
   mailboxReplayOrder: string[];
+  mailboxReplayOrderHead: number;
   lineContextCheckpoint: SDKWorkerRequest | null;
   recoveryResponseIds: Map<string, boolean>;
   idleTimerId: number | null;
@@ -179,6 +205,8 @@ export class SDKDedicatedPoolManager {
   private pools: Map<SDKDedicatedPoolType, DedicatedPoolState> = new Map();
   private mailboxResponseHandlers: Map<SDKDedicatedPoolType, SDKMailboxResponseHandler> = new Map();
   private workerRecoveryHandlers: Map<SDKDedicatedPoolType, SDKWorkerRecoveryHandler> = new Map();
+  private mailboxRecoveryDiscardHandlers: Map<SDKDedicatedPoolType,
+    SDKWorkerMailboxRecoveryDiscardHandler> = new Map();
   private mailboxAwaiters: Map<string, SDKThreadWorkerMailboxAwaiter> = new Map();
   private mailboxRetryCircuits: Map<SDKDedicatedPoolType, SDKWorkerRetryCircuit> = new Map();
   private nextTaskId: number = 0;
@@ -361,6 +389,47 @@ export class SDKDedicatedPoolManager {
   }
 
   /**
+   * Returns response credits to one exact EVENT_CONSUMER worker. Control
+   * messages bypass normal mailbox bookkeeping and intentionally produce no
+   * response, so they cannot consume a credit themselves.
+   */
+  public grantEventResponseCredits(source: SDKWorkerMailboxSource, credits: number = 1): boolean {
+    if (!source || source.pool !== SDKDedicatedPoolType.EVENT_CONSUMER || credits <= 0) {
+      return false;
+    }
+    const state = this.getPool(source.pool);
+    let slot: SDKThreadWorkerSlot | null = null;
+    for (let i = 0; i < state.workerSlots.length; i++) {
+      const candidate = state.workerSlots[i];
+      if (candidate.index === source.workerSlotIndex) {
+        slot = candidate;
+        break;
+      }
+    }
+    if (!slot || !slot.workerInstance || slot.generation !== source.workerGeneration) {
+      return false;
+    }
+    const creditPayload: SDKWorkerResponseCreditDTO = {
+      credits: Math.max(1, Math.floor(credits))
+    };
+    const creditRequest: SDKWorkerRequest = {
+      id: this.nextInternalTaskId(source.pool, 'response-credit'),
+      pool: source.pool,
+      command: SDKWorkerCommand.EVENT_RUM_RESPONSE_CREDIT,
+      priority: 9,
+      createdAt: Date.now(),
+      payload: creditPayload as Object as SDKWorkerPayload
+    };
+    try {
+      slot.workerInstance.postMessage(creditRequest);
+      return true;
+    } catch (error) {
+      state.lastError = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+  }
+
+  /**
    * Registers a Host-owned semantic recovery hook. The hook runs after line
    * context restoration and before unresolved mailbox messages are replayed.
    */
@@ -369,6 +438,22 @@ export class SDKDedicatedPoolManager {
       this.workerRecoveryHandlers.set(pool, handler);
     } else {
       this.workerRecoveryHandlers.delete(pool);
+    }
+  }
+
+  /**
+   * Reports recovery-window loss as one aggregate. It deliberately does not
+   * synthesize one failed mailbox response per request: doing that turns a
+   * Worker restart into a Host callback and logging storm.
+   */
+  public setMailboxRecoveryDiscardHandler(
+    pool: SDKDedicatedPoolType,
+    handler: SDKWorkerMailboxRecoveryDiscardHandler | null
+  ): void {
+    if (handler) {
+      this.mailboxRecoveryDiscardHandlers.set(pool, handler);
+    } else {
+      this.mailboxRecoveryDiscardHandlers.delete(pool);
     }
   }
 
@@ -464,6 +549,7 @@ export class SDKDedicatedPoolManager {
     this.mailboxAwaiters.clear();
     this.mailboxRetryCircuits.clear();
     this.workerRecoveryHandlers.clear();
+    this.mailboxRecoveryDiscardHandlers.clear();
     this.pools.forEach((state) => {
       state.isShutdown = true;
       for (let i = state.queueHeadIndex; i < state.queue.length; i++) {
@@ -472,11 +558,9 @@ export class SDKDedicatedPoolManager {
       state.queue = [];
       state.queueHeadIndex = 0;
       state.running = 0;
-      state.mailboxReplayEntries.forEach((entry) => {
-        clearTimeout(entry.timeoutId);
-      });
       state.mailboxReplayEntries.clear();
       state.mailboxReplayOrder = [];
+      state.mailboxReplayOrderHead = 0;
       state.lineContextCheckpoint = null;
       state.recoveryResponseIds.clear();
       this.clearWorkerIdleTimer(state);
@@ -570,6 +654,7 @@ export class SDKDedicatedPoolManager {
       mailboxReplayDropped: 0,
       mailboxReplayEntries: new Map(),
       mailboxReplayOrder: [],
+      mailboxReplayOrderHead: 0,
       lineContextCheckpoint: null,
       recoveryResponseIds: new Map(),
       idleTimerId: null,
@@ -690,7 +775,7 @@ export class SDKDedicatedPoolManager {
         const normalized = error instanceof Error ? error : new Error(String(error));
         state.lastError = normalized.message;
         if (!isSDKWorkerInFlightReplaySafe(request.command) ||
-          replayAttempt >= SDK_WORKER_MAX_MESSAGE_REPLAY_ATTEMPTS) {
+          replayAttempt >= MAX_WORKER_MESSAGE_REPLAY_ATTEMPTS) {
           if (!this.hasActiveWorker(state)) {
             state.backend = 'thread-worker-error';
           }
@@ -800,17 +885,33 @@ export class SDKDedicatedPoolManager {
     if (state.mailboxReplayEntries.has(request.id)) {
       return;
     }
-    if (state.mailboxReplayOrder.length >= SDK_WORKER_MAILBOX_REPLAY_CAPACITY) {
-      state.mailboxReplayDropped++;
-      throw new Error(`ThreadWorker mailbox replay capacity exceeded: ${state.pool}`);
-    }
+    this.evictOldestMailboxReplayCopies(state);
     state.mailboxReplayEntries.set(request.id, {
       request,
       replayCount: 0,
-      replaySafe: isSDKWorkerMailboxReplaySafe(request.command),
-      timeoutId: this.scheduleMailboxReplayTimeout(state, request.id, request)
+      replaySafe: isSDKWorkerMailboxReplaySafe(request.command)
     });
     state.mailboxReplayOrder.push(request.id);
+  }
+
+  /**
+   * The replay ledger is a recent recovery window, never a postMessage gate.
+   * Requests evicted here were already delivered to the Worker; only their
+   * ability to be replayed after a later Worker restart is discarded.
+   */
+  private evictOldestMailboxReplayCopies(state: DedicatedPoolState): void {
+    while (state.mailboxReplayEntries.size >= MAILBOX_REPLAY_CAPACITY &&
+      state.mailboxReplayOrderHead < state.mailboxReplayOrder.length) {
+      const requestId = state.mailboxReplayOrder[state.mailboxReplayOrderHead];
+      state.mailboxReplayOrderHead++;
+      const entry = state.mailboxReplayEntries.get(requestId);
+      if (!entry) {
+        continue;
+      }
+      state.mailboxReplayEntries.delete(requestId);
+      state.mailboxReplayDropped++;
+    }
+    this.compactMailboxReplayOrder(state);
   }
 
   private removeMailboxReplayEntry(
@@ -821,17 +922,29 @@ export class SDKDedicatedPoolManager {
     if (!entry) {
       return undefined;
     }
-    clearTimeout(entry.timeoutId);
     state.mailboxReplayEntries.delete(requestId);
-    const compacted: string[] = [];
-    for (let i = 0; i < state.mailboxReplayOrder.length; i++) {
-      const currentId = state.mailboxReplayOrder[i];
-      if (currentId !== requestId) {
-        compacted.push(currentId);
-      }
-    }
-    state.mailboxReplayOrder = compacted;
+    this.compactMailboxReplayOrder(state);
     return entry;
+  }
+
+  private compactMailboxReplayOrder(state: DedicatedPoolState): void {
+    while (state.mailboxReplayOrderHead < state.mailboxReplayOrder.length &&
+      !state.mailboxReplayEntries.has(state.mailboxReplayOrder[state.mailboxReplayOrderHead])) {
+      state.mailboxReplayOrderHead++;
+    }
+    if (state.mailboxReplayOrderHead === 0) {
+      return;
+    }
+    if (state.mailboxReplayOrderHead >= state.mailboxReplayOrder.length) {
+      state.mailboxReplayOrder = [];
+      state.mailboxReplayOrderHead = 0;
+      return;
+    }
+    if (state.mailboxReplayOrderHead >= POOL_QUEUE_COMPACT_THRESHOLD &&
+      state.mailboxReplayOrderHead * 2 >= state.mailboxReplayOrder.length) {
+      state.mailboxReplayOrder = state.mailboxReplayOrder.slice(state.mailboxReplayOrderHead);
+      state.mailboxReplayOrderHead = 0;
+    }
   }
 
   private replayMailboxRequestsAfterRestart(state: DedicatedPoolState, slot: SDKThreadWorkerSlot): void {
@@ -842,7 +955,7 @@ export class SDKDedicatedPoolManager {
     state.recoveryResponseIds.clear();
     // Snapshot before a semantic recovery hook posts new requests. Those new
     // requests have already been delivered and must not be replayed twice.
-    const replayOrder = state.mailboxReplayOrder.slice();
+    const replayOrder = state.mailboxReplayOrder.slice(state.mailboxReplayOrderHead);
     let pendingLineContextId = '';
     for (let i = 0; i < replayOrder.length; i++) {
       const pending = state.mailboxReplayEntries.get(replayOrder[i]);
@@ -858,8 +971,6 @@ export class SDKDedicatedPoolManager {
         try {
           workerInstance.postMessage(pending.request);
           pending.replayCount++;
-          clearTimeout(pending.timeoutId);
-          pending.timeoutId = this.scheduleMailboxReplayTimeout(state, pendingLineContextId, pending.request);
           state.mailboxReplayCount++;
         } catch (error) {
           state.lastError = error instanceof Error ? error.message : String(error);
@@ -905,76 +1016,83 @@ export class SDKDedicatedPoolManager {
       if (!entry) {
         continue;
       }
-      if (!entry.replaySafe || entry.replayCount >= SDK_WORKER_MAX_MESSAGE_REPLAY_ATTEMPTS) {
+      if (!entry.replaySafe || entry.replayCount >= MAX_WORKER_MESSAGE_REPLAY_ATTEMPTS) {
         failedIds.push(requestId);
         continue;
       }
       try {
         workerInstance.postMessage(entry.request);
         entry.replayCount++;
-        clearTimeout(entry.timeoutId);
-        entry.timeoutId = this.scheduleMailboxReplayTimeout(state, requestId, entry.request);
         state.mailboxReplayCount++;
       } catch (error) {
         state.lastError = error instanceof Error ? error.message : String(error);
         failedIds.push(requestId);
       }
     }
-    for (let i = 0; i < failedIds.length; i++) {
-      this.failMailboxReplayEntry(
-        state,
-        failedIds[i],
-        `ThreadWorker mailbox message could not be safely replayed: ${state.pool}`
-      );
-    }
+    this.discardMailboxReplayEntries(
+      state,
+      failedIds,
+      `ThreadWorker mailbox messages could not be safely replayed: ${state.pool}`
+    );
   }
 
   private failMailboxReplayEntries(state: DedicatedPoolState, message: string): void {
-    const requestIds = state.mailboxReplayOrder.slice();
-    for (let i = 0; i < requestIds.length; i++) {
-      this.failMailboxReplayEntry(state, requestIds[i], message);
-    }
+    const requestIds = state.mailboxReplayOrder.slice(state.mailboxReplayOrderHead);
+    this.discardMailboxReplayEntries(state, requestIds, message);
   }
 
-  private failMailboxReplayEntry(state: DedicatedPoolState, requestId: string, message: string): void {
-    const entry = state.mailboxReplayEntries.get(requestId);
-    if (!entry) {
+  /**
+   * Drops only Host recovery copies after a real Worker failure. Mailbox
+   * commands are asynchronous FIFO work, so queue age is never a failure
+   * signal. Awaiters still receive one synthetic result, while normal mailbox
+   * consumers receive a single aggregate notification for state convergence.
+   */
+  private discardMailboxReplayEntries(
+    state: DedicatedPoolState,
+    requestIds: string[],
+    message: string
+  ): void {
+    if (requestIds.length === 0) {
       return;
     }
-    const error = new Error(`${message}; command=${entry.request.command}, id=${requestId}`);
-    const response = this.createCommandErrorResponse(entry.request, error, {
-      poolWaitMs: 0,
-      poolExecuteMs: 0
-    });
-    this.handleMailboxWorkerResponse(state, response);
-  }
-
-  private scheduleMailboxReplayTimeout(
-    state: DedicatedPoolState,
-    requestId: string,
-    request: SDKWorkerRequest
-  ): number {
-    const timeoutMs = this.getWorkerCommandTimeoutMs(request);
-    return setTimeout(() => {
-      const current = state.mailboxReplayEntries.get(requestId);
-      if (!current || current.request.id !== requestId || state.isShutdown) {
-        return;
+    const discardedIds: string[] = [];
+    for (let i = 0; i < requestIds.length; i++) {
+      const requestId = requestIds[i];
+      const entry = this.removeMailboxReplayEntry(state, requestId);
+      if (!entry) {
+        continue;
       }
-      const slot = this.findMailboxWorkerSlot(state);
-      if (!slot) {
-        this.failMailboxReplayEntry(
-          state,
-          requestId,
-          `ThreadWorker mailbox timeout without an active worker: ${state.pool}/${request.command}`
-        );
-        return;
+      discardedIds.push(requestId);
+      const awaiter = this.mailboxAwaiters.get(requestId);
+      if (awaiter) {
+        clearTimeout(awaiter.timeoutId);
+        this.mailboxAwaiters.delete(requestId);
+        awaiter.resolve(this.createCommandErrorResponse(entry.request,
+          new Error(`${message}; command=${entry.request.command}, id=${requestId}`), {
+            poolWaitMs: 0,
+            poolExecuteMs: 0
+          }));
       }
-      this.handleThreadWorkerFailure(
-        state,
-        slot,
-        `ThreadWorker mailbox command timeout: ${state.pool}/${request.command}`
-      );
-    }, timeoutMs) as number;
+    }
+    if (discardedIds.length === 0) {
+      return;
+    }
+    state.failedTasks += discardedIds.length;
+    state.mailboxFailedTasks += discardedIds.length;
+    state.lastError = `${message}; discarded=${discardedIds.length}`;
+    const handler = this.mailboxRecoveryDiscardHandlers.get(state.pool);
+    if (handler) {
+      try {
+        handler({
+          pool: state.pool,
+          requestIds: discardedIds,
+          message
+        });
+      } catch (error) {
+        state.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    this.resetWorkerRestartCountIfRecovered(state);
   }
 
   private hasActiveWorker(state: DedicatedPoolState): boolean {
@@ -1029,6 +1147,7 @@ export class SDKDedicatedPoolManager {
     for (let i = 0; i < targetWorkerCount; i++) {
       const slot: SDKThreadWorkerSlot = {
         index: i,
+        generation: 0,
         workerInstance: null,
         scriptUrl: '',
         busy: false,
@@ -1071,6 +1190,7 @@ export class SDKDedicatedPoolManager {
           }
         };
         slot.workerInstance = workerInstance;
+        slot.generation++;
         slot.scriptUrl = scriptUrl;
         state.lastError = '';
         return;
@@ -1099,10 +1219,14 @@ export class SDKDedicatedPoolManager {
       return;
     }
 
-    this.handleMailboxWorkerResponse(state, response);
+    this.handleMailboxWorkerResponse(state, response, this.createMailboxSource(state, slot));
   }
 
-  private handleMailboxWorkerResponse(state: DedicatedPoolState, response: SDKWorkerResponse): void {
+  private handleMailboxWorkerResponse(
+    state: DedicatedPoolState,
+    response: SDKWorkerResponse,
+    source: SDKWorkerMailboxSource | null = null
+  ): void {
     if (!response) {
       state.failedTasks++;
       state.mailboxFailedTasks++;
@@ -1132,7 +1256,7 @@ export class SDKDedicatedPoolManager {
 
     const handler = this.mailboxResponseHandlers.get(state.pool);
     if (handler) {
-      handler(response);
+      handler(response, source);
     }
 
     const awaiter = this.mailboxAwaiters.get(response.id);
@@ -1154,6 +1278,17 @@ export class SDKDedicatedPoolManager {
     }
   }
 
+  private createMailboxSource(
+    state: DedicatedPoolState,
+    slot: SDKThreadWorkerSlot
+  ): SDKWorkerMailboxSource {
+    return {
+      pool: state.pool,
+      workerSlotIndex: slot.index,
+      workerGeneration: slot.generation
+    };
+  }
+
   private handleThreadWorkerFailure(
     state: DedicatedPoolState,
     slot: SDKThreadWorkerSlot,
@@ -1169,7 +1304,7 @@ export class SDKDedicatedPoolManager {
       clearTimeout(pending.timeoutId);
       pending.reject(new Error(message));
     }
-    if (slot.restartCount < SDK_WORKER_MAX_RESTART_ATTEMPTS && !state.isShutdown) {
+    if (slot.restartCount < MAX_WORKER_RESTART_ATTEMPTS && !state.isShutdown) {
       slot.restartCount++;
       state.restartCount++;
       this.createThreadWorkerForSlot(state, slot);
