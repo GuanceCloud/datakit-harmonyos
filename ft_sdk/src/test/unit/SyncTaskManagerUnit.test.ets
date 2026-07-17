@@ -178,6 +178,9 @@ class FakeCachePolicy implements SyncTaskCachePolicy {
 }
 
 class FakeDbTaskPool implements SyncTaskDbTaskPool {
+  errorTimeLine: number = -1;
+  getErrorTimeLineCount: number = 0;
+  updateErrorTimeLineCount: number = 0;
   hasDataResult: boolean = false;
   hasDataQueue: boolean[] = [];
   queryQueue: SyncData[][] = [];
@@ -205,6 +208,16 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   lastDeletedIds: number[] = [];
   lastInserted: SyncData[] = [];
   insertReInsertFlags: boolean[] = [];
+
+  async getLastErrorTimeLine(_context: Context): Promise<number> {
+    this.getErrorTimeLineCount++;
+    return this.errorTimeLine;
+  }
+
+  async updateLastErrorTimeLine(_context: Context, errorTimeLine: number): Promise<void> {
+    this.updateErrorTimeLineCount++;
+    this.errorTimeLine = Math.max(this.errorTimeLine, errorTimeLine);
+  }
 
   async hasSyncData(_context: Context, dataTypes: string[]): Promise<boolean> {
     this.hasDataCount++;
@@ -794,7 +807,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('errorTimelineShouldPersist', 0, async () => {
+    it('errorTimelineShouldUseRdbMetadataAndOnlyReadLegacyPreferences', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
       const view = new ViewBean('view-id', 'view', 100);
@@ -802,8 +815,8 @@ export default function syncTaskManagerUnitTest() {
       manager.setErrorTimeLine(10, view);
       await flushPromises();
       expect(view.getLastErrorTime()).assertEqual(10);
-      expect(runtime.preferences.putCount).assertEqual(1);
-      expect(runtime.preferences.flushCount).assertEqual(1);
+      expect(runtime.preferences.putCount).assertEqual(0);
+      expect(runtime.preferences.flushCount).assertEqual(0);
       expect(await manager.getErrorTimeLine()).assertEqual(10);
 
       manager.setErrorTimeLine(5, view);
@@ -815,7 +828,10 @@ export default function syncTaskManagerUnitTest() {
       manager.init(createConfig(), createContext());
       await flushPromises();
       expect(await manager.getErrorTimeLine()).assertEqual(77);
+      expect(runtime.dbTaskPool.errorTimeLine).assertEqual(77);
+      expect(runtime.dbTaskPool.updateErrorTimeLineCount).assertEqual(1);
 
+      runtime.dbTaskPool.errorTimeLine = -1;
       runtime.preferences.value = 'not-number';
       SyncInternalTestAccess.resetState();
       manager = SyncTaskManager.getInstance();
@@ -834,6 +850,8 @@ export default function syncTaskManagerUnitTest() {
       runtime.preferences.throwPut = true;
       manager.setErrorTimeLine(88, null);
       await flushPromises();
+      expect(runtime.preferences.putCount).assertEqual(0);
+      expect(runtime.preferences.flushCount).assertEqual(0);
     });
 
     it('uploadLaneShouldSyncRumWebviewBeforeLog', 0, async () => {

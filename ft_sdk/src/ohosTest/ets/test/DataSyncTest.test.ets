@@ -814,7 +814,7 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
-    it('rumLongTaskShouldUploadAndDelete', 0, async () => {
+    it('rumLongTaskShouldKeepCallerDescriptionWithoutCapturingSdkStack', 0, async () => {
       const longTaskLog = 'real_collected_long_task';
 
       await FTRUMGlobalManager.getInstance().startView('long_task_sync_view');
@@ -826,6 +826,9 @@ export default function dataSyncTest() {
         'duration'
       ], 5000);
       expect(longTaskRecord !== null).assertTrue();
+      const line = longTaskRecord?.getDataString() ?? '';
+      expect(line.includes(longTaskLog)).assertTrue();
+      expect(line.includes('Stack Trace:')).assertFalse();
 
       FTSDK.flushSyncData();
 
