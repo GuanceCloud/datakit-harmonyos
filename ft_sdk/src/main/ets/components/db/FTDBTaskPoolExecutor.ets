@@ -17,6 +17,8 @@ enum FTDBTaskPoolCommand {
   DELETE_SYNC_ROW_IDS = 'deleteSyncRowIds',
   QUERY_TOTAL_COUNT = 'queryTotalCount',
   GET_DB_SIZE = 'getDbSize',
+  GET_LAST_ERROR_TIMELINE = 'getLastErrorTimeLine',
+  UPDATE_LAST_ERROR_TIMELINE = 'updateLastErrorTimeLine',
   DELETE_OLDEST_SYNC_DATA = 'deleteOldestSyncData',
   UPDATE_DATA_TYPE = 'updateDataType',
   DELETE_EXPIRE_CACHE = 'deleteExpireCache',
@@ -53,6 +55,9 @@ export interface FTDBTaskPoolCachePolicySnapshot {
   dbCacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
+  /** Host-maintained counts; initialized once, not queried for every write. */
+  logCount: number;
+  rumCount: number;
   logDiscardStrategy: string;
   rumDiscardStrategy: string;
 }
@@ -62,6 +67,8 @@ export interface FTDBTaskPoolWriteOptions {
   reInsert: boolean;
   forceTransaction: boolean;
   updateOrInsertByUuid: boolean;
+  /** Persisted with this write's transaction when the batch contains RUM errors. */
+  lastErrorTimeLine?: number;
 }
 
 export interface FTDBTaskPoolWriteResult {
@@ -186,6 +193,10 @@ interface FTDBTaskPoolRequest {
   measurementType?: string;
 }
 
+type FTDBTaskPoolRequestFactory = () => FTDBTaskPoolRequest;
+type FTDBTaskPoolWritePolicyProvider = () => FTDBTaskPoolCachePolicySnapshot;
+type FTDBTaskPoolWriteCompletion = (response: FTDBTaskPoolWriteResponse) => void;
+
 interface FTDBTaskPoolResponse {
   ok: boolean;
   value?: boolean;
@@ -279,19 +290,28 @@ export class FTDBTaskPoolExecutor {
     source: string,
     records: SyncData[],
     options: FTDBTaskPoolWriteOptions,
-    policy: FTDBTaskPoolCachePolicySnapshot
+    getPolicy: FTDBTaskPoolWritePolicyProvider,
+    onComplete: FTDBTaskPoolWriteCompletion
   ): Promise<FTDBTaskPoolWriteResponse> {
     const payload: SyncDataJSON[] = [];
     for (let i = 0; i < records.length; i++) {
       payload.push(records[i].toJSON());
     }
-    const response = await FTDBTaskPoolExecutor.execute(context, {
-      command: FTDBTaskPoolCommand.WRITE_SYNC_DATA,
-      source,
-      records: payload,
-      options,
-      policy
-    });
+    const requestFactory = (): FTDBTaskPoolRequest => {
+      return {
+        command: FTDBTaskPoolCommand.WRITE_SYNC_DATA,
+        source,
+        records: payload,
+        options,
+        policy: getPolicy()
+      };
+    };
+    const response = await FTDBTaskPoolExecutor.executeWithRequestFactory(context, requestFactory,
+      (taskPoolResponse: FTDBTaskPoolResponse): void => {
+        if (taskPoolResponse.write && taskPoolResponse.write.result.success) {
+          onComplete(taskPoolResponse.write);
+        }
+      });
     if (!response.write) {
       throw new Error(response.errorMessage || 'DB taskpool write returned empty response');
     }
@@ -305,21 +325,60 @@ export class FTDBTaskPoolExecutor {
     drafts: FTDBTaskPoolSyncDraftDTO[],
     fallbackDataType: string,
     options: FTDBTaskPoolWriteOptions,
-    policy: FTDBTaskPoolCachePolicySnapshot
+    getPolicy: FTDBTaskPoolWritePolicyProvider,
+    onComplete: FTDBTaskPoolWriteCompletion
   ): Promise<FTDBTaskPoolWriteResponse> {
-    const response = await FTDBTaskPoolExecutor.execute(context, {
-      command: FTDBTaskPoolCommand.WRITE_SYNC_DRAFTS,
-      source,
-      drafts,
-      fallbackDataType,
-      options,
-      policy
-    });
+    const requestFactory = (): FTDBTaskPoolRequest => {
+      return {
+        command: FTDBTaskPoolCommand.WRITE_SYNC_DRAFTS,
+        source,
+        drafts,
+        fallbackDataType,
+        options,
+        policy: getPolicy()
+      };
+    };
+    const response = await FTDBTaskPoolExecutor.executeWithRequestFactory(context, requestFactory,
+      (taskPoolResponse: FTDBTaskPoolResponse): void => {
+        if (taskPoolResponse.write && taskPoolResponse.write.result.success) {
+          onComplete(taskPoolResponse.write);
+        }
+      });
     if (!response.write) {
       throw new Error(response.errorMessage || 'DB taskpool draft write returned empty response');
     }
     response.write.dbLaneWaitMs = response.dbLaneWaitMs || 0;
     return response.write;
+  }
+
+  /*
+   * The request is constructed only when it reaches the DB lane. This lets the
+   * Host create a cache-count snapshot after every preceding write has applied
+   * its in-memory delta, without issuing a COUNT(*) for each batch.
+   */
+  private static async executeWithRequestFactory(
+    context: Context,
+    requestFactory: FTDBTaskPoolRequestFactory,
+    onComplete?: (response: FTDBTaskPoolResponse) => void
+  ): Promise<FTDBTaskPoolResponse> {
+    const enqueueTime = Date.now();
+    const run = async (): Promise<FTDBTaskPoolResponse> => {
+      const request = requestFactory();
+      const dbLaneWaitMs = Math.max(0, Date.now() - enqueueTime);
+      const response = await taskpool.execute(ftDBTaskPoolExecute, context as Object, request as Object);
+      const typed = response as Object as FTDBTaskPoolResponse;
+      typed.dbLaneWaitMs = dbLaneWaitMs;
+      if (!typed.ok) {
+        throw new Error(typed.errorMessage || `DB taskpool command failed: ${request.command}`);
+      }
+      if (onComplete) {
+        onComplete(typed);
+      }
+      return typed;
+    };
+    const current = FTDBTaskPoolExecutor.dbLaneTail.then(run, run);
+    FTDBTaskPoolExecutor.dbLaneTail = current.then(() => undefined, () => undefined);
+    return await current;
   }
 
   public static async deleteSyncRows(context: Context, records: SyncData[]): Promise<number> {
@@ -355,6 +414,20 @@ export class FTDBTaskPoolExecutor {
       command: FTDBTaskPoolCommand.GET_DB_SIZE
     });
     return response.count || 0;
+  }
+
+  public static async getLastErrorTimeLine(context: Context): Promise<number> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.GET_LAST_ERROR_TIMELINE
+    });
+    return response.count || -1;
+  }
+
+  public static async updateLastErrorTimeLine(context: Context, errorTimeLine: number): Promise<void> {
+    await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.UPDATE_LAST_ERROR_TIMELINE,
+      errorTimeLine
+    });
   }
 
   public static async deleteOldestSyncData(context: Context, dataTypes: string[], limit: number): Promise<number> {
