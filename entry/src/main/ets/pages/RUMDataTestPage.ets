@@ -188,9 +188,9 @@ export struct RUMDataTestPage {
 
     try {
       const property = new ActionPropertySet('rum_unified_btn', 'RUMDataTestPage', 'test_user');
-      rumManager.startActionWithProperty('property_click', 'click', property.toRecord());
+      rumManager.startAction('property_click', 'click', property.toRecord());
       this.actionCount++;
-      this.appendResult('Action: startActionWithProperty(property_click) sent');
+      this.appendResult('Action: startAction(property_click, property) sent');
     } catch (error) {
       this.appendResult(`Action with property failed: ${error}`);
     }
@@ -218,11 +218,11 @@ export struct RUMDataTestPage {
     }
 
     try {
-      rumManager.addActionWithDuration('duration_add', 'click', 2_000_000_000);
+      rumManager.addAction('duration_add', 'click', 2_000_000_000);
       this.actionCount++;
-      this.appendResult('Action: addActionWithDuration(duration_add, 2s) sent');
+      this.appendResult('Action: addAction(duration_add, 2s) sent');
     } catch (error) {
-      this.appendResult(`addActionWithDuration failed: ${error}`);
+      this.appendResult(`addAction with duration failed: ${error}`);
     }
   }
 
