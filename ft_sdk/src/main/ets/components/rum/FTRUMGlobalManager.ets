@@ -128,114 +128,53 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Start action
-   * Includes duration calculation mechanism, attempts to associate nearby Resource, LongTask and Error events
-   * Has 100ms frequency protection mechanism, recommended for user interaction type events
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   */
-  public startAction(actionName: string, actionType: string): void {
-    if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType);
-    }
-  }
-
-  /**
-   * Start action (with properties)
-   * 
+   * Start action.
+   *
+   * Includes duration calculation and association with nearby Resource, LongTask, and Error events.
+   * The SDK controls the internal wait flag; callers only provide the action identity and optional properties.
+   *
    * @param actionName Action name
    * @param actionType Action type
    * @param property Extended properties
    */
-  public startActionWithProperty(actionName: string, actionType: string, property: Record<string, object>): void {
+  public startAction(
+    actionName: string,
+    actionType: string,
+    property: Record<string, object> = {}
+  ): void {
     if (this.innerManager) {
       this.innerManager.startAction(actionName, actionType, false, property);
     }
   }
 
   /**
-   * Start action (with wait flag)
-   * 
+   * Add a directly completed action.
+   *
+   * This action is not associated with Error, Resource, or LongTask data. The SDK captures its
+   * start time internally. The third argument supports the Android-style property-only overload;
+   * pass a duration in nanoseconds followed by properties when both are required.
+   *
    * @param actionName Action name
    * @param actionType Action type
-   * @param needWait Whether to wait
+   * @param durationOrProperty Duration in nanoseconds, or extended properties
+   * @param property Extended properties when duration is provided
    */
-  public startActionWithWait(actionName: string, actionType: string, needWait: boolean): void {
+  public addAction(
+    actionName: string,
+    actionType: string,
+    durationOrProperty: number | Record<string, object> = 0,
+    property: Record<string, object> = {}
+  ): void {
     if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType, needWait);
-    }
-  }
-
-  /**
-   * Start action (full parameters)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param needWait Whether to wait
-   * @param property Extended properties
-   */
-  public startActionFull(actionName: string, actionType: string, needWait: boolean, property: Record<string, object>): void {
-    if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType, needWait, property);
-    }
-  }
-
-  /**
-   * Add action (directly completed)
-   * This type of data cannot be associated with Error, Resource, LongTask data
-   * If you need to call actions frequently, use addAction instead of startAction
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   */
-  public addAction(actionName: string, actionType: string): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, 0, currentTime);
-    }
-  }
-
-  /**
-   * Add action (with duration)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param duration Duration (nanoseconds)
-   */
-  public addActionWithDuration(actionName: string, actionType: string, duration: number): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, duration, currentTime);
-    }
-  }
-
-  /**
-   * Add action (with properties)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param property Extended properties
-   */
-  public addActionWithProperty(actionName: string, actionType: string, property: Record<string, object>): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, 0, currentTime, property);
-    }
-  }
-
-  /**
-   * Add action (full parameters)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param duration Duration (nanoseconds)
-   * @param property Extended properties
-   */
-  public addActionFull(actionName: string, actionType: string, duration: number, property: Record<string, object>): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, duration, currentTime, property);
+      let duration = 0;
+      let actionProperty = property;
+      if (typeof durationOrProperty === 'number') {
+        duration = durationOrProperty;
+      } else {
+        actionProperty = durationOrProperty;
+      }
+      const startTime = Utils.getCurrentNanoTime();
+      this.innerManager.addAction(actionName, actionType, duration, startTime, actionProperty);
     }
   }
 
@@ -251,20 +190,6 @@ export class FTRUMGlobalManager {
       await this.innerManager.startView(viewName, property);
     } else {
       FTInnerLogger.e(TAG, " innerManager is null, cannot start view");
-    }
-  }
-
-  /**
-   * Stop action
-   * 
-   * Stop the currently active action
-   */
-  public stopAction(): void {
-    FTInnerLogger.d(TAG, "<FT-ACTION-TEST> GlobalManager.stopAction called");
-    if (this.innerManager) {
-      this.innerManager.stopAction();
-    } else {
-      FTInnerLogger.e(TAG, "<FT-ACTION-TEST> innerManager is null, cannot stop action");
     }
   }
 

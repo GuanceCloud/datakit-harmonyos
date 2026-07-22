@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.15-alpha01] - 2026-07-19
+- Consolidated the public RUM Action APIs: `addAction` now accepts optional duration and properties, while `startAction` accepts optional properties.
+- Removed split `addActionWith...` / `startActionWith...` methods and the unfinished public `stopAction` API. SDK-internal timing and wait-state parameters remain internal.
+
 ## [0.1.14] - 2026-07-17
 - Released the stable `ft_sdk` 0.1.14 package, consolidating the capabilities delivered during the 0.1.14 pre-release cycle.
 - Removed high-frequency internal Debug logs from normal Error and Resource collection paths.

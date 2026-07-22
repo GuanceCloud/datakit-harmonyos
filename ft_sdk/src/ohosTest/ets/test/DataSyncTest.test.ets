@@ -404,13 +404,13 @@ export default function dataSyncTest() {
       FTRUMGlobalManager.getInstance().addAction('add_action_basic', 'click');
       await assertActionRecordUploaded(collector, 'add_action_basic', ['action_type=click']);
 
-      FTRUMGlobalManager.getInstance().addActionWithDuration('add_action_duration', 'click', ACTION_DURATION_NS);
+      FTRUMGlobalManager.getInstance().addAction('add_action_duration', 'click', ACTION_DURATION_NS);
       await assertActionRecordUploaded(collector, 'add_action_duration', [
         'action_type=click',
         `duration=${ACTION_DURATION_NS}`
       ]);
 
-      FTRUMGlobalManager.getInstance().addActionWithProperty('add_action_property', 'click',
+      FTRUMGlobalManager.getInstance().addAction('add_action_property', 'click',
         buildActionProperty('action_prop_key', 'action_prop_value'));
       await assertActionRecordUploaded(collector, 'add_action_property', [
         'action_type=click',
@@ -418,7 +418,7 @@ export default function dataSyncTest() {
         'action_prop_value'
       ]);
 
-      FTRUMGlobalManager.getInstance().addActionFull('add_action_full', 'click', ACTION_DURATION_NS,
+      FTRUMGlobalManager.getInstance().addAction('add_action_full', 'click', ACTION_DURATION_NS,
         buildActionProperty('action_full_prop_key', 'action_full_prop_value'));
       await assertActionRecordUploaded(collector, 'add_action_full', [
         'action_type=click',
@@ -443,7 +443,7 @@ export default function dataSyncTest() {
 
       await runActionInFreshView(
         'start_action_property_view',
-        () => FTRUMGlobalManager.getInstance().startActionWithProperty('start_action_property', 'click',
+        () => FTRUMGlobalManager.getInstance().startAction('start_action_property', 'click',
           buildActionProperty('start_action_prop_key', 'start_action_prop_value')),
         async () => {
           await WaitUtils.delay(180);
@@ -456,41 +456,6 @@ export default function dataSyncTest() {
         'start_action_prop_value'
       ]);
 
-      await runActionInFreshView(
-        'start_action_wait_view',
-        () => FTRUMGlobalManager.getInstance().startActionWithWait('start_action_wait', 'click', true),
-        async () => {
-          FTRUMGlobalManager.getInstance().stopAction();
-          await FTRUMGlobalManager.getInstance().stopView();
-        }
-      );
-      await assertActionRecordUploaded(collector, 'start_action_wait', ['action_type=click']);
-
-      await runActionInFreshView(
-        'start_action_full_view',
-        () => FTRUMGlobalManager.getInstance().startActionFull('start_action_full', 'click', true,
-          buildActionProperty('start_action_full_prop_key', 'start_action_full_prop_value')),
-        async () => {
-          FTRUMGlobalManager.getInstance().stopAction();
-          await FTRUMGlobalManager.getInstance().stopView();
-        }
-      );
-      await assertActionRecordUploaded(collector, 'start_action_full', [
-        'action_type=click',
-        'start_action_full_prop_key',
-        'start_action_full_prop_value'
-      ]);
-    });
-
-    it('stopBeforeStartShouldWriteNothing', 0, async () => {
-      FTRUMGlobalManager.getInstance().stopAction();
-      await FTRUMGlobalManager.getInstance().stopView();
-      await WaitUtils.delay(300);
-
-      const stayedEmpty = await DBAssert.waitForSyncCount([DataType.RUM_APP], 0, 1200);
-
-      expect(stayedEmpty).assertTrue();
-      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
     it('errorSampledShouldUploadAfterTimeline', 0, async () => {

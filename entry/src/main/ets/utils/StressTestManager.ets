@@ -951,7 +951,7 @@ export class StressTestManager {
         "traffic_mode": new StringWrapper(this.currentConfig.trafficMode),
         "source": new StringWrapper(this.currentConfig.source)
       };
-      this.rumManager.addActionWithProperty(actionName, 'click', property);
+      this.rumManager.addAction(actionName, 'click', property);
       this.currentStats.actionsGenerated += 1;
       this.sampleCapabilityIfDue('action');
     } catch (error) {

@@ -265,11 +265,7 @@ export class FTActionTracker {
           
           // Removed high-frequency info log to reduce log output
           // FTInnerLogger.i(TAG, `[ACTION-TRACK] ⭐ Tracking action via handler: name=${actionName}, type=${nodeType}, id=${nodeId || '(no id)'}`);
-          if (property) {
-            FTRUMGlobalManager.getInstance().startActionFull(actionName, Constants.EVENT_NAME_CLICK, false, property);
-          } else {
-            FTRUMGlobalManager.getInstance().startAction(actionName, Constants.EVENT_NAME_CLICK);
-          }
+          FTRUMGlobalManager.getInstance().startAction(actionName, Constants.EVENT_NAME_CLICK, property || {});
           // Removed high-frequency info log to reduce log output
           // FTInnerLogger.i(TAG, `[ACTION-TRACK] ✅ Action started via handler: name=${actionName}`);
         } else {
@@ -364,11 +360,7 @@ export class FTActionTracker {
       // Use startAction for click events (needWait=false, same as Android)
       // startAction stores to temporary table FT_TABLE_ACTION first
       // Then automatically closes and moves to sync table after timeout (100ms for non-wait actions)
-      if (Object.keys(property).length > 0) {
-        FTRUMGlobalManager.getInstance().startActionFull(actionName, Constants.EVENT_NAME_CLICK, false, property);
-      } else {
-        FTRUMGlobalManager.getInstance().startAction(actionName, Constants.EVENT_NAME_CLICK);
-      }
+      FTRUMGlobalManager.getInstance().startAction(actionName, Constants.EVENT_NAME_CLICK, property);
       
       // Removed high-frequency info log to reduce log output
       // FTInnerLogger.i(TAG, `[ACTION-TRACK] ✅ Action started: name=${actionName} (startAction - will auto-close after 100ms)`);
@@ -450,4 +442,3 @@ export class FTActionTracker {
     }
   }
 }
-
