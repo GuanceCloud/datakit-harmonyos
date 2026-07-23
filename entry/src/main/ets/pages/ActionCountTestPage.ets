@@ -2,6 +2,7 @@ import {
   AppState,
   ErrorType,
   FTRUMGlobalManager,
+  FTSDK,
   NetStatusBean,
   ResourceParams
 } from '@guancecloud/ft_sdk/Index';
@@ -39,8 +40,8 @@ export struct ActionCountTestPage {
    */
   checkSDKStatus() {
     try {
-      const rumGlobalManager = FTRUMGlobalManager.getInstance();
-      this.isSDKInitialized = rumGlobalManager.isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      this.isSDKInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       DemoLogger.i(TAG, `<FT-ACTION-COUNT-TEST> SDK status: ${this.isSDKInitialized ? 'initialized' : 'not initialized'}`);
     } catch (error) {
       DemoLogger.e(TAG, 'Failed to check SDK status:', error);
