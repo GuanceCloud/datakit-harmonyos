@@ -1062,7 +1062,7 @@ export class StressTestManager {
 
     const netStatusBean: NetStatusBean = this.createSyntheticNetStatus();
     this.rumManager?.startResource(resourceId);
-    this.rumManager?.stopResource(resourceId, params.resourceStatus || 200, params.responseContentLength || 0);
+    this.rumManager?.stopResource(resourceId);
     this.rumManager?.addResource(resourceId, params, netStatusBean);
   }
 

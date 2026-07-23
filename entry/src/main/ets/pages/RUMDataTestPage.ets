@@ -420,7 +420,7 @@ export struct RUMDataTestPage {
       const resourceId = this.createResourceId('resource');
       rumManager.startResource(resourceId);
       setTimeout(() => {
-        rumManager.stopResource(resourceId, 200, 1024);
+        rumManager.stopResource(resourceId);
         rumManager.addResource(
           resourceId,
           this.createResourceParams('https://api.example.com/resource', 200),
@@ -444,7 +444,7 @@ export struct RUMDataTestPage {
       const resourceId = this.createResourceId('resource_prop');
       rumManager.startResource(resourceId);
       setTimeout(() => {
-        rumManager.stopResource(resourceId, 201, 2048);
+        rumManager.stopResource(resourceId);
         rumManager.addResource(
           resourceId,
           this.createResourceParams('https://api.example.com/resource/with-meta', 201, 'POST'),
@@ -472,7 +472,7 @@ export struct RUMDataTestPage {
         const resourceId = this.createResourceId(`resource_${status}`);
         rumManager.startResource(resourceId);
         setTimeout(() => {
-          rumManager.stopResource(resourceId, status, 1024 + i * 256);
+          rumManager.stopResource(resourceId);
           rumManager.addResource(
             resourceId,
             this.createResourceParams(`https://api.example.com/status/${status}`, status),

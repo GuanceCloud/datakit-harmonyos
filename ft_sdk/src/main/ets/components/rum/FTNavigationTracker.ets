@@ -1,5 +1,6 @@
 import { UIContext, uiObserver } from '@kit.ArkUI';
 import { FTRUMGlobalManager } from './FTRUMGlobalManager';
+import { FTRUMInnerManager } from './FTRUMInnerManager';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfig } from '../Configs';
 import { Utils } from '../utils/Utils';
@@ -192,7 +193,7 @@ export class FTNavigationTracker {
     // Handle state=2 (page shown) - calculate load time and start view
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentCreated calculates duration and calls onCreateView
     if (info.state === 2) {
-      // Get RUM manager instance (needed for both onCreateView and startView)
+      // Get the public RUM manager for view lifecycle reporting.
       const rum = FTRUMGlobalManager.getInstance();
       
       const createStartTime = this.pageCreateStartTimeMap.get(toName);
@@ -201,8 +202,8 @@ export class FTNavigationTracker {
         const loadTime = Utils.getCurrentNanoTime() - createStartTime;
         this.pageCreateStartTimeMap.delete(toName);
         
-        // Record load time using onCreateView (aligned with Android)
-        rum.onCreateView(toName, loadTime);
+        // Record load time through the SDK-internal automatic tracking entry point.
+        FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(toName, loadTime);
       } else {
         // No creation start time found - this happens when:
         // 1. Returning to a previous page (page already exists, no state=0 event)
@@ -240,11 +241,11 @@ export class FTNavigationTracker {
         const loadTime = Utils.getCurrentNanoTime() - resumeStartTime;
         this.pageResumeStartTimeMap.delete(toName);
         
-        // Record load time using onCreateView with resume key (aligned with Android's resume time handling)
+        // Record load time with resume key (aligned with Android's resume time handling)
         // Use resume key format: {viewName}_resume
         // getViewLoadTime() will prioritize resume key over create key
         const resumeKey = `${toName}_resume`;
-        rum.onCreateView(resumeKey, loadTime);
+        FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(resumeKey, loadTime);
       }
       
       // Continue with normal view start logic
@@ -298,4 +299,3 @@ export class FTNavigationTracker {
     return viewName;
   }
 }
-

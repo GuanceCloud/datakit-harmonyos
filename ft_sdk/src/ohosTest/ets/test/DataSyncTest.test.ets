@@ -10,6 +10,7 @@ import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTLoggerConfig, FTRUMConfig, FTTraceConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import FTTrackInner from '../../../main/ets/components/FTTrackInner';
 import { FTLogger } from '../../../main/ets/components/log/FTLogger';
 import { Status } from '../../../main/ets/components/bean/Status';
@@ -241,7 +242,7 @@ export default function dataSyncTest() {
 
     it('rumViewShouldUploadAndDelete', 0, async () => {
       const onCreateViewName = 'sync_on_create_view';
-      FTRUMGlobalManager.getInstance().onCreateView(onCreateViewName, ON_CREATE_VIEW_LOAD_TIME_NS);
+      FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(onCreateViewName, ON_CREATE_VIEW_LOAD_TIME_NS);
       await FTRUMGlobalManager.getInstance().startView(onCreateViewName);
       await WaitUtils.delay(300);
       await FTRUMGlobalManager.getInstance().stopView();
@@ -521,7 +522,13 @@ export default function dataSyncTest() {
       const errorStack = 'Error: real_collected_js_error\n  at DataSyncTest';
 
       await FTRUMGlobalManager.getInstance().startView('error_sync_view');
-      FTRUMGlobalManager.getInstance().addError(errorStack, errorMessage, ErrorType.JS, AppState.RUN);
+      FTRUMGlobalManager.getInstance().addError(
+        errorStack,
+        errorMessage,
+        Date.now() * 1000000,
+        ErrorType.JS,
+        AppState.RUN
+      );
 
       const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
         'error',
@@ -668,10 +675,49 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 200, 16);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       await assertRumRecordUploaded(collector, fragments);
+    });
+
+    it('resourceLifecyclePropertiesShouldMergeInCallOrder', 0, async () => {
+      const viewName = 'resource_lifecycle_property_view';
+      const resourceId = 'resource_lifecycle_property';
+      const resourceUrl = 'https://example.com/resource-lifecycle-property';
+
+      const startProperty = buildActionProperty('resource_start_property', 'from-start');
+      startProperty['resource_shared_property'] = { value: 'from-start' } as object;
+      const stopProperty = buildActionProperty('resource_stop_property', 'from-stop');
+      stopProperty['resource_shared_property'] = { value: 'from-stop' } as object;
+
+      const params = new ResourceParams();
+      params.setUrl(resourceUrl);
+      params.setResourceMethod('GET');
+      params.setResourceStatus(200);
+      const addProperty = new Map<string, object>();
+      addProperty.set('resource_add_property', { value: 'from-add' } as object);
+      addProperty.set('resource_shared_property', { value: 'from-add' } as object);
+      params.setProperty(addProperty);
+
+      const netStatus = new NetStatusBean();
+      netStatus.setHoleRequestTime(120000000);
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().startResource(resourceId, startProperty);
+      await WaitUtils.delay(20);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId, stopProperty);
+      FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
+
+      await assertRumRecordUploaded(collector, [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        `view_name=${viewName}`,
+        'resource_start_property=from-start',
+        'resource_stop_property=from-stop',
+        'resource_add_property=from-add',
+        'resource_shared_property=from-add'
+      ]);
     });
 
     it('statusZeroShouldWriteResourceError', 0, async () => {
@@ -694,7 +740,7 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 0, 0);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       const resourceFragments = [
@@ -751,7 +797,7 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 200, 0);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       const fragments = [

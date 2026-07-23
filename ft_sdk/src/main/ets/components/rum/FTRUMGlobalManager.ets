@@ -10,7 +10,6 @@ import { ErrorType, ErrorSource, AppState } from './enum/RUMEnums';
 import { ResourceParams } from './bean/ResourceParams';
 import { NetStatusBean } from './bean/NetStatusBean';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { RunnerCompleteCallBack } from './callback/RunnerCompleteCallBack';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfig } from '../Configs';
 
@@ -207,19 +206,6 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Create view - record page load time
-   * Aligned with Android: FTRUMGlobalManager.onCreateView(String viewName, long loadTime)
-   * 
-   * @param viewName View name
-   * @param loadTime Load time in nanoseconds
-   */
-  public onCreateView(viewName: string, loadTime: number): void {
-    if (this.innerManager) {
-      this.innerManager.onCreateView(viewName, loadTime);
-    }
-  }
-
-  /**
    * Update load time
    * 
    * @param duration Load time duration
@@ -231,35 +217,44 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Add error information
-   * Compatible with multiple addError overloads
-   * 
-   * @param log       log
-   * @param message   message
-   * @param errorType error type (string or ErrorType enum)
-   * @param state     program running state
-   * @param property  additional attribute parameters (optional)
-   * @param dateline  occurrence time, nanosecond (optional)
-   * @param callBack  thread pool call back (optional)
+   * Add error information. Supports the Android-compatible forms:
+   * addError(log, message, errorType, state, property) and
+   * addError(log, message, dateline, errorType, state, property).
    */
   public addError(
-    log: string, 
-    message: string, 
-    errorType: string | ErrorType, 
-    state: AppState,
-    property?: Record<string, object> | null,
-    dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    log: string,
+    message: string,
+    datelineOrErrorType: number | string | ErrorType,
+    errorTypeOrState: string | ErrorType | AppState,
+    stateOrProperty?: AppState | Record<string, object> | null,
+    property?: Record<string, object> | null
   ): void {
-    if (this.innerManager) {
-      const errorTypeStr = typeof errorType === 'string' ? errorType : (errorType as ErrorType).toString();
-      // Fire-and-forget: innerManager.addError is async, but we keep the API synchronous (aligned with Android)
-      // The async operation will execute in the background
-      this.innerManager.addError(log, message, errorTypeStr, state, property, dateline, callBack).catch((error: Error | string) => {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        FTInnerLogger.e(TAG, `addError failed: ${errorMsg}`);
-      });
+    if (!this.innerManager) {
+      return;
     }
+
+    let dateline: number | undefined;
+    let errorType: string | ErrorType;
+    let state: AppState;
+    let actualProperty: Record<string, object> | null | undefined;
+    if (typeof datelineOrErrorType === 'number') {
+      dateline = datelineOrErrorType;
+      errorType = errorTypeOrState as string | ErrorType;
+      state = stateOrProperty as AppState;
+      actualProperty = property;
+    } else {
+      errorType = datelineOrErrorType;
+      state = errorTypeOrState as AppState;
+      actualProperty = stateOrProperty as Record<string, object> | null | undefined;
+    }
+
+    // ErrorType is a string enum in ArkTS, so its public values can be passed directly.
+    const errorTypeStr = errorType as string;
+    // Fire-and-forget: the Worker completion callback is intentionally internal.
+    this.innerManager.addErrorInternal(log, message, errorTypeStr, state, actualProperty, dateline).catch((error: Error | string) => {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `addError failed: ${errorMsg}`);
+    });
   }
 
   /**
@@ -287,9 +282,8 @@ export class FTRUMGlobalManager {
       }
     }
     
-    // Fire-and-forget: innerManager.addError is async, but we keep the API synchronous (aligned with Android)
-    // The async operation will execute in the background
-    this.innerManager.addError(
+    // Fire-and-forget: the Worker completion callback is intentionally internal.
+    this.innerManager.addErrorInternal(
       errorStack,
       errorMessage,
       ErrorType.CUSTOM.toString(),
@@ -305,10 +299,11 @@ export class FTRUMGlobalManager {
    * Start resource
    * 
    * @param resourceId Resource ID
+   * @param property Additional properties
    */
-  public startResource(resourceId: string): void {
+  public startResource(resourceId: string, property: Record<string, object> = {}): void {
     if (this.innerManager) {
-      this.innerManager.startResource(resourceId);
+      this.innerManager.startResource(resourceId, property);
     }
   }
 
@@ -316,12 +311,11 @@ export class FTRUMGlobalManager {
    * Stop resource
    * 
    * @param resourceId Resource ID
-   * @param statusCode Status code
-   * @param contentLength Content length
+   * @param property Additional properties
    */
-  public stopResource(resourceId: string, statusCode?: number, contentLength?: number): void {
+  public stopResource(resourceId: string, property: Record<string, object> = {}): void {
     if (this.innerManager) {
-      this.innerManager.stopResource(resourceId);
+      this.innerManager.stopResource(resourceId, property);
     }
   }
 

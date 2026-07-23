@@ -300,7 +300,7 @@ export class FTExceptionHandler {
       // Aligned with Android: uploadCrashLog(crash, message, state, callBack)
       // Note: HarmonyOS uses ErrorType.CRASH instead of ErrorType.JAVA (Android uses ErrorType.JAVA for Java exceptions)
       const rumManager = FTExceptionHandler.runtime.getRumManager();
-      rumManager.addError(
+      rumManager.addErrorInternal(
         crashStack,
         crashMessage,
         ErrorType.JS_CRASH.toString(),
