@@ -28,6 +28,9 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
+import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
+import { createRemoteConfigStorage } from './remote/RemoteConfigStorage';
+import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 const TAG = "FTSDK"
 
@@ -40,6 +43,7 @@ export class FTSDK {
   private static uiFeatureInitRetryCount: number = 0;
   private static readonly UI_FEATURE_INIT_MAX_RETRY: number = 5;
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
+  private static remoteConfigManager: FTRemoteConfigManager | null = null;
 
   /**
    * Get current RUM config
@@ -49,6 +53,10 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    if (FTSDK.remoteConfigManager !== null) {
+      FTSDK.remoteConfigManager.close();
+      FTSDK.remoteConfigManager = null;
+    }
     FTInnerLogFileManager.getInstance().shutdown(false);
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     FTLogger.resetBatchStateInternal();
@@ -157,7 +165,7 @@ export class FTSDK {
     FTInnerLogger.d(TAG, "FTSDK.install completed");
   }
 
-   initFTConfig(config: FTSDKConfig): void {
+  initFTConfig(config: FTSDKConfig): void {
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
     FTInnerLogger.setSDKLogLevel(config.getSdkLogLevel());
@@ -165,6 +173,22 @@ export class FTSDK {
 
     // Get context from Utils (unified context management)
     const context = getFTSDKRuntime().getAbilityContext();
+
+    // Android applies persisted remote configuration before the SDK's dependent
+    // managers are initialized. Preferences has a synchronous HarmonyOS API,
+    // which lets us preserve that startup ordering without changing FTSDK.install.
+    if (config.isRemoteConfiguration()) {
+      const storage = createRemoteConfigStorage(context);
+      const manager = new FTRemoteConfigManager(
+        config,
+        config.getRemoteConfigMiniUpdateInterval(),
+        storage,
+        config.getRemoteConfigFetchResult()
+      );
+      manager.initFromLocalCache();
+      manager.mergeSDKConfigFromCache(config);
+      FTSDK.remoteConfigManager = manager;
+    }
 
     if (context && config.isEnableInnerLogFile()) {
       const innerLogFileConfig = config.getInnerLogFileConfig();
@@ -434,6 +458,10 @@ export class FTSDK {
 
   static shutDown() {
     FTInnerLogger.setCrashLogCollectionEnabled(false);
+    if (FTSDK.remoteConfigManager !== null) {
+      FTSDK.remoteConfigManager.close();
+      FTSDK.remoteConfigManager = null;
+    }
     // Unregister UIAbility lifecycle listener
     try {
       FTAbilityLifecycleListener.getInstance().unregister();
@@ -812,6 +840,24 @@ export class FTSDK {
     } catch (error) {
       FTInnerLogger.e(TAG, `setAutoSync failed: ${error}`);
     }
+  }
+
+  /**
+   * Fetch remote configuration using the interval configured on FTSDKConfig.
+   * A valid RUM app id is supplied once RUM configuration is installed.
+   */
+  static updateRemoteConfig(): void;
+  static updateRemoteConfig(intervalSeconds: number, result: FTRemoteConfigFetchResult | null): void;
+  static updateRemoteConfig(intervalSeconds?: number, result?: FTRemoteConfigFetchResult | null): void {
+    const manager = FTSDK.remoteConfigManager;
+    if (manager === null) {
+      return;
+    }
+    if (intervalSeconds === undefined) {
+      void manager.updateRemoteConfig();
+      return;
+    }
+    void manager.updateRemoteConfig(intervalSeconds, result === undefined ? null : result);
   }
 
   /**
