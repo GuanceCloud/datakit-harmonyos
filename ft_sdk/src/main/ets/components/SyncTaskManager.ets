@@ -1,4 +1,5 @@
 import { FTSDKConfig } from './Configs';
+import { RemoteConfigBean } from './remote/RemoteConfigBean';
 import { DataType } from './enum/Enums';
 import { SyncData } from './db/bean/SyncData';
 import { Context } from '@kit.AbilityKit';
@@ -708,6 +709,26 @@ export class SyncTaskManager {
     if (!wasAutoSync && enabled) {
       this.executeSyncPoll();
     }
+  }
+
+  /** Apply the upload settings that Android updates without SDK re-installation. */
+  public hotUpdate(config: RemoteConfigBean): void {
+    const pageSize = config.getSyncPageSize();
+    if (pageSize !== null) {
+      this.pageSize = normalizeUploadPageSize(pageSize);
+    }
+    const autoSync = config.getAutoSync();
+    if (autoSync !== null) {
+      this.setAutoSync(autoSync);
+    }
+    const syncSleepTime = config.getSyncSleepTime();
+    if (syncSleepTime !== null) {
+      this.syncSleepTime = Math.max(
+        SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS,
+        Math.min(Math.floor(syncSleepTime), SyncTaskManager.SYNC_SLEEP_MAX_TIME_MS)
+      );
+    }
+    FTInnerLogger.i(TAG, `Remote config applied: pageSize=${this.pageSize}, autoSync=${this.autoSync}, syncSleepTime=${this.syncSleepTime}`);
   }
 
   /**

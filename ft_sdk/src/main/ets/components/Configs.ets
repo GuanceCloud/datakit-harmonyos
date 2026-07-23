@@ -60,6 +60,7 @@ export class FTRUMConfig {
   private enableTraceUserResource: boolean = false;
   private enableTraceWebView: boolean = false;
   private enableResourceHostIP: boolean = false;
+  private allowWebViewHost: Array<string> | null = null;
   // Monitor data
   private extraMonitorTypeWithError: number = 0; // ERROR_MONITOR_NO_SET
   private deviceMetricsMonitorType: number = 0; // DEVICE_METRICS_MONITOR_NO_SET
@@ -243,6 +244,16 @@ export class FTRUMConfig {
   public setEnableTraceWebView(enableTraceWebView: boolean): FTRUMConfig {
     this.enableTraceWebView = enableTraceWebView;
     return this;
+  }
+
+  /** Limit the WebView bridge to the supplied host allow-list. Null allows all hosts. */
+  public setAllowWebViewHost(allowWebViewHost: Array<string> | null): FTRUMConfig {
+    this.allowWebViewHost = allowWebViewHost === null ? null : allowWebViewHost.slice();
+    return this;
+  }
+
+  public getAllowWebViewHost(): Array<string> | null {
+    return this.allowWebViewHost === null ? null : this.allowWebViewHost.slice();
   }
 
   // public getExtraMonitorTypeWithError(): number {
