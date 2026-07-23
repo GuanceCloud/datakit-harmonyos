@@ -648,6 +648,28 @@ export default function configUnitTest() {
       expect(config.setRemoteConfigMiniUpdateInterval(12.9).getRemoteConfigMiniUpdateInterval()).assertEqual(12);
     });
 
+    it('runtimeEndpointAndDeviceIdUpdatesShouldMutateInstalledConfig', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      const config = FTSDKConfig.builder();
+
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('');
+      FTSDK.install(config, createFakeContext());
+      FTSDK.setDatakitUrl('http://datakit.example.com');
+      expect(config.getDatakitUrl()).assertEqual('http://datakit.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+
+      FTSDK.setDatawayUrl('https://dataway.example.com', 'client-token');
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('https://dataway.example.com');
+      expect(config.getClientToken()).assertEqual('client-token');
+
+      FTSDK.setEnableAccessDeviceID(false);
+      expect(config.isAccessODIDEnabled()).assertFalse();
+      expect(config.getGlobalContext().has(Constants.KEY_DEVICE_UUID)).assertTrue();
+    });
+
     it('installedConfigsShouldReachManagers', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);

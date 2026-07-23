@@ -45,6 +45,7 @@ export class FTSDK {
   private static readonly UI_FEATURE_INIT_MAX_RETRY: number = 5;
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
   private static remoteConfigManager: FTRemoteConfigManager | null = null;
+  private static pendingRemoteConfigAppId: string | null = null;
 
   /**
    * Get current RUM config
@@ -58,6 +59,7 @@ export class FTSDK {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
     }
+    FTSDK.pendingRemoteConfigAppId = null;
     FTInnerLogFileManager.getInstance().shutdown(false);
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     FTLogger.resetBatchStateInternal();
@@ -395,9 +397,7 @@ export class FTSDK {
       `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
       `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
 
-    if (FTSDK.remoteConfigManager !== null) {
-      void FTSDK.remoteConfigManager.initFromRemote(rumConfig.getRumAppId());
-    }
+    FTSDK.startRemoteConfigIfPossible(rumConfig.getRumAppId());
   }
 
   private static logServerUrl(config: FTSDKConfig): void {
@@ -480,6 +480,7 @@ export class FTSDK {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
     }
+    FTSDK.pendingRemoteConfigAppId = null;
     // Unregister UIAbility lifecycle listener
     try {
       FTAbilityLifecycleListener.getInstance().unregister();
@@ -860,6 +861,43 @@ export class FTSDK {
     }
   }
 
+  /** Configure a DataKit endpoint after SDK installation and resume auto upload. */
+  static setDatakitUrl(datakitUrl: string): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set DataKit URL');
+      return;
+    }
+    config.setDatakitUrl(datakitUrl);
+    FTSDK.logServerUrl(config);
+    FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.triggerPendingRemoteConfigInit();
+  }
+
+  /** Configure a Dataway endpoint and token after SDK installation and resume auto upload. */
+  static setDatawayUrl(datawayUrl: string, clientToken: string): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set Dataway URL');
+      return;
+    }
+    config.setDatawayUrl(datawayUrl, clientToken);
+    FTSDK.logServerUrl(config);
+    FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.triggerPendingRemoteConfigInit();
+  }
+
+  /** Dynamically switch between a system device identifier and HarmonyOS privacy UUID. */
+  static setEnableAccessDeviceID(enableAccessDeviceID: boolean): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot update device ID access');
+      return;
+    }
+    config.setEnableAccessDeviceID(enableAccessDeviceID);
+    FTSDK.updateDeviceUUIDContext(config);
+  }
+
   /** Apply only the Android-supported live remote-configuration fields. */
   private static applyRemoteConfigHotUpdate(bean: RemoteConfigBean): void {
     const sdk = FTSDK.ftSdk;
@@ -920,11 +958,75 @@ export class FTSDK {
     }
   }
 
+  private static getInstalledConfig(): FTSDKConfig | null {
+    return FTSDK.ftSdk === null ? null : FTSDK.ftSdk.ftSDKConfig;
+  }
+
+  private static resumeUploadAfterEndpointUpdate(): void {
+    SyncTaskManager.getInstance().executeSyncPoll();
+  }
+
+  private static startRemoteConfigIfPossible(appId: string): void {
+    if (FTSDK.remoteConfigManager === null || appId.length === 0) {
+      return;
+    }
+    const config = FTSDK.getInstalledConfig();
+    if (config !== null && FTSDK.isUploadEndpointAvailable(config)) {
+      FTSDK.pendingRemoteConfigAppId = null;
+      void FTSDK.remoteConfigManager.initFromRemote(appId);
+      return;
+    }
+    FTSDK.pendingRemoteConfigAppId = appId;
+    FTInnerLogger.d(TAG, 'Remote config request deferred until an intake endpoint is configured');
+  }
+
+  private static triggerPendingRemoteConfigInit(): void {
+    const appId = FTSDK.pendingRemoteConfigAppId;
+    const config = FTSDK.getInstalledConfig();
+    if (appId === null || config === null || !FTSDK.isUploadEndpointAvailable(config)) {
+      return;
+    }
+    FTSDK.pendingRemoteConfigAppId = null;
+    if (FTSDK.remoteConfigManager !== null) {
+      void FTSDK.remoteConfigManager.initFromRemote(appId);
+    }
+  }
+
+  private static isUploadEndpointAvailable(config: FTSDKConfig): boolean {
+    const datakitUrl = config.getDatakitUrl().trim();
+    if (FTSDK.isValidHttpUrl(datakitUrl)) {
+      return true;
+    }
+    return FTSDK.isValidHttpUrl(config.getDatawayUrl().trim()) && config.getClientToken().trim().length > 0;
+  }
+
+  private static isValidHttpUrl(value: string): boolean {
+    return /^https?:\/\/[^\s/?#]+(?:[/?#]|$)/i.test(value);
+  }
+
+  private static updateDeviceUUIDContext(config: FTSDKConfig): void {
+    const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
+    config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    if (!config.isAccessODIDEnabled()) {
+      DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
+        if (!config.isAccessODIDEnabled()) {
+          const persistedUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
+          config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(persistedUUID));
+          FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, persistedUUID);
+        }
+      }).catch((error: Error) => {
+        FTInnerLogger.w(TAG, `Failed to refresh privacy device UUID: ${error.message}`);
+      });
+    }
+  }
+
   /**
    * Fetch remote configuration using the interval configured on FTSDKConfig.
    * A valid RUM app id is supplied once RUM configuration is installed.
    */
   static updateRemoteConfig(): void;
+  static updateRemoteConfig(intervalSeconds: number): void;
   static updateRemoteConfig(intervalSeconds: number, result: FTRemoteConfigFetchResult | null): void;
   static updateRemoteConfig(intervalSeconds?: number, result?: FTRemoteConfigFetchResult | null): void {
     const manager = FTSDK.remoteConfigManager;
