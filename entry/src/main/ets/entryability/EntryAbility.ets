@@ -10,6 +10,7 @@ import {
   EnvType,
   ErrorMonitorType,
   FTLoggerConfig,
+  FTRemoteConfigFetchResult,
   FTRUMConfig,
   FTSDK,
   FTSDKConfig,
@@ -18,7 +19,8 @@ import {
   Status,
   SyncPageSize,
   TraceType,
-  UserData
+  UserData,
+  RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
@@ -38,6 +40,9 @@ const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequentia
 // default so a normal Demo launch always uses its configured DataKit/DataWay URL.
 const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
 const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
+// Remote configuration is off for ordinary Demo launches. Enable this only
+// when validating the remote-configuration endpoint and applied fields.
+const DEFAULT_REMOTE_CONFIG_TEST_ENABLED = false;
 const NETWORK_ROUTE_TEST_HOST = '10.100.64.213';
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
 const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
@@ -52,6 +57,7 @@ export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
+export const KEY_REMOTE_CONFIG_TEST_ENABLED = "remoteConfigTestEnabled";
 
 export const KEY_APP_ID = "appId";
 
@@ -64,7 +70,23 @@ interface RuntimeConfig {
   autoSync: string;
   networkRouteTestEnabled: string;
   networkRouteTestMode: string;
+  remoteConfigTestEnabled: string;
   appId: string;
+}
+
+class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
+  onConfigSuccessFetched(configBean: RemoteConfigBean, jsonConfig: string): RemoteConfigBean | null {
+    DemoLogger.i(
+      LOG_TAG,
+      `Remote config fetched: md5=${configBean.getMd5()}, content=${jsonConfig}`
+    );
+    // Return null to persist and apply the server payload without overriding it.
+    return null;
+  }
+
+  onResult(success: boolean): void {
+    DemoLogger.i(LOG_TAG, `Remote config fetch result: success=${success}`);
+  }
 }
 
 /**
@@ -91,8 +113,11 @@ interface RuntimeConfig {
  * 7. Enable the local custom DNS route test:
  * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns
  *
- * 8. Full example:
- * --ps datakitUrl http\://10.0.0.1\:9529 --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id
+ * 8. Enable remote-configuration verification (fetches on every cold start):
+ * --ps remoteConfigTestEnabled true
+ *
+ * 9. Full example:
+ * --ps datakitUrl http\://10.0.0.1\:9529 --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id --ps remoteConfigTestEnabled true
  *
  * Behavior:
  * - Parameters passed in onCreate are persisted to preferences.
@@ -110,6 +135,7 @@ export default class EntryAbility extends UIAbility {
     autoSync: "",
     networkRouteTestEnabled: "",
     networkRouteTestMode: "",
+    remoteConfigTestEnabled: "",
     appId: ""
   };
 
@@ -154,6 +180,7 @@ export default class EntryAbility extends UIAbility {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
+    const remoteConfigTestEnabledParam = want.parameters?.[KEY_REMOTE_CONFIG_TEST_ENABLED];
     const runtimeConfig: RuntimeConfig = {
       datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
       datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
@@ -167,6 +194,9 @@ export default class EntryAbility extends UIAbility {
       networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
         ? ""
         : String(networkRouteTestModeParam),
+      remoteConfigTestEnabled: remoteConfigTestEnabledParam === undefined || remoteConfigTestEnabledParam === null
+        ? ""
+        : String(remoteConfigTestEnabledParam),
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
@@ -178,7 +208,7 @@ export default class EntryAbility extends UIAbility {
 
       DemoLogger.i(
         LOG_TAG,
-        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
+        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}, remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`);
       return runtimeConfig;
     }
 
@@ -200,6 +230,12 @@ export default class EntryAbility extends UIAbility {
       runtimeConfig.networkRouteTestMode,
       ""
     );
+    runtimeConfig.remoteConfigTestEnabled = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_REMOTE_CONFIG_TEST_ENABLED,
+      runtimeConfig.remoteConfigTestEnabled,
+      ""
+    );
     runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
 
     await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
@@ -207,7 +243,7 @@ export default class EntryAbility extends UIAbility {
 
     DemoLogger.i(
       LOG_TAG,
-      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
+      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}, remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`);
 
     return runtimeConfig;
   }
@@ -242,6 +278,7 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    AppStorage.setOrCreate(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     AppStorage.setOrCreate(KEY_APP_ID, runtimeConfig.appId);
   }
 
@@ -261,6 +298,7 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    await preferencesStore.put(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
   }
@@ -281,6 +319,14 @@ export default class EntryAbility extends UIAbility {
   private resolveNetworkRouteTestMode(): 'proxy' | 'dns' {
     const value = this.runtimeConfig.networkRouteTestMode.trim().toLowerCase();
     return value === 'dns' || value === 'proxy' ? value : DEFAULT_NETWORK_ROUTE_TEST_MODE;
+  }
+
+  private isRemoteConfigTestEnabled(): boolean {
+    const value = this.runtimeConfig.remoteConfigTestEnabled.trim().toLowerCase();
+    if (value.length === 0) {
+      return DEFAULT_REMOTE_CONFIG_TEST_ENABLED;
+    }
+    return value === 'true' || value === '1' || value === 'on';
   }
 
   /**
@@ -354,6 +400,10 @@ export default class EntryAbility extends UIAbility {
       const appId = this.runtimeConfig.appId.trim();
       const networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
       const networkRouteTestMode = this.resolveNetworkRouteTestMode();
+      const remoteConfigTestEnabled = this.isRemoteConfigTestEnabled();
+      const remoteConfigFetchResult: FTRemoteConfigFetchResult | null = remoteConfigTestEnabled
+        ? new RemoteConfigTestFetchResult()
+        : null;
 
       // Create SDK configuration
       let sdkConfig: FTSDKConfig;
@@ -394,6 +444,13 @@ export default class EntryAbility extends UIAbility {
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
         .setSyncSleepTime(100) // Default: no extra delay between upload requests
         .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
+        .setRemoteConfiguration(remoteConfigTestEnabled)
+        // A zero interval keeps endpoint validation repeatable across cold starts.
+        .setRemoteConfigMiniUpdateInterval(remoteConfigTestEnabled ? 0 : 43200)
+        .setRemoteConfigurationCallBack(remoteConfigFetchResult)
+      if (remoteConfigTestEnabled) {
+        DemoLogger.i(LOG_TAG, 'Remote configuration test enabled: refresh interval=0 seconds');
+      }
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
           host: NETWORK_ROUTE_TEST_HOST,
@@ -445,6 +502,12 @@ export default class EntryAbility extends UIAbility {
         // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
+      if (remoteConfigTestEnabled) {
+        // Exercises the public manual-refresh API. The SDK ignores it safely if
+        // the automatic request started by installRUMConfig is still running.
+        DemoLogger.i(LOG_TAG, 'Requesting remote configuration through FTSDK.updateRemoteConfig(0)');
+        FTSDK.updateRemoteConfig(0);
+      }
 
       // Bind user data using new UserData class with persistence
       const userData = new UserData();
