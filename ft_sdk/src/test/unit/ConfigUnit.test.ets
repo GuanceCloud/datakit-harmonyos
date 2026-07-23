@@ -638,6 +638,16 @@ export default function configUnitTest() {
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
     });
 
+    it('remoteConfigShouldKeepAndroidCompatibleDefaults', 0, () => {
+      const config = FTSDKConfig.builder(TEST_FAKE_URL);
+
+      expect(config.isRemoteConfiguration()).assertFalse();
+      expect(config.getRemoteConfigMiniUpdateInterval()).assertEqual(43200);
+      expect(config.setRemoteConfiguration(true).isRemoteConfiguration()).assertTrue();
+      expect(config.setRemoteConfigMiniUpdateInterval(-1).getRemoteConfigMiniUpdateInterval()).assertEqual(0);
+      expect(config.setRemoteConfigMiniUpdateInterval(12.9).getRemoteConfigMiniUpdateInterval()).assertEqual(12);
+    });
+
     it('installedConfigsShouldReachManagers', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);

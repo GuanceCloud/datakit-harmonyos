@@ -7,6 +7,7 @@ import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
+import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
@@ -701,6 +702,10 @@ export class FTSDKConfig {
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
   private enableInnerLogFile: boolean = false;
   private innerLogFileConfig: FTInnerLogFileConfig = {};
+  // Remote configuration is opt-in, matching Android SDK defaults.
+  private remoteConfiguration: boolean = false;
+  private remoteConfigFetchResult: FTRemoteConfigFetchResult | null = null;
+  private remoteConfigMiniUpdateInterval: number = 43200;
 
   // Constructor
   private constructor(datakitUrl: string = '', datawayUrl: string = '', clientToken: string = '') {
@@ -814,6 +819,44 @@ export class FTSDKConfig {
 
   isCompressIntakeRequests(): boolean {
     return this.compressIntakeRequests;
+  }
+
+  /**
+   * Enable configuration updates fetched from DataKit or Dataway. The default
+   * is disabled to preserve existing SDK initialization behaviour.
+   */
+  setRemoteConfiguration(remoteConfiguration: boolean): FTSDKConfig {
+    this.remoteConfiguration = remoteConfiguration;
+    return this;
+  }
+
+  isRemoteConfiguration(): boolean {
+    return this.remoteConfiguration;
+  }
+
+  /** Set the callback invoked after a remote configuration fetch attempt. */
+  setRemoteConfigurationCallBack(fetchResult: FTRemoteConfigFetchResult | null): FTSDKConfig {
+    this.remoteConfigFetchResult = fetchResult;
+    return this;
+  }
+
+  getRemoteConfigFetchResult(): FTRemoteConfigFetchResult | null {
+    return this.remoteConfigFetchResult;
+  }
+
+  /**
+   * Set the minimum interval between remote configuration fetches, in seconds.
+   * Values below zero are normalized to zero so callers can intentionally force
+   * an immediate refresh with a zero interval.
+   */
+  setRemoteConfigMiniUpdateInterval(intervalSeconds: number): FTSDKConfig {
+    const normalized = intervalSeconds !== intervalSeconds ? 43200 : Math.floor(intervalSeconds);
+    this.remoteConfigMiniUpdateInterval = Math.max(0, normalized);
+    return this;
+  }
+
+  getRemoteConfigMiniUpdateInterval(): number {
+    return this.remoteConfigMiniUpdateInterval;
   }
 
   /** Set the HTTP proxy used by SDK upload requests. */
