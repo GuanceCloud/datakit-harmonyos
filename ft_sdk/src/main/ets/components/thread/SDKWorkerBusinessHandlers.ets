@@ -1093,6 +1093,9 @@ function processRumResourceCommand(
   if (command.eventTime && command.eventTime > 0) {
     resource.eventTime = command.eventTime;
   }
+  if (command.property) {
+    applyResourcePropertyMetrics(resource, command.property);
+  }
 
   if (commandType === 'start') {
     resource.startTime = command.startTime && command.startTime > 0 ? command.startTime : resource.startTime;

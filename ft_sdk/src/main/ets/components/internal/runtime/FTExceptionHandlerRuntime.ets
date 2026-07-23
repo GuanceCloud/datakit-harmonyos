@@ -8,7 +8,7 @@ import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 
 export interface FTExceptionRumManager {
   stopView(): Promise<void>;
-  addError(
+  addErrorInternal(
     log: string,
     message: string,
     errorType: string,

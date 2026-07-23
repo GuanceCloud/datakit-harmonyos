@@ -45,7 +45,7 @@ export interface FTNativeCrashRumContext {
 
 export interface FTNativeCrashRumManager {
   getSavedRumContext(): Promise<FTNativeCrashRumContext>;
-  addError(
+  addErrorInternal(
     log: string,
     message: string,
     errorType: string,

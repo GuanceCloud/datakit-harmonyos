@@ -64,7 +64,7 @@ class DeviceFakeRumManager implements FTExceptionRumManager {
     return Promise.resolve();
   }
 
-  addError(
+  addErrorInternal(
     log: string,
     message: string,
     errorType: string,

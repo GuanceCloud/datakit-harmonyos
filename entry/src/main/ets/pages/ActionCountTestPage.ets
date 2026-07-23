@@ -90,8 +90,8 @@ export struct ActionCountTestPage {
         const errorStack = `Error: ${errorMessage}\n    at ActionCountTestPage.addErrorsToAction (ActionCountTestPage.ets:${120 + i})\n    at Object.onClick (ActionCountTestPage.ets:456)`;
         
         rumGlobalManager.addError(
-          errorMessage,
           errorStack,
+          errorMessage,
           ErrorType.CUSTOM,
           AppState.RUN
         );
@@ -276,8 +276,8 @@ export struct ActionCountTestPage {
           const errorStack = `Error: ${errorMessage}\n    at ActionCountTestPage.addAllEventsToAction (ActionCountTestPage.ets:${260 + i})`;
 
           rumGlobalManager.addError(
-            errorMessage,
             errorStack,
+            errorMessage,
             ErrorType.CUSTOM,
             AppState.RUN
           );
@@ -319,7 +319,7 @@ export struct ActionCountTestPage {
           // Simulate resource loading (async - action will wait for resource completion via pending_resource_count mechanism)
           setTimeout(() => {
             // Stop resource
-            rumGlobalManager.stopResource(resourceId, 200, 1024);
+            rumGlobalManager.stopResource(resourceId);
 
             // Add resource data
             const params = new ResourceParams();

@@ -238,6 +238,8 @@ export interface SDKRumResourceCommandDTO {
   context?: SDKRumResourceContextDTO;
   params?: SDKRumResourceParamsDTO;
   netStatus?: SDKRumResourceNetStatusDTO;
+  /** Custom properties supplied at the Resource lifecycle boundary. */
+  property?: SDKPropertyRecord;
   startTime?: number;
   endTime?: number;
   eventTime?: number;

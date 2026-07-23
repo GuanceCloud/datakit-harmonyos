@@ -195,7 +195,7 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
     return Promise.resolve(this.savedContext);
   }
 
-  addError(
+  addErrorInternal(
     log: string,
     message: string,
     errorType: string,
