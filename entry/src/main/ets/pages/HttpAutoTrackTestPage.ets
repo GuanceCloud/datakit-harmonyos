@@ -180,7 +180,8 @@ export struct HttpAutoTrackTestPage {
    */
   checkAutoTrackStatus() {
     try {
-      const rumEnabled = FTRUMGlobalManager.getInstance().isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      const rumEnabled = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       this.isAutoTrackEnabled = rumEnabled;
       this.addTestResult(`RCP interceptor session helper: ${this.isAutoTrackEnabled ? '✅ Available' :
         '❌ Unavailable'}`);

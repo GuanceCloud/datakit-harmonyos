@@ -111,7 +111,6 @@ export { Status } from './src/main/ets/components/bean/Status';
 export { UserData } from './src/main/ets/components/rum/bean/UserData';
 export { ResourceParams } from './src/main/ets/components/rum/bean/ResourceParams';
 export { NetStatusBean } from './src/main/ets/components/rum/bean/NetStatusBean';
-export { RunnerCompleteCallBack } from './src/main/ets/components/rum/callback/RunnerCompleteCallBack';
 
 // ============================================================================
 // Data Modifiers (Optional)

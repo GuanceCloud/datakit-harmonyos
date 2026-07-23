@@ -2,72 +2,16 @@
  * HarmonyOS SDK RUM global manager
  * RUM Global Manager for HarmonyOS
  */
-import { Context } from '@kit.AbilityKit';
 import { FTRUMInnerManager } from './FTRUMInnerManager';
+import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { UserData } from './bean/UserData';
 import { Utils } from '../utils/Utils';
-import { ErrorType, ErrorSource, AppState } from './enum/RUMEnums';
+import { ErrorType, AppState } from './enum/RUMEnums';
 import { ResourceParams } from './bean/ResourceParams';
 import { NetStatusBean } from './bean/NetStatusBean';
-import { hilog } from '@kit.PerformanceAnalysisKit';
 import { FTInnerLogger } from '../log/FTLogger';
-import { FTRUMConfig } from '../Configs';
 
 const TAG = "FTRUMGlobalManager";
-
-/**
- * Custom data interface
- */
-interface CustomData {
-  timestamp: number;
-  version: string;
-}
-
-/**
- * Property value types
- */
-type PropertyValue = string | number | boolean | AppState | ErrorType | CustomData;
-
-/**
- * Property wrapper interface
- */
-interface PropertyWrapper {
-  value: PropertyValue;
-}
-
-/**
- * Property wrapper class for ArkTS compatibility
- * ArkTS requires object literals to correspond to explicitly declared classes
- */
-class PropertyWrapperImpl implements PropertyWrapper {
-  value: PropertyValue;
-  constructor(value: PropertyValue) {
-    this.value = value;
-  }
-}
-
-/**
- * Property class for error properties using Map
- */
-class ErrorProperty {
-  public properties: Map<string, PropertyValue> = new Map();
-
-  set(key: string, value: PropertyValue): void {
-    this.properties.set(key, value);
-  }
-
-  // Convert to object for compatibility with existing code
-  toObject(): Record<string, object> {
-    const result: Record<string, object> = {};
-    this.properties.forEach((value, key) => {
-      // Use class instead of interface literal for ArkTS compatibility
-      const wrapper = new PropertyWrapperImpl(value);
-      result[key] = wrapper as object;
-    });
-    return result;
-  }
-
-}
 
 /**
  * RUM global manager
@@ -78,7 +22,11 @@ export class FTRUMGlobalManager {
   private innerManager: FTRUMInnerManager | null = null;
 
   private constructor() {
-    // Private constructor
+    const configManager = FTRUMConfigManager.getInstance();
+    configManager.setRumStateListenerInternal((enabled: boolean): void => {
+      this.updateInnerManager(enabled);
+    });
+    this.updateInnerManager(configManager.isRumEnable());
   }
 
   /**
@@ -92,38 +40,8 @@ export class FTRUMGlobalManager {
     return FTRUMGlobalManager.instance;
   }
 
-  public static resetStateInternal(): void {
-    if (FTRUMGlobalManager.instance) {
-      FTRUMGlobalManager.instance.innerManager = null;
-    }
-    FTRUMGlobalManager.instance = null;
-    FTRUMInnerManager.resetStateInternal();
-  }
-
-  /**
-   * Initialize RUM manager with config (aligned with Android: FTRUMGlobalManager.initConfig)
-   * @param config RUM configuration
-   */
-  public initConfig(config: FTRUMConfig): void {
-    // Aligned with Android: FTRUMGlobalManager.initConfig(FTRUMConfig config)
-    // if (config.isRumEnable()) { innerManager = FTRUMInnerManager.get(); }
-    if (this.isRumEnable(config)) {
-      this.innerManager = FTRUMInnerManager.getInstance();
-      FTInnerLogger.d(TAG, `initConfig: RUM enabled, innerManager initialized`);
-    } else {
-      this.innerManager = null;
-      FTInnerLogger.d(TAG, `initConfig: RUM disabled, innerManager not initialized`);
-    }
-  }
-
-  /**
-   * Check if RUM is enabled (aligned with Android: FTRUMConfig.isRumEnable())
-   * @param config RUM configuration
-   * @returns true if RUM is enabled
-   */
-  private isRumEnable(config: FTRUMConfig): boolean {
-    const rumAppId = config.getRumAppId();
-    return rumAppId != null && rumAppId !== "";
+  private updateInnerManager(enabled: boolean): void {
+    this.innerManager = enabled ? FTRUMInnerManager.getInstance() : null;
   }
 
   /**
@@ -258,44 +176,6 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Add custom error implementation
-   * 
-   * @param errorMessage Error message
-   * @param errorStack Error stack trace
-   * @param property Additional properties
-   */
-  public addCustomError(errorMessage: string, errorStack: string = "", property: Record<string, object> = {}): void {
-    if (!this.innerManager) {
-      return;
-    }
-
-    const errorPropertyObj = new ErrorProperty();
-    const keys = Object.keys(property);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = property[key];
-      try {
-        const wrapper = value as PropertyWrapper;
-        errorPropertyObj.set(key, wrapper.value);
-      } catch {
-        errorPropertyObj.set(key, value as PropertyValue);
-      }
-    }
-    
-    // Fire-and-forget: the Worker completion callback is intentionally internal.
-    this.innerManager.addErrorInternal(
-      errorStack,
-      errorMessage,
-      ErrorType.CUSTOM.toString(),
-      AppState.RUN,
-      errorPropertyObj.toObject()
-    ).catch((error: Error | string) => {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      FTInnerLogger.e(TAG, `addCustomError failed: ${errorMsg}`);
-    });
-  }
-
-  /**
    * Start resource
    * 
    * @param resourceId Resource ID
@@ -368,11 +248,4 @@ export class FTRUMGlobalManager {
     }
   }
 
-  /**
-   * Check if initialized
-   * @returns Whether initialized
-   */
-  public isInitialized(): boolean {
-    return this.innerManager !== null;
-  }
 }

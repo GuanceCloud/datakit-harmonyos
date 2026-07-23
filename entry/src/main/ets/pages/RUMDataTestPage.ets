@@ -2,6 +2,7 @@ import {
   AppState,
   ErrorType,
   FTRUMGlobalManager,
+  FTSDK,
   NetStatusBean,
   ResourceParams,
   StringWrapper
@@ -121,8 +122,8 @@ export struct RUMDataTestPage {
 
   private checkSDKStatus(): void {
     try {
-      const rumManager = FTRUMGlobalManager.getInstance();
-      this.isSDKInitialized = rumManager.isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      this.isSDKInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       this.appendResult(`SDK status: ${this.isSDKInitialized ? 'initialized' : 'not initialized'}`);
     } catch (error) {
       this.isSDKInitialized = false;
@@ -290,10 +291,12 @@ export struct RUMDataTestPage {
       const propertyBag = new PropertyBag();
       propertyBag.set('error_code', 'CUSTOM_001');
       propertyBag.set('module', 'RUMDataTestPage');
-      propertyBag.set('method', 'addCustomError');
-      rumManager.addCustomError(
-        'Custom error message from unified test page',
+      propertyBag.set('method', 'addError');
+      rumManager.addError(
         'Error stack trace:\n  at sendCustomError (RUMDataTestPage.ets)\n  at onClick (RUMDataTestPage.ets)',
+        'Custom error message from unified test page',
+        ErrorType.CUSTOM,
+        AppState.RUN,
         propertyBag.toWrappedRecord()
       );
       this.errorCount++;

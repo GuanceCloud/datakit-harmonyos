@@ -590,7 +590,7 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
-    it('customErrorShouldUploadAndDelete', 0, async () => {
+    it('customErrorTypeShouldUploadAndDelete', 0, async () => {
       const errorMessage = 'real_collected_custom_error';
       const errorStack = 'Error: real_collected_custom_error\n  at DataSyncTest';
       const fragments = [
@@ -603,8 +603,13 @@ export default function dataSyncTest() {
       ];
 
       await FTRUMGlobalManager.getInstance().startView('custom_error_sync_view');
-      FTRUMGlobalManager.getInstance().addCustomError(errorMessage, errorStack,
-        buildActionProperty('custom_error_prop_key', 'custom_error_prop_value'));
+      FTRUMGlobalManager.getInstance().addError(
+        errorStack,
+        errorMessage,
+        ErrorType.CUSTOM,
+        AppState.RUN,
+        buildActionProperty('custom_error_prop_key', 'custom_error_prop_value')
+      );
 
       await assertRumRecordUploaded(collector, fragments);
     });

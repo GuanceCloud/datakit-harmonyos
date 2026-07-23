@@ -19,7 +19,6 @@ import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
-import { FTRUMGlobalManager } from "./rum/FTRUMGlobalManager";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
@@ -285,9 +284,6 @@ export class FTSDK {
     FTDBCachePolicy.getInstance().updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
     // Initialize RUM Inner Manager with config (aligned with Android: FTRUMInnerManager.initParams)
     FTRUMInnerManager.getInstance().initParams(rumConfig);
-
-    // Initialize RUM Global Manager with config (aligned with Android: FTRUMConfigManager.initWithConfig -> FTRUMGlobalManager.initConfig)
-    FTRUMGlobalManager.getInstance().initConfig(rumConfig);
 
     // Initialize RUM config in FTTrackInner (aligned with Android: FTRUMConfigManager.initWithConfig -> FTTrackInner.initRUMConfig)
     // This initializes rumStaticFields (session_sample_rate, session_on_error_sample_rate) in SyncDataHelper
