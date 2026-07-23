@@ -29,6 +29,7 @@ import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
 import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
+import { RemoteConfigBean } from './remote/RemoteConfigBean';
 import { createRemoteConfigStorage } from './remote/RemoteConfigStorage';
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
@@ -78,7 +79,8 @@ export class FTSDK {
   }
 
   protected static requiresLifecycleListenerInternal(rumConfig: FTRUMConfig): boolean {
-    return FTSDK.requiresUIFeaturesInternal(rumConfig);
+    return FTSDK.requiresUIFeaturesInternal(rumConfig) ||
+      (FTSDK.ftSdk !== null && FTSDK.ftSdk.ftSDKConfig !== null && FTSDK.ftSdk.ftSDKConfig.isRemoteConfiguration());
   }
 
   private static autoActionTrackingEnabled: boolean = true;
@@ -185,6 +187,9 @@ export class FTSDK {
         storage,
         config.getRemoteConfigFetchResult()
       );
+      manager.setConfigAppliedListener((bean: RemoteConfigBean) => {
+        FTSDK.applyRemoteConfigHotUpdate(bean);
+      });
       manager.initFromLocalCache();
       manager.mergeSDKConfigFromCache(config);
       FTSDK.remoteConfigManager = manager;
@@ -247,6 +252,10 @@ export class FTSDK {
 
   static installLogConfig(logConfig: FTLoggerConfig): void {
     try {
+      if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
+        logConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+        FTSDK.remoteConfigManager?.mergeLogConfigFromCache(logConfig);
+      }
       // Initialize TrackLogManager
       TrackLogManager.getInstance().setLogConfig(logConfig);
       FTDBCachePolicy.getInstance().updateLogCacheLimitCount(logConfig.getLogCacheLimitCount());
@@ -275,6 +284,7 @@ export class FTSDK {
       // 1. Set service name (from base configuration)
       if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
         traceConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+        FTSDK.remoteConfigManager?.mergeTraceConfigFromCache(traceConfig);
       }
 
       // 2. Initialize Trace configuration manager
@@ -292,6 +302,10 @@ export class FTSDK {
   }
 
   static installRUMConfig(rumConfig: FTRUMConfig): void {
+    if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
+      rumConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+      FTSDK.remoteConfigManager?.mergeRUMConfigFromCache(rumConfig);
+    }
     // Save rumConfig reference for later use (e.g., ActionTracker initialization)
     FTSDK.rumConfig = rumConfig;
     FTInnerLogger.setCrashLogCollectionEnabled(
@@ -380,6 +394,10 @@ export class FTSDK {
       `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
       `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
       `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+
+    if (FTSDK.remoteConfigManager !== null) {
+      void FTSDK.remoteConfigManager.initFromRemote(rumConfig.getRumAppId());
+    }
   }
 
   private static logServerUrl(config: FTSDKConfig): void {
@@ -839,6 +857,66 @@ export class FTSDK {
       FTInnerLogger.d(TAG, `setAutoSync completed: enabled=${autoSync}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `setAutoSync failed: ${error}`);
+    }
+  }
+
+  /** Apply only the Android-supported live remote-configuration fields. */
+  private static applyRemoteConfigHotUpdate(bean: RemoteConfigBean): void {
+    const sdk = FTSDK.ftSdk;
+    const baseConfig = sdk === null ? null : sdk.ftSDKConfig;
+    if (baseConfig === null) {
+      return;
+    }
+    if (bean.getAutoSync() !== null) {
+      baseConfig.setAutoSync(bean.getAutoSync()!);
+    }
+    if (bean.getCompressIntakeRequests() !== null) {
+      baseConfig.setCompressIntakeRequests(bean.getCompressIntakeRequests()!);
+    }
+    if (bean.getSyncPageSize() !== null) {
+      baseConfig.setCustomSyncPageSize(bean.getSyncPageSize()!);
+    }
+    if (bean.getSyncSleepTime() !== null) {
+      baseConfig.setSyncSleepTime(bean.getSyncSleepTime()!);
+    }
+    SyncTaskManager.getInstance().hotUpdate(bean);
+
+    const logConfig = TrackLogManager.getInstance().getLogConfig();
+    if (logConfig !== null) {
+      if (bean.getLogLevelFilters() !== null) {
+        logConfig.setLogLevelFilters(bean.getLogLevelFilters()!);
+      }
+      if (bean.getLogEnableCustomLog() !== null) {
+        logConfig.setEnableCustomLog(bean.getLogEnableCustomLog()!);
+      }
+      if (bean.getLogEnableConsoleLog() !== null) {
+        logConfig.setEnableConsoleLog(bean.getLogEnableConsoleLog()!);
+      }
+      if (bean.getLogSampleRate() !== null) {
+        logConfig.setSamplingRate(bean.getLogSampleRate()!);
+      }
+      FTTrackInner.getInstance().initLogConfig(logConfig);
+    }
+
+    const traceConfig = FTTraceConfigManager.getInstance().getConfig();
+    if (traceConfig !== null && bean.getTraceSampleRate() !== null) {
+      traceConfig.setSamplingRate(bean.getTraceSampleRate()!);
+    }
+
+    const rumConfig = FTRUMConfigManager.getInstance().getConfig();
+    if (rumConfig !== null && rumConfig.getRumAppId().length > 0 &&
+      (bean.getRumSampleRate() !== null || bean.getRumSessionOnErrorSampleRate() !== null)) {
+      if (bean.getRumSampleRate() !== null) {
+        rumConfig.setSamplingRate(bean.getRumSampleRate()!);
+      }
+      if (bean.getRumSessionOnErrorSampleRate() !== null) {
+        rumConfig.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+      }
+      FTRUMInnerManager.getInstance().setSamplingRates(
+        rumConfig.getSamplingRate(),
+        rumConfig.getSessionErrorSampleRate()
+      );
+      FTTrackInner.getInstance().initRUMConfig(rumConfig);
     }
   }
 

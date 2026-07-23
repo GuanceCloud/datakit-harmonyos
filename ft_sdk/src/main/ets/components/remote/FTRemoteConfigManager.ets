@@ -1,11 +1,12 @@
 import { http } from '@kit.NetworkKit';
 import cryptoFramework from '@ohos.security.cryptoFramework';
 import { util } from '@kit.ArkTS';
-import { FTSDKConfig } from '../Configs';
+import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig } from '../Configs';
 import { Constants } from '../Constants';
 import { HttpBuilder } from '../http/HttpBuilder';
 import { FTInnerLogger } from '../log/FTLogger';
 import { RemoteConfigBean } from './RemoteConfigBean';
+import { TraceType } from '../trace/TraceType';
 import {
   FTRemoteConfigFetchResult,
   RemoteConfigClock,
@@ -140,6 +141,88 @@ export class FTRemoteConfigManager {
     }
   }
 
+  /** Apply cached RUM values before RUM managers are initialized. */
+  public mergeRUMConfigFromCache(config: FTRUMConfig): void {
+    const bean = this.remoteConfig;
+    if (bean === null) {
+      return;
+    }
+    if (bean.getRumSampleRate() !== null) {
+      config.setSamplingRate(bean.getRumSampleRate()!);
+    }
+    if (bean.getRumSessionOnErrorSampleRate() !== null) {
+      config.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+    }
+    if (bean.getRumEnableTraceUserAction() !== null) {
+      config.setEnableTraceUserAction(bean.getRumEnableTraceUserAction()!);
+    }
+    if (bean.getRumEnableTraceUserView() !== null) {
+      config.setEnableTraceUserView(bean.getRumEnableTraceUserView()!);
+    }
+    if (bean.getRumEnableTraceUserResource() !== null) {
+      config.setEnableTraceUserResource(bean.getRumEnableTraceUserResource()!);
+    }
+    if (bean.getRumEnableResourceHostIP() !== null) {
+      config.setEnableResourceHostIP(bean.getRumEnableResourceHostIP()!);
+    }
+    if (bean.getRumEnableTrackAppUIBlock() !== null) {
+      config.setEnableTrackAppUIBlock(bean.getRumEnableTrackAppUIBlock()!, bean.getRumBlockDurationMs() ?? undefined);
+    }
+    if (bean.getRumEnableTrackAppCrash() !== null) {
+      config.setEnableTrackAppCrash(bean.getRumEnableTrackAppCrash()!);
+    }
+    if (bean.getRumEnableTrackAppANR() !== null) {
+      config.setEnableTrackAppANR(bean.getRumEnableTrackAppANR()!);
+    }
+    if (bean.getRumEnableTraceWebView() !== null) {
+      config.setEnableTraceWebView(bean.getRumEnableTraceWebView()!);
+    }
+    if (bean.getRumAllowWebViewHost() !== null) {
+      config.setAllowWebViewHost(bean.getRumAllowWebViewHost());
+    }
+  }
+
+  /** Apply cached logger values before the logger manager is initialized. */
+  public mergeLogConfigFromCache(config: FTLoggerConfig): void {
+    const bean = this.remoteConfig;
+    if (bean === null) {
+      return;
+    }
+    if (bean.getLogSampleRate() !== null) {
+      config.setSamplingRate(bean.getLogSampleRate()!);
+    }
+    if (bean.getLogLevelFilters() !== null) {
+      config.setLogLevelFilters(bean.getLogLevelFilters()!);
+    }
+    if (bean.getLogEnableCustomLog() !== null) {
+      config.setEnableCustomLog(bean.getLogEnableCustomLog()!);
+    }
+    if (bean.getLogEnableConsoleLog() !== null) {
+      config.setEnableConsoleLog(bean.getLogEnableConsoleLog()!);
+    }
+  }
+
+  /** Apply cached trace values before the trace manager is initialized. */
+  public mergeTraceConfigFromCache(config: FTTraceConfig): void {
+    const bean = this.remoteConfig;
+    if (bean === null) {
+      return;
+    }
+    if (bean.getTraceSampleRate() !== null) {
+      config.setSamplingRate(bean.getTraceSampleRate()!);
+    }
+    if (bean.getTraceEnableAutoTrace() !== null) {
+      config.setEnableAutoTrace(bean.getTraceEnableAutoTrace()!);
+    }
+    const traceType = bean.getTraceType();
+    if (traceType !== null) {
+      const type = FTRemoteConfigManager.toTraceType(traceType);
+      if (type !== null) {
+        config.setTraceType(type);
+      }
+    }
+  }
+
   public async updateRemoteConfig(
     intervalSeconds: number = this.remoteConfigMiniUpdateInterval,
     result: FTRemoteConfigFetchResult | null = null
@@ -220,6 +303,25 @@ export class FTRemoteConfigManager {
     const callback = result === null ? this.fetchResult : result;
     if (callback !== null) {
       callback.onResult(success);
+    }
+  }
+
+  private static toTraceType(value: string): TraceType | null {
+    switch (value) {
+      case TraceType.DDTRACE:
+        return TraceType.DDTRACE;
+      case TraceType.ZIPKIN_MULTI_HEADER:
+        return TraceType.ZIPKIN_MULTI_HEADER;
+      case TraceType.ZIPKIN_SINGLE_HEADER:
+        return TraceType.ZIPKIN_SINGLE_HEADER;
+      case TraceType.TRACEPARENT:
+        return TraceType.TRACEPARENT;
+      case TraceType.SKYWALKING:
+        return TraceType.SKYWALKING;
+      case TraceType.JAEGER:
+        return TraceType.JAEGER;
+      default:
+        return null;
     }
   }
 }
