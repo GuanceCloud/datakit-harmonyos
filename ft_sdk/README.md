@@ -110,6 +110,25 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Remote Configuration and Runtime Endpoint
+
+Remote configuration is opt-in. After RUM is installed, the SDK fetches `v1/env_variable` using the RUM app ID, caches a valid response, and applies the Android-compatible fields on the next initialization or, where supported, immediately. The default refresh interval is 12 hours.
+
+```ts
+const sdkConfig = FTSDKConfig.builder()
+  .setRemoteConfiguration(true)
+  .setRemoteConfigMiniUpdateInterval(43_200)
+
+FTSDK.install(sdkConfig, this.context)
+FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId('YOUR_RUM_APP_ID'))
+
+// Upload and remote-config fetching can be enabled after SDK initialization.
+FTSDK.setDatakitUrl('https://datakit.example.com')
+// Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
+```
+
+Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry

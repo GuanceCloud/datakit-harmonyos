@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Completed Resource lifecycle properties: `startResource` and `stopResource` now accept optional properties and merge them with `ResourceParams` properties in call order.
 - Removed the unused `statusCode` and `contentLength` parameters from public `stopResource`; internal fallback Action association remains internal.
 - Aligned public `addError` overloads with Android, including the `dateline`-before-`errorType` form; Worker callbacks are now internal-only.
+- Added Android-compatible remote configuration, including cached startup merging, supported live updates, manual refresh, deferred endpoint setup, and runtime DataKit/Dataway and device-ID updates.
 - Removed public `onCreateView`; navigation load-time recording is now an internal automatic-tracking entry point.
 - Removed unsupported public RUM helpers: `initConfig`, `isInitialized`, and `addCustomError`. Use SDK installation/configuration state and `addError(..., ErrorType.CUSTOM, ...)` instead.
 - Removed the root `RunnerCompleteCallBack` export; this Worker callback remains SDK-internal.

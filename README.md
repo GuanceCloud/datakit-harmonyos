@@ -104,6 +104,24 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
 
+## Remote Configuration and Runtime Endpoint
+
+Enable remote configuration with `FTSDKConfig.setRemoteConfiguration(true)`. Once RUM is installed, the SDK requests `v1/env_variable` with the RUM app ID, persists a valid response, and applies supported updates. The default refresh interval is 12 hours.
+
+```ts
+const sdkConfig = FTSDKConfig.builder()
+  .setRemoteConfiguration(true)
+
+FTSDK.install(sdkConfig, this.context)
+FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId('YOUR_RUM_APP_ID'))
+
+// It is also valid to supply the upload endpoint later.
+FTSDK.setDatakitUrl('https://datakit.example.com')
+// Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
+```
+
+Call `FTSDK.updateRemoteConfig()` for a manual interval-respecting refresh. `FTSDK.setEnableAccessDeviceID(...)` updates the runtime `device_uuid` selection between a system identifier (when available) and the SDK privacy UUID.
+
 ## Package Guide
 
 - `@guancecloud/ft_sdk`: standard SDK initialization, RUM, logging, tracing, and common network helpers
