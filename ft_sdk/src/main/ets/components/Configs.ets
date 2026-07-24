@@ -710,9 +710,13 @@ export class FTSDKConfig {
   }
 
   // Static method to create FTSDKConfig object
+  static builder(): FTSDKConfig;
   static builder(datakitUrl: string): FTSDKConfig;
   static builder(datawayUrl: string, clientToken: string): FTSDKConfig;
-  static builder(datakitUrlOrDatawayUrl: string, clientToken?: string): FTSDKConfig {
+  static builder(datakitUrlOrDatawayUrl?: string, clientToken?: string): FTSDKConfig {
+    if (datakitUrlOrDatawayUrl === undefined) {
+      return new FTSDKConfig();
+    }
     if (clientToken !== undefined) {
       return new FTSDKConfig('', datakitUrlOrDatawayUrl, clientToken);
     } else {
@@ -732,6 +736,28 @@ export class FTSDKConfig {
 
   getClientToken(): string {
     return this.clientToken;
+  }
+
+  /**
+   * Replace the active intake endpoint with a DataKit endpoint.
+   * DataKit and Dataway are mutually exclusive upload modes.
+   */
+  setDatakitUrl(datakitUrl: string): FTSDKConfig {
+    this.datakitUrl = datakitUrl;
+    this.datawayUrl = '';
+    this.clientToken = '';
+    return this;
+  }
+
+  /**
+   * Replace the active intake endpoint with a Dataway endpoint and client token.
+   * DataKit and Dataway are mutually exclusive upload modes.
+   */
+  setDatawayUrl(datawayUrl: string, clientToken: string): FTSDKConfig {
+    this.datawayUrl = datawayUrl;
+    this.clientToken = clientToken;
+    this.datakitUrl = '';
+    return this;
   }
 
   isDebugMode(): boolean {
