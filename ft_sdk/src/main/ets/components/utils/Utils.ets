@@ -374,7 +374,7 @@ export class Utils {
       // systemDateTime.getTime(true) returns nanoseconds since Unix epoch
       const fullNanoTime = systemDateTime.getTime(true);
       
-      // Step 3: Extract the last 6 digits (microsecond part, 0-999999)
+      // Step 3: Extract the sub-millisecond nanosecond part (0-999999)
       // This simulates System.nanoTime() % 1000000L in Android
       const nanoPart = fullNanoTime % 1000000;
       
@@ -382,10 +382,9 @@ export class Utils {
       // This matches Android's format: millis * 1000000L + (nanoTime % 1000000L)
       return millis * 1000000 + nanoPart;
     } catch (error) {
-      // Fallback: use Date.now() * 1000000 (16 digits, microseconds)
-      // This is not ideal but maintains compatibility with older APIs
+      // Fallback: preserve the nanosecond epoch unit with millisecond precision.
       hilog.warn(LOG_DOMAIN, TAG, `Failed to get nanosecond time, using fallback: ${error}`);
-      return Date.now() * 1000000; // Convert to microseconds (16 digits)
+      return Date.now() * 1000000;
     }
   }
 
