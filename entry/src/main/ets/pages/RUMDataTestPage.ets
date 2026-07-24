@@ -111,7 +111,7 @@ export struct RUMDataTestPage {
   @State viewCount: number = 0;
   @State currentViewName: string = '';
   @State isViewActive: boolean = false;
-  @State loadTime: number = 0;
+  @State loadTimeNs: number = 0;
   @State testResults: string = '';
   @State lastResult: string = '';
 
@@ -160,7 +160,7 @@ export struct RUMDataTestPage {
     this.longTaskCount = 0;
     this.resourceCount = 0;
     this.viewCount = 0;
-    this.loadTime = 0;
+    this.loadTimeNs = 0;
     this.currentViewName = '';
     this.isViewActive = false;
     this.appendResult('All counters reset');
@@ -508,7 +508,7 @@ export struct RUMDataTestPage {
       rumManager.startView(viewName);
       this.currentViewName = viewName;
       this.isViewActive = true;
-      this.loadTime = 0;
+      this.loadTimeNs = 0;
       this.viewCount++;
       this.appendResult(`View: started ${viewName}`);
     } catch (error) {
@@ -541,10 +541,11 @@ export struct RUMDataTestPage {
     }
 
     try {
-      const newLoadTime = Math.floor(Math.random() * 5000) + 1000;
-      rumManager.updateLoadTime(newLoadTime);
-      this.loadTime = newLoadTime;
-      this.appendResult(`View: load time updated to ${newLoadTime}ms`);
+      const newLoadTimeMs = Math.floor(Math.random() * 5000) + 1000;
+      const newLoadTimeNs = newLoadTimeMs * 1_000_000;
+      rumManager.updateLoadTime(newLoadTimeNs);
+      this.loadTimeNs = newLoadTimeNs;
+      this.appendResult(`View: load time updated to ${newLoadTimeMs}ms (${newLoadTimeNs}ns)`);
     } catch (error) {
       this.appendResult(`Update load time failed: ${error}`);
     }
@@ -623,7 +624,7 @@ export struct RUMDataTestPage {
         Text(`Resource Count: ${this.resourceCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`View Count: ${this.viewCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`Current View: ${this.currentViewName || 'None'}`).fontSize(15).margin({ bottom: 6 })
-        Text(`Load Time: ${this.loadTime}ms`).fontSize(15).margin({ bottom: 6 })
+        Text(`Load Time: ${this.loadTimeNs / 1_000_000}ms`).fontSize(15).margin({ bottom: 6 })
         Text(`Last Result: ${this.lastResult || 'None'}`).fontSize(13)
       }
       .width('100%')
