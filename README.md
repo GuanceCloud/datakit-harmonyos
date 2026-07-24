@@ -104,6 +104,17 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
 
+## Update the Reporting Endpoint at Runtime
+
+After `FTSDK.install(...)`, update the active reporting endpoint without recreating the SDK:
+
+```ts
+FTSDK.setDatakitUrl('https://datakit.example.com')
+FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
+```
+
+DataKit and Dataway modes are mutually exclusive. The endpoint must be a complete `http://` or `https://` URL; Dataway also requires a client token. The value is kept in memory only. Automatic uploads resume after a valid endpoint is set, and `FTSDK.flushSyncData()` can request an immediate upload.
+
 ## Package Guide
 
 - `@guancecloud/ft_sdk`: standard SDK initialization, RUM, logging, tracing, and common network helpers
