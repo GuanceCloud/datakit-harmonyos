@@ -202,6 +202,7 @@ export default function configUnitTest() {
     it('sdkConfigShouldKeepDefaults', 0, () => {
       const datakitConfig = FTSDKConfig.builder(TEST_FAKE_URL).setServiceName('').setEnv('');
       const datawayConfig = FTSDKConfig.builder(TEST_FAKE_URL, TEST_FAKE_CLIENT_TOKEN).setEnv(EnvType.GRAY);
+      const deferredEndpointConfig = FTSDKConfig.builder();
 
       expect(datakitConfig.getServiceName()).assertEqual(Constants.DEFAULT_SERVICE_NAME);
       expect(datakitConfig.getEnv()).assertEqual(EnvType.PROD.toString());
@@ -213,6 +214,31 @@ export default function configUnitTest() {
       expect(datakitConfig.setSdkLogLevel(SDKLogLevel.W).getSdkLogLevel()).assertEqual(SDKLogLevel.W);
       expect(datakitConfig.isCompressIntakeRequests()).assertTrue();
       expect(datakitConfig.setCompressIntakeRequests(false).isCompressIntakeRequests()).assertFalse();
+      expect(deferredEndpointConfig.getDatakitUrl()).assertEqual('');
+      expect(deferredEndpointConfig.getDatawayUrl()).assertEqual('');
+      expect(deferredEndpointConfig.getClientToken()).assertEqual('');
+    });
+
+    it('runtimeEndpointUpdatesShouldSwitchUploadModes', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      const config = FTSDKConfig.builder();
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(config, createFakeContext());
+
+      FTSDK.setDatakitUrl('https://datakit.example.com');
+      expect(config.getDatakitUrl()).assertEqual('https://datakit.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+      expect(config.getClientToken()).assertEqual('');
+
+      FTSDK.setDatawayUrl('https://dataway.example.com', 'runtime-token');
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('https://dataway.example.com');
+      expect(config.getClientToken()).assertEqual('runtime-token');
+
+      FTSDK.setDatakitUrl('https://datakit-next.example.com');
+      expect(config.getDatakitUrl()).assertEqual('https://datakit-next.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+      expect(config.getClientToken()).assertEqual('');
     });
 
     it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {

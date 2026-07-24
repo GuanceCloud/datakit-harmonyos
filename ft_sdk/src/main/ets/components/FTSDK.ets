@@ -815,6 +815,34 @@ export class FTSDK {
   }
 
   /**
+   * Update the DataKit intake endpoint after SDK installation.
+   * This clears any Dataway endpoint and token, matching Android's FTSdk.setDatakitUrl.
+   */
+  static setDatakitUrl(datakitUrl: string): void {
+    if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set DataKit URL');
+      return;
+    }
+
+    FTSDK.ftSdk.ftSDKConfig.setDatakitUrl(datakitUrl);
+    FTSDK.logServerUrl(FTSDK.ftSdk.ftSDKConfig);
+  }
+
+  /**
+   * Update the Dataway intake endpoint and client token after SDK installation.
+   * This clears any DataKit endpoint, matching Android's FTSdk.setDatawayUrl.
+   */
+  static setDatawayUrl(datawayUrl: string, clientToken: string): void {
+    if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set Dataway URL');
+      return;
+    }
+
+    FTSDK.ftSdk.ftSDKConfig.setDatawayUrl(datawayUrl, clientToken);
+    FTSDK.logServerUrl(FTSDK.ftSdk.ftSDKConfig);
+  }
+
+  /**
    * Check if view tracking is enabled
    * Returns true if RUM is enabled and view tracking is enabled
    * Aligned with Android: FTRUMConfigManager.isRumEnable() && config.isEnableTraceUserView()
