@@ -126,7 +126,7 @@ export class FTRUMGlobalManager {
   /**
    * Update load time
    * 
-   * @param duration Load time duration
+   * @param duration Load time in nanoseconds
    */
   public updateLoadTime(duration: number): void {
     if (this.innerManager) {

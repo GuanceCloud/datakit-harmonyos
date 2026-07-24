@@ -779,7 +779,7 @@ export class SyncDataHelper {
    * @param measurement - The measurement name
    * @param tags - Map of tag key-value pairs
    * @param fields - Map of field key-value pairs
-   * @param timeStamp - Timestamp in microseconds
+   * @param timeStamp - Timestamp in nanoseconds
    * @param integerCompatible - Whether to use integer format for numbers (default: false)
    * @returns Line Protocol formatted string
    */
@@ -808,7 +808,7 @@ export class SyncDataHelper {
    * @param measurement - The measurement name
    * @param tags - Map of tag key-value pairs
    * @param fields - Map of field key-value pairs
-   * @param timeStamp - Timestamp in microseconds
+   * @param timeStamp - Timestamp in nanoseconds
    * @param integerCompatible - Whether to use integer format for numbers
    * @returns Line Protocol formatted string
    */
