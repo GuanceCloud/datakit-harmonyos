@@ -702,6 +702,44 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
+    it('executeSyncPollShouldSkipInvalidEndpointAndResumeAfterDatawayUpdate', 0, async () => {
+      const db = new FakeDbTaskPool();
+      const config = FTSDKConfig.builder();
+      runtime.dbTaskPool = db;
+      manager.init(config, createContext());
+
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'log-runtime-endpoint',
+          'df_rum_harmonyos_log,sdk_data_id=log-runtime-endpoint value=1i 100')
+      ]);
+
+      manager.executeSyncPoll();
+      await flushPromises();
+      expect(runtime.executeHttpCount).assertEqual(0);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+
+      config.setDatawayUrl('https://dataway.example.com', '');
+      manager.executeSyncPoll();
+      await flushPromises();
+      expect(runtime.executeHttpCount).assertEqual(0);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+
+      config.setDatakitUrl('not-an-http-url');
+      manager.executeSyncPoll();
+      await flushPromises();
+      expect(runtime.executeHttpCount).assertEqual(0);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+
+      config.setDatawayUrl('https://dataway.example.com', 'runtime-token');
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+      manager.executeSyncPoll();
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
+    });
+
     it('executeSyncPollShouldAggregateRepeatedTriggersWithinOneTenSecondWindow', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
