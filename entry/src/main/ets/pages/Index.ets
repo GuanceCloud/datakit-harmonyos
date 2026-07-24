@@ -205,6 +205,20 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Runtime reporting endpoint manual verification page
+            ListItem() {
+              Button() {
+                Text("Runtime Endpoint Verification")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0F766E')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/RuntimeEndpointVerificationPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Rate limit test page
             ListItem() {
               Button() {
