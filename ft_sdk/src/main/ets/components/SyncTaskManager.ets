@@ -1,5 +1,6 @@
 import { FTSDKConfig } from './Configs';
 import { DataType } from './enum/Enums';
+import { isUploadEndpointAvailable } from './http/UploadEndpoint';
 import { SyncData } from './db/bean/SyncData';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
@@ -594,6 +595,15 @@ export class SyncTaskManager {
    */
   public executeSyncPoll(): void {
     if (!this.autoSync || this.isStop) {
+      return;
+    }
+
+    if (this.sdkConfig === null || !isUploadEndpointAvailable(
+      this.sdkConfig.getDatakitUrl(),
+      this.sdkConfig.getDatawayUrl(),
+      this.sdkConfig.getClientToken()
+    )) {
+      FTInnerLogger.w(TAG, 'Upload URL not configured, skipping sync');
       return;
     }
 
