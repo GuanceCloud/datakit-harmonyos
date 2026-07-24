@@ -110,6 +110,20 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Update the Reporting Endpoint at Runtime
+
+After `FTSDK.install(...)`, switch the active reporting endpoint without recreating the SDK:
+
+```ts
+// DataKit mode
+FTSDK.setDatakitUrl('https://datakit.example.com')
+
+// Dataway mode
+FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
+```
+
+The two modes are mutually exclusive: setting a DataKit URL clears the Dataway URL and token; setting a Dataway URL clears the DataKit URL. Use a complete `http://` or `https://` URL. The new value is kept in memory only, so configure it again after an app restart if needed. Automatic upload resumes when the endpoint is valid; call `FTSDK.flushSyncData()` when you need to request an immediate upload.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry
@@ -138,6 +152,7 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 ## Notes
 
 - Call `FTSDK.install(...)` before `installRUMConfig`, `installLogConfig`, and `installTraceConfig`
+- Call `setDatakitUrl(...)` or `setDatawayUrl(...)` only after `FTSDK.install(...)`
 - Add `@guancecloud/ft_sdk_ext` when you need HarmonyOS `HttpInterceptor` chain integration
 - Add `@guancecloud/ft_native` when you need native crash monitoring. `ft_sdk` initializes `libftnativecrash.so` internally when crash tracking is enabled:
 

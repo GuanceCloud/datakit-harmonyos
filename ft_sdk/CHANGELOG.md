@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [Unreleased]
+- Added `FTSDK.setDatakitUrl(...)` and `FTSDK.setDatawayUrl(...)` for switching the active reporting endpoint after SDK installation. The modes are mutually exclusive, and automatic uploads wait for a valid HTTP(S) endpoint (plus a Dataway client token).
+
 ## [0.1.15-alpha01] - 2026-07-19
 - Clarified that `FTRUMGlobalManager.updateLoadTime(...)` accepts nanoseconds, fixed the RUM demo to pass nanoseconds, and corrected related load-time diagnostics.
 - Consolidated the public RUM Action APIs: `addAction` now accepts optional duration and properties, while `startAction` accepts optional properties.
