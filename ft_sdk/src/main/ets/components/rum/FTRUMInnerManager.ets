@@ -2285,7 +2285,7 @@ export class FTRUMInnerManager {
   
   /**
    * Update current view load time
-   * @param duration Load time (milliseconds)
+   * @param duration Load time in nanoseconds
    */
   public updateLoadTime(duration: number): void {
     try {
@@ -3265,7 +3265,7 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(resumeKey)) {
       const loadTime = this.preActivityDuration.get(resumeKey)!;
       this.preActivityDuration.delete(resumeKey);
-      FTInnerLogger.d(TAG, `Using resume time for ${viewName}: ${loadTime / 1000}ms`);
+      FTInnerLogger.d(TAG, `Using resume time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     
@@ -3273,7 +3273,7 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(viewName)) {
       const loadTime = this.preActivityDuration.get(viewName)!;
       this.preActivityDuration.delete(viewName);
-      FTInnerLogger.d(TAG, `Using create time for ${viewName}: ${loadTime / 1000}ms`);
+      FTInnerLogger.d(TAG, `Using create time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     
