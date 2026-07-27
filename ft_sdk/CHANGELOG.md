@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [Unreleased]
+- Added Android-aligned `DataModifier` support for all raw Log, native RUM, and WebView RUM tags and fields. Field callbacks may return `null` to retain the original value.
+- Aligned `LineDataModifier` with Android's record-patch contract: callbacks receive merged record data and return only existing keys to replace. A `null` or empty patch leaves the record unchanged.
+- Added the Demo application's **Data Modifier Test** page to generate field-level and record-level masking samples.
+
 ## [0.1.15] - 2026-07-27
 - Added Android-compatible local data filtering for RUM and logging. `FTSDKConfig.setEnableDataFilter(...)` controls the default-enabled filter, while `setDataFilters(...)` configures `logging` and `rum` rules.
 - Local rules support `in`, `not in`, `match`, `not match`, `and`, and `or`; matching data is discarded after `LineDataModifier` and before local-cache persistence.

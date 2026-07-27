@@ -181,6 +181,20 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Data modification and masking test page
+            ListItem() {
+              Button() {
+                Text("Data Modifier Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#00838F')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/DataModifierTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Inner log file test page
             ListItem() {
               Button() {

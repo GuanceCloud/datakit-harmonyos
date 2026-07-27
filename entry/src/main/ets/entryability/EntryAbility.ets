@@ -23,6 +23,7 @@ import {
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
+import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import {
   runPreInitAxiosSmokeTestsWithMode,
   PreInitAxiosSmokeExecutionMode,
@@ -504,7 +505,11 @@ export default class EntryAbility extends UIAbility {
         .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
         .setRemoteConfiguration(remoteConfigTestEnabled)
         .setRemoteConfigMiniUpdateInterval(remoteConfigTestEnabled ? 0 : 43200)
-        .setRemoteConfigurationCallBack(remoteConfigFetchResult);
+        .setRemoteConfigurationCallBack(remoteConfigFetchResult)
+        // The callbacks target only demo_sensitive_* fields. See the Data
+        // Modifier Test page for a reproducible masking verification flow.
+        .setDataModifier(new DemoDataModifier())
+        .setLineDataModifier(new DemoLineDataModifier());
       if (remoteConfigTestEnabled) {
         DemoLogger.i(LOG_TAG, 'Remote configuration test enabled: refresh interval=0 seconds');
       }
