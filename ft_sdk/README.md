@@ -110,10 +110,33 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Local Data Filtering
+
+Local data filtering is enabled by default. Configure rules before `FTSDK.install(...)`; a matching RUM or logging point is discarded after `LineDataModifier` runs and before the point enters the local cache.
+
+```ts
+const dataFilters = new Map<string, Array<string>>()
+dataFilters.set('logging', [
+  "{ source in ['df_rum_harmonyos_log'] and message match ['.*password.*'] }"
+])
+dataFilters.set('rum', [
+  "{ source in [resource] and resource_status in ['404', '503'] }"
+])
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataFilters(dataFilters)
+```
+
+- Supported categories are `logging` and `rum` (case-insensitive); other categories are ignored.
+- A rule is enclosed in `{}`. Supported operators are `in`, `not in`, `match`, and `not match`, combined with `and` / `or`. `match` uses regular expressions.
+- Rule fields are resolved from tags and fields. `source`, `measurement`, and `class` refer to the Line Protocol measurement. For example, HarmonyOS custom logs use `df_rum_harmonyos_log`.
+- Call `.setEnableDataFilter(false)` to turn off local filtering without removing the configured rules. Call `.setDataFilters(null)` to clear rules.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry
 - `FTSDKConfig`: base SDK configuration
+- `FTDataFilters`: local data-filter rule type
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration

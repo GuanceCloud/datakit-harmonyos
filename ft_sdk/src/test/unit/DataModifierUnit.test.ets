@@ -4,6 +4,7 @@ import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 import { FTSDKConfig } from '../../main/ets/components/Configs';
 import { DataType } from '../../main/ets/components/enum/Enums';
 import { LineDataModifier } from '../../main/ets/components/DataModifier';
+import { FTDataFilter } from '../../main/ets/components/FTDataFilter';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -47,6 +48,26 @@ export default function dataModifierUnitTest() {
       expect(lineProtocol.includes('original-user-id')).assertFalse();
       expect(lineProtocol.includes('sensitive-message')).assertFalse();
       expect(lineProtocol.includes('env=prod')).assertTrue();
+    });
+
+    it('localDataFilterShouldReadValuesAfterLineModifier', 0, () => {
+      const helper = new SyncDataHelper();
+      const rules = new Map<string, Array<string>>();
+      rules.set('logging', ["{ message in ['xxx'] }"]);
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setLineDataModifier(new MaskingLineDataModifier())
+        .setDataFilters(rules);
+      const fields = new Map<string, string>();
+      fields.set('message', 'sensitive-message');
+
+      helper.initBaseConfig(config);
+      const lineProtocol = helper.getBodyContent(
+        'df_rum_harmonyos_log', new Map<string, string>(), fields, 1234567890, DataType.LOG, 'uuid-filter-order'
+      );
+      const filter = FTDataFilter.compile(config.getDataFilters());
+
+      expect(lineProtocol.includes('message="xxx"')).assertTrue();
+      expect(filter.isFilteredLine(DataType.LOG, lineProtocol)).assertTrue();
     });
   });
 }

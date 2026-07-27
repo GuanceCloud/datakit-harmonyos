@@ -70,6 +70,8 @@ export interface SyncDataWriteResult {
   duplicateSkipped: number;
   deletedOld: number;
   errorMessage: string;
+  /** Number of records discarded by the local data-filter before cache evaluation. */
+  filtered?: number;
   /** Number of rows durably accepted by the active/inflight fallback spool. */
   fallbackPersisted?: number;
 }
