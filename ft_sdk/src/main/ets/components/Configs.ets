@@ -10,6 +10,11 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
+/**
+ * Local data-filter rules grouped by the supported categories: `logging` and `rum`.
+ * A map is recommended for parity with Android's `setDataFilters(HashMap)` API.
+ */
+export type FTDataFilters = Map<string, Array<string>> | Record<string, Array<string>>;
 
 /**
  * HTTP proxy settings for SDK upload requests.
@@ -689,6 +694,9 @@ export class FTSDKConfig {
   // Data modifiers
   private dataModifier: DataModifier | null = null;
   private lineDataModifier: LineDataModifier | null = null;
+  // Local data filtering is enabled by default, matching Android SDK behavior.
+  private enableDataFilter: boolean = true;
+  private dataFilters: Map<string, Array<string>> = new Map();
   private enableAccessDeviceID: boolean = false;
   // Data integer compatible mode (using m_ prefix to avoid method name conflict)
   private mEnableDataIntegerCompatible: boolean = false;
@@ -977,6 +985,56 @@ export class FTSDKConfig {
   setLineDataModifier(lineDataModifier: LineDataModifier | null): FTSDKConfig {
     this.lineDataModifier = lineDataModifier;
     return this;
+  }
+
+  /**
+   * Enable or disable local data filtering. It is enabled by default.
+   * Filtering is applied to RUM and logging data before it is written to the local cache.
+   */
+  setEnableDataFilter(enableDataFilter: boolean): FTSDKConfig {
+    this.enableDataFilter = enableDataFilter;
+    return this;
+  }
+
+  isEnableDataFilter(): boolean {
+    return this.enableDataFilter;
+  }
+
+  /**
+   * Set local data-filter rules. Supported categories are `logging` and `rum`.
+   * Passing `null` clears all previously configured rules.
+   */
+  setDataFilters(dataFilters: FTDataFilters | null): FTSDKConfig {
+    this.dataFilters.clear();
+    if (dataFilters === null) {
+      return this;
+    }
+
+    if (dataFilters instanceof Map) {
+      dataFilters.forEach((rules: Array<string>, category: string) => {
+        this.dataFilters.set(category, rules.slice());
+      });
+      return this;
+    }
+
+    const categories = Object.keys(dataFilters);
+    for (let i = 0; i < categories.length; i++) {
+      const category = categories[i];
+      const rules = dataFilters[category];
+      this.dataFilters.set(category, rules ? rules.slice() : []);
+    }
+    return this;
+  }
+
+  /**
+   * Get a defensive copy of the configured local data-filter rules.
+   */
+  getDataFilters(): Map<string, Array<string>> {
+    const copiedFilters = new Map<string, Array<string>>();
+    this.dataFilters.forEach((rules: Array<string>, category: string) => {
+      copiedFilters.set(category, rules.slice());
+    });
+    return copiedFilters;
   }
 
   /**
