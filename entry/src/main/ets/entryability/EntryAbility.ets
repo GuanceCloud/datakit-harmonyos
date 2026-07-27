@@ -32,6 +32,7 @@ import {
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
+export const RUNTIME_CONFIG_PREFERENCES_NAME = PREFERENCES_NAME;
 const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequential';
 // Local-only defaults for manually validating SDK upload proxy and custom DNS.
 // They can be overridden through launch parameters. Keep the test disabled by
@@ -52,6 +53,9 @@ export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
+export const KEY_LOCAL_DATA_FILTER_ENABLED = "localDataFilterEnabled";
+export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
+export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
 
@@ -64,6 +68,9 @@ interface RuntimeConfig {
   autoSync: string;
   networkRouteTestEnabled: string;
   networkRouteTestMode: string;
+  localDataFilterEnabled: string;
+  localDataFilterLogRule: string;
+  localDataFilterRumRule: string;
   appId: string;
 }
 
@@ -110,6 +117,9 @@ export default class EntryAbility extends UIAbility {
     autoSync: "",
     networkRouteTestEnabled: "",
     networkRouteTestMode: "",
+    localDataFilterEnabled: "",
+    localDataFilterLogRule: "",
+    localDataFilterRumRule: "",
     appId: ""
   };
 
@@ -154,6 +164,7 @@ export default class EntryAbility extends UIAbility {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
+    const localDataFilterEnabledParam = want.parameters?.[KEY_LOCAL_DATA_FILTER_ENABLED];
     const runtimeConfig: RuntimeConfig = {
       datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
       datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
@@ -167,6 +178,11 @@ export default class EntryAbility extends UIAbility {
       networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
         ? ""
         : String(networkRouteTestModeParam),
+      localDataFilterEnabled: localDataFilterEnabledParam === undefined || localDataFilterEnabledParam === null
+        ? ""
+        : String(localDataFilterEnabledParam),
+      localDataFilterLogRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_LOG_RULE] as string | null | undefined) ?? "",
+      localDataFilterRumRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_RUM_RULE] as string | null | undefined) ?? "",
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
@@ -198,6 +214,24 @@ export default class EntryAbility extends UIAbility {
       preferencesStore,
       KEY_NETWORK_ROUTE_TEST_MODE,
       runtimeConfig.networkRouteTestMode,
+      ""
+    );
+    runtimeConfig.localDataFilterEnabled = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_ENABLED,
+      runtimeConfig.localDataFilterEnabled,
+      "true"
+    );
+    runtimeConfig.localDataFilterLogRule = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_LOG_RULE,
+      runtimeConfig.localDataFilterLogRule,
+      ""
+    );
+    runtimeConfig.localDataFilterRumRule = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_RUM_RULE,
+      runtimeConfig.localDataFilterRumRule,
       ""
     );
     runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
@@ -242,6 +276,9 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
     AppStorage.setOrCreate(KEY_APP_ID, runtimeConfig.appId);
   }
 
@@ -261,6 +298,9 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
   }
@@ -281,6 +321,27 @@ export default class EntryAbility extends UIAbility {
   private resolveNetworkRouteTestMode(): 'proxy' | 'dns' {
     const value = this.runtimeConfig.networkRouteTestMode.trim().toLowerCase();
     return value === 'dns' || value === 'proxy' ? value : DEFAULT_NETWORK_ROUTE_TEST_MODE;
+  }
+
+  private isLocalDataFilterEnabled(): boolean {
+    const value = this.runtimeConfig.localDataFilterEnabled.trim().toLowerCase();
+    return value !== 'false' && value !== '0' && value !== 'off';
+  }
+
+  private applyLocalDataFilterConfig(sdkConfig: FTSDKConfig): FTSDKConfig {
+    const filters = new Map<string, Array<string>>();
+    const logRule = this.runtimeConfig.localDataFilterLogRule.trim();
+    const rumRule = this.runtimeConfig.localDataFilterRumRule.trim();
+    if (logRule.length > 0) {
+      filters.set('logging', [logRule]);
+    }
+    if (rumRule.length > 0) {
+      filters.set('rum', [rumRule]);
+    }
+    const enabled = this.isLocalDataFilterEnabled();
+    DemoLogger.i(LOG_TAG,
+      `Local data filter startup config: enabled=${enabled}, loggingRules=${logRule.length > 0 ? 1 : 0}, rumRules=${rumRule.length > 0 ? 1 : 0}`);
+    return sdkConfig.setEnableDataFilter(enabled).setDataFilters(filters);
   }
 
   /**
@@ -393,7 +454,8 @@ export default class EntryAbility extends UIAbility {
         .setCustomSyncPageSize(20)
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
         .setSyncSleepTime(100) // Default: no extra delay between upload requests
-        .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
+        .setCompressIntakeRequests(false); // Disable only so manual tests can read the marker
+      sdkConfig = this.applyLocalDataFilterConfig(sdkConfig);
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
           host: NETWORK_ROUTE_TEST_HOST,
