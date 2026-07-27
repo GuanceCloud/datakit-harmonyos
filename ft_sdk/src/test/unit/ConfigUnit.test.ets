@@ -4,6 +4,7 @@ import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
 import {
   FTDnsConfig,
+  FTDataFilters,
   FTLoggerConfig,
   FTProxyAuthenticator,
   FTProxyConfig,
@@ -213,6 +214,25 @@ export default function configUnitTest() {
       expect(datakitConfig.setSdkLogLevel(SDKLogLevel.W).getSdkLogLevel()).assertEqual(SDKLogLevel.W);
       expect(datakitConfig.isCompressIntakeRequests()).assertTrue();
       expect(datakitConfig.setCompressIntakeRequests(false).isCompressIntakeRequests()).assertFalse();
+    });
+
+    it('sdkConfigShouldConfigureLocalDataFilters', 0, () => {
+      const filterRules: FTDataFilters = new Map<string, Array<string>>();
+      filterRules.set('logging', ["{ message match ['password'] }"]);
+      filterRules.set('rum', ["{ resource_status in [404, 503] }"]);
+      const config = FTSDKConfig.builder(TEST_FAKE_URL).setDataFilters(filterRules);
+
+      expect(config.isEnableDataFilter()).assertTrue();
+      expect(config.getDataFilters().get('logging')![0]).assertEqual("{ message match ['password'] }");
+      expect(config.getDataFilters().get('rum')![0]).assertEqual("{ resource_status in [404, 503] }");
+
+      const copiedRules = config.getDataFilters();
+      copiedRules.get('logging')![0] = '{ source in [changed] }';
+      expect(config.getDataFilters().get('logging')![0]).assertEqual("{ message match ['password'] }");
+
+      config.setEnableDataFilter(false).setDataFilters(null);
+      expect(config.isEnableDataFilter()).assertFalse();
+      expect(config.getDataFilters().size).assertEqual(0);
     });
 
     it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {
