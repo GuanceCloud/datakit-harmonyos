@@ -104,6 +104,12 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
 
+## Data Modification and Masking
+
+`FTSDKConfig.setDataModifier(...)` masks or replaces a value by key for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to leave a value unchanged. `setLineDataModifier(...)` receives the merged record and returns a patch for existing keys when a rule needs to inspect multiple values.
+
+Configure both callbacks before `FTSDK.install(...)`. The core-package guide includes the full ArkTS example and exact patch semantics: [Data Modification and Masking](ft_sdk/README.md#data-modification-and-masking).
+
 ## Package Guide
 
 - `@guancecloud/ft_sdk`: standard SDK initialization, RUM, logging, tracing, and common network helpers
