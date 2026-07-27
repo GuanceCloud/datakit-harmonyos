@@ -118,6 +118,7 @@ export { NetStatusBean } from './src/main/ets/components/rum/bean/NetStatusBean'
 
 export {
   DataModifier,
+  DataModifierValue,
   LineDataModifier
 } from './src/main/ets/components/DataModifier';
 
