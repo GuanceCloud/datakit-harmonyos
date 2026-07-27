@@ -1,4 +1,4 @@
-import { Context } from '@kit.AbilityKit';
+import { Context, common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import preferences from '@ohos.data.preferences';
 import {
@@ -102,23 +102,32 @@ export struct LocalDataFilterTestPage {
       AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_RUM_RULE, this.rumRule.trim());
       this.settingsSaved = true;
       this.restartRequired = true;
-      this.appendResult('Settings saved. Restart the Demo application before sending verification data.');
-      promptAction.showToast({ message: 'Settings saved. Restart Demo to apply them.' });
+      this.appendResult('Settings saved. Close and reopen the Demo application before sending verification data.');
+      promptAction.showToast({ message: 'Settings saved. Close and reopen Demo to apply them.' });
     } catch (error) {
       this.appendResult(`Failed to save filter settings: ${error}`);
     }
   }
 
-  private canSendTestData(): boolean {
-    return this.settingsSaved && !this.restartRequired;
+  /**
+   * Local filtering is compiled during FTSDK.install, so this page cannot apply
+   * a changed startup configuration to the already-running SDK instance.
+   */
+  private closeDemoToApplySettings(): void {
+    promptAction.showToast({ message: 'Demo is closing. Open it again to apply the saved settings.' });
+    setTimeout(() => {
+      try {
+        const uiAbilityContext = this.abilityContext as common.UIAbilityContext;
+        uiAbilityContext.terminateSelf().catch((error: Error) => {
+          this.appendResult(`Failed to close Demo: ${error}`);
+        });
+      } catch (error) {
+        this.appendResult(`Failed to close Demo: ${error}`);
+      }
+    }, 300);
   }
 
   private sendVerificationData(): void {
-    if (!this.canSendTestData()) {
-      promptAction.showToast({ message: 'Save settings and restart the Demo before sending test data.' });
-      return;
-    }
-
     try {
       const marker = `${Date.now()}`;
       this.lastMarker = marker;
@@ -180,7 +189,7 @@ export struct LocalDataFilterTestPage {
             Text('Startup Configuration')
               .fontSize(18)
               .fontWeight(FontWeight.Bold)
-            Text('Rules are read when FTSDK installs. Save changes, then restart the Demo application to apply them.')
+            Text('Rules are read when FTSDK installs. Save changes, then close and reopen the Demo application to apply them.')
               .fontSize(13)
               .fontColor(Color.Gray)
               .width('100%')
@@ -240,6 +249,13 @@ export struct LocalDataFilterTestPage {
               .height(48)
               .backgroundColor('#2563EB')
               .onClick(() => this.saveSettings())
+            if (this.restartRequired && this.settingsSaved) {
+              Button('Close Demo to Apply Settings')
+                .width('100%')
+                .height(42)
+                .backgroundColor('#B45309')
+                .onClick(() => this.closeDemoToApplySettings())
+            }
           }
           .width('100%')
           .padding(16)
@@ -250,17 +266,16 @@ export struct LocalDataFilterTestPage {
             Text('Verification Data')
               .fontSize(18)
               .fontWeight(FontWeight.Bold)
-            Text(this.canSendTestData()
-              ? 'Ready. Sends two logs and two RUM resources (200 / 404).'
-              : 'Restart required: the current SDK instance still uses its startup configuration.')
+            Text(this.restartRequired
+              ? 'Test data can be sent now. Saved settings apply after the Demo is reopened; this send uses the current SDK configuration.'
+              : 'Ready. Sends two logs and two RUM resources (200 / 404).')
               .fontSize(13)
-              .fontColor(this.canSendTestData() ? '#15803D' : '#B45309')
+              .fontColor(this.restartRequired ? '#B45309' : '#15803D')
               .width('100%')
             Button('Send Log and RUM Verification Data')
               .width('100%')
               .height(50)
-              .backgroundColor(this.canSendTestData() ? '#16A34A' : '#9CA3AF')
-              .enabled(this.canSendTestData())
+              .backgroundColor('#16A34A')
               .onClick(() => this.sendVerificationData())
             Text('Expected for the recommended enabled rules: `local_filter_drop_log_*` and resource status 404 are filtered; `local_filter_keep_log_*` and status 200 remain.')
               .fontSize(12)
