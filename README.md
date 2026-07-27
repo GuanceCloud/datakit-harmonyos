@@ -148,6 +148,11 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 ```
 
 Rules use the `logging` and `rum` categories and support `in`, `not in`, `match`, `not match`, `and`, and `or`. See the `ft_sdk` README for rule-field semantics and full details.
+## Data Modification and Masking
+
+`FTSDKConfig.setDataModifier(...)` masks or replaces a value by key for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to leave a value unchanged. `setLineDataModifier(...)` receives the merged record and returns a patch for existing keys when a rule needs to inspect multiple values.
+
+Configure both callbacks before `FTSDK.install(...)`. The core-package guide includes the full ArkTS example and exact patch semantics: [Data Modification and Masking](ft_sdk/README.md#data-modification-and-masking).
 
 ## Package Guide
 

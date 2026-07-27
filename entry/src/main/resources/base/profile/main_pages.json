@@ -23,6 +23,7 @@
     "pages/RuntimeEndpointVerificationPage",
     "pages/LogBackgroundTestPage",
     "pages/LocalDataFilterTestPage",
+    "pages/DataModifierTestPage",
     "pages/InnerLogFileTestPage"
   ]
 }

@@ -1,7 +1,7 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextValue } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
-import { LineDataModifier } from '../../main/ets/components/DataModifier';
+import { DataModifierValue, LineDataModifier } from '../../main/ets/components/DataModifier';
 import { DataType } from '../../main/ets/components/enum/Enums';
 import { SyncDataHelper } from '../../main/ets/components/SyncDataHelper';
 import {
@@ -18,10 +18,8 @@ import { TestReset } from '../helpers/TestReset';
 const TEST_FAKE_URL = 'http://www.test.url';
 
 class MaskingLineDataModifier implements LineDataModifier {
-  modify(_measurement: string, tags: Map<string, string>, fields: Map<string, string>): Map<string, string> {
-    const result: Map<string, string> = new Map();
-    tags.forEach((value: string, key: string) => result.set(key, value));
-    fields.forEach((value: string, key: string) => result.set(key, value));
+  modify(_measurement: string, _data: Map<string, DataModifierValue>): Map<string, DataModifierValue> {
+    const result = new Map<string, DataModifierValue>();
     result.set('message', 'masked');
     result.set(Constants.KEY_RUM_USER_ID, 'masked-user');
     return result;
