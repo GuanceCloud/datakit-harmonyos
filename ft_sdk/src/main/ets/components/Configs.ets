@@ -766,6 +766,28 @@ export class FTSDKConfig {
     return getRuntimeUploadEndpoint(this)?.clientToken ?? this.clientToken;
   }
 
+  /**
+   * Replace the active intake endpoint with a DataKit endpoint.
+   * DataKit and Dataway are mutually exclusive upload modes.
+   */
+  setDatakitUrl(datakitUrl: string): FTSDKConfig {
+    this.datakitUrl = datakitUrl;
+    this.datawayUrl = '';
+    this.clientToken = '';
+    return this;
+  }
+
+  /**
+   * Replace the active intake endpoint with a Dataway endpoint and client token.
+   * DataKit and Dataway are mutually exclusive upload modes.
+   */
+  setDatawayUrl(datawayUrl: string, clientToken: string): FTSDKConfig {
+    this.datawayUrl = datawayUrl;
+    this.clientToken = clientToken;
+    this.datakitUrl = '';
+    return this;
+  }
+
   isDebugMode(): boolean {
     return this.isDebug;
   }
