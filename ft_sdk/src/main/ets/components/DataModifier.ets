@@ -1,14 +1,25 @@
 /**
- * Data modifier interface for modifying tag and field values
+ * A value supported by data modification callbacks.
+ *
+ * The SDK serializes data into Line Protocol, so an object value is converted
+ * to its string representation before it is written to the local cache.
+ */
+export type DataModifierValue = string | number | boolean | object;
+
+/**
+ * Data modifier interface for modifying tag and field values.
+ *
+ * Return null when the original value should be retained. This matches the
+ * Android SDK contract and avoids requiring callers to return untouched values.
  */
 export interface DataModifier {
   /**
    * Modify a single key-value pair
    * @param key The key to modify
    * @param value The original value
-   * @returns The modified value, or the original value if no modification needed
+   * @returns The modified value, or null if no modification is needed
    */
-  modify(key: string, value: string): string;
+  modify(key: string, value: DataModifierValue): DataModifierValue | null;
 }
 
 /**
@@ -29,8 +40,8 @@ export interface LineDataModifier {
  * Default data modifier that returns values unchanged
  */
 export class DefaultDataModifier implements DataModifier {
-  modify(key: string, value: string): string {
-    return value;
+  modify(_key: string, _value: DataModifierValue): DataModifierValue | null {
+    return null;
   }
 }
 

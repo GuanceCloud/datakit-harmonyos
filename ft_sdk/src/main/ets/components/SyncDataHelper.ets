@@ -3,7 +3,13 @@ import { DataType } from './enum/Enums';
 import { StringUtils } from './utils/StringUtils';
 import { Constants } from './Constants';
 import { FTInnerLogger } from './log/FTLogger';
-import { DataModifier, LineDataModifier, DefaultDataModifier, DefaultLineDataModifier } from './DataModifier';
+import {
+  DataModifier,
+  DataModifierValue,
+  LineDataModifier,
+  DefaultDataModifier,
+  DefaultLineDataModifier
+} from './DataModifier';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import { CollectType } from './rum/enum/RUMEnums';
 import { SDKLineProtocolContextDTO } from './thread/SDKWorkerProtocol';
@@ -46,7 +52,7 @@ export class SyncDataHelper {
       // Convert object to string: String objects should use String(value), not JSON.stringify
       // JSON.stringify would escape quotes in String objects, which is not desired
       const stringValue = typeof value === 'string' ? value as string : String(value);
-      this.basePublicTags.set(key, this.dataModifier.modify(key, stringValue));
+      this.basePublicTags.set(key, this.applyDataModifier(key, stringValue));
     });
   }
 
@@ -81,27 +87,33 @@ export class SyncDataHelper {
       // Convert object to string: String objects should use String(value), not JSON.stringify
       // JSON.stringify would escape quotes in String objects, which is not desired
       const stringValue = typeof value === 'string' ? value as string : String(value);
-      this.rumTags.set(key, stringValue);
+      this.rumTags.set(key, this.applyDataModifier(key, stringValue));
     });
 
     // Aligned with Android: add session sampling rate fields to rumStaticFields
     // Android: rumStaticFields.put(Constants.KEY_SESSION_SAMPLE_RATE, applyModifier(...))
     this.rumStaticFields.clear();
-    this.rumStaticFields.set(Constants.KEY_SESSION_SAMPLE_RATE, String(config.getSamplingRate()));
-    this.rumStaticFields.set(Constants.KEY_SESSION_ON_ERROR_SAMPLE_RATE, String(config.getSessionErrorSampleRate()));
+    this.rumStaticFields.set(
+      Constants.KEY_SESSION_SAMPLE_RATE,
+      this.applyDataModifier(Constants.KEY_SESSION_SAMPLE_RATE, String(config.getSamplingRate()))
+    );
+    this.rumStaticFields.set(
+      Constants.KEY_SESSION_ON_ERROR_SAMPLE_RATE,
+      this.applyDataModifier(Constants.KEY_SESSION_ON_ERROR_SAMPLE_RATE, String(config.getSessionErrorSampleRate()))
+    );
   }
 
   appendGlobalContext(globalContext: Map<string, string>): void {
     if (globalContext) {
       globalContext.forEach((value, key) => {
-        this.dynamicBaseTags.set(key, this.dataModifier.modify(key, value));
+        this.dynamicBaseTags.set(key, this.applyDataModifier(key, value));
       });
     }
   }
 
   appendGlobalContextByKeyValue(key: string, value: string): void {
     if (key && value) {
-      this.dynamicBaseTags.set(key, this.dataModifier.modify(key, value));
+      this.dynamicBaseTags.set(key, this.applyDataModifier(key, value));
     }
   }
 
@@ -115,7 +127,7 @@ export class SyncDataHelper {
     }
 
     globalContext.forEach((value, key) => {
-      this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+      this.dynamicRumTags.set(key, this.applyDataModifier(key, value));
     });
 
     // Add all hashmap keys as a JSON string array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
@@ -152,7 +164,7 @@ export class SyncDataHelper {
       return;
     }
 
-    this.dynamicRumTags.set(key, this.dataModifier.modify(key, value));
+    this.dynamicRumTags.set(key, this.applyDataModifier(key, value));
 
     // Add key to custom_keys array (append to existing if KEY_RUM_CUSTOM_KEYS exists)
     const newKey = key;
@@ -217,7 +229,7 @@ export class SyncDataHelper {
     if (stringValue === null || StringUtils.isEmpty(stringValue)) {
       return;
     }
-    targetTags.set(key, this.dataModifier.modify(key, stringValue));
+    targetTags.set(key, this.applyDataModifier(key, stringValue));
   }
 
   private static contextValueToString(value: LogGlobalContextValue): string | null {
@@ -240,6 +252,46 @@ export class SyncDataHelper {
 
     const jsonValue = JSON.stringify(value);
     return jsonValue !== undefined ? jsonValue : String(value);
+  }
+
+  /**
+   * Apply the field-level modifier while preserving Android's null-as-no-change
+   * contract. All HarmonyOS Line Protocol values are normalized to strings
+   * before they cross a worker boundary.
+   */
+  private applyDataModifier(key: string, value: string): string {
+    const modifiedValue = this.dataModifier.modify(key, value);
+    if (modifiedValue === null || modifiedValue === undefined) {
+      return value;
+    }
+    return SyncDataHelper.dataModifierValueToString(modifiedValue);
+  }
+
+  /**
+   * Apply the field modifier to raw event data without mutating caller-owned
+   * maps. The non-mutating behavior prevents a modifier from running twice if
+   * a worker formatting request falls back to the in-process formatter.
+   */
+  private applyDataModifierToMap(source: Map<string, string>): Map<string, string> {
+    const result = new Map<string, string>();
+    if (!source) {
+      return result;
+    }
+    source.forEach((value, key) => {
+      result.set(key, this.applyDataModifier(key, value));
+    });
+    return result;
+  }
+
+  private static dataModifierValueToString(value: DataModifierValue): string {
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    const jsonValue = JSON.stringify(value);
+    return jsonValue === undefined ? String(value) : jsonValue;
   }
 
 
@@ -274,6 +326,10 @@ export class SyncDataHelper {
     dataType: DataType,
     uuid: string
   ): string {
+    // Match Android's getBodyContent(): redact every raw tag and field before
+    // SDK context is merged and before the row-level modifier runs.
+    tags = this.applyDataModifierToMap(tags);
+    fields = this.applyDataModifierToMap(fields);
     let mergeTags: Map<string, string> = new Map();
     mergeTags.set(Constants.KEY_SDK_DATA_FLAG, uuid);
     if (tags) {
@@ -409,14 +465,14 @@ export class SyncDataHelper {
                   const updatedPkgInfo = this.parseAndAppendWebVersion(value, webVersionStr);
                   if (updatedPkgInfo) {
                     mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                      this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
                   } else {
                     // Fallback: use string manipulation if JSON parsing fails (aligned with Android's appendPackageVersion)
                     const appendPkgInfo = value.substring(0, 1) +
                       `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
                     value.substring(1);
                     mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                      this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
                   }
                 } else {
                   // Already has web version, use original value
@@ -485,7 +541,7 @@ export class SyncDataHelper {
                 const updatedPkgInfo = this.parseAndAppendWebVersion(finalPkgInfo, webVersionStr);
                 if (updatedPkgInfo) {
                   mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                    this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                    this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
                 } else {
                   // Fallback: use string manipulation if JSON parsing fails (aligned with Android's appendPackageVersion)
                   const jsonStr = finalPkgInfo.trim();
@@ -495,7 +551,7 @@ export class SyncDataHelper {
                       `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
                     jsonStr.substring(1);
                     mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                      this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                      this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
                   }
                 }
               }
@@ -548,6 +604,11 @@ export class SyncDataHelper {
     dataType: DataType,
     uuid: string
   ): PreparedLineProtocolContent {
+    // This is the normal worker-backed production path. Apply the same raw
+    // field transformation as getBodyContent() before creating a serializable
+    // worker payload.
+    tags = this.applyDataModifierToMap(tags);
+    fields = this.applyDataModifierToMap(fields);
     let mergeTags: Map<string, string> = new Map();
     mergeTags.set(Constants.KEY_SDK_DATA_FLAG, uuid);
     if (tags) {
@@ -658,13 +719,13 @@ export class SyncDataHelper {
               const updatedPkgInfo = this.parseAndAppendWebVersion(value, webVersionStr);
               if (updatedPkgInfo) {
                 mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                  this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
               } else {
                 const appendPkgInfo = value.substring(0, 1) +
                   `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
                 value.substring(1);
                 mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                  this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
               }
             } else {
               mergeTags.set(key, value);
@@ -706,7 +767,7 @@ export class SyncDataHelper {
             const updatedPkgInfo = this.parseAndAppendWebVersion(finalPkgInfo, webVersionStr);
             if (updatedPkgInfo) {
               mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
+                this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, updatedPkgInfo));
             } else {
               const jsonStr = finalPkgInfo.trim();
               if (jsonStr.startsWith('{') && jsonStr.endsWith('}')) {
@@ -714,7 +775,7 @@ export class SyncDataHelper {
                   `"${Constants.KEY_RUM_SDK_PACKAGE_WEB}":"${webVersionStr}", ` +
                 jsonStr.substring(1);
                 mergeTags.set(Constants.KEY_SDK_PACKAGE_INFO,
-                  this.dataModifier.modify(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
+                  this.applyDataModifier(Constants.KEY_SDK_PACKAGE_INFO, appendPkgInfo));
               }
             }
           }
