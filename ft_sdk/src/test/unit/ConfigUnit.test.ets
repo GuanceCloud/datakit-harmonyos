@@ -219,12 +219,12 @@ export default function configUnitTest() {
     it('sdkConfigShouldConfigureLocalDataFilters', 0, () => {
       const filterRules: FTDataFilters = new Map<string, Array<string>>();
       filterRules.set('logging', ["{ message match ['password'] }"]);
-      filterRules.set('rum', ["{ resource_status in [404, 503] }"]);
+      filterRules.set('rum', ["{ resource_status in ['404', '503'] }"]);
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setDataFilters(filterRules);
 
       expect(config.isEnableDataFilter()).assertTrue();
       expect(config.getDataFilters().get('logging')![0]).assertEqual("{ message match ['password'] }");
-      expect(config.getDataFilters().get('rum')![0]).assertEqual("{ resource_status in [404, 503] }");
+      expect(config.getDataFilters().get('rum')![0]).assertEqual("{ resource_status in ['404', '503'] }");
 
       const copiedRules = config.getDataFilters();
       copiedRules.get('logging')![0] = '{ source in [changed] }';

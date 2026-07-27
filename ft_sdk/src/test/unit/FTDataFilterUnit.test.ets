@@ -21,11 +21,11 @@ export default function ftDataFilterUnitTest() {
       expect(loggingFilter.isFiltered(DataType.LOG, 'df_rum_harmonyos_log', logTags, logFields)).assertTrue();
       expect(loggingFilter.isFiltered(DataType.LOG, 'another_measurement', logTags, logFields)).assertFalse();
 
-      const rumFilter = filtersFor('RUM', ["{ source in [resource] and resource_status in [404, 503] }"]);
-      const rumFields = new Map<string, number>();
-      rumFields.set('resource_status', 404);
-      expect(rumFilter.isFiltered(DataType.RUM_APP, 'resource', new Map(), rumFields)).assertTrue();
-      expect(rumFilter.isFiltered(DataType.RUM_WEBVIEW, 'resource', new Map(), rumFields)).assertTrue();
+      const rumFilter = filtersFor('RUM', ["{ source in [resource] and resource_status in ['404', '503'] }"]);
+      const rumTags = new Map<string, string>();
+      rumTags.set('resource_status', '404');
+      expect(rumFilter.isFiltered(DataType.RUM_APP, 'resource', rumTags, new Map())).assertTrue();
+      expect(rumFilter.isFiltered(DataType.RUM_WEBVIEW, 'resource', rumTags, new Map())).assertTrue();
     });
 
     it('shouldUseLineProtocolValuesAfterEscapingAndIgnoreInvalidRules', 0, () => {

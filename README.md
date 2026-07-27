@@ -104,6 +104,22 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
 
+## Local Data Filtering
+
+The core SDK supports Android-compatible local filtering for logging and RUM data. Filters are enabled by default and discard matching points after `LineDataModifier` and before local-cache persistence.
+
+```ts
+const filters = new Map<string, Array<string>>()
+filters.set('logging', ["{ message match ['.*password.*'] }"])
+filters.set('rum', ["{ source in [resource] and resource_status in ['404', '503'] }"])
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataFilters(filters)
+// .setEnableDataFilter(false) disables filtering while retaining these rules.
+```
+
+Rules use the `logging` and `rum` categories and support `in`, `not in`, `match`, `not match`, `and`, and `or`. See the `ft_sdk` README for rule-field semantics and full details.
+
 ## Package Guide
 
 - `@guancecloud/ft_sdk`: standard SDK initialization, RUM, logging, tracing, and common network helpers
