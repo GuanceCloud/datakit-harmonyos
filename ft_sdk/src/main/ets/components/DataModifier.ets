@@ -23,17 +23,20 @@ export interface DataModifier {
 }
 
 /**
- * Line data modifier interface for modifying entire line protocol data
+ * Line data modifier interface for modifying one complete data record.
+ *
+ * It follows Android's patch contract: the callback receives the merged tags
+ * and fields, then returns only values that should be replaced. Returning null
+ * or an empty map leaves the record unchanged.
  */
 export interface LineDataModifier {
   /**
-   * Modify line protocol data
+   * Modify a complete data record.
    * @param measurement The measurement name
-   * @param tags The tags map
-   * @param fields The fields map
-   * @returns The modified data as a map of key-value pairs
+   * @param data The merged tags and fields of the original record
+   * @returns A patch containing values to replace, or null for no modification
    */
-  modify(measurement: string, tags: Map<string, string>, fields: Map<string, string>): Map<string, string>;
+  modify(measurement: string, data: Map<string, DataModifierValue>): Map<string, DataModifierValue> | null;
 }
 
 /**
@@ -46,13 +49,10 @@ export class DefaultDataModifier implements DataModifier {
 }
 
 /**
- * Default line data modifier that returns data unchanged
+ * Default line data modifier that leaves data unchanged.
  */
 export class DefaultLineDataModifier implements LineDataModifier {
-  modify(measurement: string, tags: Map<string, string>, fields: Map<string, string>): Map<string, string> {
-    const result = new Map<string, string>();
-    tags.forEach((value, key) => result.set(key, value));
-    fields.forEach((value, key) => result.set(key, value));
-    return result;
+  modify(_measurement: string, _data: Map<string, DataModifierValue>): Map<string, DataModifierValue> | null {
+    return null;
   }
 }

@@ -350,19 +350,7 @@ export class SyncDataHelper {
             });
           }
         }
-        // Apply line data modifier
-        const logModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
-        // Save tag keys before clearing
-        const tagKeys = new Set(mergeTags.keys());
-        mergeTags.clear();
-        fields.clear();
-        logModifiedData.forEach((value, key) => {
-          if (tagKeys.has(key)) {
-            mergeTags.set(key, value);
-          } else {
-            fields.set(key, value);
-          }
-        });
+        this.applyLineDataModifier(measurement, mergeTags, fields);
         bodyContent = SyncDataHelper.convertToLineProtocolLine(
           measurement,
           mergeTags,
@@ -377,24 +365,7 @@ export class SyncDataHelper {
         this.rumStaticFields.forEach((value, key) => {
           fields.set(key, value);
         });
-        // Apply line data modifier
-        const rumModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
-        // Save tag keys before clearing
-        const rumTagKeys = new Set(mergeTags.keys());
-        mergeTags.clear();
-        fields.clear();
-        rumModifiedData.forEach((value, key) => {
-          if (rumTagKeys.has(key)) {
-            mergeTags.set(key, value);
-          } else {
-            fields.set(key, value);
-          }
-        });
-        // Aligned with Android: re-add rumStaticFields after lineDataModifier (fields.putAll(rumStaticFields))
-        // This ensures sampling rate fields are not lost after lineDataModifier processing
-        this.rumStaticFields.forEach((value, key) => {
-          fields.set(key, value);
-        });
+        this.applyLineDataModifier(measurement, mergeTags, fields);
         bodyContent = SyncDataHelper.convertToLineProtocolLine(
           measurement,
           mergeTags,
@@ -489,31 +460,13 @@ export class SyncDataHelper {
           // WebView-owned service/sdk_version are preserved.
         });
 
-        // Apply line data modifier
-        const webviewModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
-        // Save tag keys before clearing
-        const webviewTagKeys = new Set(mergeTags.keys());
-        mergeTags.clear();
-        fields.clear();
-        webviewModifiedData.forEach((value, key) => {
-          if (webviewTagKeys.has(key)) {
-            mergeTags.set(key, value);
-          } else {
-            fields.set(key, value);
-          }
-        });
-
-        if (webviewService && webviewService.length > 0) {
-          mergeTags.set(Constants.KEY_SERVICE, webviewService);
-        }
-        if (webviewSDKVersion && webviewSDKVersion.length > 0) {
-          mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
-        }
+        this.applyLineDataModifier(measurement, mergeTags, fields);
 
         // After line data modifier, ensure sdk_pkg_info has web SDK version
         // The line data modifier might have modified sdk_pkg_info, so we need to check again
         // Aligned with Android: always append web version, even if webSDKVersion is empty/null
-        if (mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
+        if (this.lineDataModifier instanceof DefaultLineDataModifier &&
+          mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
           let finalPkgInfo = mergeTags.get(Constants.KEY_SDK_PACKAGE_INFO);
 
           // Remove surrounding quotes if present (line data modifier may add quotes)
@@ -571,19 +524,7 @@ export class SyncDataHelper {
       default:
         // Use base tags by default
         this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.basePublicTags);
-        // Apply line data modifier
-        const defaultModifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
-        // Save tag keys before clearing
-        const defaultTagKeys = new Set(mergeTags.keys());
-        mergeTags.clear();
-        fields.clear();
-        defaultModifiedData.forEach((value, key) => {
-          if (defaultTagKeys.has(key)) {
-            mergeTags.set(key, value);
-          } else {
-            fields.set(key, value);
-          }
-        });
+        this.applyLineDataModifier(measurement, mergeTags, fields);
         bodyContent = SyncDataHelper.convertToLineProtocolLine(
           measurement,
           mergeTags,
@@ -631,9 +572,6 @@ export class SyncDataHelper {
           fields.set(key, value);
         });
         this.applyLineDataModifier(measurement, mergeTags, fields);
-        this.rumStaticFields.forEach((value, key) => {
-          fields.set(key, value);
-        });
         break;
       case DataType.RUM_WEBVIEW:
         this.prepareWebViewLineProtocolContent(measurement, mergeTags, fields);
@@ -676,15 +614,27 @@ export class SyncDataHelper {
     mergeTags: Map<string, string>,
     fields: Map<string, string>
   ): void {
-    const modifiedData = this.lineDataModifier.modify(measurement, mergeTags, fields);
-    const tagKeys = new Set(mergeTags.keys());
-    mergeTags.clear();
-    fields.clear();
-    modifiedData.forEach((value, key) => {
-      if (tagKeys.has(key)) {
-        mergeTags.set(key, value);
-      } else {
-        fields.set(key, value);
+    const mergedData = new Map<string, DataModifierValue>();
+    mergeTags.forEach((value, key) => mergedData.set(key, value));
+    fields.forEach((value, key) => mergedData.set(key, value));
+
+    const patch = this.lineDataModifier.modify(measurement, mergedData);
+    if (patch === null || patch === undefined || patch.size === 0) {
+      return;
+    }
+
+    // Android only applies values for keys already present in the record. This
+    // prevents a callback patch from moving a field into tags, adding a new
+    // key, or deleting data by omitting it from the returned map.
+    patch.forEach((value, key) => {
+      if (value === null || value === undefined) {
+        return;
+      }
+      const lineValue = SyncDataHelper.dataModifierValueToString(value);
+      if (mergeTags.has(key)) {
+        mergeTags.set(key, lineValue);
+      } else if (fields.has(key)) {
+        fields.set(key, lineValue);
       }
     });
   }
@@ -741,14 +691,8 @@ export class SyncDataHelper {
 
     this.applyLineDataModifier(measurement, mergeTags, fields);
 
-    if (webviewService && webviewService.length > 0) {
-      mergeTags.set(Constants.KEY_SERVICE, webviewService);
-    }
-    if (webviewSDKVersion && webviewSDKVersion.length > 0) {
-      mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
-    }
-
-    if (mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
+    if (this.lineDataModifier instanceof DefaultLineDataModifier &&
+      mergeTags.has(Constants.KEY_SDK_PACKAGE_INFO)) {
       let finalPkgInfo = mergeTags.get(Constants.KEY_SDK_PACKAGE_INFO);
       if (finalPkgInfo && typeof finalPkgInfo === 'string') {
         const trimmed = finalPkgInfo.trim();
