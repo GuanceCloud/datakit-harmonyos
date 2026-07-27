@@ -167,6 +167,20 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Local data filter test page
+            ListItem() {
+              Button() {
+                Text("Local Data Filter Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0F766E')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/LocalDataFilterTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Inner log file test page
             ListItem() {
               Button() {

@@ -21,6 +21,7 @@
     "pages/DBCacheLimitTestPage",
     "pages/DataSyncTestPage",
     "pages/LogBackgroundTestPage",
+    "pages/LocalDataFilterTestPage",
     "pages/InnerLogFileTestPage"
   ]
 }
