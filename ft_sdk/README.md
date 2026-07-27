@@ -110,6 +110,46 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Data Modification and Masking
+
+Configure callbacks before `FTSDK.install(...)` to modify or mask data before it is cached and uploaded. `DataModifier` runs for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to retain the original value.
+
+`LineDataModifier` runs after SDK tags and fields have been merged. It receives one combined map and returns a patch: only returned values for existing keys are replaced. Returning `null`, an empty map, a `null` value, or an unknown key does not change the record.
+
+```ts
+import {
+  DataModifier,
+  DataModifierValue,
+  FTSDK,
+  FTSDKConfig,
+  LineDataModifier
+} from '@guancecloud/ft_sdk/Index'
+
+class FieldMasker implements DataModifier {
+  modify(key: string, _value: DataModifierValue): DataModifierValue | null {
+    return key === 'password' || key === 'authorization' ? '[masked]' : null
+  }
+}
+
+class RecordMasker implements LineDataModifier {
+  modify(_measurement: string, data: Map<string, DataModifierValue>): Map<string, DataModifierValue> | null {
+    const patch = new Map<string, DataModifierValue>()
+    if (data.get('message') === 'sensitive message') {
+      patch.set('message', '[masked]')
+    }
+    return patch.size === 0 ? null : patch
+  }
+}
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataModifier(new FieldMasker())
+  .setLineDataModifier(new RecordMasker())
+
+FTSDK.install(sdkConfig, this.context)
+```
+
+Use `DataModifier` for global key-based rules; it is the lower-overhead option. Use `LineDataModifier` only when a decision needs multiple values in the same record. Neither callback can add, remove, or move a key between tags and fields.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry

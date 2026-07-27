@@ -21,6 +21,7 @@ import {
   UserData
 } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
+import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import {
   runPreInitAxiosSmokeTestsWithMode,
   PreInitAxiosSmokeExecutionMode,
@@ -394,6 +395,10 @@ export default class EntryAbility extends UIAbility {
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
         .setSyncSleepTime(100) // Default: no extra delay between upload requests
         .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
+        // The callbacks target only demo_sensitive_* fields. See the Data
+        // Modifier Test page for a reproducible masking verification flow.
+        .setDataModifier(new DemoDataModifier())
+        .setLineDataModifier(new DemoLineDataModifier())
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
           host: NETWORK_ROUTE_TEST_HOST,
