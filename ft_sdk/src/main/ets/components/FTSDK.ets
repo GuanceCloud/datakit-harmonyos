@@ -28,6 +28,10 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
+import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
+import { RemoteConfigBean } from './remote/RemoteConfigBean';
+import { createRemoteConfigStorage } from './remote/RemoteConfigStorage';
+import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 const TAG = "FTSDK"
 
@@ -40,6 +44,8 @@ export class FTSDK {
   private static uiFeatureInitRetryCount: number = 0;
   private static readonly UI_FEATURE_INIT_MAX_RETRY: number = 5;
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
+  private static remoteConfigManager: FTRemoteConfigManager | null = null;
+  private static pendingRemoteConfigAppId: string | null = null;
 
   /**
    * Get current RUM config
@@ -49,6 +55,11 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    if (FTSDK.remoteConfigManager !== null) {
+      FTSDK.remoteConfigManager.close();
+      FTSDK.remoteConfigManager = null;
+    }
+    FTSDK.pendingRemoteConfigAppId = null;
     FTInnerLogFileManager.getInstance().shutdown(false);
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     FTLogger.resetBatchStateInternal();
@@ -70,7 +81,8 @@ export class FTSDK {
   }
 
   protected static requiresLifecycleListenerInternal(rumConfig: FTRUMConfig): boolean {
-    return FTSDK.requiresUIFeaturesInternal(rumConfig);
+    return FTSDK.requiresUIFeaturesInternal(rumConfig) ||
+      (FTSDK.ftSdk !== null && FTSDK.ftSdk.ftSDKConfig !== null && FTSDK.ftSdk.ftSDKConfig.isRemoteConfiguration());
   }
 
   private static autoActionTrackingEnabled: boolean = true;
@@ -157,7 +169,7 @@ export class FTSDK {
     FTInnerLogger.d(TAG, "FTSDK.install completed");
   }
 
-   initFTConfig(config: FTSDKConfig): void {
+  initFTConfig(config: FTSDKConfig): void {
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
     FTInnerLogger.setSDKLogLevel(config.getSdkLogLevel());
@@ -165,6 +177,25 @@ export class FTSDK {
 
     // Get context from Utils (unified context management)
     const context = getFTSDKRuntime().getAbilityContext();
+
+    // Android applies persisted remote configuration before the SDK's dependent
+    // managers are initialized. Preferences has a synchronous HarmonyOS API,
+    // which lets us preserve that startup ordering without changing FTSDK.install.
+    if (config.isRemoteConfiguration()) {
+      const storage = createRemoteConfigStorage(context);
+      const manager = new FTRemoteConfigManager(
+        config,
+        config.getRemoteConfigMiniUpdateInterval(),
+        storage,
+        config.getRemoteConfigFetchResult()
+      );
+      manager.setConfigAppliedListener((bean: RemoteConfigBean) => {
+        FTSDK.applyRemoteConfigHotUpdate(bean);
+      });
+      manager.initFromLocalCache();
+      manager.mergeSDKConfigFromCache(config);
+      FTSDK.remoteConfigManager = manager;
+    }
 
     if (context && config.isEnableInnerLogFile()) {
       const innerLogFileConfig = config.getInnerLogFileConfig();
@@ -223,6 +254,10 @@ export class FTSDK {
 
   static installLogConfig(logConfig: FTLoggerConfig): void {
     try {
+      if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
+        logConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+        FTSDK.remoteConfigManager?.mergeLogConfigFromCache(logConfig);
+      }
       // Initialize TrackLogManager
       TrackLogManager.getInstance().setLogConfig(logConfig);
       FTDBCachePolicy.getInstance().updateLogCacheLimitCount(logConfig.getLogCacheLimitCount());
@@ -251,6 +286,7 @@ export class FTSDK {
       // 1. Set service name (from base configuration)
       if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
         traceConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+        FTSDK.remoteConfigManager?.mergeTraceConfigFromCache(traceConfig);
       }
 
       // 2. Initialize Trace configuration manager
@@ -268,6 +304,10 @@ export class FTSDK {
   }
 
   static installRUMConfig(rumConfig: FTRUMConfig): void {
+    if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
+      rumConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+      FTSDK.remoteConfigManager?.mergeRUMConfigFromCache(rumConfig);
+    }
     // Save rumConfig reference for later use (e.g., ActionTracker initialization)
     FTSDK.rumConfig = rumConfig;
     FTInnerLogger.setCrashLogCollectionEnabled(
@@ -356,6 +396,8 @@ export class FTSDK {
       `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
       `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
       `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+
+    FTSDK.startRemoteConfigIfPossible(rumConfig.getRumAppId());
   }
 
   private static logServerUrl(config: FTSDKConfig): void {
@@ -434,6 +476,11 @@ export class FTSDK {
 
   static shutDown() {
     FTInnerLogger.setCrashLogCollectionEnabled(false);
+    if (FTSDK.remoteConfigManager !== null) {
+      FTSDK.remoteConfigManager.close();
+      FTSDK.remoteConfigManager = null;
+    }
+    FTSDK.pendingRemoteConfigAppId = null;
     // Unregister UIAbility lifecycle listener
     try {
       FTAbilityLifecycleListener.getInstance().unregister();
@@ -812,6 +859,185 @@ export class FTSDK {
     } catch (error) {
       FTInnerLogger.e(TAG, `setAutoSync failed: ${error}`);
     }
+  }
+
+  /** Configure a DataKit endpoint after SDK installation and resume auto upload. */
+  static setDatakitUrl(datakitUrl: string): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set DataKit URL');
+      return;
+    }
+    config.setDatakitUrl(datakitUrl);
+    FTSDK.logServerUrl(config);
+    FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.triggerPendingRemoteConfigInit();
+  }
+
+  /** Configure a Dataway endpoint and token after SDK installation and resume auto upload. */
+  static setDatawayUrl(datawayUrl: string, clientToken: string): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot set Dataway URL');
+      return;
+    }
+    config.setDatawayUrl(datawayUrl, clientToken);
+    FTSDK.logServerUrl(config);
+    FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.triggerPendingRemoteConfigInit();
+  }
+
+  /** Dynamically switch between a system device identifier and HarmonyOS privacy UUID. */
+  static setEnableAccessDeviceID(enableAccessDeviceID: boolean): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config === null) {
+      FTInnerLogger.w(TAG, 'SDK not initialized, cannot update device ID access');
+      return;
+    }
+    config.setEnableAccessDeviceID(enableAccessDeviceID);
+    FTSDK.updateDeviceUUIDContext(config);
+  }
+
+  /** Apply only the Android-supported live remote-configuration fields. */
+  private static applyRemoteConfigHotUpdate(bean: RemoteConfigBean): void {
+    const sdk = FTSDK.ftSdk;
+    const baseConfig = sdk === null ? null : sdk.ftSDKConfig;
+    if (baseConfig === null) {
+      return;
+    }
+    if (bean.getAutoSync() !== null) {
+      baseConfig.setAutoSync(bean.getAutoSync()!);
+    }
+    if (bean.getCompressIntakeRequests() !== null) {
+      baseConfig.setCompressIntakeRequests(bean.getCompressIntakeRequests()!);
+    }
+    if (bean.getSyncPageSize() !== null) {
+      baseConfig.setCustomSyncPageSize(bean.getSyncPageSize()!);
+    }
+    if (bean.getSyncSleepTime() !== null) {
+      baseConfig.setSyncSleepTime(bean.getSyncSleepTime()!);
+    }
+    SyncTaskManager.getInstance().hotUpdate(bean);
+
+    const logConfig = TrackLogManager.getInstance().getLogConfig();
+    if (logConfig !== null) {
+      if (bean.getLogLevelFilters() !== null) {
+        logConfig.setLogLevelFilters(bean.getLogLevelFilters()!);
+      }
+      if (bean.getLogEnableCustomLog() !== null) {
+        logConfig.setEnableCustomLog(bean.getLogEnableCustomLog()!);
+      }
+      if (bean.getLogEnableConsoleLog() !== null) {
+        logConfig.setEnableConsoleLog(bean.getLogEnableConsoleLog()!);
+      }
+      if (bean.getLogSampleRate() !== null) {
+        logConfig.setSamplingRate(bean.getLogSampleRate()!);
+      }
+      FTTrackInner.getInstance().initLogConfig(logConfig);
+    }
+
+    const traceConfig = FTTraceConfigManager.getInstance().getConfig();
+    if (traceConfig !== null && bean.getTraceSampleRate() !== null) {
+      traceConfig.setSamplingRate(bean.getTraceSampleRate()!);
+    }
+
+    const rumConfig = FTRUMConfigManager.getInstance().getConfig();
+    if (rumConfig !== null && rumConfig.getRumAppId().length > 0 &&
+      (bean.getRumSampleRate() !== null || bean.getRumSessionOnErrorSampleRate() !== null)) {
+      if (bean.getRumSampleRate() !== null) {
+        rumConfig.setSamplingRate(bean.getRumSampleRate()!);
+      }
+      if (bean.getRumSessionOnErrorSampleRate() !== null) {
+        rumConfig.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+      }
+      FTRUMInnerManager.getInstance().setSamplingRates(
+        rumConfig.getSamplingRate(),
+        rumConfig.getSessionErrorSampleRate()
+      );
+      FTTrackInner.getInstance().initRUMConfig(rumConfig);
+    }
+  }
+
+  private static getInstalledConfig(): FTSDKConfig | null {
+    return FTSDK.ftSdk === null ? null : FTSDK.ftSdk.ftSDKConfig;
+  }
+
+  private static resumeUploadAfterEndpointUpdate(): void {
+    SyncTaskManager.getInstance().executeSyncPoll();
+  }
+
+  private static startRemoteConfigIfPossible(appId: string): void {
+    if (FTSDK.remoteConfigManager === null || appId.length === 0) {
+      return;
+    }
+    const config = FTSDK.getInstalledConfig();
+    if (config !== null && FTSDK.isUploadEndpointAvailable(config)) {
+      FTSDK.pendingRemoteConfigAppId = null;
+      void FTSDK.remoteConfigManager.initFromRemote(appId);
+      return;
+    }
+    FTSDK.pendingRemoteConfigAppId = appId;
+    FTInnerLogger.d(TAG, 'Remote config request deferred until an intake endpoint is configured');
+  }
+
+  private static triggerPendingRemoteConfigInit(): void {
+    const appId = FTSDK.pendingRemoteConfigAppId;
+    const config = FTSDK.getInstalledConfig();
+    if (appId === null || config === null || !FTSDK.isUploadEndpointAvailable(config)) {
+      return;
+    }
+    FTSDK.pendingRemoteConfigAppId = null;
+    if (FTSDK.remoteConfigManager !== null) {
+      void FTSDK.remoteConfigManager.initFromRemote(appId);
+    }
+  }
+
+  private static isUploadEndpointAvailable(config: FTSDKConfig): boolean {
+    const datakitUrl = config.getDatakitUrl().trim();
+    if (FTSDK.isValidHttpUrl(datakitUrl)) {
+      return true;
+    }
+    return FTSDK.isValidHttpUrl(config.getDatawayUrl().trim()) && config.getClientToken().trim().length > 0;
+  }
+
+  private static isValidHttpUrl(value: string): boolean {
+    return /^https?:\/\/[^\s/?#]+(?:[/?#]|$)/i.test(value);
+  }
+
+  private static updateDeviceUUIDContext(config: FTSDKConfig): void {
+    const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
+    config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    if (!config.isAccessODIDEnabled()) {
+      DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
+        if (!config.isAccessODIDEnabled()) {
+          const persistedUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
+          config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(persistedUUID));
+          FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, persistedUUID);
+        }
+      }).catch((error: Error) => {
+        FTInnerLogger.w(TAG, `Failed to refresh privacy device UUID: ${error.message}`);
+      });
+    }
+  }
+
+  /**
+   * Fetch remote configuration using the interval configured on FTSDKConfig.
+   * A valid RUM app id is supplied once RUM configuration is installed.
+   */
+  static updateRemoteConfig(): void;
+  static updateRemoteConfig(intervalSeconds: number): void;
+  static updateRemoteConfig(intervalSeconds: number, result: FTRemoteConfigFetchResult | null): void;
+  static updateRemoteConfig(intervalSeconds?: number, result?: FTRemoteConfigFetchResult | null): void {
+    const manager = FTSDK.remoteConfigManager;
+    if (manager === null) {
+      return;
+    }
+    if (intervalSeconds === undefined) {
+      void manager.updateRemoteConfig();
+      return;
+    }
+    void manager.updateRemoteConfig(intervalSeconds, result === undefined ? null : result);
   }
 
   /**

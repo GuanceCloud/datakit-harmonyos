@@ -638,6 +638,38 @@ export default function configUnitTest() {
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
     });
 
+    it('remoteConfigShouldKeepAndroidCompatibleDefaults', 0, () => {
+      const config = FTSDKConfig.builder(TEST_FAKE_URL);
+
+      expect(config.isRemoteConfiguration()).assertFalse();
+      expect(config.getRemoteConfigMiniUpdateInterval()).assertEqual(43200);
+      expect(config.setRemoteConfiguration(true).isRemoteConfiguration()).assertTrue();
+      expect(config.setRemoteConfigMiniUpdateInterval(-1).getRemoteConfigMiniUpdateInterval()).assertEqual(0);
+      expect(config.setRemoteConfigMiniUpdateInterval(12.9).getRemoteConfigMiniUpdateInterval()).assertEqual(12);
+    });
+
+    it('runtimeEndpointAndDeviceIdUpdatesShouldMutateInstalledConfig', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      const config = FTSDKConfig.builder();
+
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('');
+      FTSDK.install(config, createFakeContext());
+      FTSDK.setDatakitUrl('http://datakit.example.com');
+      expect(config.getDatakitUrl()).assertEqual('http://datakit.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+
+      FTSDK.setDatawayUrl('https://dataway.example.com', 'client-token');
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('https://dataway.example.com');
+      expect(config.getClientToken()).assertEqual('client-token');
+
+      FTSDK.setEnableAccessDeviceID(false);
+      expect(config.isAccessODIDEnabled()).assertFalse();
+      expect(config.getGlobalContext().has(Constants.KEY_DEVICE_UUID)).assertTrue();
+    });
+
     it('installedConfigsShouldReachManagers', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);
