@@ -58,6 +58,12 @@ export class Constants {
   static readonly FT_USER_USER_NAME = "ft.user.username";
   static readonly FT_USER_USER_EMAIL = "ft.user.email";
   static readonly FT_USER_USER_EXT = "ft.user.extdata";
+  /** Persisted remote configuration payload. */
+  static readonly FT_REMOTE_CONFIG = "ft.localCache.remoteConfig";
+  /** Persisted remote configuration fetch time, in seconds. */
+  static readonly FT_REMOTE_CONFIG_FETCH_TIME = "ft.localCache.remoteConfigFetchTime";
+  /** DataKit/Dataway endpoint used to fetch SDK remote configuration. */
+  static readonly URL_ENV_VARIABLE = "v1/env_variable";
   
   // RUM related constants
   

@@ -35,6 +35,7 @@ export class HttpBuilder {
   private readOutTime: number = 60000;
   private isDataway: boolean = false;
   private readonly headParams: Map<string, string> = new Map();
+  private readonly queryParams: Map<string, string> = new Map();
   private sdkConfig: FTSDKConfig;
 
   // Test mode support
@@ -147,6 +148,14 @@ export class HttpBuilder {
         url += `/${this.model}?token=${token}&to_headless=true&precision=ns`;
       }
     }
+    if (this.queryParams.size > 0) {
+      const query: Array<string> = [];
+      this.queryParams.forEach((value, key) => {
+        query.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+      });
+      url += url.indexOf('?') >= 0 ? '&' : '?';
+      url += query.join('&');
+    }
     return url;
   }
 
@@ -216,6 +225,18 @@ export class HttpBuilder {
 
   addHeadParam(key: string, value: string): HttpBuilder {
     this.headParams.set(key, value);
+    return this;
+  }
+
+  /**
+   * Add a URL query parameter without changing the standard intake URL and
+   * Dataway authentication handling. This is used by SDK control-plane APIs
+   * such as remote configuration.
+   */
+  addQueryParam(key: string, value: string): HttpBuilder {
+    if (key.length > 0) {
+      this.queryParams.set(key, value);
+    }
     return this;
   }
 

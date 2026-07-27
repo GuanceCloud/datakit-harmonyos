@@ -7,6 +7,7 @@ import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
+import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
@@ -59,6 +60,7 @@ export class FTRUMConfig {
   private enableTraceUserResource: boolean = false;
   private enableTraceWebView: boolean = false;
   private enableResourceHostIP: boolean = false;
+  private allowWebViewHost: Array<string> | null = null;
   // Monitor data
   private extraMonitorTypeWithError: number = 0; // ERROR_MONITOR_NO_SET
   private deviceMetricsMonitorType: number = 0; // DEVICE_METRICS_MONITOR_NO_SET
@@ -242,6 +244,16 @@ export class FTRUMConfig {
   public setEnableTraceWebView(enableTraceWebView: boolean): FTRUMConfig {
     this.enableTraceWebView = enableTraceWebView;
     return this;
+  }
+
+  /** Limit the WebView bridge to the supplied host allow-list. Null allows all hosts. */
+  public setAllowWebViewHost(allowWebViewHost: Array<string> | null): FTRUMConfig {
+    this.allowWebViewHost = allowWebViewHost === null ? null : allowWebViewHost.slice();
+    return this;
+  }
+
+  public getAllowWebViewHost(): Array<string> | null {
+    return this.allowWebViewHost === null ? null : this.allowWebViewHost.slice();
   }
 
   // public getExtraMonitorTypeWithError(): number {
@@ -701,6 +713,10 @@ export class FTSDKConfig {
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
   private enableInnerLogFile: boolean = false;
   private innerLogFileConfig: FTInnerLogFileConfig = {};
+  // Remote configuration is opt-in, matching Android SDK defaults.
+  private remoteConfiguration: boolean = false;
+  private remoteConfigFetchResult: FTRemoteConfigFetchResult | null = null;
+  private remoteConfigMiniUpdateInterval: number = 43200;
 
   // Constructor
   private constructor(datakitUrl: string = '', datawayUrl: string = '', clientToken: string = '') {
@@ -710,9 +726,13 @@ export class FTSDKConfig {
   }
 
   // Static method to create FTSDKConfig object
+  static builder(): FTSDKConfig;
   static builder(datakitUrl: string): FTSDKConfig;
   static builder(datawayUrl: string, clientToken: string): FTSDKConfig;
-  static builder(datakitUrlOrDatawayUrl: string, clientToken?: string): FTSDKConfig {
+  static builder(datakitUrlOrDatawayUrl?: string, clientToken?: string): FTSDKConfig {
+    if (datakitUrlOrDatawayUrl === undefined) {
+      return new FTSDKConfig();
+    }
     if (clientToken !== undefined) {
       return new FTSDKConfig('', datakitUrlOrDatawayUrl, clientToken);
     } else {
@@ -732,6 +752,22 @@ export class FTSDKConfig {
 
   getClientToken(): string {
     return this.clientToken;
+  }
+
+  /** Replace the active intake endpoint with a DataKit endpoint. */
+  setDatakitUrl(datakitUrl: string): FTSDKConfig {
+    this.datakitUrl = datakitUrl;
+    this.datawayUrl = '';
+    this.clientToken = '';
+    return this;
+  }
+
+  /** Replace the active intake endpoint with a Dataway endpoint and token. */
+  setDatawayUrl(datawayUrl: string, clientToken: string): FTSDKConfig {
+    this.datawayUrl = datawayUrl;
+    this.clientToken = clientToken;
+    this.datakitUrl = '';
+    return this;
   }
 
   isDebugMode(): boolean {
@@ -814,6 +850,44 @@ export class FTSDKConfig {
 
   isCompressIntakeRequests(): boolean {
     return this.compressIntakeRequests;
+  }
+
+  /**
+   * Enable configuration updates fetched from DataKit or Dataway. The default
+   * is disabled to preserve existing SDK initialization behaviour.
+   */
+  setRemoteConfiguration(remoteConfiguration: boolean): FTSDKConfig {
+    this.remoteConfiguration = remoteConfiguration;
+    return this;
+  }
+
+  isRemoteConfiguration(): boolean {
+    return this.remoteConfiguration;
+  }
+
+  /** Set the callback invoked after a remote configuration fetch attempt. */
+  setRemoteConfigurationCallBack(fetchResult: FTRemoteConfigFetchResult | null): FTSDKConfig {
+    this.remoteConfigFetchResult = fetchResult;
+    return this;
+  }
+
+  getRemoteConfigFetchResult(): FTRemoteConfigFetchResult | null {
+    return this.remoteConfigFetchResult;
+  }
+
+  /**
+   * Set the minimum interval between remote configuration fetches, in seconds.
+   * Values below zero are normalized to zero so callers can intentionally force
+   * an immediate refresh with a zero interval.
+   */
+  setRemoteConfigMiniUpdateInterval(intervalSeconds: number): FTSDKConfig {
+    const normalized = intervalSeconds !== intervalSeconds ? 43200 : Math.floor(intervalSeconds);
+    this.remoteConfigMiniUpdateInterval = Math.max(0, normalized);
+    return this;
+  }
+
+  getRemoteConfigMiniUpdateInterval(): number {
+    return this.remoteConfigMiniUpdateInterval;
   }
 
   /** Set the HTTP proxy used by SDK upload requests. */
