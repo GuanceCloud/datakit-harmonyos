@@ -1,4 +1,14 @@
-import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, FTTraceConfig, LogGlobalContextDictionary, LogGlobalContextValue } from "./Configs";
+import {
+  clearRuntimeUploadEndpointInternal,
+  FTLoggerConfig,
+  FTRUMConfig,
+  FTSDKConfig,
+  FTTraceConfig,
+  LogGlobalContextDictionary,
+  LogGlobalContextValue,
+  setRuntimeDatakitUrlInternal,
+  setRuntimeDatawayUrlInternal
+} from "./Configs";
 import { Constants } from "./Constants";
 import { UserData } from "./rum/bean/UserData";
 import { Context, common } from '@kit.AbilityKit';
@@ -55,6 +65,10 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    const config = FTSDK.getInstalledConfig();
+    if (config !== null) {
+      clearRuntimeUploadEndpointInternal(config);
+    }
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
@@ -868,7 +882,7 @@ export class FTSDK {
       FTInnerLogger.w(TAG, 'SDK not initialized, cannot set DataKit URL');
       return;
     }
-    config.setDatakitUrl(datakitUrl);
+    setRuntimeDatakitUrlInternal(config, datakitUrl);
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.triggerPendingRemoteConfigInit();
@@ -881,7 +895,7 @@ export class FTSDK {
       FTInnerLogger.w(TAG, 'SDK not initialized, cannot set Dataway URL');
       return;
     }
-    config.setDatawayUrl(datawayUrl, clientToken);
+    setRuntimeDatawayUrlInternal(config, datawayUrl, clientToken);
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.triggerPendingRemoteConfigInit();

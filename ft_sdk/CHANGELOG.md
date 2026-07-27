@@ -5,14 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.15-alpha01] - 2026-07-19
-- Clarified that `FTRUMGlobalManager.updateLoadTime(...)` accepts nanoseconds, fixed the RUM demo to pass nanoseconds, and corrected related load-time diagnostics.
+## [0.1.15] - 2026-07-27
+- Added Android-compatible remote configuration, including cached startup merging and supported live updates. Configure it with `FTSDKConfig.setRemoteConfiguration(...)`, control the fetch interval with `setRemoteConfigMiniUpdateInterval(...)`, and observe fetches through `setRemoteConfigurationCallBack(...)`; `FTSDK.updateRemoteConfig(...)` supports manual refresh.
 - Consolidated the public RUM Action APIs: `addAction` now accepts optional duration and properties, while `startAction` accepts optional properties.
 - Removed split `addActionWith...` / `startActionWith...` methods and the unfinished public `stopAction` API. SDK-internal timing and wait-state parameters remain internal.
 - Completed Resource lifecycle properties: `startResource` and `stopResource` now accept optional properties and merge them with `ResourceParams` properties in call order.
 - Removed the unused `statusCode` and `contentLength` parameters from public `stopResource`; internal fallback Action association remains internal.
 - Aligned public `addError` overloads with Android, including the `dateline`-before-`errorType` form; Worker callbacks are now internal-only.
-- Added Android-compatible remote configuration, including cached startup merging and supported live updates. Configure it with `FTSDKConfig.setRemoteConfiguration(...)`, control the fetch interval with `setRemoteConfigMiniUpdateInterval(...)`, and observe fetches through `setRemoteConfigurationCallBack(...)`; `FTSDK.updateRemoteConfig(...)` supports manual refresh.
 
 ## [0.1.14] - 2026-07-17
 - Released the stable `ft_sdk` 0.1.14 package, consolidating the capabilities delivered during the 0.1.14 pre-release cycle.

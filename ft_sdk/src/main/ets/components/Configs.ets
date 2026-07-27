@@ -46,6 +46,18 @@ export interface FTInnerLogFileConfig {
   flushIntervalMs?: number;
 }
 
+interface RuntimeUploadEndpoint {
+  datakitUrl: string;
+  datawayUrl: string;
+  clientToken: string;
+}
+
+const runtimeUploadEndpointOverrides: Map<FTSDKConfig, RuntimeUploadEndpoint> = new Map();
+
+function getRuntimeUploadEndpoint(config: FTSDKConfig): RuntimeUploadEndpoint | null {
+  return runtimeUploadEndpointOverrides.get(config) ?? null;
+}
+
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
@@ -743,31 +755,15 @@ export class FTSDKConfig {
 
   // Getter and Setter methods
   getDatakitUrl(): string {
-    return this.datakitUrl;
+    return getRuntimeUploadEndpoint(this)?.datakitUrl ?? this.datakitUrl;
   }
 
   getDatawayUrl(): string {
-    return this.datawayUrl;
+    return getRuntimeUploadEndpoint(this)?.datawayUrl ?? this.datawayUrl;
   }
 
   getClientToken(): string {
-    return this.clientToken;
-  }
-
-  /** Replace the active intake endpoint with a DataKit endpoint. */
-  setDatakitUrl(datakitUrl: string): FTSDKConfig {
-    this.datakitUrl = datakitUrl;
-    this.datawayUrl = '';
-    this.clientToken = '';
-    return this;
-  }
-
-  /** Replace the active intake endpoint with a Dataway endpoint and token. */
-  setDatawayUrl(datawayUrl: string, clientToken: string): FTSDKConfig {
-    this.datawayUrl = datawayUrl;
-    this.clientToken = clientToken;
-    this.datakitUrl = '';
-    return this;
+    return getRuntimeUploadEndpoint(this)?.clientToken ?? this.clientToken;
   }
 
   isDebugMode(): boolean {
@@ -1205,6 +1201,29 @@ export class FTSDKConfig {
     this.dbCacheDiscard = String(strategy);
     return this;
   }
+}
+
+/** @internal Runtime-only endpoint update used by FTSDK.setDatakitUrl(...). */
+export function setRuntimeDatakitUrlInternal(config: FTSDKConfig, datakitUrl: string): void {
+  runtimeUploadEndpointOverrides.set(config, {
+    datakitUrl: datakitUrl,
+    datawayUrl: '',
+    clientToken: ''
+  });
+}
+
+/** @internal Runtime-only endpoint update used by FTSDK.setDatawayUrl(...). */
+export function setRuntimeDatawayUrlInternal(config: FTSDKConfig, datawayUrl: string, clientToken: string): void {
+  runtimeUploadEndpointOverrides.set(config, {
+    datakitUrl: '',
+    datawayUrl: datawayUrl,
+    clientToken: clientToken
+  });
+}
+
+/** @internal Release the endpoint override when an SDK instance is discarded. */
+export function clearRuntimeUploadEndpointInternal(config: FTSDKConfig): void {
+  runtimeUploadEndpointOverrides.delete(config);
 }
 
 export class FTTraceConfig {
