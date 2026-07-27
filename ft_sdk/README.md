@@ -143,10 +143,33 @@ FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
 
 The two modes are mutually exclusive: setting a DataKit URL clears the Dataway URL and token; setting a Dataway URL clears the DataKit URL. Use a complete `http://` or `https://` URL. The new value is kept in memory only, so configure it again after an app restart if needed. Automatic upload resumes when the endpoint is valid; call `FTSDK.flushSyncData()` when you need to request an immediate upload.
 
+## Local Data Filtering
+
+Local data filtering is enabled by default. Configure rules before `FTSDK.install(...)`; a matching RUM or logging point is discarded after `LineDataModifier` runs and before the point enters the local cache.
+
+```ts
+const dataFilters = new Map<string, Array<string>>()
+dataFilters.set('logging', [
+  "{ source in ['df_rum_harmonyos_log'] and message match ['.*password.*'] }"
+])
+dataFilters.set('rum', [
+  "{ source in [resource] and resource_status in ['404', '503'] }"
+])
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataFilters(dataFilters)
+```
+
+- Supported categories are `logging` and `rum` (case-insensitive); other categories are ignored.
+- A rule is enclosed in `{}`. Supported operators are `in`, `not in`, `match`, and `not match`, combined with `and` / `or`. `match` uses regular expressions.
+- Rule fields are resolved from tags and fields. `source`, `measurement`, and `class` refer to the Line Protocol measurement. For example, HarmonyOS custom logs use `df_rum_harmonyos_log`.
+- Call `.setEnableDataFilter(false)` to turn off local filtering without removing the configured rules. Call `.setDataFilters(null)` to clear rules.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry
 - `FTSDKConfig`: base SDK configuration
+- `FTDataFilters`: local data-filter rule type
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration
@@ -171,7 +194,6 @@ The two modes are mutually exclusive: setting a DataKit URL clears the Dataway U
 ## Notes
 
 - Call `FTSDK.install(...)` before `installRUMConfig`, `installLogConfig`, and `installTraceConfig`
-- Call `setDatakitUrl(...)` or `setDatawayUrl(...)` only after `FTSDK.install(...)`
 - Add `@guancecloud/ft_sdk_ext` when you need HarmonyOS `HttpInterceptor` chain integration
 - Add `@guancecloud/ft_native` when you need native crash monitoring. `ft_sdk` initializes `libftnativecrash.so` internally when crash tracking is enabled:
 

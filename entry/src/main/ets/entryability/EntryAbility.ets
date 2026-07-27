@@ -34,14 +34,13 @@ import {
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
+export const RUNTIME_CONFIG_PREFERENCES_NAME = PREFERENCES_NAME;
 const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequential';
 // Local-only defaults for manually validating SDK upload proxy and custom DNS.
 // They can be overridden through launch parameters. Keep the test disabled by
 // default so a normal Demo launch always uses its configured DataKit/DataWay URL.
 const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
 const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
-// Remote configuration is off for ordinary Demo launches. Enable this only
-// when validating the remote-configuration endpoint and applied fields.
 const DEFAULT_REMOTE_CONFIG_TEST_ENABLED = false;
 const NETWORK_ROUTE_TEST_HOST = '';
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
@@ -58,6 +57,9 @@ export const KEY_AUTO_SYNC = "autoSync";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
 export const KEY_REMOTE_CONFIG_TEST_ENABLED = "remoteConfigTestEnabled";
+export const KEY_LOCAL_DATA_FILTER_ENABLED = "localDataFilterEnabled";
+export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
+export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
 
@@ -71,16 +73,15 @@ interface RuntimeConfig {
   networkRouteTestEnabled: string;
   networkRouteTestMode: string;
   remoteConfigTestEnabled: string;
+  localDataFilterEnabled: string;
+  localDataFilterLogRule: string;
+  localDataFilterRumRule: string;
   appId: string;
 }
 
 class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
   onConfigSuccessFetched(configBean: RemoteConfigBean, jsonConfig: string): RemoteConfigBean | null {
-    DemoLogger.i(
-      LOG_TAG,
-      `Remote config fetched: md5=${configBean.getMd5()}, content=${jsonConfig}`
-    );
-    // Return null to persist and apply the server payload without overriding it.
+    DemoLogger.i(LOG_TAG, `Remote config fetched: md5=${configBean.getMd5()}, content=${jsonConfig}`);
     return null;
   }
 
@@ -116,7 +117,10 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
  * 8. Enable remote-configuration verification (fetches on every cold start):
  * --ps remoteConfigTestEnabled true
  *
- * 9. Full example:
+ * 9. Configure local filter rules:
+ * --ps localDataFilterLogRule "{ message match ['.*password.*'] }"
+ *
+ * 10. Full example:
  * --ps datakitUrl http\://10.0.0.1\:9529 --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id --ps remoteConfigTestEnabled true
  *
  * Behavior:
@@ -136,6 +140,9 @@ export default class EntryAbility extends UIAbility {
     networkRouteTestEnabled: "",
     networkRouteTestMode: "",
     remoteConfigTestEnabled: "",
+    localDataFilterEnabled: "",
+    localDataFilterLogRule: "",
+    localDataFilterRumRule: "",
     appId: ""
   };
 
@@ -181,6 +188,7 @@ export default class EntryAbility extends UIAbility {
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
     const remoteConfigTestEnabledParam = want.parameters?.[KEY_REMOTE_CONFIG_TEST_ENABLED];
+    const localDataFilterEnabledParam = want.parameters?.[KEY_LOCAL_DATA_FILTER_ENABLED];
     const runtimeConfig: RuntimeConfig = {
       datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
       datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
@@ -197,6 +205,11 @@ export default class EntryAbility extends UIAbility {
       remoteConfigTestEnabled: remoteConfigTestEnabledParam === undefined || remoteConfigTestEnabledParam === null
         ? ""
         : String(remoteConfigTestEnabledParam),
+      localDataFilterEnabled: localDataFilterEnabledParam === undefined || localDataFilterEnabledParam === null
+        ? ""
+        : String(localDataFilterEnabledParam),
+      localDataFilterLogRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_LOG_RULE] as string | null | undefined) ?? "",
+      localDataFilterRumRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_RUM_RULE] as string | null | undefined) ?? "",
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
@@ -208,7 +221,7 @@ export default class EntryAbility extends UIAbility {
 
       DemoLogger.i(
         LOG_TAG,
-        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}, remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`);
+        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
       return runtimeConfig;
     }
 
@@ -236,6 +249,24 @@ export default class EntryAbility extends UIAbility {
       runtimeConfig.remoteConfigTestEnabled,
       ""
     );
+    runtimeConfig.localDataFilterEnabled = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_ENABLED,
+      runtimeConfig.localDataFilterEnabled,
+      "true"
+    );
+    runtimeConfig.localDataFilterLogRule = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_LOG_RULE,
+      runtimeConfig.localDataFilterLogRule,
+      ""
+    );
+    runtimeConfig.localDataFilterRumRule = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_LOCAL_DATA_FILTER_RUM_RULE,
+      runtimeConfig.localDataFilterRumRule,
+      ""
+    );
     runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
 
     await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
@@ -243,7 +274,7 @@ export default class EntryAbility extends UIAbility {
 
     DemoLogger.i(
       LOG_TAG,
-      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}, remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`);
+      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
 
     return runtimeConfig;
   }
@@ -279,6 +310,9 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
     AppStorage.setOrCreate(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
+    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
     AppStorage.setOrCreate(KEY_APP_ID, runtimeConfig.appId);
   }
 
@@ -299,6 +333,9 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
     await preferencesStore.put(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
+    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
     await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
     await preferencesStore.flush();
   }
@@ -327,6 +364,27 @@ export default class EntryAbility extends UIAbility {
       return DEFAULT_REMOTE_CONFIG_TEST_ENABLED;
     }
     return value === 'true' || value === '1' || value === 'on';
+  }
+
+  private isLocalDataFilterEnabled(): boolean {
+    const value = this.runtimeConfig.localDataFilterEnabled.trim().toLowerCase();
+    return value !== 'false' && value !== '0' && value !== 'off';
+  }
+
+  private applyLocalDataFilterConfig(sdkConfig: FTSDKConfig): FTSDKConfig {
+    const filters = new Map<string, Array<string>>();
+    const logRule = this.runtimeConfig.localDataFilterLogRule.trim();
+    const rumRule = this.runtimeConfig.localDataFilterRumRule.trim();
+    if (logRule.length > 0) {
+      filters.set('logging', [logRule]);
+    }
+    if (rumRule.length > 0) {
+      filters.set('rum', [rumRule]);
+    }
+    const enabled = this.isLocalDataFilterEnabled();
+    DemoLogger.i(LOG_TAG,
+      `Local data filter startup config: enabled=${enabled}, loggingRules=${logRule.length > 0 ? 1 : 0}, rumRules=${rumRule.length > 0 ? 1 : 0}`);
+    return sdkConfig.setEnableDataFilter(enabled).setDataFilters(filters);
   }
 
   /**
@@ -445,12 +503,12 @@ export default class EntryAbility extends UIAbility {
         .setSyncSleepTime(100) // Default: no extra delay between upload requests
         .setCompressIntakeRequests(false) // Disable only so manual tests can read the marker
         .setRemoteConfiguration(remoteConfigTestEnabled)
-        // A zero interval keeps endpoint validation repeatable across cold starts.
         .setRemoteConfigMiniUpdateInterval(remoteConfigTestEnabled ? 0 : 43200)
-        .setRemoteConfigurationCallBack(remoteConfigFetchResult)
+        .setRemoteConfigurationCallBack(remoteConfigFetchResult);
       if (remoteConfigTestEnabled) {
         DemoLogger.i(LOG_TAG, 'Remote configuration test enabled: refresh interval=0 seconds');
       }
+      sdkConfig = this.applyLocalDataFilterConfig(sdkConfig);
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
           host: NETWORK_ROUTE_TEST_HOST,
@@ -502,12 +560,6 @@ export default class EntryAbility extends UIAbility {
         // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
-      if (remoteConfigTestEnabled) {
-        // Exercises the public manual-refresh API. The SDK ignores it safely if
-        // the automatic request started by installRUMConfig is still running.
-        DemoLogger.i(LOG_TAG, 'Requesting remote configuration through FTSDK.updateRemoteConfig(0)');
-        FTSDK.updateRemoteConfig(0);
-      }
 
       // Bind user data using new UserData class with persistence
       const userData = new UserData();

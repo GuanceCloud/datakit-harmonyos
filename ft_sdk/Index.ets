@@ -36,6 +36,7 @@ export {
   FTProxyAuthenticator,
   FTDnsConfig,
   FTInnerLogFileConfig,
+  FTDataFilters,
   LogGlobalContextDictionary,
   LogGlobalContextValue
 } from './src/main/ets/components/Configs';

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.15] - 2026-07-27
+- Added Android-compatible local data filtering for RUM and logging. `FTSDKConfig.setEnableDataFilter(...)` controls the default-enabled filter, while `setDataFilters(...)` configures `logging` and `rum` rules.
+- Local rules support `in`, `not in`, `match`, `not match`, `and`, and `or`; matching data is discarded after `LineDataModifier` and before local-cache persistence.
 - Added `FTSDK.setDatakitUrl(...)` and `FTSDK.setDatawayUrl(...)` for switching the active reporting endpoint after SDK installation. The modes are mutually exclusive, and automatic uploads wait for a valid HTTP(S) endpoint (plus a Dataway client token).
 - Added Android-compatible remote configuration, including cached startup merging and supported live updates. Configure it with `FTSDKConfig.setRemoteConfiguration(...)`, control the fetch interval with `setRemoteConfigMiniUpdateInterval(...)`, and observe fetches through `setRemoteConfigurationCallBack(...)`; `FTSDK.updateRemoteConfig(...)` supports manual refresh.
 - Consolidated the public RUM Action APIs: `addAction` now accepts optional duration and properties, while `startAction` accepts optional properties.
