@@ -61,11 +61,15 @@ export default function httpTest() {
       const remoteConfigBuilder = HttpBuilder.Builder(FTSDKConfig.builder('http://datakit.local'))
         .setModel('v1/env_variable')
         .addQueryParam('app_id', 'rum app/id');
+      const remoteFilterBuilder = HttpBuilder.Builder(FTSDKConfig.builder('http://datakit.local'))
+        .setModel(Constants.URL_DATAKIT_PULL)
+        .addQueryParam('filters', 'true');
 
       expect(datakitBuilder.getUrl()).assertEqual('http://datakit.local/rum?precision=ns');
       expect(datawayBuilder.getUrl()).assertEqual('https://dataway.example.com/logs?token=client-token&to_headless=true&precision=ns');
       expect(emptyModelBuilder.getUrl()).assertEqual('https://dataway.example.com');
       expect(remoteConfigBuilder.getUrl()).assertEqual('http://datakit.local/v1/env_variable?precision=ns&app_id=rum%20app%2Fid');
+      expect(remoteFilterBuilder.getUrl()).assertEqual('http://datakit.local/v1/datakit/pull?precision=ns&filters=true');
     });
 
     it('builderShouldCaptureContentType', 0, async () => {

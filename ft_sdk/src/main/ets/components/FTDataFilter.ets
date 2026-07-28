@@ -170,7 +170,8 @@ class ListExpression implements FilterExpression {
       }
     }
 
-    return this.operator === FilterTokenType.NOT_IN || this.operator === FilterTokenType.NOT_MATCH
+    return this.operator === FilterTokenType.NOT_IN || this.operator === FilterTokenType.NOT_MATCH ||
+      this.operator === FilterTokenType.NEQ
       ? !matched
       : matched;
   }
@@ -261,7 +262,8 @@ class FilterParser {
 
     const left = new IdentifierExpression(this.parseFieldName());
     const operator = this.current.type;
-    if (operator !== FilterTokenType.IN && operator !== FilterTokenType.NOT_IN &&
+    if (operator !== FilterTokenType.EQ && operator !== FilterTokenType.NEQ &&
+      operator !== FilterTokenType.IN && operator !== FilterTokenType.NOT_IN &&
       operator !== FilterTokenType.MATCH && operator !== FilterTokenType.NOT_MATCH) {
       throw new Error('Unsupported filter operator');
     }

@@ -127,7 +127,7 @@ FTSDK.setDatakitUrl('https://datakit.example.com')
 // Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
 ```
 
-Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
+Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. Switching to a valid runtime endpoint also refreshes remote configuration immediately; an in-flight response from the old endpoint is ignored. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
 
 ## Update the Reporting Endpoint at Runtime
 
@@ -143,7 +143,7 @@ FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
 
 The two modes are mutually exclusive: setting a DataKit URL clears the Dataway URL and token; setting a Dataway URL clears the DataKit URL. Use a complete `http://` or `https://` URL. The new value is kept in memory only, so configure it again after an app restart if needed. Automatic upload resumes when the endpoint is valid; call `FTSDK.flushSyncData()` when you need to request an immediate upload.
 
-## Local Data Filtering
+## Data Filtering
 
 Local data filtering is enabled by default. Configure rules before `FTSDK.install(...)`; a matching RUM or logging point is discarded after `LineDataModifier` runs and before the point enters the local cache.
 
@@ -161,9 +161,10 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 ```
 
 - Supported categories are `logging` and `rum` (case-insensitive); other categories are ignored.
-- A rule is enclosed in `{}`. Supported operators are `in`, `not in`, `match`, and `not match`, combined with `and` / `or`. `match` uses regular expressions.
+- A rule is enclosed in `{}`. Supported operators are `=`, `!=`, `in`, `not in`, `match`, and `not match`, combined with `and` / `or`. `match` uses regular expressions.
 - Rule fields are resolved from tags and fields. `source`, `measurement`, and `class` refer to the Line Protocol measurement. For example, HarmonyOS custom logs use `df_rum_harmonyos_log`.
-- Call `.setEnableDataFilter(false)` to turn off local filtering without removing the configured rules. Call `.setDataFilters(null)` to clear rules.
+- While filtering is enabled and an endpoint is valid, the SDK also pulls remote `logging` and `rum` rules from `/v1/datakit/pull?filters=true`. Local and remote rules are combined: a point matching either is discarded. The next pull follows the server's `pull_interval`; an absent or invalid value retries in 10 seconds. A runtime endpoint switch clears rules from the old endpoint and immediately pulls rules from the new one.
+- Call `.setEnableDataFilter(false)` to turn off both local and remote filtering without removing the configured rules. Call `.setDataFilters(null)` to clear local rules.
 ## Data Modification and Masking
 
 Configure callbacks before `FTSDK.install(...)` to modify or mask data before it is cached and uploaded. `DataModifier` runs for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to retain the original value.
