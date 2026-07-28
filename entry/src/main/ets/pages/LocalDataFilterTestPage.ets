@@ -1,5 +1,6 @@
 import { Context, common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
+import { http } from '@kit.NetworkKit';
 import preferences from '@ohos.data.preferences';
 import {
   FTLogger,
@@ -11,6 +12,16 @@ import {
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import {
+  RUNTIME_TEST_ACTIVE_CLIENT_TOKEN,
+  RUNTIME_TEST_ACTIVE_ENDPOINT,
+  RUNTIME_TEST_ACTIVE_MODE,
+  RUNTIME_TEST_MODE_DATAKIT,
+  RUNTIME_TEST_MODE_DATAWAY
+} from '../constants/RuntimeEndpointTestState';
+import {
+  KEY_CLIENT_TOKEN,
+  KEY_DATAKIT_URL,
+  KEY_DATAWAY_URL,
   KEY_LOCAL_DATA_FILTER_ENABLED,
   KEY_LOCAL_DATA_FILTER_LOG_RULE,
   KEY_LOCAL_DATA_FILTER_RUM_RULE,
@@ -36,8 +47,19 @@ export struct LocalDataFilterTestPage {
   @State restartRequired: boolean = true;
   @State resultOutput: string = 'Load the saved startup configuration before sending test data.';
   @State lastMarker: string = '';
+  @State activeLocalRules: string = 'Loading saved startup rules...';
+  @State activeRemoteRules: string = 'Loading remote Mock response...';
+  @State remoteFilterEndpoint: string = '';
+  @State remoteFilterEndpointSource: string = 'saved startup config';
+  @State savedLoggingRule: string = '';
+  @State savedRumRule: string = '';
+  @StorageLink(RUNTIME_TEST_ACTIVE_ENDPOINT) runtimeTestEndpoint: string = '';
+  @StorageLink(RUNTIME_TEST_ACTIVE_CLIENT_TOKEN) runtimeTestClientToken: string = '';
+  @StorageLink(RUNTIME_TEST_ACTIVE_MODE) runtimeTestEndpointMode: string = '';
   private abilityContext: Context = getContext(this) as Context;
   private preferencesStore: preferences.Preferences | null = null;
+  private remoteFilterUsesDataway: boolean = false;
+  private remoteFilterClientToken: string = '';
 
   aboutToAppear(): void {
     this.loadSettings();
@@ -49,9 +71,20 @@ export struct LocalDataFilterTestPage {
       const savedEnabled = await this.preferencesStore.get(KEY_LOCAL_DATA_FILTER_ENABLED, 'true') as string;
       const savedLoggingRule = await this.preferencesStore.get(KEY_LOCAL_DATA_FILTER_LOG_RULE, '') as string;
       const savedRumRule = await this.preferencesStore.get(KEY_LOCAL_DATA_FILTER_RUM_RULE, '') as string;
+      const savedDatakitUrl = await this.preferencesStore.get(KEY_DATAKIT_URL, '') as string;
+      const savedDatawayUrl = await this.preferencesStore.get(KEY_DATAWAY_URL, '') as string;
+      const savedClientToken = await this.preferencesStore.get(KEY_CLIENT_TOKEN, '') as string;
 
       this.enableDataFilter = this.toBoolean(savedEnabled);
       this.settingsSaved = savedLoggingRule.trim().length > 0 || savedRumRule.trim().length > 0;
+      this.savedLoggingRule = savedLoggingRule.trim();
+      this.savedRumRule = savedRumRule.trim();
+      this.remoteFilterUsesDataway = savedDatawayUrl.trim().length > 0;
+      this.remoteFilterEndpoint = this.remoteFilterUsesDataway ? savedDatawayUrl.trim() : savedDatakitUrl.trim();
+      this.remoteFilterClientToken = savedClientToken.trim();
+      this.remoteFilterEndpointSource = this.remoteFilterUsesDataway
+        ? 'saved startup DataWay'
+        : 'saved startup DataKit';
       if (savedLoggingRule.trim().length > 0) {
         this.loggingRule = savedLoggingRule;
       }
@@ -59,6 +92,8 @@ export struct LocalDataFilterTestPage {
         this.rumRule = savedRumRule;
       }
       this.restartRequired = !this.settingsSaved;
+      this.refreshSavedLocalRules();
+      void this.refreshRemoteMockRules();
       this.appendResult(this.settingsSaved
         ? 'Saved startup configuration loaded. You can send verification data.'
         : 'No filter rules are saved. The recommended rules are prefilled; save them and restart the Demo.');
@@ -101,7 +136,10 @@ export struct LocalDataFilterTestPage {
       AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, this.loggingRule.trim());
       AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_RUM_RULE, this.rumRule.trim());
       this.settingsSaved = true;
+      this.savedLoggingRule = this.loggingRule.trim();
+      this.savedRumRule = this.rumRule.trim();
       this.restartRequired = true;
+      this.refreshSavedLocalRules();
       this.appendResult('Settings saved. Close and reopen the Demo application before sending verification data.');
       promptAction.showToast({ message: 'Settings saved. Close and reopen Demo to apply them.' });
     } catch (error) {
@@ -165,6 +203,94 @@ export struct LocalDataFilterTestPage {
       rumManager.stopResource(resourceId);
       rumManager.addResource(resourceId, params, networkStatus);
     }, 80);
+  }
+
+  private refreshFilterTestRules(): void {
+    this.refreshSavedLocalRules();
+    void this.refreshRemoteMockRules();
+  }
+
+  private refreshSavedLocalRules(): void {
+    if (!this.settingsSaved) {
+      this.activeLocalRules = '(none saved)';
+      return;
+    }
+    const enabled = this.enableDataFilter ? 'true' : 'false';
+    const logging = this.savedLoggingRule.length > 0 ? this.savedLoggingRule : '(none)';
+    const rum = this.savedRumRule.length > 0 ? this.savedRumRule : '(none)';
+    this.activeLocalRules = `enabled: ${enabled}\nlogging:\n  ${logging}\nrum:\n  ${rum}`;
+  }
+
+  private async refreshRemoteMockRules(): Promise<void> {
+    this.updateRemoteFilterEndpointFromRuntimeTest();
+    const baseUrl = this.trimTrailingSlashes(this.remoteFilterEndpoint);
+    if (baseUrl.length === 0) {
+      this.activeRemoteRules = '(no runtime test or saved intake URL)';
+      return;
+    }
+
+    let requestUrl = `${baseUrl}/v1/datakit/pull?precision=ns`;
+    if (this.remoteFilterUsesDataway) {
+      requestUrl += `&token=${encodeURIComponent(this.remoteFilterClientToken)}&to_headless=true`;
+    }
+    requestUrl += '&filters=true';
+
+    const request = http.createHttp();
+    try {
+      const response = await request.request(requestUrl, {
+        method: http.RequestMethod.GET,
+        header: { 'Accept': 'application/json' }
+      });
+      if (response.responseCode !== http.ResponseCode.OK) {
+        this.activeRemoteRules = `Request failed: HTTP ${response.responseCode}`;
+        this.appendResult(`Remote Mock response request failed: HTTP ${response.responseCode}.`);
+        return;
+      }
+      this.activeRemoteRules = this.formatRemoteResponse(String(response.result));
+      this.appendResult(`Remote Mock filter response refreshed from ${baseUrl}.`);
+    } catch (error) {
+      this.activeRemoteRules = `Request failed: ${error}`;
+      this.appendResult(`Remote Mock response request failed: ${error}`);
+    } finally {
+      request.destroy();
+    }
+  }
+
+  /**
+   * Prefer the endpoint most recently applied in Runtime Endpoint Verification.
+   * AppStorage is process-only, so a restart falls back to the saved startup
+   * configuration loaded above without changing SDK persistence semantics.
+   */
+  private updateRemoteFilterEndpointFromRuntimeTest(): void {
+    if (this.runtimeTestEndpointMode === RUNTIME_TEST_MODE_DATAWAY) {
+      this.remoteFilterUsesDataway = true;
+      this.remoteFilterEndpoint = this.runtimeTestEndpoint.trim();
+      this.remoteFilterClientToken = this.runtimeTestClientToken.trim();
+      this.remoteFilterEndpointSource = 'runtime test DataWay';
+      return;
+    }
+    if (this.runtimeTestEndpointMode === RUNTIME_TEST_MODE_DATAKIT) {
+      this.remoteFilterUsesDataway = false;
+      this.remoteFilterEndpoint = this.runtimeTestEndpoint.trim();
+      this.remoteFilterClientToken = '';
+      this.remoteFilterEndpointSource = 'runtime test DataKit';
+    }
+  }
+
+  private trimTrailingSlashes(value: string): string {
+    let result = value.trim();
+    while (result.endsWith('/')) {
+      result = result.substring(0, result.length - 1);
+    }
+    return result;
+  }
+
+  private formatRemoteResponse(body: string): string {
+    try {
+      return JSON.stringify(JSON.parse(body) as Object, null, 2);
+    } catch (_error) {
+      return body;
+    }
   }
 
   private appendResult(message: string): void {
@@ -256,6 +382,58 @@ export struct LocalDataFilterTestPage {
                 .backgroundColor('#B45309')
                 .onClick(() => this.closeDemoToApplySettings())
             }
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(10)
+
+          Column({ space: 8 }) {
+            Row() {
+              Text('Filter Test Configuration')
+                .layoutWeight(1)
+                .fontSize(18)
+                .fontWeight(FontWeight.Bold)
+              Button('Refresh')
+                .height(34)
+                .backgroundColor('#2563EB')
+                .onClick(() => this.refreshFilterTestRules())
+            }
+            .width('100%')
+
+            Text('Local shows the saved startup configuration and becomes active after the Demo restarts. Remote directly requests the current-process endpoint from Runtime Endpoint Verification when available, otherwise the saved intake URL; it does not inspect SDK internal state. Check the Mock request log to confirm that the SDK fetched the same response.')
+              .fontSize(12)
+              .fontColor(Color.Gray)
+              .lineHeight(18)
+              .width('100%')
+
+            Text('Local rules (saved startup config)')
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .width('100%')
+            Text(this.activeLocalRules)
+              .fontSize(12)
+              .fontColor(TestPageTheme.RESULT_TEXT_COLOR)
+              .fontFamily(TestPageTheme.RESULT_FONT_FAMILY)
+              .lineHeight(18)
+              .width('100%')
+              .padding(10)
+              .backgroundColor(TestPageTheme.RESULT_ROW_BACKGROUND)
+              .borderRadius(6)
+
+            Text(`Remote Mock response (${this.remoteFilterEndpointSource}: ${this.remoteFilterEndpoint.length > 0 ? this.remoteFilterEndpoint : 'no intake URL'})`)
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .width('100%')
+            Text(this.activeRemoteRules)
+              .fontSize(12)
+              .fontColor(TestPageTheme.RESULT_TEXT_COLOR)
+              .fontFamily(TestPageTheme.RESULT_FONT_FAMILY)
+              .lineHeight(18)
+              .width('100%')
+              .padding(10)
+              .backgroundColor(TestPageTheme.RESULT_ROW_BACKGROUND)
+              .borderRadius(6)
           }
           .width('100%')
           .padding(16)

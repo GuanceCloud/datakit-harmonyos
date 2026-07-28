@@ -1,5 +1,21 @@
-import { FTLogger, FTSDK, Status } from '@guancecloud/ft_sdk/Index';
+import {
+  AppState,
+  ErrorType,
+  FTLogger,
+  FTRUMGlobalManager,
+  FTSDK,
+  NetStatusBean,
+  ResourceParams,
+  Status
+} from '@guancecloud/ft_sdk/Index';
 import { TestPageHeader } from '../components/TestPageHeader';
+import {
+  RUNTIME_TEST_ACTIVE_CLIENT_TOKEN,
+  RUNTIME_TEST_ACTIVE_ENDPOINT,
+  RUNTIME_TEST_ACTIVE_MODE,
+  RUNTIME_TEST_MODE_DATAKIT,
+  RUNTIME_TEST_MODE_DATAWAY
+} from '../constants/RuntimeEndpointTestState';
 import { TestPageTheme } from '../constants/TestPageTheme';
 
 const TAG = 'RuntimeEndpointVerificationPage';
@@ -35,6 +51,7 @@ export struct RuntimeEndpointVerificationPage {
         this.buildOverviewCard();
         this.buildEndpointForm();
         this.buildActionButtons();
+        this.buildDataFilterButtons();
         this.buildManualChecklist();
         this.buildResultLog();
       }
@@ -161,6 +178,64 @@ export struct RuntimeEndpointVerificationPage {
   }
 
   @Builder
+  private buildDataFilterButtons() {
+    Column({ space: 9 }) {
+      Text('Data filter verification')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+
+      Text('Each action sends one or more matching markers and an unmatched control marker. For local filters, save rules in Local Data Filter Test and restart the Demo first. For remote filters, apply the Mock rules and wait for the pull request before sending data.')
+        .fontSize(12)
+        .fontColor(Color.Gray)
+        .lineHeight(18)
+
+      Button('Send Local Filter Log Pair')
+        .width('100%')
+        .height(46)
+        .backgroundColor('#0F766E')
+        .onClick(() => {
+          this.sendLocalFilterLogPair();
+        })
+
+      Button('Send Local Filter RUM Pair')
+        .width('100%')
+        .height(46)
+        .backgroundColor('#0F766E')
+        .onClick(() => {
+          this.sendLocalFilterRumPair();
+        })
+
+      Button('Send Remote Filter Log Set')
+        .width('100%')
+        .height(46)
+        .backgroundColor('#B45309')
+        .onClick(() => {
+          this.sendRemoteFilterLogSet();
+        })
+
+      Button('Send Remote Filter RUM Set')
+        .width('100%')
+        .height(46)
+        .backgroundColor('#B45309')
+        .onClick(() => {
+          this.sendRemoteFilterRumSet();
+        })
+
+      Button('Send Remote Filter View Pair')
+        .width('100%')
+        .height(46)
+        .backgroundColor('#B45309')
+        .onClick(() => {
+          this.sendRemoteFilterViewPair();
+        })
+    }
+    .width('100%')
+    .padding(14)
+    .backgroundColor(Color.White)
+    .borderRadius(10)
+  }
+
+  @Builder
   private buildManualChecklist() {
     Column({ space: 9 }) {
       Text('Human verification results')
@@ -254,6 +329,7 @@ export struct RuntimeEndpointVerificationPage {
   private applyDatakit(): void {
     const url = this.datakitUrl.trim();
     FTSDK.setDatakitUrl(url);
+    this.updateRuntimeTestEndpoint(RUNTIME_TEST_MODE_DATAKIT, url, '');
     this.activeMode = url.length > 0 ? `DataKit: ${url}` : 'DataKit: empty URL';
     this.appendResult(`Applied DataKit URL: ${url.length > 0 ? url : '(empty)'}\n`);
   }
@@ -262,8 +338,19 @@ export struct RuntimeEndpointVerificationPage {
     const url = this.datawayUrl.trim();
     const token = this.clientToken.trim();
     FTSDK.setDatawayUrl(url, token);
+    this.updateRuntimeTestEndpoint(RUNTIME_TEST_MODE_DATAWAY, url, token);
     this.activeMode = url.length > 0 ? `Dataway: ${url}` : 'Dataway: empty URL';
     this.appendResult(`Applied Dataway URL: ${url.length > 0 ? url : '(empty)'}, token=${token.length > 0 ? 'provided' : 'empty'}\n`);
+  }
+
+  /**
+   * Allows Demo verification pages to observe an endpoint switch in the
+   * current process. It intentionally does not write Preferences.
+   */
+  private updateRuntimeTestEndpoint(mode: string, endpoint: string, clientToken: string): void {
+    AppStorage.setOrCreate(RUNTIME_TEST_ACTIVE_MODE, mode);
+    AppStorage.setOrCreate(RUNTIME_TEST_ACTIVE_ENDPOINT, endpoint);
+    AppStorage.setOrCreate(RUNTIME_TEST_ACTIVE_CLIENT_TOKEN, clientToken);
   }
 
   private writeMarkerAndFlush(): void {
@@ -286,6 +373,128 @@ export struct RuntimeEndpointVerificationPage {
     properties.set('manual_endpoint_marker', new String(marker));
     properties.set('manual_endpoint_mode', new String(this.activeMode));
     FTLogger.logBackground(marker, Status.INFO, properties);
+  }
+
+  private sendLocalFilterLogPair(): void {
+    const marker = this.createMarker('local-filter-log');
+    FTLogger.i(TAG, `local_filter_drop_log_${marker}`);
+    FTLogger.i(TAG, `local_filter_keep_log_${marker}`);
+    this.flushFilterVerificationData();
+    this.appendResult(
+      `Local log marker=${marker}. Expected with the recommended local rule: local_filter_drop_log is absent; local_filter_keep_log reaches /v1/write/logging.\n`
+    );
+  }
+
+  private sendLocalFilterRumPair(): void {
+    const marker = this.createMarker('local-filter-rum');
+    this.sendVerificationResource(404, `local-filter-drop-${marker}`);
+    this.sendVerificationResource(200, `local-filter-keep-${marker}`);
+    this.flushFilterVerificationData();
+    this.appendResult(
+      `Local RUM marker=${marker}. Expected with the recommended local rule: Resource 404 is absent; Resource 200 reaches /v1/write/rum.\n`
+    );
+  }
+
+  private sendRemoteFilterLogSet(): void {
+    const marker = this.createMarker('remote-filter-log');
+    FTLogger.i(TAG, `remote-secret-num-${marker}`);
+    FTLogger.i(TAG, `remote-password-num-${marker}`);
+    FTLogger.i(TAG, `remote-token-num-${marker}`);
+    FTLogger.i(TAG, `filter-test-log-num-${marker}`);
+    FTLogger.i(TAG, `remote-filter-log-keep-${marker}`);
+    this.flushFilterVerificationData();
+    this.appendResult(
+      `Remote log marker=${marker}. The first four messages match the configured *-num rules and should be absent; remote-filter-log-keep should reach /v1/write/logging.\n`
+    );
+  }
+
+  private sendRemoteFilterRumSet(): void {
+    const marker = this.createMarker('remote-filter-rum');
+    const rumManager = FTRUMGlobalManager.getInstance();
+    const filteredStatuses: Array<number> = [200, 401, 403, 404, 500, 502, 503];
+    for (let index = 0; index < filteredStatuses.length; index++) {
+      this.sendVerificationResource(filteredStatuses[index], `remote-filter-drop-${marker}`);
+    }
+    this.sendVerificationResource(200, `remote-filter-keep-${marker}`);
+    rumManager.addError(
+      `remote-filter-error-stack-${marker}`,
+      `remote-secret-${marker}`,
+      ErrorType.CUSTOM,
+      AppState.RUN
+    );
+    rumManager.addError(
+      `remote-filter-password-stack-${marker}`,
+      `remote-password-${marker}`,
+      ErrorType.CUSTOM,
+      AppState.RUN
+    );
+    rumManager.addError(
+      `remote-filter-control-stack-${marker}`,
+      `remote-filter-error-keep-${marker}`,
+      ErrorType.CUSTOM,
+      AppState.RUN
+    );
+    rumManager.addAction(`filter-test-action-${marker}`, 'click');
+    rumManager.addAction(`remote-filter-action-keep-${marker}`, 'click');
+    this.flushFilterVerificationData();
+    this.appendResult(
+      `Remote RUM marker=${marker}. Resources 401/403/404/500/502/503, errors remote-secret and remote-password, and action filter-test-action should be absent; the 200 resource, remote-filter-error-keep, and remote-filter-action-keep should reach /v1/write/rum.\n`
+    );
+  }
+
+  private sendRemoteFilterViewPair(): void {
+    const marker = this.createMarker('remote-filter-view');
+    this.sendVerificationView(`filter-test-view-${marker}`, () => {
+      this.sendVerificationView(`remote-filter-view-keep-${marker}`, () => {
+        this.flushFilterVerificationData();
+      });
+    });
+    this.appendResult(
+      `Remote View marker=${marker}. filter-test-view should be absent; remote-filter-view-keep should reach /v1/write/rum. This action temporarily replaces the active RUM View for the current page.\n`
+    );
+  }
+
+  private sendVerificationView(viewName: string, onStopped: () => void): void {
+    const rumManager = FTRUMGlobalManager.getInstance();
+    rumManager.startView(viewName).then(() => {
+      setTimeout(() => {
+        rumManager.stopView({}).then(() => {
+          onStopped();
+        }).catch((error: Error) => {
+          this.appendResult(`Failed to stop verification View: ${error.message}\n`);
+        });
+      }, 80);
+    }).catch((error: Error) => {
+      this.appendResult(`Failed to start verification View: ${error.message}\n`);
+    });
+  }
+
+  private sendVerificationResource(status: number, marker: string): void {
+    const resourceId = `runtime_endpoint_filter_${status}_${marker}`;
+    const params = new ResourceParams();
+    params.setUrl(`https://demo.guance.local/runtime-endpoint-filter/${status}?marker=${marker}`);
+    params.setResourceMethod('GET');
+    params.setResourceStatus(status);
+    params.setResponseContentLength(128);
+    params.setResponseContentType('application/json');
+    params.setResponseBody(`{"status":${status},"marker":"${marker}"}`);
+
+    const networkStatus = new NetStatusBean();
+    networkStatus.setHoleRequestTime(80);
+
+    const rumManager = FTRUMGlobalManager.getInstance();
+    rumManager.startResource(resourceId);
+    setTimeout(() => {
+      rumManager.stopResource(resourceId);
+      rumManager.addResource(resourceId, params, networkStatus);
+    }, 80);
+  }
+
+  private flushFilterVerificationData(): void {
+    setTimeout(() => {
+      FTLogger.flush();
+      FTSDK.flushSyncData();
+    }, 180);
   }
 
   private createMarker(kind: string): string {
