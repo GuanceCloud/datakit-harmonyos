@@ -885,6 +885,7 @@ export class FTSDK {
     setRuntimeDatakitUrlInternal(config, datakitUrl);
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
@@ -898,6 +899,7 @@ export class FTSDK {
     setRuntimeDatawayUrlInternal(config, datawayUrl, clientToken);
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
+    FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
