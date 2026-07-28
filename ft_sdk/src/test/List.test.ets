@@ -20,6 +20,7 @@ import httpAutoTrackRcpConfigUnitTest from './unit/HttpAutoTrackRcpConfigUnit.te
 import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import remoteConfigUnitTest from './unit/RemoteConfigUnit.test';
+import remoteDataFilterUnitTest from './unit/RemoteDataFilterUnit.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
 import sdkDedicatedPoolManagerUnitTest from './unit/SDKDedicatedPoolManagerUnit.test';
 import sdkWorkerRetryPolicyUnitTest from './unit/SDKWorkerRetryPolicyUnit.test';
@@ -39,6 +40,7 @@ export default function testsuite() {
   traceHeaderUnitTest();
   httpTest();
   remoteConfigUnitTest();
+  remoteDataFilterUnitTest();
   ftSDKExtensionBridgeUnitTest();
   httpAutoTrackAxiosUnitTest();
   httpAutoTrackRcpConfigUnitTest();

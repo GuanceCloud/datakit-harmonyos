@@ -180,7 +180,9 @@ class FTTrackInner {
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
   private context: Context | null = null;
-  private localDataFilter: FTDataFilter = FTDataFilter.empty();
+  private localDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private dataFilter: FTDataFilter = FTDataFilter.empty();
 
   /**
    * Get all keys of an object (alternative to for...in loop)
@@ -1302,9 +1304,11 @@ class FTTrackInner {
 
     this.sdkConfig = config;
     this.context = context;
-    this.localDataFilter = config.isEnableDataFilter()
-      ? FTDataFilter.compile(config.getDataFilters())
-      : FTDataFilter.empty();
+    this.localDataFilters = config.isEnableDataFilter()
+      ? config.getDataFilters()
+      : new Map<string, Array<string>>();
+    this.remoteDataFilters.clear();
+    this.rebuildDataFilter();
     SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
       SDKDedicatedPoolType.EVENT_CONSUMER,
       (response: SDKWorkerResponse, source: SDKWorkerMailboxSource | null) => {
@@ -1753,11 +1757,41 @@ class FTTrackInner {
     return result;
   }
 
+  /** Replace remote rules while retaining application-provided local rules. */
+  public updateRemoteDataFilters(filters: Map<string, Array<string>>): void {
+    if (this.sdkConfig === null || !this.sdkConfig.isEnableDataFilter()) {
+      return;
+    }
+    this.remoteDataFilters = FTTrackInner.copyDataFilters(filters);
+    this.rebuildDataFilter();
+  }
+
+  private rebuildDataFilter(): void {
+    const merged = FTTrackInner.copyDataFilters(this.localDataFilters);
+    this.remoteDataFilters.forEach((remoteRules: Array<string>, category: string) => {
+      const localRules = merged.get(category);
+      if (localRules === undefined) {
+        merged.set(category, remoteRules.slice());
+        return;
+      }
+      merged.set(category, localRules.concat(remoteRules));
+    });
+    this.dataFilter = FTDataFilter.compile(merged);
+  }
+
+  private static copyDataFilters(filters: Map<string, Array<string>>): Map<string, Array<string>> {
+    const copied = new Map<string, Array<string>>();
+    filters.forEach((rules: Array<string>, category: string) => {
+      copied.set(category, rules.slice());
+    });
+    return copied;
+  }
+
   private applyLocalDataFilterToDrafts(
     drafts: SDKSyncDataDraftDTO[],
     fallbackDataType: DataType
   ): LocalDataFilterDraftDecision {
-    if (this.localDataFilter.isEmpty()) {
+    if (this.dataFilter.isEmpty()) {
       return { drafts, filtered: 0 };
     }
 
@@ -1766,7 +1800,7 @@ class FTTrackInner {
     for (let i = 0; i < drafts.length; i++) {
       const draft = drafts[i];
       const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
-      if (this.localDataFilter.isFilteredLine(dataType, draft.dataString)) {
+      if (this.dataFilter.isFilteredLine(dataType, draft.dataString)) {
         filtered++;
       } else {
         acceptedDrafts.push(draft);
@@ -1776,7 +1810,7 @@ class FTTrackInner {
   }
 
   private applyLocalDataFilterToRecords(records: SyncData[]): LocalDataFilterRecordDecision {
-    if (this.localDataFilter.isEmpty()) {
+    if (this.dataFilter.isEmpty()) {
       return { records, filtered: 0 };
     }
 
@@ -1784,7 +1818,7 @@ class FTTrackInner {
     let filtered = 0;
     for (let i = 0; i < records.length; i++) {
       const record = records[i];
-      if (this.localDataFilter.isFilteredLine(record.getDataType(), record.getDataString())) {
+      if (this.dataFilter.isFilteredLine(record.getDataType(), record.getDataString())) {
         filtered++;
       } else {
         acceptedRecords.push(record);

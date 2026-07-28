@@ -39,6 +39,7 @@ import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { Utils } from "./utils/Utils";
 import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
+import { FTRemoteDataFilterManager } from './remote/FTRemoteDataFilterManager';
 import { RemoteConfigBean } from './remote/RemoteConfigBean';
 import { createRemoteConfigStorage } from './remote/RemoteConfigStorage';
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
@@ -55,6 +56,7 @@ export class FTSDK {
   private static readonly UI_FEATURE_INIT_MAX_RETRY: number = 5;
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
   private static remoteConfigManager: FTRemoteConfigManager | null = null;
+  private static remoteDataFilterManager: FTRemoteDataFilterManager | null = null;
   private static pendingRemoteConfigAppId: string | null = null;
 
   /**
@@ -72,6 +74,10 @@ export class FTSDK {
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
+    }
+    if (FTSDK.remoteDataFilterManager !== null) {
+      FTSDK.remoteDataFilterManager.close();
+      FTSDK.remoteDataFilterManager = null;
     }
     FTSDK.pendingRemoteConfigAppId = null;
     FTInnerLogFileManager.getInstance().shutdown(false);
@@ -258,6 +264,7 @@ export class FTSDK {
       FTTrackInner.getInstance().initBaseConfig(config, context);
       FTRUMInnerManager.getInstance().initContext(context);
       this.refreshRandomDeviceUUIDContext(config);
+      FTSDK.initRemoteDataFilters(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
     }
@@ -493,6 +500,10 @@ export class FTSDK {
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
+    }
+    if (FTSDK.remoteDataFilterManager !== null) {
+      FTSDK.remoteDataFilterManager.close();
+      FTSDK.remoteDataFilterManager = null;
     }
     FTSDK.pendingRemoteConfigAppId = null;
     // Unregister UIAbility lifecycle listener
@@ -886,6 +897,7 @@ export class FTSDK {
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
+    FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
@@ -900,6 +912,7 @@ export class FTSDK {
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
+    FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
@@ -980,6 +993,21 @@ export class FTSDK {
 
   private static resumeUploadAfterEndpointUpdate(): void {
     SyncTaskManager.getInstance().executeSyncPoll();
+  }
+
+  private static initRemoteDataFilters(config: FTSDKConfig): void {
+    if (!config.isEnableDataFilter()) {
+      return;
+    }
+    const manager = new FTRemoteDataFilterManager(
+      config,
+      () => FTSDK.isUploadEndpointAvailable(config),
+      (filters: Map<string, Array<string>>) => {
+        FTTrackInner.getInstance().updateRemoteDataFilters(filters);
+      }
+    );
+    FTSDK.remoteDataFilterManager = manager;
+    void manager.start();
   }
 
   private static startRemoteConfigIfPossible(appId: string): void {

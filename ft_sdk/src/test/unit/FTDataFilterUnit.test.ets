@@ -10,6 +10,17 @@ function filtersFor(category: string, rules: Array<string>): FTDataFilter {
 
 export default function ftDataFilterUnitTest() {
   describe('FTDataFilterUnit', () => {
+    it('shouldSupportDataKitEqualitySyntaxUsedByRemoteRules', 0, () => {
+      const filter = filtersFor('rum', ["{ source = 'resource' and resource_status = 404 }"]);
+      expect(filter.isFilteredLine(
+        DataType.RUM_APP,
+        'resource resource_status=404i 1234567890'
+      )).assertTrue();
+      expect(filter.isFilteredLine(
+        DataType.RUM_APP,
+        'resource resource_status=200i 1234567890'
+      )).assertFalse();
+    });
     it('shouldFilterLoggingAndRumWithSupportedOperators', 0, () => {
       const loggingFilter = filtersFor('logging', [
         "{ source in ['df_rum_harmonyos_log'] and message match ['.*password.*'] }",
