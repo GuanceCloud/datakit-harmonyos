@@ -71,6 +71,12 @@ export class FTRemoteConfigManager {
   private remoteConfig: RemoteConfigBean | null = null;
   private running: boolean = false;
   private closed: boolean = false;
+  /**
+   * Changes whenever the active intake endpoint changes. A response started
+   * against an old endpoint must never be persisted or applied after a switch.
+   */
+  private endpointGeneration: number = 0;
+  private endpointRefreshPending: boolean = false;
   private onConfigApplied: ((bean: RemoteConfigBean) => void) | null = null;
 
   public constructor(
@@ -241,8 +247,12 @@ export class FTRemoteConfigManager {
       return;
     }
     this.running = true;
+    const requestEndpointGeneration = this.endpointGeneration;
     try {
       const response = await this.httpClient.fetch(this.sdkConfig, this.appId);
+      if (requestEndpointGeneration !== this.endpointGeneration) {
+        return;
+      }
       if (response.code !== http.ResponseCode.OK || response.body.length === 0) {
         this.notifyResult(result, false);
         return;
@@ -286,7 +296,29 @@ export class FTRemoteConfigManager {
       this.notifyResult(result, false);
     } finally {
       this.running = false;
+      if (this.endpointRefreshPending && !this.closed) {
+        this.endpointRefreshPending = false;
+        void this.updateRemoteConfig(0);
+      }
     }
+  }
+
+  /**
+   * Invalidate a request made against the previous intake endpoint and, when
+   * the new endpoint is usable, fetch its configuration without waiting for
+   * the normal refresh interval. This keeps runtime endpoint switching
+   * consistent with the Android SDK control-plane behavior.
+   */
+  public refreshForEndpointChange(endpointAvailable: boolean): Promise<void> {
+    this.endpointGeneration++;
+    if (this.closed || !endpointAvailable || this.appId.length === 0) {
+      return Promise.resolve();
+    }
+    if (this.running) {
+      this.endpointRefreshPending = true;
+      return Promise.resolve();
+    }
+    return this.updateRemoteConfig(0);
   }
 
   public close(): void {

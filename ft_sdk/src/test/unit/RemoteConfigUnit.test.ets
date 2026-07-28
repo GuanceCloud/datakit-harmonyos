@@ -149,6 +149,32 @@ export default function remoteConfigUnitTest() {
       expect(storage.loadFetchTime()).assertEqual(61);
     });
 
+    it('endpointSwitchShouldBypassIntervalAndUseTheLatestResponse', 0, async () => {
+      const client = new FakeRemoteConfigHttpClient({
+        code: 200,
+        body: JSON.stringify({ content: { serviceName: 'first-endpoint' } })
+      });
+      const manager = new FTRemoteConfigManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        3600,
+        new MemoryRemoteConfigStorage(),
+        null,
+        client,
+        () => 100,
+        (value: string) => value
+      );
+
+      await manager.initFromRemote('rum-app-id');
+      client.response = {
+        code: 200,
+        body: JSON.stringify({ content: { serviceName: 'second-endpoint' } })
+      };
+      await manager.refreshForEndpointChange(true);
+
+      expect(client.calls).assertEqual(2);
+      expect(manager.getCachedConfig()!.getServiceName()).assertEqual('second-endpoint');
+    });
+
     it('managerShouldMergeCachedValuesBeforeComponentInitialization', 0, () => {
       const storage = new MemoryRemoteConfigStorage();
       storage.save(JSON.stringify({
