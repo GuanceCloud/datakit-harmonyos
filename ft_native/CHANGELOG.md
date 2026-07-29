@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-07-29
+- `ft_native` 0.1.1 replaces the Debug-built 0.1.0 distribution with a production HAR built in Release mode (`debug: false`).
+- The release artifact uses ArkTS bytecode packaging and ArkGuard obfuscation, while consumer rules preserve the native crash-monitoring public API for host applications that enable obfuscation.
+- This is a packaging and code-protection correction; it does not change the native crash-monitoring API or behavior.
+
 ## [0.1.0] - 2026-07-17
 - Released the first stable `ft_native` package for standalone native crash monitoring.
 - Native crash collection automatically adapts to the installed `ft_sdk` dependency and excludes JavaScript crashes to prevent duplicate reporting.

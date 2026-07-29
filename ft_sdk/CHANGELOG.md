@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.15] - 2026-07-27
+## [0.1.15] - 2026-07-29
+- Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.
+- Enabled ArkGuard obfuscation for the published artifact while retaining the documented public API through consumer obfuscation rules.
+- Added release packaging protection without changing the public SDK APIs introduced in 0.1.15.
 - Added `DataModifier` support for all raw Log, native RUM, and WebView RUM tags and fields. Field callbacks may return `null` to retain the original value.
 - Aligned `LineDataModifier` with Android's record-patch contract: callbacks receive merged record data and return only existing keys to replace. A `null` or empty patch leaves the record unchanged.
 - Added local data filtering for RUM and logging. `FTSDKConfig.setEnableDataFilter(...)` controls the default-enabled filter, while `setDataFilters(...)` configures `logging` and `rum` rules.

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-07-29
+- Released `ft_sdk_ext` 0.1.15 as a production HAR package, aligned with `ft_sdk` 0.1.15.
+- The published package is built in Release mode (`debug: false`) as an ArkTS bytecode HAR and has ArkGuard obfuscation enabled.
+- Added consumer obfuscation rules to preserve the extension's documented interceptor APIs when the host application also enables obfuscation.
+
 ## [0.1.14] - 2026-07-17
 - Released the stable `ft_sdk_ext` package, aligned with `ft_sdk` 0.1.14.
 - Provides NetworkKit interceptor integration through the versioned `FTSDKExtensionBridge` contract.
