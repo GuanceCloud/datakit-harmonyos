@@ -151,7 +151,6 @@ export class FpsUtils {
 
     try {
       const currentFps = this.fpsHistory[this.fpsHistory.length - 1];
-      FTInnerLogger.d(TAG, `Current FPS: ${currentFps}`);
       return currentFps;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get current FPS: ${error}`);
