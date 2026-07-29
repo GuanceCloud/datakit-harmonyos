@@ -4,6 +4,12 @@ set -e  # Exit immediately if a command exits with a non-zero status
 
 # Get the module type from command line argument
 MODULE_TYPE=${1:-agent}  # Default to 'agent' if no argument provided
+BUILD_MODE="${BUILD_MODE:-release}"
+
+if [[ "$BUILD_MODE" != "release" && "$BUILD_MODE" != "debug" ]]; then
+    echo "Error: BUILD_MODE must be release or debug, got: $BUILD_MODE"
+    exit 1
+fi
 
 if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "native" ]]; then
     echo "Usage: $0 [agent|native]"
@@ -12,7 +18,7 @@ if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "native" ]]; then
     exit 1
 fi
 
-echo "Publishing module type: $MODULE_TYPE"
+echo "Publishing module type: $MODULE_TYPE (build mode: $BUILD_MODE)"
 
 # =====Test  Envs=====
 #HARMONY_OS_NODE_PATH="/Applications/DevEco-Studio.app/Contents/tools/node/bin/node"
@@ -70,9 +76,9 @@ for MODULE_NAME in "${MODULE_NAMES[@]}"; do
     BUILD_MODULE="$MODULE_NAME@default"
 
     # Step 1: Build HAR package
-    echo "Building HAR package for $MODULE_NAME with product $BUILD_PRODUCT..."
-    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" clean --analyze=normal
-    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" assembleHar --analyze=normal --parallel
+    echo "Building HAR package for $MODULE_NAME with product $BUILD_PRODUCT in $BUILD_MODE mode..."
+    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" -p buildMode="$BUILD_MODE" clean --analyze=normal
+    "$HARMONY_OS_NODE_PATH" "$HARMONY_OS_HVIGOR_PATH" --mode module -p product="$BUILD_PRODUCT" -p module="$BUILD_MODULE" -p buildMode="$BUILD_MODE" assembleHar --analyze=normal --parallel
 
     # Check if HAR package was built successfully
     if [ ! -f "$HAR_SOURCE_PATH" ]; then

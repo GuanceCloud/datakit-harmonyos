@@ -9,12 +9,18 @@ FT_SDK_PRODUCT_NAME="${FT_SDK_PRODUCT_NAME:-ft_sdk}"
 FT_SDK_EXT_PRODUCT_NAME="${FT_SDK_EXT_PRODUCT_NAME:-ft_sdk_ext}"
 FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
+BUILD_MODE="${BUILD_MODE:-release}"
 MODULE_TYPE="${1:-agent}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
 OHPM_KEY_PATH_VALUE="${OHPM_KEY_PATH:-${KEY_PATH:-}}"
 OHPM_KEY_PASSPHRASE_VALUE="${OHPM_KEY_PASSPHRASE:-${KEY_PASSPHRASE:-}}"
 # Toggle whether this script should try to preload the publish key into ssh-agent.
 OHPM_USE_SSH_AGENT_VALUE="${OHPM_USE_SSH_AGENT:-1}"
+
+if [[ "$BUILD_MODE" != "release" && "$BUILD_MODE" != "debug" ]]; then
+  echo "Error: BUILD_MODE must be release or debug, got: $BUILD_MODE"
+  exit 1
+fi
 
 if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
   echo "Usage: $0 [agent|ft_sdk_ext|native|all]"
@@ -355,11 +361,11 @@ build_har() {
   local product_name
   product_name="$(product_for_module "$module_name")"
 
-  echo "Building HAR for ${module_name} with product ${product_name}..."
+  echo "Building HAR for ${module_name} with product ${product_name} in ${BUILD_MODE} mode..."
   (
     cd "$ROOT_DIR"
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" clean --analyze=normal
-    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" assembleHar --analyze=normal --parallel
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" -p buildMode="$BUILD_MODE" clean --analyze=normal
+    "$NODE_BIN" "$HVIGOR_JS" --mode module -p product="$product_name" -p module="$build_module" -p buildMode="$BUILD_MODE" assembleHar --analyze=normal --parallel
   )
 }
 
