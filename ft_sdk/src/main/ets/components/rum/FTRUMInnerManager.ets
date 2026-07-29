@@ -24,6 +24,7 @@ import {
 } from '../thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
+  SDKLineProtocolContextDTO,
   SDKRumCompletedActionBatchDTO,
   SDKRumCompletedActionDTO,
   SDKRumCounterDeltaDTO,
@@ -860,6 +861,9 @@ export class FTRUMInnerManager {
       commands: original.commands || [],
       stateRecoveryOnly: true
     };
+    if (original.lineContext) {
+      recoveryPayload.lineContext = original.lineContext;
+    }
     return {
       id: request.id,
       pool: request.pool,
@@ -1220,7 +1224,9 @@ export class FTRUMInnerManager {
       return;
     }
 
-    FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
+    const trackInner = FTTrackInner.getInstance();
+    const lineContext: SDKLineProtocolContextDTO | null = trackInner.getWorkerLineProtocolContextSnapshot();
+    trackInner.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
     const batchSize = Math.min(
       FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingCompletedActions.length
@@ -1235,6 +1241,9 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionBatchDTO = {
       actions
     };
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -1312,10 +1321,19 @@ export class FTRUMInnerManager {
   }
 
   private attachCompletedActionDynamicTagsIfNeeded(payload: SDKRumCompletedActionDTO): void {
-    if (FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot() !== null) {
-      return;
+    payload.rumAppId = this.getSemanticRumAppId();
+    if (FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot() === null) {
+      payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
     }
-    payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+  }
+
+  /**
+   * Semantic Action/Resource/Error commands can be handled after a Worker
+   * restart, before its shared line context is restored. Keep the routing tag
+   * on the command itself so those events cannot lose their RUM application.
+   */
+  private getSemanticRumAppId(): string {
+    return this.rumConfig ? this.rumConfig.getRumAppId() : '';
   }
 
   private nextRumEventTaskName(name: string): string {
@@ -2456,7 +2474,8 @@ export class FTRUMInnerManager {
       viewName: this.activeView?.getViewName() || '',
       viewReferrer: this.activeView?.getViewReferrer() || '',
       actionId,
-      actionName
+      actionName,
+      rumAppId: this.getSemanticRumAppId()
     };
   }
 
@@ -2516,6 +2535,10 @@ export class FTRUMInnerManager {
     const payload: SDKRumResourceCommandBatchDTO = {
       commands
     };
+    const lineContext = FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot();
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -2717,6 +2740,10 @@ export class FTRUMInnerManager {
     const payload: SDKRumErrorCommandBatchDTO = {
       commands
     };
+    const lineContext = FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot();
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
