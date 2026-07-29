@@ -1592,8 +1592,8 @@ export class FTRUMInnerManager {
       
       // Memory monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-        const memoryMax = extraAttr.get(Constants.KEY_BATTERY_CURRENT_MAX);
-        const memoryAvg = extraAttr.get(Constants.KEY_BATTERY_CURRENT_AVG);
+        const memoryMax = extraAttr.get(Constants.KEY_MEMORY_MAX);
+        const memoryAvg = extraAttr.get(Constants.KEY_MEMORY_AVG);
         if (memoryMax) {
           const monitorValue = memoryMax as MonitorValue;
           if (monitorValue && monitorValue.value) {
@@ -2205,6 +2205,9 @@ export class FTRUMInnerManager {
       // Set tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       
+      // Begin the View-scoped device metrics collection before the View is persisted.
+      FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
+
       // Initialize view
       this.initView(this.activeView);
       this.generateRumData();
@@ -2258,9 +2261,6 @@ export class FTRUMInnerManager {
       
       // Update tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
-      
-      // Attach monitor data
-      FTMonitorManager.getInstance().attachMonitorData(this.activeView);
       
       // Close view
       this.activeView.close();
@@ -2981,6 +2981,25 @@ export class FTRUMInnerManager {
         FTInnerLogger.d(TAG, ` Session will not collect error data: sessionId=${this.sessionId}, collectType=DROP`);
         return;
       }
+
+      const monitorFields = FTMonitorManager.getInstance().getErrorMonitorData();
+      let effectiveProperty: Record<string, object> | null = actualProperty;
+      const monitorFieldKeys = Object.keys(monitorFields);
+      if (monitorFieldKeys.length > 0) {
+        const mergedProperty: Record<string, object> = {};
+        if (actualProperty !== null) {
+          const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+          for (let i = 0; i < propertyKeys.length; i++) {
+            const key = propertyKeys[i];
+            mergedProperty[key] = actualProperty[key];
+          }
+        }
+        for (let i = 0; i < monitorFieldKeys.length; i++) {
+          const key = monitorFieldKeys[i];
+          mergedProperty[key] = monitorFields[key];
+        }
+        effectiveProperty = mergedProperty;
+      }
       
 	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
 	        // Exclude the scenario of reporting the last native crash error
@@ -3008,7 +3027,7 @@ export class FTRUMInnerManager {
 	          errorType,
 	          errorSource: ErrorSource.LOGGER.toString(),
 	          appState: state.toString(),
-          property: this.propertyToRecord(actualProperty),
+          property: this.propertyToRecord(effectiveProperty),
 	          time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
@@ -3053,11 +3072,11 @@ export class FTRUMInnerManager {
       if (errorFieldsData.error_stack) allFields[Constants.KEY_RUM_ERROR_STACK] = errorFieldsData.error_stack;
 
       // Handle additional properties
-      if (actualProperty != null) {
-        const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+      if (effectiveProperty != null) {
+        const propertyKeys = FTRUMInnerManager.getObjectKeys(effectiveProperty);
         for (let i = 0; i < propertyKeys.length; i++) {
           const key = propertyKeys[i];
-          const obj = (actualProperty as Record<string, object>)[key];
+          const obj = (effectiveProperty as Record<string, object>)[key];
           // Extract value from PropertyWrapper objects (which have a .value property)
           if (obj && typeof obj === 'object') {
             try {
@@ -3357,8 +3376,7 @@ export class FTRUMInnerManager {
             }
           }
           this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
-          // FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
-          FTMonitorManager.getInstance().attachMonitorData(this.activeView);
+          FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
           this.initView(this.activeView);
           
           FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
@@ -3484,7 +3502,8 @@ export class FTRUMInnerManager {
    */
   private async closeView(activeViewBean: ActiveViewBean): Promise<void> {
     try {
-      // Remove monitor first
+      // Capture the final View-scoped sample before stopping its monitor.
+      await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
       FTMonitorManager.getInstance().removeMonitor(activeViewBean.getId());
       
       // Convert to ViewBean to get closure data

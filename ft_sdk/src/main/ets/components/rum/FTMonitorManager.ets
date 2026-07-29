@@ -6,6 +6,10 @@ import { FTRUMConfig } from '../Configs';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Utils } from '../utils/Utils';
 import { FpsUtils } from '../utils/FpsUtils';
+import { Constants } from '../Constants';
+import { DetectFrequency } from '../enum/Enums';
+import { hidebug } from '@kit.PerformanceAnalysisKit';
+import { batteryInfo } from '@kit.BasicServicesKit';
 import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
 import {
   SDKBackgroundMetricsRequestDTO,
@@ -18,9 +22,17 @@ import {
 } from '../thread/SDKWorkerProtocol';
 
 const TAG = 'FTMonitorManager';
-const METRICS_COLLECTION_INTERVAL_MS = 2000;
-const CPU_CACHE_INTERVAL_MS = 5000;
-const MEMORY_CACHE_INTERVAL_MS = 3000;
+const MIN_METRICS_COLLECTION_INTERVAL_MS = 100;
+const MAX_METRICS_COLLECTION_INTERVAL_MS = 60000;
+
+/** Keeps scalar monitor values compatible with the SDK's object-only property API. */
+class ErrorMonitorValue {
+  public value: string;
+
+  constructor(value: number) {
+    this.value = String(value);
+  }
+}
 
 export class FTMonitorManager {
   private static instance: FTMonitorManager | null = null;
@@ -28,6 +40,7 @@ export class FTMonitorManager {
 
   private errorMonitorType: number = ERROR_MONITOR_NO_SET;
   private deviceMetricsMonitorType: number = DEVICE_METRICS_MONITOR_NO_SET;
+  private metricsCollectionIntervalMs: number = DetectFrequency.DEFAULT;
   private runnerMap: Map<string, MonitorRunnable> = new Map();
   private isTVDevice: boolean = false;
 
@@ -43,16 +56,19 @@ export class FTMonitorManager {
   public async initWithConfig(config: FTRUMConfig): Promise<void> {
     this.errorMonitorType = config.getExtraMonitorTypeWithError();
     this.deviceMetricsMonitorType = config.getDeviceMetricsMonitorType();
+    this.metricsCollectionIntervalMs = this.normalizeMetricsCollectionInterval(
+      config.getDeviceMetricsDetectFrequency()
+    );
     this.isTVDevice = false;
 
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)) {
-      FTInnerLogger.d(TAG, 'CPU monitoring delegated to DataProcessWorker with 5s cache');
+      FTInnerLogger.d(TAG, `CPU monitoring interval=${this.metricsCollectionIntervalMs}ms`);
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-      FTInnerLogger.d(TAG, 'Memory monitoring delegated to DataProcessWorker with 3s cache');
+      FTInnerLogger.d(TAG, `Memory monitoring interval=${this.metricsCollectionIntervalMs}ms`);
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)) {
-      FTInnerLogger.d(TAG, 'Battery monitoring delegated to DataProcessWorker');
+      FTInnerLogger.d(TAG, `Battery monitoring interval=${this.metricsCollectionIntervalMs}ms`);
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
       try {
@@ -93,13 +109,14 @@ export class FTMonitorManager {
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU),
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY),
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY),
-      this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)
+      this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS),
+      this.metricsCollectionIntervalMs
     );
     this.runnerMap.set(viewId, runner);
     runner.start();
   }
 
-  public attachMonitorData(bean: ActiveViewBean): void {
+  public async attachMonitorData(bean: ActiveViewBean): Promise<void> {
     if (this.deviceMetricsMonitorType === DEVICE_METRICS_MONITOR_NO_SET) {
       return;
     }
@@ -107,6 +124,8 @@ export class FTMonitorManager {
     if (!runner) {
       return;
     }
+
+    await runner.collectSnapshot();
 
     const battery = runner.getBatteryBean();
     if (battery.isValid()) {
@@ -157,7 +176,59 @@ export class FTMonitorManager {
       runner.stop();
     });
     FTMonitorManager.instance.runnerMap.clear();
+    void FpsUtils.getInstance().release();
     FTMonitorManager.instance = null;
+  }
+
+  /** Capture the Android-compatible auxiliary fields appended to RUM errors. */
+  public getErrorMonitorData(): Record<string, object> {
+    const fields: Record<string, object> = {};
+
+    if (this.isErrorMonitorType(ErrorMonitorType.CPU)) {
+      try {
+        const cpuUse = hidebug.getCpuUsage();
+        if (Number.isFinite(cpuUse)) {
+          fields[Constants.KEY_CPU_USE] = new ErrorMonitorValue(cpuUse);
+        }
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Failed to capture error CPU usage: ${String(error)}`);
+      }
+    }
+
+    if (this.isErrorMonitorType(ErrorMonitorType.MEMORY)) {
+      try {
+        const memoryUseMB = Number(hidebug.getPss()) / 1024;
+        if (Number.isFinite(memoryUseMB) && memoryUseMB >= 0) {
+          fields[Constants.KEY_MEMORY_USE] = new ErrorMonitorValue(memoryUseMB);
+        }
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Failed to capture error memory usage: ${String(error)}`);
+      }
+    }
+
+    if (this.isErrorMonitorType(ErrorMonitorType.BATTERY)) {
+      try {
+        const batteryUse = batteryInfo.batterySOC;
+        if (Number.isFinite(batteryUse) && batteryUse >= 0) {
+          fields[Constants.KEY_BATTERY_USE] = new ErrorMonitorValue(batteryUse);
+        }
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Failed to capture error battery level: ${String(error)}`);
+      }
+    }
+
+    return fields;
+  }
+
+  private normalizeMetricsCollectionInterval(value: DetectFrequency): number {
+    const interval = Number(value);
+    if (!Number.isFinite(interval) || interval <= 0) {
+      return DetectFrequency.DEFAULT;
+    }
+    return Math.max(
+      MIN_METRICS_COLLECTION_INTERVAL_MS,
+      Math.min(MAX_METRICS_COLLECTION_INTERVAL_MS, Math.floor(interval))
+    );
   }
 }
 
@@ -170,17 +241,25 @@ class MonitorRunnable {
   private memoryBean: MonitorInfoBean = new MonitorInfoBean();
   private intervalId: number | null = null;
   private isRunning: boolean = false;
-  private isCollecting: boolean = false;
+  private collectionPromise: Promise<void> | null = null;
   private readonly collectCpu: boolean;
   private readonly collectMemory: boolean;
   private readonly collectBattery: boolean;
   private readonly collectFps: boolean;
+  private readonly collectionIntervalMs: number;
 
-  constructor(collectCpu: boolean, collectMemory: boolean, collectBattery: boolean, collectFps: boolean) {
+  constructor(
+    collectCpu: boolean,
+    collectMemory: boolean,
+    collectBattery: boolean,
+    collectFps: boolean,
+    collectionIntervalMs: number
+  ) {
     this.collectCpu = collectCpu;
     this.collectMemory = collectMemory;
     this.collectBattery = collectBattery;
     this.collectFps = collectFps;
+    this.collectionIntervalMs = collectionIntervalMs;
   }
 
   public start(): void {
@@ -188,9 +267,13 @@ class MonitorRunnable {
       return;
     }
     this.isRunning = true;
+    if (this.collectFps) {
+      FpsUtils.getInstance().beginView();
+    }
+    this.collectMetrics();
     this.intervalId = setInterval(() => {
       this.collectMetrics();
-    }, METRICS_COLLECTION_INTERVAL_MS) as number;
+    }, this.collectionIntervalMs) as number;
   }
 
   public stop(): void {
@@ -206,16 +289,33 @@ class MonitorRunnable {
       return;
     }
     this.collectFpsMetric();
-    if (this.isCollecting) {
-      return;
-    }
-    this.isCollecting = true;
-    this.collectMetricsAsync().finally(() => {
-      this.isCollecting = false;
-    });
+    void this.collectBackgroundMetrics(false);
   }
 
-  private async collectMetricsAsync(): Promise<void> {
+  public async collectSnapshot(): Promise<void> {
+    await this.collectBackgroundMetrics(true);
+    this.collectFpsMetric();
+  }
+
+  private async collectBackgroundMetrics(force: boolean): Promise<void> {
+    if (this.collectionPromise !== null) {
+      await this.collectionPromise;
+    }
+    if (!this.isRunning && !force) {
+      return;
+    }
+    const collection = this.collectBackgroundMetricsOnce();
+    this.collectionPromise = collection;
+    try {
+      await collection;
+    } finally {
+      if (this.collectionPromise === collection) {
+        this.collectionPromise = null;
+      }
+    }
+  }
+
+  private async collectBackgroundMetricsOnce(): Promise<void> {
     if (!this.collectCpu && !this.collectMemory && !this.collectBattery) {
       return;
     }
@@ -224,8 +324,8 @@ class MonitorRunnable {
       collectCpu: this.collectCpu,
       collectMemory: this.collectMemory,
       collectBattery: this.collectBattery,
-      cpuCacheMs: CPU_CACHE_INTERVAL_MS,
-      memoryCacheMs: MEMORY_CACHE_INTERVAL_MS
+      cpuCacheMs: 0,
+      memoryCacheMs: 0
     };
     const request: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.BACKGROUND_COLLECT_METRICS}:${Date.now()}:${MonitorRunnable.commandSequence}`,
@@ -240,9 +340,6 @@ class MonitorRunnable {
       if (!response.ok || !response.payload) {
         throw new Error(response.errorMessage || 'DataProcessWorker returned an empty metrics response');
       }
-      if (!this.isRunning) {
-        return;
-      }
       this.applyBackgroundMetrics(response.payload as Object as SDKBackgroundMetricsResultDTO);
     } catch (error) {
       FTInnerLogger.w(TAG, `Background metrics collection failed: ${String(error)}`);
@@ -250,13 +347,13 @@ class MonitorRunnable {
   }
 
   private applyBackgroundMetrics(metrics: SDKBackgroundMetricsResultDTO): void {
-    if (metrics.batteryCurrent > 0) {
+    if (Number.isFinite(metrics.batteryCurrent) && metrics.batteryCurrent >= 0) {
       this.batteryBean.addValue(metrics.batteryCurrent);
     }
-    if (metrics.cpuTickCount > 0) {
+    if (Number.isFinite(metrics.cpuTickCount) && metrics.cpuTickCount >= 0) {
       this.cpuBean.addValue(metrics.cpuTickCount);
     }
-    if (metrics.memoryUsageMB > 0) {
+    if (Number.isFinite(metrics.memoryUsageMB) && metrics.memoryUsageMB >= 0) {
       this.memoryBean.addValue(metrics.memoryUsageMB);
     }
   }

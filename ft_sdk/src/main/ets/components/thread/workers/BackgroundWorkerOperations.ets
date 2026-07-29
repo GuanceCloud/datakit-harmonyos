@@ -1,5 +1,6 @@
 import { process, util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
+import { batteryInfo } from '@kit.BasicServicesKit';
 import {
   SDKBackgroundMetricsRequestDTO,
   SDKBackgroundMetricsResultDTO
@@ -23,12 +24,12 @@ export function collectBackgroundMetricsInWorker(
 
   if (payload && payload.collectCpu) {
     const cpuCacheMs = normalizeCacheMs(payload.cpuCacheMs, 5000);
-    if (cachedCpuTickCount > 0 && now - cachedCpuAt < cpuCacheMs) {
+    if (cpuCacheMs > 0 && cachedCpuTickCount >= 0 && now - cachedCpuAt < cpuCacheMs) {
       cpuTickCount = cachedCpuTickCount;
       cpuFromCache = true;
     } else {
       cpuTickCount = readAppCpuTickCount();
-      if (cpuTickCount > 0) {
+      if (cpuTickCount >= 0) {
         cachedCpuTickCount = cpuTickCount;
         cachedCpuAt = now;
       }
@@ -37,12 +38,12 @@ export function collectBackgroundMetricsInWorker(
 
   if (payload && payload.collectMemory) {
     const memoryCacheMs = normalizeCacheMs(payload.memoryCacheMs, 3000);
-    if (cachedMemoryUsageMB > 0 && now - cachedMemoryAt < memoryCacheMs) {
+    if (memoryCacheMs > 0 && cachedMemoryUsageMB >= 0 && now - cachedMemoryAt < memoryCacheMs) {
       memoryUsageMB = cachedMemoryUsageMB;
       memoryFromCache = true;
     } else {
       memoryUsageMB = readAppMemoryUsageMB();
-      if (memoryUsageMB > 0) {
+      if (memoryUsageMB >= 0) {
         cachedMemoryUsageMB = memoryUsageMB;
         cachedMemoryAt = now;
       }
@@ -126,12 +127,21 @@ function readAppMemoryUsageMB(): number {
 }
 
 function readBatteryCurrent(): number {
+  try {
+    const current = batteryInfo.nowCurrent;
+    if (Number.isFinite(current)) {
+      return Math.abs(current);
+    }
+  } catch (_) {
+    // Some device classes do not expose a battery current through BatteryManager.
+  }
+
   const content = readSmallTextFile('/sys/class/power_supply/battery/current_now', 32).trim();
   if (content.length === 0) {
     return -1;
   }
   const microAmps = parseInt(content, 10);
-  return isNaN(microAmps) ? -1 : Math.floor(microAmps / 1000);
+  return isNaN(microAmps) ? -1 : Math.abs(Math.floor(microAmps / 1000));
 }
 
 function readSmallTextFile(path: string, maxBytes: number): string {
@@ -154,8 +164,11 @@ function readSmallTextFile(path: string, maxBytes: number): string {
 }
 
 function normalizeCacheMs(value: number, fallback: number): number {
-  if (value !== value || value <= 0) {
+  if (!Number.isFinite(value) || value < 0) {
     return fallback;
+  }
+  if (value === 0) {
+    return 0;
   }
   return Math.min(60_000, Math.max(1000, Math.floor(value)));
 }

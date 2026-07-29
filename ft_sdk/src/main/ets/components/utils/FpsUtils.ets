@@ -1,6 +1,7 @@
 import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
+import displaySync from '@ohos.graphics.displaySync';
 
 const TAG = Constants.LOG_TAG_PREFIX + "FpsUtils";
 
@@ -26,6 +27,11 @@ export class FpsUtils {
   private lastFrameTime: number = 0;
   private fpsHistory: number[] = [];
   private maxHistorySize: number = 60; // Keep 60 frames of history
+  private displaySyncInstance: displaySync.DisplaySync | null = null;
+  private readonly frameCallback: (info: displaySync.IntervalInfo) => void =
+    (_info: displaySync.IntervalInfo): void => {
+      this.recordFrame();
+    };
 
   private constructor() {
     // Private constructor for singleton
@@ -46,7 +52,11 @@ export class FpsUtils {
    */
   public async init(): Promise<void> {
     try {
-      // Initialize FPS monitoring (simulated for now)
+      if (this.isInitialized) {
+        return;
+      }
+      this.displaySyncInstance = displaySync.create();
+      this.displaySyncInstance.on('frame', this.frameCallback);
       this.isInitialized = true;
       this.frameCount = 0;
       this.lastFrameTime = 0;
@@ -68,10 +78,8 @@ export class FpsUtils {
     }
 
     try {
-      // Reset counters
-      this.frameCount = 0;
-      this.lastFrameTime = Date.now();
-      this.fpsHistory = [];
+      this.resetFrameWindow();
+      this.displaySyncInstance?.start();
       FTInnerLogger.d(TAG, "FPS monitoring started");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to start FPS monitoring: ${error}`);
@@ -83,6 +91,7 @@ export class FpsUtils {
    */
   public stop(): void {
     try {
+      this.displaySyncInstance?.stop();
       this.frameCount = 0;
       this.lastFrameTime = 0;
       this.fpsHistory = [];
@@ -90,6 +99,14 @@ export class FpsUtils {
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to stop FPS monitoring: ${error}`);
     }
+  }
+
+  /** Starts a fresh frame-rate aggregation window for the current RUM View. */
+  public beginView(): void {
+    if (!this.isInitialized) {
+      return;
+    }
+    this.resetFrameWindow();
   }
 
   /**
@@ -221,6 +238,9 @@ export class FpsUtils {
   public async release(): Promise<void> {
     try {
       if (this.isInitialized) {
+        this.displaySyncInstance?.off('frame', this.frameCallback);
+        this.displaySyncInstance?.stop();
+        this.displaySyncInstance = null;
         this.isInitialized = false;
         this.frameCount = 0;
         this.lastFrameTime = 0;
@@ -238,5 +258,11 @@ export class FpsUtils {
    */
   public isAvailable(): boolean {
     return this.isInitialized;
+  }
+
+  private resetFrameWindow(): void {
+    this.frameCount = 0;
+    this.lastFrameTime = 0;
+    this.fpsHistory = [];
   }
 }
