@@ -242,6 +242,23 @@ export default function configUnitTest() {
       expect(config.getClientToken()).assertEqual('');
     });
 
+    it('runtimeEndpointOverrideShouldBeClearedWhenSdkResets', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      const config = FTSDKConfig.builder('https://startup-datakit.example.com');
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(config, createFakeContext());
+
+      FTSDK.setDatawayUrl('https://runtime-dataway.example.com', 'runtime-token');
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('https://runtime-dataway.example.com');
+      expect(config.getClientToken()).assertEqual('runtime-token');
+
+      SdkInternalTestAccess.resetState();
+      expect(config.getDatakitUrl()).assertEqual('https://startup-datakit.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+      expect(config.getClientToken()).assertEqual('');
+    });
+
     it('sdkConfigShouldConfigureLocalDataFilters', 0, () => {
       const filterRules: FTDataFilters = new Map<string, Array<string>>();
       filterRules.set('logging', ["{ message match ['password'] }"]);
