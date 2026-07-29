@@ -49,6 +49,33 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
 `@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
+## Bytecode HAR Integration
+
+SDK HARs are configured to build as bytecode HARs. An application that depends on any of these packages must enable normalized OHMUrl in its root `build-profile.json5`:
+
+```json5
+{
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "buildOption": {
+          "strictMode": {
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+Bytecode HAR requires HarmonyOS API 12 or later. Keep the dependency aliases identical to the package names in `oh-package.json5`, and use only APIs exported from each package `Index.ets`.
+
+## Release Obfuscation
+
+Release builds enable ArkGuard obfuscation for all SDK HAR modules. The public APIs exported through `Index.ets`, plus the native crash Node-API bridge, are retained so the obfuscated HAR remains compatible with integrating applications. Do not remove the module `consumer-rules.txt` files: Hvigor packages them as `obfuscation.txt` and applies the required keep rules when an integrating application also enables obfuscation.
+
 ## Quick Start
 
 For most HarmonyOS applications, start with `@guancecloud/ft_sdk` and initialize it in `UIAbility.onCreate`:

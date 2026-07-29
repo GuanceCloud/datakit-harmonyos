@@ -10,6 +10,9 @@
         "./src/main/ets/components/thread/workers/ANRWorker.ets",
         "./src/main/ets/components/thread/workers/DataUploadWorker.ets"
       ]
+    },
+    "arkOptions": {
+      "byteCodeHar": true
     }
   },
   "buildOptionSet": [
@@ -18,7 +21,7 @@
       "arkOptions": {
         "obfuscation": {
           "ruleOptions": {
-            "enable": false,
+            "enable": true,
             "files": [
               "./obfuscation-rules.txt"
             ]
