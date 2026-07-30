@@ -1552,10 +1552,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(startResponse.ok).assertTrue();
       const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
 
+      const fullBodyMessage = 'x'.repeat(600);
       const row: SDKUploadRowDTO = {
         id: 1,
         dataType: 'log',
-        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-uuid message=\"hello\" 123',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-uuid message=\"' + fullBodyMessage + '\" 123',
         uuid: 'retry-uuid',
         time: 123
       };
@@ -1598,6 +1599,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(executed.shouldUpload).assertTrue();
       expect(executed.bodyLength > 0).assertTrue();
       expect(executed.bodyPreview.includes(`${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(executed.bodyPreview.includes(fullBodyMessage)).assertTrue();
       expect(httpExecutor.lastRequest !== null).assertTrue();
       expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.includes(
         `${executed.packageId}.retry-uuid`)).assertTrue();
