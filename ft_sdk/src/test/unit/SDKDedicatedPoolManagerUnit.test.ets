@@ -74,7 +74,7 @@ import { parseANREventInWorker } from '../../main/ets/components/thread/workers/
 import { normalizeANRParamsForWorker } from '../../main/ets/components/monitor/ANRDetectManager';
 import {
   parseProcStatCpuTicks,
-  parseProcStatusMemoryMB
+  parseProcStatusMemoryBytes
 } from '../../main/ets/components/thread/workers/BackgroundWorkerOperations';
 
 interface SDKLineProtocolRecordsTestPayload {
@@ -408,10 +408,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
     it('backgroundWorkerShouldParseProcMetricsDeterministically', 0, () => {
       const stat = '123 (demo process) S 1 2 3 4 5 6 7 8 9 10 120 30 0 0';
-      expect(parseProcStatCpuTicks(stat)).assertEqual(150);
-      expect(parseProcStatusMemoryMB('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20);
+      expect(parseProcStatCpuTicks(stat)).assertEqual(120);
+      expect(parseProcStatusMemoryBytes('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20480000);
       expect(parseProcStatCpuTicks('invalid')).assertEqual(-1);
-      expect(parseProcStatusMemoryMB('VmSize: 10 kB')).assertEqual(-1);
+      expect(parseProcStatusMemoryBytes('VmSize: 10 kB')).assertEqual(-1);
     });
 
     it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {
