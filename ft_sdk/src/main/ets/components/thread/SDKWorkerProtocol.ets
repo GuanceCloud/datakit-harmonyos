@@ -191,6 +191,8 @@ export interface SDKRumResourceContextDTO {
   viewReferrer: string;
   actionId: string;
   actionName: string;
+  /** Host-side fallback for semantic events when the Worker line context is unavailable. */
+  rumAppId?: string;
 }
 
 export interface SDKRumResourceParamsDTO {
@@ -251,6 +253,8 @@ export interface SDKRumResourceCommandDTO {
 
 export interface SDKRumResourceCommandBatchDTO {
   commands: SDKRumResourceCommandDTO[];
+  /** Host snapshot keeps completed resources tagged if the EventConsumer was restarted. */
+  lineContext?: SDKLineProtocolContextDTO;
   /** Rebuilds volatile Resource state after restart without reapplying committed Counter deltas. */
   stateRecoveryOnly?: boolean;
 }
@@ -272,6 +276,8 @@ export interface SDKRumErrorCommandDTO {
 
 export interface SDKRumErrorCommandBatchDTO {
   commands: SDKRumErrorCommandDTO[];
+  /** Host snapshot keeps errors tagged if the EventConsumer was restarted. */
+  lineContext?: SDKLineProtocolContextDTO;
 }
 
 export interface SDKRumCompletedActionDTO {
@@ -284,6 +290,8 @@ export interface SDKRumCompletedActionDTO {
   actionId: string;
   actionName: string;
   actionType: string;
+  /** Host-side fallback for semantic events when the Worker line context is unavailable. */
+  rumAppId?: string;
   sessionId: string;
   viewId: string;
   viewName: string;
@@ -299,6 +307,8 @@ export interface SDKRumCompletedActionDTO {
 
 export interface SDKRumCompletedActionBatchDTO {
   actions: SDKRumCompletedActionDTO[];
+  /** Host snapshot keeps completed actions tagged if the EventConsumer was restarted. */
+  lineContext?: SDKLineProtocolContextDTO;
 }
 
 export interface SDKLineProtocolRecordsDTO {

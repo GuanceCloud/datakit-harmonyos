@@ -8,6 +8,7 @@ import {
   SDKLineProtocolContextDTO,
   SDKLineProtocolInputDTO,
   SDKPropertyRecord,
+  SDKRumCompletedActionBatchDTO,
   SDKRumCompletedActionDTO,
   SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
@@ -111,6 +112,7 @@ function createRumWorkerLineContext(): SDKLineProtocolContextDTO {
   context.logTags = new Object() as SDKStringRecord;
   context.rumTags = new Object() as SDKStringRecord;
   context.rumTags['service'] = 'native-service';
+  context.rumTags['app_id'] = 'gc_app_harmonyos_demo';
   context.rumTags['sdk_version'] = 'native-version';
   context.rumTags['sdk_pkg_info'] = '{"agent":"1.0.0","native":"1.0.0"}';
   context.dynamicBaseTags = new Object() as SDKStringRecord;
@@ -840,21 +842,14 @@ export default function sdkDedicatedPoolManagerUnitTest() {
     });
 
     it('eventRumWorkerShouldNormalizeRawErrorProperties', 0, async () => {
-      await executeWorkerCommandForUnit({
-        id: 'rum-error-context',
-        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
-        priority: 7,
-        createdAt: Date.now(),
-        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
-      });
       const context: SDKRumResourceContextDTO = {
         sessionId: 'error-session',
         viewId: 'error-view',
         viewName: 'ErrorView',
         viewReferrer: 'root',
         actionId: 'error-action',
-        actionName: 'tap'
+        actionName: 'tap',
+        rumAppId: 'gc_app_harmonyos_demo'
       };
       const errorProperty = new Object() as SDKPropertyRecord;
       const customError = new Object() as SDKCompletedActionPropertyTestValue;
@@ -889,6 +884,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
       expect(drafts.length).assertEqual(2);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('app_id=gc_app_harmonyos_demo')).assertTrue();
       expect(line.includes('error_type=TypeError')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();
       expect(line.includes('custom_nested=')).assertTrue();
@@ -896,21 +892,14 @@ export default function sdkDedicatedPoolManagerUnitTest() {
     });
 
     it('eventRumWorkerShouldSortMergeAndNormalizeResourceCommands', 0, async () => {
-      await executeWorkerCommandForUnit({
-        id: 'rum-resource-context',
-        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
-        priority: 7,
-        createdAt: Date.now(),
-        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
-      });
       const context: SDKRumResourceContextDTO = {
         sessionId: 'resource-session',
         viewId: 'resource-view',
         viewName: 'ResourceView',
         viewReferrer: 'root',
         actionId: 'resource-action',
-        actionName: 'load'
+        actionName: 'load',
+        rumAppId: 'gc_app_harmonyos_demo'
       };
       const resourceProperty = new Object() as SDKPropertyRecord;
       const resourceDNS = new Object() as SDKCompletedActionPropertyTestValue;
@@ -978,6 +967,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(response.ok).assertTrue();
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
       expect(drafts.length).assertEqual(1);
+      expect(String((drafts[0] as Record<string, object>)['dataString']).includes(
+        'app_id=gc_app_harmonyos_demo')).assertTrue();
       const line = String((drafts[0] as Record<string, object>)['dataString']);
       expect(line.startsWith('resource,')).assertTrue();
       expect(line.includes('resource_url_host=example.com')).assertTrue();
@@ -1201,6 +1192,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.actionId = 'action-1';
       completedAction.actionName = 'tap';
       completedAction.actionType = 'click';
+      completedAction.rumAppId = 'gc_app_harmonyos_demo';
       completedAction.sessionId = 'session-1';
       completedAction.viewId = 'view-1';
       completedAction.viewName = 'Home';
@@ -1211,13 +1203,16 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.resourceCount = 3;
       completedAction.properties = properties;
 
+      const batch: SDKRumCompletedActionBatchDTO = {
+        actions: [completedAction]
+      };
       const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
-        command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION,
+        command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH,
         priority: 7,
         createdAt: Date.now(),
-        payload: completedAction as Object as SDKWorkerPayload
+        payload: batch as Object as SDKWorkerPayload
       });
       expect(response.ok).assertTrue();
       const records = getPayloadArray(response.payload, 'records');
@@ -1229,6 +1224,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(record['uuid'])).assertEqual('action-sync-uuid');
       expect(String(tags['action_id'])).assertEqual('action-1');
       expect(String(tags['action_type'])).assertEqual('click');
+      expect(String(tags['app_id'])).assertEqual('gc_app_harmonyos_demo');
       expect(String(tags['view_id'])).assertEqual('view-1');
       expect(String(fields['duration'])).assertEqual('42');
       expect(String(fields['action_error_count'])).assertEqual('1');
@@ -1556,10 +1552,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(startResponse.ok).assertTrue();
       const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
 
+      const fullBodyMessage = 'x'.repeat(600);
       const row: SDKUploadRowDTO = {
         id: 1,
         dataType: 'log',
-        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-uuid message=\"hello\" 123',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=retry-uuid message=\"' + fullBodyMessage + '\" 123',
         uuid: 'retry-uuid',
         time: 123
       };
@@ -1602,6 +1599,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(executed.shouldUpload).assertTrue();
       expect(executed.bodyLength > 0).assertTrue();
       expect(executed.bodyPreview.includes(`${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(executed.bodyPreview.includes(fullBodyMessage)).assertTrue();
       expect(httpExecutor.lastRequest !== null).assertTrue();
       expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.includes(
         `${executed.packageId}.retry-uuid`)).assertTrue();
