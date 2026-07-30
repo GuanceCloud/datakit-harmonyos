@@ -2596,7 +2596,10 @@ async function handleUploadExecutePage(
     bodyLimitReached: bodySelection.bodyLimitReached,
     oversizedRows: bodySelection.oversizedRows,
     transportLimitReached: payload.transportLimitReached === true,
-    bodyPreview: abbreviateUploadWorkerText(body, 512),
+    // This value is emitted by the UPLOAD BODY PREVIEW diagnostic. Keep every
+    // byte of the prepared request body so the log can be compared directly
+    // with the payload sent to DataKit/Dataway.
+    bodyPreview: body,
     shouldUpload,
     outcome: shouldUpload ? SDKUploadPageOutcome.HTTP : SDKUploadPageOutcome.EMPTY_BODY,
     httpResult,
@@ -2801,14 +2804,6 @@ function getAggregateErrorCountFromRecord(errorCounts: Record<string, number>): 
     maxCount = Math.max(maxCount, errorCounts[keys[i]] || 0);
   }
   return maxCount;
-}
-
-function abbreviateUploadWorkerText(value: string, limit: number): string {
-  if (!value || value.length === 0) {
-    return '';
-  }
-  const truncated = value.length <= limit ? value : `${value.substring(0, limit)}...`;
-  return truncated.replace(/\n/g, '\\n');
 }
 
 function handleUploadConsumeFinish(payload: SDKUploadRoundFinishDTO, state: SDKWorkerRuntimeState): SDKWorkerPayload {
