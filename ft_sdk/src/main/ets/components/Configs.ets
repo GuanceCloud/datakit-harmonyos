@@ -436,9 +436,12 @@ export class FTLoggerConfig {
    */
   private serviceName: string = Constants.DEFAULT_SERVICE_NAME;
   /**
-   * Log filter prefix
+   * Console/HiLog capture filter prefix.
+   *
+   * This is intentionally independent from FTLogger custom logs. It mirrors
+   * Android's setEnableConsoleLog(enable, prefix) behavior.
    */
-  private logPrefix: string = "";
+  private consoleLogPrefix: string = "";
   private logCacheLimitCount: number = Constants.DEFAULT_DB_LOG_CACHE_NUM;
   /**
    * Log level filters
@@ -601,10 +604,17 @@ export class FTLoggerConfig {
   }
 
   /**
-   * Check if contains prefix setting
+   * Check whether a console/HiLog message matches the configured prefix.
+   */
+  checkConsoleLogPrefix(message: string): boolean {
+    return this.consoleLogPrefix === "" || message.startsWith(this.consoleLogPrefix);
+  }
+
+  /**
+   * @deprecated Use checkConsoleLogPrefix. Kept for source compatibility.
    */
   checkPrefix(message: string): boolean {
-    return this.logPrefix === "" || message.startsWith(this.logPrefix);
+    return this.checkConsoleLogPrefix(message);
   }
 
   /**
@@ -665,12 +675,12 @@ export class FTLoggerConfig {
    * Set whether to enable console log capture
    * Aligned with Android: setEnableConsoleLog(boolean) and setEnableConsoleLog(boolean, String)
    * @param enableConsoleLog Whether to enable console log capture
-   * @param prefix Optioal log filter prefix
+   * @param prefix Optional console/HiLog log filter prefix
    */
   setEnableConsoleLog(enableConsoleLog: boolean, prefix?: string): FTLoggerConfig {
     this.enableConsoleLog = enableConsoleLog;
     if (prefix !== undefined) {
-      this.logPrefix = prefix;
+      this.consoleLogPrefix = prefix;
     }
     return this;
   }

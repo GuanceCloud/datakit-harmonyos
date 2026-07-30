@@ -31,7 +31,9 @@ import FTTrackInner from '../../main/ets/components/FTTrackInner';
 import { FTSDKAnrManager, FTSDKRuntime } from '../../main/ets/components/internal/runtime/FTSDKRuntime';
 import { SdkInternalTestAccess } from '../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTLogger } from '../../main/ets/components/log/FTLogger';
+import { FTConsoleLogBridge } from '../../main/ets/components/log/FTConsoleLogBridge';
 import { TrackLogManager } from '../../main/ets/components/log/TrackLogManager';
+import { LogBean } from '../../main/ets/components/bean/LogBean';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
@@ -174,6 +176,30 @@ class FakeAbilityContext {
 }
 
 class FakeUIContext {
+}
+
+class RecordingConsoleDelegate {
+  public callCount: number = 0;
+
+  debug(..._args: Object[]): void {
+    this.callCount++;
+  }
+
+  info(..._args: Object[]): void {
+    this.callCount++;
+  }
+
+  warn(..._args: Object[]): void {
+    this.callCount++;
+  }
+
+  error(..._args: Object[]): void {
+    this.callCount++;
+  }
+
+  log(..._args: Object[]): void {
+    this.callCount++;
+  }
 }
 
 function createFakeContext(): common.UIAbilityContext {
@@ -669,6 +695,7 @@ export default function configUnitTest() {
       expect(loggerConfig.isEnableCustomLog()).assertTrue();
       expect(loggerConfig.isEnableConsoleLog()).assertTrue();
       expect(loggerConfig.isEnableLinkRumData()).assertTrue();
+      expect(loggerConfig.checkConsoleLogPrefix('FT-message')).assertTrue();
       expect(loggerConfig.checkPrefix('FT-message')).assertTrue();
       expect(loggerConfig.checkLogLevel(LogLevel.ERROR.name)).assertTrue();
       expect(loggerConfig.checkLogLevel('warn')).assertTrue();
@@ -682,6 +709,28 @@ export default function configUnitTest() {
       expect(traceConfig.isEnableWebTrace()).assertTrue();
       expect(traceConfig.getServiceName()).assertEqual('trace-service');
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
+    });
+
+    it('consoleCaptureShouldBeIndependentFromCustomLogs', 0, () => {
+      const logManager = TrackLogManager.getInstance();
+      const config = new FTLoggerConfig().setEnableConsoleLog(true, 'capture:');
+      logManager.setLogConfig(config);
+
+      const delegate = new RecordingConsoleDelegate();
+      FTConsoleLogBridge.console(delegate, 'log', 'capture: console-only');
+      expect(delegate.callCount).assertEqual(1);
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(1);
+
+      logManager.trackLog(new LogBean('capture: manual-disabled', Date.now()));
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(1);
+
+      config.setEnableCustomLog(true);
+      logManager.trackLog(new LogBean('manual-without-console-prefix', Date.now()));
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
+
+      FTConsoleLogBridge.console(delegate, 'log', 'outside-console-prefix');
+      expect(delegate.callCount).assertEqual(2);
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
     });
 
     it('remoteConfigShouldKeepAndroidCompatibleDefaults', 0, () => {

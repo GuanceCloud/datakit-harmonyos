@@ -132,7 +132,23 @@ export class TrackLogManager {
    */
   public trackLog(logBean: LogBean, isSilence: boolean = false): void {
     this.submittedCount++;
-    if (!this.shouldProcessLog(logBean)) {
+    if (!this.shouldProcessLog(logBean, false)) {
+      this.filteredCount++;
+      return;
+    }
+
+    this.acceptedCount++;
+    this.enqueueLogDTO(this.toLogDTO(logBean, isSilence));
+  }
+
+  /**
+   * Track a log emitted by the compiler-instrumented console/HiLog bridge.
+   * Console capture is controlled by FTLoggerConfig.enableConsoleLog and is
+   * deliberately independent from the FTLogger custom-log switch.
+   */
+  public trackConsoleLog(logBean: LogBean, isSilence: boolean = false): void {
+    this.submittedCount++;
+    if (!this.shouldProcessLog(logBean, true)) {
       this.filteredCount++;
       return;
     }
@@ -156,7 +172,7 @@ export class TrackLogManager {
     for (let i = 0; i < logBeans.length; i++) {
       this.submittedCount++;
       const logBean = logBeans[i];
-      if (!this.shouldProcessLog(logBean)) {
+      if (!this.shouldProcessLog(logBean, false)) {
         this.filteredCount++;
         continue;
       }
@@ -214,13 +230,18 @@ export class TrackLogManager {
   /**
    * Determine whether log should be processed
    */
-  private shouldProcessLog(logBean: LogBean): boolean {
+  private shouldProcessLog(logBean: LogBean, isConsoleLog: boolean): boolean {
     if (!this.logConfig) {
       FTInnerLogger.w(TAG, "Log config not set, discarding log");
       return false;
     }
 
-    if (!this.logConfig.isEnableCustomLog()) {
+    if (isConsoleLog && !this.logConfig.isEnableConsoleLog()) {
+      FTInnerLogger.d(TAG, "Console log capture disabled, discarding log");
+      return false;
+    }
+
+    if (!isConsoleLog && !this.logConfig.isEnableCustomLog()) {
       FTInnerLogger.d(TAG, "Custom log disabled, discarding log");
       return false;
     }
@@ -234,7 +255,7 @@ export class TrackLogManager {
       return false;
     }
 
-    if (!this.logConfig.checkPrefix(logBean.getContent())) {
+    if (isConsoleLog && !this.logConfig.checkConsoleLogPrefix(logBean.getContent())) {
       return false;
     }
 

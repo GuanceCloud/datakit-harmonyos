@@ -55,6 +55,10 @@ export { FTRUMGlobalManager } from './src/main/ets/components/rum/FTRUMGlobalMan
 
 export { FTLogger } from './src/main/ets/components/log/FTLogger';
 
+// Runtime contract used only by the Guance Hvigor console-log compiler plugin.
+// Applications should continue to use FTLogger for manual logs.
+export { FTConsoleLogBridge } from './src/main/ets/components/log/FTConsoleLogBridge';
+
 // ============================================================================
 // Trace Manager
 // ============================================================================

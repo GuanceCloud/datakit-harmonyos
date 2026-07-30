@@ -11,7 +11,7 @@ import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
 import { Constants } from './Constants';
 import { PreparedLineProtocolContent, SyncDataHelper } from './SyncDataHelper';
 import { SyncTaskManager } from './SyncTaskManager';
-import { FTHiLogInterceptor } from './log/FTHiLogInterceptor';
+import { FTConsoleLogBridge } from './log/FTConsoleLogBridge';
 import { FTRUMInnerManager } from './rum/FTRUMInnerManager';
 import {
   SDKDedicatedPoolManager,
@@ -1348,10 +1348,7 @@ class FTTrackInner {
     // Also set to TrackLogManager
     this.trackLogManager.setLogConfig(config);
 
-    // Initialize hilog interceptor if console log capture is enabled
-    if (config.isEnableConsoleLog()) {
-      FTHiLogInterceptor.getInstance().init();
-    }
+    FTConsoleLogBridge.onLogConfigInstalled(config);
 
     FTInnerLogger.i(TAG, "FTTrackInner log config initialized");
   }
