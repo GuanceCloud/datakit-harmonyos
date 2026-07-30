@@ -22,6 +22,7 @@ import { Utils } from '../utils/Utils';
 import { FTAppStartCounter } from './FTAppStartCounter';
 import { FTDBSpoolManager } from '../db/FTDBSpoolManager';
 import { FTDBTaskPoolExecutor } from '../db/FTDBTaskPoolExecutor';
+import { FTMonitorManager } from '../rum/FTMonitorManager';
 
 const TAG = "FTAbilityLifecycleListener";
 const BACKGROUND_DB_FLUSH_TIMEOUT_MS = 2500;
@@ -203,12 +204,14 @@ export class FTAbilityLifecycleListener {
         },
         onWindowStageDestroy: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageDestroy: UIAbility lifecycle event`);
+          FTMonitorManager.getInstance().setAppInForeground(false);
           FTSDK.cleanupUIFeatures();
           // Stop view when window stage is destroyed
           this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
         },
         onAbilityForeground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityForeground: UIAbility lifecycle event`);
+          FTMonitorManager.getInstance().setAppInForeground(true);
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -269,6 +272,7 @@ export class FTAbilityLifecycleListener {
         },
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
+          FTMonitorManager.getInstance().setAppInForeground(false);
           // Stop view when ability goes to background (aligned with Android onActivityPaused)
           this.flushDbLaneOnLifecycleChange("onAbilityBackground");
           
@@ -279,6 +283,7 @@ export class FTAbilityLifecycleListener {
         },
         onAbilityDestroy: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
+          FTMonitorManager.getInstance().setAppInForeground(false);
           // Stop view when ability is destroyed (aligned with Android onDestroy)
           this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
         }
@@ -323,6 +328,7 @@ export class FTAbilityLifecycleListener {
     }
 
     try {
+      FTMonitorManager.getInstance().setAppInForeground(false);
       // Clear sleep check timer if exists
       if (this.sleepCheckTimer !== null) {
         clearTimeout(this.sleepCheckTimer);

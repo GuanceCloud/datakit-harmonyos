@@ -43,6 +43,8 @@ export class FTMonitorManager {
   private metricsCollectionIntervalMs: number = DetectFrequency.DEFAULT;
   private runnerMap: Map<string, MonitorRunnable> = new Map();
   private isTVDevice: boolean = false;
+  private isAppInForeground: boolean = true;
+  private foregroundGeneration: number = 0;
 
   private constructor() {}
 
@@ -110,13 +112,14 @@ export class FTMonitorManager {
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY),
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY),
       this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS),
-      this.metricsCollectionIntervalMs
+      this.metricsCollectionIntervalMs,
+      () => this.getForegroundGeneration()
     );
     this.runnerMap.set(viewId, runner);
     runner.start();
   }
 
-  public async attachMonitorData(bean: ActiveViewBean): Promise<void> {
+  public async attachMonitorData(bean: ActiveViewBean, logSummary: boolean = true): Promise<void> {
     if (this.deviceMetricsMonitorType === DEVICE_METRICS_MONITOR_NO_SET) {
       return;
     }
@@ -129,8 +132,8 @@ export class FTMonitorManager {
 
     const battery = runner.getBatteryBean();
     if (battery.isValid()) {
-      bean.setBatteryCurrentMax(Math.floor(battery.maxValue));
-      bean.setBatteryCurrentAvg(Math.floor(battery.avgValue));
+      bean.setBatteryCurrentMax(Math.trunc(battery.maxValue));
+      bean.setBatteryCurrentAvg(Math.trunc(battery.avgValue));
     }
 
     const cpu = runner.getCpuBean();
@@ -154,6 +157,41 @@ export class FTMonitorManager {
       bean.setMemoryMax(Math.floor(memory.maxValue));
       bean.setMemoryAvg(Math.floor(memory.avgValue));
     }
+
+    // Emit a single closing summary in debug mode. This confirms whether a
+    // missing View field originated in collection or later serialization,
+    // without reintroducing per-sample FPS log noise.
+    if (logSummary) {
+      FTInnerLogger.d(
+        TAG,
+        `View metrics attached: viewId=${bean.getId()}, cpuSamples=${cpu.count}, ` +
+        `fpsSamples=${fps.count}, memorySamples=${memory.count}, batterySamples=${battery.count}, ` +
+        `workerFailures=${runner.getBackgroundMetricsFailureCount()}`
+      );
+    }
+  }
+
+  /**
+   * Lifecycle-driven foreground gate for View-scoped device metrics.
+   * A monotonically increasing generation also invalidates a Worker response
+   * that was requested before an intervening background transition.
+   */
+  public setAppInForeground(isForeground: boolean): void {
+    if (this.isAppInForeground === isForeground) {
+      return;
+    }
+    this.isAppInForeground = isForeground;
+    this.foregroundGeneration++;
+    FTInnerLogger.d(TAG, `Device metrics app foreground=${isForeground}`);
+    if (isForeground) {
+      this.runnerMap.forEach((runner) => {
+        runner.resumeInForeground();
+      });
+    }
+  }
+
+  private getForegroundGeneration(): number {
+    return this.isAppInForeground ? this.foregroundGeneration : -1;
   }
 
   public removeMonitor(viewId: string): void {
@@ -247,19 +285,23 @@ class MonitorRunnable {
   private readonly collectBattery: boolean;
   private readonly collectFps: boolean;
   private readonly collectionIntervalMs: number;
+  private readonly getForegroundGeneration: () => number;
+  private backgroundMetricsFailureCount: number = 0;
 
   constructor(
     collectCpu: boolean,
     collectMemory: boolean,
     collectBattery: boolean,
     collectFps: boolean,
-    collectionIntervalMs: number
+    collectionIntervalMs: number,
+    getForegroundGeneration: () => number
   ) {
     this.collectCpu = collectCpu;
     this.collectMemory = collectMemory;
     this.collectBattery = collectBattery;
     this.collectFps = collectFps;
     this.collectionIntervalMs = collectionIntervalMs;
+    this.getForegroundGeneration = getForegroundGeneration;
   }
 
   public start(): void {
@@ -284,8 +326,14 @@ class MonitorRunnable {
     }
   }
 
+  public resumeInForeground(): void {
+    if (this.isRunning) {
+      this.collectMetrics();
+    }
+  }
+
   private collectMetrics(): void {
-    if (!this.isRunning) {
+    if (!this.isRunning || this.getForegroundGeneration() < 0) {
       return;
     }
     this.collectFpsMetric();
@@ -293,6 +341,9 @@ class MonitorRunnable {
   }
 
   public async collectSnapshot(): Promise<void> {
+    if (this.getForegroundGeneration() < 0) {
+      return;
+    }
     await this.collectBackgroundMetrics(true);
     this.collectFpsMetric();
   }
@@ -301,10 +352,11 @@ class MonitorRunnable {
     if (this.collectionPromise !== null) {
       await this.collectionPromise;
     }
-    if (!this.isRunning && !force) {
+    if ((!this.isRunning && !force) || this.getForegroundGeneration() < 0) {
       return;
     }
-    const collection = this.collectBackgroundMetricsOnce();
+    const foregroundGeneration = this.getForegroundGeneration();
+    const collection = this.collectBackgroundMetricsOnce(foregroundGeneration);
     this.collectionPromise = collection;
     try {
       await collection;
@@ -315,8 +367,8 @@ class MonitorRunnable {
     }
   }
 
-  private async collectBackgroundMetricsOnce(): Promise<void> {
-    if (!this.collectCpu && !this.collectMemory && !this.collectBattery) {
+  private async collectBackgroundMetricsOnce(foregroundGeneration: number): Promise<void> {
+    if ((!this.collectCpu && !this.collectMemory && !this.collectBattery) || foregroundGeneration < 0) {
       return;
     }
     MonitorRunnable.commandSequence++;
@@ -340,26 +392,35 @@ class MonitorRunnable {
       if (!response.ok || !response.payload) {
         throw new Error(response.errorMessage || 'DataProcessWorker returned an empty metrics response');
       }
+      if (foregroundGeneration !== this.getForegroundGeneration()) {
+        return;
+      }
       this.applyBackgroundMetrics(response.payload as Object as SDKBackgroundMetricsResultDTO);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Background metrics collection failed: ${String(error)}`);
+      this.backgroundMetricsFailureCount++;
+      if (this.backgroundMetricsFailureCount === 1 || this.backgroundMetricsFailureCount % 10 === 0) {
+        FTInnerLogger.w(
+          TAG,
+          `Background metrics collection failed (${this.backgroundMetricsFailureCount}): ${String(error)}`
+        );
+      }
     }
   }
 
   private applyBackgroundMetrics(metrics: SDKBackgroundMetricsResultDTO): void {
-    if (Number.isFinite(metrics.batteryCurrent) && metrics.batteryCurrent >= 0) {
+    if (metrics.hasBatteryCurrent && Number.isFinite(metrics.batteryCurrent)) {
       this.batteryBean.addValue(metrics.batteryCurrent);
     }
     if (Number.isFinite(metrics.cpuTickCount) && metrics.cpuTickCount >= 0) {
       this.cpuBean.addValue(metrics.cpuTickCount);
     }
-    if (Number.isFinite(metrics.memoryUsageMB) && metrics.memoryUsageMB >= 0) {
-      this.memoryBean.addValue(metrics.memoryUsageMB);
+    if (Number.isFinite(metrics.memoryUsageBytes) && metrics.memoryUsageBytes >= 0) {
+      this.memoryBean.addValue(metrics.memoryUsageBytes);
     }
   }
 
   private collectFpsMetric(): void {
-    if (!this.collectFps) {
+    if (!this.collectFps || this.getForegroundGeneration() < 0) {
       return;
     }
     try {
@@ -386,5 +447,9 @@ class MonitorRunnable {
 
   public getMemoryBean(): MonitorInfoBean {
     return this.memoryBean;
+  }
+
+  public getBackgroundMetricsFailureCount(): number {
+    return this.backgroundMetricsFailureCount;
   }
 }

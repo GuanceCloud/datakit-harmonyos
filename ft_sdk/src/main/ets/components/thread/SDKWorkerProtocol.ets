@@ -410,8 +410,10 @@ export interface SDKBackgroundMetricsRequestDTO {
 
 export interface SDKBackgroundMetricsResultDTO {
   cpuTickCount: number;
-  memoryUsageMB: number;
+  /** Resident memory in bytes, matching Android's VmRSS * 1000 contract. */
+  memoryUsageBytes: number;
   batteryCurrent: number;
+  hasBatteryCurrent: boolean;
   collectedAt: number;
   cpuFromCache: boolean;
   memoryFromCache: boolean;
