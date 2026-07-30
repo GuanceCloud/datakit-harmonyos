@@ -58,6 +58,8 @@ interface DataUploadConsumeState {
 export class DataUploadWorkerExecutor {
   private static readonly ONE_MINUTE_DURATION_NS = 60_000_000_000;
   private static readonly ERROR_SAMPLED_SUFFIX = '_error_sampled';
+  /** Keep each HiLog entry below the platform's single-message limit. */
+  private static readonly UPLOAD_BODY_LOG_CHUNK_SIZE = 2 * 1024;
   private static commandSequence: number = 0;
 
   private readonly syncMap: DataType[] = [DataType.RUM_APP, DataType.RUM_WEBVIEW, DataType.LOG];
@@ -425,8 +427,26 @@ export class DataUploadWorkerExecutor {
     FTInnerLogger.d(TAG,
       `type=${dataType}, pkg_id=${packageId}, rows=${rows}, bodyLength=${bodyLength}, bodyBytes=${bodyBytes}, ` +
         `bodyLimitReached=${bodyLimitReached}`);
-    FTInnerLogger.d(TAG, bodyPreview);
+    this.logUploadBodyLines(bodyPreview);
     FTInnerLogger.d(TAG, '=========================================');
+  }
+
+  /**
+   * Keeps the body readable as line protocol. An unusually long record is
+   * split only to stay within HiLog's message limit; no content is removed.
+   */
+  private logUploadBodyLines(body: string): void {
+    const lines = body.split('\n');
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const line = lines[lineIndex];
+      if (line.length === 0) {
+        FTInnerLogger.d(TAG, '');
+        continue;
+      }
+      for (let offset = 0; offset < line.length; offset += DataUploadWorkerExecutor.UPLOAD_BODY_LOG_CHUNK_SIZE) {
+        FTInnerLogger.d(TAG, line.substring(offset, offset + DataUploadWorkerExecutor.UPLOAD_BODY_LOG_CHUNK_SIZE));
+      }
+    }
   }
 
   private logUploadResult(
