@@ -119,6 +119,50 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## Automatic Console and HiLog Collection
+
+HarmonyOS collects application `console.*` and `hilog.*` calls through the Guance Hvigor compiler plugin. This follows Android's `setEnableConsoleLog` model: the switch enables collection, while the build plugin supplies the instrumentation. There is no runtime monkey-patching fallback.
+
+Copy the matching release's [`entry/hvigorCompile/ft-console-log-transform.ts`](entry/hvigorCompile/ft-console-log-transform.ts) into the application HAP module, then register it in that module's `hvigorfile.ts`:
+
+```ts
+import { HvigorNode, HvigorPlugin } from '@ohos/hvigor'
+import { hapTasks, OhosHapContext, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+
+const consoleLogCompilerPlugin: HvigorPlugin = {
+  pluginId: 'guance-console-log-compiler',
+  apply(node: HvigorNode): void {
+    const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext
+    hapContext.loadCompilePlugin('./hvigorCompile/ft-console-log-transform.ts')
+  }
+}
+
+export default {
+  system: hapTasks,
+  plugins: [consoleLogCompilerPlugin]
+}
+```
+
+Then install the log configuration:
+
+```ts
+const loggerConfig = new FTLoggerConfig()
+  .setEnableCustomLog(true) // Controls manual FTLogger reporting only.
+  .setEnableConsoleLog(true, '[business]') // Controls auto-collected console/HiLog only.
+
+FTSDK.installLogConfig(loggerConfig)
+```
+
+The plugin rewrites direct calls in the application's `src/main/ets` sources without changing files on disk. It supports `console.log/debug/info/warn/error/trace` and `hilog.debug/info/warn/error/fatal` imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`. Original console/HiLog output is retained. The optional prefix filters automatic collection only.
+
+| Setup | `console` / `hilog` automatic collection | Manual `FTLogger` reporting |
+| --- | --- | --- |
+| Plugin installed + `setEnableConsoleLog(true)` | Enabled | Controlled by `setEnableCustomLog(...)` |
+| Plugin installed + `setEnableConsoleLog(false)` | Disabled | Controlled by `setEnableCustomLog(...)` |
+| Plugin absent | Disabled; the SDK emits one diagnostic after log configuration | Controlled by `setEnableCustomLog(...)` |
+
+Without the plugin, the SDK deliberately does not pretend to collect console logs. Use `FTLogger` for manual reporting, or add the plugin when automatic coverage is required. See the [core SDK guide](ft_sdk/README.md#automatic-console-and-hilog-collection) for verification steps and HiLog privacy behavior.
+
 ## SDK Debug Logs
 
 Enable internal SDK logs in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:

@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [Unreleased]
+- Added Android-aligned automatic console and HiLog collection. `FTLoggerConfig.setEnableConsoleLog(...)` now governs instrumented application `console.*` and `hilog.*` calls independently of `setEnableCustomLog(...)`.
+- Added the Guance Hvigor compiler-plugin reference implementation and integration guidance. Automatic collection requires this plugin; without it, the SDK reports one diagnostic and manual `FTLogger` reporting remains available.
+
 ## [0.1.16] - 2026-07-29
 - Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
 - Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.

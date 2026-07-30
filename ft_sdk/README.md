@@ -98,6 +98,58 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## Automatic Console and HiLog Collection
+
+`FTLoggerConfig.setEnableConsoleLog(...)` aligns with Android: it controls automatic application-console collection, but requires the Guance Hvigor compiler plugin. `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.
+
+### Install the Hvigor Plugin
+
+Copy [`entry/hvigorCompile/ft-console-log-transform.ts`](../entry/hvigorCompile/ft-console-log-transform.ts) from the matching SDK source release into your HAP module as `hvigorCompile/ft-console-log-transform.ts`. Register it in that HAP module's `hvigorfile.ts`:
+
+```ts
+import { HvigorNode, HvigorPlugin } from '@ohos/hvigor'
+import { hapTasks, OhosHapContext, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+
+const consoleLogCompilerPlugin: HvigorPlugin = {
+  pluginId: 'guance-console-log-compiler',
+  apply(node: HvigorNode): void {
+    const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext
+    hapContext.loadCompilePlugin('./hvigorCompile/ft-console-log-transform.ts')
+  }
+}
+
+export default {
+  system: hapTasks,
+  plugins: [consoleLogCompilerPlugin]
+}
+```
+
+The plugin instruments direct calls in the application module's `src/main/ets` code. It does not rewrite source files on disk and does not instrument SDK dependencies. Supported calls are:
+
+- `console.log`, `debug`, `info`, `warn`, `error`, and `trace`
+- `hilog.debug`, `info`, `warn`, `error`, and `fatal` when `hilog` is imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`
+
+Use the same source-release version as the `@guancecloud/ft_sdk` package. The transformed call evaluates its arguments once, queues the Guance log, and keeps the original console/HiLog output.
+
+### Configure and Verify
+
+```ts
+const loggerConfig = new FTLoggerConfig()
+  .setEnableCustomLog(true) // Manual FTLogger only.
+  .setEnableConsoleLog(true, '[business]') // Automatic console/HiLog only.
+
+FTSDK.installLogConfig(loggerConfig)
+
+console.info('[business] console example')
+hilog.info(0x0000, 'Demo', '%{public}s', '[business] HiLog example')
+```
+
+Run a clean HAP build, install it on a device, and trigger both calls. Their original output must still appear in DevEco/HiLog. After upload, each generated log should have `log_source=console` or `log_source=hilog`; HiLog logs also have `domain` and `tag`. HiLog privacy is preserved: values without `%{public}` are recorded as `<private>`.
+
+To verify the switches, repeat with `setEnableConsoleLog(false)` and confirm that no new automatic logs are uploaded. Keep `setEnableCustomLog(true)` and send an `FTLogger` log: it must still upload. Conversely, disabling `setEnableCustomLog(false)` must not affect auto-collected console/HiLog data while `setEnableConsoleLog(true)` is enabled.
+
+If the compiler plugin is absent, automatic console/HiLog collection is unavailable even when `setEnableConsoleLog(true)` is set. The SDK emits one diagnostic when its log configuration is installed; this is intentional parity with Android's plugin prerequisite. There is no runtime interception fallback. Use `FTLogger` for manual logs, or install the plugin for automatic collection.
+
 ## SDK Debug Logs
 
 Enable internal SDK diagnostics in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:
