@@ -200,6 +200,10 @@ class RecordingConsoleDelegate {
   log(..._args: Object[]): void {
     this.callCount++;
   }
+
+  trace(..._args: Object[]): void {
+    this.callCount++;
+  }
 }
 
 function createFakeContext(): common.UIAbilityContext {
@@ -717,7 +721,7 @@ export default function configUnitTest() {
       logManager.setLogConfig(config);
 
       const delegate = new RecordingConsoleDelegate();
-      FTConsoleLogBridge.console(delegate, 'log', 'capture: console-only');
+      FTConsoleLogBridge.console('log', (): void => delegate.log('capture: console-only'), 'capture: console-only');
       expect(delegate.callCount).assertEqual(1);
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(1);
 
@@ -728,7 +732,7 @@ export default function configUnitTest() {
       logManager.trackLog(new LogBean('manual-without-console-prefix', Date.now()));
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
 
-      FTConsoleLogBridge.console(delegate, 'log', 'outside-console-prefix');
+      FTConsoleLogBridge.console('log', (): void => delegate.log('outside-console-prefix'), 'outside-console-prefix');
       expect(delegate.callCount).assertEqual(2);
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
     });

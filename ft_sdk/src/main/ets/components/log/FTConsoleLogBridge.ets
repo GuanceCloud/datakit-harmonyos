@@ -8,31 +8,10 @@ import { TrackLogManager } from './TrackLogManager';
 
 const TAG = 'FTConsoleLogBridge';
 
-type ConsoleLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'log';
+type ConsoleLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'log' | 'trace';
 
-/**
- * Minimal structural type shared by @ohos.hilog and @kit.PerformanceAnalysisKit
- * imports. The compiler plugin passes the imported module as the delegate so
- * the original call is executed exactly once after telemetry is queued.
- */
-interface HiLogDelegate {
-  debug(domain: number, tag: string, format: string, ...args: Object[]): void;
-  info(domain: number, tag: string, format: string, ...args: Object[]): void;
-  warn(domain: number, tag: string, format: string, ...args: Object[]): void;
-  error(domain: number, tag: string, format: string, ...args: Object[]): void;
-  fatal(domain: number, tag: string, format: string, ...args: Object[]): void;
-}
-
-/**
- * Minimal structural type for the HarmonyOS console implementation.
- */
-interface ConsoleDelegate {
-  debug(...args: Object[]): void;
-  info(...args: Object[]): void;
-  warn(...args: Object[]): void;
-  error(...args: Object[]): void;
-  log(...args: Object[]): void;
-}
+type HiLogInvoker = () => void;
+type ConsoleInvoker = () => void;
 
 /**
  * Runtime contract for the Guance Hvigor console-log compiler plugin.
@@ -69,51 +48,18 @@ export class FTConsoleLogBridge {
   /**
    * Runtime target for a transformed hilog.debug/info/warn/error/fatal call.
    */
-  public static hilog(delegate: HiLogDelegate, level: ConsoleLogLevel, domain: number, tag: string,
-    format: string, ...args: Object[]): void {
+  public static hilog(level: ConsoleLogLevel, domain: number, tag: string, format: string,
+    originalCall: HiLogInvoker, ...args: Object[]): void {
     FTConsoleLogBridge.captureHiLog(level, domain, tag, format, args);
-    switch (level) {
-      case 'debug':
-        delegate.debug(domain, tag, format, ...args);
-        return;
-      case 'info':
-        delegate.info(domain, tag, format, ...args);
-        return;
-      case 'warn':
-        delegate.warn(domain, tag, format, ...args);
-        return;
-      case 'error':
-        delegate.error(domain, tag, format, ...args);
-        return;
-      case 'fatal':
-        delegate.fatal(domain, tag, format, ...args);
-        return;
-      default:
-        delegate.info(domain, tag, format, ...args);
-    }
+    originalCall();
   }
 
   /**
    * Runtime target for a transformed console.log/debug/info/warn/error call.
    */
-  public static console(delegate: ConsoleDelegate, level: ConsoleLogLevel, ...args: Object[]): void {
+  public static console(level: ConsoleLogLevel, originalCall: ConsoleInvoker, ...args: Object[]): void {
     FTConsoleLogBridge.captureConsole(level, args);
-    switch (level) {
-      case 'debug':
-        delegate.debug(...args);
-        return;
-      case 'info':
-        delegate.info(...args);
-        return;
-      case 'warn':
-        delegate.warn(...args);
-        return;
-      case 'error':
-        delegate.error(...args);
-        return;
-      default:
-        delegate.log(...args);
-    }
+    originalCall();
   }
 
   public static resetStateInternal(): void {
@@ -158,6 +104,7 @@ export class FTConsoleLogBridge {
   private static toStatus(level: ConsoleLogLevel): string {
     switch (level) {
       case 'debug':
+      case 'trace':
         return Status.DEBUG.name;
       case 'warn':
         return Status.WARN.name;
