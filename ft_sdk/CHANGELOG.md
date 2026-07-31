@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16] - 2026-07-29
+- Remote data filters now also remove matching records that were cached before the rule was received. Only remote rules participate in this upload-time cleanup; application-provided local rules continue to apply solely before data is cached.
+- Remote data-filter pulls now continue at the server-provided `pull_interval` while MD5 skips parsing and applying an unchanged response body.
 - Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
 - Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.
 

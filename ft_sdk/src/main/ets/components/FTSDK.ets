@@ -1004,6 +1004,7 @@ export class FTSDK {
       () => FTSDK.isUploadEndpointAvailable(config),
       (filters: Map<string, Array<string>>) => {
         FTTrackInner.getInstance().updateRemoteDataFilters(filters);
+        SyncTaskManager.getInstance().updateRemoteDataFilters(filters);
       }
     );
     FTSDK.remoteDataFilterManager = manager;

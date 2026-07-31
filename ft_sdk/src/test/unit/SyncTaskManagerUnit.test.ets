@@ -206,6 +206,7 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   lastUploadMaxBytes: number = 0;
   lastDeleted: SyncData[] = [];
   lastDeletedIds: number[] = [];
+  deletedUuidBatches: string[][] = [];
   lastInserted: SyncData[] = [];
   insertReInsertFlags: boolean[] = [];
 
@@ -359,6 +360,7 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
   async deleteSyncRows(_context: Context, list: SyncData[]): Promise<number> {
     this.deleteCount++;
     this.lastDeleted = list;
+    this.deletedUuidBatches.push(list.map((row: SyncData) => row.getUuid()));
     if (this.throwDelete) {
       throw new Error('delete failed');
     }
@@ -1002,6 +1004,57 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME_FINISH)).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('uploadLaneShouldRemoveCachedRemoteFilteredRowsBeforeSending', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig().setEnableDataFilter(true), createContext());
+      manager.updateRemoteDataFilters(new Map<string, Array<string>>([
+        ['logging', ["{ message = 'blocked' }"]]
+      ]));
+
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'remote-blocked',
+          'df_rum_harmonyos_log,sdk_data_id=remote-blocked message="blocked",value=1i 100'),
+        createSyncData(DataType.LOG, 'remote-allowed',
+          'df_rum_harmonyos_log,sdk_data_id=remote-allowed message="allowed",value=1i 101')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpBody.includes('remote-blocked')).assertFalse();
+      expect(runtime.lastHttpBody.includes('remote-allowed')).assertTrue();
+      expect(db.deleteCount).assertEqual(2);
+      expect(db.deletedUuidBatches[0][0]).assertEqual('remote-blocked');
+      expect(db.deletedUuidBatches[1][0]).assertEqual('remote-allowed');
+      expect(runtime.cachePolicy.logDelta).assertEqual(-2);
+    });
+
+    it('uploadLaneShouldDeleteCachedRemoteFilteredRowsWithoutSending', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig().setEnableDataFilter(true), createContext());
+      manager.updateRemoteDataFilters(new Map<string, Array<string>>([
+        ['logging', ["{ message match ['blocked'] }"]]
+      ]));
+
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'remote-filter-only',
+          'df_rum_harmonyos_log,sdk_data_id=remote-filter-only message="blocked",value=1i 100')
+      ]);
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(0);
+      expect(db.deleteCount).assertEqual(1);
+      expect(db.deletedUuidBatches[0][0]).assertEqual('remote-filter-only');
+      expect(runtime.cachePolicy.logDelta).assertEqual(-1);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
