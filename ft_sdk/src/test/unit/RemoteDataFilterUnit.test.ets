@@ -4,6 +4,7 @@ import { FTRemoteDataFilterManager } from '../../main/ets/components/remote/FTRe
 import {
   RemoteDataFilterHttpClient,
   RemoteDataFilterHttpResponse,
+  RemoteDataFilterHash,
   RemoteDataFilterScheduler
 } from '../../main/ets/components/remote/RemoteDataFilterTypes';
 
@@ -91,6 +92,42 @@ export default function remoteDataFilterUnitTest() {
       client.response = { code: 200, body: '{}' };
       await manager.refreshForEndpointChange();
       expect(scheduler.delays[1]).assertEqual(10_000);
+      manager.close();
+    });
+
+    it('shouldKeepPullingAtTheServerIntervalAndSkipUnchangedPayloads', 0, async () => {
+      const client = new FakeRemoteDataFilterHttpClient({
+        code: 200,
+        body: JSON.stringify({
+          filters: { logging: ["{ message = 'blocked' }"] },
+          pull_interval: '45s'
+        })
+      });
+      const scheduler = new FakeRemoteDataFilterScheduler();
+      const applied: Array<Map<string, Array<string>>> = [];
+      let hashCalls = 0;
+      const hash: RemoteDataFilterHash = (_value: string): string => {
+        hashCalls++;
+        return 'unchanged-payload-md5';
+      };
+      const manager = new FTRemoteDataFilterManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        () => true,
+        (filters: Map<string, Array<string>>) => applied.push(filters),
+        client,
+        scheduler,
+        hash
+      );
+
+      await manager.start();
+      await manager.start();
+
+      expect(client.calls).assertEqual(2);
+      expect(hashCalls).assertEqual(2);
+      expect(applied.length).assertEqual(1);
+      expect(scheduler.delays.length).assertEqual(2);
+      expect(scheduler.delays[0]).assertEqual(45_000);
+      expect(scheduler.delays[1]).assertEqual(45_000);
       manager.close();
     });
 

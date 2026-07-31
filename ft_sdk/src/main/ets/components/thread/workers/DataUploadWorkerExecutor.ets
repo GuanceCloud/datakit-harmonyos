@@ -1,4 +1,5 @@
 import { DataType } from '../../enum/Enums';
+import { FTDataFilter } from '../../FTDataFilter';
 import { FTInnerLogger } from '../../log/FTLogger';
 import {
   SDKDedicatedPoolType,
@@ -45,6 +46,11 @@ interface DataUploadConsumeState {
   errorCount: number;
   startedAt: number;
   metrics: DataUploadConsumeMetrics;
+}
+
+interface DataUploadRemoteFilterResult {
+  acceptedRows: DataUploadRow[];
+  filteredRows: DataUploadRow[];
 }
 
 /**
@@ -216,12 +222,31 @@ export class DataUploadWorkerExecutor {
     let shouldContinue = true;
     while (shouldContinue && !capabilities.isStopped()) {
       const queryPage = await this.queryRows(capabilities, dataType, pageSize, state);
-      const rows = queryPage.rows;
+      let rows = queryPage.rows;
+      let queryHasMore = queryPage.hasMore;
+      const remoteFilterResult = this.filterRemoteDataRows(capabilities, dataType, rows);
+      if (remoteFilterResult.filteredRows.length > 0) {
+        const deleted = await this.deleteRemoteFilteredRows(
+          capabilities,
+          dataType,
+          remoteFilterResult.filteredRows,
+          state
+        );
+        if (!deleted) {
+          // Do not upload a partially processed page when its filtered rows
+          // could not be removed. The empty request records a retry for the
+          // current worker round without exposing the rejected records.
+          rows = [];
+          queryHasMore = true;
+        } else {
+          rows = remoteFilterResult.acceptedRows;
+        }
+      }
       const executeRequest: SDKUploadExecutePageDTO = {
         roundId,
         dataType: dataType.toString(),
         rows: rows as Object as SDKUploadRowDTO[],
-        queryHasMore: queryPage.hasMore,
+        queryHasMore,
         transportLimitReached: queryPage.byteLimitReached,
         httpConfig: capabilities.getHttpConfig(dataType),
         injectedHttpResult: rows.length > 0 ? capabilities.takeInjectedHttpResult?.() : undefined
@@ -280,6 +305,63 @@ export class DataUploadWorkerExecutor {
         await this.sleep(capabilities, committed.delayMs, state);
       }
       shouldContinue = committed.shouldContinueDataType;
+    }
+  }
+
+  private filterRemoteDataRows(
+    capabilities: DataUploadWorkerCapabilities,
+    dataType: DataType,
+    rows: DataUploadRow[]
+  ): DataUploadRemoteFilterResult {
+    const remoteDataFilters = capabilities.getRemoteDataFilters?.();
+    if (!remoteDataFilters || remoteDataFilters.size === 0 || rows.length === 0) {
+      return { acceptedRows: rows, filteredRows: [] };
+    }
+    const dataFilter = FTDataFilter.compile(remoteDataFilters);
+    if (dataFilter.isEmpty()) {
+      return { acceptedRows: rows, filteredRows: [] };
+    }
+    const acceptedRows: DataUploadRow[] = [];
+    const filteredRows: DataUploadRow[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (dataFilter.isFilteredLine(dataType, row.dataString)) {
+        filteredRows.push(row);
+      } else {
+        acceptedRows.push(row);
+      }
+    }
+    return { acceptedRows, filteredRows };
+  }
+
+  private async deleteRemoteFilteredRows(
+    capabilities: DataUploadWorkerCapabilities,
+    dataType: DataType,
+    rows: DataUploadRow[],
+    state: DataUploadConsumeState
+  ): Promise<boolean> {
+    const startedAt = capabilities.getCurrentTimeMs();
+    try {
+      const result = await capabilities.commitUpload(
+        dataType,
+        DataUploadDbCommitAction.DELETE,
+        rows,
+        [],
+        rows.length
+      );
+      state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
+      if (result.affectedRows < rows.length) {
+        throw new Error(`Remote filter DB commit affected ${result.affectedRows}/${rows.length} rows`);
+      }
+      FTInnerLogger.i(TAG, `Remote data filter removed ${rows.length} cached ${dataType} record(s)`);
+      return true;
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Remote data filter cleanup failed: ${dataType}, error=${error as string}`);
+      return false;
+    } finally {
+      const elapsed = this.elapsed(capabilities, startedAt);
+      state.metrics.dbMs += elapsed;
+      state.metrics.dbDeleteMs += elapsed;
     }
   }
 

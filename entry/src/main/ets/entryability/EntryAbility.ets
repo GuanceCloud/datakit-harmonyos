@@ -481,8 +481,11 @@ export default class EntryAbility extends UIAbility {
       } else if (datakitUrl.length > 0) {
         sdkConfig = FTSDKConfig.builder(datakitUrl);
       } else {
-        DemoLogger.w(LOG_TAG, "SDK initialization skipped: datakitUrl and datawayUrl are both empty");
-        return;
+        // The SDK can collect and cache data before an intake endpoint is
+        // configured. A later FTSDK.setDatakitUrl/setDatawayUrl call enables
+        // upload without requiring the application to reinstall the SDK.
+        sdkConfig = FTSDKConfig.builder();
+        DemoLogger.w(LOG_TAG, 'No DataKit or Dataway URL configured; installing SDK without an upload endpoint');
       }
 
       sdkConfig = sdkConfig
