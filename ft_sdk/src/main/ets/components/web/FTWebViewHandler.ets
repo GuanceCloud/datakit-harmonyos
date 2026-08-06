@@ -226,9 +226,8 @@ export class FTWebViewHandler implements JsReceiver {
     this.webController = webController;
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController assigned successfully`);
     
-    // Store allowWebViewHost configuration (if available in config)
-    // Note: HarmonyOS config may not have getAllowWebViewHost, using null to allow all hosts
-    this.allowWebViewHost = null;
+    // Keep the remote/local RUM allow-list available to the browser SDK bridge.
+    this.allowWebViewHost = config.getAllowWebViewHost();
     
     // Register JavaScript proxy early (before page loads) so browser-sdk can detect it
     // This is similar to Android's addJavascriptInterface which is available immediately

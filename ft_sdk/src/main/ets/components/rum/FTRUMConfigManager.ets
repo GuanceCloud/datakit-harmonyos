@@ -10,6 +10,8 @@ import { UserDataManager } from './UserDataManager';
 
 const TAG = "FTRUMConfigManager";
 
+type RUMStateListener = (enabled: boolean) => void;
+
 /**
  * RUM configuration manager
  * Manages RUM configuration and provides RUM-related functionality
@@ -17,6 +19,7 @@ const TAG = "FTRUMConfigManager";
 export class FTRUMConfigManager {
   private static instance: FTRUMConfigManager | null = null;
   private config: FTRUMConfig | null = null;
+  private rumStateListener: RUMStateListener | null = null;
 
   private constructor() {
     // Private constructor for singleton
@@ -32,13 +35,32 @@ export class FTRUMConfigManager {
     return FTRUMConfigManager.instance;
   }
 
+  public static resetStateInternal(): void {
+    const instance = FTRUMConfigManager.instance;
+    if (instance !== null) {
+      instance.config = null;
+      instance.notifyRumStateChanged();
+    }
+  }
+
+  public setRumStateListenerInternal(listener: RUMStateListener): void {
+    this.rumStateListener = listener;
+  }
 
   initWithConfig(config: FTRUMConfig): void {
     this.config = config;
+    this.notifyRumStateChanged();
   }
 
   initRUMGlobalContext(config: FTRUMConfig): void {
     this.config = config;
+    this.notifyRumStateChanged();
+  }
+
+  private notifyRumStateChanged(): void {
+    if (this.rumStateListener !== null) {
+      this.rumStateListener(this.isRumEnable());
+    }
   }
 
   public getConfig(): FTRUMConfig | null {
@@ -113,6 +135,7 @@ export class FTRUMConfigManager {
    */
   public release(): void {
     this.config = null;
+    this.notifyRumStateChanged();
     FTInnerLogger.d(TAG, "FTRUMConfigManager released");
   }
 }

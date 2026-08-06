@@ -37,11 +37,10 @@ export struct UIBlockTestPage {
    */
   checkSDKStatus() {
     try {
-      const rumGlobalManager = FTRUMGlobalManager.getInstance();
-      this.isSDKInitialized = rumGlobalManager.isInitialized();
-      
-      // Check if UI Block detection is enabled
       const rumConfig = FTSDK.getRumConfig();
+      this.isSDKInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
+
+      // Check if UI Block detection is enabled
       if (rumConfig) {
         this.isUIBlockEnabled = rumConfig.isEnableTrackAppUIBlock();
         this.blockDurationThreshold = rumConfig.getBlockDurationMS();
@@ -68,8 +67,9 @@ export struct UIBlockTestPage {
    */
   setupRUMContext() {
     try {
-      const rumGlobalManager = FTRUMGlobalManager.getInstance();
-      if (rumGlobalManager.isInitialized()) {
+      const rumConfig = FTSDK.getRumConfig();
+      if (rumConfig !== null && rumConfig.getRumAppId().length > 0) {
+        const rumGlobalManager = FTRUMGlobalManager.getInstance();
         // Start view for UIBlockTestPage
         rumGlobalManager.startView('UIBlockTestPage', {});
         DemoLogger.i(TAG, `<FT-UI-BLOCK-TEST> RUM view started: UIBlockTestPage`);

@@ -1,1 +1,12 @@
+# Keep rules passed to an app that integrates @guancecloud/ft_sdk_ext.
+# Do not put enable-* options here: consumer rules are merged into the app.
+-keep-global-name
+HttpFinalResponseInterceptor
+HttpInitialRequestInterceptor
+applyFTAxiosChainMethodBridge
+applyFTHttpTrack
+createFTHttpInterceptorChain
 
+-keep-property-name
+interceptorHandle
+interceptorType

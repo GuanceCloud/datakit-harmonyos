@@ -36,9 +36,12 @@ export {
   FTProxyAuthenticator,
   FTDnsConfig,
   FTInnerLogFileConfig,
+  FTDataFilters,
   LogGlobalContextDictionary,
   LogGlobalContextValue
 } from './src/main/ets/components/Configs';
+export { RemoteConfigBean } from './src/main/ets/components/remote/RemoteConfigBean';
+export { FTRemoteConfigFetchResult } from './src/main/ets/components/remote/RemoteConfigTypes';
 
 // ============================================================================
 // RUM Manager
@@ -111,7 +114,6 @@ export { Status } from './src/main/ets/components/bean/Status';
 export { UserData } from './src/main/ets/components/rum/bean/UserData';
 export { ResourceParams } from './src/main/ets/components/rum/bean/ResourceParams';
 export { NetStatusBean } from './src/main/ets/components/rum/bean/NetStatusBean';
-export { RunnerCompleteCallBack } from './src/main/ets/components/rum/callback/RunnerCompleteCallBack';
 
 // ============================================================================
 // Data Modifiers (Optional)
@@ -119,6 +121,7 @@ export { RunnerCompleteCallBack } from './src/main/ets/components/rum/callback/R
 
 export {
   DataModifier,
+  DataModifierValue,
   LineDataModifier
 } from './src/main/ets/components/DataModifier';
 

@@ -110,10 +110,106 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Remote Configuration and Runtime Endpoint
+
+Remote configuration is opt-in. After RUM is installed, the SDK fetches `v1/env_variable` using the RUM app ID, caches a valid response, and applies the Android-compatible fields on the next initialization or, where supported, immediately. The default refresh interval is 12 hours.
+
+```ts
+const sdkConfig = FTSDKConfig.builder()
+  .setRemoteConfiguration(true)
+  .setRemoteConfigMiniUpdateInterval(43_200)
+
+FTSDK.install(sdkConfig, this.context)
+FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId('YOUR_RUM_APP_ID'))
+
+// Upload and remote-config fetching can be enabled after SDK initialization.
+FTSDK.setDatakitUrl('https://datakit.example.com')
+// Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
+```
+
+Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. Switching to a valid runtime endpoint also refreshes remote configuration immediately; an in-flight response from the old endpoint is ignored. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
+
+## Update the Reporting Endpoint at Runtime
+
+After `FTSDK.install(...)`, switch the active reporting endpoint without recreating the SDK:
+
+```ts
+// DataKit mode
+FTSDK.setDatakitUrl('https://datakit.example.com')
+
+// Dataway mode
+FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
+```
+
+The two modes are mutually exclusive: setting a DataKit URL clears the Dataway URL and token; setting a Dataway URL clears the DataKit URL. Use a complete `http://` or `https://` URL. The new value is kept in memory only, so configure it again after an app restart if needed. Automatic upload resumes when the endpoint is valid; call `FTSDK.flushSyncData()` when you need to request an immediate upload.
+
+## Data Filtering
+
+Local data filtering is enabled by default. Configure rules before `FTSDK.install(...)`; a matching RUM or logging point is discarded after `LineDataModifier` runs and before the point enters the local cache.
+
+```ts
+const dataFilters = new Map<string, Array<string>>()
+dataFilters.set('logging', [
+  "{ source in ['df_rum_harmonyos_log'] and message match ['.*password.*'] }"
+])
+dataFilters.set('rum', [
+  "{ source in [resource] and resource_status in ['404', '503'] }"
+])
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataFilters(dataFilters)
+```
+
+- Supported categories are `logging` and `rum` (case-insensitive); other categories are ignored.
+- A rule is enclosed in `{}`. Supported operators are `=`, `!=`, `in`, `not in`, `match`, and `not match`, combined with `and` / `or`. `match` uses regular expressions.
+- Rule fields are resolved from tags and fields. `source`, `measurement`, and `class` refer to the Line Protocol measurement. For example, HarmonyOS custom logs use `df_rum_harmonyos_log`.
+- While filtering is enabled and an endpoint is valid, the SDK also pulls remote `logging` and `rum` rules from `/v1/datakit/pull?filters=true`. Local and remote rules are combined: a point matching either is discarded. The next pull follows the server's `pull_interval`; an absent or invalid value retries in 10 seconds. A runtime endpoint switch clears rules from the old endpoint and immediately pulls rules from the new one.
+- Call `.setEnableDataFilter(false)` to turn off both local and remote filtering without removing the configured rules. Call `.setDataFilters(null)` to clear local rules.
+## Data Modification and Masking
+
+Configure callbacks before `FTSDK.install(...)` to modify or mask data before it is cached and uploaded. `DataModifier` runs for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to retain the original value.
+
+`LineDataModifier` runs after SDK tags and fields have been merged. It receives one combined map and returns a patch: only returned values for existing keys are replaced. Returning `null`, an empty map, a `null` value, or an unknown key does not change the record.
+
+```ts
+import {
+  DataModifier,
+  DataModifierValue,
+  FTSDK,
+  FTSDKConfig,
+  LineDataModifier
+} from '@guancecloud/ft_sdk/Index'
+
+class FieldMasker implements DataModifier {
+  modify(key: string, _value: DataModifierValue): DataModifierValue | null {
+    return key === 'password' || key === 'authorization' ? '[masked]' : null
+  }
+}
+
+class RecordMasker implements LineDataModifier {
+  modify(_measurement: string, data: Map<string, DataModifierValue>): Map<string, DataModifierValue> | null {
+    const patch = new Map<string, DataModifierValue>()
+    if (data.get('message') === 'sensitive message') {
+      patch.set('message', '[masked]')
+    }
+    return patch.size === 0 ? null : patch
+  }
+}
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataModifier(new FieldMasker())
+  .setLineDataModifier(new RecordMasker())
+
+FTSDK.install(sdkConfig, this.context)
+```
+
+Use `DataModifier` for global key-based rules; it is the lower-overhead option. Use `LineDataModifier` only when a decision needs multiple values in the same record. Neither callback can add, remove, or move a key between tags and fields.
+
 ## Main Exports
 
 - `FTSDK`: SDK bootstrap entry
 - `FTSDKConfig`: base SDK configuration
+- `FTDataFilters`: local data-filter rule type
 - `FTRUMConfig`: RUM configuration
 - `FTLoggerConfig`: logger configuration
 - `FTTraceConfig`: trace configuration

@@ -228,7 +228,7 @@ export class FTNativeCrashHandler {
       }
 
       try {
-        await rumManager.addError(
+        await rumManager.addErrorInternal(
           crashReport,
           `Native Crash: ${crashData.crashType}`,
           ErrorType.NATIVE_CRASH,

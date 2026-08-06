@@ -1,4 +1,4 @@
-import { FTRUMGlobalManager } from '@guancecloud/ft_sdk/Index';
+import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import promptAction from '@ohos.promptAction';
 import * as ftcrash from 'libftcrash.so';
 import { SimpleAPMManager } from '../utils/SimpleAPMManager';
@@ -22,8 +22,8 @@ export struct CrashTestPage {
 
   private checkSDKStatus(): void {
     try {
-      const rumManager = FTRUMGlobalManager.getInstance();
-      this.isSDKInitialized = rumManager.isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      this.isSDKInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       this.addTestResult(`SDK Status: ${this.isSDKInitialized ? '✅ Initialized' : '❌ Not Initialized'}`);
     } catch (error) {
       this.isSDKInitialized = false;

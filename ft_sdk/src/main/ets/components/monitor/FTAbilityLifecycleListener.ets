@@ -224,6 +224,10 @@ export class FTAbilityLifecycleListener {
           FTInnerLogger.d(TAG, `onAbilityForeground: alreadySleep=${this.alreadySleep}, isInited=${appStartCounter.isInited()}`);
           
           if (this.alreadySleep && appStartCounter.isInited()) {
+            // Keep the Android hot-start refresh behaviour even when no UI
+            // tracking feature is enabled and this listener exists solely for
+            // remote configuration.
+            FTSDK.updateRemoteConfig();
             // App has been initialized and was sleeping (in background for >10s)
             // This is a hot start
             // In HarmonyOS, onAbilityWindowStageCreate may not be called again if WindowStage already exists

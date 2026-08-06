@@ -434,7 +434,7 @@ export class FTSDKExtensionBridge {
     }
 
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
-    FTRUMInnerManager.getInstance().stopResource(state.resourceId, state.actionId);
+    FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
   }
 
   private static completeResourceError(
@@ -454,7 +454,7 @@ export class FTSDKExtensionBridge {
     const metricValue: PerformanceMetricValue = { value: Math.max(Date.now() - state.startTime, 1) * 1000000 };
     resourceParams.addProperty('resourceLoad', metricValue);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
-    FTRUMInnerManager.getInstance().stopResource(state.resourceId, state.actionId);
+    FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
   }
 
   private static createTraceInterceptor(): FTTraceInterceptor {

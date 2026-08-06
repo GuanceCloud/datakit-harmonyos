@@ -49,6 +49,33 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
 `@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
+## Bytecode HAR Integration
+
+SDK HARs are configured to build as bytecode HARs. An application that depends on any of these packages must enable normalized OHMUrl in its root `build-profile.json5`:
+
+```json5
+{
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "buildOption": {
+          "strictMode": {
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+Bytecode HAR requires HarmonyOS API 12 or later. Keep the dependency aliases identical to the package names in `oh-package.json5`, and use only APIs exported from each package `Index.ets`.
+
+## Release Obfuscation
+
+Release builds enable ArkGuard obfuscation for all SDK HAR modules. The public APIs exported through `Index.ets`, plus the native crash Node-API bridge, are retained so the obfuscated HAR remains compatible with integrating applications. Do not remove the module `consumer-rules.txt` files: Hvigor packages them as `obfuscation.txt` and applies the required keep rules when an integrating application also enables obfuscation.
+
 ## Quick Start
 
 For most HarmonyOS applications, start with `@guancecloud/ft_sdk` and initialize it in `UIAbility.onCreate`:
@@ -103,6 +130,56 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 ```
 
 `V` and `D` show all current SDK diagnostics; `I`, `W`, and `E` progressively reduce output to those levels and above. Debug logs include the masked upload endpoint, RUM/Log/Trace configuration summaries, Resource lifecycle events, and upload results. Never enable these logs in a production build unless troubleshooting is required.
+
+## Update the Reporting Endpoint at Runtime
+
+After `FTSDK.install(...)`, update the active reporting endpoint without recreating the SDK:
+
+```ts
+FTSDK.setDatakitUrl('https://datakit.example.com')
+FTSDK.setDatawayUrl('https://dataway.example.com', 'YOUR_CLIENT_TOKEN')
+```
+
+DataKit and Dataway modes are mutually exclusive. The endpoint must be a complete `http://` or `https://` URL; Dataway also requires a client token. The value is kept in memory only. Automatic uploads resume after a valid endpoint is set, and `FTSDK.flushSyncData()` can request an immediate upload.
+
+## Remote Configuration and Runtime Endpoint
+
+Enable remote configuration with `FTSDKConfig.setRemoteConfiguration(true)`. Once RUM is installed, the SDK requests `v1/env_variable` with the RUM app ID, persists a valid response, and applies supported updates. The default refresh interval is 12 hours.
+
+```ts
+const sdkConfig = FTSDKConfig.builder()
+  .setRemoteConfiguration(true)
+
+FTSDK.install(sdkConfig, this.context)
+FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId('YOUR_RUM_APP_ID'))
+
+// It is also valid to supply the upload endpoint later.
+FTSDK.setDatakitUrl('https://datakit.example.com')
+// Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
+```
+
+Call `FTSDK.updateRemoteConfig()` for a manual interval-respecting refresh. `FTSDK.setEnableAccessDeviceID(...)` updates the runtime `device_uuid` selection between a system identifier (when available) and the SDK privacy UUID.
+
+## Local Data Filtering
+
+The core SDK supports Android-compatible local filtering for logging and RUM data. Filters are enabled by default and discard matching points after `LineDataModifier` and before local-cache persistence.
+
+```ts
+const filters = new Map<string, Array<string>>()
+filters.set('logging', ["{ message match ['.*password.*'] }"])
+filters.set('rum', ["{ source in [resource] and resource_status in ['404', '503'] }"])
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDataFilters(filters)
+// .setEnableDataFilter(false) disables filtering while retaining these rules.
+```
+
+Rules use the `logging` and `rum` categories and support `in`, `not in`, `match`, `not match`, `and`, and `or`. See the `ft_sdk` README for rule-field semantics and full details.
+## Data Modification and Masking
+
+`FTSDKConfig.setDataModifier(...)` masks or replaces a value by key for every raw Log, native RUM, and WebView RUM tag/field. Return `null` to leave a value unchanged. `setLineDataModifier(...)` receives the merged record and returns a patch for existing keys when a rule needs to inspect multiple values.
+
+Configure both callbacks before `FTSDK.install(...)`. The core-package guide includes the full ArkTS example and exact patch semantics: [Data Modification and Masking](ft_sdk/README.md#data-modification-and-masking).
 
 ## Package Guide
 

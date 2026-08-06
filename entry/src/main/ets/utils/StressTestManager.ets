@@ -1,5 +1,7 @@
 import {
+  AppState,
   createFTRCPTrackConfig,
+  ErrorType,
   FTLogger,
   FTSDK,
   FTRUMGlobalManager,
@@ -453,6 +455,11 @@ export class StressTestManager {
     return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
   }
 
+  private isRumEnabled(): boolean {
+    const rumConfig = FTSDK.getRumConfig();
+    return rumConfig !== null && rumConfig.getRumAppId().length > 0;
+  }
+
   private initRUM(): void {
     if (this.rumManager === null) {
       this.rumManager = FTRUMGlobalManager.getInstance();
@@ -460,7 +467,7 @@ export class StressTestManager {
         DemoLogger.e(TAG, "Failed to get FTRUMGlobalManager instance");
         return;
       }
-      if (!this.rumManager.isInitialized()) {
+      if (!this.isRumEnabled()) {
         DemoLogger.w(TAG, "RUM Manager not initialized, stress test may not work correctly");
       } else {
         DemoLogger.i(TAG, "RUM Manager initialized successfully");
@@ -569,7 +576,7 @@ export class StressTestManager {
     if (!this.hasRumDependentScenario(config)) {
       return false;
     }
-    return this.rumManager === null || !this.rumManager.isInitialized();
+    return this.rumManager === null || !this.isRumEnabled();
   }
 
   private hasRumDependentScenario(config: StressTestConfig): boolean {
@@ -938,7 +945,7 @@ export class StressTestManager {
         DemoLogger.w(TAG, `rumManager is null, cannot send action from timer ${threadIndex}`);
         return;
       }
-      if (!this.rumManager.isInitialized()) {
+      if (!this.isRumEnabled()) {
         DemoLogger.w(TAG, `rumManager is not initialized, cannot send action from timer ${threadIndex}`);
         return;
       }
@@ -951,7 +958,7 @@ export class StressTestManager {
         "traffic_mode": new StringWrapper(this.currentConfig.trafficMode),
         "source": new StringWrapper(this.currentConfig.source)
       };
-      this.rumManager.addActionWithProperty(actionName, 'click', property);
+      this.rumManager.addAction(actionName, 'click', property);
       this.currentStats.actionsGenerated += 1;
       this.sampleCapabilityIfDue('action');
     } catch (error) {
@@ -1062,7 +1069,7 @@ export class StressTestManager {
 
     const netStatusBean: NetStatusBean = this.createSyntheticNetStatus();
     this.rumManager?.startResource(resourceId);
-    this.rumManager?.stopResource(resourceId, params.resourceStatus || 200, params.responseContentLength || 0);
+    this.rumManager?.stopResource(resourceId);
     this.rumManager?.addResource(resourceId, params, netStatusBean);
   }
 
@@ -1090,7 +1097,7 @@ export class StressTestManager {
 
   private sendCustomError(): void {
     try {
-      if (this.rumManager === null || !this.rumManager.isInitialized()) {
+      if (this.rumManager === null || !this.isRumEnabled()) {
         return;
       }
       const errorIndex = this.errorCounter++;
@@ -1099,9 +1106,11 @@ export class StressTestManager {
         "error_index": new StringWrapper(errorIndex.toString()),
         "source": new StringWrapper(this.currentConfig.source)
       };
-      this.rumManager.addCustomError(
-        `Stress custom error ${errorIndex}`,
+      this.rumManager.addError(
         `Error: Stress custom error ${errorIndex}\n  at StressTestManager.sendCustomError`,
+        `Stress custom error ${errorIndex}`,
+        ErrorType.CUSTOM,
+        AppState.RUN,
         property
       );
       this.currentStats.errorsGenerated += 1;
@@ -1155,7 +1164,7 @@ export class StressTestManager {
 
   private sendLongTask(): void {
     try {
-      if (this.rumManager === null || !this.rumManager.isInitialized()) {
+      if (this.rumManager === null || !this.isRumEnabled()) {
         return;
       }
       const longTaskIndex = this.longTaskCounter++;

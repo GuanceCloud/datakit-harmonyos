@@ -39,6 +39,7 @@ import { Utils } from './utils/Utils';
 import { FTDBManager, SyncDataWriteResult } from './db/FTDBManager';
 import { FTDBCachePolicy } from './db/FTDBCachePolicy';
 import { FTDBTaskPoolSyncDraftDTO } from './db/FTDBTaskPoolExecutor';
+import { FTDataFilter } from './FTDataFilter';
 // SessionReplay functionality has been migrated to independent library @ft/session-replay-harmonyos
 // import { FTSessionReplayManager, SessionReplayConfig } from '@ft/session-replay-harmonyos';
 
@@ -98,6 +99,16 @@ interface SyncDataCachePolicyDecision {
 interface SyncDataCacheCountSummary {
   log: number;
   rum: number;
+}
+
+interface LocalDataFilterDraftDecision {
+  drafts: SDKSyncDataDraftDTO[];
+  filtered: number;
+}
+
+interface LocalDataFilterRecordDecision {
+  records: SyncData[];
+  filtered: number;
 }
 
 interface PendingRumWorkerCallback {
@@ -169,6 +180,9 @@ class FTTrackInner {
   // private sessionReplayManager: FTSessionReplayManager;
   private sdkConfig: FTSDKConfig | null = null;
   private context: Context | null = null;
+  private localDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private dataFilter: FTDataFilter = FTDataFilter.empty();
 
   /**
    * Get all keys of an object (alternative to for...in loop)
@@ -1009,6 +1023,8 @@ class FTTrackInner {
     if (result && customDataType && customDataType.length > 0) {
       FTInnerLogger.d(TAG,
         `[FT-ERROR-SAMPLING] Successfully stored data as ${customDataType}: uuid=${firstUuid}, measurement=${measurement}`);
+    } else if (!result && writeResult !== null && (writeResult.filtered || 0) > 0) {
+      this.logLocalDataFilterDrop(dataType, writeResult.filtered || 0);
     } else if (!result && writeResult !== null && writeResult.dropped > 0) {
       this.logRumCacheDiscard(normalizedDrafts.length,
         `${measurement} ${customDataType || dataType.toString()}, uuid=${firstUuid}`);
@@ -1182,15 +1198,23 @@ class FTTrackInner {
       return null;
     }
 
+    // Worker drafts are already finalized Line Protocol. Filtering here therefore runs
+    // after LineDataModifier and before any cache policy or database write.
+    const filterDecision = this.applyLocalDataFilterToDrafts(drafts, fallbackDataType);
+    if (filterDecision.drafts.length === 0) {
+      return this.createLocalDataFilterWriteResult(source, drafts.length, filterDecision.filtered);
+    }
+
     const dbManager = FTDBManager.getInstance(this.context);
-    const taskPoolDrafts = drafts as Object as FTDBTaskPoolSyncDraftDTO[];
-    return await dbManager.writeSyncDraftsAtomically(source, taskPoolDrafts, fallbackDataType, {
+    const taskPoolDrafts = filterDecision.drafts as Object as FTDBTaskPoolSyncDraftDTO[];
+    const result = await dbManager.writeSyncDraftsAtomically(source, taskPoolDrafts, fallbackDataType, {
       applyCachePolicy: true,
       reInsert: false,
-      forceTransaction: drafts.length > 1,
-      updateOrInsertByUuid: this.shouldUpdateOrInsertByDraftUuid(drafts),
+      forceTransaction: filterDecision.drafts.length > 1,
+      updateOrInsertByUuid: this.shouldUpdateOrInsertByDraftUuid(filterDecision.drafts),
       lastErrorTimeLine
     });
+    return this.mergeLocalDataFilterResult(result, drafts.length, filterDecision.filtered);
   }
 
   private shouldUpdateOrInsertByDraftUuid(drafts: SDKSyncDataDraftDTO[]): boolean {
@@ -1280,6 +1304,11 @@ class FTTrackInner {
 
     this.sdkConfig = config;
     this.context = context;
+    this.localDataFilters = config.isEnableDataFilter()
+      ? config.getDataFilters()
+      : new Map<string, Array<string>>();
+    this.remoteDataFilters.clear();
+    this.rebuildDataFilter();
     SDKDedicatedPoolManager.getInstance().setMailboxResponseHandler(
       SDKDedicatedPoolType.EVENT_CONSUMER,
       (response: SDKWorkerResponse, source: SDKWorkerMailboxSource | null) => {
@@ -1705,6 +1734,104 @@ class FTTrackInner {
     };
   }
 
+  private createLocalDataFilterWriteResult(
+    source: string,
+    requested: number,
+    filtered: number
+  ): SyncDataWriteResult {
+    const result = this.createPolicyOnlyWriteResult(source, requested, filtered, 0);
+    result.filtered = filtered;
+    return result;
+  }
+
+  private mergeLocalDataFilterResult(
+    result: SyncDataWriteResult,
+    requested: number,
+    filtered: number
+  ): SyncDataWriteResult {
+    result.requested = requested;
+    if (filtered > 0) {
+      result.dropped += filtered;
+      result.filtered = (result.filtered || 0) + filtered;
+    }
+    return result;
+  }
+
+  /** Replace remote rules while retaining application-provided local rules. */
+  public updateRemoteDataFilters(filters: Map<string, Array<string>>): void {
+    if (this.sdkConfig === null || !this.sdkConfig.isEnableDataFilter()) {
+      return;
+    }
+    this.remoteDataFilters = FTTrackInner.copyDataFilters(filters);
+    this.rebuildDataFilter();
+  }
+
+  private rebuildDataFilter(): void {
+    const merged = FTTrackInner.copyDataFilters(this.localDataFilters);
+    this.remoteDataFilters.forEach((remoteRules: Array<string>, category: string) => {
+      const localRules = merged.get(category);
+      if (localRules === undefined) {
+        merged.set(category, remoteRules.slice());
+        return;
+      }
+      merged.set(category, localRules.concat(remoteRules));
+    });
+    this.dataFilter = FTDataFilter.compile(merged);
+  }
+
+  private static copyDataFilters(filters: Map<string, Array<string>>): Map<string, Array<string>> {
+    const copied = new Map<string, Array<string>>();
+    filters.forEach((rules: Array<string>, category: string) => {
+      copied.set(category, rules.slice());
+    });
+    return copied;
+  }
+
+  private applyLocalDataFilterToDrafts(
+    drafts: SDKSyncDataDraftDTO[],
+    fallbackDataType: DataType
+  ): LocalDataFilterDraftDecision {
+    if (this.dataFilter.isEmpty()) {
+      return { drafts, filtered: 0 };
+    }
+
+    const acceptedDrafts: SDKSyncDataDraftDTO[] = [];
+    let filtered = 0;
+    for (let i = 0; i < drafts.length; i++) {
+      const draft = drafts[i];
+      const dataType = this.dataTypeFromWorkerString(draft.dataType, fallbackDataType);
+      if (this.dataFilter.isFilteredLine(dataType, draft.dataString)) {
+        filtered++;
+      } else {
+        acceptedDrafts.push(draft);
+      }
+    }
+    return { drafts: acceptedDrafts, filtered };
+  }
+
+  private applyLocalDataFilterToRecords(records: SyncData[]): LocalDataFilterRecordDecision {
+    if (this.dataFilter.isEmpty()) {
+      return { records, filtered: 0 };
+    }
+
+    const acceptedRecords: SyncData[] = [];
+    let filtered = 0;
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (this.dataFilter.isFilteredLine(record.getDataType(), record.getDataString())) {
+        filtered++;
+      } else {
+        acceptedRecords.push(record);
+      }
+    }
+    return { records: acceptedRecords, filtered };
+  }
+
+  private logLocalDataFilterDrop(dataType: DataType, count: number): void {
+    FTInnerLogger.d(TAG,
+      `Local data filter dropped records before cache: type=${dataType.toString()}, count=${count}`);
+  }
+
   private async applyWriteCachePolicy(records: SyncData[]): Promise<SyncDataCachePolicyDecision> {
     const category = this.getWriteCacheCategoryForRecords(records);
     if (category === WriteCacheCategory.LOG || category === WriteCacheCategory.RUM) {
@@ -1798,9 +1925,25 @@ class FTTrackInner {
       return null;
     }
 
-    const cacheDecision = await this.applyWriteCachePolicy(records);
+    // SyncData contains the final Line Protocol created after LineDataModifier.
+    // Filter before cache reservation and database persistence to match Android behavior.
+    const filterDecision = this.applyLocalDataFilterToRecords(records);
+    if (filterDecision.records.length === 0) {
+      return this.createLocalDataFilterWriteResult(source, records.length, filterDecision.filtered);
+    }
+
+    const cacheDecision = await this.applyWriteCachePolicy(filterDecision.records);
     if (cacheDecision.records.length === 0) {
-      return this.createPolicyOnlyWriteResult(source, records.length, cacheDecision.dropped, cacheDecision.deletedOld);
+      const result = this.createPolicyOnlyWriteResult(
+        source,
+        records.length,
+        cacheDecision.dropped + filterDecision.filtered,
+        cacheDecision.deletedOld
+      );
+      if (filterDecision.filtered > 0) {
+        result.filtered = filterDecision.filtered;
+      }
+      return result;
     }
 
     try {
@@ -1812,7 +1955,8 @@ class FTTrackInner {
       );
       const dbDeletedOld = writeResult.deletedOld;
       this.rollbackReservedCacheCounts(cacheDecision, writeResult.inserted, dbDeletedOld);
-      return this.mergeCachePolicyDecision(writeResult, records.length, cacheDecision);
+      const mergedResult = this.mergeCachePolicyDecision(writeResult, filterDecision.records.length, cacheDecision);
+      return this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
       throw error instanceof Error ? error : new Error(String(error));

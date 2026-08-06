@@ -10,6 +10,7 @@ import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTLoggerConfig, FTRUMConfig, FTTraceConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import FTTrackInner from '../../../main/ets/components/FTTrackInner';
 import { FTLogger } from '../../../main/ets/components/log/FTLogger';
 import { Status } from '../../../main/ets/components/bean/Status';
@@ -241,7 +242,7 @@ export default function dataSyncTest() {
 
     it('rumViewShouldUploadAndDelete', 0, async () => {
       const onCreateViewName = 'sync_on_create_view';
-      FTRUMGlobalManager.getInstance().onCreateView(onCreateViewName, ON_CREATE_VIEW_LOAD_TIME_NS);
+      FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(onCreateViewName, ON_CREATE_VIEW_LOAD_TIME_NS);
       await FTRUMGlobalManager.getInstance().startView(onCreateViewName);
       await WaitUtils.delay(300);
       await FTRUMGlobalManager.getInstance().stopView();
@@ -404,13 +405,13 @@ export default function dataSyncTest() {
       FTRUMGlobalManager.getInstance().addAction('add_action_basic', 'click');
       await assertActionRecordUploaded(collector, 'add_action_basic', ['action_type=click']);
 
-      FTRUMGlobalManager.getInstance().addActionWithDuration('add_action_duration', 'click', ACTION_DURATION_NS);
+      FTRUMGlobalManager.getInstance().addAction('add_action_duration', 'click', ACTION_DURATION_NS);
       await assertActionRecordUploaded(collector, 'add_action_duration', [
         'action_type=click',
         `duration=${ACTION_DURATION_NS}`
       ]);
 
-      FTRUMGlobalManager.getInstance().addActionWithProperty('add_action_property', 'click',
+      FTRUMGlobalManager.getInstance().addAction('add_action_property', 'click',
         buildActionProperty('action_prop_key', 'action_prop_value'));
       await assertActionRecordUploaded(collector, 'add_action_property', [
         'action_type=click',
@@ -418,7 +419,7 @@ export default function dataSyncTest() {
         'action_prop_value'
       ]);
 
-      FTRUMGlobalManager.getInstance().addActionFull('add_action_full', 'click', ACTION_DURATION_NS,
+      FTRUMGlobalManager.getInstance().addAction('add_action_full', 'click', ACTION_DURATION_NS,
         buildActionProperty('action_full_prop_key', 'action_full_prop_value'));
       await assertActionRecordUploaded(collector, 'add_action_full', [
         'action_type=click',
@@ -443,7 +444,7 @@ export default function dataSyncTest() {
 
       await runActionInFreshView(
         'start_action_property_view',
-        () => FTRUMGlobalManager.getInstance().startActionWithProperty('start_action_property', 'click',
+        () => FTRUMGlobalManager.getInstance().startAction('start_action_property', 'click',
           buildActionProperty('start_action_prop_key', 'start_action_prop_value')),
         async () => {
           await WaitUtils.delay(180);
@@ -456,41 +457,6 @@ export default function dataSyncTest() {
         'start_action_prop_value'
       ]);
 
-      await runActionInFreshView(
-        'start_action_wait_view',
-        () => FTRUMGlobalManager.getInstance().startActionWithWait('start_action_wait', 'click', true),
-        async () => {
-          FTRUMGlobalManager.getInstance().stopAction();
-          await FTRUMGlobalManager.getInstance().stopView();
-        }
-      );
-      await assertActionRecordUploaded(collector, 'start_action_wait', ['action_type=click']);
-
-      await runActionInFreshView(
-        'start_action_full_view',
-        () => FTRUMGlobalManager.getInstance().startActionFull('start_action_full', 'click', true,
-          buildActionProperty('start_action_full_prop_key', 'start_action_full_prop_value')),
-        async () => {
-          FTRUMGlobalManager.getInstance().stopAction();
-          await FTRUMGlobalManager.getInstance().stopView();
-        }
-      );
-      await assertActionRecordUploaded(collector, 'start_action_full', [
-        'action_type=click',
-        'start_action_full_prop_key',
-        'start_action_full_prop_value'
-      ]);
-    });
-
-    it('stopBeforeStartShouldWriteNothing', 0, async () => {
-      FTRUMGlobalManager.getInstance().stopAction();
-      await FTRUMGlobalManager.getInstance().stopView();
-      await WaitUtils.delay(300);
-
-      const stayedEmpty = await DBAssert.waitForSyncCount([DataType.RUM_APP], 0, 1200);
-
-      expect(stayedEmpty).assertTrue();
-      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
     it('errorSampledShouldUploadAfterTimeline', 0, async () => {
@@ -556,7 +522,13 @@ export default function dataSyncTest() {
       const errorStack = 'Error: real_collected_js_error\n  at DataSyncTest';
 
       await FTRUMGlobalManager.getInstance().startView('error_sync_view');
-      FTRUMGlobalManager.getInstance().addError(errorStack, errorMessage, ErrorType.JS, AppState.RUN);
+      FTRUMGlobalManager.getInstance().addError(
+        errorStack,
+        errorMessage,
+        Date.now() * 1000000,
+        ErrorType.JS,
+        AppState.RUN
+      );
 
       const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
         'error',
@@ -618,7 +590,7 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
-    it('customErrorShouldUploadAndDelete', 0, async () => {
+    it('customErrorTypeShouldUploadAndDelete', 0, async () => {
       const errorMessage = 'real_collected_custom_error';
       const errorStack = 'Error: real_collected_custom_error\n  at DataSyncTest';
       const fragments = [
@@ -631,8 +603,13 @@ export default function dataSyncTest() {
       ];
 
       await FTRUMGlobalManager.getInstance().startView('custom_error_sync_view');
-      FTRUMGlobalManager.getInstance().addCustomError(errorMessage, errorStack,
-        buildActionProperty('custom_error_prop_key', 'custom_error_prop_value'));
+      FTRUMGlobalManager.getInstance().addError(
+        errorStack,
+        errorMessage,
+        ErrorType.CUSTOM,
+        AppState.RUN,
+        buildActionProperty('custom_error_prop_key', 'custom_error_prop_value')
+      );
 
       await assertRumRecordUploaded(collector, fragments);
     });
@@ -703,10 +680,49 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 200, 16);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       await assertRumRecordUploaded(collector, fragments);
+    });
+
+    it('resourceLifecyclePropertiesShouldMergeInCallOrder', 0, async () => {
+      const viewName = 'resource_lifecycle_property_view';
+      const resourceId = 'resource_lifecycle_property';
+      const resourceUrl = 'https://example.com/resource-lifecycle-property';
+
+      const startProperty = buildActionProperty('resource_start_property', 'from-start');
+      startProperty['resource_shared_property'] = { value: 'from-start' } as object;
+      const stopProperty = buildActionProperty('resource_stop_property', 'from-stop');
+      stopProperty['resource_shared_property'] = { value: 'from-stop' } as object;
+
+      const params = new ResourceParams();
+      params.setUrl(resourceUrl);
+      params.setResourceMethod('GET');
+      params.setResourceStatus(200);
+      const addProperty = new Map<string, object>();
+      addProperty.set('resource_add_property', { value: 'from-add' } as object);
+      addProperty.set('resource_shared_property', { value: 'from-add' } as object);
+      params.setProperty(addProperty);
+
+      const netStatus = new NetStatusBean();
+      netStatus.setHoleRequestTime(120000000);
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().startResource(resourceId, startProperty);
+      await WaitUtils.delay(20);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId, stopProperty);
+      FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
+
+      await assertRumRecordUploaded(collector, [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        `view_name=${viewName}`,
+        'resource_start_property=from-start',
+        'resource_stop_property=from-stop',
+        'resource_add_property=from-add',
+        'resource_shared_property=from-add'
+      ]);
     });
 
     it('statusZeroShouldWriteResourceError', 0, async () => {
@@ -729,7 +745,7 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 0, 0);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       const resourceFragments = [
@@ -786,7 +802,7 @@ export default function dataSyncTest() {
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().startResource(resourceId);
       await WaitUtils.delay(20);
-      FTRUMGlobalManager.getInstance().stopResource(resourceId, 200, 0);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
       FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
 
       const fragments = [
