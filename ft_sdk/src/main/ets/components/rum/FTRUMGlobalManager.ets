@@ -2,73 +2,16 @@
  * HarmonyOS SDK RUM global manager
  * RUM Global Manager for HarmonyOS
  */
-import { Context } from '@kit.AbilityKit';
 import { FTRUMInnerManager } from './FTRUMInnerManager';
+import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { UserData } from './bean/UserData';
 import { Utils } from '../utils/Utils';
-import { ErrorType, ErrorSource, AppState } from './enum/RUMEnums';
+import { ErrorType, AppState } from './enum/RUMEnums';
 import { ResourceParams } from './bean/ResourceParams';
 import { NetStatusBean } from './bean/NetStatusBean';
-import { hilog } from '@kit.PerformanceAnalysisKit';
-import { RunnerCompleteCallBack } from './callback/RunnerCompleteCallBack';
 import { FTInnerLogger } from '../log/FTLogger';
-import { FTRUMConfig } from '../Configs';
 
 const TAG = "FTRUMGlobalManager";
-
-/**
- * Custom data interface
- */
-interface CustomData {
-  timestamp: number;
-  version: string;
-}
-
-/**
- * Property value types
- */
-type PropertyValue = string | number | boolean | AppState | ErrorType | CustomData;
-
-/**
- * Property wrapper interface
- */
-interface PropertyWrapper {
-  value: PropertyValue;
-}
-
-/**
- * Property wrapper class for ArkTS compatibility
- * ArkTS requires object literals to correspond to explicitly declared classes
- */
-class PropertyWrapperImpl implements PropertyWrapper {
-  value: PropertyValue;
-  constructor(value: PropertyValue) {
-    this.value = value;
-  }
-}
-
-/**
- * Property class for error properties using Map
- */
-class ErrorProperty {
-  public properties: Map<string, PropertyValue> = new Map();
-
-  set(key: string, value: PropertyValue): void {
-    this.properties.set(key, value);
-  }
-
-  // Convert to object for compatibility with existing code
-  toObject(): Record<string, object> {
-    const result: Record<string, object> = {};
-    this.properties.forEach((value, key) => {
-      // Use class instead of interface literal for ArkTS compatibility
-      const wrapper = new PropertyWrapperImpl(value);
-      result[key] = wrapper as object;
-    });
-    return result;
-  }
-
-}
 
 /**
  * RUM global manager
@@ -79,7 +22,11 @@ export class FTRUMGlobalManager {
   private innerManager: FTRUMInnerManager | null = null;
 
   private constructor() {
-    // Private constructor
+    const configManager = FTRUMConfigManager.getInstance();
+    configManager.setRumStateListenerInternal((enabled: boolean): void => {
+      this.updateInnerManager(enabled);
+    });
+    this.updateInnerManager(configManager.isRumEnable());
   }
 
   /**
@@ -93,149 +40,58 @@ export class FTRUMGlobalManager {
     return FTRUMGlobalManager.instance;
   }
 
-  public static resetStateInternal(): void {
-    if (FTRUMGlobalManager.instance) {
-      FTRUMGlobalManager.instance.innerManager = null;
-    }
-    FTRUMGlobalManager.instance = null;
-    FTRUMInnerManager.resetStateInternal();
+  private updateInnerManager(enabled: boolean): void {
+    this.innerManager = enabled ? FTRUMInnerManager.getInstance() : null;
   }
 
   /**
-   * Initialize RUM manager with config (aligned with Android: FTRUMGlobalManager.initConfig)
-   * @param config RUM configuration
-   */
-  public initConfig(config: FTRUMConfig): void {
-    // Aligned with Android: FTRUMGlobalManager.initConfig(FTRUMConfig config)
-    // if (config.isRumEnable()) { innerManager = FTRUMInnerManager.get(); }
-    if (this.isRumEnable(config)) {
-      this.innerManager = FTRUMInnerManager.getInstance();
-      FTInnerLogger.d(TAG, `initConfig: RUM enabled, innerManager initialized`);
-    } else {
-      this.innerManager = null;
-      FTInnerLogger.d(TAG, `initConfig: RUM disabled, innerManager not initialized`);
-    }
-  }
-
-  /**
-   * Check if RUM is enabled (aligned with Android: FTRUMConfig.isRumEnable())
-   * @param config RUM configuration
-   * @returns true if RUM is enabled
-   */
-  private isRumEnable(config: FTRUMConfig): boolean {
-    const rumAppId = config.getRumAppId();
-    return rumAppId != null && rumAppId !== "";
-  }
-
-  /**
-   * Start action
-   * Includes duration calculation mechanism, attempts to associate nearby Resource, LongTask and Error events
-   * Has 100ms frequency protection mechanism, recommended for user interaction type events
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   */
-  public startAction(actionName: string, actionType: string): void {
-    if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType);
-    }
-  }
-
-  /**
-   * Start action (with properties)
-   * 
+   * Start action.
+   *
+   * Includes duration calculation and association with nearby Resource, LongTask, and Error events.
+   * The SDK controls the internal wait flag; callers only provide the action identity and optional properties.
+   *
    * @param actionName Action name
    * @param actionType Action type
    * @param property Extended properties
    */
-  public startActionWithProperty(actionName: string, actionType: string, property: Record<string, object>): void {
+  public startAction(
+    actionName: string,
+    actionType: string,
+    property: Record<string, object> = {}
+  ): void {
     if (this.innerManager) {
       this.innerManager.startAction(actionName, actionType, false, property);
     }
   }
 
   /**
-   * Start action (with wait flag)
-   * 
+   * Add a directly completed action.
+   *
+   * This action is not associated with Error, Resource, or LongTask data. The SDK captures its
+   * start time internally. The third argument supports the Android-style property-only overload;
+   * pass a duration in nanoseconds followed by properties when both are required.
+   *
    * @param actionName Action name
    * @param actionType Action type
-   * @param needWait Whether to wait
+   * @param durationOrProperty Duration in nanoseconds, or extended properties
+   * @param property Extended properties when duration is provided
    */
-  public startActionWithWait(actionName: string, actionType: string, needWait: boolean): void {
+  public addAction(
+    actionName: string,
+    actionType: string,
+    durationOrProperty: number | Record<string, object> = 0,
+    property: Record<string, object> = {}
+  ): void {
     if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType, needWait);
-    }
-  }
-
-  /**
-   * Start action (full parameters)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param needWait Whether to wait
-   * @param property Extended properties
-   */
-  public startActionFull(actionName: string, actionType: string, needWait: boolean, property: Record<string, object>): void {
-    if (this.innerManager) {
-      this.innerManager.startAction(actionName, actionType, needWait, property);
-    }
-  }
-
-  /**
-   * Add action (directly completed)
-   * This type of data cannot be associated with Error, Resource, LongTask data
-   * If you need to call actions frequently, use addAction instead of startAction
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   */
-  public addAction(actionName: string, actionType: string): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, 0, currentTime);
-    }
-  }
-
-  /**
-   * Add action (with duration)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param duration Duration (nanoseconds)
-   */
-  public addActionWithDuration(actionName: string, actionType: string, duration: number): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, duration, currentTime);
-    }
-  }
-
-  /**
-   * Add action (with properties)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param property Extended properties
-   */
-  public addActionWithProperty(actionName: string, actionType: string, property: Record<string, object>): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, 0, currentTime, property);
-    }
-  }
-
-  /**
-   * Add action (full parameters)
-   * 
-   * @param actionName Action name
-   * @param actionType Action type
-   * @param duration Duration (nanoseconds)
-   * @param property Extended properties
-   */
-  public addActionFull(actionName: string, actionType: string, duration: number, property: Record<string, object>): void {
-    if (this.innerManager) {
-      const currentTime = Utils.getCurrentNanoTime();
-      this.innerManager.addAction(actionName, actionType, duration, currentTime, property);
+      let duration = 0;
+      let actionProperty = property;
+      if (typeof durationOrProperty === 'number') {
+        duration = durationOrProperty;
+      } else {
+        actionProperty = durationOrProperty;
+      }
+      const startTime = Utils.getCurrentNanoTime();
+      this.innerManager.addAction(actionName, actionType, duration, startTime, actionProperty);
     }
   }
 
@@ -255,20 +111,6 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Stop action
-   * 
-   * Stop the currently active action
-   */
-  public stopAction(): void {
-    FTInnerLogger.d(TAG, "<FT-ACTION-TEST> GlobalManager.stopAction called");
-    if (this.innerManager) {
-      this.innerManager.stopAction();
-    } else {
-      FTInnerLogger.e(TAG, "<FT-ACTION-TEST> innerManager is null, cannot stop action");
-    }
-  }
-
-  /**
    * Stop view
    * 
    * @param property View properties
@@ -282,22 +124,9 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Create view - record page load time
-   * Aligned with Android: FTRUMGlobalManager.onCreateView(String viewName, long loadTime)
-   * 
-   * @param viewName View name
-   * @param loadTime Load time in nanoseconds
-   */
-  public onCreateView(viewName: string, loadTime: number): void {
-    if (this.innerManager) {
-      this.innerManager.onCreateView(viewName, loadTime);
-    }
-  }
-
-  /**
    * Update load time
    * 
-   * @param duration Load time duration
+   * @param duration Load time in nanoseconds
    */
   public updateLoadTime(duration: number): void {
     if (this.innerManager) {
@@ -306,73 +135,43 @@ export class FTRUMGlobalManager {
   }
 
   /**
-   * Add error information
-   * Compatible with multiple addError overloads
-   * 
-   * @param log       log
-   * @param message   message
-   * @param errorType error type (string or ErrorType enum)
-   * @param state     program running state
-   * @param property  additional attribute parameters (optional)
-   * @param dateline  occurrence time, nanosecond (optional)
-   * @param callBack  thread pool call back (optional)
+   * Add error information. Supports the Android-compatible forms:
+   * addError(log, message, errorType, state, property) and
+   * addError(log, message, dateline, errorType, state, property).
    */
   public addError(
-    log: string, 
-    message: string, 
-    errorType: string | ErrorType, 
-    state: AppState,
-    property?: Record<string, object> | null,
-    dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    log: string,
+    message: string,
+    datelineOrErrorType: number | string | ErrorType,
+    errorTypeOrState: string | ErrorType | AppState,
+    stateOrProperty?: AppState | Record<string, object> | null,
+    property?: Record<string, object> | null
   ): void {
-    if (this.innerManager) {
-      const errorTypeStr = typeof errorType === 'string' ? errorType : (errorType as ErrorType).toString();
-      // Fire-and-forget: innerManager.addError is async, but we keep the API synchronous (aligned with Android)
-      // The async operation will execute in the background
-      this.innerManager.addError(log, message, errorTypeStr, state, property, dateline, callBack).catch((error: Error | string) => {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        FTInnerLogger.e(TAG, `addError failed: ${errorMsg}`);
-      });
-    }
-  }
-
-  /**
-   * Add custom error implementation
-   * 
-   * @param errorMessage Error message
-   * @param errorStack Error stack trace
-   * @param property Additional properties
-   */
-  public addCustomError(errorMessage: string, errorStack: string = "", property: Record<string, object> = {}): void {
     if (!this.innerManager) {
       return;
     }
 
-    const errorPropertyObj = new ErrorProperty();
-    const keys = Object.keys(property);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = property[key];
-      try {
-        const wrapper = value as PropertyWrapper;
-        errorPropertyObj.set(key, wrapper.value);
-      } catch {
-        errorPropertyObj.set(key, value as PropertyValue);
-      }
+    let dateline: number | undefined;
+    let errorType: string | ErrorType;
+    let state: AppState;
+    let actualProperty: Record<string, object> | null | undefined;
+    if (typeof datelineOrErrorType === 'number') {
+      dateline = datelineOrErrorType;
+      errorType = errorTypeOrState as string | ErrorType;
+      state = stateOrProperty as AppState;
+      actualProperty = property;
+    } else {
+      errorType = datelineOrErrorType;
+      state = errorTypeOrState as AppState;
+      actualProperty = stateOrProperty as Record<string, object> | null | undefined;
     }
-    
-    // Fire-and-forget: innerManager.addError is async, but we keep the API synchronous (aligned with Android)
-    // The async operation will execute in the background
-    this.innerManager.addError(
-      errorStack,
-      errorMessage,
-      ErrorType.CUSTOM.toString(),
-      AppState.RUN,
-      errorPropertyObj.toObject()
-    ).catch((error: Error | string) => {
+
+    // ErrorType is a string enum in ArkTS, so its public values can be passed directly.
+    const errorTypeStr = errorType as string;
+    // Fire-and-forget: the Worker completion callback is intentionally internal.
+    this.innerManager.addErrorInternal(log, message, errorTypeStr, state, actualProperty, dateline).catch((error: Error | string) => {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      FTInnerLogger.e(TAG, `addCustomError failed: ${errorMsg}`);
+      FTInnerLogger.e(TAG, `addError failed: ${errorMsg}`);
     });
   }
 
@@ -380,10 +179,11 @@ export class FTRUMGlobalManager {
    * Start resource
    * 
    * @param resourceId Resource ID
+   * @param property Additional properties
    */
-  public startResource(resourceId: string): void {
+  public startResource(resourceId: string, property: Record<string, object> = {}): void {
     if (this.innerManager) {
-      this.innerManager.startResource(resourceId);
+      this.innerManager.startResource(resourceId, property);
     }
   }
 
@@ -391,12 +191,11 @@ export class FTRUMGlobalManager {
    * Stop resource
    * 
    * @param resourceId Resource ID
-   * @param statusCode Status code
-   * @param contentLength Content length
+   * @param property Additional properties
    */
-  public stopResource(resourceId: string, statusCode?: number, contentLength?: number): void {
+  public stopResource(resourceId: string, property: Record<string, object> = {}): void {
     if (this.innerManager) {
-      this.innerManager.stopResource(resourceId);
+      this.innerManager.stopResource(resourceId, property);
     }
   }
 
@@ -449,11 +248,4 @@ export class FTRUMGlobalManager {
     }
   }
 
-  /**
-   * Check if initialized
-   * @returns Whether initialized
-   */
-  public isInitialized(): boolean {
-    return this.innerManager !== null;
-  }
 }

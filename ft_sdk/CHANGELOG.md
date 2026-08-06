@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.16] - 2026-07-29
+- Remote data filters now also remove matching records that were cached before the rule was received. Only remote rules participate in this upload-time cleanup; application-provided local rules continue to apply solely before data is cached.
+- Remote data-filter pulls now continue at the server-provided `pull_interval` while MD5 skips parsing and applying an unchanged response body.
+- Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
+- Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.
+
+## [0.1.15] - 2026-07-29
+- Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.
+- Enabled ArkGuard obfuscation for the published artifact while retaining the documented public API through consumer obfuscation rules.
+- Added release packaging protection without changing the public SDK APIs introduced in 0.1.15.
+- Added `DataModifier` support for all raw Log, native RUM, and WebView RUM tags and fields. Field callbacks may return `null` to retain the original value.
+- Aligned `LineDataModifier` with Android's record-patch contract: callbacks receive merged record data and return only existing keys to replace. A `null` or empty patch leaves the record unchanged.
+- Added local data filtering for RUM and logging. `FTSDKConfig.setEnableDataFilter(...)` controls the default-enabled filter, while `setDataFilters(...)` configures `logging` and `rum` rules.
+- Local rules support `in`, `not in`, `match`, `not match`, `and`, and `or`; matching data is discarded after `LineDataModifier` and before local-cache persistence.
+- Added remote data filters. While data filtering is enabled, the SDK pulls `logging` and `rum` rules from `/v1/datakit/pull?filters=true`, combines them with local rules, and refreshes using the server's `pull_interval` (10 seconds when invalid or absent).
+- Added `FTSDK.setDatakitUrl(...)` and `FTSDK.setDatawayUrl(...)` for switching the active reporting endpoint after SDK installation. The modes are mutually exclusive, and automatic uploads wait for a valid HTTP(S) endpoint (plus a Dataway client token).
+- Switching to a valid runtime endpoint now immediately refreshes enabled remote configuration from that endpoint; responses from the previous endpoint are ignored.
+- Added Android-compatible remote configuration, including cached startup merging and supported live updates. Configure it with `FTSDKConfig.setRemoteConfiguration(...)`, control the fetch interval with `setRemoteConfigMiniUpdateInterval(...)`, and observe fetches through `setRemoteConfigurationCallBack(...)`; `FTSDK.updateRemoteConfig(...)` supports manual refresh.
+- Consolidated the public RUM Action APIs: `addAction` now accepts optional duration and properties, while `startAction` accepts optional properties.
+- Removed split `addActionWith...` / `startActionWith...` methods and the unfinished public `stopAction` API. SDK-internal timing and wait-state parameters remain internal.
+- Completed Resource lifecycle properties: `startResource` and `stopResource` now accept optional properties and merge them with `ResourceParams` properties in call order.
+- Removed the unused `statusCode` and `contentLength` parameters from public `stopResource`; internal fallback Action association remains internal.
+- Aligned public `addError` overloads with Android, including the `dateline`-before-`errorType` form; Worker callbacks are now internal-only.
+
 ## [0.1.14] - 2026-07-17
 - Released the stable `ft_sdk` 0.1.14 package, consolidating the capabilities delivered during the 0.1.14 pre-release cycle.
 - Removed high-frequency internal Debug logs from normal Error and Resource collection paths.

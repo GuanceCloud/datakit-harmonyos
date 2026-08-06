@@ -1,1 +1,12 @@
+# Release-only ArkTS obfuscation for @guancecloud/ft_sdk_ext.
+-enable-property-obfuscation
+-enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
 
+# Keep the extension's documented public entry point stable.
+-keep-file-name
+Index
+
+-keep
+./Index.ets

@@ -72,10 +72,6 @@ export struct BatchUploadTestPage {
       for (let i = 0; i < 10; i++) {
         setTimeout(() => {
           rumManager.startAction(`Test Action ${i + 1}`, 'click');
-          // Close action after 50ms
-          setTimeout(() => {
-            rumManager.stopAction();
-          }, 50);
           this.actionCount++;
           if (this.actionCount === 10) {
             this.addTestResult(`✅ Generated ${this.actionCount} action records (will auto-close after 100ms)`);

@@ -24,6 +24,7 @@ import {
 } from '../thread/SDKDedicatedPoolManager';
 import {
   SDKDedicatedPoolType,
+  SDKLineProtocolContextDTO,
   SDKRumCompletedActionBatchDTO,
   SDKRumCompletedActionDTO,
   SDKRumCounterDeltaDTO,
@@ -860,6 +861,9 @@ export class FTRUMInnerManager {
       commands: original.commands || [],
       stateRecoveryOnly: true
     };
+    if (original.lineContext) {
+      recoveryPayload.lineContext = original.lineContext;
+    }
     return {
       id: request.id,
       pool: request.pool,
@@ -1220,7 +1224,9 @@ export class FTRUMInnerManager {
       return;
     }
 
-    FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
+    const trackInner = FTTrackInner.getInstance();
+    const lineContext: SDKLineProtocolContextDTO | null = trackInner.getWorkerLineProtocolContextSnapshot();
+    trackInner.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
     const batchSize = Math.min(
       FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
       this.pendingCompletedActions.length
@@ -1235,6 +1241,9 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionBatchDTO = {
       actions
     };
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -1312,10 +1321,19 @@ export class FTRUMInnerManager {
   }
 
   private attachCompletedActionDynamicTagsIfNeeded(payload: SDKRumCompletedActionDTO): void {
-    if (FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot() !== null) {
-      return;
+    payload.rumAppId = this.getSemanticRumAppId();
+    if (FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot() === null) {
+      payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
     }
-    payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+  }
+
+  /**
+   * Semantic Action/Resource/Error commands can be handled after a Worker
+   * restart, before its shared line context is restored. Keep the routing tag
+   * on the command itself so those events cannot lose their RUM application.
+   */
+  private getSemanticRumAppId(): string {
+    return this.rumConfig ? this.rumConfig.getRumAppId() : '';
   }
 
   private nextRumEventTaskName(name: string): string {
@@ -2285,7 +2303,7 @@ export class FTRUMInnerManager {
   
   /**
    * Update current view load time
-   * @param duration Load time (milliseconds)
+   * @param duration Load time in nanoseconds
    */
   public updateLoadTime(duration: number): void {
     try {
@@ -2456,7 +2474,8 @@ export class FTRUMInnerManager {
       viewName: this.activeView?.getViewName() || '',
       viewReferrer: this.activeView?.getViewReferrer() || '',
       actionId,
-      actionName
+      actionName,
+      rumAppId: this.getSemanticRumAppId()
     };
   }
 
@@ -2516,6 +2535,10 @@ export class FTRUMInnerManager {
     const payload: SDKRumResourceCommandBatchDTO = {
       commands
     };
+    const lineContext = FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot();
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -2717,6 +2740,10 @@ export class FTRUMInnerManager {
     const payload: SDKRumErrorCommandBatchDTO = {
       commands
     };
+    const lineContext = FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot();
+    if (lineContext) {
+      payload.lineContext = lineContext;
+    }
     const workerRequest: SDKWorkerRequest = {
       id: `${SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH}:${traceName}:${Date.now()}`,
       pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -2835,7 +2862,7 @@ export class FTRUMInnerManager {
     return `circuitOpen=${result.circuitOpen}, failures=${result.consecutiveFailures}`;
   }
 
-  private errorPropertyToRecord(property: Record<string, object> | null): SDKPropertyRecord {
+  private propertyToRecord(property: Record<string, object> | null | undefined): SDKPropertyRecord {
     const record: SDKPropertyRecord = {};
     if (property === null || property === undefined) {
       return record;
@@ -2900,6 +2927,7 @@ export class FTRUMInnerManager {
         commandType: 'start',
         resourceId,
         context,
+        property: this.propertyToRecord(property),
         startTime: Utils.getCurrentNanoTime(),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.start');
@@ -2912,17 +2940,30 @@ export class FTRUMInnerManager {
   /**
    * Stop resource monitoring
    */
-  public stopResource(resourceId: string, fallbackActionId?: string): void {
+  public stopResource(resourceId: string, property: Record<string, object> = {}): void {
+    this.stopResourceInternal(resourceId, '', property);
+  }
+
+  /**
+   * Stops a Resource while preserving the Action association captured by internal interceptors.
+   * This is an SDK-internal bridge and must not be exposed through FTRUMGlobalManager.
+   */
+  public stopResourceInternal(
+    resourceId: string,
+    fallbackActionId: string = '',
+    property: Record<string, object> = {}
+  ): void {
     try {
       const storedContext = this.resourceContextById.get(resourceId);
-      const context = storedContext || this.createCurrentResourceContext(fallbackActionId || '');
+      const context = storedContext || this.createCurrentResourceContext(fallbackActionId);
       this.updateResourceContextMemoryOnStop(context);
       this.submitResourceWorkerCommand({
         commandType: 'stop',
         resourceId,
         context,
+        property: this.propertyToRecord(property),
         endTime: Utils.getCurrentNanoTime(),
-        fallbackActionId: fallbackActionId || '',
+        fallbackActionId,
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.stop');
       this.scheduleRumCounterFlush();
@@ -2933,8 +2974,7 @@ export class FTRUMInnerManager {
   }
   
   /**
-   * Add error information
-   * Compatible with multiple addError overloads
+   * Add error information for SDK internals.
    * 
    * @param log       log
    * @param message   message
@@ -2944,7 +2984,7 @@ export class FTRUMInnerManager {
    * @param dateline  occurrence time, nanosecond (optional, defaults to current time)
    * @param callBack  thread pool call back (optional)
    */
-  public async addError(
+  public async addErrorInternal(
     log: string, 
     message: string, 
     errorType: string,
@@ -2995,7 +3035,7 @@ export class FTRUMInnerManager {
 	          errorType,
 	          errorSource: ErrorSource.LOGGER.toString(),
 	          appState: state.toString(),
-	          property: this.errorPropertyToRecord(actualProperty),
+          property: this.propertyToRecord(actualProperty),
 	          time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
@@ -3216,30 +3256,30 @@ export class FTRUMInnerManager {
   }
   
   /**
-   * Create view - record page load time
-   * Aligned with Android: FTRUMInnerManager.onCreateView(String viewName, long loadTime)
+   * Records navigation-tracker view load time. This is an SDK-internal automatic
+   * tracking entry point and is intentionally not exposed through FTRUMGlobalManager.
    * 
    * @param viewName View name
    * @param loadTime Load time in nanoseconds
    */
-  public onCreateView(viewName: string, loadTime: number): void {
+  public recordViewLoadTimeInternal(viewName: string, loadTime: number): void {
     if (viewName && viewName.length > 0 && loadTime > 0) {
       this.preActivityDuration.set(viewName, loadTime);
-      FTInnerLogger.d(TAG, `onCreateView: recorded load time for ${viewName}: ${loadTime / 1000000}ms (${loadTime}ns)`);
+      FTInnerLogger.d(TAG, `recordViewLoadTimeInternal: recorded load time for ${viewName}: ${loadTime / 1000000}ms (${loadTime}ns)`);
       
-      // If activeView already exists, update it with the recorded loadTime
-      // This handles the case where startView is called before onCreateView (e.g., manual startView calls)
+      // If activeView already exists, update it with the recorded loadTime.
+      // This handles load-time records that arrive after a manual startView call.
       // Also handles the case where startView is called multiple times (e.g., navigation tracker + manual call)
-      // Aligned with Android: onCreateView updates loadTime if view already exists
+      // Keep the latest automatic-tracking load time when a matching view already exists.
       if (this.activeView && this.activeView.getViewName() === viewName) {
         // Always update loadTime if activeView exists, even if it's not -1
         // This ensures loadTime is preserved even if startView is called multiple times
         const oldLoadTime = this.activeView.getLoadTime();
         this.activeView.setLoadTime(loadTime);
-        FTInnerLogger.d(TAG, `onCreateView: updated activeView loadTime for ${viewName}: ${oldLoadTime}ns -> ${loadTime}ns (${loadTime / 1000000}ms)`);
+        FTInnerLogger.d(TAG, `recordViewLoadTimeInternal: updated activeView loadTime for ${viewName}: ${oldLoadTime}ns -> ${loadTime}ns (${loadTime / 1000000}ms)`);
       }
     } else {
-      FTInnerLogger.w(TAG, `onCreateView: invalid parameters, viewName=${viewName}, loadTime=${loadTime}`);
+      FTInnerLogger.w(TAG, `recordViewLoadTimeInternal: invalid parameters, viewName=${viewName}, loadTime=${loadTime}`);
     }
   }
 
@@ -3252,7 +3292,7 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(resumeKey)) {
       const loadTime = this.preActivityDuration.get(resumeKey)!;
       this.preActivityDuration.delete(resumeKey);
-      FTInnerLogger.d(TAG, `Using resume time for ${viewName}: ${loadTime / 1000}ms`);
+      FTInnerLogger.d(TAG, `Using resume time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     
@@ -3260,7 +3300,7 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(viewName)) {
       const loadTime = this.preActivityDuration.get(viewName)!;
       this.preActivityDuration.delete(viewName);
-      FTInnerLogger.d(TAG, `Using create time for ${viewName}: ${loadTime / 1000}ms`);
+      FTInnerLogger.d(TAG, `Using create time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     

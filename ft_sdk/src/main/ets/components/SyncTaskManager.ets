@@ -1,5 +1,7 @@
 import { FTSDKConfig } from './Configs';
+import { RemoteConfigBean } from './remote/RemoteConfigBean';
 import { DataType } from './enum/Enums';
+import { isUploadEndpointAvailable } from './http/UploadEndpoint';
 import { SyncData } from './db/bean/SyncData';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
@@ -93,17 +95,20 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
   private readonly contextProvider: () => Context | null;
   private readonly dbTaskPoolProvider: () => SyncTaskDbTaskPool;
   private readonly stopProvider: () => boolean;
+  private readonly remoteDataFilterProvider: () => Map<string, Array<string>>;
 
   constructor(
     configProvider: () => FTSDKConfig | null,
     contextProvider: () => Context | null,
     dbTaskPoolProvider: () => SyncTaskDbTaskPool,
-    stopProvider: () => boolean
+    stopProvider: () => boolean,
+    remoteDataFilterProvider: () => Map<string, Array<string>>
   ) {
     this.configProvider = configProvider;
     this.contextProvider = contextProvider;
     this.dbTaskPoolProvider = dbTaskPoolProvider;
     this.stopProvider = stopProvider;
+    this.remoteDataFilterProvider = remoteDataFilterProvider;
   }
 
   isStopped(): boolean {
@@ -153,6 +158,10 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       transportBytes: page.transportBytes,
       byteLimitReached: page.byteLimitReached
     };
+  }
+
+  getRemoteDataFilters(): Map<string, Array<string>> {
+    return this.copyDataFilters(this.remoteDataFilterProvider());
   }
 
   private emptyUploadQueryPage(): DataUploadQueryPage {
@@ -326,6 +335,14 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
     return DataType.LOG;
   }
 
+  private copyDataFilters(filters: Map<string, Array<string>>): Map<string, Array<string>> {
+    const copied = new Map<string, Array<string>>();
+    filters.forEach((rules: Array<string>, category: string) => {
+      copied.set(category, rules.slice());
+    });
+    return copied;
+  }
+
   private applyCacheCountDelta(logDelta: number, rumDelta: number): void {
     if (logDelta !== 0) {
       syncTaskRuntime.getCachePolicy().optLogCount(logDelta);
@@ -375,6 +392,7 @@ export class SyncTaskManager {
   private preferencesStore: SyncTaskPreferences | null = null;
   private preferencesInitPromise: Promise<void> | null = null;
   private uploadWorkerExecutor = new DataUploadWorkerExecutor();
+  private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
   private constructor() {
   }
 
@@ -406,6 +424,7 @@ export class SyncTaskManager {
    */
   public init(config: FTSDKConfig, context?: Context): void {
     this.sdkConfig = config;
+    this.remoteDataFilters.clear();
 
     // Update configuration values (do not require context)
     this.dataSyncMaxRetryCount = normalizeUploadRetryCount(config.getDataSyncRetryCount());
@@ -571,8 +590,21 @@ export class SyncTaskManager {
       () => this.sdkConfig,
       () => this.context,
       () => syncTaskRuntime.getDbTaskPool(),
-      () => this.isStop
+      () => this.isStop,
+      () => this.remoteDataFilters
     );
+  }
+
+  /**
+   * Keep remote rules separate from local creation-time rules. Uploads use
+   * these rules to remove matching records that were cached before a rule was
+   * fetched from DataKit.
+   */
+  public updateRemoteDataFilters(filters: Map<string, Array<string>>): void {
+    this.remoteDataFilters.clear();
+    filters.forEach((rules: Array<string>, category: string) => {
+      this.remoteDataFilters.set(category, rules.slice());
+    });
   }
 
   /**
@@ -594,6 +626,15 @@ export class SyncTaskManager {
    */
   public executeSyncPoll(): void {
     if (!this.autoSync || this.isStop) {
+      return;
+    }
+
+    if (this.sdkConfig === null || !isUploadEndpointAvailable(
+      this.sdkConfig.getDatakitUrl(),
+      this.sdkConfig.getDatawayUrl(),
+      this.sdkConfig.getClientToken()
+    )) {
+      FTInnerLogger.w(TAG, 'Upload URL not configured, skipping sync');
       return;
     }
 
@@ -708,6 +749,26 @@ export class SyncTaskManager {
     if (!wasAutoSync && enabled) {
       this.executeSyncPoll();
     }
+  }
+
+  /** Apply the upload settings that Android updates without SDK re-installation. */
+  public hotUpdate(config: RemoteConfigBean): void {
+    const pageSize = config.getSyncPageSize();
+    if (pageSize !== null) {
+      this.pageSize = normalizeUploadPageSize(pageSize);
+    }
+    const autoSync = config.getAutoSync();
+    if (autoSync !== null) {
+      this.setAutoSync(autoSync);
+    }
+    const syncSleepTime = config.getSyncSleepTime();
+    if (syncSleepTime !== null) {
+      this.syncSleepTime = Math.max(
+        SyncTaskManager.SYNC_SLEEP_MINI_TIME_MS,
+        Math.min(Math.floor(syncSleepTime), SyncTaskManager.SYNC_SLEEP_MAX_TIME_MS)
+      );
+    }
+    FTInnerLogger.i(TAG, `Remote config applied: pageSize=${this.pageSize}, autoSync=${this.autoSync}, syncSleepTime=${this.syncSleepTime}`);
   }
 
   /**

@@ -2,6 +2,7 @@ import {
   AppState,
   ErrorType,
   FTRUMGlobalManager,
+  FTSDK,
   NetStatusBean,
   ResourceParams,
   StringWrapper
@@ -110,7 +111,7 @@ export struct RUMDataTestPage {
   @State viewCount: number = 0;
   @State currentViewName: string = '';
   @State isViewActive: boolean = false;
-  @State loadTime: number = 0;
+  @State loadTimeNs: number = 0;
   @State testResults: string = '';
   @State lastResult: string = '';
 
@@ -121,8 +122,8 @@ export struct RUMDataTestPage {
 
   private checkSDKStatus(): void {
     try {
-      const rumManager = FTRUMGlobalManager.getInstance();
-      this.isSDKInitialized = rumManager.isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      this.isSDKInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       this.appendResult(`SDK status: ${this.isSDKInitialized ? 'initialized' : 'not initialized'}`);
     } catch (error) {
       this.isSDKInitialized = false;
@@ -159,7 +160,7 @@ export struct RUMDataTestPage {
     this.longTaskCount = 0;
     this.resourceCount = 0;
     this.viewCount = 0;
-    this.loadTime = 0;
+    this.loadTimeNs = 0;
     this.currentViewName = '';
     this.isViewActive = false;
     this.appendResult('All counters reset');
@@ -188,9 +189,9 @@ export struct RUMDataTestPage {
 
     try {
       const property = new ActionPropertySet('rum_unified_btn', 'RUMDataTestPage', 'test_user');
-      rumManager.startActionWithProperty('property_click', 'click', property.toRecord());
+      rumManager.startAction('property_click', 'click', property.toRecord());
       this.actionCount++;
-      this.appendResult('Action: startActionWithProperty(property_click) sent');
+      this.appendResult('Action: startAction(property_click, property) sent');
     } catch (error) {
       this.appendResult(`Action with property failed: ${error}`);
     }
@@ -218,11 +219,11 @@ export struct RUMDataTestPage {
     }
 
     try {
-      rumManager.addActionWithDuration('duration_add', 'click', 2_000_000_000);
+      rumManager.addAction('duration_add', 'click', 2_000_000_000);
       this.actionCount++;
-      this.appendResult('Action: addActionWithDuration(duration_add, 2s) sent');
+      this.appendResult('Action: addAction(duration_add, 2s) sent');
     } catch (error) {
-      this.appendResult(`addActionWithDuration failed: ${error}`);
+      this.appendResult(`addAction with duration failed: ${error}`);
     }
   }
 
@@ -290,10 +291,12 @@ export struct RUMDataTestPage {
       const propertyBag = new PropertyBag();
       propertyBag.set('error_code', 'CUSTOM_001');
       propertyBag.set('module', 'RUMDataTestPage');
-      propertyBag.set('method', 'addCustomError');
-      rumManager.addCustomError(
-        'Custom error message from unified test page',
+      propertyBag.set('method', 'addError');
+      rumManager.addError(
         'Error stack trace:\n  at sendCustomError (RUMDataTestPage.ets)\n  at onClick (RUMDataTestPage.ets)',
+        'Custom error message from unified test page',
+        ErrorType.CUSTOM,
+        AppState.RUN,
         propertyBag.toWrappedRecord()
       );
       this.errorCount++;
@@ -420,7 +423,7 @@ export struct RUMDataTestPage {
       const resourceId = this.createResourceId('resource');
       rumManager.startResource(resourceId);
       setTimeout(() => {
-        rumManager.stopResource(resourceId, 200, 1024);
+        rumManager.stopResource(resourceId);
         rumManager.addResource(
           resourceId,
           this.createResourceParams('https://api.example.com/resource', 200),
@@ -444,7 +447,7 @@ export struct RUMDataTestPage {
       const resourceId = this.createResourceId('resource_prop');
       rumManager.startResource(resourceId);
       setTimeout(() => {
-        rumManager.stopResource(resourceId, 201, 2048);
+        rumManager.stopResource(resourceId);
         rumManager.addResource(
           resourceId,
           this.createResourceParams('https://api.example.com/resource/with-meta', 201, 'POST'),
@@ -472,7 +475,7 @@ export struct RUMDataTestPage {
         const resourceId = this.createResourceId(`resource_${status}`);
         rumManager.startResource(resourceId);
         setTimeout(() => {
-          rumManager.stopResource(resourceId, status, 1024 + i * 256);
+          rumManager.stopResource(resourceId);
           rumManager.addResource(
             resourceId,
             this.createResourceParams(`https://api.example.com/status/${status}`, status),
@@ -505,7 +508,7 @@ export struct RUMDataTestPage {
       rumManager.startView(viewName);
       this.currentViewName = viewName;
       this.isViewActive = true;
-      this.loadTime = 0;
+      this.loadTimeNs = 0;
       this.viewCount++;
       this.appendResult(`View: started ${viewName}`);
     } catch (error) {
@@ -538,10 +541,11 @@ export struct RUMDataTestPage {
     }
 
     try {
-      const newLoadTime = Math.floor(Math.random() * 5000) + 1000;
-      rumManager.updateLoadTime(newLoadTime);
-      this.loadTime = newLoadTime;
-      this.appendResult(`View: load time updated to ${newLoadTime}ms`);
+      const newLoadTimeMs = Math.floor(Math.random() * 5000) + 1000;
+      const newLoadTimeNs = newLoadTimeMs * 1_000_000;
+      rumManager.updateLoadTime(newLoadTimeNs);
+      this.loadTimeNs = newLoadTimeNs;
+      this.appendResult(`View: load time updated to ${newLoadTimeMs}ms (${newLoadTimeNs}ns)`);
     } catch (error) {
       this.appendResult(`Update load time failed: ${error}`);
     }
@@ -620,7 +624,7 @@ export struct RUMDataTestPage {
         Text(`Resource Count: ${this.resourceCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`View Count: ${this.viewCount}`).fontSize(15).margin({ bottom: 6 })
         Text(`Current View: ${this.currentViewName || 'None'}`).fontSize(15).margin({ bottom: 6 })
-        Text(`Load Time: ${this.loadTime}ms`).fontSize(15).margin({ bottom: 6 })
+        Text(`Load Time: ${this.loadTimeNs / 1_000_000}ms`).fontSize(15).margin({ bottom: 6 })
         Text(`Last Result: ${this.lastResult || 'None'}`).fontSize(13)
       }
       .width('100%')

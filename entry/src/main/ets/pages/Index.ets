@@ -167,6 +167,34 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Local data filter test page
+            ListItem() {
+              Button() {
+                Text("Local Data Filter Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0F766E')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/LocalDataFilterTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Data modification and masking test page
+            ListItem() {
+              Button() {
+                Text("Data Modifier Test")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#00838F')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/DataModifierTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Inner log file test page
             ListItem() {
               Button() {
@@ -201,6 +229,20 @@ struct Index {
               .fontColor(Color.White)
               .height(50).onClick(() => {
                 router.pushUrl({ url: 'pages/DataSyncTestPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
+            // Runtime reporting endpoint manual verification page
+            ListItem() {
+              Button() {
+                Text("Runtime Endpoint Verification")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0F766E')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/RuntimeEndpointVerificationPage' })
               })
             }
             .margin({ bottom: 10 })

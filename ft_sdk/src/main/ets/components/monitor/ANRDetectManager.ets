@@ -434,7 +434,7 @@ export class ANRDetectManager {
       const value: ErrorPropertyValue = { value: parsed.properties[keys[i]] };
       properties[keys[i]] = value;
     }
-    await FTRUMInnerManager.getInstance().addError(
+    await FTRUMInnerManager.getInstance().addErrorInternal(
       parsed.stackTrace,
       parsed.message,
       ErrorType.ANR_CRASH,

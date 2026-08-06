@@ -1,0 +1,17 @@
+# Keep rules passed to an app that integrates @guancecloud/ft_native.
+# Do not put enable-* options here: consumer rules are merged into the app.
+-keep-global-name
+HAR_VERSION
+
+# These names are exported at runtime by libftnativecrash.so through Node-API.
+-keep-property-name
+initNativeCrashHandler
+setCrashCallback
+clearCrashCallback
+startWatching
+stopWatching
+addLog
+getCollectedLogs
+clearLogs
+setMaxLogSize
+getVersion

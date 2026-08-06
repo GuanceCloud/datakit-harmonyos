@@ -15,7 +15,6 @@ import { DataType, DBCacheDiscard, EnvType, LogCacheDiscard, RUMCacheDiscard, Sy
 import { ConfigRecord, SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
 import { FTDBCachePolicy } from '../../../main/ets/components/db/FTDBCachePolicy';
 import { FTRUMConfigManager } from '../../../main/ets/components/rum/FTRUMConfigManager';
-import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { SyncDataHelper } from '../../../main/ets/components/SyncDataHelper';
 import { FTTraceConfigManager } from '../../../main/ets/components/trace/FTTraceConfigManager';
 
@@ -263,29 +262,6 @@ export default function configTest() {
       expect(FTRUMConfigManager.getInstance().getConfig()!.isEnableTraceUserResource()).assertFalse();
 
       console.info('ConfigTest', 'rumTrackAppANR passed');
-    });
-
-    /**
-     * Validate RUM global manager initialization state follows RUM app id.
-     */
-    it('rumGlobalManagerInitializedState', 0, () => {
-      FTRUMGlobalManager.resetStateInternal();
-      expect(FTRUMGlobalManager.getInstance().isInitialized()).assertFalse();
-
-      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL));
-      FTSDK.installRUMConfig(new FTRUMConfig());
-      expect(FTRUMGlobalManager.getInstance().isInitialized()).assertFalse();
-
-      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
-      expect(FTRUMGlobalManager.getInstance().isInitialized()).assertTrue();
-
-      FTSDK.installRUMConfig(new FTRUMConfig());
-      expect(FTRUMGlobalManager.getInstance().isInitialized()).assertFalse();
-
-      FTRUMGlobalManager.resetStateInternal();
-      expect(FTRUMGlobalManager.getInstance().isInitialized()).assertFalse();
-
-      console.info('ConfigTest', 'rumGlobalManagerInitializedState passed');
     });
 
     /**

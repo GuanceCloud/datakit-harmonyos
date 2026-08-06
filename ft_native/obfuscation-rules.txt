@@ -1,1 +1,12 @@
-# Obfuscation rules for ft_native_crash HAR package
+# Release-only ArkTS obfuscation for @guancecloud/ft_native.
+-enable-property-obfuscation
+-enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
+
+# Keep the package entry point stable for consumers.
+-keep-file-name
+Index
+
+-keep
+./Index.ets

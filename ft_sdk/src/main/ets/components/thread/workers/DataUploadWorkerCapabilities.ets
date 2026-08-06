@@ -87,6 +87,12 @@ export interface DataUploadWorkerCapabilities {
   isStopped(): boolean;
   hasData(dataType: DataType): Promise<boolean>;
   queryRows(dataType: DataType, pageSize: number): Promise<DataUploadQueryPage>;
+  /**
+   * Remote rules are evaluated by the Host before a cached page crosses into
+   * the upload worker. Local rules intentionally do not participate here:
+   * they only control newly produced data before it is cached.
+   */
+  getRemoteDataFilters?(): Map<string, Array<string>>;
   commitUpload(
     dataType: DataType,
     action: DataUploadDbCommitAction,

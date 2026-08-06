@@ -19,7 +19,7 @@ import {
   SDKWorkerResponse
 } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
 import { DeviceUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/DeviceUtils';
-import { FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
+import { AppState, ErrorType, FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { Context } from '@kit.AbilityKit';
 import { TestPageHeader } from '../components/TestPageHeader';
@@ -1490,7 +1490,7 @@ export struct DBCacheLimitTestPage {
         rumManager.addAction(`AutoAction_${count}`, 'click');
         
         // Write an error
-        rumManager.addCustomError(`AutoError_${count}`, `Error stack trace ${count}`);
+        rumManager.addError(`Error stack trace ${count}`, `AutoError_${count}`, ErrorType.CUSTOM, AppState.RUN);
         
         count++;
         this.writeCount = count * 2; // Write 2 RUM items each time
@@ -1592,7 +1592,7 @@ export struct DBCacheLimitTestPage {
       
       for (let i = 0; i < count; i++) {
         rumManager.addAction(`BatchAction_${i}`, 'click');
-        rumManager.addCustomError(`BatchError_${i}`, `Error ${i}`);
+        rumManager.addError(`Error ${i}`, `BatchError_${i}`, ErrorType.CUSTOM, AppState.RUN);
         if ((i + 1) % 25 === 0) {
           await this.yieldToUi();
         }

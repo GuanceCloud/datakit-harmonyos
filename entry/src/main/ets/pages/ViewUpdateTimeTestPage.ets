@@ -2,7 +2,7 @@
  * View Update Time Test Page
  * Test view_update_time counter functionality
  */
-import { createFTRCPTrackConfig, FTRUMGlobalManager } from '@guancecloud/ft_sdk/Index';
+import { createFTRCPTrackConfig, FTRUMGlobalManager, FTSDK } from '@guancecloud/ft_sdk/Index';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -44,8 +44,8 @@ export struct ViewUpdateTimeTestPage {
    */
   checkSDKStatus() {
     try {
-      const rumGlobalManager = FTRUMGlobalManager.getInstance();
-      const isInitialized = rumGlobalManager.isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      const isInitialized = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       this.addTestResult(`SDK Status: ${isInitialized ? '✅ Initialized' : '❌ Not Initialized'}`);
       
       if (!isInitialized) {
@@ -111,7 +111,8 @@ export struct ViewUpdateTimeTestPage {
    */
   async testResourceRequest() {
     try {
-      const isEnabled = FTRUMGlobalManager.getInstance().isInitialized();
+      const rumConfig = FTSDK.getRumConfig();
+      const isEnabled = rumConfig !== null && rumConfig.getRumAppId().length > 0;
       
       if (!isEnabled) {
         this.addTestResult("⚠️ RCP interceptor session helper is not available");

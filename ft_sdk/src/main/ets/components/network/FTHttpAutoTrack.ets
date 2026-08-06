@@ -432,7 +432,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
       FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
       const fallbackActionId = this.resourceActionMap.get(resourceId);
-      FTRUMInnerManager.getInstance().stopResource(resourceId, fallbackActionId);
+      FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
@@ -462,7 +462,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
       FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
       const fallbackActionId = this.resourceActionMap.get(resourceId);
-      FTRUMInnerManager.getInstance().stopResource(resourceId, fallbackActionId);
+      FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
@@ -1017,7 +1017,7 @@ function completeAxiosResource(
   }
 
   FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
-  FTRUMInnerManager.getInstance().stopResource(state.resourceId, state.actionId);
+  FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
 }
 
 export function createFTRCPInterceptors(
