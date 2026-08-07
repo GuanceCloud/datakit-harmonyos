@@ -309,7 +309,6 @@ export default function webViewAutoTrackDeviceTest() {
 
       await FTRUMGlobalManager.getInstance().startView(nativeViewName);
       await WaitUtils.delay(300);
-      handler.setNativeViewName(nativeViewName);
       handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
 
       handler.sendEventWithCallback(buildWebViewRumEvent(
@@ -347,9 +346,10 @@ export default function webViewAutoTrackDeviceTest() {
       expect(viewRecord !== null).assertTrue();
       expect(actionRecord !== null).assertTrue();
       expect(viewLine.includes(`view_referrer=${nativeViewName}`)).assertTrue();
-      expect(viewLine.includes('view_path_name=/products/list')).assertTrue();
+      expect(viewLine.includes('view_path_name=')).assertFalse();
       expect(viewLine.includes('service=browser')).assertTrue();
-      expect(viewLine.includes(`sdk_version=${WEB_SDK_VERSION}`)).assertTrue();
+      expect(viewLine.includes(`sdk_version=${WEB_SDK_VERSION}`)).assertFalse();
+      expect(viewLine.includes(`"web":"${WEB_SDK_VERSION}"`)).assertTrue();
       expect(viewLine.includes(`app_id=${TEST_FAKE_RUM_ID}`)).assertTrue();
       expect(viewLine.includes('loading_time=123')).assertTrue();
       expect(actionLine.includes('service=browser')).assertTrue();

@@ -376,44 +376,15 @@ export class SyncDataHelper {
         break;
       case DataType.RUM_WEBVIEW:
         // Aligned with Android: SyncDataHelper.getBodyContent() for RUM_WEBVIEW
-        // IMPORTANT: Save webview's service and sdk_version fields BEFORE merging tags, as they should be preserved
-        // Android logic: service=browser from webview is preserved by skipping KEY_SERVICE in rumTags iteration
-        const webviewService = mergeTags.get(Constants.KEY_SERVICE);
-        // IMPORTANT: Save webview's sdk_version BEFORE merging tags, as native SDK's sdk_version will override it
-        // This ensures we get the correct Web SDK version for sdk_pkg_info
-        const webviewSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
-
-        // Merge dynamic base tags and RUM tags first (aligned with Android: mergeTags.putAll(dynamicBaseTags); mergeTags.putAll(dynamicLRumTags))
+        // Browser tags are overlaid by dynamic tags before static native RUM
+        // tags are applied. The Web SDK version at this point is recorded in
+        // sdk_pkg_info; static rumTags then replace sdk_version.
         this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, new Map());
+        const webSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION) || "";
 
-        // Restore webview's service field if it exists (preserve service=browser from webview)
-        if (webviewService && webviewService.length > 0) {
-          mergeTags.set(Constants.KEY_SERVICE, webviewService);
-        }
-
-        // Restore webview's sdk_version field if it exists (preserve Web SDK version from webview)
-        // This ensures mergeTags has the correct sdk_version for any other use cases
-        if (webviewSDKVersion && webviewSDKVersion.length > 0) {
-          mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
-        }
-
-        // IMPORTANT: Get Web SDK version from saved webviewSDKVersion, not from mergeTags after merging
-        // Android logic: Object webSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
-        // But Android doesn't merge dynamic tags that would override sdk_version, so we need to preserve it
-        const webSDKVersion = (webviewSDKVersion && webviewSDKVersion.length > 0) ? webviewSDKVersion :
-          (mergeTags.get(Constants.KEY_SDK_VERSION) || "");
-        // FTInnerLogger.d(TAG,
-        //   `[RUM-WEBVIEW] Web SDK version: "${webSDKVersion}" (saved from webview: ${webviewSDKVersion ||
-        //     'none'}, from mergeTags after restore: ${mergeTags.get(Constants.KEY_SDK_VERSION) || 'none'})`);
-
-        // Debug: Check if webSDKVersion looks like a version number (contains digits and dots) or SDK name
-        if (webSDKVersion && !webSDKVersion.match(/^\d+\.\d+/)) {
-          // FTInnerLogger.w(TAG,
-          //   `[RUM-WEBVIEW] ⚠️ Web SDK version "${webSDKVersion}" doesn't look like a version number (expected format: X.Y.Z). This might be SDK name instead of version.`);
-        }
-
-        // Aligned with Android: iterate through rumTags and preserve WebView-owned values.
-        // service=browser and the Web SDK version must not be overwritten by native RUM tags.
+        // Aligned with Android: service remains Browser-SDK-owned, while
+        // sdk_version is replaced by the native RUM tag after its Web value
+        // has been recorded in sdk_pkg_info.
         // Debug: Log app_id in rumTags and mergeTags before replacement
         // const rumTagsAppId = this.rumTags.get(Constants.KEY_RUM_APP_ID);
         // const mergeTagsAppIdBefore = mergeTags.get(Constants.KEY_RUM_APP_ID);
@@ -421,7 +392,7 @@ export class SyncDataHelper {
         //   `[RUM-WEBVIEW] app_id in rumTags: "${rumTagsAppId}", in mergeTags before replacement: "${mergeTagsAppIdBefore}"`);
 
         this.rumTags.forEach((value, key) => {
-          if (key !== Constants.KEY_SERVICE && key !== Constants.KEY_SDK_VERSION) {
+          if (key !== Constants.KEY_SERVICE) {
             if (key === Constants.KEY_SDK_PACKAGE_INFO) {
               // Append Web SDK version to sdk_pkg_info (aligned with Android appendPackageVersion behavior)
               // Android SDK always calls appendPackageVersion even if webSDKVersion is null (converts to empty string)
@@ -457,7 +428,7 @@ export class SyncDataHelper {
               mergeTags.set(key, value);
             }
           }
-          // WebView-owned service/sdk_version are preserved.
+          // service remains WebView-owned.
         });
 
         this.applyLineDataModifier(measurement, mergeTags, fields);
@@ -644,23 +615,11 @@ export class SyncDataHelper {
     mergeTags: Map<string, string>,
     fields: Map<string, string>
   ): void {
-    const webviewService = mergeTags.get(Constants.KEY_SERVICE);
-    const webviewSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION);
-
     this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, new Map());
-
-    if (webviewService && webviewService.length > 0) {
-      mergeTags.set(Constants.KEY_SERVICE, webviewService);
-    }
-    if (webviewSDKVersion && webviewSDKVersion.length > 0) {
-      mergeTags.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
-    }
-
-    const webSDKVersion = (webviewSDKVersion && webviewSDKVersion.length > 0) ? webviewSDKVersion :
-      (mergeTags.get(Constants.KEY_SDK_VERSION) || "");
+    const webSDKVersion = mergeTags.get(Constants.KEY_SDK_VERSION) || "";
 
     this.rumTags.forEach((value, key) => {
-      if (key !== Constants.KEY_SERVICE && key !== Constants.KEY_SDK_VERSION) {
+      if (key !== Constants.KEY_SERVICE) {
         if (key === Constants.KEY_SDK_PACKAGE_INFO) {
           if (value && typeof value === 'string' && value.trim().startsWith('{')) {
             const hasWebVersion = value.includes(`"${Constants.KEY_RUM_SDK_PACKAGE_WEB}"`);

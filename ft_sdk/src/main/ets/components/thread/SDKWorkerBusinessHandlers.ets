@@ -958,18 +958,19 @@ function prepareRumWebViewLineRecords(
   const inputTags = event.tags || {};
   const tags: SDKStringRecord = {};
   const fields = copyStringRecord(event.fields || {});
-  const webviewService = inputTags[Constants.KEY_SERVICE] || '';
-  const webviewSdkVersion = inputTags[Constants.KEY_SDK_VERSION] || '';
 
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
+  // Mirror Android's SyncDataHelper ordering: Browser tags are received first,
+  // then dynamic tags are overlaid, followed by static native RUM tags.
+  mergeStringRecords(tags, inputTags);
   mergeStringRecords(tags, lineContext.dynamicBaseTags);
   mergeStringRecords(tags, lineContext.dynamicRumTags);
-  mergeStringRecords(tags, inputTags);
+  const webviewSdkVersion = tags[Constants.KEY_SDK_VERSION] || '';
 
   const rumTagKeys = Object.keys(lineContext.rumTags);
   for (let i = 0; i < rumTagKeys.length; i++) {
     const key = rumTagKeys[i];
-    if (key === Constants.KEY_SERVICE || key === Constants.KEY_SDK_VERSION) {
+    if (key === Constants.KEY_SERVICE) {
       continue;
     }
     const value = lineContext.rumTags[key];
@@ -977,12 +978,6 @@ function prepareRumWebViewLineRecords(
       appendWebSdkVersion(value, webviewSdkVersion) : value;
   }
 
-  if (webviewService.length > 0) {
-    tags[Constants.KEY_SERVICE] = webviewService;
-  }
-  if (webviewSdkVersion.length > 0) {
-    tags[Constants.KEY_SDK_VERSION] = webviewSdkVersion;
-  }
   if (tags[Constants.KEY_SDK_PACKAGE_INFO]) {
     tags[Constants.KEY_SDK_PACKAGE_INFO] = appendWebSdkVersion(
       tags[Constants.KEY_SDK_PACKAGE_INFO],

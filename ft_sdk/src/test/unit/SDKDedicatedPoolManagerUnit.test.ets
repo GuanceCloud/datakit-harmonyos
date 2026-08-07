@@ -600,7 +600,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(drafts.length).assertEqual(1);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
       expect(line.includes('service=browser')).assertTrue();
-      expect(line.includes('sdk_version=2.3.4')).assertTrue();
+      expect(line.includes('sdk_version=native-version')).assertTrue();
+      expect(line.includes('sdk_version=2.3.4')).assertFalse();
       expect(line.includes('env=worker-test')).assertTrue();
       expect(line.includes('custom_key=worker-value')).assertTrue();
       expect(line.includes('"web":"2.3.4"')).assertTrue();
