@@ -57,6 +57,8 @@ export struct WebViewPage {
 
         Row() {
           Web({ src: this.webViewUrl, controller: this.browserTabController })
+            .width('100%')
+            .layoutWeight(1)
             .javaScriptAccess(true)
             .domStorageAccess(true)
             // Register JavaScript proxy for direct communication with browser-sdk
@@ -93,6 +95,8 @@ export struct WebViewPage {
               }
             })
         }
+        .width('100%')
+        .layoutWeight(1)
       }
       .width('100%')
       .height('100%')
