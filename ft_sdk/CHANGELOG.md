@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16] - 2026-07-29
+- Aligned WebView bridge enrichment with Android: no synthetic `view_path_name` is added, missing WebView referrers resolve from the native host View, and `sdk_version` follows Android's native-tag precedence while the Browser SDK version remains in `sdk_pkg_info`.
 - Aligned automatic Action names with Android: default names now use `component/text#id`, list and tab actions append `#position:n`, and configured `FTActionTrackingHandler` names remain unchanged.
 - Aligned View custom-property fields with Android: View properties now retain their caller-provided names instead of receiving a `view_property_` prefix.
 - Native and WebView Resource records, and their generated network Error records, now use the Resource record's stable UUID (the unprefixed UUID portion of the Resource `sdk_data_id`) as `resource_id` for reliable correlation.
