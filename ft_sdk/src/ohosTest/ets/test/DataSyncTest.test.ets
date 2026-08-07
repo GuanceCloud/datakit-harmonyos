@@ -301,6 +301,27 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
+    it('rumViewPropertiesShouldKeepOriginalFieldNames', 0, async () => {
+      const viewName = 'view_property_field_name';
+      const property = buildActionProperty('custom_view_property', 'from-start-view');
+
+      await FTRUMGlobalManager.getInstance().startView(viewName, property);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,',
+        `view_name=${viewName}`,
+        'custom_view_property',
+        'from-start-view'
+      ], 5000);
+      const line = record?.getDataString() ?? '';
+
+      expect(record !== null).assertTrue();
+      expect(line.includes('custom_view_property')).assertTrue();
+      expect(line.includes('view_property_custom_view_property')).assertFalse();
+    });
+
     it('logUpdateShouldUpload', 0, async () => {
       const logContent = '----logUpdateDataTest----';
 

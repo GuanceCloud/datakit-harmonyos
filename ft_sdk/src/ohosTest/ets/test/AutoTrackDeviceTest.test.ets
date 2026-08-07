@@ -67,6 +67,9 @@ class FakeFrameNode {
   private nodeId: string;
   private uniqueId: number;
   private customProperties: Map<string, Object> = new Map();
+  private inspectorAttributes: Record<string, Object> = {};
+  private parent: FakeFrameNode | null = null;
+  private previousSibling: FakeFrameNode | null = null;
 
   constructor(nodeType: string, nodeId: string, uniqueId: number) {
     this.nodeType = nodeType;
@@ -92,6 +95,33 @@ class FakeFrameNode {
 
   getCustomProperty(key: string): Object {
     return this.customProperties.get(key) || '';
+  }
+
+  setInspectorAttribute(key: string, value: Object): FakeFrameNode {
+    this.inspectorAttributes[key] = value;
+    return this;
+  }
+
+  getInspectorInfo(): Object {
+    return { '$attrs': this.inspectorAttributes } as Object;
+  }
+
+  setParent(parent: FakeFrameNode): FakeFrameNode {
+    this.parent = parent;
+    return this;
+  }
+
+  getParent(): FrameNode | null {
+    return this.parent as Object as FrameNode | null;
+  }
+
+  setPreviousSibling(previousSibling: FakeFrameNode): FakeFrameNode {
+    this.previousSibling = previousSibling;
+    return this;
+  }
+
+  getPreviousSibling(): FrameNode | null {
+    return this.previousSibling as Object as FrameNode | null;
   }
 }
 
@@ -340,12 +370,14 @@ export default function autoTrackDeviceTest() {
 
     it('willClickShouldUploadAction', 0, async () => {
       const viewName = 'auto_action_view';
-      const actionName = 'Button/auto_action_button';
+      const actionName = 'Button/登录#auto_action_button';
       initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
       expect(uiContext.observer.hasWillClickCallback()).assertTrue();
       await startViewForAction(viewName);
 
-      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'auto_action_button', 1001));
+      const button = new FakeFrameNode('Button', 'auto_action_button', 1001)
+        .setInspectorAttribute('label', '登录');
+      await uiContext.observer.emitWillClick(button);
       await assertActionStarted(actionName);
       await closeCurrentViewAndWaitForRum();
 
@@ -354,6 +386,54 @@ export default function autoTrackDeviceTest() {
         `action_name=${actionName}`,
         `view_name=${viewName}`,
         `action_type=${Constants.EVENT_NAME_CLICK}`
+      ]);
+    });
+
+    it('willClickShouldAppendListItemPosition', 0, async () => {
+      const viewName = 'list_item_action_view';
+      const actionName = 'Button/商品#item_action#position:1';
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
+      await startViewForAction(viewName);
+
+      const firstItem = new FakeFrameNode('ListItem', 'first_item', 1101);
+      const secondItem = new FakeFrameNode('ListItem', 'second_item', 1102)
+        .setPreviousSibling(firstItem);
+      const button = new FakeFrameNode('Button', 'item_action', 1103)
+        .setInspectorAttribute('label', '商品')
+        .setParent(secondItem);
+
+      await uiContext.observer.emitWillClick(button);
+      await assertActionStarted(actionName);
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
+      ]);
+    });
+
+    it('willClickShouldAppendTabPosition', 0, async () => {
+      const viewName = 'tab_action_view';
+      const actionName = 'Button/设置#tab_action#position:1';
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
+      await startViewForAction(viewName);
+
+      const firstTab = new FakeFrameNode('TabContent', 'first_tab', 1201);
+      const secondTab = new FakeFrameNode('TabContent', 'second_tab', 1202)
+        .setPreviousSibling(firstTab);
+      const button = new FakeFrameNode('Button', 'tab_action', 1203)
+        .setInspectorAttribute('label', '设置')
+        .setParent(secondTab);
+
+      await uiContext.observer.emitWillClick(button);
+      await assertActionStarted(actionName);
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
       ]);
     });
 
