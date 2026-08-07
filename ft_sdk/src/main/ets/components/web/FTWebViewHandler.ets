@@ -631,11 +631,28 @@ export class FTWebViewHandler implements JsReceiver {
           const sessionIdValue = FTRUMInnerManager.getInstance().getSessionId();
           const collectType = sessionIdValue ? CollectType.ALL : CollectType.DROP;
 
+          // Browser Resource and Error points arrive separately. Assign the
+          // Resource UUID before crossing the Worker boundary so its
+          // resource_id and the unprefixed Resource sdk_data_id UUID are the
+          // same value. Upload later adds a package prefix only to sdk_data_id.
+          const resourceDraftUuid = measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE ?
+            Utils.generateUUID() : undefined;
+          if (resourceDraftUuid) {
+            tagsMap.set(Constants.KEY_RUM_RESOURCE_ID, resourceDraftUuid);
+          }
+
           // Action-ID de-duplication now runs in EVENT_CONSUMER. Browser view
           // records remain intentionally non-deduplicated to match Android.
 
           // Call FTTrackInner to sync RUM data
-          FTTrackInner.getInstance().rumWebView(time, measurement, tagsMap, fieldsMap, collectType);
+          FTTrackInner.getInstance().rumWebView(
+            time,
+            measurement,
+            tagsMap,
+            fieldsMap,
+            collectType,
+            resourceDraftUuid
+          );
         }
 
       } else if (name === WEB_JS_TYPE_TRACK) {

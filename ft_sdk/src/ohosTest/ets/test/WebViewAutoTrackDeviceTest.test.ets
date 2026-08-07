@@ -149,6 +149,51 @@ class WebViewActionFields {
   }
 }
 
+class WebViewResourceTags {
+  service: string = 'browser';
+  sdk_version: string = WEB_SDK_VERSION;
+  view_id: string;
+  view_name: string;
+  resource_url: string;
+  resource_url_host: string;
+  resource_method: string;
+  resource_status: string;
+
+  constructor(viewId: string, viewName: string, resourceUrl: string, resourceStatus: string) {
+    this.view_id = viewId;
+    this.view_name = viewName;
+    this.resource_url = resourceUrl;
+    this.resource_url_host = 'webview.test';
+    this.resource_method = 'GET';
+    this.resource_status = resourceStatus;
+  }
+}
+
+class WebViewNetworkErrorTags extends WebViewResourceTags {
+  error_source: string = 'network';
+  error_type: string = 'network';
+
+  constructor(viewId: string, viewName: string, resourceUrl: string, resourceStatus: string) {
+    super(viewId, viewName, resourceUrl, resourceStatus);
+  }
+}
+
+class WebViewResourceFields {
+  duration: number;
+
+  constructor(duration: number) {
+    this.duration = duration;
+  }
+}
+
+class WebViewNetworkErrorFields {
+  error_message: string;
+
+  constructor(message: string) {
+    this.error_message = message;
+  }
+}
+
 function buildWebViewRumEvent(measurement: string, tags: Object, fields: Object, tag: string): string {
   return JSON.stringify(new WebViewRumEvent(new WebViewRumData(measurement, tags, fields, WEB_EVENT_TIME_MS), tag));
 }
@@ -178,6 +223,11 @@ function containsAll(value: string, fragments: string[]): boolean {
     }
   }
   return true;
+}
+
+function getLineProtocolTag(line: string, key: string): string {
+  const match = line.match(new RegExp(`(?:^|,)${key}=([^,\\s]+)`));
+  return match !== null && match.length > 1 ? match[1] : '';
 }
 
 async function countWebViewSyncRecordsContaining(fragments: string[]): Promise<number> {
@@ -321,6 +371,57 @@ export default function webViewAutoTrackDeviceTest() {
       expect(uploadedAction.length > 0).assertTrue();
       expect(viewConsumed).assertTrue();
       expect(actionConsumed).assertTrue();
+    });
+
+    it('webViewResourceErrorShouldLinkToResourceSdkDataId', 0, async () => {
+      const webViewId = 'webview_resource_error_view_id';
+      const webViewName = 'webview_resource_error_view';
+      const resourceUrl = 'https://webview.test/api/failed-request';
+      const resourceStatus = '503';
+      const errorMessage = '[503][https://webview.test/api/failed-request]';
+      const handler = new FTWebViewHandler();
+      const fakeController = new FakeWebviewController(resourceUrl);
+      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+
+      handler.sendEvent(buildWebViewRumEvent(
+        Constants.FT_MEASUREMENT_RUM_RESOURCE,
+        new WebViewResourceTags(webViewId, webViewName, resourceUrl, resourceStatus),
+        new WebViewResourceFields(123),
+        'webview_resource_error_resource'
+      ));
+      handler.sendEvent(buildWebViewRumEvent(
+        Constants.FT_MEASUREMENT_RUM_ERROR,
+        new WebViewNetworkErrorTags(webViewId, webViewName, resourceUrl, resourceStatus),
+        new WebViewNetworkErrorFields(errorMessage),
+        'webview_resource_error_error'
+      ));
+
+      const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_WEBVIEW, [
+        'resource,',
+        `view_id=${webViewId}`,
+        `resource_url=${resourceUrl}`,
+        `resource_status=${resourceStatus}`
+      ], 5000);
+      const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_WEBVIEW, [
+        'error,',
+        `view_id=${webViewId}`,
+        'error_source=network',
+        errorMessage
+      ], 5000);
+      const resourceLine = resourceRecord?.getDataString() ?? '';
+      const errorLine = errorRecord?.getDataString() ?? '';
+      const resourceId = getLineProtocolTag(resourceLine, 'resource_id');
+      const resourceDataId = getLineProtocolTag(resourceLine, 'sdk_data_id');
+      const errorResourceId = getLineProtocolTag(errorLine, 'resource_id');
+      const errorDataId = getLineProtocolTag(errorLine, 'sdk_data_id');
+
+      expect(resourceRecord !== null).assertTrue();
+      expect(errorRecord !== null).assertTrue();
+      expect(resourceId.length > 0).assertTrue();
+      expect(/^[0-9a-f]{32}$/.test(resourceId)).assertTrue();
+      expect(resourceId).assertEqual(resourceDataId);
+      expect(errorResourceId).assertEqual(resourceId);
+      expect(errorDataId !== resourceId).assertTrue();
     });
 
     it('webViewProxyShouldForwardCallback', 0, async () => {

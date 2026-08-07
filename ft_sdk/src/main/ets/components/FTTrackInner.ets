@@ -1562,7 +1562,8 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    collectType: CollectType = CollectType.ALL
+    collectType: CollectType = CollectType.ALL,
+    draftUuid?: string
   ): void {
     FTInnerLogger.d(TAG, `TAG ========== rumWebView() called ==========`);
     FTInnerLogger.d(TAG, `TAG Measurement: ${measurement},Time: ${time}, Collect type: ${collectType}`);
@@ -1574,7 +1575,7 @@ class FTTrackInner {
 
     if (sessionId && this.dataHelper.checkSessionWillCollect(sessionId)) {
       FTInnerLogger.d(TAG, `TAG Session will collect, calling syncDataBackground`);
-      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null);
+      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null, draftUuid);
     } else {
       const willCollect = sessionId ? this.dataHelper.checkSessionWillCollect(sessionId) : false;
       FTInnerLogger.w(TAG,
@@ -2022,12 +2023,24 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     // Reduced logging - only log key information
 
     const taskName = `data.prepare:${measurement}`;
-    this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+    this.submitRumWorkerDraftTask(
+      taskName,
+      dataType,
+      undefined,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      false,
+      draftUuid
+    );
   }
 
   private syncDataBackgroundRecords(

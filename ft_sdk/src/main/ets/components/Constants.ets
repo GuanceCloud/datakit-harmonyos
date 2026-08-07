@@ -119,6 +119,7 @@ export class Constants {
   /**
    * RUM resource related keys
    */
+  static readonly KEY_RUM_RESOURCE_ID = "resource_id";
   static readonly KEY_RUM_RESOURCE_URL = "resource_url";
   static readonly KEY_RUM_RESOURCE_URL_HOST = "resource_url_host";
   static readonly KEY_RUM_RESOURCE_URL_PATH = "resource_url_path";

@@ -639,6 +639,66 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(2);
     });
 
+    it('eventRumWorkerShouldDiscardExpiredWebViewResourceErrorLinks', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const resourceUuid = 'stale-webview-resource-uuid';
+      const resourceEvent: SDKRumEventDTO = {
+        time: 1000,
+        dataType: 'rum_webview',
+        measurement: 'resource',
+        uuid: resourceUuid,
+        tags: {
+          view_id: 'stale-link-view',
+          resource_method: 'GET',
+          resource_url: 'https://webview.test/api/stale-link'
+        },
+        fields: { duration: '1' }
+      };
+      const resourceResponse = await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-resource',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: resourceEvent as Object as SDKWorkerPayload
+      });
+      expect(resourceResponse.ok).assertTrue();
+
+      const errorEvent: SDKRumEventDTO = {
+        time: 32001,
+        dataType: 'rum_webview',
+        measurement: 'error',
+        tags: {
+          view_id: 'stale-link-view',
+          resource_method: 'GET',
+          resource_url: 'https://webview.test/api/stale-link',
+          error_source: 'network'
+        },
+        fields: { error_message: 'network error without a matching resource' }
+      };
+      const errorResponse = await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-error',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: errorEvent as Object as SDKWorkerPayload
+      });
+      expect(errorResponse.ok).assertTrue();
+      const drafts = getPayloadArray(errorResponse.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes(`resource_id=${resourceUuid}`)).assertFalse();
+      expect(unitWorkerStates[SDKDedicatedPoolType.EVENT_CONSUMER].webViewResourceErrorLinks.size).assertEqual(0);
+    });
+
     it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
       const updates: SDKRumCounterUpdateDTO[] = [
         {
@@ -884,6 +944,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
       expect(drafts.length).assertEqual(2);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('sdk_name=df_harmonyos_rum_sdk')).assertTrue();
       expect(line.includes('app_id=gc_app_harmonyos_demo')).assertTrue();
       expect(line.includes('error_type=TypeError')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();
@@ -1261,6 +1322,36 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const body = getPayloadString(response.payload, 'body');
       expect(body.includes('pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
+    });
+
+    it('dataUploadCommandShouldOnlyPrefixSdkDataIdWhenResourceIdMatchesRowUuid', 0, async () => {
+      const resourceUuid = '64697047c13d4ac8ae1a64aa1d364d39';
+      const row: SDKUploadRowDTO = {
+        id: 2,
+        dataType: 'rum_app',
+        dataString: `resource,resource_id=${resourceUuid},sdk_data_id=${resourceUuid} status=404i 123`,
+        uuid: resourceUuid,
+        time: 123
+      };
+      const page: SDKUploadPageDTO = {
+        dataType: 'rum_app',
+        rows: [row],
+        packageId: 'pkg-2'
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'upload-resource-id',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_FORMAT_BODY,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: page as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const body = getPayloadString(response.payload, 'body');
+      expect(body.includes(`resource_id=${resourceUuid}`)).assertTrue();
+      expect(body.includes(`sdk_data_id=pkg-2.${resourceUuid}`)).assertTrue();
+      expect(body.includes(`resource_id=pkg-2.${resourceUuid}`)).assertFalse();
     });
 
     it('dataUploadSoftTimeoutShouldDestroyStalledWorkerRequest', 0, async () => {
