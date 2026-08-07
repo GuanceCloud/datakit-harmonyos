@@ -35,13 +35,10 @@ export struct ButtonClickTestPage {
     this.testResults += 'Instructions:\n';
     this.testResults += '1. Click any component below (Button, Checkbox, Radio, Toggle)\n';
     this.testResults += '2. Each click should be automatically tracked by FTActionTracker\n';
-    this.testResults += '3. Action name format: ComponentType/{componentId}\n';
-    this.testResults += '   - Button: Button/{id} or Button/\n';
-    this.testResults += '   - Checkbox: Checkbox/{id} or Checkbox/\n';
-    this.testResults += '   - Radio: Radio/{id} or Radio/\n';
-    this.testResults += '   - Toggle: Toggle/{id} or Toggle/\n';
-    this.testResults += '   - Text: Text/{id} or Text/ (TextView onClick)\n';
-    this.testResults += '   - Image: Image/{id} or Image/ (ImageView onClick)\n';
+    this.testResults += '3. Action name format: ComponentType/text#id\n';
+    this.testResults += '   - Button: Button/Login#login_button\n';
+    this.testResults += '   - List and tab components append #position:n\n';
+    this.testResults += '   - Missing text or id leaves that part empty\n';
     this.testResults += '4. Check logs for "[ACTION-TRACK]" to see tracking details\n';
     this.testResults += '5. Action data will be uploaded to server as RUM action data\n';
     this.testResults += '\nNote: Make sure FTSDK.initializeUIFeatures() was called in EntryAbility\n';
@@ -58,8 +55,8 @@ export struct ButtonClickTestPage {
     this.trackedActions.push(actionInfo);
     this.testResults += `✅ ${actionInfo}`;
     
-    // Expected action name format: ComponentType/{componentId}
-    const expectedActionName = componentId ? `${componentType}/${componentId}` : `${componentType}/`;
+    // Expected action name format: ComponentType/text#id
+    const expectedActionName = `${componentType}/${description}${componentId ? `#${componentId}` : ''}`;
     this.testResults += `   Expected action name: ${expectedActionName}\n`;
     this.testResults += `   Component type: ${componentType}\n`;
     this.testResults += `   Action type: click\n`;
@@ -648,7 +645,7 @@ export struct ButtonClickTestPage {
             .fontSize(12)
             .width('100%')
 
-          Text('• Action name format: ComponentType/{id} or ComponentType/ (if no ID)')
+          Text('• Action name format: ComponentType/text#id; lists and tabs append #position:n')
             .fontSize(12)
             .width('100%')
 

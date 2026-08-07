@@ -1692,14 +1692,14 @@ export class FTRUMInnerManager {
           const value = properties[key];
           // Only add primitive types to avoid [object Object] issues
           if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-            fieldsMap.set(`view_property_${key}`, String(value));
+            fieldsMap.set(key, String(value));
           } else if (typeof value === 'object' && value !== null) {
             // If object has 'value' property (like MonitorValue), extract it directly
             if (value['value'] !== undefined) {
-              fieldsMap.set(`view_property_${key}`, String(value['value']));
+              fieldsMap.set(key, String(value['value']));
             } else {
               // Convert other objects to JSON string
-              fieldsMap.set(`view_property_${key}`, JSON.stringify(value));
+              fieldsMap.set(key, JSON.stringify(value));
             }
           }
         }
