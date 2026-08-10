@@ -284,6 +284,7 @@ interface SDKRumWorkerResourceState {
   resourceDownloadTimeStart: number;
   resourceLoad: number;
   properties: SDKStringRecord;
+  startRegistered: boolean;
   contentSet: boolean;
   netStateSet: boolean;
   isProcessing: boolean;
@@ -1249,6 +1250,10 @@ function processRumResourceCommand(
   }
 
   if (commandType === 'start') {
+    if (resource.startRegistered) {
+      return false;
+    }
+    resource.startRegistered = true;
     resource.startTime = command.startTime && command.startTime > 0 ? command.startTime : resource.startTime;
     if (!stateRecoveryOnly) {
       appendResourcePendingIncreaseDelta(state, resource.context.viewId, resource.context.actionId);
@@ -1348,6 +1353,7 @@ function getOrCreateRumResourceState(
     resourceDownloadTimeStart: -1,
     resourceLoad: -1,
     properties: {},
+    startRegistered: false,
     contentSet: false,
     netStateSet: false,
     isProcessing: false,
@@ -1362,12 +1368,16 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   if (!context) {
     return;
   }
-  resource.context.sessionId = context.sessionId || resource.context.sessionId;
-  resource.context.viewId = context.viewId || resource.context.viewId;
-  resource.context.viewName = context.viewName || resource.context.viewName;
-  resource.context.viewReferrer = context.viewReferrer || resource.context.viewReferrer;
-  resource.context.actionId = context.actionId || resource.context.actionId;
-  resource.context.actionName = context.actionName || resource.context.actionName;
+  // The start command owns resource context. Later lifecycle commands can
+  // supply a context only when the resource did not have one (for example,
+  // addResource without a preceding startResource), preventing a late
+  // completion from being rebound to a newer action.
+  resource.context.sessionId = resource.context.sessionId || context.sessionId;
+  resource.context.viewId = resource.context.viewId || context.viewId;
+  resource.context.viewName = resource.context.viewName || context.viewName;
+  resource.context.viewReferrer = resource.context.viewReferrer || context.viewReferrer;
+  resource.context.actionId = resource.context.actionId || context.actionId;
+  resource.context.actionName = resource.context.actionName || context.actionName;
 }
 
 function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRumResourceParamsDTO): void {

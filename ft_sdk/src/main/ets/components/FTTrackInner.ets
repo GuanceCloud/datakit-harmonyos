@@ -855,7 +855,10 @@ class FTTrackInner {
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         if (payload.deltas && payload.deltas.length > 0) {
           rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -868,7 +871,10 @@ class FTTrackInner {
       this.logRumCacheDiscard(drafts.length);
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         // DISCARD is terminal for these drafts. Advance the barrier here so
         // resource draft/context state is still converged without a DB task.
@@ -900,7 +906,10 @@ class FTTrackInner {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
     if (draftsCommitted && countersApplied) {
-      rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+      rumManager.markRumResourcesCompleted(
+        payload.completedResourceIds || [],
+        !!(payload.deltas && payload.deltas.length > 0)
+      );
       rumManager.markRumSemanticHostApplied(response.id);
       if (payload.deltas && payload.deltas.length > 0) {
         rumManager.acknowledgeRumSemanticThrough(response.id);
