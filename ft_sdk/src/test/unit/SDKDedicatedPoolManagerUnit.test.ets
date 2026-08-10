@@ -1015,7 +1015,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         commandType: 'stop', resourceId: 'resource-worker', context, endTime: 40
       };
       const batch: SDKRumResourceCommandBatchDTO = {
-        commands: [stop, network, content, content, start]
+        commands: [stop, network, content, content, start, start]
       };
       const response = await executeWorkerCommandForUnit({
         id: 'rum-resource-batch',
@@ -1040,6 +1040,126 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('duration=50i')).assertTrue();
       const snapshot = await getRumWorkerSnapshotForUnit('rum-resource-command-state-key-snapshot');
       expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
+      const counterFlush = await executeWorkerCommandForUnit({
+        id: 'rum-resource-duplicate-start-counter-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      const counterDeltas = getPayloadArray(counterFlush.payload, 'deltas');
+      let actionPendingDelta = 0;
+      let actionResourceDelta = 0;
+      for (let i = 0; i < counterDeltas.length; i++) {
+        const delta = counterDeltas[i] as Record<string, object>;
+        if (String(delta['actionId']) === 'resource-action') {
+          actionPendingDelta = Number(delta['actionPendingDelta']);
+          actionResourceDelta = Number(delta['actionResourceDelta']);
+        }
+      }
+      expect(actionPendingDelta).assertEqual(0);
+      expect(actionResourceDelta).assertEqual(1);
+    });
+
+    it('eventRumResourceAndNetworkErrorShouldKeepStartActionContext', 0, async () => {
+      const startContext: SDKRumResourceContextDTO = {
+        sessionId: 'session-first-action',
+        viewId: 'view-first-action',
+        viewName: 'FirstActionView',
+        viewReferrer: 'root',
+        actionId: 'action-first',
+        actionName: 'first tap',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const laterContext: SDKRumResourceContextDTO = {
+        sessionId: 'session-later-action',
+        viewId: 'view-later-action',
+        viewName: 'LaterActionView',
+        viewReferrer: 'FirstActionView',
+        actionId: 'action-later',
+        actionName: 'later tap',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/late-response',
+        requestHeader: '',
+        responseHeader: '',
+        responseConnection: '',
+        responseContentType: '',
+        responseContentEncoding: '',
+        responseContentLength: 0,
+        resourceMethod: 'GET',
+        responseBody: 'HTTP 500',
+        resourceStatus: 500,
+        resourceType: 'network',
+        requestErrorStack: '',
+        requestErrorMsg: '',
+        property: new Object() as SDKPropertyRecord
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 0,
+        dnsStartTime: 0,
+        tcpTime: 0,
+        tcpStartTime: 0,
+        sslTime: 0,
+        sslStartTime: 0,
+        ttfbTime: 0,
+        responseTime: 0,
+        firstByteTime: 0,
+        firstByteStartTime: 0,
+        downloadTime: 0,
+        downloadStartTime: 0,
+        holeRequestTime: 10,
+        resourceHostIP: ''
+      };
+      const batch: SDKRumResourceCommandBatchDTO = {
+        commands: [{
+          commandType: 'start',
+          resourceId: 'late-resource',
+          draftUuid: 'late-resource-draft',
+          errorDraftUuid: 'late-resource-error-draft',
+          context: startContext,
+          startTime: 10
+        }, {
+          // This mirrors a request completing after a second click. The host
+          // normally reuses startContext; the Worker also keeps it authoritative.
+          commandType: 'add',
+          resourceId: 'late-resource',
+          draftUuid: 'late-resource-draft',
+          errorDraftUuid: 'late-resource-error-draft',
+          context: laterContext,
+          params,
+          netStatus,
+          eventTime: 20
+        }]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-resource-keeps-start-action',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(2);
+      let resourceLine = '';
+      let errorLine = '';
+      for (let i = 0; i < drafts.length; i++) {
+        const draft = drafts[i] as Record<string, object>;
+        const uuid = String(draft['uuid']);
+        if (uuid === 'late-resource-draft') {
+          resourceLine = String(draft['dataString']);
+        } else if (uuid === 'late-resource-error-draft') {
+          errorLine = String(draft['dataString']);
+        }
+      }
+      expect(resourceLine.includes('action_id=action-first')).assertTrue();
+      expect(resourceLine.includes('action_id=action-later')).assertFalse();
+      expect(errorLine.includes('action_id=action-first')).assertTrue();
+      expect(errorLine.includes('action_id=action-later')).assertFalse();
     });
 
     it('eventRumResourceAndCounterReplayShouldSurviveFreshWorkerState', 0, () => {
