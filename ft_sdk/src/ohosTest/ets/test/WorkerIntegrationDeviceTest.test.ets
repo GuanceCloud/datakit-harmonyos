@@ -137,7 +137,7 @@ export default function workerIntegrationDeviceTest() {
       const metrics = metricsResponse.payload as Object as SDKBackgroundMetricsResultDTO;
       expect(metrics.collectedAt > 0).assertTrue();
       expect(metrics.cpuTickCount >= -1).assertTrue();
-      expect(metrics.memoryUsageMB >= -1).assertTrue();
+      expect(metrics.memoryUsageBytes >= -1).assertTrue();
       expect(metrics.batteryCurrent === metrics.batteryCurrent).assertTrue();
     });
 
