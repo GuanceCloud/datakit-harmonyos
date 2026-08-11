@@ -16,6 +16,7 @@ import { Constants } from '../../main/ets/components/Constants';
 import {
   DataType,
   DBCacheDiscard,
+  DetectFrequency,
   EnvType,
   LogCacheDiscard,
   RUMCacheDiscard,
@@ -242,6 +243,23 @@ export default function configUnitTest() {
       expect(config.getClientToken()).assertEqual('');
     });
 
+    it('runtimeEndpointOverrideShouldBeClearedWhenSdkResets', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      const config = FTSDKConfig.builder('https://startup-datakit.example.com');
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.install(config, createFakeContext());
+
+      FTSDK.setDatawayUrl('https://runtime-dataway.example.com', 'runtime-token');
+      expect(config.getDatakitUrl()).assertEqual('');
+      expect(config.getDatawayUrl()).assertEqual('https://runtime-dataway.example.com');
+      expect(config.getClientToken()).assertEqual('runtime-token');
+
+      SdkInternalTestAccess.resetState();
+      expect(config.getDatakitUrl()).assertEqual('https://startup-datakit.example.com');
+      expect(config.getDatawayUrl()).assertEqual('');
+      expect(config.getClientToken()).assertEqual('');
+    });
+
     it('sdkConfigShouldConfigureLocalDataFilters', 0, () => {
       const filterRules: FTDataFilters = new Map<string, Array<string>>();
       filterRules.set('logging', ["{ message match ['password'] }"]);
@@ -464,7 +482,8 @@ export default function configUnitTest() {
         .setEnableTraceUserResource(true)
         .setEnableTraceWebView(true)
         .setExtraMonitorTypeWithError(ErrorMonitorType.CPU)
-        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY);
+        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)
+        .setDeviceMetricsDetectFrequency(DetectFrequency.FREQUENT);
 
       expect(config.getRumAppId()).assertEqual(TEST_FAKE_RUM_ID);
       expect(config.getBlockDurationMS()).assertEqual(100);
@@ -476,6 +495,7 @@ export default function configUnitTest() {
       expect(config.isEnableTraceWebView()).assertTrue();
       expect(config.getExtraMonitorTypeWithError()).assertEqual(ErrorMonitorType.CPU);
       expect(config.getDeviceMetricsMonitorType()).assertEqual(DeviceMetricsMonitorType.MEMORY);
+      expect(config.getDeviceMetricsDetectFrequency()).assertEqual(DetectFrequency.FREQUENT);
     });
 
     it('rumConfigShouldRequireUiFeatures', 0, () => {

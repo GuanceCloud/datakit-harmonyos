@@ -1670,81 +1670,40 @@ export class FTRUMInnerManager {
       // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
       const extraAttr = viewBean.getExtraAttr();
       
-      // Define MonitorValue interface locally (same as in ViewBean.ets)
-      interface MonitorValue {
-        value: string;
-      }
-      
       // CPU monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)) {
         const cpuTickCountPerSecond = extraAttr.get("cpu_tick_count_per_second");
         const cpuTickCount = extraAttr.get("cpu_tick_count");
-        if (cpuTickCountPerSecond) {
-          const monitorValue = cpuTickCountPerSecond as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            fieldsMap.set(Constants.KEY_CPU_TICK_COUNT_PER_SECOND, monitorValue.value);
-          }
-        }
-        if (cpuTickCount) {
-          const monitorValue = cpuTickCount as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            fieldsMap.set(Constants.KEY_CPU_TICK_COUNT, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(
+          fieldsMap,
+          Constants.KEY_CPU_TICK_COUNT_PER_SECOND,
+          cpuTickCountPerSecond
+        );
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_CPU_TICK_COUNT, cpuTickCount);
       }
       
       // Memory monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-        const memoryMax = extraAttr.get(Constants.KEY_BATTERY_CURRENT_MAX);
-        const memoryAvg = extraAttr.get(Constants.KEY_BATTERY_CURRENT_AVG);
-        if (memoryMax) {
-          const monitorValue = memoryMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_MEMORY_MAX, monitorValue.value);
-          }
-        }
-        if (memoryAvg) {
-          const monitorValue = memoryAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_MEMORY_AVG, monitorValue.value);
-          }
-        }
+        const memoryMax = extraAttr.get(Constants.KEY_MEMORY_MAX);
+        const memoryAvg = extraAttr.get(Constants.KEY_MEMORY_AVG);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_MEMORY_MAX, memoryMax);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_MEMORY_AVG, memoryAvg);
       }
       
       // Battery monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)) {
         const batteryCurrentAvg = extraAttr.get(Constants.KEY_BATTERY_CURRENT_AVG);
         const batteryCurrentMax = extraAttr.get(Constants.KEY_BATTERY_CURRENT_MAX);
-        if (batteryCurrentAvg) {
-          const monitorValue = batteryCurrentAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_BATTERY_CURRENT_AVG, monitorValue.value);
-          }
-        }
-        if (batteryCurrentMax) {
-          const monitorValue = batteryCurrentMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_BATTERY_CURRENT_MAX, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_BATTERY_CURRENT_AVG, batteryCurrentAvg, true);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_BATTERY_CURRENT_MAX, batteryCurrentMax, true);
       }
       
       // FPS monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
         const fpsAvg = extraAttr.get("fps_avg");
         const fpsMini = extraAttr.get("fps_mini");
-        if (fpsAvg) {
-          const monitorValue = fpsAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_FPS_AVG, monitorValue.value);
-          }
-        }
-        if (fpsMini) {
-          const monitorValue = fpsMini as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_FPS_MINI, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_FPS_AVG, fpsAvg);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_FPS_MINI, fpsMini);
       }
       
       // Session error timestamp (aligned with Android: if (bean.getLastErrorTime() > 0))
@@ -1821,6 +1780,28 @@ export class FTRUMInnerManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
       // Remove from both sets if insert failed, so it can be retried
+    }
+  }
+
+  /**
+   * Monitor samples begin as primitive numbers in ActiveViewBean, then are
+   * persisted by ViewBean as `{ value: string }`. Accept both representations
+   * so a View can be serialized before or after its database round trip.
+   */
+  private appendNumericViewMetricField(
+    fieldsMap: Map<string, string>,
+    fieldName: string,
+    rawValue: object | undefined,
+    allowNegative: boolean = false
+  ): void {
+    if (rawValue === undefined || rawValue === null) {
+      return;
+    }
+    const monitorValue = rawValue as MonitorValue;
+    const scalarValue = monitorValue.value === undefined ? rawValue : monitorValue.value;
+    const value = Number.parseFloat(String(scalarValue));
+    if (Number.isFinite(value) && (allowNegative || value >= 0)) {
+      fieldsMap.set(fieldName, String(value));
     }
   }
 
@@ -2317,6 +2298,10 @@ export class FTRUMInnerManager {
       // Set tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       
+      // Begin the View-scoped device metrics collection before the View is persisted.
+      FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
+      this.collectInitialViewMetrics(this.activeView);
+
       // Initialize view
       this.initView(this.activeView);
       this.generateRumData();
@@ -2370,9 +2355,6 @@ export class FTRUMInnerManager {
       
       // Update tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
-      
-      // Attach monitor data
-      FTMonitorManager.getInstance().attachMonitorData(this.activeView);
       
       // Close view
       this.activeView.close();
@@ -3113,6 +3095,25 @@ export class FTRUMInnerManager {
         FTInnerLogger.d(TAG, ` Session will not collect error data: sessionId=${this.sessionId}, collectType=DROP`);
         return;
       }
+
+      const monitorFields = FTMonitorManager.getInstance().getErrorMonitorData();
+      let effectiveProperty: Record<string, object> | null = actualProperty;
+      const monitorFieldKeys = Object.keys(monitorFields);
+      if (monitorFieldKeys.length > 0) {
+        const mergedProperty: Record<string, object> = {};
+        if (actualProperty !== null) {
+          const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+          for (let i = 0; i < propertyKeys.length; i++) {
+            const key = propertyKeys[i];
+            mergedProperty[key] = actualProperty[key];
+          }
+        }
+        for (let i = 0; i < monitorFieldKeys.length; i++) {
+          const key = monitorFieldKeys[i];
+          mergedProperty[key] = monitorFields[key];
+        }
+        effectiveProperty = mergedProperty;
+      }
       
 	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
 	        // Exclude the scenario of reporting the last native crash error
@@ -3140,7 +3141,7 @@ export class FTRUMInnerManager {
 	          errorType,
 	          errorSource: ErrorSource.LOGGER.toString(),
 	          appState: state.toString(),
-          property: this.propertyToRecord(actualProperty),
+          property: this.propertyToRecord(effectiveProperty),
 	          time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
@@ -3185,11 +3186,11 @@ export class FTRUMInnerManager {
       if (errorFieldsData.error_stack) allFields[Constants.KEY_RUM_ERROR_STACK] = errorFieldsData.error_stack;
 
       // Handle additional properties
-      if (actualProperty != null) {
-        const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+      if (effectiveProperty != null) {
+        const propertyKeys = FTRUMInnerManager.getObjectKeys(effectiveProperty);
         for (let i = 0; i < propertyKeys.length; i++) {
           const key = propertyKeys[i];
-          const obj = (actualProperty as Record<string, object>)[key];
+          const obj = (effectiveProperty as Record<string, object>)[key];
           // Extract value from PropertyWrapper objects (which have a .value property)
           if (obj && typeof obj === 'object') {
             try {
@@ -3509,8 +3510,8 @@ export class FTRUMInnerManager {
             }
           }
           this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
-          // FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
-          FTMonitorManager.getInstance().attachMonitorData(this.activeView);
+          FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
+          this.collectInitialViewMetrics(this.activeView);
           this.initView(this.activeView);
           
           FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
@@ -3617,6 +3618,16 @@ export class FTRUMInnerManager {
     }
   }
 
+  /**
+   * Match Android's create-view behavior without blocking navigation on the
+   * Worker round trip. A final snapshot is still captured before View close.
+   */
+  private collectInitialViewMetrics(activeViewBean: ActiveViewBean): void {
+    void FTMonitorManager.getInstance().attachMonitorData(activeViewBean, false).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Failed to capture initial View metrics: ${error.message}`);
+    });
+  }
+
   private async initViewAsync(context: Context, viewBean: ViewBean): Promise<void> {
     try {
       const result = await FTDBTaskPoolExecutor.upsertRumView(context, viewBean);
@@ -3636,7 +3647,8 @@ export class FTRUMInnerManager {
    */
   private async closeView(activeViewBean: ActiveViewBean): Promise<void> {
     try {
-      // Remove monitor first
+      // Capture the final View-scoped sample before stopping its monitor.
+      await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
       FTMonitorManager.getInstance().removeMonitor(activeViewBean.getId());
       
       // Convert to ViewBean to get closure data
