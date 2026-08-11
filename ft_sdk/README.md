@@ -104,23 +104,15 @@ export default class EntryAbility extends UIAbility {
 
 ### Install the Hvigor Plugin
 
-Copy [`entry/hvigorCompile/ft-console-log-transform.ts`](../entry/hvigorCompile/ft-console-log-transform.ts) from the matching SDK source release into your HAP module as `hvigorCompile/ft-console-log-transform.ts`. Register it in that HAP module's `hvigorfile.ts`:
+Install `@guancecloud/ft-hvigor-plugin` in the project-level `hvigor/hvigor-config.json5`. This build-time tool package is separate from the `@guancecloud/ft_sdk` runtime HAR. Register it in the HAP module's `hvigorfile.ts`:
 
 ```ts
-import { HvigorNode, HvigorPlugin } from '@ohos/hvigor'
-import { hapTasks, OhosHapContext, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
-
-const consoleLogCompilerPlugin: HvigorPlugin = {
-  pluginId: 'guance-console-log-compiler',
-  apply(node: HvigorNode): void {
-    const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext
-    hapContext.loadCompilePlugin('./hvigorCompile/ft-console-log-transform.ts')
-  }
-}
+import { hapTasks } from '@ohos/hvigor-ohos-plugin'
+import { ftConsoleLogPlugin } from '@guancecloud/ft-hvigor-plugin'
 
 export default {
   system: hapTasks,
-  plugins: [consoleLogCompilerPlugin]
+  plugins: [ftConsoleLogPlugin()]
 }
 ```
 

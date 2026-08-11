@@ -121,25 +121,17 @@ export default class EntryAbility extends UIAbility {
 
 ## Automatic Console and HiLog Collection
 
-HarmonyOS collects application `console.*` and `hilog.*` calls through the Guance Hvigor compiler plugin. This follows Android's `setEnableConsoleLog` model: the switch enables collection, while the build plugin supplies the instrumentation. There is no runtime monkey-patching fallback.
+HarmonyOS collects application `console.*` and `hilog.*` calls through the standalone Guance Hvigor compiler plugin. This follows Android's `setEnableConsoleLog` model: the switch enables collection, while the build plugin supplies the instrumentation. There is no runtime monkey-patching fallback.
 
-Copy the matching release's [`entry/hvigorCompile/ft-console-log-transform.ts`](entry/hvigorCompile/ft-console-log-transform.ts) into the application HAP module, then register it in that module's `hvigorfile.ts`:
+Install `@guancecloud/ft-hvigor-plugin` in the project-level `hvigor/hvigor-config.json5` (this is a Hvigor tool dependency, not an `oh-package.json5` runtime dependency), then register it in the application HAP module's `hvigorfile.ts`:
 
 ```ts
-import { HvigorNode, HvigorPlugin } from '@ohos/hvigor'
-import { hapTasks, OhosHapContext, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
-
-const consoleLogCompilerPlugin: HvigorPlugin = {
-  pluginId: 'guance-console-log-compiler',
-  apply(node: HvigorNode): void {
-    const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext
-    hapContext.loadCompilePlugin('./hvigorCompile/ft-console-log-transform.ts')
-  }
-}
+import { hapTasks } from '@ohos/hvigor-ohos-plugin'
+import { ftConsoleLogPlugin } from '@guancecloud/ft-hvigor-plugin'
 
 export default {
   system: hapTasks,
-  plugins: [consoleLogCompilerPlugin]
+  plugins: [ftConsoleLogPlugin()]
 }
 ```
 
