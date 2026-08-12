@@ -37,6 +37,7 @@ import { AppUtils } from "./utils/AppUtils";
 import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
+import { FTUIBlockManager } from "./monitor/FTUIBlockManager";
 import { Utils } from "./utils/Utils";
 import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
 import { FTRemoteDataFilterManager } from './remote/FTRemoteDataFilterManager';
@@ -67,6 +68,7 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    FTUIBlockManager.getInstance().release();
     const config = FTSDK.getInstalledConfig();
     if (config !== null) {
       clearRuntimeUploadEndpointInternal(config);
@@ -102,6 +104,7 @@ export class FTSDK {
 
   protected static requiresLifecycleListenerInternal(rumConfig: FTRUMConfig): boolean {
     return FTSDK.requiresUIFeaturesInternal(rumConfig) ||
+      rumConfig.isEnableTrackAppUIBlock() ||
       (FTSDK.ftSdk !== null && FTSDK.ftSdk.ftSDKConfig !== null && FTSDK.ftSdk.ftSDKConfig.isRemoteConfiguration());
   }
 
@@ -403,6 +406,8 @@ export class FTSDK {
     if (rumConfig.isEnableTrackAppUIBlock()) {
       getFTSDKRuntime().startUIBlockManager(rumConfig);
       FTInnerLogger.d(TAG, "FTUIBlockManager initialized for UI block detection");
+    } else {
+      FTUIBlockManager.getInstance().release();
     }
 
     if (FTSDK.pendingUIFeatureInit) {
@@ -496,6 +501,7 @@ export class FTSDK {
 
 
   static shutDown() {
+    FTUIBlockManager.getInstance().release();
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();

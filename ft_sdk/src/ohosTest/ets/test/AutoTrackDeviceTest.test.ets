@@ -303,8 +303,8 @@ export default function autoTrackDeviceTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('routerPageShouldUploadView', 0, async () => {
-      const routeName = 'pages/AutoTrackRouterPage';
+    it('routerPageShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+      const routeName = 'pages/account/AutoTrackRouterPage';
       const normalizedViewName = 'AutoTrackRouterPage';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
       expect(uiContext.observer.hasRouterPageUpdateCallback()).assertTrue();
@@ -338,8 +338,8 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('navDestinationShouldUploadView', 0, async () => {
-      const routeName = 'pages/AutoTrackNavDestination';
+    it('navDestinationShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+      const routeName = 'pages/account/AutoTrackNavDestination';
       const normalizedViewName = 'AutoTrackNavDestination';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
       expect(uiContext.observer.hasNavDestinationSwitchCallback()).assertTrue();
