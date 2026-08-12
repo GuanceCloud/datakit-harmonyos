@@ -23,6 +23,7 @@ import { FTAppStartCounter } from './FTAppStartCounter';
 import { FTDBSpoolManager } from '../db/FTDBSpoolManager';
 import { FTDBTaskPoolExecutor } from '../db/FTDBTaskPoolExecutor';
 import { FTMonitorManager } from '../rum/FTMonitorManager';
+import { FTUIBlockManager } from './FTUIBlockManager';
 
 const TAG = "FTAbilityLifecycleListener";
 const BACKGROUND_DB_FLUSH_TIMEOUT_MS = 2500;
@@ -193,6 +194,7 @@ export class FTAbilityLifecycleListener {
         },
         onWindowStageActive: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageActive: UIAbility lifecycle event`);
+          FTUIBlockManager.getInstance().setAppInForeground(true);
           try {
             const mainWindow = windowStage.getMainWindowSync();
             FTSDK.onWindowStageActive(mainWindow);
@@ -205,6 +207,7 @@ export class FTAbilityLifecycleListener {
         onWindowStageDestroy: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageDestroy: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(false);
+          FTUIBlockManager.getInstance().setAppInForeground(false);
           FTSDK.cleanupUIFeatures();
           // Stop view when window stage is destroyed
           this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
@@ -212,6 +215,7 @@ export class FTAbilityLifecycleListener {
         onAbilityForeground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityForeground: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(true);
+          FTUIBlockManager.getInstance().setAppInForeground(true);
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -273,6 +277,7 @@ export class FTAbilityLifecycleListener {
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(false);
+          FTUIBlockManager.getInstance().setAppInForeground(false);
           // Stop view when ability goes to background (aligned with Android onActivityPaused)
           this.flushDbLaneOnLifecycleChange("onAbilityBackground");
           
@@ -284,6 +289,7 @@ export class FTAbilityLifecycleListener {
         onAbilityDestroy: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(false);
+          FTUIBlockManager.getInstance().setAppInForeground(false);
           // Stop view when ability is destroyed (aligned with Android onDestroy)
           this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
         }
@@ -329,6 +335,7 @@ export class FTAbilityLifecycleListener {
 
     try {
       FTMonitorManager.getInstance().setAppInForeground(false);
+      FTUIBlockManager.getInstance().setAppInForeground(false);
       // Clear sleep check timer if exists
       if (this.sleepCheckTimer !== null) {
         clearTimeout(this.sleepCheckTimer);

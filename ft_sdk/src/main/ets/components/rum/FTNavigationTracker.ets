@@ -84,7 +84,8 @@ export class FTNavigationTracker {
     const fromNameRaw: string = this.getNavName(info.from) || (this.currentViewName ? this.currentViewName : '');
     const toNameRaw: string = this.getNavName(info.to);
     
-    // Normalize view names: convert route paths to page names
+    // Use the route's simple name for automatic views, matching Android's
+    // Activity.getClass().getSimpleName() default naming rule.
     const fromName: string = this.normalizeViewName(fromNameRaw);
     let toName: string = this.normalizeViewName(toNameRaw);
 
@@ -151,8 +152,8 @@ export class FTNavigationTracker {
       return;
     }
 
-    // Normalize view name: convert route path (e.g., "pages/ActionTestPage") to page name (e.g., "ActionTestPage")
-    // This ensures consistency with manual startView calls that use page names
+    // Use the route's simple name for automatic views, matching Android's
+    // Activity.getClass().getSimpleName() default naming rule.
     toName = this.normalizeViewName(toName);
 
     // Handle state=0 (page created) - record creation start time for load time calculation
@@ -278,24 +279,30 @@ export class FTNavigationTracker {
   }
 
   /**
-   * Normalize view name by converting route path to page name
+   * Resolve the automatic View name from an ArkUI route.
+   *
+   * Android automatic View tracking uses Activity.getClass().getSimpleName().
+   * An ArkUI route has no Activity class, so its final path segment is the
+   * equivalent stable page name. Manual startView names are not passed here
+   * and are intentionally left untouched.
    * Examples:
    *   "pages/ActionTestPage" -> "ActionTestPage"
-   *   "pages/Index" -> "Index"
+   *   "pages/account/SettingsPage" -> "SettingsPage"
    *   "ActionTestPage" -> "ActionTestPage" (no change)
    * @param viewName Original view name (may be route path or page name)
-   * @returns Normalized view name (page name)
+   * @returns Simple automatic view name
    */
   private normalizeViewName(viewName: string): string {
     if (!viewName || viewName.length === 0) {
       return viewName;
     }
     
-    // Remove "pages/" prefix if present
-    if (viewName.startsWith('pages/')) {
-      return viewName.substring(6); // Remove "pages/" (6 characters)
+    let routeName = viewName;
+    while (routeName.endsWith('/')) {
+      routeName = routeName.substring(0, routeName.length - 1);
     }
-    
-    return viewName;
+
+    const separatorIndex = routeName.lastIndexOf('/');
+    return separatorIndex >= 0 ? routeName.substring(separatorIndex + 1) : routeName;
   }
 }
