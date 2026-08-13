@@ -96,6 +96,15 @@ function assertContainsAll(value: string, fragments: string[]): void {
   }
 }
 
+function getLineProtocolTag(line: string, key: string): string {
+  const match = line.match(new RegExp(`(?:^|,)${key}=([^,\\s]+)`));
+  return match !== null && match.length > 1 ? match[1] : '';
+}
+
+function isSdkUuid(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}
+
 async function flushAndWaitForPayload(
   collector: MockCollector,
   identityFragments: string[]
@@ -290,6 +299,27 @@ export default function dataSyncTest() {
 
       expect(uploaded.length > 0).assertTrue();
       expect(consumed).assertTrue();
+    });
+
+    it('rumViewPropertiesShouldKeepOriginalFieldNames', 0, async () => {
+      const viewName = 'view_property_field_name';
+      const property = buildActionProperty('custom_view_property', 'from-start-view');
+
+      await FTRUMGlobalManager.getInstance().startView(viewName, property);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,',
+        `view_name=${viewName}`,
+        'custom_view_property',
+        'from-start-view'
+      ], 5000);
+      const line = record?.getDataString() ?? '';
+
+      expect(record !== null).assertTrue();
+      expect(line.includes('custom_view_property')).assertTrue();
+      expect(line.includes('view_property_custom_view_property')).assertFalse();
     });
 
     it('logUpdateShouldUpload', 0, async () => {
@@ -769,6 +799,14 @@ export default function dataSyncTest() {
       expect(resourceRecord !== null).assertTrue();
       expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
       expect(errorRecord !== null).assertTrue();
+      const resourceRumId = getLineProtocolTag(resourceRecord?.getDataString() ?? '', 'resource_id');
+      const resourceDataId = getLineProtocolTag(resourceRecord?.getDataString() ?? '', 'sdk_data_id');
+      const errorRumId = getLineProtocolTag(errorRecord?.getDataString() ?? '', 'resource_id');
+      expect(isSdkUuid(resourceRumId)).assertTrue();
+      expect(resourceRumId).assertEqual(resourceDataId);
+      expect(errorRumId).assertEqual(resourceRumId);
+      resourceFragments.push(`resource_id=${resourceRumId}`);
+      errorFragments.push(`resource_id=${resourceRumId}`);
 
       collector.clearRequests();
       FTSDK.flushSyncData();

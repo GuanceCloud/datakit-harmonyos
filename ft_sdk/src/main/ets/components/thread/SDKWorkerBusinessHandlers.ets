@@ -58,6 +58,14 @@ import { prepareDataUploadPayload } from './workers/DataUploadCompression';
 
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
+const WEBVIEW_RESOURCE_ERROR_LINK_MAX_KEYS = 256;
+const WEBVIEW_RESOURCE_ERROR_LINK_MAX_PER_KEY = 8;
+const WEBVIEW_RESOURCE_ERROR_LINK_MAX_AGE_MS = 30 * 1000;
+
+interface SDKWebViewResourceErrorLink {
+  resourceUuid: string;
+  eventTime: number;
+}
 
 export interface SDKWorkerRuntimeState {
   pool: SDKDedicatedPoolType;
@@ -74,6 +82,7 @@ export interface SDKWorkerRuntimeState {
   rumCounterNeedsActionCloseCheck: boolean;
   rumCounterNeedsRumDataGenerate: boolean;
   rumResources: Map<string, SDKRumWorkerResourceState>;
+  webViewResourceErrorLinks: Map<string, SDKWebViewResourceErrorLink[]>;
   logQueue: SDKLogDTO[];
   logBatchBuffer: SDKLogDTO[];
   uploadIsScheduled: boolean;
@@ -275,6 +284,7 @@ interface SDKRumWorkerResourceState {
   resourceDownloadTimeStart: number;
   resourceLoad: number;
   properties: SDKStringRecord;
+  startRegistered: boolean;
   contentSet: boolean;
   netStateSet: boolean;
   isProcessing: boolean;
@@ -308,6 +318,7 @@ export function createSDKWorkerRuntimeStateWithBackend(
     rumCounterNeedsActionCloseCheck: false,
     rumCounterNeedsRumDataGenerate: false,
     rumResources: new Map<string, SDKRumWorkerResourceState>(),
+    webViewResourceErrorLinks: new Map<string, SDKWebViewResourceErrorLink[]>(),
     logQueue: [],
     logBatchBuffer: [],
     uploadIsScheduled: false,
@@ -463,6 +474,7 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.rumCounterNeedsActionCloseCheck = false;
   state.rumCounterNeedsRumDataGenerate = false;
   state.rumResources.clear();
+  state.webViewResourceErrorLinks.clear();
   state.logQueue = [];
   state.logBatchBuffer = [];
   state.uploadIsScheduled = false;
@@ -562,6 +574,7 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
   }
 
   const finalizedEvent = finalizeRumEvent(event);
+  correlateWebViewResourceError(finalizedEvent, state);
   const eventType = finalizedEvent.eventType || '';
 
   state.eventSequence++;
@@ -672,6 +685,137 @@ function finalizeRumEvent(event: SDKRumEventDTO): SDKRumEventDTO {
     tags,
     fields
   };
+}
+
+/**
+ * Browser RUM sends a failed Resource and the generated network Error as two
+ * independent WebView events.  Once the Resource has its final draft UUID,
+ * retain that UUID briefly so the following Error can point to the Resource
+ * record rather than receiving an unrelated `resource_id`.
+ */
+function correlateWebViewResourceError(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): void {
+  if (event.dataType !== 'rum_webview') {
+    return;
+  }
+
+  const tags = event.tags || {};
+  const fields = event.fields || {};
+  event.tags = tags;
+  const correlationKey = getWebViewResourceCorrelationKey(event);
+  if (event.measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+    // A Resource's resource_id is its local persisted UUID. During upload the
+    // sdk_data_id tag receives a package prefix, while resource_id stays the
+    // stable UUID used to link its generated Error.
+    tags[Constants.KEY_RUM_RESOURCE_ID] = event.uuid || '';
+    if (correlationKey.length > 0 && event.uuid && event.uuid.length > 0) {
+      rememberWebViewResourceErrorLink(correlationKey, event.uuid, event.time, state);
+    }
+    return;
+  }
+
+  if (event.measurement !== Constants.FT_MEASUREMENT_RUM_ERROR ||
+    readWorkerEventValue(tags, fields, Constants.KEY_RUM_ERROR_SOURCE) !== 'network' ||
+    correlationKey.length === 0) {
+    return;
+  }
+
+  const resourceUuid = consumeWebViewResourceErrorLink(correlationKey, event.time, state);
+  if (resourceUuid.length > 0) {
+    tags[Constants.KEY_RUM_RESOURCE_ID] = resourceUuid;
+  }
+}
+
+function getWebViewResourceCorrelationKey(event: SDKRumEventDTO): string {
+  const tags = event.tags || {};
+  const fields = event.fields || {};
+  const resourceUrl = readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_URL);
+  if (resourceUrl.length === 0) {
+    return '';
+  }
+  const viewId = readWorkerEventValue(tags, fields, Constants.KEY_RUM_VIEW_ID) || event.viewId || '';
+  const method = readWorkerEventValue(tags, fields, Constants.KEY_RUM_RESOURCE_METHOD);
+  return `${viewId}\u0001${method}\u0001${resourceUrl}`;
+}
+
+function rememberWebViewResourceErrorLink(
+  correlationKey: string,
+  resourceUuid: string,
+  eventTime: number,
+  state: SDKWorkerRuntimeState
+): void {
+  discardExpiredWebViewResourceErrorLinksFromState(state, eventTime);
+  let links = state.webViewResourceErrorLinks.get(correlationKey);
+  if (!links) {
+    if (state.webViewResourceErrorLinks.size >= WEBVIEW_RESOURCE_ERROR_LINK_MAX_KEYS) {
+      const keys = Array.from(state.webViewResourceErrorLinks.keys());
+      if (keys.length > 0) {
+        state.webViewResourceErrorLinks.delete(keys[0]);
+      }
+    }
+    links = [];
+    state.webViewResourceErrorLinks.set(correlationKey, links);
+  }
+  links.push({ resourceUuid, eventTime });
+  if (links.length > WEBVIEW_RESOURCE_ERROR_LINK_MAX_PER_KEY) {
+    links.splice(0, links.length - WEBVIEW_RESOURCE_ERROR_LINK_MAX_PER_KEY);
+  }
+}
+
+function consumeWebViewResourceErrorLink(
+  correlationKey: string,
+  errorTime: number,
+  state: SDKWorkerRuntimeState
+): string {
+  discardExpiredWebViewResourceErrorLinksFromState(state, errorTime);
+  const links = state.webViewResourceErrorLinks.get(correlationKey);
+  if (!links || links.length === 0) {
+    return '';
+  }
+
+  let matchedIndex = 0;
+  let smallestTimeDistance = Math.abs(links[0].eventTime - errorTime);
+  for (let i = 1; i < links.length; i++) {
+    const timeDistance = Math.abs(links[i].eventTime - errorTime);
+    if (timeDistance < smallestTimeDistance) {
+      matchedIndex = i;
+      smallestTimeDistance = timeDistance;
+    }
+  }
+  const resourceUuid = links[matchedIndex].resourceUuid;
+  links.splice(matchedIndex, 1);
+  if (links.length === 0) {
+    state.webViewResourceErrorLinks.delete(correlationKey);
+  }
+  return resourceUuid;
+}
+
+function discardExpiredWebViewResourceErrorLinksFromState(
+  state: SDKWorkerRuntimeState,
+  referenceTime: number
+): void {
+  const correlationKeys = Array.from(state.webViewResourceErrorLinks.keys());
+  for (let i = 0; i < correlationKeys.length; i++) {
+    const correlationKey = correlationKeys[i];
+    const links = state.webViewResourceErrorLinks.get(correlationKey);
+    if (!links) {
+      continue;
+    }
+    discardExpiredWebViewResourceErrorLinks(links, referenceTime);
+    if (links.length === 0) {
+      state.webViewResourceErrorLinks.delete(correlationKey);
+    }
+  }
+}
+
+function discardExpiredWebViewResourceErrorLinks(
+  links: SDKWebViewResourceErrorLink[],
+  referenceTime: number
+): void {
+  for (let i = links.length - 1; i >= 0; i--) {
+    if (Math.abs(links[i].eventTime - referenceTime) > WEBVIEW_RESOURCE_ERROR_LINK_MAX_AGE_MS) {
+      links.splice(i, 1);
+    }
+  }
 }
 
 function deriveRumEventType(measurement: string, fields: SDKStringRecord, fallback: string): string {
@@ -815,18 +959,19 @@ function prepareRumWebViewLineRecords(
   const inputTags = event.tags || {};
   const tags: SDKStringRecord = {};
   const fields = copyStringRecord(event.fields || {});
-  const webviewService = inputTags[Constants.KEY_SERVICE] || '';
-  const webviewSdkVersion = inputTags[Constants.KEY_SDK_VERSION] || '';
 
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
+  // Mirror Android's SyncDataHelper ordering: Browser tags are received first,
+  // then dynamic tags are overlaid, followed by static native RUM tags.
+  mergeStringRecords(tags, inputTags);
   mergeStringRecords(tags, lineContext.dynamicBaseTags);
   mergeStringRecords(tags, lineContext.dynamicRumTags);
-  mergeStringRecords(tags, inputTags);
+  const webviewSdkVersion = tags[Constants.KEY_SDK_VERSION] || '';
 
   const rumTagKeys = Object.keys(lineContext.rumTags);
   for (let i = 0; i < rumTagKeys.length; i++) {
     const key = rumTagKeys[i];
-    if (key === Constants.KEY_SERVICE || key === Constants.KEY_SDK_VERSION) {
+    if (key === Constants.KEY_SERVICE) {
       continue;
     }
     const value = lineContext.rumTags[key];
@@ -834,12 +979,6 @@ function prepareRumWebViewLineRecords(
       appendWebSdkVersion(value, webviewSdkVersion) : value;
   }
 
-  if (webviewService.length > 0) {
-    tags[Constants.KEY_SERVICE] = webviewService;
-  }
-  if (webviewSdkVersion.length > 0) {
-    tags[Constants.KEY_SDK_VERSION] = webviewSdkVersion;
-  }
   if (tags[Constants.KEY_SDK_PACKAGE_INFO]) {
     tags[Constants.KEY_SDK_PACKAGE_INFO] = appendWebSdkVersion(
       tags[Constants.KEY_SDK_PACKAGE_INFO],
@@ -938,6 +1077,9 @@ function processRumErrorCommand(
   state.eventSequence++;
   const tags: SDKStringRecord = {};
   const context = command.context;
+  // DataKit runs source-map processing for RUM errors and requires sdk_name on
+  // every error point, including points assembled without a line context.
+  tags[Constants.KEY_SDK_NAME] = Constants.SDK_NAME.toString();
   tags[Constants.KEY_RUM_ERROR_SOURCE] = command.errorSource || 'logger';
   tags[Constants.KEY_RUM_ERROR_TYPE] = command.errorType || 'unknown';
   tags[Constants.KEY_RUM_ERROR_SITUATION] = command.appState || 'unknown';
@@ -1108,6 +1250,10 @@ function processRumResourceCommand(
   }
 
   if (commandType === 'start') {
+    if (resource.startRegistered) {
+      return false;
+    }
+    resource.startRegistered = true;
     resource.startTime = command.startTime && command.startTime > 0 ? command.startTime : resource.startTime;
     if (!stateRecoveryOnly) {
       appendResourcePendingIncreaseDelta(state, resource.context.viewId, resource.context.actionId);
@@ -1207,6 +1353,7 @@ function getOrCreateRumResourceState(
     resourceDownloadTimeStart: -1,
     resourceLoad: -1,
     properties: {},
+    startRegistered: false,
     contentSet: false,
     netStateSet: false,
     isProcessing: false,
@@ -1221,12 +1368,16 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   if (!context) {
     return;
   }
-  resource.context.sessionId = context.sessionId || resource.context.sessionId;
-  resource.context.viewId = context.viewId || resource.context.viewId;
-  resource.context.viewName = context.viewName || resource.context.viewName;
-  resource.context.viewReferrer = context.viewReferrer || resource.context.viewReferrer;
-  resource.context.actionId = context.actionId || resource.context.actionId;
-  resource.context.actionName = context.actionName || resource.context.actionName;
+  // The start command owns resource context. Later lifecycle commands can
+  // supply a context only when the resource did not have one (for example,
+  // addResource without a preceding startResource), preventing a late
+  // completion from being rebound to a newer action.
+  resource.context.sessionId = resource.context.sessionId || context.sessionId;
+  resource.context.viewId = resource.context.viewId || context.viewId;
+  resource.context.viewName = resource.context.viewName || context.viewName;
+  resource.context.viewReferrer = resource.context.viewReferrer || context.viewReferrer;
+  resource.context.actionId = resource.context.actionId || context.actionId;
+  resource.context.actionName = resource.context.actionName || context.actionName;
 }
 
 function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRumResourceParamsDTO): void {
@@ -1409,6 +1560,7 @@ function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEven
 
 function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRumEventDTO {
   const tags: SDKStringRecord = {};
+  tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
   tags[Constants.KEY_RUM_ERROR_TYPE] = 'network';
   tags[Constants.KEY_RUM_ERROR_SOURCE] = 'network';
   tags[Constants.KEY_RUM_ERROR_SITUATION] = 'run';
@@ -1458,6 +1610,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
 
 function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const tags: SDKStringRecord = {};
+  tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
   tags[Constants.KEY_RUM_SESSION_ID] = resource.context.sessionId;
   tags[Constants.KEY_RUM_VIEW_ID] = resource.context.viewId;
   tags[Constants.KEY_RUM_VIEW_NAME] = resource.context.viewName;
@@ -3158,7 +3311,12 @@ function applyPackageId(dataString: string, uuid: string, packageId: string): st
   if (!dataString || !uuid || !packageId) {
     return dataString || '';
   }
-  return dataString.replace(uuid, `${packageId}.${uuid}`);
+  // A Resource can use its draft UUID as resource_id. Prefixing the first
+  // matching UUID would then corrupt resource_id rather than sdk_data_id,
+  // breaking its link to the generated network Error. Only sdk_data_id is an
+  // upload transport identifier and must receive the package prefix.
+  const sdkDataId = `${Constants.KEY_SDK_DATA_FLAG}=${uuid}`;
+  return dataString.replace(sdkDataId, `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${uuid}`);
 }
 
 function buildLineProtocol(
