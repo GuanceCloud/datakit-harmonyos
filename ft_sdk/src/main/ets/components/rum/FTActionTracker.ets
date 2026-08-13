@@ -372,49 +372,124 @@ export class FTActionTracker {
   }
 
   /**
-   * Build action name from component type and ID
-   * Format: NodeType/ID (similar to Android's getViewDesc: ClassName/text#viewId)
-   * @param nodeType Component type
-   * @param nodeId Component ID
-   * @returns Action name string
+   * Build the default automatic-action name using Android's component/text#id format.
+   * A configured FTActionTrackingHandler bypasses this method and supplies its name unchanged.
    */
   private buildActionName(nodeType: string, nodeId: string | undefined, node?: FrameNode): string {
-    // Prefer descriptive name from customProperty when available; fallback to NodeType/ID
-    // Example fallback: Button/button1, Checkbox/checkbox1, Radio/radio1, Toggle/toggle1
-    let actionName: string = nodeId && nodeId.length > 0 ? `${nodeType}/${nodeId}` : `${nodeType}/`;
+    const nodeText = this.resolveNodeText(node, nodeId);
+    const resourceId = nodeId && nodeId.length > 0 ? `#${nodeId}` : '';
+    return `${nodeType}/${nodeText}${resourceId}${this.resolvePositionSuffix(node)}`;
+  }
+
+  /**
+   * Resolve a user-visible control label without changing the caller-provided value.
+   * customProperty values are preferred so applications can supply a semantic name when
+   * the platform does not expose a textual component attribute.
+   */
+  private resolveNodeText(node: FrameNode | undefined, nodeId: string | undefined): string {
+    if (!node) {
+      return '';
+    }
+
     try {
-      if (node) {
-        interface CustomPropertyGetter { getCustomProperty(key: string): Object }
-        const maybe: CustomPropertyGetter = node as CustomPropertyGetter;
-        if (maybe && typeof maybe.getCustomProperty === 'function') {
-          // Priority 1: Check for 'action-count-test' customProperty (for ActionCountTestPage)
-          const actionCountTest: Object = maybe.getCustomProperty('action-count-test');
-          if (typeof actionCountTest === 'string' && actionCountTest.length > 0) {
-            actionName = actionCountTest;
-            return actionName;
-          }
-          
-          // Priority 2: Check for nodeId-mapped customProperty
-          if (nodeId && nodeId.length > 0) {
-            const valueObj: Object = maybe.getCustomProperty(nodeId);
-            if (typeof valueObj === 'string' && valueObj.length > 0) {
-              actionName = valueObj;
-              return actionName;
-            }
-          }
-          
-          // Priority 3: Check for generic 'action_name' customProperty
-          const generic: Object = maybe.getCustomProperty('action_name');
-          if (typeof generic === 'string' && generic.length > 0) {
-            actionName = generic;
-            return actionName;
+      interface CustomPropertyGetter { getCustomProperty(key: string): Object | undefined }
+      const customPropertyNode = node as CustomPropertyGetter;
+      if (customPropertyNode && typeof customPropertyNode.getCustomProperty === 'function') {
+        const keys: string[] = ['action-count-test'];
+        if (nodeId && nodeId.length > 0) {
+          keys.push(nodeId);
+        }
+        keys.push('action_name', 'action_text', 'text', 'label');
+        for (let i = 0; i < keys.length; i++) {
+          const text = this.asNonEmptyString(customPropertyNode.getCustomProperty(keys[i]));
+          if (text.length > 0) {
+            return text;
           }
         }
       }
-    } catch (e) {
-      // Ignore and keep fallback name
+    } catch (error) {
+      FTInnerLogger.d(TAG, `[ACTION-TRACK] Cannot read custom action text: ${error}`);
     }
-    return actionName;
+
+    // FrameNode does not offer a component-specific text getter. Inspector attributes are
+    // available from API 12 and are consulted only after application-provided properties.
+    try {
+      const inspectorInfo = node.getInspectorInfo() as Record<string, Object>;
+      const attributes = inspectorInfo['$attrs'];
+      if (attributes && typeof attributes === 'object') {
+        const attributeRecord = attributes as Record<string, Object>;
+        const keys = ['text', 'label', 'content', 'value', 'title'];
+        for (let i = 0; i < keys.length; i++) {
+          const text = this.asNonEmptyString(attributeRecord[keys[i]]);
+          if (text.length > 0) {
+            return text;
+          }
+        }
+      }
+    } catch (error) {
+      FTInnerLogger.d(TAG, `[ACTION-TRACK] Cannot read inspector action text: ${error}`);
+    }
+
+    return '';
+  }
+
+  private asNonEmptyString(value: Object | undefined): string {
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return '';
+  }
+
+  /**
+   * Android appends positions for list and tab actions. The FrameNode hierarchy provides
+   * the equivalent ListItem/TabContent sibling index on HarmonyOS.
+   */
+  private resolvePositionSuffix(node: FrameNode | undefined): string {
+    const listItem = this.findAncestorByType(node, 'ListItem');
+    if (listItem) {
+      return `#position:${this.getSameTypeSiblingIndex(listItem, 'ListItem')}`;
+    }
+
+    const tabContent = this.findAncestorByType(node, 'TabContent');
+    if (tabContent) {
+      return `#position:${this.getSameTypeSiblingIndex(tabContent, 'TabContent')}`;
+    }
+
+    return '';
+  }
+
+  private findAncestorByType(node: FrameNode | undefined, targetType: string): FrameNode | null {
+    let current = node || null;
+    try {
+      for (let depth = 0; current !== null && depth < 32; depth++) {
+        if (current.getNodeType() === targetType) {
+          return current;
+        }
+        current = current.getParent();
+      }
+    } catch (error) {
+      FTInnerLogger.d(TAG, `[ACTION-TRACK] Cannot resolve ${targetType} position: ${error}`);
+    }
+    return null;
+  }
+
+  private getSameTypeSiblingIndex(node: FrameNode, nodeType: string): number {
+    let index = 0;
+    try {
+      let sibling = node.getPreviousSibling();
+      for (let inspected = 0; sibling !== null && inspected < 10000; inspected++) {
+        if (sibling.getNodeType() === nodeType) {
+          index++;
+        }
+        sibling = sibling.getPreviousSibling();
+      }
+    } catch (error) {
+      FTInnerLogger.d(TAG, `[ACTION-TRACK] Cannot resolve ${nodeType} sibling index: ${error}`);
+    }
+    return index;
   }
 
   /**

@@ -855,7 +855,10 @@ class FTTrackInner {
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         if (payload.deltas && payload.deltas.length > 0) {
           rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -868,7 +871,10 @@ class FTTrackInner {
       this.logRumCacheDiscard(drafts.length);
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         // DISCARD is terminal for these drafts. Advance the barrier here so
         // resource draft/context state is still converged without a DB task.
@@ -900,7 +906,10 @@ class FTTrackInner {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
     if (draftsCommitted && countersApplied) {
-      rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+      rumManager.markRumResourcesCompleted(
+        payload.completedResourceIds || [],
+        !!(payload.deltas && payload.deltas.length > 0)
+      );
       rumManager.markRumSemanticHostApplied(response.id);
       if (payload.deltas && payload.deltas.length > 0) {
         rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -1562,7 +1571,8 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    collectType: CollectType = CollectType.ALL
+    collectType: CollectType = CollectType.ALL,
+    draftUuid?: string
   ): void {
     FTInnerLogger.d(TAG, `TAG ========== rumWebView() called ==========`);
     FTInnerLogger.d(TAG, `TAG Measurement: ${measurement},Time: ${time}, Collect type: ${collectType}`);
@@ -1574,7 +1584,7 @@ class FTTrackInner {
 
     if (sessionId && this.dataHelper.checkSessionWillCollect(sessionId)) {
       FTInnerLogger.d(TAG, `TAG Session will collect, calling syncDataBackground`);
-      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null);
+      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null, draftUuid);
     } else {
       const willCollect = sessionId ? this.dataHelper.checkSessionWillCollect(sessionId) : false;
       FTInnerLogger.w(TAG,
@@ -2022,12 +2032,24 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     // Reduced logging - only log key information
 
     const taskName = `data.prepare:${measurement}`;
-    this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+    this.submitRumWorkerDraftTask(
+      taskName,
+      dataType,
+      undefined,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      false,
+      draftUuid
+    );
   }
 
   private syncDataBackgroundRecords(

@@ -1,5 +1,6 @@
 import { process, util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
+import { batteryInfo } from '@kit.BasicServicesKit';
 import {
   SDKBackgroundMetricsRequestDTO,
   SDKBackgroundMetricsResultDTO
@@ -7,7 +8,7 @@ import {
 
 let cachedCpuTickCount = -1;
 let cachedCpuAt = 0;
-let cachedMemoryUsageMB = -1;
+let cachedMemoryUsageBytes = -1;
 let cachedMemoryAt = 0;
 
 /** Runs only inside the DataProcessWorker background-metrics command. */
@@ -16,19 +17,20 @@ export function collectBackgroundMetricsInWorker(
 ): SDKBackgroundMetricsResultDTO {
   const now = Date.now();
   let cpuTickCount = -1;
-  let memoryUsageMB = -1;
-  let batteryCurrent = -1;
+  let memoryUsageBytes = -1;
+  let batteryCurrent = 0;
+  let hasBatteryCurrent = false;
   let cpuFromCache = false;
   let memoryFromCache = false;
 
   if (payload && payload.collectCpu) {
     const cpuCacheMs = normalizeCacheMs(payload.cpuCacheMs, 5000);
-    if (cachedCpuTickCount > 0 && now - cachedCpuAt < cpuCacheMs) {
+    if (cpuCacheMs > 0 && cachedCpuTickCount >= 0 && now - cachedCpuAt < cpuCacheMs) {
       cpuTickCount = cachedCpuTickCount;
       cpuFromCache = true;
     } else {
       cpuTickCount = readAppCpuTickCount();
-      if (cpuTickCount > 0) {
+      if (cpuTickCount >= 0) {
         cachedCpuTickCount = cpuTickCount;
         cachedCpuAt = now;
       }
@@ -37,26 +39,31 @@ export function collectBackgroundMetricsInWorker(
 
   if (payload && payload.collectMemory) {
     const memoryCacheMs = normalizeCacheMs(payload.memoryCacheMs, 3000);
-    if (cachedMemoryUsageMB > 0 && now - cachedMemoryAt < memoryCacheMs) {
-      memoryUsageMB = cachedMemoryUsageMB;
+    if (memoryCacheMs > 0 && cachedMemoryUsageBytes >= 0 && now - cachedMemoryAt < memoryCacheMs) {
+      memoryUsageBytes = cachedMemoryUsageBytes;
       memoryFromCache = true;
     } else {
-      memoryUsageMB = readAppMemoryUsageMB();
-      if (memoryUsageMB > 0) {
-        cachedMemoryUsageMB = memoryUsageMB;
+      memoryUsageBytes = readAppMemoryUsageBytes();
+      if (memoryUsageBytes >= 0) {
+        cachedMemoryUsageBytes = memoryUsageBytes;
         cachedMemoryAt = now;
       }
     }
   }
 
   if (payload && payload.collectBattery) {
-    batteryCurrent = readBatteryCurrent();
+    const current = readBatteryCurrent();
+    if (current !== undefined) {
+      batteryCurrent = current;
+      hasBatteryCurrent = true;
+    }
   }
 
   return {
     cpuTickCount,
-    memoryUsageMB,
+    memoryUsageBytes,
     batteryCurrent,
+    hasBatteryCurrent,
     collectedAt: now,
     cpuFromCache,
     memoryFromCache
@@ -93,12 +100,13 @@ export function parseProcStatCpuTicks(content: string): number {
   if (fields.length <= 14) {
     return -1;
   }
+  // Android's CpuUtils#getAppCPUTickCount returns /proc/<pid>/stat field 14
+  // (utime) only. Keep the same user-tick definition across SDKs.
   const userTicks = parseInt(fields[13], 10);
-  const systemTicks = parseInt(fields[14], 10);
-  return isNaN(userTicks) || isNaN(systemTicks) ? -1 : userTicks + systemTicks;
+  return isNaN(userTicks) ? -1 : userTicks;
 }
 
-export function parseProcStatusMemoryMB(content: string): number {
+export function parseProcStatusMemoryBytes(content: string): number {
   if (!content || content.length === 0) {
     return -1;
   }
@@ -107,13 +115,14 @@ export function parseProcStatusMemoryMB(content: string): number {
     return -1;
   }
   const memoryKB = parseInt(match[1], 10);
-  return isNaN(memoryKB) ? -1 : memoryKB / 1024;
+  // Android reports VmRSS in bytes by multiplying the proc value by 1000.
+  return isNaN(memoryKB) ? -1 : memoryKB * 1000;
 }
 
 export function resetBackgroundMetricsCacheForTest(): void {
   cachedCpuTickCount = -1;
   cachedCpuAt = 0;
-  cachedMemoryUsageMB = -1;
+  cachedMemoryUsageBytes = -1;
   cachedMemoryAt = 0;
 }
 
@@ -121,17 +130,26 @@ function readAppCpuTickCount(): number {
   return parseProcStatCpuTicks(readSmallTextFile(`/proc/${process.pid}/stat`, 2048));
 }
 
-function readAppMemoryUsageMB(): number {
-  return parseProcStatusMemoryMB(readSmallTextFile(`/proc/${process.pid}/status`, 8192));
+function readAppMemoryUsageBytes(): number {
+  return parseProcStatusMemoryBytes(readSmallTextFile(`/proc/${process.pid}/status`, 8192));
 }
 
-function readBatteryCurrent(): number {
+function readBatteryCurrent(): number | undefined {
+  try {
+    const current = batteryInfo.nowCurrent;
+    if (Number.isFinite(current)) {
+      return Math.trunc(current);
+    }
+  } catch (_) {
+    // Some device classes do not expose a battery current through BatteryManager.
+  }
+
   const content = readSmallTextFile('/sys/class/power_supply/battery/current_now', 32).trim();
   if (content.length === 0) {
-    return -1;
+    return undefined;
   }
   const microAmps = parseInt(content, 10);
-  return isNaN(microAmps) ? -1 : Math.floor(microAmps / 1000);
+  return isNaN(microAmps) ? undefined : Math.trunc(microAmps / 1000);
 }
 
 function readSmallTextFile(path: string, maxBytes: number): string {
@@ -154,8 +172,11 @@ function readSmallTextFile(path: string, maxBytes: number): string {
 }
 
 function normalizeCacheMs(value: number, fallback: number): number {
-  if (value !== value || value <= 0) {
+  if (!Number.isFinite(value) || value < 0) {
     return fallback;
+  }
+  if (value === 0) {
+    return 0;
   }
   return Math.min(60_000, Math.max(1000, Math.floor(value)));
 }

@@ -3,6 +3,7 @@
  */
 import { DataType } from '../../enum/Enums';
 import { Utils } from '../../utils';
+import { Constants } from '../../Constants';
 
 /**
  * SyncData JSON Interface
@@ -164,8 +165,8 @@ export class SyncData {
 
 
   /**
-   * Mark package sequence ID, replace uuid with packageId.uuid in sdk_data_id tag
-   * Android: dataString = dataString.replaceFirst(uuid, packageId + "." + uuid);
+   * Mark package sequence ID in the sdk_data_id tag. Resource records can use
+   * the same UUID in resource_id, which must not be changed by this operation.
    * This replaces the uuid in sdk_data_id tag, changing:
    * sdk_data_id=abc123 -> sdk_data_id=1_2_3.abc123
    * Used for data tracking and batch identification
@@ -176,9 +177,8 @@ export class SyncData {
     if (!this.dataString || !packageId) {
       return this.dataString || "";
     }
-    // Replace the first occurrence of uuid with packageId.uuid
-    // This is done to mark the data with package ID for tracking
-    return this.dataString.replace(this.uuid, `${packageId}.${this.uuid}`);
+    const sdkDataId = `${Constants.KEY_SDK_DATA_FLAG}=${this.uuid}`;
+    return this.dataString.replace(sdkDataId, `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${this.uuid}`);
   }
 
   /**
