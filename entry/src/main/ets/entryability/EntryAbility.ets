@@ -6,6 +6,7 @@ import window from '@ohos.window';
 import { hidebug } from '@kit.PerformanceAnalysisKit';
 import {
   DBCacheDiscard,
+  DetectFrequency,
   DeviceMetricsMonitorType,
   EnvType,
   ErrorMonitorType,
@@ -564,7 +565,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserView(true)
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
-        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL)
+        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
         // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
