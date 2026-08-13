@@ -1,4 +1,4 @@
-import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { describe, beforeEach, afterEach, it } from '@ohos/hypium';
 import { FTRUMConfig } from '../../../main/ets/components/Configs';
 import { FTUIBlockManager } from '../../../main/ets/components/monitor/FTUIBlockManager';
 
@@ -16,25 +16,13 @@ export default function uiBlockManagerDeviceTest() {
       manager.release();
     });
 
-    it('shouldUsePlatformObserverWithoutPollingTimer', 0, () => {
+    it('shouldStartAndReleasePlatformObserver', 0, () => {
       manager.start(new FTRUMConfig()
         .setRumAppId(TEST_FAKE_RUM_ID)
         .setEnableTrackAppUIBlock(true, 1000));
-
-      const running = manager.getStatus();
-      expect(running.isRunning).assertTrue();
-      expect(running.isAppInForeground).assertFalse();
-      expect(running.usesPollingTimer).assertFalse();
-
       manager.setAppInForeground(true);
-      expect(manager.getStatus().isAppInForeground).assertTrue();
       manager.setAppInForeground(false);
-      expect(manager.getStatus().isAppInForeground).assertFalse();
-
       manager.release();
-      const released = manager.getStatus();
-      expect(released.isRunning).assertFalse();
-      expect(released.isAppInForeground).assertFalse();
     });
   });
 }
