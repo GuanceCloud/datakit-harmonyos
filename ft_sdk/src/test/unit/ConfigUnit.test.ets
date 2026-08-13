@@ -482,8 +482,10 @@ export default function configUnitTest() {
         .setEnableTraceUserResource(true)
         .setEnableTraceWebView(true)
         .setExtraMonitorTypeWithError(ErrorMonitorType.CPU)
-        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)
-        .setDeviceMetricsDetectFrequency(DetectFrequency.FREQUENT);
+        .setDeviceMetricsMonitorType(
+          DeviceMetricsMonitorType.MEMORY,
+          DetectFrequency.FREQUENT
+        );
 
       expect(config.getRumAppId()).assertEqual(TEST_FAKE_RUM_ID);
       expect(config.getBlockDurationMS()).assertEqual(100);
