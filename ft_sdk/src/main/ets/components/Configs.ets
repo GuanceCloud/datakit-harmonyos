@@ -273,33 +273,6 @@ export class FTRUMConfig {
     return this.allowWebViewHost === null ? null : this.allowWebViewHost.slice();
   }
 
-  // public getExtraMonitorTypeWithError(): number {
-  //   return this.extraMonitorTypeWithError;
-  // }
-  //
-  // public setExtraMonitorTypeWithError(extraMonitorTypeWithError: number): FTRUMConfig {
-  //   this.extraMonitorTypeWithError = extraMonitorTypeWithError;
-  //   return this;
-  // }
-  //
-  // public getDeviceMetricsMonitorType(): number {
-  //   return this.deviceMetricsMonitorType;
-  // }
-  //
-  // public setDeviceMetricsMonitorType(deviceMetricsMonitorType: number): FTRUMConfig {
-  //   this.deviceMetricsMonitorType = deviceMetricsMonitorType;
-  //   return this;
-  // }
-  //
-  // public setDeviceMetricsMonitorTypeWithFrequency(
-  //   deviceMetricsMonitorType: number,
-  //   frequency: DetectFrequency
-  // ): FTRUMConfig {
-  //   this.deviceMetricsMonitorType = deviceMetricsMonitorType;
-  //   this.deviceMetricsDetectFrequency = frequency;
-  //   return this;
-  // }
-
   public addGlobalContext(key: string, value: object): FTRUMConfig {
     this.globalContext.set(key, value);
     return this;
@@ -371,26 +344,22 @@ export class FTRUMConfig {
   }
 
   /**
-   * Set device metrics monitor type
+   * Set device metrics collection types and sampling frequency.
    */
-  public setDeviceMetricsMonitorType(deviceMetricsMonitorType: number): FTRUMConfig {
+  public setDeviceMetricsMonitorType(
+    deviceMetricsMonitorType: number,
+    deviceMetricsDetectFrequency: DetectFrequency
+  ): FTRUMConfig {
     this.deviceMetricsMonitorType = deviceMetricsMonitorType;
+    this.deviceMetricsDetectFrequency = deviceMetricsDetectFrequency;
     return this;
   }
 
   /**
-   * Get device metrics detect frequency
+   * Get device metrics detect frequency.
    */
   public getDeviceMetricsDetectFrequency(): DetectFrequency {
     return this.deviceMetricsDetectFrequency;
-  }
-
-  /**
-   * Set device metrics detect frequency
-   */
-  public setDeviceMetricsDetectFrequency(deviceMetricsDetectFrequency: DetectFrequency): FTRUMConfig {
-    this.deviceMetricsDetectFrequency = deviceMetricsDetectFrequency;
-    return this;
   }
 
   // public getExtraLogCatWithJavaCrash(): ExtraLogCatSetting | null {

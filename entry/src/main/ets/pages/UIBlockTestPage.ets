@@ -1,4 +1,5 @@
 import { FTSDK, FTRUMGlobalManager } from '@guancecloud/ft_sdk/Index';
+import { hiAppEvent } from '@kit.PerformanceAnalysisKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -23,7 +24,7 @@ export struct UIBlockTestPage {
   @State isSDKInitialized: boolean = false;
   @State isUIBlockEnabled: boolean = false;
   @State blockDurationThreshold: number = 0;
-  @State detectedBlockCount: number = 0;
+  @State systemJankTestPolicyConfigured: boolean = false;
   @State testResults: string = 'Ready to test UI Block detection\n';
   @State isTesting: boolean = false;
 
@@ -45,7 +46,6 @@ export struct UIBlockTestPage {
         this.isUIBlockEnabled = rumConfig.isEnableTrackAppUIBlock();
         this.blockDurationThreshold = rumConfig.getBlockDurationMS();
       }
-      
       this.testResults += `SDK Status: ${this.isSDKInitialized ? 'Initialized' : 'Not Initialized'}\n`;
       this.testResults += `UI Block Detection: ${this.isUIBlockEnabled ? 'Enabled' : 'Disabled'}\n`;
       if (this.isUIBlockEnabled && rumConfig) {
@@ -91,12 +91,23 @@ export struct UIBlockTestPage {
     }
 
     this.isTesting = true;
+    this.runUIBlock(durationMs, description);
+    this.isTesting = false;
+  }
+
+  /**
+   * Runs a single synchronous main-thread block. The caller is responsible for
+   * guarding concurrent tests so this method can also be reused by the
+   * multi-block scenario.
+   */
+  private runUIBlock(durationMs: number, description: string): void {
     this.testResults += `\n[${this.getTimeString()}] Starting: ${description} (${durationMs}ms)\n`;
     
     const startTime = Date.now();
     
-    // Perform CPU-intensive work on main thread to simulate blocking
-    // This will trigger UI Block detection if duration exceeds threshold
+    // Perform CPU-intensive work on main thread to simulate blocking.
+    // MAIN_THREAD_JANK is delivered asynchronously by the system after the
+    // block ends.
     let iterations = 0;
     const targetTime = startTime + durationMs;
     
@@ -113,12 +124,123 @@ export struct UIBlockTestPage {
     const actualDuration = Date.now() - startTime;
     this.testResults += `[${this.getTimeString()}] Completed: ${description}\n`;
     this.testResults += `  Actual duration: ${actualDuration}ms, Iterations: ${iterations}\n`;
-    this.testResults += `  If duration > threshold, UI Block should be detected\n\n`;
-    
-    this.detectedBlockCount++;
-    this.isTesting = false;
+    this.testResults += `  Waiting for the system MAIN_THREAD_JANK callback...\n\n`;
     
     DemoLogger.i(TAG, `<FT-UI-BLOCK-TEST> Simulated UI block: ${description}, duration: ${actualDuration}ms`);
+  }
+
+  /**
+   * Applies a low-threshold MAIN_THREAD_JANK policy to this demo process.
+   *
+   * This is deliberately a demo-only action. An SDK must not change the host
+   * application's system-event policy because it changes the process-wide
+   * sampling and report-rate behavior.
+   */
+  private async configureSystemJankTestPolicy(): Promise<boolean> {
+    if (this.systemJankTestPolicyConfigured) {
+      return true;
+    }
+
+    // `setEventConfig(MAIN_THREAD_JANK)` is the public ArkTS API that is
+    // explicitly documented for this event. Use the documented stack-sampling
+    // example values so the test does not depend on native-only V2 behavior.
+    const params: Record<string, hiAppEvent.ParamType> = {
+      'log_type': '1',
+      'sample_interval': '100',
+      'ignore_startup_time': '3',
+      'sample_count': '21',
+      'report_times_per_app': '3'
+    };
+    try {
+      await hiAppEvent.setEventConfig(hiAppEvent.event.MAIN_THREAD_JANK, params);
+      this.systemJankTestPolicyConfigured = true;
+      this.testResults += 'System Jank V1 test policy configured: interval=100ms, sample-count=21, startup-ignore=3s, report-limit=3\n';
+      DemoLogger.i(TAG, '<FT-UI-BLOCK-TEST> MAIN_THREAD_JANK V1 test policy configured');
+      return true;
+    } catch (error) {
+      // API 22 offers a newer policy API. It is a compatibility fallback only:
+      // the primary test path above remains the documented V1 event API.
+      this.testResults += `MAIN_THREAD_JANK V1 config unavailable, trying API 22 policy: ${String(error)}\n`;
+      const policy: hiAppEvent.EventPolicy = {
+        mainThreadJankPolicy: {
+          logType: 1,
+          sampleInterval: 100,
+          ignoreStartupTime: 3,
+          sampleCount: 21,
+          reportTimesPerApp: 3,
+          autoStopSampling: true
+        }
+      };
+      try {
+        await hiAppEvent.configEventPolicy(policy);
+        this.systemJankTestPolicyConfigured = true;
+        this.testResults += 'System Jank API 22 fallback policy configured: interval=100ms, sample-count=21, startup-ignore=3s, report-limit=3\n';
+        DemoLogger.i(TAG, '<FT-UI-BLOCK-TEST> MAIN_THREAD_JANK API 22 fallback policy configured');
+        return true;
+      } catch (fallbackError) {
+        this.testResults += `Failed to configure System Jank test policy: ${String(fallbackError)}\n`;
+        DemoLogger.e(TAG, 'Failed to configure MAIN_THREAD_JANK test policy:', fallbackError);
+        return false;
+      }
+    }
+  }
+
+  /**
+   * Prepares the documented jank policy. The three timeouts remain separate
+   * button clicks because the platform sample relies on separately dispatched
+   * click tasks, rather than timer callbacks queued by one click handler.
+   */
+  async testSystemJankCallback(): Promise<void> {
+    if (!this.isSDKInitialized) {
+      this.testResults += 'Error: SDK not initialized\n';
+      return;
+    }
+    if (!this.isUIBlockEnabled) {
+      this.testResults += 'Warning: UI Block detection is not enabled in RUM config\n';
+      return;
+    }
+    if (this.isTesting) {
+      this.testResults += 'Previous test is still running, please wait...\n';
+      return;
+    }
+
+    this.isTesting = true;
+    try {
+      const configured = await this.configureSystemJankTestPolicy();
+      if (!configured) {
+        return;
+      }
+
+      this.testResults += 'Waiting 3.2s for the system startup-ignore window before the MAIN_THREAD_JANK test...\n';
+      await new Promise<void>((resolve: () => void) => {
+        setTimeout(resolve, 3200);
+      });
+
+      this.testResults += 'Policy ready. Quickly tap 350ms, 150ms, then 500ms below as three separate clicks.\n';
+    } finally {
+      this.isTesting = false;
+    }
+  }
+
+  private runManualSystemJankTimeout(durationMs: number): void {
+    if (!this.systemJankTestPolicyConfigured) {
+      this.testResults += 'Prepare the System Jank policy first.\n';
+      return;
+    }
+    this.simulateUIBlock(durationMs, `Manual System Jank Timeout (${durationMs}ms)`);
+  }
+
+  testSmallBlock() {
+    if (!this.isSDKInitialized) {
+      this.testResults += 'Error: SDK not initialized\n';
+      return;
+    }
+    if (!this.isUIBlockEnabled) {
+      this.testResults += 'Warning: UI Block detection is not enabled in RUM config\n';
+      this.testResults += 'Please enable it: FTRUMConfig.setEnableTrackAppUIBlock(true)\n';
+      return;
+    }
+    this.simulateUIBlock(500, 'Medium Block (500ms)');
   }
 
   /**
@@ -208,7 +330,7 @@ export struct UIBlockTestPage {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       this.testResults += `\n[${this.getTimeString()}] Executing: ${block.desc}\n`;
-      this.simulateUIBlock(block.duration, block.desc);
+      this.runUIBlock(block.duration, block.desc);
       
       // Small delay between blocks
       await new Promise<void>((resolve: () => void) => {
@@ -275,7 +397,7 @@ export struct UIBlockTestPage {
    */
   clearResults() {
     this.testResults = 'Test results cleared\n';
-    this.detectedBlockCount = 0;
+    this.checkSDKStatus();
   }
 
   /**
@@ -303,16 +425,13 @@ export struct UIBlockTestPage {
         Text(`UI Block Detection: ${this.isUIBlockEnabled ? '✅ Enabled' : '❌ Disabled'}`)
           .fontSize(14)
           .margin({ bottom: 5 })
-        
+
         if (this.isUIBlockEnabled && this.blockDurationThreshold > 0) {
           Text(`Threshold: ${this.blockDurationThreshold}ms`)
             .fontSize(14)
             .margin({ bottom: 5 })
         }
         
-        Text(`Detected Blocks: ${this.detectedBlockCount}`)
-          .fontSize(14)
-          .fontColor(this.detectedBlockCount > 0 ? Color.Red : Color.Black)
       }
       .width('100%')
       .padding(10)
@@ -322,12 +441,77 @@ export struct UIBlockTestPage {
       // Test buttons
       Scroll() {
         Column() {
+          Text('System MAIN_THREAD_JANK Test')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .margin({ top: 10, bottom: 10 })
+            .width('100%')
+
+          Text('1. Prepare policy. 2. Quickly tap 350ms → 150ms → 500ms as separate clicks.')
+            .fontSize(12)
+            .fontColor('#666666')
+            .width('90%')
+            .margin({ bottom: 10 })
+
+          Button('1. Prepare System Jank Policy (about 4s)')
+            .width('90%')
+            .height(50)
+            .margin({ bottom: 10 })
+            .enabled(!this.isTesting)
+            .onClick(() => {
+              this.testSystemJankCallback();
+            })
+
+          Row() {
+            Button('2. Timeout 350ms')
+              .layoutWeight(1)
+              .height(45)
+              .margin({ right: 5 })
+              .enabled(this.systemJankTestPolicyConfigured && !this.isTesting)
+              .onClick(() => {
+                this.runManualSystemJankTimeout(350);
+              })
+
+            Button('3. Timeout 150ms')
+              .layoutWeight(1)
+              .height(45)
+              .margin({ left: 5, right: 5 })
+              .enabled(this.systemJankTestPolicyConfigured && !this.isTesting)
+              .onClick(() => {
+                this.runManualSystemJankTimeout(150);
+              })
+
+            Button('4. Timeout 500ms')
+              .layoutWeight(1)
+              .height(45)
+              .margin({ left: 5 })
+              .enabled(this.systemJankTestPolicyConfigured && !this.isTesting)
+              .onClick(() => {
+                this.runManualSystemJankTimeout(500);
+              })
+          }
+          .width('90%')
+          .margin({ bottom: 10 })
+
+          Divider()
+            .margin({ top: 10, bottom: 10 })
+
           // Basic tests
           Text('Basic Tests')
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .margin({ top: 10, bottom: 10 })
             .width('100%')
+
+
+          Button('Test 1: Medium Block (500ms)')
+            .width('90%')
+            .height(50)
+            .margin({ bottom: 10 })
+            .enabled(!this.isTesting)
+            .onClick(() => {
+              this.testSmallBlock();
+            })
 
           Button('Test 1: Medium Block (1500ms)')
             .width('90%')
