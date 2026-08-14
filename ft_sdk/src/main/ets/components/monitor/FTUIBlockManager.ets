@@ -6,22 +6,16 @@ import { hiAppEvent } from '@kit.PerformanceAnalysisKit';
 const TAG = 'FTUIBlockManager';
 const MAIN_THREAD_JANK_EVENT = 'MAIN_THREAD_JANK';
 
-export interface FTUIBlockManagerStatus {
-  isRunning: boolean;
-  isAppInForeground: boolean;
-  usesPollingTimer: boolean;
-}
-
 /**
  * Detects foreground main-thread blocks and reports them as RUM LongTasks.
  *
  * Android attaches a Printer to the main Looper and receives exactly one start
  * and end callback for each dispatched main-thread message. HarmonyOS does not
- * expose that Looper API. MAIN_THREAD_JANK is the platform-provided equivalent:
- * it represents one measured main-thread stall and optionally includes its
- * heaviest stack. We intentionally do not add a polling timer because a timer
- * delayed by background scheduling is not a main-thread message duration and
- * can duplicate the platform event.
+ * expose that Looper API. MAIN_THREAD_JANK is the platform-provided equivalent,
+ * but it starts after a system startup grace period, requires consecutive
+ * timeouts, and has a per-process reporting limit. LongTasks are created only
+ * after this platform observer receives a MAIN_THREAD_JANK event; the SDK does
+ * not use a polling or heartbeat fallback.
  */
 export class FTUIBlockManager {
   public static readonly DEFAULT_TIME_BLOCK_MS = 1000;
@@ -60,9 +54,13 @@ export class FTUIBlockManager {
 
     const blockDurationMs = config.getBlockDurationMS() || FTUIBlockManager.DEFAULT_TIME_BLOCK_MS;
     this.blockDurationNS = Math.max(blockDurationMs * 1000000, FTUIBlockManager.MINI_TIME_BLOCK_NS);
-    // Match Android's activity-count gate: do not collect until a foreground
-    // lifecycle event has been received after SDK installation.
-    this.isAppInForeground = false;
+    // RUM is normally installed from UIAbility.onCreate while that Ability is
+    // launching into the foreground. The first onAbilityForeground/
+    // onWindowStageActive notification can precede lifecycle-listener
+    // registration, so waiting for it would leave collection permanently
+    // disabled for the entire first foreground session. Subsequent lifecycle
+    // background callbacks still close this gate immediately.
+    this.isAppInForeground = true;
     this.isRunning = true;
     this.subscribeToMainThreadJankEvents();
     FTInnerLogger.i(TAG, `[FT-UI-BLOCK] UI block detection started with threshold: ${blockDurationMs}ms`);
@@ -73,17 +71,6 @@ export class FTUIBlockManager {
    */
   public setAppInForeground(isInForeground: boolean): void {
     this.isAppInForeground = isInForeground;
-  }
-
-  /**
-   * Internal status used by diagnostics and regression tests.
-   */
-  public getStatus(): FTUIBlockManagerStatus {
-    return {
-      isRunning: this.isRunning,
-      isAppInForeground: this.isAppInForeground,
-      usesPollingTimer: false
-    };
   }
 
   /**
@@ -102,7 +89,7 @@ export class FTUIBlockManager {
 
   private subscribeToMainThreadJankEvents(): void {
     try {
-      hiAppEvent.addWatcher({
+      const holder = hiAppEvent.addWatcher({
         name: this.appEventWatcherName,
         appEventFilters: [{
           domain: hiAppEvent.domain.OS,
@@ -112,6 +99,11 @@ export class FTUIBlockManager {
           this.handleMainThreadJankEvents(appEventGroups);
         }
       });
+      if (holder === null) {
+        FTInnerLogger.e(TAG, '[FT-UI-BLOCK] hiAppEvent.addWatcher returned null');
+        return;
+      }
+      FTInnerLogger.i(TAG, `[FT-UI-BLOCK] MAIN_THREAD_JANK watcher registered: ${this.appEventWatcherName}`);
     } catch (error) {
       FTInnerLogger.e(TAG, `[FT-UI-BLOCK] Failed to subscribe to MAIN_THREAD_JANK events: ${String(error)}`);
     }
@@ -156,12 +148,7 @@ export class FTUIBlockManager {
       if (durationNS <= this.blockDurationNS) {
         return;
       }
-
-      FTRUMInnerManager.getInstance().addLongTask(
-        this.getLongTaskMessage(params),
-        durationNS,
-        {}
-      );
+      FTRUMInnerManager.getInstance().addLongTask(this.getLongTaskMessage(params, eventInfo.name), durationNS, {});
       FTInnerLogger.i(TAG, `[FT-UI-BLOCK] Reported foreground main-thread block: duration=${durationMs.toFixed(2)}ms`);
     } catch (error) {
       FTInnerLogger.e(TAG, `[FT-UI-BLOCK] Failed to report MAIN_THREAD_JANK as long task: ${String(error)}`);
@@ -184,13 +171,21 @@ export class FTUIBlockManager {
         return duration;
       }
     }
+
+    // MAIN_THREAD_JANK provides its task time range as wall-clock timestamps.
+    // The event does not define duration/blockDuration/jankDuration fields.
+    const beginTime = Number(params.begin_time);
+    const endTime = Number(params.end_time);
+    if (Number.isFinite(beginTime) && Number.isFinite(endTime) && endTime > beginTime) {
+      return endTime - beginTime;
+    }
     return 0;
   }
 
-  private getLongTaskMessage(params: Record<string, Object>): string {
+  private getLongTaskMessage(params: Record<string, Object>, eventName: string): string {
     const method = typeof params.event_handler === 'string' && params.event_handler.length > 0
       ? params.event_handler
-      : MAIN_THREAD_JANK_EVENT;
+      : eventName;
     const stackCandidates: Array<Object | undefined> = [
       params.heaviest_stack,
       params.exception,

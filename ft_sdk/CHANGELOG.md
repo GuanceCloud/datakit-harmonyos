@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16] - 2026-07-29
-- Aligned UI block collection with Android semantics: the SDK now relies on one platform main-thread-jank event per block, reports only while foregrounded, and releases its observer on shutdown. The prior periodic polling timer has been removed.
+- Added View-scoped device metrics collection. Configure `FTRUMConfig.setDeviceMetricsMonitorType(...)` with `DeviceMetricsMonitorType` and `DetectFrequency` to report CPU, memory, battery-current, and FPS aggregates in RUM View events.
+- Fixed HarmonyOS automatic UI-block LongTask reporting: `MAIN_THREAD_JANK` duration is now calculated from the system event's `begin_time` and `end_time` fields.
+- UI block LongTask collection now uses only HarmonyOS `MAIN_THREAD_JANK` events; the SDK no longer generates timer or heartbeat fallback LongTasks.
 - Aligned WebView bridge enrichment with Android: no synthetic `view_path_name` is added, missing WebView referrers resolve from the native host View, and `sdk_version` follows Android's native-tag precedence while the Browser SDK version remains in `sdk_pkg_info`.
 - Aligned automatic Action names with Android: default names now use `component/text#id`, list and tab actions append `#position:n`, and configured `FTActionTrackingHandler` names remain unchanged.
 - Aligned View custom-property fields with Android: View properties now retain their caller-provided names instead of receiving a `view_property_` prefix.
