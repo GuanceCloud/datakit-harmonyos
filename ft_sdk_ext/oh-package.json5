@@ -4,6 +4,7 @@
   "description": "Guance HarmonyOS SDK extensions for newer compiler and platform capabilities.",
   "main": "Index.ets",
   "author": "Guance <lizhao@guance.com> (https://www.guance.com)",
+  "repository": "https://gitlab.jiagouyun.com/cma/ft-sdk-harmonyos.git",
   "license": "Apache-2.0",
   "dependencies": {
     // Keep ft_sdk_ext aligned with the published ft_sdk version it extends.

@@ -4,6 +4,7 @@
   "description": "Guance Native Crash Monitoring Module for HarmonyOS - Provides C++ crash detection and monitoring capabilities",
   "main": "Index.ets",
   "author": "Guance <lizhao@guance.com> (https://www.guance.com)",
+  "repository": "https://gitlab.jiagouyun.com/cma/ft-sdk-harmonyos.git",
   "license": "Apache-2.0",
   "dependencies": {}
 }
