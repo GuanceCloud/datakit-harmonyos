@@ -46,6 +46,9 @@ import {
 } from '../../main/ets/components/trace/FTTraceHeaderHandler';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
+import { FTViewNavigationTrackingHandler } from '../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
+import { FTViewRouterTrackingHandler } from '../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -389,6 +392,31 @@ export default function configUnitTest() {
       expect(rumConfig.getBlockDurationMS()).assertEqual(1000);
       expect(rumConfig.getRumCacheLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
       expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);
+    });
+
+    it('rumConfigShouldStoreAutomaticViewTrackingHandlers', 0, () => {
+      const routerHandler: FTViewRouterTrackingHandler = {
+        resolveHandlerView: (routeName: string): HandlerView | null => {
+          return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
+        }
+      };
+      const navigationHandler: FTViewNavigationTrackingHandler = {
+        resolveHandlerView: (destinationName: string): HandlerView | null => {
+          return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
+        }
+      };
+      const rumConfig = new FTRUMConfig()
+        .setViewRouterTrackingHandler(routerHandler)
+        .setViewNavigationTrackingHandler(navigationHandler);
+
+      expect(rumConfig.getViewRouterTrackingHandler() === routerHandler).assertTrue();
+      expect(rumConfig.getViewNavigationTrackingHandler() === navigationHandler).assertTrue();
+      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('Home')?.getViewName() ?? '')
+        .assertEqual('router_Home');
+      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('IgnoredRoute') === null).assertTrue();
+      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('Detail')?.getViewName() ?? '')
+        .assertEqual('navigation_Detail');
+      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('IgnoredDestination') === null).assertTrue();
     });
 
     it('sdkConfigShouldStoreCacheOptions', 0, () => {

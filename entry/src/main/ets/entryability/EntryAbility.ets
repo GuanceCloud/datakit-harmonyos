@@ -16,6 +16,9 @@ import {
   FTSDK,
   FTSDKConfig,
   FTTraceConfig,
+  FTViewNavigationTrackingHandler,
+  FTViewRouterTrackingHandler,
+  HandlerView,
   LogCacheDiscard,
   Status,
   SyncPageSize,
@@ -48,6 +51,11 @@ const NETWORK_ROUTE_TEST_HOST = '10.100.64.213';
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
 const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
 const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
+// Routes and Navigation destinations whose final name starts with this prefix
+// are deliberately excluded from automatic RUM View collection. Keep the
+// prefix-based rule in the demo so page filtering can be verified without
+// changing collection for its existing test pages.
+const IGNORED_AUTOMATIC_VIEW_PREFIX = 'IgnoreViewTracking';
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -89,6 +97,27 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
 
   onResult(success: boolean): void {
     DemoLogger.i(LOG_TAG, `Remote config fetch result: success=${success}`);
+  }
+}
+
+class DemoRouterViewTrackingHandler implements FTViewRouterTrackingHandler {
+  resolveHandlerView(routeName: string): HandlerView | null {
+    if (routeName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+      DemoLogger.i(LOG_TAG, `Router View filtered: ${routeName}`);
+      return null;
+    }
+    return new HandlerView(routeName);
+  }
+}
+
+class DemoNavigationViewTrackingHandler implements FTViewNavigationTrackingHandler {
+  resolveHandlerView(destinationName: string): HandlerView | null {
+    if (destinationName.trim().length === 0 ||
+      destinationName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+      DemoLogger.i(LOG_TAG, `Navigation View filtered: ${destinationName}`);
+      return null;
+    }
+    return new HandlerView(destinationName);
   }
 }
 
@@ -562,7 +591,8 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
         .setEnableTrackAppUIBlock(true,400)
-        .setEnableTraceUserView(true)
+        .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
+        .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)

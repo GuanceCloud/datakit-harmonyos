@@ -48,6 +48,9 @@ export { FTRemoteConfigFetchResult } from './src/main/ets/components/remote/Remo
 // ============================================================================
 
 export { FTRUMGlobalManager } from './src/main/ets/components/rum/FTRUMGlobalManager';
+export { HandlerView } from './src/main/ets/components/rum/bean/HandlerView';
+export { FTViewRouterTrackingHandler } from './src/main/ets/components/rum/handler/FTViewRouterTrackingHandler';
+export { FTViewNavigationTrackingHandler } from './src/main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
 
 // ============================================================================
 // Logger
