@@ -40,10 +40,13 @@ FTTraceHeaderHandler
 FTTraceInterceptor
 FTTraceManager
 FTTraceRequestContext
+FTViewNavigationTrackingHandler
+FTViewRouterTrackingHandler
 FTWebViewHandler
 FT_SDK_EXTENSION_CONTRACT_VERSION
 HAR_VERSION
 HeaderHandler
+HandlerView
 HttpRequestData
 HttpResponseData
 JsReceiver
@@ -312,6 +315,9 @@ getTraceType
 getTraceTypeEnum
 getValue
 getVersion
+getViewName
+getViewNavigationTrackingHandler
+getViewRouterTrackingHandler
 handleWebViewData
 hasHandler
 headers
@@ -388,6 +394,7 @@ requestErrorMsg
 requestErrorStack
 requestHeader
 requestHeaderMap
+resolveHandlerView
 reset
 resetBatchStateInternal
 resourceHostIP
@@ -524,6 +531,8 @@ setTraceSampleRate
 setTraceType
 setUrl
 setValue
+setViewNavigationTrackingHandler
+setViewRouterTrackingHandler
 setWebView
 shutDown
 singleFileMaxSize

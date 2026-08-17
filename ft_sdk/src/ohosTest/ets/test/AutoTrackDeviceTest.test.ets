@@ -10,7 +10,10 @@ import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigati
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
 import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
+import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
+import { FTViewNavigationTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
+import { FTViewRouterTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -209,6 +212,40 @@ class HandlerActionTrackingHandler implements FTActionTrackingHandler {
   }
 }
 
+class FilteringRouterTrackingHandler implements FTViewRouterTrackingHandler {
+  public resolvedRouteNames: string[] = [];
+
+  resolveHandlerView(routeName: string): HandlerView | null {
+    this.resolvedRouteNames.push(routeName);
+    if (routeName === 'IgnoredRouterPage') {
+      return null;
+    }
+    const property: Record<string, object> = {};
+    property['view_handler_source'] = new ActionPropertyWrapper('router');
+    return new HandlerView(`custom_router_${routeName}`, property);
+  }
+}
+
+class FilteringNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+  public resolvedDestinationNames: string[] = [];
+
+  resolveHandlerView(destinationName: string): HandlerView | null {
+    this.resolvedDestinationNames.push(destinationName);
+    if (destinationName === 'IgnoredNavigationDestination') {
+      return null;
+    }
+    const property: Record<string, object> = {};
+    property['view_handler_source'] = new ActionPropertyWrapper('navigation');
+    return new HandlerView(`custom_navigation_${destinationName}`, property);
+  }
+}
+
+class EmptyViewNameNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+  resolveHandlerView(_destinationName: string): HandlerView | null {
+    return new HandlerView('   ');
+  }
+}
+
 function buildSdkConfig(): FTSDKConfig {
   return FTSDKConfig.builder(TEST_HOST)
     .setDebug(true)
@@ -338,6 +375,42 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
+    it('routerHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+      const handler = new FilteringRouterTrackingHandler();
+      const rumConfig = buildRumConfig(true, false).setViewRouterTrackingHandler(handler);
+      const routeName = 'pages/account/HandledRouterPage';
+      const viewName = 'custom_router_HandledRouterPage';
+      initializeAutoTrack(context, uiContext, rumConfig);
+
+      await uiContext.observer.emitRouterPageUpdate(routeName, 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2);
+      await WaitUtils.delay(300);
+
+      expect(handler.resolvedRouteNames.length).assertEqual(1);
+      expect(handler.resolvedRouteNames[0]).assertEqual('HandledRouterPage');
+      await closeCurrentViewAndWaitForRum();
+      await flushAndAssertPayload(collector, [
+        'view,',
+        `view_name=${viewName}`,
+        'view_handler_source='
+      ]);
+
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.resetAll();
+      const filteredHandler = new FilteringRouterTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewRouterTrackingHandler(filteredHandler));
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 2);
+      await WaitUtils.delay(500);
+
+      expect(filteredHandler.resolvedRouteNames.length).assertEqual(1);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
     it('navDestinationShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
       const routeName = 'pages/account/AutoTrackNavDestination';
       const normalizedViewName = 'AutoTrackNavDestination';
@@ -366,6 +439,93 @@ export default function autoTrackDeviceTest() {
 
       expect((await DBAssert.queryViews(20)).length).assertEqual(0);
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('navigationSwitchShouldNotSuppressRouterView', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/NavigationDestination');
+      await uiContext.observer.emitRouterPageUpdate('pages/RouterDestination', 0);
+      await uiContext.observer.emitRouterPageUpdate('pages/RouterDestination', 2);
+      await WaitUtils.delay(300);
+
+      const view = await DBAssert.waitForViewNamed('RouterDestination', 5000);
+      expect(view !== null).assertTrue();
+      expect(view?.getViewName() ?? '').assertEqual('RouterDestination');
+    });
+
+    it('navigationHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      const rumConfig = buildRumConfig(true, false).setViewNavigationTrackingHandler(handler);
+      const destinationName = 'pages/account/HandledNavigationDestination';
+      const viewName = 'custom_navigation_HandledNavigationDestination';
+      initializeAutoTrack(context, uiContext, rumConfig);
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', destinationName);
+      await WaitUtils.delay(300);
+
+      expect(handler.resolvedDestinationNames.length).assertEqual(1);
+      expect(handler.resolvedDestinationNames[0]).assertEqual('HandledNavigationDestination');
+      await closeCurrentViewAndWaitForRum();
+      await flushAndAssertPayload(collector, [
+        'view,',
+        `view_name=${viewName}`,
+        'view_handler_source='
+      ]);
+
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.resetAll();
+      const filteredHandler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(filteredHandler));
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
+      await WaitUtils.delay(500);
+
+      expect(filteredHandler.resolvedDestinationNames.length).assertEqual(1);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('navigationHandlerEmptyViewNameShouldSkipAutomaticView', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(new EmptyViewNameNavigationTrackingHandler()));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/BlankNavigationDestination');
+      await WaitUtils.delay(300);
+
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('filteredDestinationShouldCloseThePreviousAutomaticView', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(handler));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/TrackedNavigationDestination');
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitNavDestinationSwitch('pages/TrackedNavigationDestination', 'pages/IgnoredNavigationDestination');
+
+      const previousView = await DBAssert.waitForViewNamed('custom_navigation_TrackedNavigationDestination', 5000);
+      expect(previousView !== null).assertTrue();
+      const views = await DBAssert.queryViews(20);
+      expect(views.length).assertEqual(1);
+      expect(views[0].getViewName()).assertEqual('custom_navigation_TrackedNavigationDestination');
+    });
+
+    it('filteredNavigationShouldNotBlockSameNamedRouterView', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(handler));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredNavigationDestination', 0);
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredNavigationDestination', 2);
+      await WaitUtils.delay(300);
+
+      const view = await DBAssert.waitForViewNamed('IgnoredNavigationDestination', 5000);
+      expect(view !== null).assertTrue();
+      expect(view?.getViewName() ?? '').assertEqual('IgnoredNavigationDestination');
     });
 
     it('willClickShouldUploadAction', 0, async () => {

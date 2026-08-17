@@ -7,6 +7,8 @@ import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
+import { FTViewRouterTrackingHandler } from "./rum/handler/FTViewRouterTrackingHandler";
+import { FTViewNavigationTrackingHandler } from "./rum/handler/FTViewNavigationTrackingHandler";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
@@ -90,6 +92,8 @@ export class FTRUMConfig {
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
+  private viewRouterTrackingHandler: FTViewRouterTrackingHandler | null = null;
+  private viewNavigationTrackingHandler: FTViewNavigationTrackingHandler | null = null;
   private rumCacheLimitCount: number = Constants.DEFAULT_DB_RUM_CACHE_NUM;
   private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
@@ -300,6 +304,48 @@ export class FTRUMConfig {
    */
   public setActionTrackingHandler(handler: FTActionTrackingHandler | null): FTRUMConfig {
     this.actionTrackingHandler = handler;
+    return this;
+  }
+
+  /**
+   * Get the Router page View tracking handler.
+   *
+   * A configured handler can rename an automatic Router View and attach custom
+   * properties. Returning null from the handler skips the route entirely.
+   */
+  public getViewRouterTrackingHandler(): FTViewRouterTrackingHandler | null {
+    return this.viewRouterTrackingHandler;
+  }
+
+  /**
+   * Customize automatic Router page View collection.
+   *
+   * Requires setEnableTraceUserView(true). When the handler is null, Router
+   * pages keep the default final-route-segment View name.
+   */
+  public setViewRouterTrackingHandler(handler: FTViewRouterTrackingHandler | null): FTRUMConfig {
+    this.viewRouterTrackingHandler = handler;
+    return this;
+  }
+
+  /**
+   * Get the Navigation destination View tracking handler.
+   *
+   * A configured handler can rename an automatic Navigation View and attach
+   * custom properties. Returning null from the handler skips the destination.
+   */
+  public getViewNavigationTrackingHandler(): FTViewNavigationTrackingHandler | null {
+    return this.viewNavigationTrackingHandler;
+  }
+
+  /**
+   * Customize automatic Navigation destination View collection.
+   *
+   * Requires setEnableTraceUserView(true). When the handler is null,
+   * destinations keep the default final-route-segment View name.
+   */
+  public setViewNavigationTrackingHandler(handler: FTViewNavigationTrackingHandler | null): FTRUMConfig {
+    this.viewNavigationTrackingHandler = handler;
     return this;
   }
 

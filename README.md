@@ -119,6 +119,44 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## Automatic View Filtering
+
+When automatic View tracking is enabled, Router pages and `Navigation`
+destinations can be independently renamed or filtered. Return a `HandlerView`
+to collect the automatic View; return `null` to skip it. With no handler set,
+the SDK keeps the default behavior and reports the final route segment.
+
+```ts
+import {
+  FTRUMConfig,
+  FTViewRouterTrackingHandler,
+  FTViewNavigationTrackingHandler,
+  HandlerView
+} from '@guancecloud/ft_sdk/Index'
+
+const routerHandler: FTViewRouterTrackingHandler = {
+  resolveHandlerView: (routeName: string): HandlerView | null => {
+    if (routeName === 'LoginPage') {
+      return null // Do not collect this Router page
+    }
+    return new HandlerView(`Router_${routeName}`)
+  }
+}
+
+const navigationHandler: FTViewNavigationTrackingHandler = {
+  resolveHandlerView: (destinationName: string): HandlerView | null => {
+    return destinationName === 'OrderDetail'
+      ? new HandlerView('Order Detail')
+      : null
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserView(true)
+  .setViewRouterTrackingHandler(routerHandler)
+  .setViewNavigationTrackingHandler(navigationHandler)
+```
+
 ## SDK Debug Logs
 
 Enable internal SDK logs in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:
