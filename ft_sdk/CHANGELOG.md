@@ -5,18 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.16] - 2026-07-29
-- Added View-scoped device metrics collection. Configure `FTRUMConfig.setDeviceMetricsMonitorType(...)` with `DeviceMetricsMonitorType` and `DetectFrequency` to report CPU, memory, battery-current, and FPS aggregates in RUM View events.
-- Fixed HarmonyOS automatic UI-block LongTask reporting: `MAIN_THREAD_JANK` duration is now calculated from the system event's `begin_time` and `end_time` fields.
-- UI block LongTask collection now uses only HarmonyOS `MAIN_THREAD_JANK` events; the SDK no longer generates timer or heartbeat fallback LongTasks.
+## [0.1.16-alpha01] - 2026-08-14
+- Added Android-aligned automatic View filtering for HarmonyOS Router pages and `Navigation` destinations. Configure `FTRUMConfig.setViewRouterTrackingHandler(...)` or `setViewNavigationTrackingHandler(...)`; returning `HandlerView` customizes the View name/properties and returning `null` skips automatic View collection.
+- Added RUM device metrics collection for View and Error events. Configure `FTRUMConfig.setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)` to report CPU, memory, battery-current, and FPS aggregates in View events, and `setExtraMonitorTypeWithError(...)` to append CPU usage, memory usage, and battery level to Error events.
+- Fixed HarmonyOS automatic UI-block LongTask reporting: `MAIN_THREAD_JANK` duration is now calculated from the system event's `begin_time` and `end_time` fields,the SDK no longer generates timer or heartbeat fallback LongTasks.
+- Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
+- Native and WebView Resource records, and their generated network Error records, now use the Resource record's stable UUID (the unprefixed UUID portion of the Resource `sdk_data_id`) as `resource_id` for reliable correlation.
 - Aligned WebView bridge enrichment with Android: no synthetic `view_path_name` is added, missing WebView referrers resolve from the native host View, and `sdk_version` follows Android's native-tag precedence while the Browser SDK version remains in `sdk_pkg_info`.
 - Aligned automatic Action names with Android: default names now use `component/text#id`, list and tab actions append `#position:n`, and configured `FTActionTrackingHandler` names remain unchanged.
 - Aligned View custom-property fields with Android: View properties now retain their caller-provided names instead of receiving a `view_property_` prefix.
-- Native and WebView Resource records, and their generated network Error records, now use the Resource record's stable UUID (the unprefixed UUID portion of the Resource `sdk_data_id`) as `resource_id` for reliable correlation.
 - Remote data filters now also remove matching records that were cached before the rule was received. Only remote rules participate in this upload-time cleanup; application-provided local rules continue to apply solely before data is cached.
-- Remote data-filter pulls now continue at the server-provided `pull_interval` while MD5 skips parsing and applying an unchanged response body.
-- Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
-- Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.
 
 ## [0.1.15] - 2026-07-29
 - Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.

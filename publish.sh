@@ -4,7 +4,7 @@ set -e  # Exit immediately if a command exits with a non-zero status
 
 # Get the module type from command line argument
 MODULE_TYPE=${1:-agent}  # Default to 'agent' if no argument provided
-BUILD_MODE="${BUILD_MODE:-release}"
+BUILD_MODE="${BUILD_MODE:-debug}"
 
 if [[ "$BUILD_MODE" != "release" && "$BUILD_MODE" != "debug" ]]; then
     echo "Error: BUILD_MODE must be release or debug, got: $BUILD_MODE"
