@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.16-alpha02] - 2026-08-18
+- Restored source compatibility for device metrics configuration. `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)` remain supported; new integrations should use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
+
 ## [0.1.16-alpha01] - 2026-08-14
 - Added Android-aligned automatic View filtering for HarmonyOS Router pages and `Navigation` destinations. Configure `FTRUMConfig.setViewRouterTrackingHandler(...)` or `setViewNavigationTrackingHandler(...)`; returning `HandlerView` customizes the View name/properties and returning `null` skips automatic View collection.
 - Added RUM device metrics collection for View and Error events. Configure `FTRUMConfig.setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)` to report CPU, memory, battery-current, and FPS aggregates in View events, and `setExtraMonitorTypeWithError(...)` to append CPU usage, memory usage, and battery level to Error events.

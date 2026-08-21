@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16-alpha02] - 2026-08-18
+- No extension API changes.
+
 ## [0.1.16-alpha01] - 2026-08-14
 - No extension API changes. Version is aligned with `ft_sdk` 0.1.16, which fixes missing RUM `app_id` tags after an EventConsumer Worker restart.
 
