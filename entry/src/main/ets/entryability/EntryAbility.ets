@@ -102,7 +102,7 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
 
 class DemoRouterViewTrackingHandler implements FTViewRouterTrackingHandler {
   resolveHandlerView(routeName: string): HandlerView | null {
-    if (routeName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+    if (/^\d+$/.test(routeName) || routeName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
       DemoLogger.i(LOG_TAG, `Router View filtered: ${routeName}`);
       return null;
     }
@@ -590,7 +590,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
-        .setEnableTrackAppUIBlock(true,400)
+        .setEnableTrackAppUIBlock(true,300)
         .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
         .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
         .addGlobalContext("custom_key",new String("custom_value"))

@@ -430,6 +430,7 @@ setDatawayUrl
 setDbCacheDiscard
 setDbCacheLimit
 setDebug
+setDeviceMetricsDetectFrequency
 setDeviceMetricsMonitorType
 setDns
 setDownloadTime

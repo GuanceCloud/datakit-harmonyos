@@ -390,13 +390,26 @@ export class FTRUMConfig {
   }
 
   /**
-   * Set device metrics collection types and sampling frequency.
+   * Set device metrics collection types and optionally the sampling frequency.
    */
   public setDeviceMetricsMonitorType(
     deviceMetricsMonitorType: number,
-    deviceMetricsDetectFrequency: DetectFrequency
+    deviceMetricsDetectFrequency?: DetectFrequency
   ): FTRUMConfig {
     this.deviceMetricsMonitorType = deviceMetricsMonitorType;
+    if (deviceMetricsDetectFrequency !== undefined) {
+      this.deviceMetricsDetectFrequency = deviceMetricsDetectFrequency;
+    }
+    return this;
+  }
+
+  /**
+   * Set the device metrics sampling frequency.
+   *
+   * Retained for source compatibility. New integrations should configure both
+   * values with setDeviceMetricsMonitorType(deviceMetricsMonitorType, deviceMetricsDetectFrequency).
+   */
+  public setDeviceMetricsDetectFrequency(deviceMetricsDetectFrequency: DetectFrequency): FTRUMConfig {
     this.deviceMetricsDetectFrequency = deviceMetricsDetectFrequency;
     return this;
   }

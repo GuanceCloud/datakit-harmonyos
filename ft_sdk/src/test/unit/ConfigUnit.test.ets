@@ -510,10 +510,8 @@ export default function configUnitTest() {
         .setEnableTraceUserResource(true)
         .setEnableTraceWebView(true)
         .setExtraMonitorTypeWithError(ErrorMonitorType.CPU)
-        .setDeviceMetricsMonitorType(
-          DeviceMetricsMonitorType.MEMORY,
-          DetectFrequency.FREQUENT
-        );
+        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)
+        .setDeviceMetricsDetectFrequency(DetectFrequency.FREQUENT);
 
       expect(config.getRumAppId()).assertEqual(TEST_FAKE_RUM_ID);
       expect(config.getBlockDurationMS()).assertEqual(100);
@@ -526,6 +524,13 @@ export default function configUnitTest() {
       expect(config.getExtraMonitorTypeWithError()).assertEqual(ErrorMonitorType.CPU);
       expect(config.getDeviceMetricsMonitorType()).assertEqual(DeviceMetricsMonitorType.MEMORY);
       expect(config.getDeviceMetricsDetectFrequency()).assertEqual(DetectFrequency.FREQUENT);
+
+      const combinedConfig = new FTRUMConfig().setDeviceMetricsMonitorType(
+        DeviceMetricsMonitorType.CPU,
+        DetectFrequency.RARE
+      );
+      expect(combinedConfig.getDeviceMetricsMonitorType()).assertEqual(DeviceMetricsMonitorType.CPU);
+      expect(combinedConfig.getDeviceMetricsDetectFrequency()).assertEqual(DetectFrequency.RARE);
     });
 
     it('rumConfigShouldRequireUiFeatures', 0, () => {

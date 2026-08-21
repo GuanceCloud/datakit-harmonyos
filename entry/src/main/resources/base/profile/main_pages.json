@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/WebViewPage",
     "pages/NavigationStackDemoPage",
+    "pages/NavigationWebSwitchVerificationPage",
     "pages/NavSubPage1",
     "pages/NavSubPage2",
     "pages/BatchUploadTestPage",

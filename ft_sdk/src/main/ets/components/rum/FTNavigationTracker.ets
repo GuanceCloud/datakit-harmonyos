@@ -388,6 +388,6 @@ export class FTNavigationTracker {
 
     const separatorIndex = routeName.lastIndexOf('/');
     const normalizedName = separatorIndex >= 0 ? routeName.substring(separatorIndex + 1) : routeName;
-    return /^\d+$/.test(normalizedName) ? '' : normalizedName;
+    return normalizedName;
   }
 }
