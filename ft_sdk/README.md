@@ -136,6 +136,39 @@ const rumConfig = new FTRUMConfig()
   .setViewNavigationTrackingHandler(navigationHandler)
 ```
 
+## Automatic Action Filtering
+
+When automatic Action tracking is enabled, configure
+`FTRUMConfig.setActionTrackingHandler(...)` to filter click Actions.
+The handler is called for each automatically tracked user operation. Return
+`null` to skip collection; return `undefined` to continue through the SDK's
+original automatic Action collection path, including name, properties,
+position, and View association.
+
+```ts
+import {
+  ActionEventWrapper,
+  FTActionTrackingHandler,
+  FTRUMConfig
+} from '@guancecloud/ft_sdk/Index'
+
+const actionHandler: FTActionTrackingHandler = {
+  resolveHandlerAction: (event: ActionEventWrapper): null | undefined => {
+    // Do not collect clicks from this component.
+    if (event.getSource()?.getId() === 'ignore_action_view') {
+      return null
+    }
+
+    // Continue through the original automatic Action collection path.
+    return undefined
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserAction(true)
+  .setActionTrackingHandler(actionHandler)
+```
+
 ## SDK Debug Logs
 
 Enable internal SDK diagnostics in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:

@@ -9,7 +9,6 @@ import { FTActionTracker } from '../../../main/ets/components/rum/FTActionTracke
 import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
-import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
 import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
 import { FTViewNavigationTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
@@ -200,15 +199,22 @@ class FakeUIContext {
   }
 }
 
-class HandlerActionTrackingHandler implements FTActionTrackingHandler {
-  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | null {
+class FilteringActionTrackingHandler implements FTActionTrackingHandler {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
     const source = actionEventWrapper.getSource();
-    if (!source || source.getId() !== 'handler_button') {
+    if (source?.getId() === 'ignore_action_view') {
       return null;
     }
-    const property: Record<string, object> = {};
-    property['handler_property'] = new ActionPropertyWrapper('handler_value');
-    return new HandlerAction('handler_action_name', property);
+    return undefined;
+  }
+}
+
+class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
+  public resolvedCount: number = 0;
+
+  resolveHandlerAction(_actionEventWrapper: ActionEventWrapper): null | undefined {
+    this.resolvedCount += 1;
+    return undefined;
   }
 }
 
@@ -597,21 +603,40 @@ export default function autoTrackDeviceTest() {
       ]);
     });
 
-    it('willClickShouldUseCustomHandler', 0, async () => {
-      const viewName = 'handler_action_view';
-      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new HandlerActionTrackingHandler()));
-      expect(uiContext.observer.hasWillClickCallback()).assertTrue();
+    it('willClickHandlerShouldFilterAutomaticAction', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new FilteringActionTrackingHandler()));
+      await startViewForAction('filtered_action_view');
+
+      // FilteringActionTrackingHandler returns null for the configured filtered ID.
+      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'ignore_action_view', 1003));
+      await WaitUtils.delay(500);
+
+      expect((await DBAssert.queryActions(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('willClickHandlerShouldContinueOriginalCollectionForUndefined', 0, async () => {
+      const viewName = 'pass_through_action_view';
+      const actionName = 'Button/继续默认采集#pass_through_action#position:1';
+      const handler = new PassThroughActionTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, handler));
       await startViewForAction(viewName);
 
-      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'handler_button', 1002));
-      await assertActionStarted('handler_action_name');
+      const firstTab = new FakeFrameNode('TabContent', 'pass_through_first_tab', 1004);
+      const secondTab = new FakeFrameNode('TabContent', 'pass_through_second_tab', 1005)
+        .setPreviousSibling(firstTab);
+      const button = new FakeFrameNode('Button', 'pass_through_action', 1006)
+        .setInspectorAttribute('label', '继续默认采集')
+        .setParent(secondTab);
+      await uiContext.observer.emitWillClick(button);
+      expect(handler.resolvedCount).assertEqual(1);
+      await assertActionStarted(actionName);
       await closeCurrentViewAndWaitForRum();
 
       await flushAndAssertPayload(collector, [
         'action,',
-        'action_name=handler_action_name',
-        `view_name=${viewName}`,
-        'handler_property='
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
       ]);
     });
   });
