@@ -1,24 +1,24 @@
 import { ActionEventWrapper } from '../bean/ActionEventWrapper';
-import { HandlerAction } from '../bean/HandlerAction';
 
 /**
  * Action tracking handler interface
- * Allows you to customize how user actions are tracked in RUM data
+ * Allows you to filter automatically tracked user actions in RUM data
  * Aligned with Android SDK: FTActionTrackingHandler
  * 
  * When a user action occurs (click, touch, etc.), this handler will be called to determine
- * how the action should be tracked.
+ * whether the action should be filtered. Return `undefined` to continue through the
+ * SDK's original automatic Action collection path.
  * 
  * @example
  * ```typescript
  * FTSdk.initRUMWithConfig(new FTRUMConfig()
  *   .setActionTrackingHandler({
- *     resolveHandlerAction: (actionEventWrapper: ActionEventWrapper): HandlerAction | null => {
+ *     resolveHandlerAction: (actionEventWrapper: ActionEventWrapper): null | undefined => {
  *       const nodeType = actionEventWrapper.getSource()?.getNodeType();
  *       if (nodeType === 'CustomComponent') {
- *         return new HandlerAction('CustomAction', { customProp: 'value' });
+ *         return null; // Skip tracking
  *       }
- *       return null; // Skip tracking
+ *       return undefined; // Continue through the original automatic Action path
  *     }
  *   })
  * );
@@ -26,11 +26,11 @@ import { HandlerAction } from '../bean/HandlerAction';
  */
 export interface FTActionTrackingHandler {
   /**
-   * Determine how a user action should be tracked
+   * Determine whether a user action should be filtered
    * 
    * @param actionEventWrapper The action event wrapper containing information about the action
-   * @returns HandlerAction with custom action name and properties, or null to skip tracking
+   * @returns null to skip collection, or undefined to continue through the SDK's original
+   *          automatic Action collection behavior.
    */
-  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | null;
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined;
 }
-

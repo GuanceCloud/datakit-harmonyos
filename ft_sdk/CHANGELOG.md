@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.16-alpha03] - 2026-08-20
+- Added public HarmonyOS Action filtering aligned with Android's `setActionTrackingHandler(...)`. Exported `FTActionTrackingHandler`, `ActionEventWrapper`, and `ActionSourceType` from `@guancecloud/ft_sdk/Index`. Return `null` from `resolveHandlerAction(...)` to skip an automatic Action; return `undefined` to continue through the original complete automatic Action collection path, including its name, properties, position, and `view_name` association.
+
 ## [0.1.16-alpha02] - 2026-08-18
 - Restored source compatibility for device metrics configuration. `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)` remain supported; new integrations should use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
 

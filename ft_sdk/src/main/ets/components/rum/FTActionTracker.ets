@@ -5,7 +5,6 @@ import { Constants } from '../Constants';
 import { FTRUMConfig } from '../Configs';
 import { FTRUMInnerManager } from './FTRUMInnerManager';
 import { ActionEventWrapper } from './bean/ActionEventWrapper';
-import { HandlerAction } from './bean/HandlerAction';
 import { ActionSourceType } from './enum/ActionSourceType';
 
 const TAG = "FTActionTracker";
@@ -251,30 +250,21 @@ export class FTActionTracker {
       }
 
 
-      // Check if custom handler is configured (aligned with Android SDK)
+      // Check whether this Action should be filtered.
       const handler = this.rumConfig.getActionTrackingHandler();
       if (handler) {
-        // Use custom handler to determine if action should be tracked
         const actionEventWrapper = new ActionEventWrapper(node, ActionSourceType.CLICK_VIEW, null);
-        const handlerAction = handler.resolveHandlerAction(actionEventWrapper);
-        
-        if (handlerAction) {
-          // Handler returned action, track it with custom name and properties
-          const actionName = handlerAction.getActionName();
-          const property = handlerAction.getProperty();
-          
-          // Removed high-frequency info log to reduce log output
-          // FTInnerLogger.i(TAG, `[ACTION-TRACK] ⭐ Tracking action via handler: name=${actionName}, type=${nodeType}, id=${nodeId || '(no id)'}`);
-          FTRUMGlobalManager.getInstance().startAction(actionName, Constants.EVENT_NAME_CLICK, property || {});
-          // Removed high-frequency info log to reduce log output
-          // FTInnerLogger.i(TAG, `[ACTION-TRACK] ✅ Action started via handler: name=${actionName}`);
-        } else {
-          // Handler returned null, skip tracking
+        const handlerResult = handler.resolveHandlerAction(actionEventWrapper);
+
+        // Only an explicit null filters the Action. Every other result uses the
+        // original automatic collection flow below without a simplified path.
+        if (handlerResult === null) {
+          return;
         }
-        return;
       }
 
-      // No custom handler, use default behavior: track all components with onClick
+      // No handler, or a non-matching handler result: use the original complete
+      // automatic collection behavior.
       // willClick event is only triggered when component has onClick callback
       // So we can track all components that trigger willClick (aligned with user requirement)
 
@@ -373,7 +363,6 @@ export class FTActionTracker {
 
   /**
    * Build the default automatic-action name using Android's component/text#id format.
-   * A configured FTActionTrackingHandler bypasses this method and supplies its name unchanged.
    */
   private buildActionName(nodeType: string, nodeId: string | undefined, node?: FrameNode): string {
     const nodeText = this.resolveNodeText(node, nodeId);

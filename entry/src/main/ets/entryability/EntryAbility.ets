@@ -10,6 +10,8 @@ import {
   DeviceMetricsMonitorType,
   EnvType,
   ErrorMonitorType,
+  ActionEventWrapper,
+  FTActionTrackingHandler,
   FTLoggerConfig,
   FTRemoteConfigFetchResult,
   FTRUMConfig,
@@ -56,6 +58,13 @@ const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
 // prefix-based rule in the demo so page filtering can be verified without
 // changing collection for its existing test pages.
 const IGNORED_AUTOMATIC_VIEW_PREFIX = 'IgnoreViewTracking';
+// User-configurable automatic Action filters. Names are matched by prefix;
+// component IDs are matched exactly. Add application-specific IDs here when
+// their automatic Actions should not be reported.
+const FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES: Array<string> = [
+  '__Common__/'
+];
+const FILTERED_AUTOMATIC_ACTION_IDS: Array<string> = [];
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -121,6 +130,40 @@ class DemoNavigationViewTrackingHandler implements FTViewNavigationTrackingHandl
       return null;
     }
     return new HandlerView(destinationName);
+  }
+}
+
+/**
+ * Example of automatic Action filtering. Returning null skips a matching
+ * Action; returning undefined continues through the original automatic Action
+ * collection path.
+ */
+class DemoActionTrackingHandler implements FTActionTrackingHandler {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
+    const source = actionEventWrapper.getSource();
+    const nodeId = source?.getId() ?? '';
+    const nodeType = source?.getNodeType() ?? 'UnknownComponent';
+    const actionName = nodeId.length > 0 ? `${nodeType}/${nodeId}` : nodeType;
+    if (this.shouldFilterAction(actionName, nodeId)) {
+      DemoLogger.i(LOG_TAG, `Automatic Action filtered: name=${actionName}, id=${nodeId}`);
+      return null;
+    }
+
+    return undefined;
+  }
+
+  private shouldFilterAction(actionName: string, nodeId: string): boolean {
+    for (let index = 0; index < FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES.length; index++) {
+      if (actionName.startsWith(FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES[index])) {
+        return true;
+      }
+    }
+    for (let index = 0; index < FILTERED_AUTOMATIC_ACTION_IDS.length; index++) {
+      if (nodeId === FILTERED_AUTOMATIC_ACTION_IDS[index]) {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -596,6 +639,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTrackAppUIBlock(true,300)
         .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
         .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
+        .setActionTrackingHandler(new DemoActionTrackingHandler())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
