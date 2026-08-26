@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16-alpha03] - 2026-08-20
+- Added the API 22 `observeFTAppFirstFrame(...)` integration helper. It listens
+  for the first `frameMetricsMeasured` event with `firstDrawFrame=true`, then
+  unregisters and reports the core SDK cold-launch T3 boundary.
+- Documented the API 22 fallback for devices that reject the listener before
+  content loading: retry once from the successful `loadContent` callback. Only
+  a subsequent `firstDrawFrame=true` event is accepted as T3.
+
 ## [0.1.16-alpha02] - 2026-08-18
 - No extension API changes.
 
