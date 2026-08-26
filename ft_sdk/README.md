@@ -98,6 +98,86 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## Cold Launch Timing
+
+Cold-launch durations use the monotonic
+`systemDateTime.getUptime(TimeType.STARTUP, true)` clock. The SDK retains the
+measured boundaries until RUM Action collection is ready, then emits exactly
+one `launch_cold` Action. Its `duration` is T3 - T0 for a foreground launch;
+the Action timestamp remains an epoch timestamp for compatibility with the
+existing data pipeline.
+
+Record the earliest available boundaries in the host app. The optional T0
+hook is useful only when the SDK module is loaded after the host's own startup
+boundary; do not pass `Date.now()` or a wall-clock value.
+
+```ts
+import AbilityStage from '@ohos.app.ability.AbilityStage'
+import UIAbility from '@ohos.app.ability.UIAbility'
+import { FTSDK } from '@guancecloud/ft_sdk/Index'
+
+export class AppStage extends AbilityStage {
+  onCreate(): void {
+    // T1. The SDK also snapshots this process's current visibility through
+    // ApplicationContext.getRunningProcessInformation().
+    FTSDK.recordAppApplicationInit(this.context)
+
+    // Also initialize FTSDK/RUM here from the app's already-available
+    // persisted/static configuration when this process can start with no UI.
+  }
+}
+
+export class EntryAbility extends UIAbility {
+  onCreate(): void {
+    // T2: first UIAbility creation.
+    FTSDK.recordAppFirstUIAbilityCreate()
+  }
+}
+```
+
+Set the AbilityStage file as the module `srcEntry`. The core package does not
+invent a first-frame time: API 22 applications should additionally install
+`@guancecloud/ft_sdk_ext` and register its observer before `loadContent()`.
+Without the extension, `app_first_frame_init_time` is absent rather than being
+approximated with `onWindowStageCreate()`.
+
+Foreground launches emit these Action Fields only when each pair of boundaries
+is present and strictly increasing:
+
+- `app_launch_type = foreground`
+- `app_pre_application_init_time = {"start":0,"duration":T1-T0}`
+- `app_application_init_time = {"start":T1-T0,"duration":T2-T1}`
+- `app_first_frame_init_time = {"start":T2-T0,"duration":T3-T2}`
+
+At T1, the core first obtains and preserves the current process state from
+`ApplicationContext.getRunningProcessInformation()` (foreground/active or
+background). It does not depend only on `applicationStateChange`; that event
+continues to correct foreground/background races. A generation-reset,
+two-consecutive-turn lifecycle quiescence barrier replaces the former single
+`setTimeout(0)`: first UIAbility creation, application-state changes, and
+WindowStage SHOWN/ACTIVE reset the barrier before a no-UI launch can settle.
+No `RUNNING_STATE_OBSERVER` appManager listener or permission is used.
+
+For a background-only launch, the initial snapshot must be `background` and
+the quiescence barrier must complete without a UIAbility, foreground state, or
+shown/active Window. It then settles `launch_cold` at the latest valid
+boundary, emits `app_launch_type = background`, does not wait for a frame, and
+omits the first-frame field. Later foregrounding follows the existing hot-start
+and View lifecycle paths. Hot-start Actions do not carry these cold-launch
+Fields.
+
+RUM must be initialized from AbilityStage or an AppService/push entry as well
+as any UIAbility entry. Otherwise a process that creates no UIAbility never
+becomes RUM-ready and intentionally cannot submit `launch_cold`. The Demo
+shows this with its AbilityStage and `StressServiceAbility` bootstrap: it uses
+persisted runtime settings, or equivalent AppService Want parameters, to
+initialize the minimum SDK/RUM configuration before any UI is created.
+
+The repository Demo accepts the non-persistent launch parameter
+`coldStartDelayMs` (capped at 30,000 ms). For example, use `5000` on a cold
+launch to delay `loadContent()` by five seconds; this safely produces a long
+T2→T3/`launch_cold.duration` scenario without changing normal launches.
+
 ## Automatic View Filtering
 
 When automatic View tracking is enabled, Router pages and `Navigation`

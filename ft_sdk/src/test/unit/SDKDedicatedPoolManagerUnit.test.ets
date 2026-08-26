@@ -86,6 +86,11 @@ interface SDKCompletedActionPropertyTestValue {
   nested?: string;
 }
 
+interface SDKCompletedActionLaunchPhaseTestValue {
+  start: number;
+  duration: number;
+}
+
 interface SDKANRTestFrame {
   file: string;
   line: number;
@@ -1363,6 +1368,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const properties = new Object() as Record<string, object>;
       properties['custom_text'] = customText;
       properties['custom_json'] = customJson;
+      properties['duration'] = new String('must-not-override-sdk-duration');
+      properties['app_launch_type'] = new String('foreground');
+      const launchPhase: SDKCompletedActionLaunchPhaseTestValue = { start: 0, duration: 20 };
+      properties['app_pre_application_init_time'] = launchPhase;
       const dynamicTags = new Object() as SDKStringRecord;
       dynamicTags['env'] = 'test';
       const completedAction = new Object() as SDKRumCompletedActionDTO;
@@ -1373,7 +1382,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.dynamicTags = dynamicTags;
       completedAction.actionId = 'action-1';
       completedAction.actionName = 'tap';
-      completedAction.actionType = 'click';
+      completedAction.actionType = 'launch_cold';
       completedAction.rumAppId = 'gc_app_harmonyos_demo';
       completedAction.sessionId = 'session-1';
       completedAction.viewId = 'view-1';
@@ -1388,6 +1397,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const batch: SDKRumCompletedActionBatchDTO = {
         actions: [completedAction]
       };
+      const lineContext = createRumWorkerLineContext();
+      lineContext.rumStaticFields['duration'] = 'must-not-override-sdk-duration-from-context';
+      lineContext.rumStaticFields['app_launch_type'] = 'must-not-override-cold-launch-type';
+      batch.lineContext = lineContext;
       const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -1405,7 +1418,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(record['measurement'])).assertEqual('action');
       expect(String(record['uuid'])).assertEqual('action-sync-uuid');
       expect(String(tags['action_id'])).assertEqual('action-1');
-      expect(String(tags['action_type'])).assertEqual('click');
+      expect(String(tags['action_type'])).assertEqual('launch_cold');
       expect(String(tags['app_id'])).assertEqual('gc_app_harmonyos_demo');
       expect(String(tags['view_id'])).assertEqual('view-1');
       expect(String(fields['duration'])).assertEqual('42');
@@ -1414,6 +1427,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(fields['action_resource_count'])).assertEqual('3');
       expect(String(fields['custom_text'])).assertEqual('fast');
       expect(String(fields['custom_json']).includes('nested')).assertTrue();
+      expect(String(fields['app_launch_type'])).assertEqual('foreground');
+      expect(String(fields['app_pre_application_init_time'])).assertEqual('{"start":0,"duration":20}');
+      const syncDrafts = getPayloadArray(response.payload, 'syncDrafts');
+      const lineProtocol = String((syncDrafts[0] as Record<string, object>)['dataString']);
+      expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
     });
 
     it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {

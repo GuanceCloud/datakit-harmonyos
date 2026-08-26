@@ -14,7 +14,6 @@
  */
 
 import { FTInnerLogger } from '../log/FTLogger';
-import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { FTSDK } from '../FTSDK';
@@ -22,33 +21,11 @@ import { FTSDK } from '../FTSDK';
 const TAG = "FTAppStartCounter";
 
 /**
- * Application startup timing tracker
- * Similar to Android's FTAppStartCounter
- * 
- * Records cold start and hot start duration
- * Cold start: from app process start to first Ability's onWindowStageCreate
- * Hot start: from app returning from background to onWindowStageCreate
- * 
- * Reference: https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/application-context-stage#listening-for-uiability-lifecycle-changes
+ * Retains the existing hot-start Action behavior. Cold-start timing is owned
+ * by FTAppLaunchTracker so T0-T3 use one startup-uptime clock.
  */
 export class FTAppStartCounter {
   private static instance: FTAppStartCounter | null = null;
-  
-  /**
-   * Application startup time (nanoseconds)
-   * Recorded when SDK class is loaded (similar to Android's FTApplication.APP_START_TIME)
-   */
-  private static readonly APP_START_TIME: number = Utils.getCurrentNanoTime();
-  
-  /**
-   * Cold start duration (nanoseconds)
-   */
-  private coldStartDuration: number = 0;
-  
-  /**
-   * Cold start timeline (nanoseconds)
-   */
-  private coldStartTimeLine: number = 0;
   
   /**
    * Whether app has been initialized (used to distinguish cold start from hot start)
@@ -67,76 +44,6 @@ export class FTAppStartCounter {
       FTAppStartCounter.instance = new FTAppStartCounter();
     }
     return FTAppStartCounter.instance;
-  }
-  
-  /**
-   * Get application startup time
-   * Similar to Android's Utils.getAppStartTimeNs()
-   * 
-   * For HarmonyOS, we use the time when SDK class is loaded
-   * This is similar to Android's FTApplication.APP_START_TIME
-   * 
-   * @returns Application startup time in nanoseconds
-   */
-  public static getAppStartTimeNs(): number {
-    return FTAppStartCounter.APP_START_TIME;
-  }
-  
-  /**
-   * Record cold start duration
-   * Called when first Ability's onWindowStageCreate is completed
-   * 
-   * @param coldStartEndTimeLine End time of cold start (nanoseconds)
-   */
-  public coldStart(coldStartEndTimeLine: number): void {
-    this.coldStartTimeLine = FTAppStartCounter.getAppStartTimeNs();
-    this.coldStartDuration = coldStartEndTimeLine - this.coldStartTimeLine;
-    FTInnerLogger.d(TAG, `coldStart: duration=${this.coldStartDuration}ns (${this.coldStartDuration / 1000000}ms)`);
-  }
-  
-  /**
-   * Upload cold start time
-   * Similar to Android's FTAppStartCounter.coldStartUpload()
-   * 
-   * Reference: Android's FTAutoTrack.putRUMLaunchPerformance(true, coldStartDuration, coldStartTimeLine)
-   * Android calls: FTRUMInnerManager.get().addAction(actionName, actionType, duration, startTime, property)
-   */
-  public coldStartUpload(): void {
-    if (this.coldStartDuration <= 0 || this.coldStartTimeLine <= 0) {
-      FTInnerLogger.w(TAG, "Cold start data is invalid, skipping upload");
-      return;
-    }
-    
-    // Get RUM config from FTSDK (aligned with Android: FTRUMConfigManager.get().getConfig())
-    const config = FTSDK.getRumConfig();
-    
-    if (!config || !config.isEnableTraceUserAction()) {
-      FTInnerLogger.d(TAG, "RUM or action tracking is disabled, skipping cold start upload");
-      return;
-    }
-    
-    // Upload cold start as an Action
-    // Similar to Android's FTAutoTrack.putRUMLaunchPerformance(true, coldStartDuration, coldStartTimeLine)
-    // Android: FTRUMInnerManager.get().addAction(actionName, actionType, duration, startTime, property)
-    // Directly call FTRUMInnerManager.addAction with startTime parameter (matches Android implementation)
-    const innerManager = FTRUMInnerManager.getInstance();
-    if (innerManager) {
-      // Directly call innerManager.addAction with startTime parameter
-      // This matches Android's implementation: addAction(actionName, actionType, duration, startTime, property)
-      innerManager.addAction(
-        Constants.ACTION_NAME_LAUNCH_COLD,
-        Constants.ACTION_TYPE_LAUNCH_COLD,
-        this.coldStartDuration,
-        this.coldStartTimeLine,  // Use startTime (coldStartTimeLine) instead of currentTime
-        {}
-      );
-      FTInnerLogger.d(TAG, `Cold start uploaded: duration=${this.coldStartDuration}ns (${this.coldStartDuration / 1000000}ms), startTime=${this.coldStartTimeLine}`);
-    } else {
-      FTInnerLogger.e(TAG, "FTRUMInnerManager is not available, cannot upload cold start data");
-    }
-    
-    // Reset after upload
-    this.coldStartDuration = 0;
   }
   
   /**
@@ -179,18 +86,6 @@ export class FTAppStartCounter {
       FTInnerLogger.i(TAG, `✅ Hot start uploaded successfully: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms), startTime=${startTime}`);
     } else {
       FTInnerLogger.e(TAG, "FTRUMInnerManager is not available, cannot upload hot start data");
-    }
-  }
-  
-  /**
-   * Check for retransmission
-   * Applied to lifecycle, in cases earlier than SDK install
-   * Generally used for third-party frameworks, such as Flutter SDK, ReactNative SDK
-   * Similar to Android's FTAppStartCounter.checkToReUpload()
-   */
-  public checkToReUpload(): void {
-    if (this.coldStartDuration > 0) {
-      this.coldStartUpload();
     }
   }
   

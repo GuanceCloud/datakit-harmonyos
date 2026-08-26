@@ -1900,13 +1900,19 @@ function appendCompletedActionDraft(
   tags[Constants.KEY_RUM_ACTION_NAME] = action.actionName || '';
 
   const fields: SDKStringRecord = {};
+  // Map user/custom data first. The SDK applies reserved fields after the
+  // static RUM context as well, because a global custom context must not
+  // replace an Action duration or launch classification.
+  copyActionPropertiesToFields(action.properties || {}, fields);
+  if (lineContext) {
+    mergeStringRecords(fields, lineContext.rumStaticFields);
+  }
   fields[Constants.KEY_RUM_ACTION_DURATION] = String(action.duration || 0);
   fields[Constants.KEY_RUM_ACTION_ERROR_COUNT] = String(action.errorCount || 0);
   fields[Constants.KEY_RUM_ACTION_LONG_TASK_COUNT] = String(action.longTaskCount || 0);
   fields[Constants.KEY_RUM_ACTION_RESOURCE_COUNT] = String(action.resourceCount || 0);
-  copyActionPropertiesToFields(action.properties || {}, fields);
-  if (lineContext) {
-    mergeStringRecords(fields, lineContext.rumStaticFields);
+  if (action.actionType === Constants.ACTION_TYPE_LAUNCH_COLD) {
+    copyColdLaunchPropertiesToFields(action.properties || {}, fields);
   }
 
   const record: SDKLineProtocolInputDTO = {
@@ -3462,6 +3468,26 @@ function copyActionPropertiesToFields(properties: Record<string, object>, fields
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     fields[key] = stringifyActionPropertyValue(properties[key]);
+  }
+}
+
+/**
+ * launch_cold properties are SDK-owned Field names. Reapply them after custom
+ * and global-context mappings so a custom Action handler cannot lose or
+ * override the launch type/phase data.
+ */
+function copyColdLaunchPropertiesToFields(properties: Record<string, object>, fields: SDKStringRecord): void {
+  const coldLaunchKeys: string[] = [
+    'app_launch_type',
+    'app_pre_application_init_time',
+    'app_application_init_time',
+    'app_first_frame_init_time'
+  ];
+  for (let i = 0; i < coldLaunchKeys.length; i++) {
+    const key = coldLaunchKeys[i];
+    if (properties[key] !== undefined && properties[key] !== null) {
+      fields[key] = stringifyActionPropertyValue(properties[key]);
+    }
   }
 }
 
