@@ -28,6 +28,7 @@ import {
   UserData,
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
+import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import {
@@ -81,6 +82,9 @@ export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
 export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
+/** Demo-only launch parameter; delays first content loading to exercise T2-T3. */
+export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
+const MAX_COLD_START_DELAY_MS = 30_000;
 
 interface RuntimeConfig {
   datakitUrl: string;
@@ -207,6 +211,7 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {
+  private coldStartDelayMs: number = 0;
   private runtimeConfig: RuntimeConfig = {
     datakitUrl: "",
     datawayUrl: "",
@@ -224,6 +229,8 @@ export default class EntryAbility extends UIAbility {
   };
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    FTSDK.recordAppFirstUIAbilityCreate();
+    this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     DemoLogger.e("log test", `onCreate `);
     console.log("log test,onCreate")
     this.logAppMemoryLimitOnMainThread();
@@ -253,6 +260,15 @@ export default class EntryAbility extends UIAbility {
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to get app VM memory info on main thread: ${error}`);
     }
+  }
+
+  private resolveColdStartDelayMs(want: Want): number {
+    const value = want.parameters?.[KEY_COLD_START_DELAY_MS];
+    const delayMs = Number(value);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      return 0;
+    }
+    return Math.min(MAX_COLD_START_DELAY_MS, Math.floor(delayMs));
   }
 
   onDestroy(): void {
@@ -673,12 +689,27 @@ export default class EntryAbility extends UIAbility {
   }
 
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
+    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage);
+    if (this.coldStartDelayMs > 0) {
+      DemoLogger.i(LOG_TAG, `Demo cold-start delay enabled: ${this.coldStartDelayMs}ms before loadContent`);
+      setTimeout(() => {
+        this.loadEntryContent(windowStage, firstFrameListenerRegistered);
+      }, this.coldStartDelayMs);
+      return;
+    }
+    this.loadEntryContent(windowStage, firstFrameListenerRegistered);
+  }
 
+  private loadEntryContent(windowStage: window.WindowStage, firstFrameListenerRegistered: boolean): void {
     windowStage.loadContent('pages/Index', (err) => {
       DemoLogger.i(LOG_TAG, "loadContent callback called");
       if (err.code) {
         DemoLogger.e(LOG_TAG, `loadContent failed: ${err.code}`);
         return;
+      }
+      if (!firstFrameListenerRegistered) {
+        DemoLogger.i(LOG_TAG, "Registering first-frame listener from successful loadContent callback");
+        observeFTAppFirstFrame(windowStage);
       }
       DemoLogger.i(LOG_TAG, "Content loaded successfully");
     });

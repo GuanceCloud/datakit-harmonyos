@@ -1,5 +1,6 @@
 import { AppServiceExtensionAbility, Want } from '@kit.AbilityKit';
 import rpc from "@ohos.rpc";
+import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import {
   createDefaultStressTestConfig,
   StressTestConfig,
@@ -16,6 +17,7 @@ import {
   STRESS_SERVICE_STATE_STOPPED,
   STRESS_SERVICE_STATE_STOPPING
 } from '../utils/StressServiceStatusStore';
+import { initializeDemoColdLaunchRum } from '../utils/DemoColdLaunchRumInitializer';
 
 const TAG = "StressServiceAbility";
 
@@ -37,6 +39,10 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
   onCreate(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onCreate");
+    // AppService may be the only Ability created by a cold process. Reuse the
+    // same T1/state snapshot hook and bootstrap RUM from persisted/Want config.
+    FTSDK.recordAppApplicationInit(this.context);
+    initializeDemoColdLaunchRum(this.context, 'StressServiceAbility', want);
     markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onCreate');
     this.handleRequest(want, 0);
   }

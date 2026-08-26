@@ -16,6 +16,7 @@
         "name": "ohos.permission.INTERNET"
       }
     ],
+    "srcEntry": "./ets/abilitystage/EntryAbilityStage.ets",
     "pages": "$profile:main_pages",
     "abilities": [
       {
