@@ -560,7 +560,8 @@ export class FTWebViewHandler implements JsReceiver {
           // Browser Resource and Error points arrive separately. Assign the
           // Resource UUID before crossing the Worker boundary so its
           // resource_id and the unprefixed Resource sdk_data_id UUID are the
-          // same value. Upload later adds a package prefix only to sdk_data_id.
+          // same value. The first upload adds the package prefix only to
+          // sdk_data_id; retry keeps that established value unchanged.
           const resourceDraftUuid = measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE ?
             Utils.generateUUID() : undefined;
           if (resourceDraftUuid) {

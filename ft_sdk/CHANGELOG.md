@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16-alpha03] - 2026-08-20
+- Fixed duplicate RUM uploads after retry: the first upload's existing
+  package-prefixed `sdk_data_id` is persisted and reused unchanged by retries,
+  instead of receiving another package prefix.
 - Added an internal cold-launch state machine using
   `systemDateTime.getUptime(TimeType.STARTUP, true)` for all duration
   boundaries. Foreground cold launches now report T0-T3 phase Fields and a

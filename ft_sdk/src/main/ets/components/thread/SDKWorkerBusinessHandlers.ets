@@ -2722,6 +2722,7 @@ async function handleUploadExecutePage(
     shouldUpload ? SDKUploadPageOutcome.HTTP : SDKUploadPageOutcome.EMPTY_BODY,
     httpResult.code,
     deferredRows > 0,
+    packageId,
     checkpointAfterCommit,
     state
   );
@@ -2800,6 +2801,7 @@ function classifyUploadPageResult(
   outcome: SDKUploadPageOutcome,
   httpCode: number,
   hasDeferredRows: boolean,
+  packageId: string,
   checkpoint: SDKUploadCheckpointDTO,
   state: SDKWorkerRuntimeState
 ): SDKUploadPageProposal {
@@ -2840,7 +2842,7 @@ function classifyUploadPageResult(
     retryCount = 0;
   } else if (isRetryableUploadCode(httpCode)) {
     dbAction = SDKUploadDbActionDTO.REINSERT;
-    reInsertRows = createUploadReInsertRows(rows);
+    reInsertRows = createUploadReInsertRows(rows, packageId);
     checkpoint.ignoredErrorCounts[dataType] = 0;
     retryCount = Math.min(
       state.uploadRoundMaxRetryCount + 1,
@@ -3147,6 +3149,9 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
   };
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+    // The first upload assigns the established package-prefixed sdk_data_id
+    // structure. A retry receives the persisted prefixed value and this helper
+    // therefore leaves it unchanged.
     const line = row && row.dataString && row.dataString.trim().length > 0 ?
       applyPackageId(row.dataString, row.uuid, packageId) : '';
     if (line.length === 0) {
@@ -3269,15 +3274,18 @@ function getUploadIgnoredBackoffMs(errorCount: number): number {
   return Math.min(8000, getUploadNormalBackoffMs(errorCount));
 }
 
-function createUploadReInsertRows(rows: SDKUploadRowDTO[]): SDKUploadRowDTO[] {
+function createUploadReInsertRows(rows: SDKUploadRowDTO[], packageId: string): SDKUploadRowDTO[] {
   const result: SDKUploadRowDTO[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     result.push({
       id: row.id,
       dataType: row.dataType,
-      dataString: row.dataString,
-      uuid: generateWorkerUuid(),
+      // Persist the exact sdk_data_id sent by the first attempt. This retains
+      // the established package-prefixed format and prevents retries from
+      // assigning another package prefix.
+      dataString: applyPackageId(row.dataString, row.uuid, packageId),
+      uuid: row.uuid,
       time: row.time,
       customDataType: row.customDataType
     });
@@ -3313,14 +3321,15 @@ function handleUploadFormatBody(payload: SDKUploadPageDTO): SDKWorkerPayload {
   return resultPayload as Object as SDKWorkerPayload;
 }
 
+/**
+ * Assigns the established package-prefixed sdk_data_id only when the cached
+ * record still contains its unprefixed UUID. If a prior failed attempt already
+ * persisted a prefixed ID, the exact original value is returned unchanged.
+ */
 function applyPackageId(dataString: string, uuid: string, packageId: string): string {
   if (!dataString || !uuid || !packageId) {
     return dataString || '';
   }
-  // A Resource can use its draft UUID as resource_id. Prefixing the first
-  // matching UUID would then corrupt resource_id rather than sdk_data_id,
-  // breaking its link to the generated network Error. Only sdk_data_id is an
-  // upload transport identifier and must receive the package prefix.
   const sdkDataId = `${Constants.KEY_SDK_DATA_FLAG}=${uuid}`;
   return dataString.replace(sdkDataId, `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${uuid}`);
 }

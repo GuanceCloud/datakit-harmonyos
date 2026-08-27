@@ -165,13 +165,11 @@ export class SyncData {
 
 
   /**
-   * Mark package sequence ID in the sdk_data_id tag. Resource records can use
-   * the same UUID in resource_id, which must not be changed by this operation.
-   * This replaces the uuid in sdk_data_id tag, changing:
-   * sdk_data_id=abc123 -> sdk_data_id=1_2_3.abc123
-   * Used for data tracking and batch identification
-   * @param packageId Package ID (format: {seq}_{pid}_{count})
-   * @returns string Modified line protocol data with package ID
+   * Assigns the package prefix to an unprefixed sdk_data_id. Once this value
+   * has been persisted after a failed upload, subsequent retries must reuse it
+   * unchanged rather than invoking this method with a new package ID.
+   * @param packageId Package ID (format: {sequence}.{instance}.{count}.{nonce})
+   * @returns Line protocol with an established package-prefixed sdk_data_id
    */
   public getLineProtocolDataWithPkgId(packageId: string): string {
     if (!this.dataString || !packageId) {

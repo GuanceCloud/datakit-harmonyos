@@ -1434,7 +1434,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
     });
 
-    it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {
+    it('dataUploadCommandShouldKeepSdkDataIdStableInsideUploadPool', 0, async () => {
       const row: SDKUploadRowDTO = {
         id: 1,
         dataType: 'log',
@@ -1459,7 +1459,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const response = await executeWorkerCommandForUnit(request);
       expect(response.ok).assertTrue();
       const body = getPayloadString(response.payload, 'body');
-      expect(body.includes('pkg-1.uuid-1')).assertTrue();
+      expect(body.includes('sdk_data_id=pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
     });
 
@@ -1833,8 +1833,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(httpExecutor.lastRequest !== null).assertTrue();
       expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.includes(
         `${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(createDataUploadHeaders(httpExecutor.lastRequest as SDKUploadHttpRequestDTO)['X-Pkg-Id']).assertEqual(
+        `rumm-${executed.packageId}`);
       expect(executed.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
       expect(executed.reInsertRows.length).assertEqual(1);
+      expect(executed.reInsertRows[0].uuid).assertEqual(row.uuid);
+      expect(executed.reInsertRows[0].dataString.includes(
+        `sdk_data_id=${executed.packageId}.retry-uuid`)).assertTrue();
       expect(executed.retryCount).assertEqual(1);
       expect(executed.delayMs).assertEqual(500);
       expect(executed.shouldContinueDataType).assertFalse();
@@ -1861,6 +1866,25 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(committed.delayMs).assertEqual(500);
       expect(committed.shouldContinueDataType).assertFalse();
       expect(committed.roundHasMoreData).assertTrue();
+
+      const retryExecutePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows: executed.reInsertRows,
+        httpConfig: executePayload.httpConfig
+      };
+      const retryExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'upload-retry-execute-page',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: retryExecutePayload as Object as SDKWorkerPayload
+      }, unitWorkerStates[SDKDedicatedPoolType.DATA_UPLOAD], httpExecutor);
+      expect(retryExecuteResponse.ok).assertTrue();
+      const retried = retryExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(retried.bodyPreview.includes(`sdk_data_id=${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(retried.bodyPreview.includes(`sdk_data_id=${retried.packageId}.retry-uuid`)).assertFalse();
 
       const finishPayload: SDKUploadRoundFinishDTO = { roundId: start.roundId };
       const finishResponse = await executeWorkerCommandForUnit({
