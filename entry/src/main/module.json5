@@ -38,6 +38,16 @@
             ]
           }
         ]
+      },
+      {
+        "name": "SecondaryLaunchAbility",
+        "srcEntry": "./ets/secondaryability/SecondaryLaunchAbility.ets",
+        "description": "Multi-UIAbility cold-launch verification target",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
       }
     ],
 

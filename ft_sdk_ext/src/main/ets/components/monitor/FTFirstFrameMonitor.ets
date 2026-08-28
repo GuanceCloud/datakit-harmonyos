@@ -13,7 +13,14 @@ const TAG = 'FTFirstFrameMonitor';
  * not consume vsyncTimestamp until API 22 device validation confirms it has
  * the same time origin as systemDateTime.getUptime(STARTUP, true).
  */
-export function observeFTAppFirstFrame(windowStage: window.WindowStage): boolean {
+/**
+ * `onFirstFrameRecorded` runs only after T3 has been handed to ft_sdk. It is
+ * optional so existing integrations keep the original one-argument API.
+ */
+export function observeFTAppFirstFrame(
+  windowStage: window.WindowStage,
+  onFirstFrameRecorded?: () => void
+): boolean {
   try {
     const mainWindow = windowStage.getMainWindowSync();
     let firstFrameMetricsObserved = false;
@@ -42,6 +49,11 @@ export function observeFTAppFirstFrame(windowStage: window.WindowStage): boolean
       }
       FTSDK.recordAppFirstFrame(callbackUptimeNs);
       console.info(`${TAG}: T3 submitted to ft_sdk`);
+      try {
+        onFirstFrameRecorded?.();
+      } catch (error) {
+        console.warn(`${TAG}: first-frame completion callback failed: ${String(error)}`);
+      }
     };
     mainWindow.on('frameMetricsMeasured', callback);
     console.info(`${TAG}: frameMetricsMeasured listener registered`);

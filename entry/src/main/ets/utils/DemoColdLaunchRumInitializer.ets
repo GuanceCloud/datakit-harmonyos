@@ -32,8 +32,10 @@ export function initializeDemoColdLaunchRum(
   want?: Want
 ): Promise<void> {
   if (FTSDK.getRumConfig() !== null) {
-    DemoLogger.i(TAG, `RUM already initialized; early bootstrap skipped, source=${source}`);
-    return Promise.resolve();
+    // AbilityStage can have initialized RUM from persisted settings before a
+    // UIAbility arrives with newer Want parameters. Refresh the intake route
+    // instead of silently retaining an empty or stale endpoint.
+    return refreshUploadEndpoint(context, source, want);
   }
   if (initializationInFlight !== null) {
     return initializationInFlight;
@@ -78,6 +80,25 @@ async function initialize(context: Context, source: string, want?: Want): Promis
     DemoLogger.i(TAG, `Early SDK/RUM bootstrap completed, source=${source}`);
   } catch (error) {
     DemoLogger.e(TAG, `Early SDK/RUM bootstrap failed, source=${source}, error=${String(error)}`);
+  }
+}
+
+async function refreshUploadEndpoint(context: Context, source: string, want?: Want): Promise<void> {
+  try {
+    const settings = await readSettings(context, want);
+    if (settings.datawayUrl.length > 0 && settings.clientToken.length > 0) {
+      FTSDK.setDatawayUrl(settings.datawayUrl, settings.clientToken);
+      DemoLogger.i(TAG, `RUM already initialized; refreshed Dataway endpoint, source=${source}`);
+      return;
+    }
+    if (settings.datakitUrl.length > 0) {
+      FTSDK.setDatakitUrl(settings.datakitUrl);
+      DemoLogger.i(TAG, `RUM already initialized; refreshed DataKit endpoint, source=${source}`);
+      return;
+    }
+    DemoLogger.i(TAG, `RUM already initialized; no upload endpoint override, source=${source}`);
+  } catch (error) {
+    DemoLogger.e(TAG, `Failed to refresh RUM upload endpoint, source=${source}, error=${String(error)}`);
   }
 }
 
