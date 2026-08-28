@@ -491,11 +491,19 @@ export class SyncTaskManager {
     const normalizedDelay = Math.max(0, delay);
     const taskName = this.nextUploadTaskName();
     if (this.uploadScheduled || this.uploadRunning) {
+      // A repeated auto-sync trigger is already covered by the outstanding
+      // aggregation window. Do not manufacture a follow-up poll for every
+      // cached record written during that window.
+      if (this.uploadScheduled && this.uploadScheduledDelay > 0 && normalizedDelay > 0) {
+        return;
+      }
+      const hadReschedule = this.uploadNeedReschedule;
       this.uploadNeedReschedule = true;
-      // Match Android's DataUploadThreadPool: a trigger received while work is
-      // already waiting or running is consumed by an immediate follow-up task.
-      // In particular, this must not start a second 10-second wait.
-      this.uploadRescheduleDelay = 0;
+      // Keep the caller's requested delay. In particular, executeSyncPoll()
+      // must retain its aggregation delay while an upload is in progress;
+      // forcing it to zero turns continuous cache writes into a tight poll.
+      this.uploadRescheduleDelay = hadReschedule ?
+        Math.min(this.uploadRescheduleDelay, normalizedDelay) : normalizedDelay;
       return;
     }
 
@@ -548,7 +556,16 @@ export class SyncTaskManager {
       const consumeResult = await this.executeDataUploadWorkerConsume(taskName);
       this.errorCount = consumeResult.errorCount;
       if (consumeResult.hasMoreData && !this.isStop) {
-        this.scheduleUpload(0);
+        if (consumeResult.consumedRows > 0 || consumeResult.retryableFailure) {
+          // Keep draining committed pages and preserve explicit transient
+          // retry behavior. The Worker has already applied its backoff.
+          this.scheduleUpload(0);
+        } else {
+          // A local limit or an empty, non-retryable page cannot make forward
+          // progress. Leave its cache row intact and wait for a new external
+          // sync trigger instead of retaining the upload lane indefinitely.
+          FTInnerLogger.w(TAG, 'Upload paused: cached data made no progress and is not retryable');
+        }
       }
     } catch (error) {
       this.uploadRunning = false;

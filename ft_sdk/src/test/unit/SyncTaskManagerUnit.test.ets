@@ -789,7 +789,7 @@ export default function syncTaskManagerUnitTest() {
       const uploadStatus = manager.getStatus().uploadLaneStatus;
       expect(uploadStatus.isScheduled).assertTrue();
       expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
-      expect(uploadStatus.needReschedule).assertTrue();
+      expect(uploadStatus.needReschedule).assertFalse();
       expect(runtime.timerCallbacks.size).assertEqual(2);
 
       await runScheduledUpload(runtime);
@@ -828,6 +828,8 @@ export default function syncTaskManagerUnitTest() {
 
       expect(db.hasDataCount).assertEqual(hasDataCountBefore);
       expect(manager.getStatus().uploadLaneStatus.needReschedule).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.rescheduleDelay)
+        .assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
 
       releaseHttp();
       runtime.httpBarrier = null;
@@ -835,6 +837,25 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('uploadLaneShouldStopWhenMoreDataMakesNoProgress', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      const oversizedPayload = 'x'.repeat(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'transport-limit-row',
+          `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${oversizedPayload}" 100`)
+      ]);
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      const uploadStatus = manager.getStatus().uploadLaneStatus;
+      expect(runtime.executeHttpCount).assertEqual(0);
+      expect(runtime.sleepDurations.length).assertEqual(0);
+      expect(uploadStatus.isScheduled).assertFalse();
     });
 
     it('executeSyncPollShouldUploadWhenCachedDataExistsAfterInit', 0, async () => {
@@ -1001,6 +1022,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpContentEncoding).assertEqual('deflate');
       expect(runtime.lastHttpCompressedBody !== undefined).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME)).assertTrue();
+      expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_PREPARE_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_COMMIT_PAGE)).assertTrue();
       expect(runtime.uploadWorkerCommands.includes(SDKWorkerCommand.UPLOAD_CONSUME_FINISH)).assertTrue();
@@ -1029,9 +1051,10 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpBody.includes('remote-blocked')).assertFalse();
       expect(runtime.lastHttpBody.includes('remote-allowed')).assertTrue();
-      expect(db.deleteCount).assertEqual(2);
+      expect(db.deleteCount).assertEqual(3);
       expect(db.deletedUuidBatches[0][0]).assertEqual('remote-blocked');
       expect(db.deletedUuidBatches[1][0]).assertEqual('remote-allowed');
+      expect(db.deletedUuidBatches[2][0]).assertEqual('remote-allowed');
       expect(runtime.cachePolicy.logDelta).assertEqual(-2);
     });
 
@@ -1072,7 +1095,9 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
-      expect(runtime.executeHttpCount).assertEqual(1);
+      // Package persistence is atomic and precedes HTTP, so a failed cache
+      // write must prevent the request from being sent.
+      expect(runtime.executeHttpCount).assertEqual(0);
       expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
       expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
       expect(runtime.cachePolicy.logDelta).assertEqual(0);
@@ -1093,7 +1118,7 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
-      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.executeHttpCount).assertEqual(0);
       expect(runtime.uploadWorkerState.uploadCheckpointVersion).assertEqual(0);
       expect(runtime.uploadWorkerState.uploadPendingPage === null).assertTrue();
       expect(runtime.cachePolicy.logDelta).assertEqual(0);
@@ -1110,8 +1135,8 @@ export default function syncTaskManagerUnitTest() {
       await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-400', 400);
       await runSingleBatchUpload(manager, runtime, db, DataType.LOG, 'log-404', 404);
 
-      expect(db.deleteCount).assertEqual(4);
-      expect(db.insertCount).assertEqual(0);
+      expect(db.deleteCount).assertEqual(8);
+      expect(db.insertCount).assertEqual(4);
       expect(runtime.cachePolicy.logDelta).assertEqual(-4);
       expect(getBackoffDurations(runtime).length).assertEqual(0);
       expect(manager.getStatus().errorCount).assertEqual(0);
@@ -1130,8 +1155,8 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
-      expect(db.deleteCount).assertEqual(1);
-      expect(db.insertCount).assertEqual(0);
+      expect(db.deleteCount).assertEqual(2);
+      expect(db.insertCount).assertEqual(1);
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
       expect(runtime.sleepDurations.includes(500)).assertTrue();
 
@@ -1143,8 +1168,8 @@ export default function syncTaskManagerUnitTest() {
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
-      expect(db.deleteCount).assertEqual(2);
-      expect(db.insertCount).assertEqual(0);
+      expect(db.deleteCount).assertEqual(4);
+      expect(db.insertCount).assertEqual(2);
       expect(runtime.cachePolicy.logDelta).assertEqual(-2);
       expect(runtime.sleepDurations.includes(1000)).assertTrue();
     });
@@ -1170,8 +1195,8 @@ export default function syncTaskManagerUnitTest() {
       expect(backoffs[4]).assertEqual(4000);
       expect(backoffs[5]).assertEqual(8000);
       expect(backoffs[6]).assertEqual(8000);
-      expect(db.deleteCount).assertEqual(7);
-      expect(db.insertCount).assertEqual(0);
+      expect(db.deleteCount).assertEqual(14);
+      expect(db.insertCount).assertEqual(7);
     });
 
     it('uploadLaneShouldIsolateRetryBackoffByDataType', 0, async () => {
@@ -1190,11 +1215,12 @@ export default function syncTaskManagerUnitTest() {
       expect(backoffs[1]).assertEqual(1000);
       expect(backoffs[2]).assertEqual(500);
       expect(backoffs[3]).assertEqual(1000);
-      expect(db.insertCount).assertEqual(4);
+      expect(db.insertCount).assertEqual(5);
       expect(db.insertReInsertFlags[0]).assertTrue();
       expect(db.insertReInsertFlags[1]).assertTrue();
       expect(db.insertReInsertFlags[2]).assertTrue();
       expect(db.insertReInsertFlags[3]).assertTrue();
+      expect(db.insertReInsertFlags[4]).assertTrue();
       expect(manager.getStatus().errorCount).assertEqual(2);
     });
 

@@ -33,6 +33,8 @@ import {
   SDKUploadHttpResultDTO,
   SDKUploadPageDTO,
   SDKUploadPageOutcome,
+  SDKUploadPreparePageDTO,
+  SDKUploadPreparePageResultDTO,
   SDKUploadRoundFinishDTO,
   SDKUploadRoundResultDTO,
   SDKUploadRoundStartDTO,
@@ -449,6 +451,8 @@ function handleSDKWorkerCommand(request: SDKWorkerRequest, state: SDKWorkerRunti
       return handleUploadSchedule(request.payload as SDKUploadSchedulePayload, state);
     case SDKWorkerCommand.UPLOAD_CONSUME:
       return handleUploadRoundStart(request.payload as SDKUploadRoundStartDTO, state);
+    case SDKWorkerCommand.UPLOAD_PREPARE_PAGE:
+      return handleUploadPreparePage(request.payload as SDKUploadPreparePageDTO, state);
     case SDKWorkerCommand.UPLOAD_COMMIT_PAGE:
       return handleUploadCommitPage(request.payload as SDKUploadCommitPageDTO, state);
     case SDKWorkerCommand.UPLOAD_CONSUME_FINISH:
@@ -2557,6 +2561,116 @@ function clearPendingUploadPage(state: SDKWorkerRuntimeState): void {
   state.uploadPendingPage = null;
 }
 
+interface SDKUploadPreparedRows {
+  sourceRows: SDKUploadRowDTO[];
+  rows: SDKUploadRowDTO[];
+  needsPersistence: boolean;
+  deduplicatedRows: SDKUploadRowDTO[];
+  packageId: string;
+  bodySelection: SDKUploadBodySelection;
+  deferredRows: number;
+}
+
+/**
+ * Select exactly one package for an upload request. Existing package-prefixed
+ * rows are kept together; raw rows are assigned one new package. This helper
+ * is shared by the pre-HTTP persistence step and the HTTP execution step so
+ * the Header package ID always matches every sdk_data_id in the request body.
+ */
+function prepareUploadRows(
+  dataType: string,
+  rows: SDKUploadRowDTO[],
+  queryHasMore: boolean,
+  requestedPackageId: string,
+  state: SDKWorkerRuntimeState
+): SDKUploadPreparedRows {
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
+  let packageId = requestedPackageId || findPersistedUploadPackageId(pageRows);
+  let candidateRows: SDKUploadRowDTO[] = [];
+  if (packageId.length > 0) {
+    candidateRows = selectRowsForUploadPackage(pageRows, packageId);
+  } else {
+    candidateRows = selectRawUploadRows(pageRows);
+  }
+
+  let bodySelection: SDKUploadBodySelection = createEmptyUploadBodySelection();
+  if (candidateRows.length > 0) {
+    if (packageId.length === 0) {
+      const provisionalPackageId = createUploadPackageId(dataType, candidateRows.length, state);
+      bodySelection = selectUploadRowsForBody(candidateRows, provisionalPackageId);
+      packageId = provisionalPackageId;
+      if (bodySelection.rows.length > 0 && bodySelection.oversizedRows === 0 &&
+        bodySelection.rows.length !== candidateRows.length) {
+        const bodyLimitReached = bodySelection.bodyLimitReached;
+        packageId = createUploadPackageId(dataType, bodySelection.rows.length, state);
+        bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
+        bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
+      }
+    } else {
+      bodySelection = selectUploadRowsForBody(candidateRows, packageId);
+    }
+  }
+
+  const sourceRows = bodySelection.rows;
+  const preparedRows = createUploadReInsertRows(sourceRows, packageId);
+  return {
+    sourceRows,
+    rows: preparedRows,
+    needsPersistence: haveUploadRowsChanged(sourceRows, preparedRows),
+    deduplicatedRows,
+    packageId,
+    bodySelection,
+    deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
+  };
+}
+
+function handleUploadPreparePage(
+  payload: SDKUploadPreparePageDTO,
+  state: SDKWorkerRuntimeState
+): SDKWorkerPayload {
+  const startedAt = Date.now();
+  assertUploadRound(payload ? payload.roundId : '', state);
+  if (state.uploadPendingPage !== null) {
+    throw new Error(`Upload page commit is pending: ${state.uploadPendingPage.attemptId}`);
+  }
+  const inputRows = payload && payload.rows ? payload.rows : [];
+  const prepared = prepareUploadRows(
+    payload.dataType,
+    inputRows,
+    payload.queryHasMore === true,
+    '',
+    state
+  );
+  const body = prepared.bodySelection.lines.join('\n');
+  const hasMoreData = prepared.deferredRows > 0 || prepared.bodySelection.oversizedRows > 0;
+  if (hasMoreData) {
+    state.uploadRoundHasMoreData = true;
+  }
+  const result: SDKUploadPreparePageResultDTO = {
+    roundId: state.uploadRoundId,
+    dataType: payload.dataType,
+    sourceRows: prepared.sourceRows,
+    rows: prepared.rows,
+    needsPersistence: prepared.needsPersistence,
+    queriedRows: inputRows.length,
+    acceptedRows: prepared.rows.length,
+    duplicateRows: Math.max(0, inputRows.length - prepared.deduplicatedRows.length),
+    deferredRows: prepared.deferredRows,
+    packageId: prepared.packageId,
+    bodyLength: body.length,
+    bodyBytes: prepared.bodySelection.bodyBytes,
+    bodyLimitReached: prepared.bodySelection.bodyLimitReached,
+    oversizedRows: prepared.bodySelection.oversizedRows,
+    transportLimitReached: payload.transportLimitReached === true,
+    bodyPreview: body,
+    shouldExecute: prepared.rows.length > 0,
+    roundHasMoreData: state.uploadRoundHasMoreData,
+    computeMs: finishUploadComputeMetric(state, startedAt)
+  };
+  return result as Object as SDKWorkerPayload;
+}
+
 async function handleUploadExecutePage(
   payload: SDKUploadExecutePageDTO,
   state: SDKWorkerRuntimeState,
@@ -2569,11 +2683,18 @@ async function handleUploadExecutePage(
   }
 
   const rows = payload && payload.rows ? payload.rows : [];
-  const deduplicatedRows = deduplicateUploadRows(payload.dataType, rows, state);
-  const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
-  if (pageRows.length === 0) {
+  const preparedRows = prepareUploadRows(
+    payload.dataType,
+    rows,
+    payload.queryHasMore === true,
+    payload.packageId || '',
+    state
+  );
+  const deduplicatedRows = preparedRows.deduplicatedRows;
+  if (preparedRows.sourceRows.length === 0) {
     const queryHasMore = payload.queryHasMore === true;
-    if (queryHasMore) {
+    const hasDeferredRows = preparedRows.deferredRows > 0;
+    if (queryHasMore || hasDeferredRows) {
       state.uploadRoundHasMoreData = true;
     }
     const computeMs = finishUploadComputeMetric(state, prepareStartedAt);
@@ -2584,13 +2705,13 @@ async function handleUploadExecutePage(
       rows: [],
       queriedRows: rows.length,
       acceptedRows: 0,
-      duplicateRows: rows.length,
-      deferredRows: queryHasMore ? 1 : 0,
-      packageId: '',
+      duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+      deferredRows: preparedRows.deferredRows,
+      packageId: preparedRows.packageId,
       bodyLength: 0,
       bodyBytes: 0,
-      bodyLimitReached: false,
-      oversizedRows: 0,
+      bodyLimitReached: preparedRows.bodySelection.bodyLimitReached,
+      oversizedRows: preparedRows.bodySelection.oversizedRows,
       transportLimitReached: payload.transportLimitReached === true,
       bodyPreview: '',
       shouldUpload: false,
@@ -2613,58 +2734,11 @@ async function handleUploadExecutePage(
     return emptyResult as Object as SDKWorkerPayload;
   }
 
-  const provisionalPackageId = createUploadPackageId(payload.dataType, pageRows.length, state);
-  let bodySelection = selectUploadRowsForBody(pageRows, provisionalPackageId);
-  let packageId = provisionalPackageId;
-  if (bodySelection.rows.length > 0 && bodySelection.oversizedRows === 0 &&
-    bodySelection.rows.length !== pageRows.length) {
-    const bodyLimitReached = bodySelection.bodyLimitReached;
-    packageId = createUploadPackageId(payload.dataType, bodySelection.rows.length, state);
-    bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
-    bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
-  }
-  const acceptedRows = bodySelection.rows;
+  const bodySelection = preparedRows.bodySelection;
+  const packageId = preparedRows.packageId;
+  const acceptedRows = preparedRows.rows;
   const body = bodySelection.lines.join('\n');
-  const deferredRows = Math.max(0, deduplicatedRows.length - acceptedRows.length) +
-    (payload.queryHasMore === true ? 1 : 0);
-  if (acceptedRows.length === 0 && bodySelection.oversizedRows > 0) {
-    state.uploadRoundHasMoreData = true;
-    const computeMs = finishUploadComputeMetric(state, prepareStartedAt);
-    const deferredResult: SDKUploadExecutePageResultDTO = {
-      roundId: state.uploadRoundId,
-      attemptId: '',
-      dataType: payload.dataType,
-      rows: [],
-      queriedRows: rows.length,
-      acceptedRows: 0,
-      duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
-      deferredRows,
-      packageId,
-      bodyLength: 0,
-      bodyBytes: 0,
-      bodyLimitReached: true,
-      oversizedRows: bodySelection.oversizedRows,
-      transportLimitReached: payload.transportLimitReached === true,
-      bodyPreview: '',
-      shouldUpload: false,
-      outcome: SDKUploadPageOutcome.EMPTY_BODY,
-      httpResult: createEmptyUploadHttpResult(),
-      dbAction: SDKUploadDbActionDTO.NONE,
-      reInsertRows: [],
-      reduceCount: 0,
-      delayMs: DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
-      shouldContinueDataType: false,
-      roundHasMoreData: true,
-      retryCount: getUploadErrorCount(state, payload.dataType),
-      retryLimitReached: false,
-      ignoredClientError: false,
-      successfulResponse: false,
-      errorCount: getAggregateUploadErrorCount(state),
-      computeMs,
-      checkpointAfterCommit: createUploadCheckpoint(state)
-    };
-    return deferredResult as Object as SDKWorkerPayload;
-  }
+  const deferredRows = preparedRows.deferredRows;
   const shouldUpload = body.length > 0;
   if (shouldUpload) {
     markUploadRows(payload.dataType, acceptedRows, state);
@@ -2723,6 +2797,7 @@ async function handleUploadExecutePage(
     httpResult.code,
     deferredRows > 0,
     packageId,
+    payload.sdkDataIdPersisted === true,
     checkpointAfterCommit,
     state
   );
@@ -2802,6 +2877,7 @@ function classifyUploadPageResult(
   httpCode: number,
   hasDeferredRows: boolean,
   packageId: string,
+  sdkDataIdPersisted: boolean,
   checkpoint: SDKUploadCheckpointDTO,
   state: SDKWorkerRuntimeState
 ): SDKUploadPageProposal {
@@ -2841,8 +2917,15 @@ function classifyUploadPageResult(
     successfulResponse = httpCode >= 200 && httpCode < 300;
     retryCount = 0;
   } else if (isRetryableUploadCode(httpCode)) {
-    dbAction = SDKUploadDbActionDTO.REINSERT;
-    reInsertRows = createUploadReInsertRows(rows, packageId);
+    // Production calls persist the package-prefixed sdk_data_id before HTTP.
+    // Keep those rows untouched on a retry; legacy/direct callers still get
+    // the old reinsert behavior so their first failed attempt is durable.
+    if (sdkDataIdPersisted) {
+      dbAction = SDKUploadDbActionDTO.NONE;
+    } else {
+      dbAction = SDKUploadDbActionDTO.REINSERT;
+      reInsertRows = createUploadReInsertRows(rows, packageId);
+    }
     checkpoint.ignoredErrorCounts[dataType] = 0;
     retryCount = Math.min(
       state.uploadRoundMaxRetryCount + 1,
@@ -3139,14 +3222,80 @@ interface SDKUploadBodySelection {
   oversizedRows: number;
 }
 
-function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SDKUploadBodySelection {
-  const result: SDKUploadBodySelection = {
+function createEmptyUploadBodySelection(): SDKUploadBodySelection {
+  return {
     rows: [],
     lines: [],
     bodyBytes: 0,
     bodyLimitReached: false,
     oversizedRows: 0
   };
+}
+
+function haveUploadRowsChanged(sourceRows: SDKUploadRowDTO[], preparedRows: SDKUploadRowDTO[]): boolean {
+  if (sourceRows.length !== preparedRows.length) {
+    return true;
+  }
+  for (let i = 0; i < sourceRows.length; i++) {
+    if (sourceRows[i].dataString !== preparedRows[i].dataString) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns only an established package prefix at the very start of
+ * sdk_data_id. The suffix is intentionally opaque: legacy cache rows can
+ * have a database UUID that differs from the line tag, or an old raw value
+ * containing dots. This makes the outer persisted P authoritative.
+ */
+function getPersistedUploadPackageId(row: SDKUploadRowDTO): string {
+  return getPersistedUploadPackageIdFromValue(getUploadSdkDataId(row));
+}
+
+function getUploadSdkDataId(row: SDKUploadRowDTO): string {
+  if (!row || !row.dataString) {
+    return '';
+  }
+  const match = row.dataString.match(/sdk_data_id=([^,\s]+)/);
+  return match && match[1] ? match[1] : '';
+}
+
+function isGeneratedUploadPackageId(value: string): boolean {
+  // `sequence.processId.rowCount.nanoId`; keep this strict so a legacy raw
+  // sdk_data_id containing dots is never mistaken for an existing package.
+  return /^[0-9a-z]+\.[0-9A-Za-z]+\.\d+\.[0-9A-Za-z]+$/.test(value);
+}
+
+function findPersistedUploadPackageId(rows: SDKUploadRowDTO[]): string {
+  // Preserve the DB query order. The first row chooses the group; all rows
+  // with a different historical package (or raw UUID) are deferred.
+  return rows.length > 0 ? getPersistedUploadPackageId(rows[0]) : '';
+}
+
+function selectRowsForUploadPackage(rows: SDKUploadRowDTO[], packageId: string): SDKUploadRowDTO[] {
+  const result: SDKUploadRowDTO[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (getPersistedUploadPackageId(rows[i]) === packageId) {
+      result.push(rows[i]);
+    }
+  }
+  return result;
+}
+
+function selectRawUploadRows(rows: SDKUploadRowDTO[]): SDKUploadRowDTO[] {
+  const result: SDKUploadRowDTO[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (getPersistedUploadPackageId(rows[i]).length === 0) {
+      result.push(rows[i]);
+    }
+  }
+  return result;
+}
+
+function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SDKUploadBodySelection {
+  const result = createEmptyUploadBodySelection();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     // The first upload assigns the established package-prefixed sdk_data_id
@@ -3163,8 +3312,8 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
       result.bodyLimitReached = true;
       if (result.rows.length === 0) {
         // Never delete a row merely because a local limit rejected it. It
-        // remains in DB and is retried with bounded delay until a real HTTP +
-        // DB commit accepts it or an explicit data policy handles it.
+        // remains in DB. The current upload round stops, and a future external
+        // sync trigger can retry it after the data or policy changes.
         result.oversizedRows = 1;
       }
       break;
@@ -3322,16 +3471,34 @@ function handleUploadFormatBody(payload: SDKUploadPageDTO): SDKWorkerPayload {
 }
 
 /**
- * Assigns the established package-prefixed sdk_data_id only when the cached
- * record still contains its unprefixed UUID. If a prior failed attempt already
- * persisted a prefixed ID, the exact original value is returned unchanged.
+ * Assigns the established package-prefixed sdk_data_id only when no standard
+ * package occupies its outer prefix. A non-standard historical value is raw:
+ * it is wrapped exactly once, then its outer standard P is reused on every
+ * retry without changing the value again.
  */
 function applyPackageId(dataString: string, uuid: string, packageId: string): string {
-  if (!dataString || !uuid || !packageId) {
+  if (!dataString || !packageId) {
     return dataString || '';
   }
-  const sdkDataId = `${Constants.KEY_SDK_DATA_FLAG}=${uuid}`;
-  return dataString.replace(sdkDataId, `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${uuid}`);
+  const match = dataString.match(/sdk_data_id=([^,\s]+)/);
+  if (!match || !match[1]) {
+    return dataString;
+  }
+  const currentSdkDataId = match[1];
+  if (getPersistedUploadPackageIdFromValue(currentSdkDataId).length > 0) {
+    return dataString;
+  }
+  const replacement = `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${currentSdkDataId}`;
+  return dataString.replace(`${Constants.KEY_SDK_DATA_FLAG}=${currentSdkDataId}`, replacement);
+}
+
+function getPersistedUploadPackageIdFromValue(value: string): string {
+  // P is `sequence.processId.rowCount.nanoId`. Do not use the database UUID
+  // or the last dot as a delimiter: both are historical data and may contain
+  // dots. Matching only at the start prevents P.P.old-id prefix growth.
+  const match = value.match(/^([0-9a-z]+\.[0-9A-Za-z]+\.\d+\.[0-9A-Za-z]+)\./);
+  const packageId = match && match[1] ? match[1] : '';
+  return isGeneratedUploadPackageId(packageId) ? packageId : '';
 }
 
 function buildLineProtocol(
