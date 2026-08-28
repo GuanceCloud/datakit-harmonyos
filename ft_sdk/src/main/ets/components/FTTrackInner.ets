@@ -1345,9 +1345,6 @@ class FTTrackInner {
     this.refreshWorkerLineProtocolContextSnapshot();
     this.syncLineProtocolContextToDefaultWorkers();
 
-    // Debug log for SyncTaskManager initialization
-    this.syncTaskManager.init(config, context);
-
     FTInnerLogger.i(TAG, "FTTrackInner base config initialized");
   }
 

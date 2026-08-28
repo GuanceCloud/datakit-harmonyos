@@ -6,9 +6,5 @@ import { initializeDemoColdLaunchRum } from '../utils/DemoColdLaunchRumInitializ
 export default class EntryAbilityStage extends AbilityStage {
   onCreate(): void {
     FTSDK.recordAppApplicationInit(this.context);
-    // This is intentionally independent from UIAbility.onCreate: a service or
-    // push cold launch can have no UIAbility, yet must make the launch tracker
-    // RUM-ready and report its bounded background cold-start Action.
-    initializeDemoColdLaunchRum(this.context, 'AbilityStage');
   }
 }
