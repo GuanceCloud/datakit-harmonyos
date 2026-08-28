@@ -314,7 +314,6 @@ export class FTAbilityLifecycleListener {
       };
       appContext.on('applicationStateChange', this.applicationStateCallback);
       this.applicationStateRegistered = true;
-      FTInnerLogger.d(TAG, 'Application-state listener registered for cold-launch classification');
     } catch (error) {
       FTInnerLogger.w(TAG, `Unable to register application-state listener: ${String(error)}`);
       this.applicationStateCallback = null;

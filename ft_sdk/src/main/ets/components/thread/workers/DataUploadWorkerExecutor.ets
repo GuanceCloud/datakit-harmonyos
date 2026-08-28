@@ -270,10 +270,14 @@ export class DataUploadWorkerExecutor {
           `Deduplication filtered out ${prepared.duplicateRows} duplicate record(s) for ${dataType}`);
       }
       if (!prepared.rows || prepared.rows.length === 0 || !prepared.shouldExecute) {
-        FTInnerLogger.w(TAG,
-          `Upload page made no progress: type=${dataType}, queried=${prepared.queriedRows}, ` +
-          `deferred=${prepared.deferredRows}, oversized=${prepared.oversizedRows}, ` +
-          `bodyLimit=${prepared.bodyLimitReached}, transportLimit=${prepared.transportLimitReached}`);
+        const hasBlockedCachedRows = prepared.queriedRows > 0 || prepared.deferredRows > 0 ||
+          prepared.oversizedRows > 0 || prepared.bodyLimitReached || prepared.transportLimitReached;
+        if (hasBlockedCachedRows) {
+          FTInnerLogger.w(TAG,
+            `Upload page made no progress: type=${dataType}, queried=${prepared.queriedRows}, ` +
+            `deferred=${prepared.deferredRows}, oversized=${prepared.oversizedRows}, ` +
+            `bodyLimit=${prepared.bodyLimitReached}, transportLimit=${prepared.transportLimitReached}`);
+        }
         state.hasMoreData = state.hasMoreData || prepared.roundHasMoreData;
         return;
       }
@@ -318,10 +322,12 @@ export class DataUploadWorkerExecutor {
       // row is absent by the time the execution phase runs. Sending an empty
       // commit would otherwise fail forever with `expected=, actual=`.
       if (executed.attemptId.length === 0) {
-        FTInnerLogger.w(TAG,
-          `Upload execution produced no request: type=${dataType}, queried=${executed.queriedRows}, ` +
-          `accepted=${executed.acceptedRows}, deferred=${executed.deferredRows}, ` +
-          `pkg_id=${executed.packageId}`);
+        if (executed.queriedRows > 0 || executed.acceptedRows > 0 || executed.deferredRows > 0) {
+          FTInnerLogger.w(TAG,
+            `Upload execution produced no request: type=${dataType}, queried=${executed.queriedRows}, ` +
+            `accepted=${executed.acceptedRows}, deferred=${executed.deferredRows}, ` +
+            `pkg_id=${executed.packageId}`);
+        }
         state.hasMoreData = state.hasMoreData || executed.roundHasMoreData;
         if (executed.delayMs > 0) {
           await this.sleep(capabilities, executed.delayMs, state);

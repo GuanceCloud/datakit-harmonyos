@@ -7,6 +7,7 @@ import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
 import { ViewBean } from './db/bean/ViewBean';
 import { FTInnerLogger } from './log/FTLogger';
+import { FTLogSeparator } from './log/FTLogSeparator';
 import {
   DefaultSyncTaskManagerRuntime,
   SyncTaskCachePolicy,
@@ -453,7 +454,7 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
-    FTInnerLogger.d(TAG, "******************* Sync Poll Ready *******************>>>");
+    FTLogSeparator.data(TAG, "数据上传就绪");
   }
 
   private async initializePreferences(context: Context): Promise<void> {
@@ -518,7 +519,7 @@ export class SyncTaskManager {
     }, normalizedDelay);
 
     if (normalizedDelay > 0) {
-      FTInnerLogger.d(TAG, "******************* Sync Poll Waiting *******************>>>");
+      FTLogSeparator.data(TAG, "数据上传等待");
     }
   }
 
@@ -548,7 +549,7 @@ export class SyncTaskManager {
       return;
     }
 
-    FTInnerLogger.d(TAG, "******************* Sync Poll Running *******************>>>");
+    FTLogSeparator.data(TAG, "数据上传开始");
     this.uploadRunning = true;
     this.running = true;
 
@@ -581,7 +582,7 @@ export class SyncTaskManager {
       const nextDelay = this.uploadRescheduleDelay;
       this.uploadRunning = false;
       this.running = false;
-      FTInnerLogger.d(TAG, "******************* Sync Poll Finish *******************>>>");
+      FTLogSeparator.data(TAG, "数据上传结束");
       this.uploadNeedReschedule = false;
       this.uploadRescheduleDelay = 0;
       if (shouldReschedule && !this.isStop) {

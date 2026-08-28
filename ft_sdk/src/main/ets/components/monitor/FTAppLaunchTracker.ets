@@ -143,21 +143,18 @@ export class FTAppLaunchTracker {
   /** Optional app-provided T0 for applications that initialize the SDK late. */
   public setAppStartTime(uptimeNs: number): void {
     if (this.reported || uptimeNs <= 0 || this.hasRecordedBoundary()) {
-      FTInnerLogger.d(TAG, `Ignoring T0 override: reported=${this.reported}, uptimeNs=${uptimeNs}, hasBoundary=${this.hasRecordedBoundary()}`);
       return;
     }
     this.appStartUptimeNs = uptimeNs;
-    FTInnerLogger.d(TAG, `T0 overridden: uptimeNs=${uptimeNs}`);
   }
 
   /** T1: AbilityStage/application initialization. */
   public recordApplicationInit(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.applicationInitUptimeNs > 0 || uptimeNs <= 0) {
-      FTInnerLogger.d(TAG, `Ignoring T1: existing=${this.applicationInitUptimeNs}, uptimeNs=${uptimeNs}`);
       return;
     }
     this.applicationInitUptimeNs = uptimeNs;
-    FTInnerLogger.d(TAG, `T1 recorded: uptimeNs=${uptimeNs}`);
+    FTInnerLogger.d(TAG, 'Cold launch tracking started');
     this.tryReport();
   }
 
@@ -168,7 +165,6 @@ export class FTAppLaunchTracker {
    */
   public recordInitialVisibility(visibility: FTAppLaunchInitialVisibility): void {
     if (this.initialVisibilityCaptured) {
-      FTInnerLogger.d(TAG, `Ignoring initial visibility: existing=${this.initialVisibility}, incoming=${visibility}`);
       return;
     }
     this.initialVisibility = visibility;
@@ -176,14 +172,12 @@ export class FTAppLaunchTracker {
     // result diagnostic-only and allow a later Service/AbilityStage context to
     // replace it with an actual foreground/background snapshot.
     if (visibility === 'unknown') {
-      FTInnerLogger.d(TAG, 'Initial application visibility is unknown; awaiting a later concrete snapshot');
       return;
     }
     this.initialVisibilityCaptured = true;
     if (visibility === 'foreground') {
       this.applicationForegroundObserved = true;
     }
-    FTInnerLogger.d(TAG, `Initial application visibility recorded: ${visibility}`);
     this.resolveBackgroundLaunchIfNeeded();
   }
 
@@ -193,7 +187,6 @@ export class FTAppLaunchTracker {
       return;
     }
     this.initialLifecycleRoundComplete = true;
-    FTInnerLogger.d(TAG, 'Initial lifecycle round quiescence barrier completed');
     this.resolveBackgroundLaunchIfNeeded();
   }
 
@@ -205,44 +198,37 @@ export class FTAppLaunchTracker {
   /** T2: the first UIAbility.onCreate entry. */
   public recordFirstUIAbilityCreated(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.firstUIAbilityUptimeNs > 0 || uptimeNs <= 0) {
-      FTInnerLogger.d(TAG, `Ignoring T2: existing=${this.firstUIAbilityUptimeNs}, uptimeNs=${uptimeNs}`);
       return;
     }
     this.firstUIAbilityUptimeNs = uptimeNs;
     this.launchType = 'foreground';
-    FTInnerLogger.d(TAG, `T2 recorded: uptimeNs=${uptimeNs}`);
     this.tryReport();
   }
 
   /** T3: the first frame callback from the API 22 extension. */
   public recordFirstFrame(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.firstFrameUptimeNs > 0 || uptimeNs <= 0) {
-      FTInnerLogger.d(TAG, `Ignoring T3: existing=${this.firstFrameUptimeNs}, uptimeNs=${uptimeNs}`);
       return;
     }
     this.firstFrameUptimeNs = uptimeNs;
     this.launchType = 'foreground';
-    FTInnerLogger.d(TAG, `T3 recorded: uptimeNs=${uptimeNs}`);
     this.tryReport();
   }
 
   public recordApplicationForeground(): void {
     this.applicationForegroundObserved = true;
-    FTInnerLogger.d(TAG, 'Application foreground signal received');
     if (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved) {
       this.launchType = 'foreground';
     }
   }
 
   public recordApplicationBackground(): void {
-    FTInnerLogger.d(TAG, 'Application background signal received');
     this.resolveBackgroundLaunchIfNeeded();
   }
 
   /** Window SHOWN/ACTIVE is a foreground corroboration signal. */
   public recordWindowForeground(): void {
     this.windowForegroundObserved = true;
-    FTInnerLogger.d(TAG, 'Window SHOWN/ACTIVE signal received');
     if (this.firstUIAbilityUptimeNs > 0 || this.applicationForegroundObserved) {
       this.launchType = 'foreground';
     }
@@ -251,7 +237,6 @@ export class FTAppLaunchTracker {
   /** RUM can become ready after any subset of T0-T3 has already been recorded. */
   public markRumReady(enabled: boolean): void {
     this.rumReady = enabled;
-    FTInnerLogger.d(TAG, `RUM Action readiness=${enabled}`);
     this.tryReport();
   }
 
@@ -303,7 +288,6 @@ export class FTAppLaunchTracker {
       return;
     }
     this.launchType = 'background';
-    FTInnerLogger.d(TAG, 'Background cold launch settled: no UI/Window appeared in first scheduling round');
     this.tryReport();
   }
 
@@ -312,17 +296,16 @@ export class FTAppLaunchTracker {
       return;
     }
     if (!this.rumReady || !this.launchType) {
-      FTInnerLogger.d(TAG, `Cold launch pending: rumReady=${this.rumReady}, launchType=${this.launchType}`);
       return;
     }
 
     const action = this.buildAction();
     if (!action) {
-      FTInnerLogger.d(TAG, `Cold launch pending: terminal boundary missing or invalid for launchType=${this.launchType}`);
       return;
     }
     this.reported = this.reporter.report(action);
-    FTInnerLogger.d(TAG, `Cold launch report submitted=${this.reported}, type=${this.launchType}, durationNs=${action.durationNs}`);
+    FTInnerLogger.d(TAG,
+      `Cold launch report submitted=${this.reported}, type=${this.launchType}, durationMs=${action.durationNs / 1_000_000}`);
     if (this.reported) {
       this.notifyReportSubmitted();
     }

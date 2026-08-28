@@ -22,6 +22,7 @@ import { FTRUMInnerManager } from "./rum/FTRUMInnerManager";
 import { FTTraceConfigManager } from "./trace/FTTraceConfigManager";
 import { TrackLogManager } from "./log/TrackLogManager";
 import { FTInnerLogger, FTLogger } from "./log/FTLogger";
+import { FTLogSeparator } from "./log/FTLogSeparator";
 import { FTInnerLogFileManager } from "./log/FTInnerLogFileManager";
 import { UserDataManager } from "./rum/UserDataManager";
 import { FTNetworkListener } from "./utils/FTNetworkListener";
@@ -84,6 +85,12 @@ export class FTSDK {
   private static launchInitialLifecycleRoundOpen: boolean = false;
   private static launchInitialLifecycleBarrierScheduled: boolean = false;
   private static launchInitialLifecycleGeneration: number = 0;
+  private static baseCapabilitiesReady: boolean = false;
+  private static logConfigReady: boolean = false;
+  private static rumConfigReady: boolean = false;
+  private static traceConfigReady: boolean = false;
+  private static uiPhaseResolved: boolean = false;
+  private static initializationCompleteSeparatorPrinted: boolean = false;
 
   /**
    * Get current RUM config
@@ -117,7 +124,7 @@ export class FTSDK {
 
   /** T2 hook: call at the first UIAbility.onCreate() entry. */
   public static recordAppFirstUIAbilityCreate(): void {
-    FTSDK.recordInitialLifecycleSignal('UIAbility.onCreate');
+    FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordFirstUIAbilityCreated();
   }
 
@@ -132,19 +139,19 @@ export class FTSDK {
 
   /** Internal lifecycle bridge for application foreground/background state. */
   public static recordAppLaunchApplicationForeground(): void {
-    FTSDK.recordInitialLifecycleSignal('application foreground');
+    FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationForeground();
   }
 
   /** Internal lifecycle bridge for application foreground/background state. */
   public static recordAppLaunchApplicationBackground(): void {
-    FTSDK.recordInitialLifecycleSignal('application background');
+    FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationBackground();
   }
 
   /** Internal lifecycle bridge for WindowStage SHOWN/ACTIVE. */
   public static recordAppLaunchWindowForeground(): void {
-    FTSDK.recordInitialLifecycleSignal('WindowStage shown/active');
+    FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordWindowForeground();
   }
 
@@ -173,8 +180,32 @@ export class FTSDK {
     FTSDK.uiFeaturesInitialized = false;
     FTSDK.pendingUIFeatureInit = false;
     FTSDK.uiFeatureInitRetryCount = 0;
+    FTSDK.resetInitializationSeparatorState();
     FTSDK.autoActionTrackingEnabled = true;
     FTSDK.cachedPACKAGE_UUID = null;
+  }
+
+  private static resetInitializationSeparatorState(): void {
+    FTSDK.baseCapabilitiesReady = false;
+    FTSDK.logConfigReady = false;
+    FTSDK.rumConfigReady = false;
+    FTSDK.traceConfigReady = false;
+    FTSDK.uiPhaseResolved = false;
+    FTSDK.initializationCompleteSeparatorPrinted = false;
+  }
+
+  private static tryPrintInitializationCompleteSeparator(): void {
+    if (FTSDK.initializationCompleteSeparatorPrinted ||
+      !FTSDK.baseCapabilitiesReady ||
+      !FTSDK.logConfigReady ||
+      !FTSDK.rumConfigReady ||
+      !FTSDK.traceConfigReady ||
+      !FTSDK.uiPhaseResolved) {
+      return;
+    }
+
+    FTSDK.initializationCompleteSeparatorPrinted = true;
+    FTLogSeparator.initialization(TAG, "SDK 初始化完成");
   }
 
   private static registerAppLaunchStateListener(context?: Object): void {
@@ -241,17 +272,14 @@ export class FTSDK {
     for (let index = 0; index < processes.length; index++) {
       const state = processes[index].state;
       if (state === PROCESS_STATE_FOREGROUND || state === PROCESS_STATE_ACTIVE) {
-        FTInnerLogger.d(TAG, `Initial application visibility snapshot=foreground, processState=${state}`);
         return 'foreground';
       }
     }
     for (let index = 0; index < processes.length; index++) {
       if (processes[index].state === PROCESS_STATE_BACKGROUND) {
-        FTInnerLogger.d(TAG, `Initial application visibility snapshot=background, processState=${PROCESS_STATE_BACKGROUND}`);
         return 'background';
       }
     }
-    FTInnerLogger.w(TAG, 'Initial application visibility snapshot is indeterminate');
     return 'unknown';
   }
 
@@ -261,12 +289,11 @@ export class FTSDK {
    * setTimeout(0): a UIAbility/Window callback queued after AbilityStage gets
    * two event-loop turns to arrive before a no-UI launch is settled.
    */
-  private static recordInitialLifecycleSignal(source: string): void {
+  private static recordInitialLifecycleSignal(): void {
     if (!FTSDK.launchInitialLifecycleRoundOpen) {
       return;
     }
     FTSDK.launchInitialLifecycleGeneration++;
-    FTInnerLogger.d(TAG, `Initial lifecycle signal received: ${source}, generation=${FTSDK.launchInitialLifecycleGeneration}`);
     FTSDK.scheduleInitialLifecycleBarrier();
   }
 
@@ -369,6 +396,9 @@ export class FTSDK {
         FTInnerLogger.e(TAG, "Parameter ftSDKConfig cannot be null");
         return;
       }
+
+      FTSDK.resetInitializationSeparatorState();
+      FTLogSeparator.initialization(TAG, "FTSDK 初始化开始");
 
       // Initialize Utils with context (required for ApplicationContext access)
       if (context && (context as common.UIAbilityContext)) {
@@ -479,8 +509,14 @@ export class FTSDK {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
     }
 
+    FTSDK.baseCapabilitiesReady = context !== null && context !== undefined;
+    if (FTSDK.baseCapabilitiesReady) {
+      FTLogSeparator.initialization(TAG, "基础能力就绪");
+    }
+
     // Print debug log
     FTInnerLogger.d(TAG, "FTSDK.initFTConfig complete");
+    FTSDK.tryPrintInitializationCompleteSeparator();
   }
 
   static installLogConfig(logConfig: FTLoggerConfig): void {
@@ -497,6 +533,8 @@ export class FTSDK {
       // Initialize FTTrackInner log configuration
       if (FTSDK.ftSdk) {
         FTTrackInner.getInstance().initLogConfig(logConfig);
+        FTSDK.logConfigReady = true;
+        FTLogSeparator.initialization(TAG, "Log 配置完成");
         FTInnerLogger.d(TAG,
           `installLogConfig completed: serviceName=${logConfig.getServiceName()}, samplingRate=${logConfig.getSamplingRate()}, ` +
           `enableCustomLog=${logConfig.isEnableCustomLog()}, enableLinkRumData=${logConfig.isEnableLinkRumData()}, ` +
@@ -506,6 +544,8 @@ export class FTSDK {
       }else{
         FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
       }
+
+      FTSDK.tryPrintInitializationCompleteSeparator();
 
     } catch (error) {
       FTInnerLogger.e(TAG, `installLogConfig failed: ${error}`);
@@ -522,12 +562,18 @@ export class FTSDK {
 
       // 2. Initialize Trace configuration manager
       FTTraceConfigManager.getInstance().initWithConfig(traceConfig);
+      if (FTSDK.ftSdk) {
+        FTSDK.traceConfigReady = true;
+        FTLogSeparator.initialization(TAG, "Trace 配置完成");
+      }
 
       FTInnerLogger.d(TAG,
         `installTraceConfig completed: serviceName=${traceConfig.getServiceName()}, samplingRate=${traceConfig.getSamplingRate()}, ` +
         `traceType=${traceConfig.getTraceType()}, enableAutoTrace=${traceConfig.isEnableAutoTrace()}, ` +
         `enableLinkRUMData=${traceConfig.isEnableLinkRUMData()}, enableWebTrace=${traceConfig.isEnableWebTrace()}, ` +
-        `customTraceHeaderHandler=${traceConfig.getTraceHeaderHandler() !== null}`);
+          `customTraceHeaderHandler=${traceConfig.getTraceHeaderHandler() !== null}`);
+
+      FTSDK.tryPrintInitializationCompleteSeparator();
 
     } catch (error) {
       FTInnerLogger.e(TAG, `installTraceConfig failed: ${error}`);
@@ -535,6 +581,7 @@ export class FTSDK {
   }
 
   static installRUMConfig(rumConfig: FTRUMConfig): void {
+    FTSDK.uiPhaseResolved = false;
     if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
       rumConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
       FTSDK.remoteConfigManager?.mergeRUMConfigFromCache(rumConfig);
@@ -603,9 +650,18 @@ export class FTSDK {
       FTUIBlockManager.getInstance().release();
     }
 
+    if (FTSDK.ftSdk) {
+      FTSDK.rumConfigReady = true;
+      FTLogSeparator.initialization(TAG, "RUM 配置完成");
+    }
+
     if (FTSDK.pendingUIFeatureInit) {
+      FTLogSeparator.initialization(TAG, "UI 能力等待就绪");
       getFTSDKRuntime().setMainWindow();
       FTSDK.tryInitializeUIFeaturesInternal();
+    } else {
+      FTSDK.uiPhaseResolved = true;
+      FTLogSeparator.initialization(TAG, "无需 UI 能力");
     }
 
     FTInnerLogger.d(TAG,
@@ -615,6 +671,7 @@ export class FTSDK {
       `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
       `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
       `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+    FTSDK.tryPrintInitializationCompleteSeparator();
 
     FTSDK.startRemoteConfigIfPossible(rumConfig.getRumAppId());
   }
@@ -927,7 +984,10 @@ export class FTSDK {
       FTSDK.uiFeaturesInitialized = true;
       FTSDK.pendingUIFeatureInit = false;
       FTSDK.uiFeatureInitRetryCount = 0;
+      FTSDK.uiPhaseResolved = true;
+      FTLogSeparator.initialization(TAG, "UI 能力就绪");
       FTInnerLogger.i(TAG, "UI features (action tracker and ANR monitor) initialized successfully");
+      FTSDK.tryPrintInitializationCompleteSeparator();
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize UI features: ${error}`);
     }
@@ -1218,13 +1278,11 @@ export class FTSDK {
       // Remote filtering is control-plane work, not part of cold-start data
       // collection. Preserve the active config but do not send /pull until the
       // cold-launch Action has reached the RUM pipeline.
-      FTInnerLogger.d(TAG, 'Deferring remote data-filter pull until cold launch report is submitted');
       FTSDK.remoteDataFilterLaunchUnsubscribe = launchTracker.onReportSubmitted((): void => {
         FTSDK.remoteDataFilterLaunchUnsubscribe = null;
         if (FTSDK.remoteDataFilterManager !== manager) {
           return;
         }
-        FTInnerLogger.d(TAG, 'Cold launch report submitted; starting remote data-filter pull');
         void manager.start();
       });
       return;

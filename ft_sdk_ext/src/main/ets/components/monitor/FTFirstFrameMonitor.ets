@@ -23,12 +23,7 @@ export function observeFTAppFirstFrame(
 ): boolean {
   try {
     const mainWindow = windowStage.getMainWindowSync();
-    let firstFrameMetricsObserved = false;
     const callback = (frameMetrics: window.FrameMetrics): void => {
-      if (!firstFrameMetricsObserved) {
-        firstFrameMetricsObserved = true;
-        console.info(`${TAG}: first frameMetricsMeasured received, firstDrawFrame=${String(frameMetrics?.firstDrawFrame)}`);
-      }
       if (!frameMetrics || !frameMetrics.firstDrawFrame) {
         return;
       }
@@ -41,14 +36,12 @@ export function observeFTAppFirstFrame(
       } catch (error) {
         console.warn(`${TAG}: failed to read STARTUP uptime: ${String(error)}`);
       }
-      console.info(`${TAG}: firstDrawFrame=true; recording T3 uptimeNs=${callbackUptimeNs}`);
       try {
         mainWindow.off('frameMetricsMeasured', callback);
       } catch (error) {
         console.warn(`${TAG}: failed to remove first-frame listener: ${String(error)}`);
       }
       FTSDK.recordAppFirstFrame(callbackUptimeNs);
-      console.info(`${TAG}: T3 submitted to ft_sdk`);
       try {
         onFirstFrameRecorded?.();
       } catch (error) {
@@ -56,7 +49,6 @@ export function observeFTAppFirstFrame(
       }
     };
     mainWindow.on('frameMetricsMeasured', callback);
-    console.info(`${TAG}: frameMetricsMeasured listener registered`);
     return true;
   } catch (error) {
     console.warn(`${TAG}: first-frame observation unavailable: ${String(error)}`);
