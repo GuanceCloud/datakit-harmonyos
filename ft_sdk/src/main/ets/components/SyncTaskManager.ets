@@ -555,7 +555,12 @@ export class SyncTaskManager {
     try {
       const consumeResult = await this.executeDataUploadWorkerConsume(taskName);
       this.errorCount = consumeResult.errorCount;
-      if (consumeResult.hasMoreData && !this.isStop) {
+      if (consumeResult.retryLimitReached) {
+        // The failed data is retained for a future external trigger. A retry
+        // budget exhaustion must be terminal for the current scheduling chain
+        // or an offline device will continuously run zero-delay polls.
+        FTInnerLogger.w(TAG, 'Upload paused: retry limit reached; awaiting an external sync trigger');
+      } else if (consumeResult.hasMoreData && !this.isStop) {
         if (consumeResult.consumedRows > 0 || consumeResult.retryableFailure) {
           // Keep draining committed pages and preserve explicit transient
           // retry behavior. The Worker has already applied its backoff.

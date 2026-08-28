@@ -6,22 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16-alpha03] - 2026-08-20
-- Fixed duplicate RUM uploads after retry: the first upload's existing
-  package-prefixed `sdk_data_id` is persisted and reused unchanged by retries,
-  instead of receiving another package prefix.
-- Added an internal cold-launch state machine using
-  `systemDateTime.getUptime(TimeType.STARTUP, true)` for all duration
-  boundaries. Foreground cold launches now report T0-T3 phase Fields and a
-  protected `app_launch_type`; background-only launches settle without waiting
-  for a frame.
-- Added minimal host hooks for AbilityStage initialization, first UIAbility
-  creation, and an optional monotonic T0 override. True first-frame collection
-  remains an API 22 extension capability.
-- Cold-launch classification now snapshots the initial process visibility from
-  `ApplicationContext.getRunningProcessInformation()` at AbilityStage/service
-  entry and uses a generation-reset two-turn lifecycle quiescence barrier,
-  rather than relying on an application-state callback or a single timer.
-- Added public HarmonyOS Action filtering aligned with Android's `setActionTrackingHandler(...)`. Exported `FTActionTrackingHandler`, `ActionEventWrapper`, and `ActionSourceType` from `@guancecloud/ft_sdk/Index`. Return `null` from `resolveHandlerAction(...)` to skip an automatic Action; return `undefined` to continue through the original complete automatic Action collection path, including its name, properties, position, and `view_name` association.
+- Fixed duplicate RUM uploads on retry by preserving and reusing the original `sdk_data_id` package ID.
+- Fixed offline upload polling: an exhausted retry round now waits for an external trigger, and legacy or oversized cached rows no longer block later uploadable RUM data.
+- Added cold-launch tracking for foreground and background launches, including T0-T3 phase fields, lifecycle-based completion, and AbilityStage/UIAbility initialization hooks. First-frame metrics require API 22.
+- Added Android-aligned automatic Action filtering through `FTActionTrackingHandler`.
 
 ## [0.1.16-alpha02] - 2026-08-18
 - Restored source compatibility for device metrics configuration. `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)` remain supported; new integrations should use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.

@@ -314,6 +314,10 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
         row.customDataType = customDataType;
       }
       const rowBytes = this.estimateUploadTransportRowBytes(row);
+      if (rowBytes > maxBytes) {
+        byteLimitReached = true;
+        continue;
+      }
       if (transportBytes + rowBytes > maxBytes) {
         byteLimitReached = true;
         break;
@@ -858,6 +862,28 @@ export default function syncTaskManagerUnitTest() {
       expect(uploadStatus.isScheduled).assertFalse();
     });
 
+    it('uploadLaneShouldSkipOversizedRowsAndUploadLaterCachedData', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      const oversizedPayload = 'x'.repeat(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'transport-limit-row',
+          `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${oversizedPayload}" 100`),
+        createSyncData(DataType.LOG, 'cold-launch-row',
+          'df_rum_harmonyos_log,sdk_data_id=cold-launch-row value=1i 101')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpBody.includes('sdk_data_id=')).assertTrue();
+      expect(runtime.lastHttpBody.includes('cold-launch-row')).assertTrue();
+      expect(runtime.lastHttpBody.includes('transport-limit-row')).assertFalse();
+    });
+
     it('executeSyncPollShouldUploadWhenCachedDataExistsAfterInit', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
@@ -969,6 +995,52 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.httpModels[2]).assertEqual(Constants.URL_MODEL_LOG);
       expect(runtime.cachePolicy.rumDelta).assertEqual(-2);
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
+    });
+
+    it('uploadLaneShouldSendPersistedRumPackageWithoutReSelectingIt', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      queueUploadRowsForOnly(db, DataType.RUM_APP, [
+        createSyncData(DataType.RUM_APP, 'cold-launch-rum-id',
+          'action,sdk_data_id=cold-launch-rum-id,action_id=cold-launch value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_RUM);
+      expect(runtime.lastHttpBody.includes(`${runtime.lastHttpPkgId}.cold-launch-rum-id`)).assertTrue();
+      expect(runtime.cachePolicy.rumDelta).assertEqual(-1);
+    });
+
+    it('uploadLaneShouldNotLetLegacyRumRowsWithoutSdkDataIdBlockColdLaunch', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.queryQueue.push(
+        [
+          createSyncData(DataType.RUM_APP, 'legacy-resource',
+            'resource,resource_id=legacy-resource resource_size=1i 100'),
+          createSyncData(DataType.RUM_APP, 'legacy-error',
+            'error,resource_id=legacy-resource,error_type=network message="timeout" 101'),
+          createSyncData(DataType.RUM_APP, 'cold-launch-rum-id',
+            'action,sdk_data_id=cold-launch-rum-id,action_id=cold-launch value=1i 102')
+        ],
+        [],
+        []
+      );
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(runtime.lastHttpBody.includes('resource_id=legacy-resource')).assertTrue();
+      expect(runtime.lastHttpBody.includes(`${runtime.lastHttpPkgId}.cold-launch-rum-id`)).assertTrue();
+      expect(runtime.cachePolicy.rumDelta).assertEqual(-3);
     });
 
     it('uploadLaneShouldRespectPerRoundPageBudget', 0, async () => {
@@ -1247,6 +1319,37 @@ export default function syncTaskManagerUnitTest() {
       expect(db.insertReInsertFlags[2]).assertTrue();
       expect(db.insertReInsertFlags[3]).assertTrue();
       expect(runtime.cachePolicy.logDelta).assertEqual(0);
+    });
+
+    it('uploadLaneShouldStopSchedulingAfterOfflineRetryLimit', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      const offlineRow = createSyncData(DataType.RUM_APP, 'offline-cold-launch',
+        'action,sdk_data_id=offline-cold-launch,action_id=cold-launch value=1i 100');
+      // Three upload rounds: each round queries RUM, WebView, then Log. The
+      // configured retry count is two, so the third failed request is final
+      // for this scheduling chain.
+      db.queryQueue.push(
+        [offlineRow], [], [],
+        [offlineRow], [], [],
+        [offlineRow], [], []
+      );
+      runtime.httpResults.push(
+        new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'offline', '11000'),
+        new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'offline', '11000'),
+        new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'offline', '11000')
+      );
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(3);
+      expect(getBackoffDurations(runtime).includes(500)).assertTrue();
+      expect(getBackoffDurations(runtime).includes(1000)).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+      expect(manager.getStatus().uploadLaneStatus.isRunning).assertFalse();
+      expect(runtime.cachePolicy.rumDelta).assertEqual(0);
     });
 
     it('executePollShouldUploadRetry', 0, async () => {

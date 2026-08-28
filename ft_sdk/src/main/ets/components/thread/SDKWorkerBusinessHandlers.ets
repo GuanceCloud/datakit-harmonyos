@@ -2600,12 +2600,13 @@ function prepareUploadRows(
       const provisionalPackageId = createUploadPackageId(dataType, candidateRows.length, state);
       bodySelection = selectUploadRowsForBody(candidateRows, provisionalPackageId);
       packageId = provisionalPackageId;
-      if (bodySelection.rows.length > 0 && bodySelection.oversizedRows === 0 &&
-        bodySelection.rows.length !== candidateRows.length) {
+      if (bodySelection.rows.length > 0 && bodySelection.rows.length !== candidateRows.length) {
         const bodyLimitReached = bodySelection.bodyLimitReached;
+        const oversizedRows = bodySelection.oversizedRows;
         packageId = createUploadPackageId(dataType, bodySelection.rows.length, state);
         bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
         bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
+        bodySelection.oversizedRows += oversizedRows;
       }
     } else {
       bodySelection = selectUploadRowsForBody(candidateRows, packageId);
@@ -2618,6 +2619,36 @@ function prepareUploadRows(
     sourceRows,
     rows: preparedRows,
     needsPersistence: haveUploadRowsChanged(sourceRows, preparedRows),
+    deduplicatedRows,
+    packageId,
+    bodySelection,
+    deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
+  };
+}
+
+/**
+ * UPLOAD_PREPARE_PAGE has already selected these rows. The Host has atomically
+ * stored package-prefixed sdk_data_id values where the historical line has
+ * that tag. Do not select the package a second time before HTTP: legacy RUM
+ * resource/error rows can legitimately predate sdk_data_id, and a second
+ * parser pass would drop the entire selected page and block later cold-launch
+ * records behind it.
+ */
+function preparePersistedUploadRows(
+  dataType: string,
+  rows: SDKUploadRowDTO[],
+  queryHasMore: boolean,
+  packageId: string,
+  state: SDKWorkerRuntimeState
+): SDKUploadPreparedRows {
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
+  const bodySelection = selectUploadRowsForBody(pageRows, packageId);
+  const sourceRows = bodySelection.rows;
+  return {
+    sourceRows,
+    rows: sourceRows,
+    needsPersistence: false,
     deduplicatedRows,
     packageId,
     bodySelection,
@@ -2683,13 +2714,21 @@ async function handleUploadExecutePage(
   }
 
   const rows = payload && payload.rows ? payload.rows : [];
-  const preparedRows = prepareUploadRows(
-    payload.dataType,
-    rows,
-    payload.queryHasMore === true,
-    payload.packageId || '',
-    state
-  );
+  const requestedPackageId = payload.packageId || '';
+  const preparedRows = payload.sdkDataIdPersisted === true && requestedPackageId.length > 0 ?
+    preparePersistedUploadRows(
+      payload.dataType,
+      rows,
+      payload.queryHasMore === true,
+      requestedPackageId,
+      state
+    ) : prepareUploadRows(
+      payload.dataType,
+      rows,
+      payload.queryHasMore === true,
+      requestedPackageId,
+      state
+    );
   const deduplicatedRows = preparedRows.deduplicatedRows;
   if (preparedRows.sourceRows.length === 0) {
     const queryHasMore = payload.queryHasMore === true;
@@ -2811,7 +2850,10 @@ async function handleUploadExecutePage(
     checkpointAfterCommit: copyUploadCheckpoint(checkpointAfterCommit),
     processedPagesAfterCommit: proposal.processedPagesAfterCommit,
     roundHasMoreDataAfterCommit: proposal.roundHasMoreData,
-    consumedRowsDelta: shouldUpload ? acceptedRows.length : 0,
+    // A failed HTTP request is not consumed: its rows remain in the cache and
+    // must not be interpreted by the scheduler as forward progress. Only a
+    // delete decision removes records permanently.
+    consumedRowsDelta: proposal.dbAction === SDKUploadDbActionDTO.DELETE ? proposal.reduceCount : 0,
     delayMs: proposal.delayMs,
     shouldContinueDataType: proposal.shouldContinueDataType
   };
@@ -3310,13 +3352,11 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
     const lineBytes = getUploadUtf8ByteLength(line);
     if (lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
       result.bodyLimitReached = true;
-      if (result.rows.length === 0) {
-        // Never delete a row merely because a local limit rejected it. It
-        // remains in DB. The current upload round stops, and a future external
-        // sync trigger can retry it after the data or policy changes.
-        result.oversizedRows = 1;
-      }
-      break;
+      // Never delete a row merely because a local limit rejected it. Keep it
+      // cached and continue scanning this page so it cannot block a later
+      // uploadable cold-launch record.
+      result.oversizedRows++;
+      continue;
     }
     const separatorBytes = result.lines.length > 0 ? 1 : 0;
     if (result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
