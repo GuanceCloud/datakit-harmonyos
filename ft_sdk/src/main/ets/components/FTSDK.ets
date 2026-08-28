@@ -78,6 +78,7 @@ export class FTSDK {
   private static readonly UI_FEATURE_INIT_RETRY_DELAY_MS: number = 100;
   private static remoteConfigManager: FTRemoteConfigManager | null = null;
   private static remoteDataFilterManager: FTRemoteDataFilterManager | null = null;
+  private static remoteDataFilterLaunchUnsubscribe: (() => void) | null = null;
   private static pendingRemoteConfigAppId: string | null = null;
   private static launchInitialVisibilityCaptureStarted: boolean = false;
   private static launchInitialLifecycleRoundOpen: boolean = false;
@@ -157,10 +158,7 @@ export class FTSDK {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
     }
-    if (FTSDK.remoteDataFilterManager !== null) {
-      FTSDK.remoteDataFilterManager.close();
-      FTSDK.remoteDataFilterManager = null;
-    }
+    FTSDK.closeRemoteDataFilterManager();
     FTSDK.pendingRemoteConfigAppId = null;
     FTSDK.launchInitialVisibilityCaptureStarted = false;
     FTSDK.launchInitialLifecycleRoundOpen = false;
@@ -702,10 +700,7 @@ export class FTSDK {
       FTSDK.remoteConfigManager.close();
       FTSDK.remoteConfigManager = null;
     }
-    if (FTSDK.remoteDataFilterManager !== null) {
-      FTSDK.remoteDataFilterManager.close();
-      FTSDK.remoteDataFilterManager = null;
-    }
+    FTSDK.closeRemoteDataFilterManager();
     FTSDK.pendingRemoteConfigAppId = null;
     // Unregister UIAbility lifecycle listener
     try {
@@ -1099,7 +1094,9 @@ export class FTSDK {
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
-    FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
+    if (FTSDK.remoteDataFilterLaunchUnsubscribe === null) {
+      FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
+    }
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
@@ -1114,7 +1111,9 @@ export class FTSDK {
     FTSDK.logServerUrl(config);
     FTSDK.resumeUploadAfterEndpointUpdate();
     FTSDK.remoteConfigManager?.refreshForEndpointChange(FTSDK.isUploadEndpointAvailable(config));
-    FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
+    if (FTSDK.remoteDataFilterLaunchUnsubscribe === null) {
+      FTSDK.remoteDataFilterManager?.refreshForEndpointChange();
+    }
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
@@ -1198,6 +1197,9 @@ export class FTSDK {
   }
 
   private static initRemoteDataFilters(config: FTSDKConfig): void {
+    // Reinstalling the SDK must not leave an earlier manager and its retry
+    // timer alive. It would otherwise issue duplicate /pull requests.
+    FTSDK.closeRemoteDataFilterManager();
     if (!config.isEnableDataFilter()) {
       return;
     }
@@ -1210,7 +1212,35 @@ export class FTSDK {
       }
     );
     FTSDK.remoteDataFilterManager = manager;
+    const launchTracker = FTAppLaunchTracker.getInstance();
+    const launchSnapshot = launchTracker.getSnapshot();
+    if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
+      // Remote filtering is control-plane work, not part of cold-start data
+      // collection. Preserve the active config but do not send /pull until the
+      // cold-launch Action has reached the RUM pipeline.
+      FTInnerLogger.d(TAG, 'Deferring remote data-filter pull until cold launch report is submitted');
+      FTSDK.remoteDataFilterLaunchUnsubscribe = launchTracker.onReportSubmitted((): void => {
+        FTSDK.remoteDataFilterLaunchUnsubscribe = null;
+        if (FTSDK.remoteDataFilterManager !== manager) {
+          return;
+        }
+        FTInnerLogger.d(TAG, 'Cold launch report submitted; starting remote data-filter pull');
+        void manager.start();
+      });
+      return;
+    }
     void manager.start();
+  }
+
+  private static closeRemoteDataFilterManager(): void {
+    if (FTSDK.remoteDataFilterLaunchUnsubscribe !== null) {
+      FTSDK.remoteDataFilterLaunchUnsubscribe();
+      FTSDK.remoteDataFilterLaunchUnsubscribe = null;
+    }
+    if (FTSDK.remoteDataFilterManager !== null) {
+      FTSDK.remoteDataFilterManager.close();
+      FTSDK.remoteDataFilterManager = null;
+    }
   }
 
   private static startRemoteConfigIfPossible(appId: string): void {

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.16-alpha03] - 2026-08-20
 - Fixed duplicate RUM uploads on retry by preserving and reusing the original `sdk_data_id` package ID.
 - Fixed offline upload polling: an exhausted retry round now waits for an external trigger, and legacy or oversized cached rows no longer block later uploadable RUM data.
+- Deferred the initial remote data-filter pull until cold-launch reporting completes, and close replaced filter managers to avoid duplicate startup pulls.
 - Added cold-launch tracking for foreground and background launches, including T0-T3 phase fields, lifecycle-based completion, and AbilityStage/UIAbility initialization hooks. First-frame metrics require API 22.
 - Added Android-aligned automatic Action filtering through `FTActionTrackingHandler`.
 

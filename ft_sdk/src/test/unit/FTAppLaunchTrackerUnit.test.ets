@@ -80,6 +80,28 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(tracker.getSnapshot().reported).assertTrue();
     });
 
+    it('shouldNotifyColdLaunchCompletionListenersOnce', 0, () => {
+      const clock = new FixedLaunchClock();
+      const reporter = new RecordingLaunchReporter();
+      const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
+      let completionCount = 0;
+      tracker.onReportSubmitted((): void => {
+        completionCount++;
+      });
+
+      tracker.recordApplicationInit(120);
+      tracker.recordFirstUIAbilityCreated(150);
+      tracker.markRumReady(true);
+      tracker.recordFirstFrame(200);
+      tracker.recordFirstFrame(210);
+
+      expect(completionCount).assertEqual(1);
+      tracker.onReportSubmitted((): void => {
+        completionCount++;
+      });
+      expect(completionCount).assertEqual(2);
+    });
+
     it('shouldFinishBackgroundWithoutWaitingForFirstFrame', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();

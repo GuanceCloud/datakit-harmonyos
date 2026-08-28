@@ -100,6 +100,7 @@ export class FTAppLaunchTracker {
   private initialVisibility: FTAppLaunchInitialVisibility = 'unknown';
   private initialVisibilityCaptured: boolean = false;
   private initialLifecycleRoundComplete: boolean = false;
+  private reportSubmittedListeners: Array<() => void> = [];
 
   public constructor(
     clock: FTAppLaunchClock = new SystemAppLaunchClock(),
@@ -268,6 +269,26 @@ export class FTAppLaunchTracker {
     };
   }
 
+  /**
+   * Invoked once the cold-launch Action has been accepted by the RUM pipeline.
+   * Internal non-essential startup work can use this to stay out of the cold
+   * launch critical path. Returns a disposer for callers that are replaced
+   * before the launch reaches its terminal boundary.
+   */
+  public onReportSubmitted(listener: () => void): () => void {
+    if (this.reported) {
+      listener();
+      return (): void => {};
+    }
+    this.reportSubmittedListeners.push(listener);
+    return (): void => {
+      const index = this.reportSubmittedListeners.indexOf(listener);
+      if (index >= 0) {
+        this.reportSubmittedListeners.splice(index, 1);
+      }
+    };
+  }
+
   private hasRecordedBoundary(): boolean {
     return this.applicationInitUptimeNs > 0 ||
       this.firstUIAbilityUptimeNs > 0 ||
@@ -302,6 +323,21 @@ export class FTAppLaunchTracker {
     }
     this.reported = this.reporter.report(action);
     FTInnerLogger.d(TAG, `Cold launch report submitted=${this.reported}, type=${this.launchType}, durationNs=${action.durationNs}`);
+    if (this.reported) {
+      this.notifyReportSubmitted();
+    }
+  }
+
+  private notifyReportSubmitted(): void {
+    const listeners = this.reportSubmittedListeners.slice();
+    this.reportSubmittedListeners = [];
+    for (let index = 0; index < listeners.length; index++) {
+      try {
+        listeners[index]();
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Cold-launch completion listener failed: ${String(error)}`);
+      }
+    }
   }
 
   private buildAction(): FTAppLaunchAction | null {
