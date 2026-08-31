@@ -2,6 +2,7 @@ import { FTRUMConfig } from '../../Configs';
 import { FTExceptionHandler } from '../../FTExceptionHandler';
 import { FTNativeCrashHandler } from '../../FTNativeCrashHandler';
 import { FTSDK } from '../../FTSDK';
+import { FTAppLaunchTracker } from '../../monitor/FTAppLaunchTracker';
 import { FTInnerLogger } from '../../log/FTLogger';
 import ftnativecrash from 'libftnativecrash.so';
 import {
@@ -32,6 +33,7 @@ export class SdkInternalTestAccess extends FTSDK {
 
   public static resetState(): void {
     SdkInternalTestAccess.resetInternalState();
+    FTAppLaunchTracker.resetInstanceInternal();
   }
 
   public static requiresUIFeatures(config: FTRUMConfig): boolean {

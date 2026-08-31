@@ -126,6 +126,11 @@ export class FTAppLaunchTracker {
     return FTAppLaunchTracker.instance;
   }
 
+  /** Internal test seam. A process normally has exactly one cold launch. */
+  public static resetInstanceInternal(): void {
+    FTAppLaunchTracker.instance = null;
+  }
+
   /**
    * Returns one monotonic duration clock for all cold-launch phases.
    * A zero result intentionally disables duration reporting instead of falling
