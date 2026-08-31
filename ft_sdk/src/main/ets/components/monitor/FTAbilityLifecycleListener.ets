@@ -19,6 +19,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMGlobalManager } from '../rum/FTRUMGlobalManager';
 import { FTSDK } from '../FTSDK';
 import { Utils } from '../utils/Utils';
+import { FTAppLaunchTracker } from './FTAppLaunchTracker';
 import { FTAppStartCounter } from './FTAppStartCounter';
 import { FTDBSpoolManager } from '../db/FTDBSpoolManager';
 import { FTDBTaskPoolExecutor } from '../db/FTDBTaskPoolExecutor';
@@ -48,11 +49,23 @@ interface AbilityLifecycleCallback {
   onAbilityDestroy?: (ability: UIAbility) => void;
 }
 
+interface ApplicationStateChangeCallback {
+  onApplicationForeground: () => void;
+  onApplicationBackground: () => void;
+}
+
+interface ApplicationContextWithApplicationStateChange {
+  on(type: 'applicationStateChange', callback: ApplicationStateChangeCallback): void;
+  off(type: 'applicationStateChange', callback?: ApplicationStateChangeCallback): void;
+}
+
 export class FTAbilityLifecycleListener {
   private static instance: FTAbilityLifecycleListener | null = null;
   private isRegistered: boolean = false;
   private lifecycleCallback: AbilityLifecycleCallback | null = null;
   private lifecycleId: number = -1;
+  private applicationStateCallback: ApplicationStateChangeCallback | null = null;
+  private applicationStateRegistered: boolean = false;
   
   /**
    * Sleep delay time (10 seconds)
@@ -64,7 +77,7 @@ export class FTAbilityLifecycleListener {
    * Whether already in sleep state, here going to background for 10 seconds is considered as sleep
    * Similar to Android's LifeCircleTraceCallback.alreadySleep
    */
-  private alreadySleep: boolean = true;
+  private alreadySleep: boolean = false;
   
   /**
    * Hot start start time (nanoseconds)
@@ -125,72 +138,17 @@ export class FTAbilityLifecycleListener {
         return;
       }
       FTInnerLogger.d(TAG, "ApplicationContext obtained successfully");
+      this.registerApplicationStateListener(applicationContext as Object);
 
       // Create lifecycle callback
       this.lifecycleCallback = {
         onAbilityCreate: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityCreate: UIAbility lifecycle event`);
-          // Record start time for cold start calculation
-          // This is similar to Android's LifeCircleTraceCallback.onPreOnCreate()
-          const appStartCounter = FTAppStartCounter.getInstance();
-          if (!appStartCounter.isInited()) {
-            // This is the first Ability creation, record as potential cold start
-            FTInnerLogger.d(TAG, "First Ability created, potential cold start");
-          }
+          FTSDK.recordAppFirstUIAbilityCreate();
         },
         onWindowStageCreate: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageCreate: UIAbility lifecycle event`);
-          // Calculate cold start or hot start time when window stage is created
-          // Similar to Android's LifeCircleTraceCallback.onPostResume()
-          const appStartCounter = FTAppStartCounter.getInstance();
-          const config = FTSDK.getRumConfig();
-          
-          if (!appStartCounter.isInited()) {
-            // Cold start: from app process start to first window stage create
-            const endTime = Utils.getCurrentNanoTime();
-            appStartCounter.coldStart(endTime);
-            
-            // Get RUM config from FTSDK (aligned with Android: FTRUMConfigManager.get().getConfig())
-            if (config && config.isEnableTraceUserAction()) {
-              // Upload cold start data
-              appStartCounter.coldStartUpload();
-            }
-            
-            // Mark as initialized
-            appStartCounter.setInited(true);
-            FTInnerLogger.d(TAG, "Cold start calculated and uploaded");
-          } else if (this.alreadySleep) {
-            // Hot start: app returning from background (alreadySleep = true)
-            // Note: In HarmonyOS, onAbilityWindowStageCreate may not be called again if WindowStage already exists
-            // So hot start is now handled in onAbilityForeground instead
-            // This branch is kept for compatibility, but should rarely be reached
-            FTInnerLogger.d(TAG, `onWindowStageCreate: Hot start condition met but hot start should have been handled in onAbilityForeground. alreadySleep=${this.alreadySleep}, startTimeNanoTime=${this.startTimeNanoTime}`);
-            if (config && config.isEnableTraceUserAction()) {
-              if (this.startTimeNanoTime > 0) {
-                // Calculate hot start duration
-                // For HarmonyOS, we use getCurrentNanoTime() difference since we don't have elapsedRealtimeNanos
-                // Duration is from onAbilityForeground to onAbilityWindowStageCreate
-                const now = Utils.getCurrentNanoTime();
-                const hotStartDuration = now - this.startClockTimeNano;
-                
-                // Upload hot start data
-                appStartCounter.hotStart(hotStartDuration, this.startTimeNanoTime);
-                FTInnerLogger.d(TAG, `Hot start calculated and uploaded from onWindowStageCreate: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms)`);
-                
-                // Reset start time after upload
-                this.startTimeNanoTime = 0;
-                this.startClockTimeNano = 0;
-              } else {
-                FTInnerLogger.w(TAG, `Hot start condition met but startTimeNanoTime is 0, hot start not recorded. This may happen if onAbilityForeground was not called or conditions were not met.`);
-              }
-            } else {
-              FTInnerLogger.d(TAG, `Hot start condition met but RUM or action tracking is disabled, skipping hot start upload`);
-            }
-            // Reset alreadySleep flag
-            this.alreadySleep = false;
-          } else {
-            FTInnerLogger.d(TAG, `Not a hot start: alreadySleep=${this.alreadySleep}, isInited=${appStartCounter.isInited()}`);
-          }
+          this.registerLaunchWindowStateListener(windowStage);
         },
         onWindowStageActive: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageActive: UIAbility lifecycle event`);
@@ -216,6 +174,7 @@ export class FTAbilityLifecycleListener {
           FTInnerLogger.d(TAG, `onAbilityForeground: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
+          FTSDK.recordAppLaunchApplicationForeground();
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -241,17 +200,17 @@ export class FTAbilityLifecycleListener {
             // So we calculate and upload hot start directly in onAbilityForeground
             const startTime = Utils.getCurrentNanoTime();
             this.startTimeNanoTime = startTime;
-            this.startClockTimeNano = startTime;
+            this.startClockTimeNano = FTAppLaunchTracker.getStartupUptimeNs();
             FTInnerLogger.d(TAG, `App returning from background, hot start detected - startTime=${this.startTimeNanoTime}`);
             
             // Calculate hot start duration after a short delay to ensure UI is ready
             // Use setTimeout to delay the calculation, similar to waiting for onAbilityWindowStageCreate
             setTimeout(() => {
-              if (this.startTimeNanoTime > 0) {
-                const endTime = Utils.getCurrentNanoTime();
+              if (this.startTimeNanoTime > 0 && this.startClockTimeNano > 0) {
+                const endTime = FTAppLaunchTracker.getStartupUptimeNs();
                 const hotStartDuration = endTime - this.startClockTimeNano;
                 
-                if (config && config.isEnableTraceUserAction()) {
+                if (hotStartDuration > 0 && config && config.isEnableTraceUserAction()) {
                   // Upload hot start data //FIXME do not call in first cold launch
                   appStartCounter.hotStart(hotStartDuration, this.startTimeNanoTime);
                   FTInnerLogger.d(TAG, `Hot start calculated and uploaded from onAbilityForeground: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms)`);
@@ -260,6 +219,12 @@ export class FTAbilityLifecycleListener {
                 }
                 
                 // Reset start time after upload
+                this.startTimeNanoTime = 0;
+                this.startClockTimeNano = 0;
+              } else {
+                // Never retain a half-recorded hot-start boundary. In
+                // particular, do not retry with a wall-clock duration if the
+                // monotonic STARTUP clock is unavailable.
                 this.startTimeNanoTime = 0;
                 this.startClockTimeNano = 0;
               }
@@ -278,6 +243,7 @@ export class FTAbilityLifecycleListener {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(false);
           FTUIBlockManager.getInstance().setAppInForeground(false);
+          FTSDK.recordAppLaunchApplicationBackground();
           // Stop view when ability goes to background (aligned with Android onActivityPaused)
           this.flushDbLaneOnLifecycleChange("onAbilityBackground");
           
@@ -325,10 +291,59 @@ export class FTAbilityLifecycleListener {
   }
 
   /**
+   * This listener is intentionally registerable from AbilityStage before RUM
+   * installation, so a background-only process can be classified without an
+   * appManager observer or extra permission.
+   */
+  public registerApplicationStateListener(applicationContext: Object): void {
+    if (this.applicationStateRegistered || !applicationContext) {
+      return;
+    }
+    try {
+      const appContext = applicationContext as ApplicationContextWithApplicationStateChange;
+      if (typeof appContext.on !== 'function') {
+        return;
+      }
+      this.applicationStateCallback = {
+        onApplicationForeground: (): void => {
+          FTSDK.recordAppLaunchApplicationForeground();
+        },
+        onApplicationBackground: (): void => {
+          FTSDK.recordAppLaunchApplicationBackground();
+        }
+      };
+      appContext.on('applicationStateChange', this.applicationStateCallback);
+      this.applicationStateRegistered = true;
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Unable to register application-state listener: ${String(error)}`);
+      this.applicationStateCallback = null;
+    }
+  }
+
+  private registerLaunchWindowStateListener(windowStage: window.WindowStage): void {
+    try {
+      const callback = (event: window.WindowStageEventType): void => {
+        if (event !== window.WindowStageEventType.SHOWN && event !== window.WindowStageEventType.ACTIVE) {
+          return;
+        }
+        FTSDK.recordAppLaunchWindowForeground();
+        try {
+          windowStage.off('windowStageEvent', callback);
+        } catch (error) {
+          FTInnerLogger.w(TAG, `Unable to unregister launch WindowStage listener: ${String(error)}`);
+        }
+      };
+      windowStage.on('windowStageEvent', callback);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Unable to observe launch WindowStage state: ${String(error)}`);
+    }
+  }
+
+  /**
    * Unregister lifecycle callback
    */
   public unregister(): void {
-    if (!this.isRegistered) {
+    if (!this.isRegistered && !this.applicationStateRegistered) {
       FTInnerLogger.w(TAG, "Lifecycle listener is not registered");
       return;
     }
@@ -345,11 +360,10 @@ export class FTAbilityLifecycleListener {
       
       const applicationContext = Utils.getApplicationContext();
       if (!applicationContext) {
-        FTInnerLogger.w(TAG, "ApplicationContext is not available, cannot unregister lifecycle listener");
-        return;
+        FTInnerLogger.w(TAG, "ApplicationContext is not available, lifecycle callbacks cannot be unregistered");
       }
 
-      if (this.lifecycleCallback) {
+      if (this.lifecycleCallback && applicationContext) {
         // Remove callback using off('abilityLifecycle') event
         // Define interface for ApplicationContext with off method
         interface ApplicationContextWithOff {
@@ -362,13 +376,26 @@ export class FTAbilityLifecycleListener {
             FTInnerLogger.e(TAG, `Failed to unregister abilityLifecycle listener: ${String(error)}`);
           });
         }
-        this.lifecycleCallback = null;
       }
+      this.lifecycleCallback = null;
+
+      if (this.applicationStateCallback && applicationContext) {
+        try {
+          const applicationStateContext = applicationContext as ApplicationContextWithApplicationStateChange;
+          if (typeof applicationStateContext.off === 'function') {
+            applicationStateContext.off('applicationStateChange', this.applicationStateCallback);
+          }
+        } catch (error) {
+          FTInnerLogger.w(TAG, `Unable to unregister application-state listener: ${String(error)}`);
+        }
+      }
+      this.applicationStateCallback = null;
 
       // Reset state
       this.isRegistered = false;
+      this.applicationStateRegistered = false;
       this.lifecycleId = -1;
-      this.alreadySleep = true; // Reset to default
+      this.alreadySleep = false; // Reset to default
       this.startTimeNanoTime = 0;
       this.startClockTimeNano = 0;
       

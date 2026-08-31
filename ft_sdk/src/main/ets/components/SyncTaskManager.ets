@@ -7,6 +7,7 @@ import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
 import { ViewBean } from './db/bean/ViewBean';
 import { FTInnerLogger } from './log/FTLogger';
+import { FTLogSeparator } from './log/FTLogSeparator';
 import {
   DefaultSyncTaskManagerRuntime,
   SyncTaskCachePolicy,
@@ -453,7 +454,7 @@ export class SyncTaskManager {
     } else {
       FTInnerLogger.w(TAG, `SyncTaskManager initialized without context (test mode): pageSize=${this.pageSize}, autoSync=${this.autoSync}`);
     }
-    FTInnerLogger.d(TAG, "******************* Sync Poll Ready *******************>>>");
+    FTLogSeparator.data(TAG, "数据上传就绪");
   }
 
   private async initializePreferences(context: Context): Promise<void> {
@@ -491,11 +492,19 @@ export class SyncTaskManager {
     const normalizedDelay = Math.max(0, delay);
     const taskName = this.nextUploadTaskName();
     if (this.uploadScheduled || this.uploadRunning) {
+      // A repeated auto-sync trigger is already covered by the outstanding
+      // aggregation window. Do not manufacture a follow-up poll for every
+      // cached record written during that window.
+      if (this.uploadScheduled && this.uploadScheduledDelay > 0 && normalizedDelay > 0) {
+        return;
+      }
+      const hadReschedule = this.uploadNeedReschedule;
       this.uploadNeedReschedule = true;
-      // Match Android's DataUploadThreadPool: a trigger received while work is
-      // already waiting or running is consumed by an immediate follow-up task.
-      // In particular, this must not start a second 10-second wait.
-      this.uploadRescheduleDelay = 0;
+      // Keep the caller's requested delay. In particular, executeSyncPoll()
+      // must retain its aggregation delay while an upload is in progress;
+      // forcing it to zero turns continuous cache writes into a tight poll.
+      this.uploadRescheduleDelay = hadReschedule ?
+        Math.min(this.uploadRescheduleDelay, normalizedDelay) : normalizedDelay;
       return;
     }
 
@@ -510,7 +519,7 @@ export class SyncTaskManager {
     }, normalizedDelay);
 
     if (normalizedDelay > 0) {
-      FTInnerLogger.d(TAG, "******************* Sync Poll Waiting *******************>>>");
+      FTLogSeparator.data(TAG, "数据上传等待");
     }
   }
 
@@ -540,15 +549,29 @@ export class SyncTaskManager {
       return;
     }
 
-    FTInnerLogger.d(TAG, "******************* Sync Poll Running *******************>>>");
+    FTLogSeparator.data(TAG, "数据上传开始");
     this.uploadRunning = true;
     this.running = true;
 
     try {
       const consumeResult = await this.executeDataUploadWorkerConsume(taskName);
       this.errorCount = consumeResult.errorCount;
-      if (consumeResult.hasMoreData && !this.isStop) {
-        this.scheduleUpload(0);
+      if (consumeResult.retryLimitReached) {
+        // The failed data is retained for a future external trigger. A retry
+        // budget exhaustion must be terminal for the current scheduling chain
+        // or an offline device will continuously run zero-delay polls.
+        FTInnerLogger.w(TAG, 'Upload paused: retry limit reached; awaiting an external sync trigger');
+      } else if (consumeResult.hasMoreData && !this.isStop) {
+        if (consumeResult.consumedRows > 0 || consumeResult.retryableFailure) {
+          // Keep draining committed pages and preserve explicit transient
+          // retry behavior. The Worker has already applied its backoff.
+          this.scheduleUpload(0);
+        } else {
+          // A local limit or an empty, non-retryable page cannot make forward
+          // progress. Leave its cache row intact and wait for a new external
+          // sync trigger instead of retaining the upload lane indefinitely.
+          FTInnerLogger.w(TAG, 'Upload paused: cached data made no progress and is not retryable');
+        }
       }
     } catch (error) {
       this.uploadRunning = false;
@@ -559,7 +582,7 @@ export class SyncTaskManager {
       const nextDelay = this.uploadRescheduleDelay;
       this.uploadRunning = false;
       this.running = false;
-      FTInnerLogger.d(TAG, "******************* Sync Poll Finish *******************>>>");
+      FTLogSeparator.data(TAG, "数据上传结束");
       this.uploadNeedReschedule = false;
       this.uploadRescheduleDelay = 0;
       if (shouldReschedule && !this.isStop) {

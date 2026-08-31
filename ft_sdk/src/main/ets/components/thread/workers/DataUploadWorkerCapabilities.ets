@@ -40,6 +40,10 @@ export interface DataUploadConsumeOptions {
 export interface DataUploadConsumeResult {
   consumedRows: number;
   hasMoreData: boolean;
+  /** True only when a transient HTTP or DB failure requires another attempt. */
+  retryableFailure: boolean;
+  /** A retryable request exhausted this round's configured retry budget. */
+  retryLimitReached: boolean;
   errorCount: number;
   metrics?: DataUploadConsumeMetrics;
 }

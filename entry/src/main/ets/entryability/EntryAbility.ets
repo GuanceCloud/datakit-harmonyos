@@ -28,6 +28,7 @@ import {
   UserData,
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
+import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import {
@@ -81,6 +82,11 @@ export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
 export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
+/** Demo-only launch parameter; delays first content loading to exercise T2-T3. */
+export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
+/** Demo-only parameter for switching between the two test UIAbilities after the source first frame. */
+export const KEY_COLD_LAUNCH_NEXT_UI_ABILITY = "coldLaunchNextUIAbility";
+const MAX_COLD_START_DELAY_MS = 30_000;
 
 interface RuntimeConfig {
   datakitUrl: string;
@@ -208,6 +214,9 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {
+  private coldStartDelayMs: number = 0;
+  private coldLaunchTestWant: Want | null = null;
+  private secondaryLaunchStarted: boolean = false;
   private runtimeConfig: RuntimeConfig = {
     datakitUrl: "",
     datawayUrl: "",
@@ -226,6 +235,9 @@ export default class EntryAbility extends UIAbility {
   };
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    FTSDK.recordAppFirstUIAbilityCreate();
+    this.coldLaunchTestWant = want;
+    this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     DemoLogger.e("log test", `onCreate `);
     console.log("log test,onCreate")
     this.logAppMemoryLimitOnMainThread();
@@ -254,6 +266,60 @@ export default class EntryAbility extends UIAbility {
       console.info(`JS-totalHeap=${vmMemory.totalHeap} KB`);
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to get app VM memory info on main thread: ${error}`);
+    }
+  }
+
+  private resolveColdStartDelayMs(want: Want): number {
+    const value = want.parameters?.[KEY_COLD_START_DELAY_MS];
+    const delayMs = Number(value);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      return 0;
+    }
+    return Math.min(MAX_COLD_START_DELAY_MS, Math.floor(delayMs));
+  }
+
+  private readWantString(want: Want, key: string, defaultValue: string): string {
+    const value = want.parameters?.[key];
+    return value === null || value === undefined ? defaultValue : String(value);
+  }
+
+  /**
+   * A-to-B half of the multi-UIAbility cold-launch acceptance test. The
+   * parameter is forwarded to B, but B accepts only EntryAbility as a target,
+   * which prevents a launch loop.
+   */
+  private async startSecondaryLaunchAbilityIfRequested(): Promise<void> {
+    const want = this.coldLaunchTestWant;
+    if (want === null) {
+      return;
+    }
+    const nextAbility = this.readWantString(want, KEY_COLD_LAUNCH_NEXT_UI_ABILITY, '');
+    if (nextAbility !== 'SecondaryLaunchAbility') {
+      return;
+    }
+    if (this.secondaryLaunchStarted) {
+      return;
+    }
+    this.secondaryLaunchStarted = true;
+
+    // The test starts its target only after the source T3 callback. Force the
+    // test Action through the normal worker/cache drain now; normal launches
+    // retain their regular 10-second automatic upload aggregation window.
+    FTSDK.flushSyncData();
+    DemoLogger.i(LOG_TAG, 'Cold-launch test parameter requests EntryAbility -> SecondaryLaunchAbility after first frame');
+
+    const targetWant: Want = {
+      bundleName: this.context.abilityInfo.bundleName,
+      moduleName: this.context.abilityInfo.moduleName,
+      abilityName: nextAbility,
+      parameters: want.parameters
+    };
+    try {
+      await this.context.startAbility(targetWant);
+      DemoLogger.i(LOG_TAG, 'Cold-launch test parameter started SecondaryLaunchAbility');
+    } catch (error) {
+      this.secondaryLaunchStarted = false;
+      DemoLogger.e(LOG_TAG, `Cold-launch test parameter failed to start SecondaryLaunchAbility: ${error}`);
     }
   }
 
@@ -693,12 +759,34 @@ export default class EntryAbility extends UIAbility {
   }
 
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
+    const startSecondaryAfterFirstFrame = (): void => {
+      void this.startSecondaryLaunchAbilityIfRequested();
+    };
+    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
+    if (this.coldStartDelayMs > 0) {
+      DemoLogger.i(LOG_TAG, `Demo cold-start delay enabled: ${this.coldStartDelayMs}ms before loadContent`);
+      setTimeout(() => {
+        this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+      }, this.coldStartDelayMs);
+      return;
+    }
+    this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+  }
 
+  private loadEntryContent(
+    windowStage: window.WindowStage,
+    firstFrameListenerRegistered: boolean,
+    startSecondaryAfterFirstFrame: () => void
+  ): void {
     windowStage.loadContent('pages/Index', (err) => {
       DemoLogger.i(LOG_TAG, "loadContent callback called");
       if (err.code) {
         DemoLogger.e(LOG_TAG, `loadContent failed: ${err.code}`);
         return;
+      }
+      if (!firstFrameListenerRegistered) {
+        DemoLogger.i(LOG_TAG, "Registering first-frame listener from successful loadContent callback");
+        observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
       }
       DemoLogger.i(LOG_TAG, "Content loaded successfully");
     });

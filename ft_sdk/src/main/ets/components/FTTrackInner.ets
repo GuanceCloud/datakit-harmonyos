@@ -2,6 +2,7 @@ import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextDictionary, L
 import { DataType } from './enum/Enums';
 import { CollectType } from './rum/enum/RUMEnums';
 import { FTInnerLogger } from './log/FTLogger';
+import { FTLogSeparator } from './log/FTLogSeparator';
 import { SyncData } from './db/bean/SyncData';
 import { TrackLogManager } from './log/TrackLogManager';
 import { LogBean } from './bean/LogBean';
@@ -1064,6 +1065,7 @@ class FTTrackInner {
 
     const groups = this.buildRumDraftWriteLogGroups(fallbackMeasurement, fallbackDataType, drafts);
     const uuidSample = this.buildRumDraftUuidSample(drafts, 3);
+    FTLogSeparator.data(TAG, "数据入库");
     FTInnerLogger.d(TAG,
       `syncDataBackground:batch requested=${writeResult.requested},inserted=${writeResult.inserted},` +
         `updated=${writeResult.updated},dropped=${writeResult.dropped},duplicate=${writeResult.duplicateSkipped},` +
@@ -1182,6 +1184,9 @@ class FTTrackInner {
       }
       const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
       const affected = this.getWriteAffectedCount(writeResult);
+      if (affected > 0) {
+        FTLogSeparator.data(TAG, "数据入库");
+      }
       if (affected > 0 && !isSilence) {
         this.syncTaskManager.executeSyncPoll();
       }
@@ -1339,9 +1344,6 @@ class FTTrackInner {
     this.dataHelper.initBaseConfig(config);
     this.refreshWorkerLineProtocolContextSnapshot();
     this.syncLineProtocolContextToDefaultWorkers();
-
-    // Debug log for SyncTaskManager initialization
-    this.syncTaskManager.init(config, context);
 
     FTInnerLogger.i(TAG, "FTTrackInner base config initialized");
   }
@@ -1966,7 +1968,11 @@ class FTTrackInner {
       const dbDeletedOld = writeResult.deletedOld;
       this.rollbackReservedCacheCounts(cacheDecision, writeResult.inserted, dbDeletedOld);
       const mergedResult = this.mergeCachePolicyDecision(writeResult, filterDecision.records.length, cacheDecision);
-      return this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
+      const result = this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
+      if (this.getWriteAffectedCount(result) > 0) {
+        FTLogSeparator.data(TAG, "数据入库");
+      }
+      return result;
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
       throw error instanceof Error ? error : new Error(String(error));

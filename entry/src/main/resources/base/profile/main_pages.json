@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
+    "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",
     "pages/NavigationStackDemoPage",
     "pages/NavigationWebSwitchVerificationPage",
