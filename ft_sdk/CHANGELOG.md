@@ -6,26 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.16-alpha03] - 2026-08-20
-- Added public HarmonyOS Action filtering aligned with Android's `setActionTrackingHandler(...)`. Exported `FTActionTrackingHandler`, `ActionEventWrapper`, and `ActionSourceType` from `@guancecloud/ft_sdk/Index`. Return `null` from `resolveHandlerAction(...)` to skip an automatic Action; return `undefined` to continue through the original complete automatic Action collection path, including its name, properties, position, and `view_name` association.
-- Fixed duplicate RUM uploads on retry by preserving and reusing the original `sdk_data_id` package ID.
-- Fixed offline upload polling: an exhausted retry round now waits for an external trigger, and legacy or oversized cached rows no longer block later uploadable RUM data.
-- Deferred the initial remote data-filter pull until cold-launch reporting completes (or a no-UI background lifecycle settles), and close replaced filter managers to avoid duplicate startup pulls.
-- Added cold-launch tracking for foreground and background launches, including process-start, application-initialization, first-UIAbility, and first-frame timing fields. First-frame metrics require API 22.
-- Changed background-originated cold launches to classify a no-UI background entry first, then emit one `app_launch_type=background` Action only when a later UI first frame is observed.
+- Added `FTActionTrackingHandler.resolveHandlerAction(...)` for filtering automatic Actions; return `null` to skip an Action and `undefined` to retain default collection.
+- Fixed retry uploads to retain the original `sdk_data_id` package ID.
+- Stopped exhausted offline retries from polling until an external trigger arrives; invalid cached rows no longer block later uploads.
+- Deferred the initial remote data-filter pull until cold-launch reporting completes or a no-UI background launch settles.
+- Added `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` for cold-launch tracking. `launch_cold` is emitted after the first rendered frame; first-frame observation requires API 22 and `ft_sdk_ext.observeFTAppFirstFrame(...)`.
+- Background entries emit one `app_launch_type=background` Action only after a later UI first frame.
 
 ## [0.1.16-alpha02] - 2026-08-18
-- Restored source compatibility for device metrics configuration. `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)` remain supported; new integrations should use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
+- Restored `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)`; new integrations can use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
 
 ## [0.1.16-alpha01] - 2026-08-14
-- Added Android-aligned automatic View filtering for HarmonyOS Router pages and `Navigation` destinations. Configure `FTRUMConfig.setViewRouterTrackingHandler(...)` or `setViewNavigationTrackingHandler(...)`; returning `HandlerView` customizes the View name/properties and returning `null` skips automatic View collection.
-- Added RUM device metrics collection for View and Error events. Configure `FTRUMConfig.setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)` to report CPU, memory, battery-current, and FPS aggregates in View events, and `setExtraMonitorTypeWithError(...)` to append CPU usage, memory usage, and battery level to Error events.
-- Fixed HarmonyOS automatic UI-block LongTask reporting: `MAIN_THREAD_JANK` duration is now calculated from the system event's `begin_time` and `end_time` fields,the SDK no longer generates timer or heartbeat fallback LongTasks.
-- Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
-- Native and WebView Resource records, and their generated network Error records, now use the Resource record's stable UUID (the unprefixed UUID portion of the Resource `sdk_data_id`) as `resource_id` for reliable correlation.
-- Aligned WebView bridge enrichment with Android: no synthetic `view_path_name` is added, missing WebView referrers resolve from the native host View, and `sdk_version` follows Android's native-tag precedence while the Browser SDK version remains in `sdk_pkg_info`.
-- Aligned automatic Action names with Android: default names now use `component/text#id`, list and tab actions append `#position:n`, and configured `FTActionTrackingHandler` names remain unchanged.
-- Aligned View custom-property fields with Android: View properties now retain their caller-provided names instead of receiving a `view_property_` prefix.
-- Remote data filters now also remove matching records that were cached before the rule was received. Only remote rules participate in this upload-time cleanup; application-provided local rules continue to apply solely before data is cached.
+- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` for automatic View filtering.
+- Added `FTRUMConfig.setDeviceMetricsMonitorType(...)` and `setExtraMonitorTypeWithError(...)` for View and Error device metrics.
+- Fixed UI-block LongTask duration calculation and removed timer or heartbeat fallback reporting.
+- Fixed missing RUM `app_id` tags after an EventConsumer Worker restart.
+- Used the stable Resource UUID as `resource_id` to correlate native/WebView Resource and network Error data.
+- Updated WebView enrichment, automatic Action names, and View custom-property keys.
+- Remote data filters now also remove matching cached data; local filters remain insertion-time only.
 
 ## [0.1.15] - 2026-07-29
 - Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.
