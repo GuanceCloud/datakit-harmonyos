@@ -5,8 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.16] - 2026-07-29
-- No extension API changes. Version is aligned with `ft_sdk` 0.1.16, which fixes missing RUM `app_id` tags after an EventConsumer Worker restart.
+## [0.1.16-alpha03] - 2026-08-20
+- Added the API 22 `observeFTAppFirstFrame(...)` helper for one-shot cold-launch first-frame timing.
+
+## [0.1.16-alpha02] - 2026-08-18
+- No extension API changes.
+
+## [0.1.16-alpha01] - 2026-08-14
+- No extension API changes; released with `ft_sdk` 0.1.16-alpha01.
 
 ## [0.1.15] - 2026-07-29
 - Released `ft_sdk_ext` 0.1.15 as a production HAR package, aligned with `ft_sdk` 0.1.15.

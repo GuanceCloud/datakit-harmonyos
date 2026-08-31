@@ -184,6 +184,7 @@ export default function syncDataHelperUnitTest() {
 
       expect(lineProtocol.includes('service=browser')).assertTrue();
       expect(lineProtocol.includes('service=native-service')).assertFalse();
+      expect(lineProtocol.includes('sdk_version=2.0.0')).assertFalse();
       expect(lineProtocol.includes('"agent":"1.0.0"')).assertTrue();
       expect(lineProtocol.includes('"web":"2.0.0"')).assertTrue();
     });

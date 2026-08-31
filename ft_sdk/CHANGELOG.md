@@ -5,9 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.16] - 2026-07-29
-- Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
-- Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.
+## [0.1.16-alpha03] - 2026-08-20
+- Added `FTActionTrackingHandler.resolveHandlerAction(...)` for filtering automatic Actions; return `null` to skip an Action and `undefined` to retain default collection.
+- Fixed retry uploads to retain the original `sdk_data_id` package ID.
+- Stopped exhausted offline retries from polling until an external trigger arrives; invalid cached rows no longer block later uploads.
+- Deferred the initial remote data-filter pull until cold-launch reporting completes or a no-UI background launch settles.
+- Added `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` for cold-launch tracking. `launch_cold` is emitted after the first rendered frame; first-frame observation requires API 22 and `ft_sdk_ext.observeFTAppFirstFrame(...)`.
+- Background entries emit one `app_launch_type=background` Action only after a later UI first frame.
+
+## [0.1.16-alpha02] - 2026-08-18
+- Restored `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)`; new integrations can use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
+
+## [0.1.16-alpha01] - 2026-08-14
+- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` for automatic View filtering.
+- Added `FTRUMConfig.setDeviceMetricsMonitorType(...)` and `setExtraMonitorTypeWithError(...)` for View and Error device metrics.
+- Fixed UI-block LongTask duration calculation and removed timer or heartbeat fallback reporting.
+- Fixed missing RUM `app_id` tags after an EventConsumer Worker restart.
+- Used the stable Resource UUID as `resource_id` to correlate native/WebView Resource and network Error data.
+- Updated WebView enrichment, automatic Action names, and View custom-property keys.
+- Remote data filters now also remove matching cached data; local filters remain insertion-time only.
 
 ## [0.1.15] - 2026-07-29
 - Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.

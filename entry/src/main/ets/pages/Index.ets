@@ -119,6 +119,20 @@ struct Index {
             }
             .margin({ bottom: 10 })
 
+            // Navigation + Web NavDestination switch verification page
+            ListItem() {
+              Button() {
+                Text("Navigation Web Switch Verification")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0F766E')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/NavigationWebSwitchVerificationPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // WebView test page
             ListItem() {
               Button() {

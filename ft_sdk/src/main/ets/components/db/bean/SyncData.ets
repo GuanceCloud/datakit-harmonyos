@@ -3,6 +3,7 @@
  */
 import { DataType } from '../../enum/Enums';
 import { Utils } from '../../utils';
+import { Constants } from '../../Constants';
 
 /**
  * SyncData JSON Interface
@@ -164,21 +165,18 @@ export class SyncData {
 
 
   /**
-   * Mark package sequence ID, replace uuid with packageId.uuid in sdk_data_id tag
-   * Android: dataString = dataString.replaceFirst(uuid, packageId + "." + uuid);
-   * This replaces the uuid in sdk_data_id tag, changing:
-   * sdk_data_id=abc123 -> sdk_data_id=1_2_3.abc123
-   * Used for data tracking and batch identification
-   * @param packageId Package ID (format: {seq}_{pid}_{count})
-   * @returns string Modified line protocol data with package ID
+   * Assigns the package prefix to an unprefixed sdk_data_id. Resource records
+   * can use that same UUID in resource_id, which must not be changed. Once the
+   * prefixed value is persisted after a failed upload, retries reuse it unchanged.
+   * @param packageId Package ID (format: {sequence}.{instance}.{count}.{nonce})
+   * @returns Line protocol with an established package-prefixed sdk_data_id
    */
   public getLineProtocolDataWithPkgId(packageId: string): string {
     if (!this.dataString || !packageId) {
       return this.dataString || "";
     }
-    // Replace the first occurrence of uuid with packageId.uuid
-    // This is done to mark the data with package ID for tracking
-    return this.dataString.replace(this.uuid, `${packageId}.${this.uuid}`);
+    const sdkDataId = `${Constants.KEY_SDK_DATA_FLAG}=${this.uuid}`;
+    return this.dataString.replace(sdkDataId, `${Constants.KEY_SDK_DATA_FLAG}=${packageId}.${this.uuid}`);
   }
 
   /**

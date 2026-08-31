@@ -6,15 +6,21 @@ import window from '@ohos.window';
 import { hidebug } from '@kit.PerformanceAnalysisKit';
 import {
   DBCacheDiscard,
+  DetectFrequency,
   DeviceMetricsMonitorType,
   EnvType,
   ErrorMonitorType,
+  ActionEventWrapper,
+  FTActionTrackingHandler,
   FTLoggerConfig,
   FTRemoteConfigFetchResult,
   FTRUMConfig,
   FTSDK,
   FTSDKConfig,
   FTTraceConfig,
+  FTViewNavigationTrackingHandler,
+  FTViewRouterTrackingHandler,
+  HandlerView,
   LogCacheDiscard,
   Status,
   SyncPageSize,
@@ -22,6 +28,7 @@ import {
   UserData,
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
+import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import {
@@ -43,10 +50,21 @@ const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequentia
 const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
 const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
 const DEFAULT_REMOTE_CONFIG_TEST_ENABLED = false;
-const NETWORK_ROUTE_TEST_HOST = '10.100.64.213';
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
 const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
 const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
+// Routes and Navigation destinations whose final name starts with this prefix
+// are deliberately excluded from automatic RUM View collection. Keep the
+// prefix-based rule in the demo so page filtering can be verified without
+// changing collection for its existing test pages.
+const IGNORED_AUTOMATIC_VIEW_PREFIX = 'IgnoreViewTracking';
+// User-configurable automatic Action filters. Names are matched by prefix;
+// component IDs are matched exactly. Add application-specific IDs here when
+// their automatic Actions should not be reported.
+const FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES: Array<string> = [
+  '__Common__/'
+];
+const FILTERED_AUTOMATIC_ACTION_IDS: Array<string> = [];
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -57,12 +75,18 @@ export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
+export const KEY_NETWORK_ROUTE_TEST_HOST = "networkRouteTestHost";
 export const KEY_REMOTE_CONFIG_TEST_ENABLED = "remoteConfigTestEnabled";
 export const KEY_LOCAL_DATA_FILTER_ENABLED = "localDataFilterEnabled";
 export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
 export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
+/** Demo-only launch parameter; delays first content loading to exercise first-frame timing. */
+export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
+/** Demo-only parameter for switching between the two test UIAbilities after the source first frame. */
+export const KEY_COLD_LAUNCH_NEXT_UI_ABILITY = "coldLaunchNextUIAbility";
+const MAX_COLD_START_DELAY_MS = 30_000;
 
 interface RuntimeConfig {
   datakitUrl: string;
@@ -73,6 +97,7 @@ interface RuntimeConfig {
   autoSync: string;
   networkRouteTestEnabled: string;
   networkRouteTestMode: string;
+  networkRouteTestHost: string;
   remoteConfigTestEnabled: string;
   localDataFilterEnabled: string;
   localDataFilterLogRule: string;
@@ -88,6 +113,64 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
 
   onResult(success: boolean): void {
     DemoLogger.i(LOG_TAG, `Remote config fetch result: success=${success}`);
+  }
+}
+
+class DemoRouterViewTrackingHandler implements FTViewRouterTrackingHandler {
+  resolveHandlerView(routeName: string): HandlerView | null {
+    const normalizedRouteName = routeName.trim();
+    if (normalizedRouteName.length === 0 || /^\d+$/.test(normalizedRouteName) ||
+      normalizedRouteName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+      DemoLogger.i(LOG_TAG, `Router View filtered: ${routeName}`);
+      return null;
+    }
+    return new HandlerView(routeName);
+  }
+}
+
+class DemoNavigationViewTrackingHandler implements FTViewNavigationTrackingHandler {
+  resolveHandlerView(destinationName: string): HandlerView | null {
+    const normalizedDestinationName = destinationName.trim();
+    if (normalizedDestinationName.length === 0 || /^\d+$/.test(normalizedDestinationName) ||
+      normalizedDestinationName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+      DemoLogger.i(LOG_TAG, `Navigation View filtered: ${destinationName}`);
+      return null;
+    }
+    return new HandlerView(destinationName);
+  }
+}
+
+/**
+ * Example of automatic Action filtering. Returning null skips a matching
+ * Action; returning undefined continues through the original automatic Action
+ * collection path.
+ */
+class DemoActionTrackingHandler implements FTActionTrackingHandler {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
+    const source = actionEventWrapper.getSource();
+    const nodeId = source?.getId() ?? '';
+    const nodeType = source?.getNodeType() ?? 'UnknownComponent';
+    const actionName = nodeId.length > 0 ? `${nodeType}/${nodeId}` : nodeType;
+    if (this.shouldFilterAction(actionName, nodeId)) {
+      DemoLogger.i(LOG_TAG, `Automatic Action filtered: name=${actionName}, id=${nodeId}`);
+      return null;
+    }
+
+    return undefined;
+  }
+
+  private shouldFilterAction(actionName: string, nodeId: string): boolean {
+    for (let index = 0; index < FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES.length; index++) {
+      if (actionName.startsWith(FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES[index])) {
+        return true;
+      }
+    }
+    for (let index = 0; index < FILTERED_AUTOMATIC_ACTION_IDS.length; index++) {
+      if (nodeId === FILTERED_AUTOMATIC_ACTION_IDS[index]) {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -110,10 +193,10 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
  * --ps traceUrl http\://10.0.0.1\:8000/api/user
  *
  * 6. Enable the local proxy route test:
- * --ps networkRouteTestEnabled true --ps networkRouteTestMode proxy
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode proxy --ps networkRouteTestHost your_route_test_host
  *
  * 7. Enable the local custom DNS route test:
- * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns --ps networkRouteTestHost your_dns_server
  *
  * 8. Enable remote-configuration verification (fetches on every cold start):
  * --ps remoteConfigTestEnabled true
@@ -131,6 +214,9 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {
+  private coldStartDelayMs: number = 0;
+  private coldLaunchTestWant: Want | null = null;
+  private secondaryLaunchStarted: boolean = false;
   private runtimeConfig: RuntimeConfig = {
     datakitUrl: "",
     datawayUrl: "",
@@ -140,6 +226,7 @@ export default class EntryAbility extends UIAbility {
     autoSync: "",
     networkRouteTestEnabled: "",
     networkRouteTestMode: "",
+    networkRouteTestHost: "",
     remoteConfigTestEnabled: "",
     localDataFilterEnabled: "",
     localDataFilterLogRule: "",
@@ -148,6 +235,9 @@ export default class EntryAbility extends UIAbility {
   };
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    FTSDK.recordAppFirstUIAbilityCreate();
+    this.coldLaunchTestWant = want;
+    this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     DemoLogger.e("log test", `onCreate `);
     console.log("log test,onCreate")
     this.logAppMemoryLimitOnMainThread();
@@ -179,6 +269,60 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
+  private resolveColdStartDelayMs(want: Want): number {
+    const value = want.parameters?.[KEY_COLD_START_DELAY_MS];
+    const delayMs = Number(value);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      return 0;
+    }
+    return Math.min(MAX_COLD_START_DELAY_MS, Math.floor(delayMs));
+  }
+
+  private readWantString(want: Want, key: string, defaultValue: string): string {
+    const value = want.parameters?.[key];
+    return value === null || value === undefined ? defaultValue : String(value);
+  }
+
+  /**
+   * A-to-B half of the multi-UIAbility cold-launch acceptance test. The
+   * parameter is forwarded to B, but B accepts only EntryAbility as a target,
+   * which prevents a launch loop.
+   */
+  private async startSecondaryLaunchAbilityIfRequested(): Promise<void> {
+    const want = this.coldLaunchTestWant;
+    if (want === null) {
+      return;
+    }
+    const nextAbility = this.readWantString(want, KEY_COLD_LAUNCH_NEXT_UI_ABILITY, '');
+    if (nextAbility !== 'SecondaryLaunchAbility') {
+      return;
+    }
+    if (this.secondaryLaunchStarted) {
+      return;
+    }
+    this.secondaryLaunchStarted = true;
+
+    // The test starts its target only after the source first-frame callback. Force the
+    // test Action through the normal worker/cache drain now; normal launches
+    // retain their regular 10-second automatic upload aggregation window.
+    FTSDK.flushSyncData();
+    DemoLogger.i(LOG_TAG, 'Cold-launch test parameter requests EntryAbility -> SecondaryLaunchAbility after first frame');
+
+    const targetWant: Want = {
+      bundleName: this.context.abilityInfo.bundleName,
+      moduleName: this.context.abilityInfo.moduleName,
+      abilityName: nextAbility,
+      parameters: want.parameters
+    };
+    try {
+      await this.context.startAbility(targetWant);
+      DemoLogger.i(LOG_TAG, 'Cold-launch test parameter started SecondaryLaunchAbility');
+    } catch (error) {
+      this.secondaryLaunchStarted = false;
+      DemoLogger.e(LOG_TAG, `Cold-launch test parameter failed to start SecondaryLaunchAbility: ${error}`);
+    }
+  }
+
   onDestroy(): void {
     // Lifecycle monitoring is now handled automatically by SDK via applicationContext
     // No manual stopView() call needed - SDK's FTAbilityLifecycleListener handles this
@@ -188,6 +332,7 @@ export default class EntryAbility extends UIAbility {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
+    const networkRouteTestHostParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_HOST];
     const remoteConfigTestEnabledParam = want.parameters?.[KEY_REMOTE_CONFIG_TEST_ENABLED];
     const localDataFilterEnabledParam = want.parameters?.[KEY_LOCAL_DATA_FILTER_ENABLED];
     const runtimeConfig: RuntimeConfig = {
@@ -203,6 +348,9 @@ export default class EntryAbility extends UIAbility {
       networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
         ? ""
         : String(networkRouteTestModeParam),
+      networkRouteTestHost: networkRouteTestHostParam === undefined || networkRouteTestHostParam === null
+        ? ""
+        : String(networkRouteTestHostParam),
       remoteConfigTestEnabled: remoteConfigTestEnabledParam === undefined || remoteConfigTestEnabledParam === null
         ? ""
         : String(remoteConfigTestEnabledParam),
@@ -242,6 +390,12 @@ export default class EntryAbility extends UIAbility {
       preferencesStore,
       KEY_NETWORK_ROUTE_TEST_MODE,
       runtimeConfig.networkRouteTestMode,
+      ""
+    );
+    runtimeConfig.networkRouteTestHost = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_NETWORK_ROUTE_TEST_HOST,
+      runtimeConfig.networkRouteTestHost,
       ""
     );
     runtimeConfig.remoteConfigTestEnabled = await this.resolveRuntimeValue(
@@ -310,6 +464,7 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
     AppStorage.setOrCreate(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
     AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
@@ -333,6 +488,7 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
     await preferencesStore.put(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     await preferencesStore.put(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
     await preferencesStore.put(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
@@ -457,19 +613,25 @@ export default class EntryAbility extends UIAbility {
       const datawayUrl = this.runtimeConfig.datawayUrl.trim();
       const clientToken = this.runtimeConfig.clientToken.trim();
       const appId = this.runtimeConfig.appId.trim();
-      const networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
+      let networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
       const networkRouteTestMode = this.resolveNetworkRouteTestMode();
+      const networkRouteTestHost = this.runtimeConfig.networkRouteTestHost.trim();
       const remoteConfigTestEnabled = this.isRemoteConfigTestEnabled();
       const remoteConfigFetchResult: FTRemoteConfigFetchResult | null = remoteConfigTestEnabled
         ? new RemoteConfigTestFetchResult()
         : null;
+
+      if (networkRouteTestEnabled && networkRouteTestHost.length === 0) {
+        DemoLogger.w(LOG_TAG, "Network route test disabled: networkRouteTestHost is required");
+        networkRouteTestEnabled = false;
+      }
 
       // Create SDK configuration
       let sdkConfig: FTSDKConfig;
       if (networkRouteTestEnabled) {
         const uploadUrl = networkRouteTestMode === 'dns'
           ? `http://${NETWORK_ROUTE_TEST_DNS_HOSTNAME}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`
-          : `http://${NETWORK_ROUTE_TEST_HOST}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`;
+          : `http://${networkRouteTestHost}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`;
         sdkConfig = FTSDKConfig.builder(uploadUrl);
         DemoLogger.i(LOG_TAG, `Network route test enabled: mode=${networkRouteTestMode}, uploadUrl=${uploadUrl}`);
       } else if (datawayUrl.length > 0) {
@@ -481,8 +643,11 @@ export default class EntryAbility extends UIAbility {
       } else if (datakitUrl.length > 0) {
         sdkConfig = FTSDKConfig.builder(datakitUrl);
       } else {
-        DemoLogger.w(LOG_TAG, "SDK initialization skipped: datakitUrl and datawayUrl are both empty");
-        return;
+        // The SDK can collect and cache data before an intake endpoint is
+        // configured. A later FTSDK.setDatakitUrl/setDatawayUrl call enables
+        // upload without requiring the application to reinstall the SDK.
+        sdkConfig = FTSDKConfig.builder();
+        DemoLogger.w(LOG_TAG, 'No DataKit or Dataway URL configured; installing SDK without an upload endpoint');
       }
 
       sdkConfig = sdkConfig
@@ -516,12 +681,12 @@ export default class EntryAbility extends UIAbility {
       sdkConfig = this.applyLocalDataFilterConfig(sdkConfig);
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
-          host: NETWORK_ROUTE_TEST_HOST,
+          host: networkRouteTestHost,
           port: NETWORK_ROUTE_TEST_PROXY_PORT
         });
       } else if (networkRouteTestEnabled && networkRouteTestMode === 'dns') {
         sdkConfig = sdkConfig.setDns({
-          servers: [NETWORK_ROUTE_TEST_HOST]
+          servers: [networkRouteTestHost]
         });
       }
       // Initialize SDK
@@ -557,11 +722,13 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
-        .setEnableTrackAppUIBlock(false)
-        .setEnableTraceUserView(true)
+        .setEnableTrackAppUIBlock(true,300)
+        .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
+        .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
+        .setActionTrackingHandler(new DemoActionTrackingHandler())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
-        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL)
+        .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
         // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
@@ -592,12 +759,34 @@ export default class EntryAbility extends UIAbility {
   }
 
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
+    const startSecondaryAfterFirstFrame = (): void => {
+      void this.startSecondaryLaunchAbilityIfRequested();
+    };
+    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
+    if (this.coldStartDelayMs > 0) {
+      DemoLogger.i(LOG_TAG, `Demo cold-start delay enabled: ${this.coldStartDelayMs}ms before loadContent`);
+      setTimeout(() => {
+        this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+      }, this.coldStartDelayMs);
+      return;
+    }
+    this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+  }
 
+  private loadEntryContent(
+    windowStage: window.WindowStage,
+    firstFrameListenerRegistered: boolean,
+    startSecondaryAfterFirstFrame: () => void
+  ): void {
     windowStage.loadContent('pages/Index', (err) => {
       DemoLogger.i(LOG_TAG, "loadContent callback called");
       if (err.code) {
         DemoLogger.e(LOG_TAG, `loadContent failed: ${err.code}`);
         return;
+      }
+      if (!firstFrameListenerRegistered) {
+        DemoLogger.i(LOG_TAG, "Registering first-frame listener from successful loadContent callback");
+        observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
       }
       DemoLogger.i(LOG_TAG, "Content loaded successfully");
     });

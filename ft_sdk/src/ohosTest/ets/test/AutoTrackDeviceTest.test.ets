@@ -9,8 +9,10 @@ import { FTActionTracker } from '../../../main/ets/components/rum/FTActionTracke
 import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
-import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
+import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
+import { FTViewNavigationTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
+import { FTViewRouterTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -67,6 +69,9 @@ class FakeFrameNode {
   private nodeId: string;
   private uniqueId: number;
   private customProperties: Map<string, Object> = new Map();
+  private inspectorAttributes: Record<string, Object> = {};
+  private parent: FakeFrameNode | null = null;
+  private previousSibling: FakeFrameNode | null = null;
 
   constructor(nodeType: string, nodeId: string, uniqueId: number) {
     this.nodeType = nodeType;
@@ -92,6 +97,33 @@ class FakeFrameNode {
 
   getCustomProperty(key: string): Object {
     return this.customProperties.get(key) || '';
+  }
+
+  setInspectorAttribute(key: string, value: Object): FakeFrameNode {
+    this.inspectorAttributes[key] = value;
+    return this;
+  }
+
+  getInspectorInfo(): Object {
+    return { '$attrs': this.inspectorAttributes } as Object;
+  }
+
+  setParent(parent: FakeFrameNode): FakeFrameNode {
+    this.parent = parent;
+    return this;
+  }
+
+  getParent(): FrameNode | null {
+    return this.parent as Object as FrameNode | null;
+  }
+
+  setPreviousSibling(previousSibling: FakeFrameNode): FakeFrameNode {
+    this.previousSibling = previousSibling;
+    return this;
+  }
+
+  getPreviousSibling(): FrameNode | null {
+    return this.previousSibling as Object as FrameNode | null;
   }
 }
 
@@ -167,15 +199,56 @@ class FakeUIContext {
   }
 }
 
-class HandlerActionTrackingHandler implements FTActionTrackingHandler {
-  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | null {
+class FilteringActionTrackingHandler implements FTActionTrackingHandler {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
     const source = actionEventWrapper.getSource();
-    if (!source || source.getId() !== 'handler_button') {
+    if (source?.getId() === 'ignore_action_view') {
+      return null;
+    }
+    return undefined;
+  }
+}
+
+class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
+  public resolvedCount: number = 0;
+
+  resolveHandlerAction(_actionEventWrapper: ActionEventWrapper): null | undefined {
+    this.resolvedCount += 1;
+    return undefined;
+  }
+}
+
+class FilteringRouterTrackingHandler implements FTViewRouterTrackingHandler {
+  public resolvedRouteNames: string[] = [];
+
+  resolveHandlerView(routeName: string): HandlerView | null {
+    this.resolvedRouteNames.push(routeName);
+    if (routeName === 'IgnoredRouterPage') {
       return null;
     }
     const property: Record<string, object> = {};
-    property['handler_property'] = new ActionPropertyWrapper('handler_value');
-    return new HandlerAction('handler_action_name', property);
+    property['view_handler_source'] = new ActionPropertyWrapper('router');
+    return new HandlerView(`custom_router_${routeName}`, property);
+  }
+}
+
+class FilteringNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+  public resolvedDestinationNames: string[] = [];
+
+  resolveHandlerView(destinationName: string): HandlerView | null {
+    this.resolvedDestinationNames.push(destinationName);
+    if (destinationName === 'IgnoredNavigationDestination') {
+      return null;
+    }
+    const property: Record<string, object> = {};
+    property['view_handler_source'] = new ActionPropertyWrapper('navigation');
+    return new HandlerView(`custom_navigation_${destinationName}`, property);
+  }
+}
+
+class EmptyViewNameNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+  resolveHandlerView(_destinationName: string): HandlerView | null {
+    return new HandlerView('   ');
   }
 }
 
@@ -273,8 +346,8 @@ export default function autoTrackDeviceTest() {
       await DBAssert.cleanupAll();
     });
 
-    it('routerPageShouldUploadView', 0, async () => {
-      const routeName = 'pages/AutoTrackRouterPage';
+    it('routerPageShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+      const routeName = 'pages/account/AutoTrackRouterPage';
       const normalizedViewName = 'AutoTrackRouterPage';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
       expect(uiContext.observer.hasRouterPageUpdateCallback()).assertTrue();
@@ -308,8 +381,44 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('navDestinationShouldUploadView', 0, async () => {
-      const routeName = 'pages/AutoTrackNavDestination';
+    it('routerHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+      const handler = new FilteringRouterTrackingHandler();
+      const rumConfig = buildRumConfig(true, false).setViewRouterTrackingHandler(handler);
+      const routeName = 'pages/account/HandledRouterPage';
+      const viewName = 'custom_router_HandledRouterPage';
+      initializeAutoTrack(context, uiContext, rumConfig);
+
+      await uiContext.observer.emitRouterPageUpdate(routeName, 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2);
+      await WaitUtils.delay(300);
+
+      expect(handler.resolvedRouteNames.length).assertEqual(1);
+      expect(handler.resolvedRouteNames[0]).assertEqual('HandledRouterPage');
+      await closeCurrentViewAndWaitForRum();
+      await flushAndAssertPayload(collector, [
+        'view,',
+        `view_name=${viewName}`,
+        'view_handler_source='
+      ]);
+
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.resetAll();
+      const filteredHandler = new FilteringRouterTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewRouterTrackingHandler(filteredHandler));
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 2);
+      await WaitUtils.delay(500);
+
+      expect(filteredHandler.resolvedRouteNames.length).assertEqual(1);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('navDestinationShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+      const routeName = 'pages/account/AutoTrackNavDestination';
       const normalizedViewName = 'AutoTrackNavDestination';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
       expect(uiContext.observer.hasNavDestinationSwitchCallback()).assertTrue();
@@ -338,14 +447,103 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
+    it('navigationSwitchShouldNotSuppressRouterView', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/NavigationDestination');
+      await uiContext.observer.emitRouterPageUpdate('pages/RouterDestination', 0);
+      await uiContext.observer.emitRouterPageUpdate('pages/RouterDestination', 2);
+      await WaitUtils.delay(300);
+
+      const view = await DBAssert.waitForViewNamed('RouterDestination', 5000);
+      expect(view !== null).assertTrue();
+      expect(view?.getViewName() ?? '').assertEqual('RouterDestination');
+    });
+
+    it('navigationHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      const rumConfig = buildRumConfig(true, false).setViewNavigationTrackingHandler(handler);
+      const destinationName = 'pages/account/HandledNavigationDestination';
+      const viewName = 'custom_navigation_HandledNavigationDestination';
+      initializeAutoTrack(context, uiContext, rumConfig);
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', destinationName);
+      await WaitUtils.delay(300);
+
+      expect(handler.resolvedDestinationNames.length).assertEqual(1);
+      expect(handler.resolvedDestinationNames[0]).assertEqual('HandledNavigationDestination');
+      await closeCurrentViewAndWaitForRum();
+      await flushAndAssertPayload(collector, [
+        'view,',
+        `view_name=${viewName}`,
+        'view_handler_source='
+      ]);
+
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.resetAll();
+      const filteredHandler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(filteredHandler));
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
+      await WaitUtils.delay(500);
+
+      expect(filteredHandler.resolvedDestinationNames.length).assertEqual(1);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('navigationHandlerEmptyViewNameShouldSkipAutomaticView', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(new EmptyViewNameNavigationTrackingHandler()));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/BlankNavigationDestination');
+      await WaitUtils.delay(300);
+
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('filteredDestinationShouldCloseThePreviousAutomaticView', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(handler));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/TrackedNavigationDestination');
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitNavDestinationSwitch('pages/TrackedNavigationDestination', 'pages/IgnoredNavigationDestination');
+
+      const previousView = await DBAssert.waitForViewNamed('custom_navigation_TrackedNavigationDestination', 5000);
+      expect(previousView !== null).assertTrue();
+      const views = await DBAssert.queryViews(20);
+      expect(views.length).assertEqual(1);
+      expect(views[0].getViewName()).assertEqual('custom_navigation_TrackedNavigationDestination');
+    });
+
+    it('filteredNavigationShouldNotBlockSameNamedRouterView', 0, async () => {
+      const handler = new FilteringNavigationTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewNavigationTrackingHandler(handler));
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredNavigationDestination', 0);
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredNavigationDestination', 2);
+      await WaitUtils.delay(300);
+
+      const view = await DBAssert.waitForViewNamed('IgnoredNavigationDestination', 5000);
+      expect(view !== null).assertTrue();
+      expect(view?.getViewName() ?? '').assertEqual('IgnoredNavigationDestination');
+    });
+
     it('willClickShouldUploadAction', 0, async () => {
       const viewName = 'auto_action_view';
-      const actionName = 'Button/auto_action_button';
+      const actionName = 'Button/登录#auto_action_button';
       initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
       expect(uiContext.observer.hasWillClickCallback()).assertTrue();
       await startViewForAction(viewName);
 
-      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'auto_action_button', 1001));
+      const button = new FakeFrameNode('Button', 'auto_action_button', 1001)
+        .setInspectorAttribute('label', '登录');
+      await uiContext.observer.emitWillClick(button);
       await assertActionStarted(actionName);
       await closeCurrentViewAndWaitForRum();
 
@@ -357,21 +555,88 @@ export default function autoTrackDeviceTest() {
       ]);
     });
 
-    it('willClickShouldUseCustomHandler', 0, async () => {
-      const viewName = 'handler_action_view';
-      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new HandlerActionTrackingHandler()));
-      expect(uiContext.observer.hasWillClickCallback()).assertTrue();
+    it('willClickShouldAppendListItemPosition', 0, async () => {
+      const viewName = 'list_item_action_view';
+      const actionName = 'Button/商品#item_action#position:1';
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
       await startViewForAction(viewName);
 
-      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'handler_button', 1002));
-      await assertActionStarted('handler_action_name');
+      const firstItem = new FakeFrameNode('ListItem', 'first_item', 1101);
+      const secondItem = new FakeFrameNode('ListItem', 'second_item', 1102)
+        .setPreviousSibling(firstItem);
+      const button = new FakeFrameNode('Button', 'item_action', 1103)
+        .setInspectorAttribute('label', '商品')
+        .setParent(secondItem);
+
+      await uiContext.observer.emitWillClick(button);
+      await assertActionStarted(actionName);
       await closeCurrentViewAndWaitForRum();
 
       await flushAndAssertPayload(collector, [
         'action,',
-        'action_name=handler_action_name',
-        `view_name=${viewName}`,
-        'handler_property='
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
+      ]);
+    });
+
+    it('willClickShouldAppendTabPosition', 0, async () => {
+      const viewName = 'tab_action_view';
+      const actionName = 'Button/设置#tab_action#position:1';
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true));
+      await startViewForAction(viewName);
+
+      const firstTab = new FakeFrameNode('TabContent', 'first_tab', 1201);
+      const secondTab = new FakeFrameNode('TabContent', 'second_tab', 1202)
+        .setPreviousSibling(firstTab);
+      const button = new FakeFrameNode('Button', 'tab_action', 1203)
+        .setInspectorAttribute('label', '设置')
+        .setParent(secondTab);
+
+      await uiContext.observer.emitWillClick(button);
+      await assertActionStarted(actionName);
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
+      ]);
+    });
+
+    it('willClickHandlerShouldFilterAutomaticAction', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new FilteringActionTrackingHandler()));
+      await startViewForAction('filtered_action_view');
+
+      // FilteringActionTrackingHandler returns null for the configured filtered ID.
+      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'ignore_action_view', 1003));
+      await WaitUtils.delay(500);
+
+      expect((await DBAssert.queryActions(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('willClickHandlerShouldContinueOriginalCollectionForUndefined', 0, async () => {
+      const viewName = 'pass_through_action_view';
+      const actionName = 'Button/继续默认采集#pass_through_action#position:1';
+      const handler = new PassThroughActionTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, handler));
+      await startViewForAction(viewName);
+
+      const firstTab = new FakeFrameNode('TabContent', 'pass_through_first_tab', 1004);
+      const secondTab = new FakeFrameNode('TabContent', 'pass_through_second_tab', 1005)
+        .setPreviousSibling(firstTab);
+      const button = new FakeFrameNode('Button', 'pass_through_action', 1006)
+        .setInspectorAttribute('label', '继续默认采集')
+        .setParent(secondTab);
+      await uiContext.observer.emitWillClick(button);
+      expect(handler.resolvedCount).assertEqual(1);
+      await assertActionStarted(actionName);
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        `action_name=${actionName}`,
+        `view_name=${viewName}`
       ]);
     });
   });

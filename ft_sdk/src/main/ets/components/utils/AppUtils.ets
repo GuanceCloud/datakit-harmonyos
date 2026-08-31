@@ -1,10 +1,15 @@
+/**
+ * SPDX-FileCopyrightText: 2024 Tanranran
+ * SPDX-FileContributor: Changzhou Guance Information Technology Co., Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Derived from HarmonyUtilCode; verified against:
+ * https://github.com/ByteRax/HarmonyUtilCode/tree/9751d1af45ed7c847e636f760f9c38168f1e479a/utilcode
+ * Original author: Tanranran (2024-05-15).
+ * Modifications and HarmonyOS SDK integration by Guance.
+ */
 import { bundleManager } from '@kit.AbilityKit';
 
-/**
- * @author Tanranran
- * @date 2024/5/15 22:10
- * @description https://github.com/tanranran/HarmonyUtilCode
- */
 export class AppUtils {
   private static mBundleInfo?: bundleManager.BundleInfo
   private static mAppName: string = ""

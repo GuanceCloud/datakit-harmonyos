@@ -83,6 +83,8 @@ export enum SDKWorkerCommand {
   NATIVE_CRASH_LOG_APPEND = 'nativeCrashLog.append',
   UPLOAD_SCHEDULE = 'upload.schedule',
   UPLOAD_CONSUME = 'upload.consume',
+  /** Allocate or recover one persisted upload package before HTTP is sent. */
+  UPLOAD_PREPARE_PAGE = 'upload.preparePage',
   UPLOAD_EXECUTE_PAGE = 'upload.executePage',
   UPLOAD_COMMIT_PAGE = 'upload.commitPage',
   UPLOAD_CONSUME_FINISH = 'upload.consumeFinish',
@@ -410,8 +412,10 @@ export interface SDKBackgroundMetricsRequestDTO {
 
 export interface SDKBackgroundMetricsResultDTO {
   cpuTickCount: number;
-  memoryUsageMB: number;
+  /** Resident memory in bytes, matching Android's VmRSS * 1000 contract. */
+  memoryUsageBytes: number;
   batteryCurrent: number;
+  hasBatteryCurrent: boolean;
   collectedAt: number;
   cpuFromCache: boolean;
   memoryFromCache: boolean;
@@ -515,10 +519,56 @@ export interface SDKUploadHttpResultDTO {
   softTimedOut: boolean;
 }
 
+/**
+ * Worker-only preparation request. The Host atomically persists `rows` before
+ * forwarding the same package to UPLOAD_EXECUTE_PAGE.
+ */
+export interface SDKUploadPreparePageDTO {
+  roundId: string;
+  dataType: string;
+  rows: SDKUploadRowDTO[];
+  /** More rows remain in DB or were deferred by the Host transport byte cap. */
+  queryHasMore?: boolean;
+  transportLimitReached?: boolean;
+}
+
+export interface SDKUploadPreparePageResultDTO {
+  roundId: string;
+  dataType: string;
+  /** Rows as read from DB; use these as the atomic replacement target. */
+  sourceRows: SDKUploadRowDTO[];
+  /** Rows with the selected package ID persisted in sdk_data_id. */
+  rows: SDKUploadRowDTO[];
+  /** True only when the Host must atomically replace raw cached rows before HTTP. */
+  needsPersistence: boolean;
+  queriedRows: number;
+  acceptedRows: number;
+  duplicateRows: number;
+  deferredRows: number;
+  packageId: string;
+  bodyLength: number;
+  bodyBytes: number;
+  bodyLimitReached: boolean;
+  oversizedRows: number;
+  transportLimitReached: boolean;
+  bodyPreview: string;
+  /** False only when no acceptable row can be sent in this round. */
+  shouldExecute: boolean;
+  roundHasMoreData: boolean;
+  computeMs: number;
+}
+
 export interface SDKUploadExecutePageDTO {
   roundId: string;
   dataType: string;
   rows: SDKUploadRowDTO[];
+  /**
+   * The package selected by UPLOAD_PREPARE_PAGE. Upload retries must reuse
+   * this value instead of allocating another package.
+   */
+  packageId?: string;
+  /** The Host atomically stored the package-prefixed sdk_data_id before HTTP. */
+  sdkDataIdPersisted?: boolean;
   /** More rows remain in DB or were deferred by the Host transport byte cap. */
   queryHasMore?: boolean;
   transportLimitReached?: boolean;

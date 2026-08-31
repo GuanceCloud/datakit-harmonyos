@@ -24,6 +24,7 @@ import realBackendSmokeTest from './RealBackendSmokeTest.test';
 import syncUploadChainDeviceTest from './SyncUploadChainDeviceTest.test';
 import userDataManagerPersistenceTest from './UserDataManagerPersistenceTest.test';
 import webViewAutoTrackDeviceTest from './WebViewAutoTrackDeviceTest.test';
+import uiBlockManagerDeviceTest from './UIBlockManagerDeviceTest.test';
 import workerIntegrationDeviceTest from './WorkerIntegrationDeviceTest.test';
 
 export default function testsuite() {
@@ -47,6 +48,7 @@ export default function testsuite() {
   syncUploadChainDeviceTest();
   userDataManagerPersistenceTest();
   webViewAutoTrackDeviceTest();
+  uiBlockManagerDeviceTest();
   workerIntegrationDeviceTest();
 
   // Manual real backend smoke. Disabled by default unless explicitly enabled.

@@ -48,6 +48,12 @@ export { FTRemoteConfigFetchResult } from './src/main/ets/components/remote/Remo
 // ============================================================================
 
 export { FTRUMGlobalManager } from './src/main/ets/components/rum/FTRUMGlobalManager';
+export { ActionEventWrapper } from './src/main/ets/components/rum/bean/ActionEventWrapper';
+export { HandlerView } from './src/main/ets/components/rum/bean/HandlerView';
+export { ActionSourceType } from './src/main/ets/components/rum/enum/ActionSourceType';
+export { FTActionTrackingHandler } from './src/main/ets/components/rum/handler/FTActionTrackingHandler';
+export { FTViewRouterTrackingHandler } from './src/main/ets/components/rum/handler/FTViewRouterTrackingHandler';
+export { FTViewNavigationTrackingHandler } from './src/main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
 
 // ============================================================================
 // Logger

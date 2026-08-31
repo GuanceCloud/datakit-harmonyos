@@ -4,6 +4,7 @@ import { FTRUMInnerManager } from './FTRUMInnerManager';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfig } from '../Configs';
 import { Utils } from '../utils/Utils';
+import { HandlerView } from './bean/HandlerView';
 
 const TAG = 'FTNavigationTracker';
 
@@ -11,8 +12,15 @@ export class FTNavigationTracker {
   private static instance: FTNavigationTracker | null = null;
   private uiContext: UIContext | null = null;
   private rumConfig: FTRUMConfig | null = null;
+  // The View name currently reported to RUM. It can differ from the route name
+  // when an application configures an automatic View tracking handler.
   private currentViewName: string = '';
-  private lastSwitchTs: number = 0;
+  // The normalized Router/Navigation name for the active automatic View.
+  // A filtered page deliberately leaves this empty so it cannot suppress a
+  // later callback from the other automatic source.
+  private currentRouteName: string = '';
+  private lastNavigationSwitchTs: number = 0;
+  private lastRouterShownTs: number = 0;
   private inited: boolean = false;
   // Track page creation start time for load time calculation
   // Map<viewName, startTime in nanoseconds>
@@ -21,6 +29,10 @@ export class FTNavigationTracker {
   // Map<viewName, resumeStartTime in nanoseconds>
   // Used when returning to a previous page that was already created
   private pageResumeStartTimeMap: Map<string, number> = new Map();
+  // Router state=0 is the creation phase and state=2 is the shown phase. Keep
+  // the handler's decision between them so a filtered route remains filtered
+  // for its whole automatic View lifecycle.
+  private pendingRouterHandlerViews: Map<string, HandlerView | null> = new Map();
 
   public static getInstance(): FTNavigationTracker {
     if (!FTNavigationTracker.instance) {
@@ -62,10 +74,13 @@ export class FTNavigationTracker {
     this.uiContext = null;
     this.rumConfig = null;
     this.currentViewName = '';
-    this.lastSwitchTs = 0;
+    this.currentRouteName = '';
+    this.lastNavigationSwitchTs = 0;
+    this.lastRouterShownTs = 0;
     this.inited = false;
     this.pageCreateStartTimeMap.clear();
     this.pageResumeStartTimeMap.clear();
+    this.pendingRouterHandlerViews.clear();
   }
 
   private async handleSwitchNav(info: uiObserver.NavDestinationSwitchInfo): Promise<void> {
@@ -74,56 +89,43 @@ export class FTNavigationTracker {
       return;
     }
     
-    const now = Date.now();
-    // simple debounce to merge duplicate events
-    if (now - this.lastSwitchTs < 80) {
-      return;
-    }
-    this.lastSwitchTs = now;
-
-    const fromNameRaw: string = this.getNavName(info.from) || (this.currentViewName ? this.currentViewName : '');
     const toNameRaw: string = this.getNavName(info.to);
     
-    // Normalize view names: convert route paths to page names
-    const fromName: string = this.normalizeViewName(fromNameRaw);
-    let toName: string = this.normalizeViewName(toNameRaw);
+    // Use the route's simple name for automatic views, matching Android's
+    // Activity.getClass().getSimpleName() default naming rule.
+    const toName: string = this.normalizeViewName(toNameRaw);
 
     if (!toName || toName.length === 0) {
+      await this.startAutomaticView('', null);
       return;
     }
 
-    if (this.currentViewName === toName) {
+    const handlerView = this.resolveNavigationHandlerView(toName);
+    if (handlerView === null) {
+      await this.startAutomaticView(toName, null);
       return;
     }
 
-    // Check if this is a returning page (page already exists, no creation start time)
-    // If so, record resume start time for load time calculation
-    // Aligned with Android: when returning to a previous Activity, onActivityResumed is called
-    // and we need to measure the time from resume to shown
-    const createStartTime = this.pageCreateStartTimeMap.get(toName);
-    if (!createStartTime) {
-      // This is likely a returning page (page already exists)
-      // Record resume start time for load time calculation
-      const resumeStartTime = Utils.getCurrentNanoTime();
-      this.pageResumeStartTimeMap.set(toName, resumeStartTime);
+    if (this.currentRouteName === toName) {
+      return;
     }
 
-    const rum = FTRUMGlobalManager.getInstance();
-    try {
-      // stop previous view if exists
-      if (this.currentViewName && this.currentViewName.length > 0) {
-        await rum.stopView();
-      }
-    } catch (e) {
-      FTInnerLogger.w(TAG, `stopView failed: ${e}`);
+    const now = Date.now();
+    // Merge duplicate Navigation callbacks only. Router lifecycle callbacks
+    // use an independent debounce window and must not be suppressed here.
+    if (now - this.lastNavigationSwitchTs < 80) {
+      return;
+    }
+    this.lastNavigationSwitchTs = now;
+
+    // A Navigation destination does not expose a Router state=0 creation
+    // callback. Preserve the existing resume-to-shown load-time measurement
+    // for a subsequent Router state=2 notification.
+    if (!this.pageCreateStartTimeMap.get(toName)) {
+      this.pageResumeStartTimeMap.set(toName, Utils.getCurrentNanoTime());
     }
 
-    try {
-      await rum.startView(toName);
-      this.currentViewName = toName;
-    } catch (e) {
-      FTInnerLogger.w(TAG, `startView failed: ${e}`);
-    }
+    await this.startAutomaticView(toName, handlerView);
   }
 
   private getNavName(item: uiObserver.NavDestinationInfo | "navBar" | undefined): string {
@@ -144,20 +146,36 @@ export class FTNavigationTracker {
       return;
     }
     
-    const fromName: string = this.currentViewName ? this.currentViewName : '';
     let toName: string = info.name ? info.name : '';
 
     if (!toName || toName.length === 0) {
+      if (info.state === 2) {
+        await this.startAutomaticView('', null);
+      }
       return;
     }
 
-    // Normalize view name: convert route path (e.g., "pages/ActionTestPage") to page name (e.g., "ActionTestPage")
-    // This ensures consistency with manual startView calls that use page names
+    // Use the route's simple name for automatic views, matching Android's
+    // Activity.getClass().getSimpleName() default naming rule.
     toName = this.normalizeViewName(toName);
+    if (!toName || toName.length === 0) {
+      if (info.state === 2) {
+        await this.startAutomaticView('', null);
+      }
+      return;
+    }
 
-    // Handle state=0 (page created) - record creation start time for load time calculation
+    // Handle state=0 (page created) - determine whether this Router page is
+    // tracked, then record its creation time only for Views that will be sent.
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentPreAttached records start time
     if (info.state === 0) {
+      const handlerView = this.resolveRouterHandlerView(toName);
+      this.pendingRouterHandlerViews.set(toName, handlerView);
+      if (handlerView === null) {
+        this.pageCreateStartTimeMap.delete(toName);
+        this.pageResumeStartTimeMap.delete(toName);
+        return;
+      }
       const createStartTime = Utils.getCurrentNanoTime();
       this.pageCreateStartTimeMap.set(toName, createStartTime);
       // Clear any existing resume start time (page is being created, not resumed)
@@ -175,7 +193,7 @@ export class FTNavigationTracker {
     // Record resume start time at this point to measure from pushBack to page shown
     if (info.state === 3 || info.state === 4) {
       // Check if this is the current active page being hidden
-      if (toName === this.currentViewName) {
+      if (toName === this.currentRouteName) {
         // Current page is being hidden, likely due to pushBack
         // Try to determine the next page that will be shown (returning page)
         // We can infer from the navigation stack: when pushing back, the previous page in the stack will be shown
@@ -193,109 +211,183 @@ export class FTNavigationTracker {
     // Handle state=2 (page shown) - calculate load time and start view
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentCreated calculates duration and calls onCreateView
     if (info.state === 2) {
-      // Get the public RUM manager for view lifecycle reporting.
-      const rum = FTRUMGlobalManager.getInstance();
-      
-      const createStartTime = this.pageCreateStartTimeMap.get(toName);
-      if (createStartTime) {
-        // New page creation: calculate load time from creation (state=0) to shown (state=2)
-        const loadTime = Utils.getCurrentNanoTime() - createStartTime;
-        this.pageCreateStartTimeMap.delete(toName);
-        
-        // Record load time through the SDK-internal automatic tracking entry point.
-        FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(toName, loadTime);
+      let handlerView: HandlerView | null;
+      if (this.pendingRouterHandlerViews.has(toName)) {
+        handlerView = this.pendingRouterHandlerViews.get(toName) ?? null;
+        this.pendingRouterHandlerViews.delete(toName);
       } else {
-        // No creation start time found - this happens when:
-        // 1. Returning to a previous page (page already exists, no state=0 event)
-        // 2. Page creation event was missed or cleared
-        // 
-        // For returning pages, check if we have a resume start time (recorded in handleSwitchNav, state=3/4, or earlier state=2)
-        // Aligned with Android: when returning to a previous Activity, onActivityResumed is called
-        // and we need to measure the time from resume to shown
-        let resumeStartTime = this.pageResumeStartTimeMap.get(toName);
-        
-        // If no resume start time for this specific page, check for pending resume time (from state=3/4 pushBack)
-        if (!resumeStartTime) {
-          const pendingResumeTime = this.pageResumeStartTimeMap.get('_pending_resume');
-          if (pendingResumeTime) {
-            // Use the pending resume time (recorded when pushBack started in state=3/4)
-            resumeStartTime = pendingResumeTime;
-            this.pageResumeStartTimeMap.delete('_pending_resume');
-            // Store it with the page name for future reference
-            this.pageResumeStartTimeMap.set(toName, resumeStartTime);
-          } else {
-            // No resume start time found - this happens when:
-            // 1. handleSwitchNav was not called (only handleSwitchRouter was called)
-            // 2. Resume start time was cleared or missed
-            // 3. State=3/4 was not triggered or detected
-            // 
-            // Record current time as resume start (approximation)
-            // In practice, resume should start slightly before state=2, but this is the best we can do
-            // We'll use a small default loadTime to approximate the time from resume to shown
-            resumeStartTime = Utils.getCurrentNanoTime();
-            this.pageResumeStartTimeMap.set(toName, resumeStartTime);
-          }
-        }
-        
-        // Calculate load time from resume start to shown
-        const loadTime = Utils.getCurrentNanoTime() - resumeStartTime;
+        // A Router page may be restored without emitting state=0. Resolve it
+        // at display time in that case, matching Android's resume behavior.
+        handlerView = this.resolveRouterHandlerView(toName);
+      }
+
+      if (handlerView === null) {
+        this.pageCreateStartTimeMap.delete(toName);
         this.pageResumeStartTimeMap.delete(toName);
-        
-        // Record load time with resume key (aligned with Android's resume time handling)
-        // Use resume key format: {viewName}_resume
-        // getViewLoadTime() will prioritize resume key over create key
-        const resumeKey = `${toName}_resume`;
-        FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(resumeKey, loadTime);
+        await this.startAutomaticView(toName, null);
+        return;
       }
-      
-      // Continue with normal view start logic
+
+      // A Navigation callback may already have started the same automatic
+      // View. Keep that View and attach this Router lifecycle's load time to
+      // it when timing data is available.
+      if (this.currentRouteName === toName) {
+        this.recordRouterViewLoadTime(toName, this.currentViewName, false);
+        return;
+      }
+
       const now = Date.now();
-      if (now - this.lastSwitchTs < 80) {
+      if (now - this.lastRouterShownTs < 80) {
+        this.pageCreateStartTimeMap.delete(toName);
+        this.pageResumeStartTimeMap.delete(toName);
         return;
       }
-      this.lastSwitchTs = now;
+      this.lastRouterShownTs = now;
 
-      if (this.currentViewName === toName) {
-        return;
-      }
+      this.recordRouterViewLoadTime(toName, handlerView.getViewName(), true);
 
-      try {
-        if (this.currentViewName && this.currentViewName.length > 0) {
-          await rum.stopView();
-        }
-      } catch (e) {
-        FTInnerLogger.w(TAG, `stopView failed: ${e}`);
-      }
-
-      try {
-        await rum.startView(toName);
-        this.currentViewName = toName;
-      } catch (e) {
-        FTInnerLogger.w(TAG, `startView failed: ${e}`);
-      }
+      await this.startAutomaticView(toName, handlerView);
       return;
     }
   }
 
   /**
-   * Normalize view name by converting route path to page name
+   * Uses the configured Router handler when present. Without a handler, keep
+   * the existing automatic behavior and collect the normalized route name.
+   */
+  private resolveRouterHandlerView(routeName: string): HandlerView | null {
+    const handler = this.rumConfig?.getViewRouterTrackingHandler() ?? null;
+    if (handler === null) {
+      return new HandlerView(routeName);
+    }
+    try {
+      return this.validateHandlerView(handler.resolveHandlerView(routeName), 'Router', routeName);
+    } catch (e) {
+      FTInnerLogger.w(TAG, `Router View handler failed for ${routeName}: ${e}`);
+      return null;
+    }
+  }
+
+  /**
+   * Uses the configured Navigation handler when present. Without a handler,
+   * keep the existing automatic behavior and collect the normalized name.
+   */
+  private resolveNavigationHandlerView(destinationName: string): HandlerView | null {
+    const handler = this.rumConfig?.getViewNavigationTrackingHandler() ?? null;
+    if (handler === null) {
+      return new HandlerView(destinationName);
+    }
+    try {
+      return this.validateHandlerView(handler.resolveHandlerView(destinationName), 'Navigation', destinationName);
+    } catch (e) {
+      FTInnerLogger.w(TAG, `Navigation View handler failed for ${destinationName}: ${e}`);
+      return null;
+    }
+  }
+
+  /** Treat a blank handler View name as the same skip decision as null. */
+  private validateHandlerView(handlerView: HandlerView | null, source: string, routeName: string): HandlerView | null {
+    if (handlerView !== null && handlerView.getViewName().trim().length === 0) {
+      FTInnerLogger.w(TAG, `${source} View handler returned an empty View name for ${routeName}`);
+      return null;
+    }
+    return handlerView;
+  }
+
+  /**
+   * Records the load time from Router lifecycle callbacks. If a Navigation
+   * callback has already started the same View, `viewName` is that active
+   * View's name instead of the Router handler's prospective name.
+   */
+  private recordRouterViewLoadTime(routeName: string, viewName: string, allowFallback: boolean): void {
+    const createStartTime = this.pageCreateStartTimeMap.get(routeName);
+    if (createStartTime !== undefined) {
+      const loadTime = Utils.getCurrentNanoTime() - createStartTime;
+      this.pageCreateStartTimeMap.delete(routeName);
+      FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(viewName, loadTime);
+      return;
+    }
+
+    let resumeStartTime = this.pageResumeStartTimeMap.get(routeName);
+    if (resumeStartTime === undefined) {
+      const pendingResumeTime = this.pageResumeStartTimeMap.get('_pending_resume');
+      if (pendingResumeTime !== undefined) {
+        resumeStartTime = pendingResumeTime;
+        this.pageResumeStartTimeMap.delete('_pending_resume');
+      }
+    }
+
+    if (resumeStartTime === undefined) {
+      if (!allowFallback) {
+        return;
+      }
+      resumeStartTime = Utils.getCurrentNanoTime();
+    }
+
+    this.pageResumeStartTimeMap.delete(routeName);
+    const loadTime = Utils.getCurrentNanoTime() - resumeStartTime;
+    const resumeKey = `${viewName}_resume`;
+    FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(resumeKey, loadTime);
+  }
+
+  /**
+   * Transitions the automatic View state to a Router page or Navigation
+   * destination. A null HandlerView closes the prior tracked View and
+   * deliberately starts no replacement View.
+   */
+  private async startAutomaticView(routeName: string, handlerView: HandlerView | null): Promise<void> {
+    const rum = FTRUMGlobalManager.getInstance();
+    try {
+      if (this.currentViewName.length > 0) {
+        await rum.stopView();
+      }
+    } catch (e) {
+      FTInnerLogger.w(TAG, `stopView failed: ${e}`);
+    }
+
+    this.currentViewName = '';
+    this.currentRouteName = '';
+
+    if (handlerView === null) {
+      FTInnerLogger.d(TAG, `automatic View filtered: ${routeName}`);
+      return;
+    }
+
+    try {
+      await rum.startView(handlerView.getViewName(), handlerView.getProperty() ?? {});
+      this.currentViewName = handlerView.getViewName();
+      this.currentRouteName = routeName;
+    } catch (e) {
+      FTInnerLogger.w(TAG, `startView failed: ${e}`);
+    }
+  }
+
+  /**
+   * Resolve the automatic View name from an ArkUI route.
+   *
+   * Android automatic View tracking uses Activity.getClass().getSimpleName().
+   * An ArkUI route has no Activity class, so its final path segment is the
+   * equivalent stable page name. Manual startView names are not passed here
+   * and are intentionally left untouched.
    * Examples:
    *   "pages/ActionTestPage" -> "ActionTestPage"
-   *   "pages/Index" -> "Index"
+   *   "pages/account/SettingsPage" -> "SettingsPage"
    *   "ActionTestPage" -> "ActionTestPage" (no change)
    * @param viewName Original view name (may be route path or page name)
-   * @returns Normalized view name (page name)
+   * @returns Simple automatic view name
    */
   private normalizeViewName(viewName: string): string {
     if (!viewName || viewName.length === 0) {
       return viewName;
     }
     
-    // Remove "pages/" prefix if present
-    if (viewName.startsWith('pages/')) {
-      return viewName.substring(6); // Remove "pages/" (6 characters)
+    let routeName = viewName.trim();
+    while (routeName.endsWith('/')) {
+      routeName = routeName.substring(0, routeName.length - 1);
     }
-    
-    return viewName;
+
+    const separatorIndex = routeName.lastIndexOf('/');
+    const normalizedName = separatorIndex >= 0 ? routeName.substring(separatorIndex + 1) : routeName;
+    return normalizedName;
   }
 }

@@ -98,6 +98,159 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+## Cold Launch Timing
+
+Cold-launch durations use the monotonic
+`systemDateTime.getUptime(TimeType.STARTUP, true)` clock. The SDK retains the
+measured boundaries until RUM Action collection is ready, then emits exactly
+one `launch_cold` Action after the first UI frame. Its `duration` spans from
+the process-start boundary to the first rendered frame;
+the Action timestamp remains an epoch timestamp for compatibility with the
+existing data pipeline.
+
+Record the earliest available boundaries in the host app. The optional
+application-start timestamp hook is useful only when the SDK module is loaded
+after the host's own startup boundary; do not pass `Date.now()` or a wall-clock
+value.
+
+```ts
+import AbilityStage from '@ohos.app.ability.AbilityStage'
+import UIAbility from '@ohos.app.ability.UIAbility'
+import { FTSDK } from '@guancecloud/ft_sdk/Index'
+
+export class AppStage extends AbilityStage {
+  onCreate(): void {
+    // Record application initialization. The SDK also snapshots this process's current visibility through
+    // ApplicationContext.getRunningProcessInformation().
+    FTSDK.recordAppApplicationInit(this.context)
+
+    // Also initialize FTSDK/RUM here from the app's already-available
+    // persisted/static configuration when this process can start with no UI.
+  }
+}
+
+export class EntryAbility extends UIAbility {
+  onCreate(): void {
+    // Record the first UIAbility creation.
+    FTSDK.recordAppFirstUIAbilityCreate()
+  }
+}
+```
+
+Set the AbilityStage file as the module `srcEntry`. The core package does not
+invent a first-frame time: API 22 applications should additionally install
+`@guancecloud/ft_sdk_ext` and register its observer before `loadContent()`.
+Without the extension, `app_first_frame_init_time` is absent rather than being
+approximated with `onWindowStageCreate()`.
+
+Foreground launches emit these Action Fields only when each pair of boundaries
+is present and strictly increasing:
+
+- `app_launch_type = foreground`
+- `app_pre_application_init_time`: process start to application initialization
+- `app_application_init_time`: application initialization to first UIAbility creation
+- `app_first_frame_init_time`: first UIAbility creation to first rendered frame
+
+At application initialization, the core first obtains and preserves the current process state from
+`ApplicationContext.getRunningProcessInformation()` (foreground/active or
+background). It does not depend only on `applicationStateChange`; that event
+continues to correct foreground/background races. A generation-reset,
+two-consecutive-turn lifecycle quiescence barrier replaces the former single
+`setTimeout(0)`: first UIAbility creation, application-state changes, and
+WindowStage SHOWN/ACTIVE reset the barrier before a no-UI launch can settle.
+No `RUNNING_STATE_OBSERVER` appManager listener or permission is used.
+
+For a background-originated launch, the initial snapshot must
+be `background` and the quiescence barrier must complete without a UIAbility,
+foreground state, or shown/active Window. The SDK records that classification
+but does not emit a no-UI `launch_cold` Action. If a UIAbility is later created,
+the first frame emits one Action with `app_launch_type = background` and a
+duration from the process-start boundary to the first frame; a process that remains background-only emits no launch
+Action. Hot-start Actions do not carry these cold-launch fields.
+
+RUM must be initialized before the first UI frame. For AppService/push entries,
+initialize it from AbilityStage or the entry itself when those processes also
+need RUM data; a background-only process does not emit `launch_cold` in this
+case. The Demo shows this with its AbilityStage and
+`StressServiceAbility` bootstrap, using persisted runtime settings or
+equivalent AppService Want parameters.
+
+The repository Demo accepts the non-persistent launch parameter
+`coldStartDelayMs` (capped at 30,000 ms). For example, use `5000` on a cold
+launch to delay `loadContent()` by five seconds; this safely produces a long
+first-UIAbility-creation-to-first-frame/`launch_cold.duration` scenario without changing normal launches.
+
+## Automatic View Filtering
+
+When automatic View tracking is enabled, Router pages and `Navigation`
+destinations can be independently renamed or filtered. Return a `HandlerView`
+to collect the automatic View; return `null` to skip it. With no handler set,
+the SDK keeps the default behavior and reports the final route segment.
+
+```ts
+import {
+  FTRUMConfig,
+  FTViewRouterTrackingHandler,
+  FTViewNavigationTrackingHandler,
+  HandlerView
+} from '@guancecloud/ft_sdk/Index'
+
+const routerHandler: FTViewRouterTrackingHandler = {
+  resolveHandlerView: (routeName: string): HandlerView | null => {
+    if (routeName === 'LoginPage') {
+      return null // Do not collect this Router page
+    }
+    return new HandlerView(`Router_${routeName}`)
+  }
+}
+
+const navigationHandler: FTViewNavigationTrackingHandler = {
+  resolveHandlerView: (destinationName: string): HandlerView | null => {
+    return destinationName === 'OrderDetail'
+      ? new HandlerView('Order Detail')
+      : null
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserView(true)
+  .setViewRouterTrackingHandler(routerHandler)
+  .setViewNavigationTrackingHandler(navigationHandler)
+```
+
+## Automatic Action Filtering
+
+When automatic Action tracking is enabled, configure
+`FTRUMConfig.setActionTrackingHandler(...)` to filter click Actions.
+The handler is called for each automatically tracked user operation. Return
+`null` to skip collection; return `undefined` to continue through the SDK's
+original automatic Action collection path, including name, properties,
+position, and View association.
+
+```ts
+import {
+  ActionEventWrapper,
+  FTActionTrackingHandler,
+  FTRUMConfig
+} from '@guancecloud/ft_sdk/Index'
+
+const actionHandler: FTActionTrackingHandler = {
+  resolveHandlerAction: (event: ActionEventWrapper): null | undefined => {
+    // Do not collect clicks from this component.
+    if (event.getSource()?.getId() === 'ignore_action_view') {
+      return null
+    }
+
+    // Continue through the original automatic Action collection path.
+    return undefined
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserAction(true)
+  .setActionTrackingHandler(actionHandler)
+```
+
 ## SDK Debug Logs
 
 Enable internal SDK diagnostics in debug builds, then filter HiLog/LogCat with `[FT-SDK]`:

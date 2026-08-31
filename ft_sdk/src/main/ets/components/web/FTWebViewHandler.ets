@@ -422,10 +422,6 @@ export class FTWebViewHandler implements JsReceiver {
           const tagsJsonStr = JSON.stringify(jsonTags);
           for (let idx = 0; idx < tagKeyList.length; idx++) {
             const currentKey = tagKeyList[idx];
-            // Skip platform field - not needed in line protocol
-            if (currentKey === "platform") {
-              continue;
-            }
             const valueStr = extractValueFromJson(tagsJsonStr, currentKey);
             if (valueStr !== null) {
               // Remove quotes if present
@@ -529,97 +525,27 @@ export class FTWebViewHandler implements JsReceiver {
             fieldsMap.set('is_active', 'false');
           }
 
-          // Aligned with Android: add native view name as referrer if referrer is empty
+          // Aligned with Android: add the native host view as referrer when the
+          // Browser SDK has not provided one.
           const referrerValue = tagsMap.get(Constants.KEY_RUM_VIEW_REFERRER);
           if (!referrerValue || referrerValue.length === 0) {
-            const nativeViewName = this.nativeViewName;
+            const nativeViewName = this.resolveNativeViewName();
             if (nativeViewName && nativeViewName.length > 0) {
               tagsMap.set(Constants.KEY_RUM_VIEW_REFERRER, nativeViewName);
             }
           }
 
-          // Aligned with Android: only merge dynamic tags in FTWebViewHandler
-          // Android logic: In FTWebViewHandler, only merge getRUMPublicDynamicTags() (dynamic tags)
-          // Static tags replacement (except service) happens in SyncDataHelper.getBodyContent()
-          // IMPORTANT: Save webview's service and sdk_version fields BEFORE merging dynamic tags, as they should be preserved
-          const webviewService = tagsMap.get(Constants.KEY_SERVICE);
-          // IMPORTANT: Save webview's sdk_version BEFORE merging dynamic tags, as native SDK's sdk_version will override it
-          // This ensures we get the correct Web SDK version for sdk_pkg_info
-          const webviewSDKVersion = tagsMap.get(Constants.KEY_SDK_VERSION);
-          
-          // Get dynamic tags from RUM config (aligned with Android: getRUMPublicDynamicTags())
+          // Aligned with Android: merge all dynamic RUM tags at the bridge.
+          // Do not reserve service or sdk_version here: Android applies an
+          // identically named dynamic tag before the final native RUM tags are
+          // added by SyncDataHelper.
           const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
           const dynamicTagKeys = Object.keys(dynamicTags);
           for (let i = 0; i < dynamicTagKeys.length; i++) {
             const key = dynamicTagKeys[i];
-            // Aligned with Android: skip KEY_SERVICE and KEY_SDK_VERSION to preserve webview's values
-            if (key !== Constants.KEY_SERVICE && key !== Constants.KEY_SDK_VERSION) {
-              const value = dynamicTags[key];
-              if (value !== undefined && value !== null) {
-                tagsMap.set(key, String(value));
-              }
-            }
-          }
-          
-          // Restore webview's service field if it exists (preserve service=browser from webview)
-          if (webviewService && webviewService.length > 0) {
-            tagsMap.set(Constants.KEY_SERVICE, webviewService);
-          }
-          
-          // Restore webview's sdk_version field if it exists (preserve Web SDK version from webview)
-          if (webviewSDKVersion && webviewSDKVersion.length > 0) {
-            tagsMap.set(Constants.KEY_SDK_VERSION, webviewSDKVersion);
-          }
-          
-          // Try to get view_path_name from WebView if not provided by Web SDK
-          // This ensures compatibility with Android SDK behavior where this field is present
-          if (this.webController) {
-            try {
-              // Get view_path_name if not present in tags
-              if (!tagsMap.has('view_path_name')) {
-                const url = this.webController.getUrl();
-                if (url && url.length > 0) {
-                  try {
-                    // Extract pathname from URL manually (ArkTS doesn't support URL constructor)
-                    // Extract pathname by finding the path part after the domain
-                    const urlStr: string = url;
-                    // Find the path part (after ://)
-                    const protocolIndex = urlStr.indexOf('://');
-                    if (protocolIndex >= 0) {
-                      const afterProtocol = urlStr.substring(protocolIndex + 3);
-                      const pathStart = afterProtocol.indexOf('/');
-                      if (pathStart >= 0) {
-                        const pathAndQuery = afterProtocol.substring(pathStart);
-                        // Remove query string and hash
-                        const queryIndex = pathAndQuery.indexOf('?');
-                        const hashIndex = pathAndQuery.indexOf('#');
-                        let pathname: string;
-                        if (queryIndex >= 0 && hashIndex >= 0) {
-                          pathname = pathAndQuery.substring(0, queryIndex < hashIndex ? queryIndex : hashIndex);
-                        } else if (queryIndex >= 0) {
-                          pathname = pathAndQuery.substring(0, queryIndex);
-                        } else if (hashIndex >= 0) {
-                          pathname = pathAndQuery.substring(0, hashIndex);
-                        } else {
-                          pathname = pathAndQuery;
-                        }
-                        if (pathname && pathname.length > 0) {
-                          tagsMap.set('view_path_name', pathname);
-                          FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Added view_path_name from WebView URL: ${pathname}`);
-                        }
-                      } else {
-                        // No path found, use root path
-                        tagsMap.set('view_path_name', '/');
-                        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Added view_path_name as root path: /`);
-                      }
-                    }
-                  } catch (e) {
-                    FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Failed to extract pathname from URL: ${url}, error: ${e}`);
-                  }
-                }
-              }
-            } catch (error) {
-              FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Error getting view_path_name from WebView: ${error}`);
+            const value = dynamicTags[key];
+            if (value !== undefined && value !== null) {
+              tagsMap.set(key, String(value));
             }
           }
           
@@ -631,11 +557,29 @@ export class FTWebViewHandler implements JsReceiver {
           const sessionIdValue = FTRUMInnerManager.getInstance().getSessionId();
           const collectType = sessionIdValue ? CollectType.ALL : CollectType.DROP;
 
+          // Browser Resource and Error points arrive separately. Assign the
+          // Resource UUID before crossing the Worker boundary so its
+          // resource_id and the unprefixed Resource sdk_data_id UUID are the
+          // same value. The first upload adds a package prefix only to
+          // sdk_data_id; retry keeps that established value unchanged.
+          const resourceDraftUuid = measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE ?
+            Utils.generateUUID() : undefined;
+          if (resourceDraftUuid) {
+            tagsMap.set(Constants.KEY_RUM_RESOURCE_ID, resourceDraftUuid);
+          }
+
           // Action-ID de-duplication now runs in EVENT_CONSUMER. Browser view
           // records remain intentionally non-deduplicated to match Android.
 
           // Call FTTrackInner to sync RUM data
-          FTTrackInner.getInstance().rumWebView(time, measurement, tagsMap, fieldsMap, collectType);
+          FTTrackInner.getInstance().rumWebView(
+            time,
+            measurement,
+            tagsMap,
+            fieldsMap,
+            collectType,
+            resourceDraftUuid
+          );
         }
 
       } else if (name === WEB_JS_TYPE_TRACK) {
@@ -834,6 +778,20 @@ export class FTWebViewHandler implements JsReceiver {
    */
   public getNativeViewName(): string {
     return this.nativeViewName;
+  }
+
+  /**
+   * Android obtains the host Activity name when a WebView is bound. ArkUI does
+   * not expose an Activity from WebviewController, so resolve the currently
+   * tracked native View at event time. An explicit setNativeViewName() keeps
+   * priority for applications that use a custom host name.
+   */
+  private resolveNativeViewName(): string {
+    if (this.nativeViewName && this.nativeViewName.length > 0) {
+      return this.nativeViewName;
+    }
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    return activeView ? activeView.getViewName() : '';
   }
 
   /**

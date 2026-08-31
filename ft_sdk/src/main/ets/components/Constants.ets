@@ -119,6 +119,7 @@ export class Constants {
   /**
    * RUM resource related keys
    */
+  static readonly KEY_RUM_RESOURCE_ID = "resource_id";
   static readonly KEY_RUM_RESOURCE_URL = "resource_url";
   static readonly KEY_RUM_RESOURCE_URL_HOST = "resource_url_host";
   static readonly KEY_RUM_RESOURCE_URL_PATH = "resource_url_path";
@@ -467,10 +468,9 @@ export class Constants {
    */
   static readonly KEY_RUM_SDK_PACKAGE_WEB = "web";
   /**
-   * SDK data flag [packageId].[pid].[pkg_dataCount].[uuid]
-   * <p>
-   *
-   *
+   * SDK data flag [packageId].[instance].[packageDataCount].[nonce].[uuid].
+   * The package-prefixed value selected for the first upload must remain
+   * unchanged for every retry.
    */
   static readonly KEY_SDK_DATA_FLAG = "sdk_data_id";
   /**
