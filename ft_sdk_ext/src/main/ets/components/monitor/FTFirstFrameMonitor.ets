@@ -14,7 +14,7 @@ const TAG = 'FTFirstFrameMonitor';
  * the same time origin as systemDateTime.getUptime(STARTUP, true).
  */
 /**
- * `onFirstFrameRecorded` runs only after T3 has been handed to ft_sdk. It is
+ * `onFirstFrameRecorded` runs only after the first-frame timestamp has been handed to ft_sdk. It is
  * optional so existing integrations keep the original one-argument API.
  */
 export function observeFTAppFirstFrame(
@@ -27,8 +27,8 @@ export function observeFTAppFirstFrame(
       if (!frameMetrics || !frameMetrics.firstDrawFrame) {
         return;
       }
-      // Capture T3 at callback entry before any unregistration work. This is
-      // intentionally the same STARTUP uptime source as T0-T2, not the API 22
+      // Capture the first-frame timestamp at callback entry before any unregistration work. This is
+      // intentionally the same STARTUP uptime source as application initialization and UIAbility creation, not the API 22
       // vsync timestamp whose time origin still requires device validation.
       let callbackUptimeNs = 0;
       try {

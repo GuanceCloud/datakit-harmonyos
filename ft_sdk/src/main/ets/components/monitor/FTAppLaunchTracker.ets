@@ -32,6 +32,7 @@ export interface FTAppLaunchSnapshot {
   launchType: FTAppLaunchType | null;
   initialVisibility: FTAppLaunchInitialVisibility;
   initialLifecycleRoundComplete: boolean;
+  backgroundLaunchPendingUi: boolean;
   rumReady: boolean;
   reported: boolean;
 }
@@ -100,7 +101,14 @@ export class FTAppLaunchTracker {
   private initialVisibility: FTAppLaunchInitialVisibility = 'unknown';
   private initialVisibilityCaptured: boolean = false;
   private initialLifecycleRoundComplete: boolean = false;
+  /**
+   * The process completed its initial lifecycle round as background-only.
+   * Keep this classification until a later UI first frame without emitting a
+   * no-UI Action.
+   */
+  private backgroundLaunchPendingUi: boolean = false;
   private reportSubmittedListeners: Array<() => void> = [];
+  private backgroundLaunchDetectedListeners: Array<() => void> = [];
 
   public constructor(
     clock: FTAppLaunchClock = new SystemAppLaunchClock(),
@@ -145,7 +153,7 @@ export class FTAppLaunchTracker {
     }
   }
 
-  /** Optional app-provided T0 for applications that initialize the SDK late. */
+  /** Optional host-provided application-start timestamp when the SDK loads late. */
   public setAppStartTime(uptimeNs: number): void {
     if (this.reported || uptimeNs <= 0 || this.hasRecordedBoundary()) {
       return;
@@ -153,7 +161,7 @@ export class FTAppLaunchTracker {
     this.appStartUptimeNs = uptimeNs;
   }
 
-  /** T1: AbilityStage/application initialization. */
+  /** Records application initialization from AbilityStage.onCreate() or another non-UI entry. */
   public recordApplicationInit(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.applicationInitUptimeNs > 0 || uptimeNs <= 0) {
       return;
@@ -200,29 +208,30 @@ export class FTAppLaunchTracker {
     this.completeInitialLifecycleRound();
   }
 
-  /** T2: the first UIAbility.onCreate entry. */
+  /** Records entry into the first UIAbility.onCreate(). */
   public recordFirstUIAbilityCreated(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.firstUIAbilityUptimeNs > 0 || uptimeNs <= 0) {
       return;
     }
     this.firstUIAbilityUptimeNs = uptimeNs;
-    this.launchType = 'foreground';
+    this.launchType = this.resolveUiLaunchType();
     this.tryReport();
   }
 
-  /** T3: the first frame callback from the API 22 extension. */
+  /** Records the first rendered frame observed by the API 22 extension. */
   public recordFirstFrame(uptimeNs: number = this.clock.nowUptimeNs()): void {
     if (this.firstFrameUptimeNs > 0 || uptimeNs <= 0) {
       return;
     }
     this.firstFrameUptimeNs = uptimeNs;
-    this.launchType = 'foreground';
+    this.launchType = this.resolveUiLaunchType();
     this.tryReport();
   }
 
   public recordApplicationForeground(): void {
     this.applicationForegroundObserved = true;
-    if (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved) {
+    if (!this.backgroundLaunchPendingUi &&
+      (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved)) {
       this.launchType = 'foreground';
     }
   }
@@ -234,12 +243,13 @@ export class FTAppLaunchTracker {
   /** Window SHOWN/ACTIVE is a foreground corroboration signal. */
   public recordWindowForeground(): void {
     this.windowForegroundObserved = true;
-    if (this.firstUIAbilityUptimeNs > 0 || this.applicationForegroundObserved) {
+    if (!this.backgroundLaunchPendingUi &&
+      (this.firstUIAbilityUptimeNs > 0 || this.applicationForegroundObserved)) {
       this.launchType = 'foreground';
     }
   }
 
-  /** RUM can become ready after any subset of T0-T3 has already been recorded. */
+  /** RUM can become ready after application, UIAbility, or first-frame boundaries are recorded. */
   public markRumReady(enabled: boolean): void {
     this.rumReady = enabled;
     this.tryReport();
@@ -254,6 +264,7 @@ export class FTAppLaunchTracker {
       launchType: this.launchType,
       initialVisibility: this.initialVisibility,
       initialLifecycleRoundComplete: this.initialLifecycleRoundComplete,
+      backgroundLaunchPendingUi: this.backgroundLaunchPendingUi,
       rumReady: this.rumReady,
       reported: this.reported
     };
@@ -279,6 +290,25 @@ export class FTAppLaunchTracker {
     };
   }
 
+  /**
+   * Invoked when a background component has completed the initial no-UI
+   * lifecycle round. This is intentionally separate from Action submission:
+   * a later UI first frame is required before the launch Action is submitted.
+   */
+  public onBackgroundLaunchDetected(listener: () => void): () => void {
+    if (this.backgroundLaunchPendingUi) {
+      listener();
+      return (): void => {};
+    }
+    this.backgroundLaunchDetectedListeners.push(listener);
+    return (): void => {
+      const index = this.backgroundLaunchDetectedListeners.indexOf(listener);
+      if (index >= 0) {
+        this.backgroundLaunchDetectedListeners.splice(index, 1);
+      }
+    };
+  }
+
   private hasRecordedBoundary(): boolean {
     return this.applicationInitUptimeNs > 0 ||
       this.firstUIAbilityUptimeNs > 0 ||
@@ -286,14 +316,16 @@ export class FTAppLaunchTracker {
   }
 
   private resolveBackgroundLaunchIfNeeded(): void {
-    if (this.reported || this.initialVisibility !== 'background' || !this.initialLifecycleRoundComplete) {
+    if (this.reported || this.backgroundLaunchPendingUi ||
+      this.initialVisibility !== 'background' || !this.initialLifecycleRoundComplete) {
       return;
     }
     if (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved || this.applicationForegroundObserved) {
       return;
     }
-    this.launchType = 'background';
-    this.tryReport();
+    this.backgroundLaunchPendingUi = true;
+    FTInnerLogger.d(TAG, 'Background launch detected; waiting for the first UI frame');
+    this.notifyBackgroundLaunchDetected();
   }
 
   private tryReport(): void {
@@ -328,26 +360,22 @@ export class FTAppLaunchTracker {
     }
   }
 
-  private buildAction(): FTAppLaunchAction | null {
-    if (this.launchType === 'foreground') {
-      const total = this.createPhase(this.appStartUptimeNs, this.firstFrameUptimeNs);
-      if (!total) {
-        return null;
+  private notifyBackgroundLaunchDetected(): void {
+    const listeners = this.backgroundLaunchDetectedListeners.slice();
+    this.backgroundLaunchDetectedListeners = [];
+    for (let index = 0; index < listeners.length; index++) {
+      try {
+        listeners[index]();
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Background-launch listener failed: ${String(error)}`);
       }
-      const properties = this.buildProperties();
-      return {
-        durationNs: total.duration,
-        startEpochNs: this.appStartEpochNs,
-        properties
-      };
     }
+  }
 
-    // A background-only process has no T3. Finish it at the newest valid
-    // completed boundary rather than waiting forever for a frame that cannot exist.
-    const completionTime = this.firstUIAbilityUptimeNs > 0
-      ? this.firstUIAbilityUptimeNs
-      : this.applicationInitUptimeNs;
-    const total = this.createPhase(this.appStartUptimeNs, completionTime);
+  private buildAction(): FTAppLaunchAction | null {
+    // Both foreground and background-originated launches finish on the first
+    // UI frame. A process that remains background-only emits no launch Action.
+    const total = this.createPhase(this.appStartUptimeNs, this.firstFrameUptimeNs);
     if (!total) {
       return null;
     }
@@ -356,6 +384,10 @@ export class FTAppLaunchTracker {
       startEpochNs: this.appStartEpochNs,
       properties: this.buildProperties()
     };
+  }
+
+  private resolveUiLaunchType(): FTAppLaunchType {
+    return this.backgroundLaunchPendingUi ? 'background' : 'foreground';
   }
 
   private buildProperties(): Record<string, object> {

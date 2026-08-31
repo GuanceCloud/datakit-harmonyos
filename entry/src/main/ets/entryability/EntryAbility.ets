@@ -82,7 +82,7 @@ export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
 export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
 
 export const KEY_APP_ID = "appId";
-/** Demo-only launch parameter; delays first content loading to exercise T2-T3. */
+/** Demo-only launch parameter; delays first content loading to exercise first-frame timing. */
 export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
 /** Demo-only parameter for switching between the two test UIAbilities after the source first frame. */
 export const KEY_COLD_LAUNCH_NEXT_UI_ABILITY = "coldLaunchNextUIAbility";
@@ -302,7 +302,7 @@ export default class EntryAbility extends UIAbility {
     }
     this.secondaryLaunchStarted = true;
 
-    // The test starts its target only after the source T3 callback. Force the
+    // The test starts its target only after the source first-frame callback. Force the
     // test Action through the normal worker/cache drain now; normal launches
     // retain their regular 10-second automatic upload aggregation window.
     FTSDK.flushSyncData();

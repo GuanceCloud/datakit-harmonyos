@@ -100,14 +100,14 @@ export class FTSDK {
   }
 
   /**
-   * Optionally inject the earliest application T0 captured by the host app.
+   * Optionally inject the earliest application-start timestamp captured by the host app.
    * The value must use systemDateTime.getUptime(TimeType.STARTUP, true).
    */
   public static setAppLaunchStartTime(uptimeNs: number): void {
     FTAppLaunchTracker.getInstance().setAppStartTime(uptimeNs);
   }
 
-  /** T1 hook: call from AbilityStage.onCreate(). */
+  /** Records application initialization from AbilityStage.onCreate() or another non-UI entry. */
   public static recordAppApplicationInit(context?: Object): void {
     const tracker = FTAppLaunchTracker.getInstance();
     const firstApplicationInit = tracker.getSnapshot().applicationInitUptimeNs === 0;
@@ -122,14 +122,14 @@ export class FTSDK {
     FTSDK.scheduleInitialLifecycleBarrier();
   }
 
-  /** T2 hook: call at the first UIAbility.onCreate() entry. */
+  /** Records entry into the first UIAbility.onCreate(). */
   public static recordAppFirstUIAbilityCreate(): void {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordFirstUIAbilityCreated();
   }
 
   /**
-   * T3 hook used by ft_sdk_ext after API 22 reports firstDrawFrame=true.
+   * Records the first rendered frame when ft_sdk_ext reports firstDrawFrame=true on API 22.
    * The extension deliberately reads the same STARTUP uptime clock at callback
    * arrival until device validation proves vsyncTimestamp has this same origin.
    */
@@ -353,9 +353,7 @@ export class FTSDK {
 
   /**
    * Application UUID - generated deterministically based on package name + version
-   * One build will generate a fixed UUID, same for all installations of the same build
-   * Aligned with Android: ft-plugin/src/main/java/com/ft/plugin/garble/Constants.java
-   * PACKAGE_UUID = UUID.randomUUID().toString() (generated at compile time)
+   * One build will generate a fixed UUID, same for all installations of the same build.
    *
    * Note: In HarmonyOS, we use package name + version as seed to generate deterministic UUID.
    * Same package name + version will always generate the same UUID, ensuring consistency across all installations.
@@ -600,10 +598,10 @@ export class FTSDK {
     FTRUMConfigManager.getInstance().initWithConfig(rumConfig);
     FTDBCachePolicy.getInstance().updateRumCacheLimitCount(rumConfig.getRumCacheLimitCount());
     FTDBCachePolicy.getInstance().updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
-    // Initialize RUM Inner Manager with config (aligned with Android: FTRUMInnerManager.initParams)
+    // Initialize the RUM inner manager with the supplied configuration.
     FTRUMInnerManager.getInstance().initParams(rumConfig);
 
-    // Initialize RUM config in FTTrackInner (aligned with Android: FTRUMConfigManager.initWithConfig -> FTTrackInner.initRUMConfig)
+    // Initialize RUM configuration in FTTrackInner.
     // This initializes rumStaticFields (session_sample_rate, session_on_error_sample_rate) in SyncDataHelper
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().initRUMConfig(rumConfig);
@@ -623,7 +621,7 @@ export class FTSDK {
     }
 
     // RUM readiness never completes a cold launch. The launch state machine
-    // caches T0-T3 until it can report exactly once after both prerequisites
+    // caches application, UIAbility, and first-frame boundaries until it can report exactly once after both prerequisites
     // (RUM ready and a valid terminal boundary) are available.
     FTAppLaunchTracker.getInstance().markRumReady(rumConfig.isEnableTraceUserAction());
     FTAppStartCounter.getInstance().setInited(true);
@@ -634,15 +632,13 @@ export class FTSDK {
     // Initialize ANR detect manager
     FTSDK.anrDetectManager = getFTSDKRuntime().getAnrDetectManager();
 
-    // Initialize exception handler for crash tracking
-    // Aligned with Android: FTExceptionHandler.get().initConfig(config)
+    // Initialize exception handler for crash tracking.
     if (rumConfig.isEnableTrackAppCrash()) {
       getFTSDKRuntime().initExceptionHandler(rumConfig);
       FTInnerLogger.d(TAG, "FTExceptionHandler initialized for crash tracking");
     }
 
-    // Initialize UI block detection
-    // Aligned with Android: FTUIBlockManager.get().start(config)
+    // Initialize UI block detection.
     if (rumConfig.isEnableTrackAppUIBlock()) {
       getFTSDKRuntime().startUIBlockManager(rumConfig);
       FTInnerLogger.d(TAG, "FTUIBlockManager initialized for UI block detection");
@@ -783,8 +779,7 @@ export class FTSDK {
    * @param globalContext Global context map
    */
   static appendGlobalContext(globalContext: Map<string, string>): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendGlobalContext() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendGlobalContext(globalContext);
     }
@@ -796,8 +791,7 @@ export class FTSDK {
    * @param value Tag value
    */
   static appendGlobalContextKeyValue(key: string, value: string): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendGlobalContextKeyValue() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendGlobalContextKeyValue(key, value);
     }
@@ -808,8 +802,7 @@ export class FTSDK {
    * @param globalContext RUM global context map
    */
   static appendRUMGlobalContext(globalContext: Map<string, string>): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendRUMGlobalContext() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendRUMGlobalContext(globalContext);
     }
@@ -821,8 +814,7 @@ export class FTSDK {
    * @param value Tag value
    */
   static appendRUMGlobalContextKeyValue(key: string, value: string): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendRUMGlobalContextKeyValue() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendRUMGlobalContextKeyValue(key, value);
     }
@@ -833,8 +825,7 @@ export class FTSDK {
    * @param globalContext Log global context map
    */
   static appendLogGlobalContext(globalContext: LogGlobalContextDictionary): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendLogGlobalContext() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendLogGlobalContext(globalContext);
     }
@@ -846,8 +837,7 @@ export class FTSDK {
    * @param value Tag value
    */
   static appendLogGlobalContextKeyValue(key: string, value: LogGlobalContextValue): void {
-    // Ensure trackInner exists, even if called before install completes
-    // Aligned with Android: FTSdk.appendLogGlobalContextKeyValue() behavior
+    // Ignore the call until the SDK installation creates trackInner.
     if (FTSDK.ftSdk) {
       FTTrackInner.getInstance().appendLogGlobalContextKeyValue(key, value);
     }
@@ -957,7 +947,7 @@ export class FTSDK {
           FTInnerLogger.i(TAG, "Auto action tracking is disabled; skipping FTActionTracker init");
         }
         // Initialize navigation tracker (automatic view start/stop from navigation/router events)
-        // Only initialize if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks)
+        // Navigation tracking is initialized only when View tracking is enabled.
         getFTSDKRuntime().initNavigationTracker(uiContext, rumConfig);
         FTInnerLogger.d(TAG, "Navigation tracker initialized successfully");
       } else {
@@ -1073,8 +1063,7 @@ export class FTSDK {
 
   /**
    * Clear unreported cached data
-   * Deletes all data from database (sync_data_flat, rum_view, rum_action tables)
-   * Aligned with Android: FTSdk.clearAllData()
+   * Deletes all data from database (sync_data_flat, rum_view, rum_action tables).
    */
   static async clearAllData(): Promise<void> {
     try {
@@ -1100,8 +1089,7 @@ export class FTSDK {
 
   /**
    * Actively sync data
-   * Triggers immediate data synchronization to server
-   * Aligned with Android: FTSdk.flushSyncData()
+   * Triggers immediate data synchronization to server.
    */
   static flushSyncData(): void {
     try {
@@ -1113,7 +1101,7 @@ export class FTSDK {
       FTInnerLogger.d(TAG, "flushSyncData requested");
       FTTrackInner.getInstance().flushPendingWorkerDataBeforeUpload().then(() => {
         FTInnerLogger.d(TAG, "flushSyncData worker queues drained, scheduling sync poll");
-        SyncTaskManager.getInstance().executePoll(false);  // Don't wait, execute immediately (aligned with Android SDK)
+        SyncTaskManager.getInstance().executePoll(false);  // Execute immediately after worker queues drain.
       }).catch((error: Error) => {
         FTInnerLogger.e(TAG, `flushSyncData worker queue drain failed, scheduling sync poll: ${error.message}`);
         SyncTaskManager.getInstance().executePoll(false);
@@ -1126,7 +1114,6 @@ export class FTSDK {
   /**
    * Enable or disable automatic upload of cached data after SDK initialization.
    * Manual calls to {@link flushSyncData} remain available while auto sync is disabled.
-   * Aligned with Android: FTSdk.setAutoSync(boolean).
    */
   static setAutoSync(autoSync: boolean): void {
     try {
@@ -1276,15 +1263,37 @@ export class FTSDK {
     const launchSnapshot = launchTracker.getSnapshot();
     if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
       // Remote filtering is control-plane work, not part of cold-start data
-      // collection. Preserve the active config but do not send /pull until the
-      // cold-launch Action has reached the RUM pipeline.
-      FTSDK.remoteDataFilterLaunchUnsubscribe = launchTracker.onReportSubmitted((): void => {
+      // collection. Preserve the active config until the cold-launch Action is
+      // submitted, except for a background-only process: its launch Action
+      // waits for a later UI frame, so unblock control-plane work
+      // as soon as the no-UI lifecycle round has settled.
+      let settled: boolean = false;
+      let removeReportListener: () => void = (): void => {};
+      let removeBackgroundListener: () => void = (): void => {};
+      const startAfterLaunch = (): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        removeReportListener();
+        removeBackgroundListener();
         FTSDK.remoteDataFilterLaunchUnsubscribe = null;
         if (FTSDK.remoteDataFilterManager !== manager) {
           return;
         }
         void manager.start();
-      });
+      };
+      removeReportListener = launchTracker.onReportSubmitted(startAfterLaunch);
+      removeBackgroundListener = launchTracker.onBackgroundLaunchDetected(startAfterLaunch);
+      if (settled) {
+        removeReportListener();
+        removeBackgroundListener();
+        return;
+      }
+      FTSDK.remoteDataFilterLaunchUnsubscribe = (): void => {
+        removeReportListener();
+        removeBackgroundListener();
+      };
       return;
     }
     void manager.start();
@@ -1376,9 +1385,7 @@ export class FTSDK {
   }
 
   /**
-   * Check if view tracking is enabled
-   * Returns true if RUM is enabled and view tracking is enabled
-   * Aligned with Android: FTRUMConfigManager.isRumEnable() && config.isEnableTraceUserView()
+   * Returns true when RUM and View tracking are both enabled.
    */
   static isViewTrackingEnabled(): boolean {
     if (!FTSDK.rumConfig) {

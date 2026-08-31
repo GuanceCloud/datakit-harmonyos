@@ -38,7 +38,7 @@ function phaseProperty(action: FTAppLaunchAction, key: string): Record<string, n
 
 export default function ftAppLaunchTrackerUnitTest() {
   describe('FTAppLaunchTrackerUnit', () => {
-    it('shouldReportForegroundT0ToT3WithPhaseFields', 0, () => {
+    it('shouldReportForegroundLaunchWithPhaseFields', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 1_000_000);
@@ -102,7 +102,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(completionCount).assertEqual(2);
     });
 
-    it('shouldFinishBackgroundWithoutWaitingForFirstFrame', 0, () => {
+    it('shouldWaitForFirstUiFrameBeforeReportingBackgroundLaunch', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -112,14 +112,45 @@ export default function ftAppLaunchTrackerUnitTest() {
       tracker.completeInitialLifecycleRound();
       tracker.markRumReady(true);
 
+      expect(reporter.actions.length).assertEqual(0);
+      expect(tracker.getSnapshot().backgroundLaunchPendingUi).assertTrue();
+
+      tracker.recordFirstUIAbilityCreated(220);
+      tracker.recordFirstFrame(260);
+
       expect(reporter.actions.length).assertEqual(1);
       const action = reporter.actions[0];
-      expect(action.durationNs).assertEqual(60);
+      expect(action.durationNs).assertEqual(160);
       expect(propertyText(action, 'app_launch_type')).assertEqual('background');
       expect(phaseProperty(action, 'app_pre_application_init_time')['start']).assertEqual(0);
       expect(phaseProperty(action, 'app_pre_application_init_time')['duration']).assertEqual(60);
-      expect(action.properties['app_application_init_time'] === undefined).assertTrue();
-      expect(action.properties['app_first_frame_init_time'] === undefined).assertTrue();
+      expect(phaseProperty(action, 'app_application_init_time')['start']).assertEqual(60);
+      expect(phaseProperty(action, 'app_application_init_time')['duration']).assertEqual(60);
+      expect(phaseProperty(action, 'app_first_frame_init_time')['start']).assertEqual(120);
+      expect(phaseProperty(action, 'app_first_frame_init_time')['duration']).assertEqual(40);
+    });
+
+    it('shouldNotifyBackgroundLaunchDetectionWithoutSubmittingAnAction', 0, () => {
+      const clock = new FixedLaunchClock();
+      const reporter = new RecordingLaunchReporter();
+      const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
+      let detectionCount = 0;
+      tracker.onBackgroundLaunchDetected((): void => {
+        detectionCount++;
+      });
+
+      tracker.recordApplicationInit(130);
+      tracker.recordInitialVisibility('background');
+      tracker.completeInitialLifecycleRound();
+      tracker.markRumReady(true);
+
+      expect(detectionCount).assertEqual(1);
+      expect(reporter.actions.length).assertEqual(0);
+
+      tracker.onBackgroundLaunchDetected((): void => {
+        detectionCount++;
+      });
+      expect(detectionCount).assertEqual(2);
     });
 
     it('shouldOmitInvalidPhaseButKeepValidForegroundTotal', 0, () => {
@@ -212,6 +243,10 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(tracker.getSnapshot().initialVisibility).assertEqual('unknown');
 
       tracker.recordInitialVisibility('background');
+      expect(reporter.actions.length).assertEqual(0);
+      expect(tracker.getSnapshot().backgroundLaunchPendingUi).assertTrue();
+      tracker.recordFirstUIAbilityCreated(180);
+      tracker.recordFirstFrame(210);
       expect(reporter.actions.length).assertEqual(1);
       expect(propertyText(reporter.actions[0], 'app_launch_type')).assertEqual('background');
     });
@@ -225,7 +260,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       tracker.recordApplicationInit(120);
       tracker.recordFirstUIAbilityCreated(180);
 
-      // No T3: a foreground process that exits before drawing must not produce
+      // No first frame: a foreground process that exits before drawing must not produce
       // a synthetic first-frame phase or an incomplete launch_cold Action.
       expect(reporter.actions.length).assertEqual(0);
     });

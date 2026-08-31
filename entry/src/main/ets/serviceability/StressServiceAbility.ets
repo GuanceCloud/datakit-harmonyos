@@ -40,7 +40,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
   onCreate(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onCreate");
     // AppService may be the only Ability created by a cold process. Reuse the
-    // same T1/state snapshot hook and bootstrap RUM from persisted/Want config.
+    // same application-initialization and visibility-snapshot hook, then bootstrap RUM from persisted/Want config.
     FTSDK.recordAppApplicationInit(this.context);
     initializeDemoColdLaunchRum(this.context, 'StressServiceAbility', want);
     markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onCreate');

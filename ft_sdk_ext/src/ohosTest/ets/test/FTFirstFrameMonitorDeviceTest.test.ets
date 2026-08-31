@@ -58,7 +58,7 @@ export default function ftFirstFrameMonitorDeviceTest() {
       expect(windowStage.mainWindow.offCalls).assertEqual(1);
 
       // Emitting a later frame does nothing because the one-shot listener has
-      // been removed, so T3 cannot be recorded a second time.
+      // been removed, so the first-frame timestamp cannot be recorded a second time.
       windowStage.mainWindow.emit(true);
       expect(windowStage.mainWindow.offCalls).assertEqual(1);
     });

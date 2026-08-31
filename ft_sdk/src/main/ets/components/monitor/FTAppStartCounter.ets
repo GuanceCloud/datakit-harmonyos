@@ -22,7 +22,7 @@ const TAG = "FTAppStartCounter";
 
 /**
  * Retains the existing hot-start Action behavior. Cold-start timing is owned
- * by FTAppLaunchTracker so T0-T3 use one startup-uptime clock.
+ * by FTAppLaunchTracker so all cold-launch boundaries use one startup-uptime clock.
  */
 export class FTAppStartCounter {
   private static instance: FTAppStartCounter | null = null;
