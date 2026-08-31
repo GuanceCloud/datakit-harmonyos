@@ -49,7 +49,6 @@ const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequentia
 const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
 const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
 const DEFAULT_REMOTE_CONFIG_TEST_ENABLED = false;
-const NETWORK_ROUTE_TEST_HOST = '';
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
 const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
 const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
@@ -75,6 +74,7 @@ export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
+export const KEY_NETWORK_ROUTE_TEST_HOST = "networkRouteTestHost";
 export const KEY_REMOTE_CONFIG_TEST_ENABLED = "remoteConfigTestEnabled";
 export const KEY_LOCAL_DATA_FILTER_ENABLED = "localDataFilterEnabled";
 export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
@@ -91,6 +91,7 @@ interface RuntimeConfig {
   autoSync: string;
   networkRouteTestEnabled: string;
   networkRouteTestMode: string;
+  networkRouteTestHost: string;
   remoteConfigTestEnabled: string;
   localDataFilterEnabled: string;
   localDataFilterLogRule: string;
@@ -186,10 +187,10 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
  * --ps traceUrl http\://10.0.0.1\:8000/api/user
  *
  * 6. Enable the local proxy route test:
- * --ps networkRouteTestEnabled true --ps networkRouteTestMode proxy
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode proxy --ps networkRouteTestHost your_route_test_host
  *
  * 7. Enable the local custom DNS route test:
- * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns
+ * --ps networkRouteTestEnabled true --ps networkRouteTestMode dns --ps networkRouteTestHost your_dns_server
  *
  * 8. Enable remote-configuration verification (fetches on every cold start):
  * --ps remoteConfigTestEnabled true
@@ -216,6 +217,7 @@ export default class EntryAbility extends UIAbility {
     autoSync: "",
     networkRouteTestEnabled: "",
     networkRouteTestMode: "",
+    networkRouteTestHost: "",
     remoteConfigTestEnabled: "",
     localDataFilterEnabled: "",
     localDataFilterLogRule: "",
@@ -264,6 +266,7 @@ export default class EntryAbility extends UIAbility {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
+    const networkRouteTestHostParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_HOST];
     const remoteConfigTestEnabledParam = want.parameters?.[KEY_REMOTE_CONFIG_TEST_ENABLED];
     const localDataFilterEnabledParam = want.parameters?.[KEY_LOCAL_DATA_FILTER_ENABLED];
     const runtimeConfig: RuntimeConfig = {
@@ -279,6 +282,9 @@ export default class EntryAbility extends UIAbility {
       networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
         ? ""
         : String(networkRouteTestModeParam),
+      networkRouteTestHost: networkRouteTestHostParam === undefined || networkRouteTestHostParam === null
+        ? ""
+        : String(networkRouteTestHostParam),
       remoteConfigTestEnabled: remoteConfigTestEnabledParam === undefined || remoteConfigTestEnabledParam === null
         ? ""
         : String(remoteConfigTestEnabledParam),
@@ -318,6 +324,12 @@ export default class EntryAbility extends UIAbility {
       preferencesStore,
       KEY_NETWORK_ROUTE_TEST_MODE,
       runtimeConfig.networkRouteTestMode,
+      ""
+    );
+    runtimeConfig.networkRouteTestHost = await this.resolveRuntimeValue(
+      preferencesStore,
+      KEY_NETWORK_ROUTE_TEST_HOST,
+      runtimeConfig.networkRouteTestHost,
       ""
     );
     runtimeConfig.remoteConfigTestEnabled = await this.resolveRuntimeValue(
@@ -386,6 +398,7 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
     AppStorage.setOrCreate(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
     AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
@@ -409,6 +422,7 @@ export default class EntryAbility extends UIAbility {
     await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
     await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
+    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
     await preferencesStore.put(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
     await preferencesStore.put(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
     await preferencesStore.put(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
@@ -533,19 +547,25 @@ export default class EntryAbility extends UIAbility {
       const datawayUrl = this.runtimeConfig.datawayUrl.trim();
       const clientToken = this.runtimeConfig.clientToken.trim();
       const appId = this.runtimeConfig.appId.trim();
-      const networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
+      let networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
       const networkRouteTestMode = this.resolveNetworkRouteTestMode();
+      const networkRouteTestHost = this.runtimeConfig.networkRouteTestHost.trim();
       const remoteConfigTestEnabled = this.isRemoteConfigTestEnabled();
       const remoteConfigFetchResult: FTRemoteConfigFetchResult | null = remoteConfigTestEnabled
         ? new RemoteConfigTestFetchResult()
         : null;
+
+      if (networkRouteTestEnabled && networkRouteTestHost.length === 0) {
+        DemoLogger.w(LOG_TAG, "Network route test disabled: networkRouteTestHost is required");
+        networkRouteTestEnabled = false;
+      }
 
       // Create SDK configuration
       let sdkConfig: FTSDKConfig;
       if (networkRouteTestEnabled) {
         const uploadUrl = networkRouteTestMode === 'dns'
           ? `http://${NETWORK_ROUTE_TEST_DNS_HOSTNAME}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`
-          : `http://${NETWORK_ROUTE_TEST_HOST}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`;
+          : `http://${networkRouteTestHost}:${NETWORK_ROUTE_TEST_UPLOAD_PORT}`;
         sdkConfig = FTSDKConfig.builder(uploadUrl);
         DemoLogger.i(LOG_TAG, `Network route test enabled: mode=${networkRouteTestMode}, uploadUrl=${uploadUrl}`);
       } else if (datawayUrl.length > 0) {
@@ -595,12 +615,12 @@ export default class EntryAbility extends UIAbility {
       sdkConfig = this.applyLocalDataFilterConfig(sdkConfig);
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
-          host: NETWORK_ROUTE_TEST_HOST,
+          host: networkRouteTestHost,
           port: NETWORK_ROUTE_TEST_PROXY_PORT
         });
       } else if (networkRouteTestEnabled && networkRouteTestMode === 'dns') {
         sdkConfig = sdkConfig.setDns({
-          servers: [NETWORK_ROUTE_TEST_HOST]
+          servers: [networkRouteTestHost]
         });
       }
       // Initialize SDK
