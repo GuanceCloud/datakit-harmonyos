@@ -76,6 +76,13 @@ import {
 import { parseANREventInWorker } from '../../main/ets/components/thread/workers/ANRWorkerOperations';
 import { normalizeANRParamsForWorker } from '../../main/ets/components/monitor/ANRDetectManager';
 import {
+  calculateBatteryUsagePercent,
+  calculateSystemMemoryUsagePercent,
+  formatAndroidLocale,
+  normalizeProcessCpuUsage
+} from '../../main/ets/components/utils/DeviceUtils';
+import { MonitorInfoBean } from '../../main/ets/components/rum/bean/MonitorInfoBean';
+import {
   parseProcStatCpuTicks,
   parseProcStatusMemoryBytes
 } from '../../main/ets/components/thread/workers/BackgroundWorkerOperations';
@@ -420,6 +427,25 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(parseProcStatusMemoryBytes('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20480000);
       expect(parseProcStatCpuTicks('invalid')).assertEqual(-1);
       expect(parseProcStatusMemoryBytes('VmSize: 10 kB')).assertEqual(-1);
+    });
+
+    it('errorMonitorMetricUnitsShouldMatchAndroid', 0, () => {
+      // Android reports device memory occupancy (not app PSS) as a percentage.
+      expect(calculateSystemMemoryUsagePercent(8 * 1024 * 1024, 2 * 1024 * 1024)).assertEqual(75);
+      // HiDebug reports a 0–1 process ratio; Android normalizes its top value by cores.
+      expect(normalizeProcessCpuUsage(0.5, 4)).assertEqual(12.5);
+      // Android's battery_use means consumed battery, not remaining SOC.
+      expect(calculateBatteryUsagePercent(20)).assertEqual(80);
+      expect(calculateBatteryUsagePercent(120)).assertEqual(0);
+      expect(formatAndroidLocale('zh-Hans-CN')).assertEqual('zh_CN_#Hans');
+      expect(formatAndroidLocale('en-US')).assertEqual('en_US');
+
+      const battery = new MonitorInfoBean();
+      battery.addBatteryCurrentValue(-300);
+      battery.addBatteryCurrentValue(-100);
+      expect(battery.maxValue).assertEqual(0);
+      expect(battery.miniValue).assertEqual(-300);
+      expect(battery.avgValue).assertEqual(-200);
     });
 
     it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {
@@ -935,6 +961,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       errorCommand.errorSource = 'logger';
       errorCommand.appState = 'run';
       errorCommand.property = errorProperty;
+      errorCommand.deviceTags = {
+        memory_total: '8GB',
+        locale: 'zh-Hans-CN'
+      };
       errorCommand.time = 500;
       const batch: SDKRumErrorCommandBatchDTO = {
         commands: [errorCommand, errorCommand]
@@ -956,6 +986,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('sdk_name=df_harmonyos_rum_sdk')).assertTrue();
       expect(line.includes('app_id=gc_app_harmonyos_demo')).assertTrue();
       expect(line.includes('error_type=TypeError')).assertTrue();
+      expect(line.includes('memory_total=8GB')).assertTrue();
+      expect(line.includes('locale=zh-Hans-CN')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();
       expect(line.includes('custom_nested=')).assertTrue();
       expect(line.includes('stack-line')).assertTrue();
@@ -1138,6 +1170,15 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           context: laterContext,
           params,
           netStatus,
+          errorDeviceTags: {
+            memory_total: '8GB',
+            locale: 'zh-Hans-CN'
+          },
+          errorDeviceFields: {
+            memory_use: '51.25',
+            cpu_use: '12.5',
+            battery_use: '80'
+          },
           eventTime: 20
         }]
       };
@@ -1168,6 +1209,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(resourceLine.includes('action_id=action-later')).assertFalse();
       expect(errorLine.includes('action_id=action-first')).assertTrue();
       expect(errorLine.includes('action_id=action-later')).assertFalse();
+      expect(errorLine.includes('memory_total=8GB')).assertTrue();
+      expect(errorLine.includes('locale=zh-Hans-CN')).assertTrue();
+      expect(errorLine.includes('memory_use="51.25"')).assertTrue();
+      expect(errorLine.includes('cpu_use="12.5"')).assertTrue();
+      expect(errorLine.includes('battery_use="80"')).assertTrue();
+      expect(resourceLine.includes('memory_total=8GB')).assertFalse();
+      expect(resourceLine.includes('locale=zh-Hans-CN')).assertFalse();
     });
 
     it('eventRumResourceAndCounterReplayShouldSurviveFreshWorkerState', 0, () => {

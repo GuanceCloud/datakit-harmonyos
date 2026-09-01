@@ -8,8 +8,8 @@ import { Utils } from '../utils/Utils';
 import { FpsUtils } from '../utils/FpsUtils';
 import { Constants } from '../Constants';
 import { DetectFrequency } from '../enum/Enums';
-import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
+import { DeviceUtils } from '../utils/DeviceUtils';
 import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
 import {
   SDKBackgroundMetricsRequestDTO,
@@ -182,6 +182,13 @@ export class FTMonitorManager {
     }
     this.isAppInForeground = isForeground;
     this.foregroundGeneration++;
+    if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
+      if (isForeground) {
+        FpsUtils.getInstance().start();
+      } else {
+        FpsUtils.getInstance().stop();
+      }
+    }
     FTInnerLogger.d(TAG, `Device metrics app foreground=${isForeground}`);
     if (isForeground) {
       this.runnerMap.forEach((runner) => {
@@ -224,7 +231,7 @@ export class FTMonitorManager {
 
     if (this.isErrorMonitorType(ErrorMonitorType.CPU)) {
       try {
-        const cpuUse = hidebug.getCpuUsage();
+        const cpuUse = DeviceUtils.getCpuUsage();
         if (Number.isFinite(cpuUse)) {
           fields[Constants.KEY_CPU_USE] = new ErrorMonitorValue(cpuUse);
         }
@@ -235,9 +242,9 @@ export class FTMonitorManager {
 
     if (this.isErrorMonitorType(ErrorMonitorType.MEMORY)) {
       try {
-        const memoryUseMB = Number(hidebug.getPss()) / 1024;
-        if (Number.isFinite(memoryUseMB) && memoryUseMB >= 0) {
-          fields[Constants.KEY_MEMORY_USE] = new ErrorMonitorValue(memoryUseMB);
+        const memoryUse = DeviceUtils.getMemoryUsagePercent();
+        if (Number.isFinite(memoryUse) && memoryUse >= 0) {
+          fields[Constants.KEY_MEMORY_USE] = new ErrorMonitorValue(memoryUse);
         }
       } catch (error) {
         FTInnerLogger.w(TAG, `Failed to capture error memory usage: ${String(error)}`);
@@ -246,7 +253,7 @@ export class FTMonitorManager {
 
     if (this.isErrorMonitorType(ErrorMonitorType.BATTERY)) {
       try {
-        const batteryUse = batteryInfo.batterySOC;
+        const batteryUse = DeviceUtils.getBatteryUsagePercent(batteryInfo.batterySOC);
         if (Number.isFinite(batteryUse) && batteryUse >= 0) {
           fields[Constants.KEY_BATTERY_USE] = new ErrorMonitorValue(batteryUse);
         }
@@ -309,9 +316,6 @@ class MonitorRunnable {
       return;
     }
     this.isRunning = true;
-    if (this.collectFps) {
-      FpsUtils.getInstance().beginView();
-    }
     this.collectMetrics();
     this.intervalId = setInterval(() => {
       this.collectMetrics();
@@ -409,7 +413,7 @@ class MonitorRunnable {
 
   private applyBackgroundMetrics(metrics: SDKBackgroundMetricsResultDTO): void {
     if (metrics.hasBatteryCurrent && Number.isFinite(metrics.batteryCurrent)) {
-      this.batteryBean.addValue(metrics.batteryCurrent);
+      this.batteryBean.addBatteryCurrentValue(metrics.batteryCurrent);
     }
     if (Number.isFinite(metrics.cpuTickCount) && metrics.cpuTickCount >= 0) {
       this.cpuBean.addValue(metrics.cpuTickCount);

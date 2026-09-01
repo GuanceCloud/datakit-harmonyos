@@ -307,7 +307,9 @@ export class Constants {
    */
   static readonly KEY_TIME_COST_DURATION = "duration";
 
-
+  /**
+   * Battery consumption percentage: 100 minus the remaining battery SOC.
+   */
   static readonly KEY_BATTERY_USE = "battery_use";
   /* Page lifecycle start =======> */
 
@@ -320,23 +322,23 @@ export class Constants {
    */
   static readonly KEY_MEMORY_USE = "memory_use";
   /**
-   * Current application CPU load
+   * Current application process CPU usage percentage, normalized by logical CPU cores.
    */
   static readonly KEY_CPU_USE = "cpu_use";
   /**
-   * Current application CPU tick count
+   * Current application's user-mode CPU clock ticks accumulated during a View.
    */
   static readonly KEY_CPU_TICK_COUNT = "cpu_tick_count";
   /**
-   * Current application CPU count per second
+   * Current application's user-mode CPU clock ticks per second during a View.
    */
   static readonly KEY_CPU_TICK_COUNT_PER_SECOND = "cpu_tick_count_per_second";
   /**
-   * Memory average value
+   * Average application resident memory during a View, in bytes.
    */
   static readonly KEY_MEMORY_AVG = "memory_avg";
   /**
-   * Memory maximum value
+   * Peak application resident memory during a View, in bytes.
    */
   static readonly KEY_MEMORY_MAX = "memory_max";
   /**
@@ -348,11 +350,11 @@ export class Constants {
    */
   static readonly KEY_FPS_AVG = "fps_avg";
   /**
-   * Current application battery average value
+   * Average device battery current during a View, in mA.
    */
   static readonly KEY_BATTERY_CURRENT_AVG = "battery_current_avg";
   /**
-   * Current application battery maximum consumption
+   * Maximum device battery current during a View, in mA.
    */
   static readonly KEY_BATTERY_CURRENT_MAX = "battery_current_max";
   /* <======= Page lifecycle end */

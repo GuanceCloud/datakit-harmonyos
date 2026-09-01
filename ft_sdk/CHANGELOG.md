@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.16] - 2026-08-31
+- Added Error device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale). They are included in automatically generated network Errors as well; `memory_total` follows the memory Error-monitor setting.
+- Aligned Error and View device metrics with Android: Error memory, CPU, and battery values are percentage-based and use Android-compatible calculations; Error `locale` now uses Android `Locale.toString()` format; View memory remains bytes, battery current remains mA (including Android-compatible negative-current maxima), CPU fields remain process clock ticks/ticks per second, and FPS uses one-second frame windows.
+
 ## [0.1.16-alpha03] - 2026-08-20
 - Added `FTActionTrackingHandler.resolveHandlerAction(...)` for filtering automatic Actions; return `null` to skip an Action and `undefined` to retain default collection.
 - Fixed retry uploads to retain the original `sdk_data_id` package ID.

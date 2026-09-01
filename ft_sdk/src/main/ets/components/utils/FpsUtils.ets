@@ -1,4 +1,3 @@
-import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import displaySync from '@ohos.graphics.displaySync';
@@ -17,16 +16,19 @@ interface FpsStats {
 }
 
 /**
- * FPS monitoring utility for HarmonyOS
- * Based on @ohos.hidebug API for performance analysis
+ * FPS monitoring utility for HarmonyOS.
+ *
+ * Android publishes one FPS value for each elapsed one-second frame window;
+ * View monitors then aggregate those values. Keep the same calculation here
+ * instead of treating each individual frame interval as a separate FPS value.
  */
 export class FpsUtils {
   private static instance: FpsUtils | null = null;
   private isInitialized: boolean = false;
-  private frameCount: number = 0;
-  private lastFrameTime: number = 0;
-  private fpsHistory: number[] = [];
-  private maxHistorySize: number = 60; // Keep 60 frames of history
+  private frameStartTime: number = 0;
+  private framesRendered: number = 0;
+  private currentFps: number = 0;
+  private readonly fpsWindowMs: number = 1000;
   private displaySyncInstance: displaySync.DisplaySync | null = null;
   private readonly frameCallback: (info: displaySync.IntervalInfo) => void =
     (_info: displaySync.IntervalInfo): void => {
@@ -58,9 +60,8 @@ export class FpsUtils {
       this.displaySyncInstance = displaySync.create();
       this.displaySyncInstance.on('frame', this.frameCallback);
       this.isInitialized = true;
-      this.frameCount = 0;
-      this.lastFrameTime = 0;
-      this.fpsHistory = [];
+      this.currentFps = 0;
+      this.resetFrameWindow();
       FTInnerLogger.d(TAG, "FPS monitoring initialized successfully");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize FPS monitoring: ${error}`);
@@ -92,49 +93,34 @@ export class FpsUtils {
   public stop(): void {
     try {
       this.displaySyncInstance?.stop();
-      this.frameCount = 0;
-      this.lastFrameTime = 0;
-      this.fpsHistory = [];
+      this.resetFrameWindow();
       FTInnerLogger.d(TAG, "FPS monitoring stopped");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to stop FPS monitoring: ${error}`);
     }
   }
 
-  /** Starts a fresh frame-rate aggregation window for the current RUM View. */
-  public beginView(): void {
-    if (!this.isInitialized) {
-      return;
-    }
-    this.resetFrameWindow();
-  }
-
   /**
-   * Record a frame for FPS calculation
+   * Records a frame and publishes an FPS sample when a one-second window has
+   * elapsed, matching Android's Choreographer Metronome implementation.
    */
-  public recordFrame(): void {
+  public recordFrame(currentTime: number = Date.now()): void {
     if (!this.isInitialized) {
       return;
     }
 
     try {
-      const currentTime = Date.now();
-      this.frameCount++;
-
-      if (this.lastFrameTime > 0) {
-        const frameTime = currentTime - this.lastFrameTime;
-        if (frameTime > 0) {
-          const fps = 1000 / frameTime; // Convert ms to FPS
-          this.fpsHistory.push(fps);
-
-          // Keep only recent history
-          if (this.fpsHistory.length > this.maxHistorySize) {
-            this.fpsHistory.shift();
-          }
+      if (this.frameStartTime > 0) {
+        const elapsedMs = currentTime - this.frameStartTime;
+        this.framesRendered++;
+        if (elapsedMs > this.fpsWindowMs) {
+          this.currentFps = (this.framesRendered * 1000) / elapsedMs;
+          this.frameStartTime = currentTime;
+          this.framesRendered = 0;
         }
+      } else {
+        this.frameStartTime = currentTime;
       }
-
-      this.lastFrameTime = currentTime;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to record frame: ${error}`);
     }
@@ -145,16 +131,15 @@ export class FpsUtils {
    * @returns Current FPS value
    */
   public getFps(): number {
-    if (!this.isInitialized || this.fpsHistory.length === 0) {
-      return -1;
+    if (!this.isInitialized) {
+      return 0;
     }
 
     try {
-      const currentFps = this.fpsHistory[this.fpsHistory.length - 1];
-      return currentFps;
+      return this.currentFps;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get current FPS: ${error}`);
-      return -1;
+      return 0;
     }
   }
 
@@ -163,18 +148,15 @@ export class FpsUtils {
    * @returns Average FPS value
    */
   public getAverageFps(): number {
-    if (!this.isInitialized || this.fpsHistory.length === 0) {
-      return -1;
+    if (!this.isInitialized || this.currentFps <= 0) {
+      return 0;
     }
 
     try {
-      const sum = this.fpsHistory.reduce((acc, fps) => acc + fps, 0);
-      const averageFps = sum / this.fpsHistory.length;
-      FTInnerLogger.d(TAG, `Average FPS: ${averageFps}`);
-      return averageFps;
+      return this.currentFps;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get average FPS: ${error}`);
-      return -1;
+      return 0;
     }
   }
 
@@ -183,17 +165,15 @@ export class FpsUtils {
    * @returns Minimum FPS value
    */
   public getMinFps(): number {
-    if (!this.isInitialized || this.fpsHistory.length === 0) {
-      return -1;
+    if (!this.isInitialized || this.currentFps <= 0) {
+      return 0;
     }
 
     try {
-      const minFps = Math.min(...this.fpsHistory);
-      FTInnerLogger.d(TAG, `Minimum FPS: ${minFps}`);
-      return minFps;
+      return this.currentFps;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get minimum FPS: ${error}`);
-      return -1;
+      return 0;
     }
   }
 
@@ -202,17 +182,15 @@ export class FpsUtils {
    * @returns Maximum FPS value
    */
   public getMaxFps(): number {
-    if (!this.isInitialized || this.fpsHistory.length === 0) {
-      return -1;
+    if (!this.isInitialized || this.currentFps <= 0) {
+      return 0;
     }
 
     try {
-      const maxFps = Math.max(...this.fpsHistory);
-      FTInnerLogger.d(TAG, `Maximum FPS: ${maxFps}`);
-      return maxFps;
+      return this.currentFps;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to get maximum FPS: ${error}`);
-      return -1;
+      return 0;
     }
   }
 
@@ -226,7 +204,7 @@ export class FpsUtils {
       average: this.getAverageFps(),
       min: this.getMinFps(),
       max: this.getMaxFps(),
-      frameCount: this.frameCount
+      frameCount: this.framesRendered
     };
     return result;
   }
@@ -241,9 +219,8 @@ export class FpsUtils {
         this.displaySyncInstance?.stop();
         this.displaySyncInstance = null;
         this.isInitialized = false;
-        this.frameCount = 0;
-        this.lastFrameTime = 0;
-        this.fpsHistory = [];
+        this.currentFps = 0;
+        this.resetFrameWindow();
         FTInnerLogger.d(TAG, "FPS monitoring released");
       }
     } catch (error) {
@@ -260,8 +237,7 @@ export class FpsUtils {
   }
 
   private resetFrameWindow(): void {
-    this.frameCount = 0;
-    this.lastFrameTime = 0;
-    this.fpsHistory = [];
+    this.frameStartTime = 0;
+    this.framesRendered = 0;
   }
 }

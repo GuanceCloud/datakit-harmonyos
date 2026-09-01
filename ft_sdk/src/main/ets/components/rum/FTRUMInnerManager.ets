@@ -46,8 +46,10 @@ import {
   SDKWorkerResponse
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
+import { DeviceUtils } from '../utils/DeviceUtils';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
+import { ErrorMonitorType } from './enum/ErrorMonitorType';
 import { DeviceMetricsMonitorType } from './enum/DeviceMetricsMonitorType';
 import { Context } from '@kit.AbilityKit';
 import { RunnerCompleteCallBack } from './callback/RunnerCompleteCallBack';
@@ -141,6 +143,8 @@ interface ErrorTags {
   error_source?: string;
   error_type?: string;
   error_situation?: string;
+  memory_total?: string;
+  locale?: string;
 }
 
 /**
@@ -149,11 +153,14 @@ interface ErrorTags {
 interface ErrorFields {
   error_message?: string;
   error_stack?: string;
-  memory_total?: string;
   memory_use?: number;
   cpu_use?: number;
   battery_use?: number;
-  locale?: string;
+}
+
+interface ErrorDeviceData {
+  tags: SDKStringRecord;
+  fields: Record<string, object>;
 }
 
 /**
@@ -2955,6 +2962,20 @@ export class FTRUMInnerManager {
     return record;
   }
 
+  private errorMonitorFieldsToStringRecord(fields: Record<string, object>): SDKStringRecord {
+    const record: SDKStringRecord = {};
+    const keys = FTRUMInnerManager.getObjectKeys(fields);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const value = fields[key];
+      if (value === null || value === undefined) {
+        continue;
+      }
+      record[key] = String((value as PropertyWrapper).value);
+    }
+    return record;
+  }
+
   /** Strip ArkTS class prototypes at the Worker transfer boundary only. */
   private toRumPropertyTransferValue(value: object): object {
     try {
@@ -3096,7 +3117,8 @@ export class FTRUMInnerManager {
         return;
       }
 
-      const monitorFields = FTMonitorManager.getInstance().getErrorMonitorData();
+      const errorDeviceData = this.getErrorDeviceData();
+      const monitorFields = errorDeviceData.fields;
       let effectiveProperty: Record<string, object> | null = actualProperty;
       const monitorFieldKeys = Object.keys(monitorFields);
       if (monitorFieldKeys.length > 0) {
@@ -3139,10 +3161,11 @@ export class FTRUMInnerManager {
 	          log,
 	          message,
 	          errorType,
-	          errorSource: ErrorSource.LOGGER.toString(),
-	          appState: state.toString(),
+          errorSource: ErrorSource.LOGGER.toString(),
+          appState: state.toString(),
           property: this.propertyToRecord(effectiveProperty),
-	          time: actualDateline,
+          deviceTags: errorDeviceData.tags,
+          time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
 	        }, 'rum.error');
@@ -3167,6 +3190,12 @@ export class FTRUMInnerManager {
       
       // Layer 3: RUM association
       this.attachRUMRelative(allTags,true)
+
+      const errorDeviceTagKeys = Object.keys(errorDeviceData.tags);
+      for (let i = 0; i < errorDeviceTagKeys.length; i++) {
+        const key = errorDeviceTagKeys[i];
+        allTags[key] = errorDeviceData.tags[key];
+      }
 
       // Layer 4: Error-specific tags
       if (errorTagsData.error_source) allTags[Constants.KEY_RUM_ERROR_SOURCE] = errorTagsData.error_source;
@@ -3258,12 +3287,17 @@ export class FTRUMInnerManager {
         this.resourceContextById.set(resourceId, context);
       }
       const collectType = this.checkSessionWillCollect(context.sessionId);
+      const resourceParams = this.createResourceParamsDTO(resourceId, params);
+      const errorDeviceData = collectType !== CollectType.DROP ?
+        this.createResourceErrorDeviceData(resourceParams) : undefined;
       this.submitResourceWorkerCommand({
         commandType: 'add',
         resourceId,
         context,
-        params: this.createResourceParamsDTO(resourceId, params),
+        params: resourceParams,
         netStatus: this.createResourceNetStatusDTO(netStatusBean),
+        errorDeviceTags: errorDeviceData?.tags,
+        errorDeviceFields: errorDeviceData ? this.errorMonitorFieldsToStringRecord(errorDeviceData.fields) : undefined,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
@@ -3293,11 +3327,16 @@ export class FTRUMInnerManager {
       const context = storedContext || this.createCurrentResourceContext();
       this.resourceContextById.set(resourceId, context);
       const collectType = this.checkSessionWillCollect(context.sessionId);
+      const resourceParams = this.createResourceParamsDTO(resourceId, params);
+      const errorDeviceData = collectType !== CollectType.DROP ?
+        this.createResourceErrorDeviceData(resourceParams) : undefined;
       this.submitResourceWorkerCommand({
         commandType: 'setContent',
         resourceId,
         context,
-        params: this.createResourceParamsDTO(resourceId, params),
+        params: resourceParams,
+        errorDeviceTags: errorDeviceData?.tags,
+        errorDeviceFields: errorDeviceData ? this.errorMonitorFieldsToStringRecord(errorDeviceData.fields) : undefined,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
@@ -4922,10 +4961,7 @@ export class FTRUMInnerManager {
   }
 
   /**
-   * Build Error-specific fields
-   * Note: This method is called from addError which is async, 
-   * so we don't populate device info here to avoid double async calls.
-   * Device info should be gathered in the caller.
+   * Build Error-specific fields.
    * @param message Error message
    * @param log Error stack trace
    * @returns Error fields object
@@ -4934,9 +4970,34 @@ export class FTRUMInnerManager {
     const fields: ErrorFields = {};
     fields.error_message = message;
     fields.error_stack = log;
-    // Note: memory_total, memory_use, cpu_use, battery_use, locale 
-    // should be populated in the caller (addError method)
     return fields;
+  }
+
+  /** Capture Error-only device tags and monitor fields on the host thread. */
+  private getErrorDeviceData(): ErrorDeviceData {
+    const tags: SDKStringRecord = {};
+    const locale = DeviceUtils.getSystemLocale();
+    if (locale.length > 0) {
+      tags[Constants.KEY_DEVICE_LOCALE] = locale;
+    }
+
+    if (FTMonitorManager.getInstance().isErrorMonitorType(ErrorMonitorType.MEMORY)) {
+      const memoryTotalGB = DeviceUtils.getMemoryTotalGB();
+      if (memoryTotalGB > 0) {
+        tags[Constants.KEY_MEMORY_TOTAL] = `${memoryTotalGB}GB`;
+      }
+    }
+
+    return {
+      tags,
+      fields: FTMonitorManager.getInstance().getErrorMonitorData()
+    };
+  }
+
+  private createResourceErrorDeviceData(params: SDKRumResourceParamsDTO): ErrorDeviceData | undefined {
+    const isNetworkError = params.resourceStatus >= 400 ||
+      (params.resourceStatus === 0 && params.requestErrorStack.length > 0);
+    return isNetworkError ? this.getErrorDeviceData() : undefined;
   }
 
 }
