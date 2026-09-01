@@ -244,10 +244,6 @@ export interface SDKRumResourceCommandDTO {
   netStatus?: SDKRumResourceNetStatusDTO;
   /** Custom properties supplied at the Resource lifecycle boundary. */
   property?: SDKPropertyRecord;
-  /** Device tags captured only when this Resource completion also creates an Error. */
-  errorDeviceTags?: SDKStringRecord;
-  /** Device fields captured only when this Resource completion also creates an Error. */
-  errorDeviceFields?: SDKStringRecord;
   startTime?: number;
   endTime?: number;
   eventTime?: number;

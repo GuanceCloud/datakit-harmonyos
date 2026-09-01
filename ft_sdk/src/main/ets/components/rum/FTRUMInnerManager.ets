@@ -2962,20 +2962,6 @@ export class FTRUMInnerManager {
     return record;
   }
 
-  private errorMonitorFieldsToStringRecord(fields: Record<string, object>): SDKStringRecord {
-    const record: SDKStringRecord = {};
-    const keys = FTRUMInnerManager.getObjectKeys(fields);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = fields[key];
-      if (value === null || value === undefined) {
-        continue;
-      }
-      record[key] = String((value as PropertyWrapper).value);
-    }
-    return record;
-  }
-
   /** Strip ArkTS class prototypes at the Worker transfer boundary only. */
   private toRumPropertyTransferValue(value: object): object {
     try {
@@ -3288,16 +3274,12 @@ export class FTRUMInnerManager {
       }
       const collectType = this.checkSessionWillCollect(context.sessionId);
       const resourceParams = this.createResourceParamsDTO(resourceId, params);
-      const errorDeviceData = collectType !== CollectType.DROP ?
-        this.createResourceErrorDeviceData(resourceParams) : undefined;
       this.submitResourceWorkerCommand({
         commandType: 'add',
         resourceId,
         context,
         params: resourceParams,
         netStatus: this.createResourceNetStatusDTO(netStatusBean),
-        errorDeviceTags: errorDeviceData?.tags,
-        errorDeviceFields: errorDeviceData ? this.errorMonitorFieldsToStringRecord(errorDeviceData.fields) : undefined,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
@@ -3328,15 +3310,11 @@ export class FTRUMInnerManager {
       this.resourceContextById.set(resourceId, context);
       const collectType = this.checkSessionWillCollect(context.sessionId);
       const resourceParams = this.createResourceParamsDTO(resourceId, params);
-      const errorDeviceData = collectType !== CollectType.DROP ?
-        this.createResourceErrorDeviceData(resourceParams) : undefined;
       this.submitResourceWorkerCommand({
         commandType: 'setContent',
         resourceId,
         context,
         params: resourceParams,
-        errorDeviceTags: errorDeviceData?.tags,
-        errorDeviceFields: errorDeviceData ? this.errorMonitorFieldsToStringRecord(errorDeviceData.fields) : undefined,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
@@ -4992,12 +4970,6 @@ export class FTRUMInnerManager {
       tags,
       fields: FTMonitorManager.getInstance().getErrorMonitorData()
     };
-  }
-
-  private createResourceErrorDeviceData(params: SDKRumResourceParamsDTO): ErrorDeviceData | undefined {
-    const isNetworkError = params.resourceStatus >= 400 ||
-      (params.resourceStatus === 0 && params.requestErrorStack.length > 0);
-    return isNetworkError ? this.getErrorDeviceData() : undefined;
   }
 
 }

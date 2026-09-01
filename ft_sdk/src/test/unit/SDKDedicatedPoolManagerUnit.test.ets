@@ -1170,15 +1170,6 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           context: laterContext,
           params,
           netStatus,
-          errorDeviceTags: {
-            memory_total: '8GB',
-            locale: 'zh-Hans-CN'
-          },
-          errorDeviceFields: {
-            memory_use: '51.25',
-            cpu_use: '12.5',
-            battery_use: '80'
-          },
           eventTime: 20
         }]
       };
@@ -1209,11 +1200,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(resourceLine.includes('action_id=action-later')).assertFalse();
       expect(errorLine.includes('action_id=action-first')).assertTrue();
       expect(errorLine.includes('action_id=action-later')).assertFalse();
-      expect(errorLine.includes('memory_total=8GB')).assertTrue();
-      expect(errorLine.includes('locale=zh-Hans-CN')).assertTrue();
-      expect(errorLine.includes('memory_use="51.25"')).assertTrue();
-      expect(errorLine.includes('cpu_use="12.5"')).assertTrue();
-      expect(errorLine.includes('battery_use="80"')).assertTrue();
+      expect(errorLine.includes('memory_total=8GB')).assertFalse();
+      expect(errorLine.includes('locale=zh-Hans-CN')).assertFalse();
+      expect(errorLine.includes('memory_use="51.25"')).assertFalse();
+      expect(errorLine.includes('cpu_use="12.5"')).assertFalse();
+      expect(errorLine.includes('battery_use="80"')).assertFalse();
       expect(resourceLine.includes('memory_total=8GB')).assertFalse();
       expect(resourceLine.includes('locale=zh-Hans-CN')).assertFalse();
     });

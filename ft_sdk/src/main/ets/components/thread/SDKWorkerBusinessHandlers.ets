@@ -286,8 +286,6 @@ interface SDKRumWorkerResourceState {
   resourceDownloadTimeStart: number;
   resourceLoad: number;
   properties: SDKStringRecord;
-  errorDeviceTags: SDKStringRecord;
-  errorDeviceFields: SDKStringRecord;
   startRegistered: boolean;
   contentSet: boolean;
   netStateSet: boolean;
@@ -1255,13 +1253,6 @@ function processRumResourceCommand(
   if (command.property) {
     applyResourcePropertyMetrics(resource, command.property);
   }
-  if (command.errorDeviceTags) {
-    mergeStringRecords(resource.errorDeviceTags, command.errorDeviceTags);
-  }
-  if (command.errorDeviceFields) {
-    mergeStringRecords(resource.errorDeviceFields, command.errorDeviceFields);
-  }
-
   if (commandType === 'start') {
     if (resource.startRegistered) {
       return false;
@@ -1366,8 +1357,6 @@ function getOrCreateRumResourceState(
     resourceDownloadTimeStart: -1,
     resourceLoad: -1,
     properties: {},
-    errorDeviceTags: {},
-    errorDeviceFields: {},
     startRegistered: false,
     contentSet: false,
     netStateSet: false,
@@ -1597,15 +1586,12 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
     tags[Constants.KEY_RUM_RESOURCE_URL_PATH] = resource.urlPath;
     tags[Constants.KEY_RUM_RESOURCE_URL_PATH_GROUP] = normalizeResourcePathGroup(resource.urlPath);
   }
-  mergeStringRecords(tags, resource.errorDeviceTags);
-
   const fields: SDKStringRecord = {};
   const localErrorMsg = resource.requestErrorMsg.length > 0 ? `:${resource.requestErrorMsg}` : '';
   fields[Constants.KEY_RUM_ERROR_MESSAGE] = `[${resource.resourceStatus}${localErrorMsg}][${resource.url}]`;
   if (resource.requestErrorStack.length > 0) {
     fields[Constants.KEY_RUM_ERROR_STACK] = resource.requestErrorStack;
   }
-  mergeStringRecords(fields, resource.errorDeviceFields);
   return {
     eventType: 'rum.error',
     name: fields[Constants.KEY_RUM_ERROR_MESSAGE],
