@@ -11,10 +11,9 @@ FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
 BUILD_MODE="${BUILD_MODE:-debug}"
 MODULE_TYPE="${1:-agent}"
-# Move latest to each selected module's new version after all selected modules
-# publish successfully. OHPM_PUBLISH_TAG (or PUBLISH_TAG) can override latest
-# for a deliberately separate prerelease channel.
-OHPM_PUBLISH_TAG_VALUE="${OHPM_PUBLISH_TAG:-${PUBLISH_TAG:-latest}}"
+# An explicit OHPM dist-tag to update after all selected modules publish
+# successfully. Leave it unset to publish without changing any existing tag.
+OHPM_PUBLISH_TAG_VALUE="${OHPM_PUBLISH_TAG:-${PUBLISH_TAG:-}}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
 OHPM_KEY_PATH_VALUE="${OHPM_KEY_PATH:-${KEY_PATH:-}}"
 OHPM_KEY_PASSPHRASE_VALUE="${OHPM_KEY_PASSPHRASE:-${KEY_PASSPHRASE:-}}"
@@ -502,12 +501,15 @@ main() {
       ;;
   esac
 
-  # Move a tag only once the entire selected group has been published.
-  for package_spec in "${PUBLISHED_PACKAGES[@]}"; do
-    local package_name="${package_spec%@*}"
-    local package_version="${package_spec##*@}"
-    update_publish_tag "$package_name" "$package_version"
-  done
+  # Move an explicitly requested tag only after the entire selected group has
+  # been published successfully.
+  if [[ -n "$OHPM_PUBLISH_TAG_VALUE" ]]; then
+    for package_spec in "${PUBLISHED_PACKAGES[@]}"; do
+      local package_name="${package_spec%@*}"
+      local package_version="${package_spec##*@}"
+      update_publish_tag "$package_name" "$package_version"
+    done
+  fi
 
   echo "Publish completed successfully for ${MODULE_TYPE}"
 }
