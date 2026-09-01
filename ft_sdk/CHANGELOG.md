@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
 - Aligned Error and View device metrics with Android: Error memory, CPU, and battery values are percentage-based and use Android-compatible calculations; Error `locale` now uses Android `Locale.toString()` format; View memory remains bytes, battery current remains mA (including Android-compatible negative-current maxima), CPU fields remain process clock ticks/ticks per second, and FPS uses one-second frame windows.
+- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` to customize or filter automatically tracked Router page and Navigation destination Views. Handlers can set the View name and properties, or return `null` to skip collection.
+- Added RUM device-metric collection. `setDeviceMetricsMonitorType(...)` configures View CPU, memory, battery-current, and FPS metrics, while `setExtraMonitorTypeWithError(...)` adds CPU, memory, and battery metrics to Errors. The existing `setDeviceMetricsDetectFrequency(...)` and one-argument `setDeviceMetricsMonitorType(...)` calls remain supported.
+- Added `FTRUMConfig.setActionTrackingHandler(...)` to filter automatic Click Actions. Return `null` to skip collection or `undefined` to retain default collection.
+- Added cold-launch collection APIs: `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` record process startup, `AbilityStage` initialization, first `UIAbility` creation, and first-frame timing. First-frame observation requires HarmonyOS API 22 or later and `ft_sdk_ext.observeFTAppFirstFrame(...)`. A background entry reports `app_launch_type=background` only after a later UI first frame.
+- Fixed UI-block LongTask duration calculation to use the system `MAIN_THREAD_JANK` event's `begin_time` and `end_time`, without timer or heartbeat fallback data.
+- Fixed occasional missing `app_id` tags on RUM Action, Resource, and Error data after an EventConsumer Worker restart.
+- Fixed native and WebView Resource data and their generated Network Errors to use a stable Resource UUID as `resource_id` for correlation.
+- Fixed possible duplicate RUM uploads during retries by retaining and reusing the original `sdk_data_id`.
+- Changed WebView enrichment: `view_path_name` is no longer generated; a missing `view_referrer` uses the native View; `sdk_version` uses the native SDK version and the Browser SDK version remains in `sdk_pkg_info`.
+- Changed automatic Action default names to `component type/component text#component ID`; components in lists and Tabs append `#position:n`.
+- Changed remote data filters to remove matching cached data before upload; local filters continue to apply only before data is written to the cache.
+- Optimized offline uploads: after retries are exhausted, polling waits for an external trigger; legacy-format or oversized cached data no longer blocks later uploadable RUM data.
 
 ## [0.1.16-alpha03] - 2026-08-20
 - Added `FTActionTrackingHandler.resolveHandlerAction(...)` for filtering automatic Actions; return `null` to skip an Action and `undefined` to retain default collection.
