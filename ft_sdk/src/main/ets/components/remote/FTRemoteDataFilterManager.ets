@@ -9,7 +9,7 @@ import {
   RemoteDataFilterHttpClient,
   RemoteDataFilterHttpResponse,
   RemoteDataFilterHash,
-  RemoteDataFilterScheduler
+  RemoteDataFilterClock
 } from './RemoteDataFilterTypes';
 
 const TAG = 'FTRemoteDataFilterManager';
@@ -41,60 +41,58 @@ class DefaultRemoteDataFilterHttpClient implements RemoteDataFilterHttpClient {
   }
 }
 
-class DefaultRemoteDataFilterScheduler implements RemoteDataFilterScheduler {
-  schedule(delayMs: number, callback: () => void): number {
-    return setTimeout(callback, delayMs) as number;
-  }
-
-  cancel(timerId: number): void {
-    clearTimeout(timerId);
-  }
-}
-
 interface RemoteDataFilterPayload {
   filters: Map<string, Array<string>>;
   refreshDelayMs: number;
 }
 
 /**
- * Pulls DataKit-compatible remote blacklist rules. The manager deliberately
- * keeps transport and scheduling separate from filtering so FTTrackInner can
- * combine remote rules with application-provided rules in one evaluator.
+ * Pulls DataKit-compatible remote blacklist rules. Refreshes are initiated by
+ * upload tasks after the server-provided pull_interval has elapsed, matching
+ * Android's on-demand control-plane behavior.
  */
 export class FTRemoteDataFilterManager {
   private readonly config: FTSDKConfig;
   private readonly endpointAvailable: () => boolean;
   private readonly onFiltersApplied: (filters: Map<string, Array<string>>) => void;
   private readonly httpClient: RemoteDataFilterHttpClient;
-  private readonly scheduler: RemoteDataFilterScheduler;
   private readonly hash: RemoteDataFilterHash;
-  private timerId: number | null = null;
+  private readonly clock: RemoteDataFilterClock;
   private running: boolean = false;
   private closed: boolean = false;
   private endpointGeneration: number = 0;
-  private refreshPending: boolean = false;
   private lastPayloadMd5: string | null = null;
   private lastRefreshDelayMs: number = FALLBACK_REFRESH_DELAY_MS;
+  private lastPullTimeMs: number = 0;
 
   public constructor(
     config: FTSDKConfig,
     endpointAvailable: () => boolean,
     onFiltersApplied: (filters: Map<string, Array<string>>) => void,
     httpClient: RemoteDataFilterHttpClient = new DefaultRemoteDataFilterHttpClient(),
-    scheduler: RemoteDataFilterScheduler = new DefaultRemoteDataFilterScheduler(),
-    hash: RemoteDataFilterHash = defaultMd5
+    hash: RemoteDataFilterHash = defaultMd5,
+    clock: RemoteDataFilterClock = (): number => Date.now()
   ) {
     this.config = config;
     this.endpointAvailable = endpointAvailable;
     this.onFiltersApplied = onFiltersApplied;
     this.httpClient = httpClient;
-    this.scheduler = scheduler;
     this.hash = hash;
+    this.clock = clock;
   }
 
   /** Start the first pull immediately when an intake endpoint is configured. */
   public start(): Promise<void> {
-    return this.requestRefresh();
+    return this.requestRefresh(true);
+  }
+
+  /**
+   * Called when an upload task starts. A due pull is started asynchronously;
+   * callers deliberately do not await it so the current upload can continue
+   * using the most recently applied remote rules.
+   */
+  public syncRemoteIfNeeded(): Promise<void> {
+    return this.requestRefresh(false);
   }
 
   /**
@@ -103,29 +101,28 @@ export class FTRemoteDataFilterManager {
    */
   public refreshForEndpointChange(): Promise<void> {
     this.endpointGeneration++;
-    this.cancelScheduledRefresh();
     if (this.closed) {
       return Promise.resolve();
     }
     this.lastPayloadMd5 = null;
     this.lastRefreshDelayMs = FALLBACK_REFRESH_DELAY_MS;
     this.onFiltersApplied(new Map<string, Array<string>>());
-    return this.requestRefresh();
+    return this.requestRefresh(true);
   }
 
   public close(): void {
     this.closed = true;
     this.endpointGeneration++;
-    this.refreshPending = false;
-    this.cancelScheduledRefresh();
   }
 
-  private requestRefresh(): Promise<void> {
+  private requestRefresh(force: boolean): Promise<void> {
     if (this.closed || !this.endpointAvailable()) {
       return Promise.resolve();
     }
     if (this.running) {
-      this.refreshPending = true;
+      return Promise.resolve();
+    }
+    if (!force && this.clock() - this.lastPullTimeMs < this.lastRefreshDelayMs) {
       return Promise.resolve();
     }
     return this.refresh();
@@ -140,54 +137,37 @@ export class FTRemoteDataFilterManager {
         return;
       }
       if (response.code !== http.ResponseCode.OK) {
-        this.scheduleRefresh(FALLBACK_REFRESH_DELAY_MS);
         return;
       }
       const payloadMd5 = this.hash(response.body);
       if (payloadMd5 === this.lastPayloadMd5) {
-        // Identical bodies imply the same server-provided pull_interval, so
-        // preserve the requested cadence without parsing or reapplying rules.
-        this.scheduleRefresh(this.lastRefreshDelayMs);
+        // Do not reparse, reapply, or repeatedly log an unchanged response.
         return;
       }
+      FTInnerLogger.d(TAG,
+        `Remote data-filter response changed: code=${response.code}, body=${response.body}`);
       const payload = FTRemoteDataFilterManager.parsePayload(response.body);
       if (payload === null) {
-        this.scheduleRefresh(FALLBACK_REFRESH_DELAY_MS);
+        // Keep this payload digest so an unchanged malformed response is
+        // retried without repeatedly logging or parsing the same body.
+        this.lastPayloadMd5 = payloadMd5;
+        this.lastRefreshDelayMs = FALLBACK_REFRESH_DELAY_MS;
         return;
       }
       this.lastPayloadMd5 = payloadMd5;
       this.lastRefreshDelayMs = payload.refreshDelayMs;
       this.onFiltersApplied(payload.filters);
-      this.scheduleRefresh(payload.refreshDelayMs);
     } catch (error) {
       if (!this.closed && requestEndpointGeneration === this.endpointGeneration) {
         FTInnerLogger.w(TAG, `Remote data-filter refresh failed: ${String(error)}`);
-        this.scheduleRefresh(FALLBACK_REFRESH_DELAY_MS);
       }
     } finally {
       this.running = false;
-      if (this.refreshPending && !this.closed) {
-        this.refreshPending = false;
-        void this.requestRefresh();
+      if (!this.closed && requestEndpointGeneration === this.endpointGeneration) {
+        // Android records the completed pull time for both successful and
+        // failed requests, preventing repeated requests from every upload.
+        this.lastPullTimeMs = this.clock();
       }
-    }
-  }
-
-  private scheduleRefresh(delayMs: number): void {
-    this.cancelScheduledRefresh();
-    if (this.closed || !this.endpointAvailable()) {
-      return;
-    }
-    this.timerId = this.scheduler.schedule(delayMs, () => {
-      this.timerId = null;
-      void this.requestRefresh();
-    });
-  }
-
-  private cancelScheduledRefresh(): void {
-    if (this.timerId !== null) {
-      this.scheduler.cancel(this.timerId);
-      this.timerId = null;
     }
   }
 
@@ -231,7 +211,9 @@ export class FTRemoteDataFilterManager {
 
   private static parsePullInterval(value: Object | undefined): number {
     if (typeof value === 'number') {
-      return FTRemoteDataFilterManager.toDelayMs(value);
+      // DataKit represents numeric duration values in nanoseconds, for
+      // example 10_000_000_000 for a ten-second refresh interval.
+      return FTRemoteDataFilterManager.toDelayMsFromNanoseconds(value);
     }
     if (typeof value !== 'string') {
       return FALLBACK_REFRESH_DELAY_MS;
@@ -282,5 +264,12 @@ export class FTRemoteDataFilterManager {
       return FALLBACK_REFRESH_DELAY_MS;
     }
     return Math.max(1, Math.floor(seconds * 1_000));
+  }
+
+  private static toDelayMsFromNanoseconds(nanoseconds: number): number {
+    if (!Number.isFinite(nanoseconds) || nanoseconds <= 0) {
+      return FALLBACK_REFRESH_DELAY_MS;
+    }
+    return Math.max(1, Math.floor(nanoseconds / 1_000_000));
   }
 }

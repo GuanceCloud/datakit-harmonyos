@@ -1259,6 +1259,9 @@ export class FTSDK {
       }
     );
     FTSDK.remoteDataFilterManager = manager;
+    SyncTaskManager.getInstance().setRemoteDataFilterSyncHandler((): void => {
+      void manager.syncRemoteIfNeeded();
+    });
     const launchTracker = FTAppLaunchTracker.getInstance();
     const launchSnapshot = launchTracker.getSnapshot();
     if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
@@ -1308,6 +1311,7 @@ export class FTSDK {
       FTSDK.remoteDataFilterManager.close();
       FTSDK.remoteDataFilterManager = null;
     }
+    SyncTaskManager.getInstance().setRemoteDataFilterSyncHandler(null);
   }
 
   private static startRemoteConfigIfPossible(appId: string): void {

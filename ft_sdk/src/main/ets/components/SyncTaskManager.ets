@@ -394,6 +394,7 @@ export class SyncTaskManager {
   private preferencesInitPromise: Promise<void> | null = null;
   private uploadWorkerExecutor = new DataUploadWorkerExecutor();
   private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private remoteDataFilterSyncHandler: (() => void) | null = null;
   private constructor() {
   }
 
@@ -549,6 +550,9 @@ export class SyncTaskManager {
       return;
     }
 
+    // Match Android: an upload task checks whether the remote filter pull is
+    // due, but does not wait for the control-plane request to finish.
+    this.remoteDataFilterSyncHandler?.();
     FTLogSeparator.data(TAG, "数据上传开始");
     this.uploadRunning = true;
     this.running = true;
@@ -628,6 +632,14 @@ export class SyncTaskManager {
     filters.forEach((rules: Array<string>, category: string) => {
       this.remoteDataFilters.set(category, rules.slice());
     });
+  }
+
+  /**
+   * Set the lightweight remote-filter pull check run when an upload starts.
+   * The handler must start work asynchronously and must not delay the upload.
+   */
+  public setRemoteDataFilterSyncHandler(handler: (() => void) | null): void {
+    this.remoteDataFilterSyncHandler = handler;
   }
 
   /**
