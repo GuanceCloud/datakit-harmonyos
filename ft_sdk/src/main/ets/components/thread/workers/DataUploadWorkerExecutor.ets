@@ -1,4 +1,5 @@
 import { DataType } from '../../enum/Enums';
+import { FTDataFilter } from '../../FTDataFilter';
 import { FTInnerLogger } from '../../log/FTLogger';
 import {
   SDKDedicatedPoolType,
@@ -9,6 +10,8 @@ import {
   SDKUploadExecutePageDTO,
   SDKUploadExecutePageResultDTO,
   SDKUploadPageOutcome,
+  SDKUploadPreparePageDTO,
+  SDKUploadPreparePageResultDTO,
   SDKUploadRoundFinishDTO,
   SDKUploadRoundResultDTO,
   SDKUploadRoundStartDTO,
@@ -42,18 +45,25 @@ const TAG = 'DataUploadWorker';
 interface DataUploadConsumeState {
   consumedRows: number;
   hasMoreData: boolean;
+  retryableFailure: boolean;
+  retryLimitReached: boolean;
   errorCount: number;
   startedAt: number;
   metrics: DataUploadConsumeMetrics;
 }
 
+interface DataUploadRemoteFilterResult {
+  acceptedRows: DataUploadRow[];
+  filteredRows: DataUploadRow[];
+}
+
 /**
  * Host-side upload orchestrator.
  *
- * DB capabilities remain TaskPool-backed. Page preparation, HTTPS, response
- * classification, page budgets, and retry state execute as one asynchronous
- * DATA_UPLOAD ThreadWorker command. Host code only orchestrates DB commit and
- * persists a lightweight serializable worker checkpoint.
+ * DB capabilities remain TaskPool-backed. The DATA_UPLOAD Worker selects one
+ * package per page, prepares HTTPS, and owns response/retry state; the Host
+ * atomically persists a newly assigned sdk_data_id package before HTTP and
+ * persists a lightweight serializable worker checkpoint after page commits.
  */
 export class DataUploadWorkerExecutor {
   private static readonly ONE_MINUTE_DURATION_NS = 60_000_000_000;
@@ -116,7 +126,7 @@ export class DataUploadWorkerExecutor {
         finishPayload as Object as SDKWorkerPayload
       ) as Object as SDKUploadRoundResultDTO;
       state.consumedRows = roundResult.consumedRows;
-      state.hasMoreData = roundResult.hasMoreData;
+      state.hasMoreData = state.hasMoreData || roundResult.hasMoreData;
       state.errorCount = roundResult.errorCount;
       state.metrics.computeMs = Math.max(state.metrics.computeMs, roundResult.computeMs);
       this.adoptCheckpoint(roundResult.checkpoint);
@@ -124,6 +134,7 @@ export class DataUploadWorkerExecutor {
     } catch (error) {
       FTInnerLogger.e(TAG, `Sync Fail: ${error as string}`);
       state.hasMoreData = roundId.length > 0;
+      state.retryableFailure = roundId.length > 0;
       if (roundId.length > 0) {
         await this.finishFailedRoundSilently(capabilities, roundId, state);
       }
@@ -136,6 +147,8 @@ export class DataUploadWorkerExecutor {
     return {
       consumedRows: 0,
       hasMoreData: false,
+      retryableFailure: false,
+      retryLimitReached: false,
       errorCount: 0,
       startedAt: capabilities.getCurrentTimeMs(),
       metrics: {
@@ -164,6 +177,8 @@ export class DataUploadWorkerExecutor {
     return {
       consumedRows: state.consumedRows,
       hasMoreData: state.hasMoreData,
+      retryableFailure: state.retryableFailure,
+      retryLimitReached: state.retryLimitReached,
       errorCount: state.errorCount,
       metrics: state.metrics
     };
@@ -216,15 +231,83 @@ export class DataUploadWorkerExecutor {
     let shouldContinue = true;
     while (shouldContinue && !capabilities.isStopped()) {
       const queryPage = await this.queryRows(capabilities, dataType, pageSize, state);
-      const rows = queryPage.rows;
-      const executeRequest: SDKUploadExecutePageDTO = {
+      let rows = queryPage.rows;
+      let queryHasMore = queryPage.hasMore;
+      const remoteFilterResult = this.filterRemoteDataRows(capabilities, dataType, rows);
+      if (remoteFilterResult.filteredRows.length > 0) {
+        const deleted = await this.deleteRemoteFilteredRows(
+          capabilities,
+          dataType,
+          remoteFilterResult.filteredRows,
+          state
+        );
+        if (!deleted) {
+          // Do not upload a partially processed page when its filtered rows
+          // could not be removed. The empty request records a retry for the
+          // current worker round without exposing the rejected records.
+          rows = [];
+          queryHasMore = true;
+          state.retryableFailure = true;
+        } else {
+          rows = remoteFilterResult.acceptedRows;
+        }
+      }
+      const prepareRequest: SDKUploadPreparePageDTO = {
         roundId,
         dataType: dataType.toString(),
         rows: rows as Object as SDKUploadRowDTO[],
-        queryHasMore: queryPage.hasMore,
-        transportLimitReached: queryPage.byteLimitReached,
+        queryHasMore,
+        transportLimitReached: queryPage.byteLimitReached
+      };
+      const prepared = await this.executeUploadWorkerCommand(
+        capabilities,
+        SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        prepareRequest as Object as SDKWorkerPayload
+      ) as Object as SDKUploadPreparePageResultDTO;
+      state.metrics.computeMs += Math.max(0, prepared.computeMs);
+      if (prepared.duplicateRows > 0) {
+        FTInnerLogger.w(TAG,
+          `Deduplication filtered out ${prepared.duplicateRows} duplicate record(s) for ${dataType}`);
+      }
+      if (!prepared.rows || prepared.rows.length === 0 || !prepared.shouldExecute) {
+        const hasBlockedCachedRows = prepared.queriedRows > 0 || prepared.deferredRows > 0 ||
+          prepared.oversizedRows > 0 || prepared.bodyLimitReached || prepared.transportLimitReached;
+        if (hasBlockedCachedRows) {
+          FTInnerLogger.w(TAG,
+            `Upload page made no progress: type=${dataType}, queried=${prepared.queriedRows}, ` +
+            `deferred=${prepared.deferredRows}, oversized=${prepared.oversizedRows}, ` +
+            `bodyLimit=${prepared.bodyLimitReached}, transportLimit=${prepared.transportLimitReached}`);
+        }
+        state.hasMoreData = state.hasMoreData || prepared.roundHasMoreData;
+        return;
+      }
+
+      const packagePersisted = !prepared.needsPersistence || await this.persistPreparedUploadRows(
+        capabilities,
+        dataType,
+        prepared,
+        state
+      );
+      if (!packagePersisted) {
+        // No request is sent until the exact sdk_data_id from its body is
+        // durable. Preserve the retry signal even if the worker round itself
+        // has no queued-page state to report.
+        state.hasMoreData = true;
+        state.retryableFailure = true;
+        await this.sleep(capabilities, DATA_UPLOAD_LIMIT_RETRY_DELAY_MS, state);
+        return;
+      }
+
+      const executeRequest: SDKUploadExecutePageDTO = {
+        roundId,
+        dataType: dataType.toString(),
+        rows: prepared.rows,
+        queryHasMore: prepared.deferredRows > 0,
+        transportLimitReached: prepared.transportLimitReached,
+        packageId: prepared.packageId,
+        sdkDataIdPersisted: true,
         httpConfig: capabilities.getHttpConfig(dataType),
-        injectedHttpResult: rows.length > 0 ? capabilities.takeInjectedHttpResult?.() : undefined
+        injectedHttpResult: prepared.rows.length > 0 ? capabilities.takeInjectedHttpResult?.() : undefined
       };
       const executed = await this.executeUploadWorkerCommand(
         capabilities,
@@ -233,14 +316,21 @@ export class DataUploadWorkerExecutor {
       ) as Object as SDKUploadExecutePageResultDTO;
       state.metrics.computeMs += Math.max(0, executed.computeMs);
       state.metrics.httpMs += Math.max(0, executed.httpResult.elapsedMs);
-      if (executed.duplicateRows > 0) {
-        FTInnerLogger.w(TAG,
-          `Deduplication filtered out ${executed.duplicateRows} duplicate record(s) for ${dataType}`);
-      }
-      if (!executed.rows || executed.rows.length === 0 || executed.attemptId.length === 0) {
+
+      // An empty execution has no Worker-side pending page and therefore no
+      // attempt to acknowledge. This can happen when a concurrently filtered
+      // row is absent by the time the execution phase runs. Sending an empty
+      // commit would otherwise fail forever with `expected=, actual=`.
+      if (executed.attemptId.length === 0) {
+        if (executed.queriedRows > 0 || executed.acceptedRows > 0 || executed.deferredRows > 0) {
+          FTInnerLogger.w(TAG,
+            `Upload execution produced no request: type=${dataType}, queried=${executed.queriedRows}, ` +
+            `accepted=${executed.acceptedRows}, deferred=${executed.deferredRows}, ` +
+            `pkg_id=${executed.packageId}`);
+        }
         state.hasMoreData = state.hasMoreData || executed.roundHasMoreData;
         if (executed.delayMs > 0) {
-          await this.sleep(capabilities, Math.max(DATA_UPLOAD_LIMIT_RETRY_DELAY_MS, executed.delayMs), state);
+          await this.sleep(capabilities, executed.delayMs, state);
         }
         return;
       }
@@ -254,6 +344,9 @@ export class DataUploadWorkerExecutor {
             DATA_UPLOAD_MAX_BODY_BYTES}`);
       }
       const dbSucceeded = await this.applyDbDecision(capabilities, dataType, executed, state);
+      if (!dbSucceeded) {
+        state.retryableFailure = true;
+      }
       if (dbSucceeded) {
         // Store before ACK. A Worker hard-timeout after DB commit can then be
         // recovered without reusing package/retry sequence values.
@@ -274,12 +367,77 @@ export class DataUploadWorkerExecutor {
       state.hasMoreData = committed.roundHasMoreData;
       state.errorCount = committed.errorCount;
       state.consumedRows = committed.consumedRows;
+      if (executed.retryLimitReached) {
+        // The rows remain in cache. Let an external trigger (for example a
+        // real network recovery) start a later round rather than letting the
+        // TaskManager immediately spin another exhausted round.
+        state.retryLimitReached = true;
+      } else if (executed.retryCount > 0) {
+        state.retryableFailure = true;
+      }
 
       this.logUploadResult(dataType, executed, dbSucceeded);
       if (committed.delayMs > 0) {
         await this.sleep(capabilities, committed.delayMs, state);
       }
       shouldContinue = committed.shouldContinueDataType;
+    }
+  }
+
+  private filterRemoteDataRows(
+    capabilities: DataUploadWorkerCapabilities,
+    dataType: DataType,
+    rows: DataUploadRow[]
+  ): DataUploadRemoteFilterResult {
+    const remoteDataFilters = capabilities.getRemoteDataFilters?.();
+    if (!remoteDataFilters || remoteDataFilters.size === 0 || rows.length === 0) {
+      return { acceptedRows: rows, filteredRows: [] };
+    }
+    const dataFilter = FTDataFilter.compile(remoteDataFilters);
+    if (dataFilter.isEmpty()) {
+      return { acceptedRows: rows, filteredRows: [] };
+    }
+    const acceptedRows: DataUploadRow[] = [];
+    const filteredRows: DataUploadRow[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (dataFilter.isFilteredLine(dataType, row.dataString)) {
+        filteredRows.push(row);
+      } else {
+        acceptedRows.push(row);
+      }
+    }
+    return { acceptedRows, filteredRows };
+  }
+
+  private async deleteRemoteFilteredRows(
+    capabilities: DataUploadWorkerCapabilities,
+    dataType: DataType,
+    rows: DataUploadRow[],
+    state: DataUploadConsumeState
+  ): Promise<boolean> {
+    const startedAt = capabilities.getCurrentTimeMs();
+    try {
+      const result = await capabilities.commitUpload(
+        dataType,
+        DataUploadDbCommitAction.DELETE,
+        rows,
+        [],
+        rows.length
+      );
+      state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
+      if (result.affectedRows < rows.length) {
+        throw new Error(`Remote filter DB commit affected ${result.affectedRows}/${rows.length} rows`);
+      }
+      FTInnerLogger.i(TAG, `Remote data filter removed ${rows.length} cached ${dataType} record(s)`);
+      return true;
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Remote data filter cleanup failed: ${dataType}, error=${error as string}`);
+      return false;
+    } finally {
+      const elapsed = this.elapsed(capabilities, startedAt);
+      state.metrics.dbMs += elapsed;
+      state.metrics.dbDeleteMs += elapsed;
     }
   }
 
@@ -304,6 +462,44 @@ export class DataUploadWorkerExecutor {
       const elapsed = this.elapsed(capabilities, startedAt);
       state.metrics.dbMs += elapsed;
       state.metrics.dbQueryMs += elapsed;
+    }
+  }
+
+  /**
+   * Atomically replaces raw cache rows with their package-prefixed form before
+   * the matching HTTP request is allowed to leave the process. The DB action
+   * runs in one transaction and does not change cached-data counts.
+   */
+  private async persistPreparedUploadRows(
+    capabilities: DataUploadWorkerCapabilities,
+    dataType: DataType,
+    prepared: SDKUploadPreparePageResultDTO,
+    state: DataUploadConsumeState
+  ): Promise<boolean> {
+    const startedAt = capabilities.getCurrentTimeMs();
+    try {
+      const result = await capabilities.commitUpload(
+        dataType,
+        DataUploadDbCommitAction.REINSERT,
+        prepared.sourceRows as Object as DataUploadRow[],
+        prepared.rows as Object as DataUploadRow[],
+        0
+      );
+      state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
+      const expectedAffectedRows = prepared.sourceRows.length + prepared.rows.length;
+      if (result.affectedRows < expectedAffectedRows) {
+        throw new Error(`Upload package persistence affected ${result.affectedRows}/${expectedAffectedRows} row operations`);
+      }
+      return true;
+    } catch (error) {
+      FTInnerLogger.e(TAG,
+        `Upload package persistence failed before HTTP: ${dataType}, pkg_id=${prepared.packageId}, error=${error as string}`);
+      return false;
+    } finally {
+      const elapsed = this.elapsed(capabilities, startedAt);
+      state.metrics.dbMs += elapsed;
+      state.metrics.dbDeleteMs += elapsed;
+      state.metrics.dbInsertMs += elapsed;
     }
   }
 

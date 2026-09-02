@@ -42,6 +42,17 @@ export class MonitorInfoBean {
   }
 
   /**
+   * Android starts generic metric maxima from zero. Battery current is often
+   * negative while discharging, so preserve that Android-compatible maximum.
+   */
+  public addBatteryCurrentValue(value: number): void {
+    this.addValue(value);
+    if (this.count === 1 && value < 0) {
+      this.maxValue = 0;
+    }
+  }
+
+  /**
    * Check if the bean is valid
    * @returns true if valid
    */

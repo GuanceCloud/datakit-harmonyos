@@ -4,7 +4,7 @@
   "description": "Please describe the basic information.",
   "main": "",
   "author": "",
-  "license": "",
+  "license": "Apache-2.0",
   "dependencies":  {
     "@ohos/axios": "2.2.8",
     "@guancecloud/ft_sdk":"file:../ft_sdk",

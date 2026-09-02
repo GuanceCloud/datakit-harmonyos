@@ -2,6 +2,7 @@ import { FTLoggerConfig, FTRUMConfig, FTSDKConfig, LogGlobalContextDictionary, L
 import { DataType } from './enum/Enums';
 import { CollectType } from './rum/enum/RUMEnums';
 import { FTInnerLogger } from './log/FTLogger';
+import { FTLogSeparator } from './log/FTLogSeparator';
 import { SyncData } from './db/bean/SyncData';
 import { TrackLogManager } from './log/TrackLogManager';
 import { LogBean } from './bean/LogBean';
@@ -855,7 +856,10 @@ class FTTrackInner {
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         if (payload.deltas && payload.deltas.length > 0) {
           rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -868,7 +872,10 @@ class FTTrackInner {
       this.logRumCacheDiscard(drafts.length);
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
-        rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+        rumManager.markRumResourcesCompleted(
+          payload.completedResourceIds || [],
+          !!(payload.deltas && payload.deltas.length > 0)
+        );
         rumManager.markRumSemanticHostApplied(response.id);
         // DISCARD is terminal for these drafts. Advance the barrier here so
         // resource draft/context state is still converged without a DB task.
@@ -900,7 +907,10 @@ class FTTrackInner {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
     if (draftsCommitted && countersApplied) {
-      rumManager.markRumResourcesCompleted(payload.completedResourceIds || []);
+      rumManager.markRumResourcesCompleted(
+        payload.completedResourceIds || [],
+        !!(payload.deltas && payload.deltas.length > 0)
+      );
       rumManager.markRumSemanticHostApplied(response.id);
       if (payload.deltas && payload.deltas.length > 0) {
         rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -1055,6 +1065,7 @@ class FTTrackInner {
 
     const groups = this.buildRumDraftWriteLogGroups(fallbackMeasurement, fallbackDataType, drafts);
     const uuidSample = this.buildRumDraftUuidSample(drafts, 3);
+    FTLogSeparator.data(TAG, "数据入库");
     FTInnerLogger.d(TAG,
       `syncDataBackground:batch requested=${writeResult.requested},inserted=${writeResult.inserted},` +
         `updated=${writeResult.updated},dropped=${writeResult.dropped},duplicate=${writeResult.duplicateSkipped},` +
@@ -1173,6 +1184,9 @@ class FTTrackInner {
       }
       const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
       const affected = this.getWriteAffectedCount(writeResult);
+      if (affected > 0) {
+        FTLogSeparator.data(TAG, "数据入库");
+      }
       if (affected > 0 && !isSilence) {
         this.syncTaskManager.executeSyncPoll();
       }
@@ -1330,9 +1344,6 @@ class FTTrackInner {
     this.dataHelper.initBaseConfig(config);
     this.refreshWorkerLineProtocolContextSnapshot();
     this.syncLineProtocolContextToDefaultWorkers();
-
-    // Debug log for SyncTaskManager initialization
-    this.syncTaskManager.init(config, context);
 
     FTInnerLogger.i(TAG, "FTTrackInner base config initialized");
   }
@@ -1559,7 +1570,8 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    collectType: CollectType = CollectType.ALL
+    collectType: CollectType = CollectType.ALL,
+    draftUuid?: string
   ): void {
     FTInnerLogger.d(TAG, `TAG ========== rumWebView() called ==========`);
     FTInnerLogger.d(TAG, `TAG Measurement: ${measurement},Time: ${time}, Collect type: ${collectType}`);
@@ -1571,7 +1583,7 @@ class FTTrackInner {
 
     if (sessionId && this.dataHelper.checkSessionWillCollect(sessionId)) {
       FTInnerLogger.d(TAG, `TAG Session will collect, calling syncDataBackground`);
-      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null);
+      this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null, draftUuid);
     } else {
       const willCollect = sessionId ? this.dataHelper.checkSessionWillCollect(sessionId) : false;
       FTInnerLogger.w(TAG,
@@ -1953,7 +1965,11 @@ class FTTrackInner {
       const dbDeletedOld = writeResult.deletedOld;
       this.rollbackReservedCacheCounts(cacheDecision, writeResult.inserted, dbDeletedOld);
       const mergedResult = this.mergeCachePolicyDecision(writeResult, filterDecision.records.length, cacheDecision);
-      return this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
+      const result = this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
+      if (this.getWriteAffectedCount(result) > 0) {
+        FTLogSeparator.data(TAG, "数据入库");
+      }
+      return result;
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);
       throw error instanceof Error ? error : new Error(String(error));
@@ -2019,12 +2035,24 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     // Reduced logging - only log key information
 
     const taskName = `data.prepare:${measurement}`;
-    this.submitRumWorkerDraftTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+    this.submitRumWorkerDraftTask(
+      taskName,
+      dataType,
+      undefined,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      false,
+      draftUuid
+    );
   }
 
   private syncDataBackgroundRecords(

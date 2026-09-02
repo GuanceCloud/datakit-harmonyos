@@ -8,10 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - Added Android-aligned automatic console and HiLog collection. `FTLoggerConfig.setEnableConsoleLog(...)` now governs instrumented application `console.*` and `hilog.*` calls independently of `setEnableCustomLog(...)`.
 - Added the Guance Hvigor compiler-plugin reference implementation and integration guidance. Automatic collection requires this plugin; without it, the SDK reports one diagnostic and manual `FTLogger` reporting remains available.
-
-## [0.1.16] - 2026-07-29
 - Fixed RUM Action, Resource, and Error events occasionally missing the `app_id` tag when the EventConsumer Worker restarts before its line-protocol context has been restored. Event batches now carry the host context snapshot and a per-event RUM app ID fallback so affected data remains associated with the configured RUM application.
 - Upload-body diagnostics now emit the complete prepared request body as readable line-protocol log entries instead of truncating it to a preview.
+
+## [0.1.16] - 2026-08-31
+- Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
+- Aligned Error and View device metrics with Android: Error memory, CPU, and battery values are percentage-based and use Android-compatible calculations; Error `locale` now uses Android `Locale.toString()` format; View memory remains bytes, battery current remains mA (including Android-compatible negative-current maxima), CPU fields remain process clock ticks/ticks per second, and FPS uses one-second frame windows.
+- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` to customize or filter automatically tracked Router page and Navigation destination Views. Handlers can set the View name and properties, or return `null` to skip collection.
+- Added RUM device-metric collection. `setDeviceMetricsMonitorType(...)` configures View CPU, memory, battery-current, and FPS metrics, while `setExtraMonitorTypeWithError(...)` adds CPU, memory, and battery metrics to Errors. The existing `setDeviceMetricsDetectFrequency(...)` and one-argument `setDeviceMetricsMonitorType(...)` calls remain supported.
+- Added `FTRUMConfig.setActionTrackingHandler(...)` to filter automatic Click Actions. Return `null` to skip collection or `undefined` to retain default collection.
+- Added cold-launch collection APIs: `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` record process startup, `AbilityStage` initialization, first `UIAbility` creation, and first-frame timing. First-frame observation requires HarmonyOS API 22 or later and `ft_sdk_ext.observeFTAppFirstFrame(...)`. A background entry reports `app_launch_type=background` only after a later UI first frame.
+- Fixed UI-block LongTask duration calculation to use the system `MAIN_THREAD_JANK` event's `begin_time` and `end_time`, without timer or heartbeat fallback data.
+- Fixed occasional missing `app_id` tags on RUM Action, Resource, and Error data after an EventConsumer Worker restart.
+- Fixed native and WebView Resource data and their generated Network Errors to use a stable Resource UUID as `resource_id` for correlation.
+- Fixed possible duplicate RUM uploads during retries by retaining and reusing the original `sdk_data_id`.
+- Changed WebView enrichment: `view_path_name` is no longer generated; a missing `view_referrer` uses the native View; `sdk_version` uses the native SDK version and the Browser SDK version remains in `sdk_pkg_info`.
+- Changed automatic Action default names to `component type/component text#component ID`; components in lists and Tabs append `#position:n`.
+- Changed remote data filters to remove matching cached data before upload; local filters continue to apply only before data is written to the cache.
+- Optimized offline uploads: after retries are exhausted, polling waits for an external trigger; legacy-format or oversized cached data no longer blocks later uploadable RUM data.
+
+## [0.1.16-alpha03] - 2026-08-20
+- Added `FTActionTrackingHandler.resolveHandlerAction(...)` for filtering automatic Actions; return `null` to skip an Action and `undefined` to retain default collection.
+- Fixed retry uploads to retain the original `sdk_data_id` package ID.
+- Stopped exhausted offline retries from polling until an external trigger arrives; invalid cached rows no longer block later uploads.
+- Deferred the initial remote data-filter pull until cold-launch reporting completes or a no-UI background launch settles.
+- Added `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` for cold-launch tracking. `launch_cold` is emitted after the first rendered frame; first-frame observation requires API 22 and `ft_sdk_ext.observeFTAppFirstFrame(...)`.
+- Background entries emit one `app_launch_type=background` Action only after a later UI first frame.
+
+## [0.1.16-alpha02] - 2026-08-18
+- Restored `setDeviceMetricsDetectFrequency(...)` and the one-argument `setDeviceMetricsMonitorType(...)`; new integrations can use `setDeviceMetricsMonitorType(deviceMetricsMonitorType, detectFrequency)`.
+
+## [0.1.16-alpha01] - 2026-08-14
+- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` for automatic View filtering.
+- Added `FTRUMConfig.setDeviceMetricsMonitorType(...)` and `setExtraMonitorTypeWithError(...)` for View and Error device metrics.
+- Fixed UI-block LongTask duration calculation and removed timer or heartbeat fallback reporting.
+- Fixed missing RUM `app_id` tags after an EventConsumer Worker restart.
+- Used the stable Resource UUID as `resource_id` to correlate native/WebView Resource and network Error data.
+- Updated WebView enrichment, automatic Action names, and View custom-property keys.
+- Remote data filters now also remove matching cached data; local filters remain insertion-time only.
 
 ## [0.1.15] - 2026-07-29
 - Released `ft_sdk` 0.1.15 as a production HAR package. The package is built in Release mode (`debug: false`) and uses ArkTS bytecode packaging.

@@ -3,6 +3,8 @@
 # Update this list whenever Index.ets exposes a new public API.
 
 -keep-global-name
+ActionEventWrapper
+ActionSourceType
 ActionType
 AppState
 CollectType
@@ -40,10 +42,14 @@ FTTraceHeaderHandler
 FTTraceInterceptor
 FTTraceManager
 FTTraceRequestContext
+FTActionTrackingHandler
+FTViewNavigationTrackingHandler
+FTViewRouterTrackingHandler
 FTWebViewHandler
 FT_SDK_EXTENSION_CONTRACT_VERSION
 HAR_VERSION
 HeaderHandler
+HandlerView
 HttpRequestData
 HttpResponseData
 JsReceiver
@@ -75,6 +81,17 @@ ANR_ERROR
 BACKGROUND
 BATTERY
 CLICK
+CLICK_BACK
+CLICK_DIALOG_BUTTON
+CLICK_EXPAND_GROUP_ITEM
+CLICK_EXPAND_LIST_ITEM
+CLICK_LIST_ITEM
+CLICK_MENU
+CLICK_MENU_ITEM
+CLICK_PAD_CENTER
+CLICK_RADIO_BUTTON
+CLICK_TAB
+CLICK_VIEW
 COMMON
 CONSOLE
 CPU
@@ -127,6 +144,8 @@ KEY_TRACE_SAMPLE_RATE
 KEY_TRACE_TYPE
 LARGE
 LAUNCH
+LAUNCH_COLD
+LAUNCH_HOT
 LOCAL
 MEDIUM
 MEMORY
@@ -206,6 +225,7 @@ flushSyncData
 foreground
 fromName
 getActionTrackingHandler
+getActionName
 getAllHandlerKeys
 getAllStatuses
 getAllowWebViewHost
@@ -234,6 +254,7 @@ getDownloadTime
 getDownloadTimeStart
 getEmail
 getEnv
+getExtra
 getExt
 getExtraMonitorTypeWithError
 getExts
@@ -264,10 +285,13 @@ getPageSize
 getPkgInfo
 getProxy
 getProxyAuthenticator
+getProperty
 getRemoteConfigFetchResult
 getRemoteConfigMiniUpdateInterval
 getResourceHostIP
 getResourceUrlHandler
+getSource
+getSourceType
 getResponseTime
 getRumAllowWebViewHost
 getRumAppId
@@ -312,6 +336,9 @@ getTraceType
 getTraceTypeEnum
 getValue
 getVersion
+getViewName
+getViewNavigationTrackingHandler
+getViewRouterTrackingHandler
 handleWebViewData
 hasHandler
 headers
@@ -388,8 +415,10 @@ requestErrorMsg
 requestErrorStack
 requestHeader
 requestHeaderMap
+resolveHandlerView
 reset
 resetBatchStateInternal
+resolveHandlerAction
 resourceHostIP
 resourceMethod
 resourceStatus
@@ -525,6 +554,8 @@ setTraceSampleRate
 setTraceType
 setUrl
 setValue
+setViewNavigationTrackingHandler
+setViewRouterTrackingHandler
 setWebView
 shutDown
 singleFileMaxSize

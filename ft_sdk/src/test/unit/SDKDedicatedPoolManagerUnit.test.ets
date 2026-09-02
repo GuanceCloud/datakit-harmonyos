@@ -27,10 +27,13 @@ import {
   SDKUploadDbActionDTO,
   SDKUploadExecutePageDTO,
   SDKUploadExecutePageResultDTO,
+  SDKUploadHttpConfigDTO,
   SDKUploadHttpProxyDTO,
   SDKUploadHttpRequestDTO,
   SDKUploadHttpResultDTO,
   SDKUploadPageDTO,
+  SDKUploadPreparePageDTO,
+  SDKUploadPreparePageResultDTO,
   SDKUploadRoundFinishDTO,
   SDKUploadRoundResultDTO,
   SDKUploadRoundStartDTO,
@@ -73,8 +76,15 @@ import {
 import { parseANREventInWorker } from '../../main/ets/components/thread/workers/ANRWorkerOperations';
 import { normalizeANRParamsForWorker } from '../../main/ets/components/monitor/ANRDetectManager';
 import {
+  calculateBatteryUsagePercent,
+  calculateSystemMemoryUsagePercent,
+  formatAndroidLocale,
+  normalizeProcessCpuUsage
+} from '../../main/ets/components/utils/DeviceUtils';
+import { MonitorInfoBean } from '../../main/ets/components/rum/bean/MonitorInfoBean';
+import {
   parseProcStatCpuTicks,
-  parseProcStatusMemoryMB
+  parseProcStatusMemoryBytes
 } from '../../main/ets/components/thread/workers/BackgroundWorkerOperations';
 
 interface SDKLineProtocolRecordsTestPayload {
@@ -84,6 +94,11 @@ interface SDKLineProtocolRecordsTestPayload {
 interface SDKCompletedActionPropertyTestValue {
   value?: string | number;
   nested?: string;
+}
+
+interface SDKCompletedActionLaunchPhaseTestValue {
+  start: number;
+  duration: number;
 }
 
 interface SDKANRTestFrame {
@@ -408,10 +423,29 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
     it('backgroundWorkerShouldParseProcMetricsDeterministically', 0, () => {
       const stat = '123 (demo process) S 1 2 3 4 5 6 7 8 9 10 120 30 0 0';
-      expect(parseProcStatCpuTicks(stat)).assertEqual(150);
-      expect(parseProcStatusMemoryMB('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20);
+      expect(parseProcStatCpuTicks(stat)).assertEqual(120);
+      expect(parseProcStatusMemoryBytes('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20480000);
       expect(parseProcStatCpuTicks('invalid')).assertEqual(-1);
-      expect(parseProcStatusMemoryMB('VmSize: 10 kB')).assertEqual(-1);
+      expect(parseProcStatusMemoryBytes('VmSize: 10 kB')).assertEqual(-1);
+    });
+
+    it('errorMonitorMetricUnitsShouldMatchAndroid', 0, () => {
+      // Android reports device memory occupancy (not app PSS) as a percentage.
+      expect(calculateSystemMemoryUsagePercent(8 * 1024 * 1024, 2 * 1024 * 1024)).assertEqual(75);
+      // HiDebug reports a 0–1 process ratio; Android normalizes its top value by cores.
+      expect(normalizeProcessCpuUsage(0.5, 4)).assertEqual(12.5);
+      // Android's battery_use means consumed battery, not remaining SOC.
+      expect(calculateBatteryUsagePercent(20)).assertEqual(80);
+      expect(calculateBatteryUsagePercent(120)).assertEqual(0);
+      expect(formatAndroidLocale('zh-Hans-CN')).assertEqual('zh_CN_#Hans');
+      expect(formatAndroidLocale('en-US')).assertEqual('en_US');
+
+      const battery = new MonitorInfoBean();
+      battery.addBatteryCurrentValue(-300);
+      battery.addBatteryCurrentValue(-100);
+      expect(battery.maxValue).assertEqual(0);
+      expect(battery.miniValue).assertEqual(-300);
+      expect(battery.avgValue).assertEqual(-200);
     });
 
     it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {
@@ -600,7 +634,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(drafts.length).assertEqual(1);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
       expect(line.includes('service=browser')).assertTrue();
-      expect(line.includes('sdk_version=2.3.4')).assertTrue();
+      expect(line.includes('sdk_version=native-version')).assertTrue();
+      expect(line.includes('sdk_version=2.3.4')).assertFalse();
       expect(line.includes('env=worker-test')).assertTrue();
       expect(line.includes('custom_key=worker-value')).assertTrue();
       expect(line.includes('"web":"2.3.4"')).assertTrue();
@@ -637,6 +672,66 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('web-action');
       expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(2);
+    });
+
+    it('eventRumWorkerShouldDiscardExpiredWebViewResourceErrorLinks', 0, async () => {
+      await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-context',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.LINE_CONTEXT_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
+      });
+      const resourceUuid = 'stale-webview-resource-uuid';
+      const resourceEvent: SDKRumEventDTO = {
+        time: 1000,
+        dataType: 'rum_webview',
+        measurement: 'resource',
+        uuid: resourceUuid,
+        tags: {
+          view_id: 'stale-link-view',
+          resource_method: 'GET',
+          resource_url: 'https://webview.test/api/stale-link'
+        },
+        fields: { duration: '1' }
+      };
+      const resourceResponse = await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-resource',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: resourceEvent as Object as SDKWorkerPayload
+      });
+      expect(resourceResponse.ok).assertTrue();
+
+      const errorEvent: SDKRumEventDTO = {
+        time: 32001,
+        dataType: 'rum_webview',
+        measurement: 'error',
+        tags: {
+          view_id: 'stale-link-view',
+          resource_method: 'GET',
+          resource_url: 'https://webview.test/api/stale-link',
+          error_source: 'network'
+        },
+        fields: { error_message: 'network error without a matching resource' }
+      };
+      const errorResponse = await executeWorkerCommandForUnit({
+        id: 'rum-webview-expired-link-error',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: errorEvent as Object as SDKWorkerPayload
+      });
+      expect(errorResponse.ok).assertTrue();
+      const drafts = getPayloadArray(errorResponse.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes(`resource_id=${resourceUuid}`)).assertFalse();
+      expect(unitWorkerStates[SDKDedicatedPoolType.EVENT_CONSUMER].webViewResourceErrorLinks.size).assertEqual(0);
     });
 
     it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
@@ -866,6 +961,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       errorCommand.errorSource = 'logger';
       errorCommand.appState = 'run';
       errorCommand.property = errorProperty;
+      errorCommand.deviceTags = {
+        memory_total: '8GB',
+        locale: 'zh-Hans-CN'
+      };
       errorCommand.time = 500;
       const batch: SDKRumErrorCommandBatchDTO = {
         commands: [errorCommand, errorCommand]
@@ -884,8 +983,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const drafts = getPayloadArray(response.payload, 'syncDrafts');
       expect(drafts.length).assertEqual(2);
       const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('sdk_name=df_harmonyos_rum_sdk')).assertTrue();
       expect(line.includes('app_id=gc_app_harmonyos_demo')).assertTrue();
       expect(line.includes('error_type=TypeError')).assertTrue();
+      expect(line.includes('memory_total=8GB')).assertTrue();
+      expect(line.includes('locale=zh-Hans-CN')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();
       expect(line.includes('custom_nested=')).assertTrue();
       expect(line.includes('stack-line')).assertTrue();
@@ -953,7 +1055,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         commandType: 'stop', resourceId: 'resource-worker', context, endTime: 40
       };
       const batch: SDKRumResourceCommandBatchDTO = {
-        commands: [stop, network, content, content, start]
+        commands: [stop, network, content, content, start, start]
       };
       const response = await executeWorkerCommandForUnit({
         id: 'rum-resource-batch',
@@ -978,6 +1080,133 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('duration=50i')).assertTrue();
       const snapshot = await getRumWorkerSnapshotForUnit('rum-resource-command-state-key-snapshot');
       expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
+      const counterFlush = await executeWorkerCommandForUnit({
+        id: 'rum-resource-duplicate-start-counter-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      const counterDeltas = getPayloadArray(counterFlush.payload, 'deltas');
+      let actionPendingDelta = 0;
+      let actionResourceDelta = 0;
+      for (let i = 0; i < counterDeltas.length; i++) {
+        const delta = counterDeltas[i] as Record<string, object>;
+        if (String(delta['actionId']) === 'resource-action') {
+          actionPendingDelta = Number(delta['actionPendingDelta']);
+          actionResourceDelta = Number(delta['actionResourceDelta']);
+        }
+      }
+      expect(actionPendingDelta).assertEqual(0);
+      expect(actionResourceDelta).assertEqual(1);
+    });
+
+    it('eventRumResourceAndNetworkErrorShouldKeepStartActionContext', 0, async () => {
+      const startContext: SDKRumResourceContextDTO = {
+        sessionId: 'session-first-action',
+        viewId: 'view-first-action',
+        viewName: 'FirstActionView',
+        viewReferrer: 'root',
+        actionId: 'action-first',
+        actionName: 'first tap',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const laterContext: SDKRumResourceContextDTO = {
+        sessionId: 'session-later-action',
+        viewId: 'view-later-action',
+        viewName: 'LaterActionView',
+        viewReferrer: 'FirstActionView',
+        actionId: 'action-later',
+        actionName: 'later tap',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/late-response',
+        requestHeader: '',
+        responseHeader: '',
+        responseConnection: '',
+        responseContentType: '',
+        responseContentEncoding: '',
+        responseContentLength: 0,
+        resourceMethod: 'GET',
+        responseBody: 'HTTP 500',
+        resourceStatus: 500,
+        resourceType: 'network',
+        requestErrorStack: '',
+        requestErrorMsg: '',
+        property: new Object() as SDKPropertyRecord
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 0,
+        dnsStartTime: 0,
+        tcpTime: 0,
+        tcpStartTime: 0,
+        sslTime: 0,
+        sslStartTime: 0,
+        ttfbTime: 0,
+        responseTime: 0,
+        firstByteTime: 0,
+        firstByteStartTime: 0,
+        downloadTime: 0,
+        downloadStartTime: 0,
+        holeRequestTime: 10,
+        resourceHostIP: ''
+      };
+      const batch: SDKRumResourceCommandBatchDTO = {
+        commands: [{
+          commandType: 'start',
+          resourceId: 'late-resource',
+          draftUuid: 'late-resource-draft',
+          errorDraftUuid: 'late-resource-error-draft',
+          context: startContext,
+          startTime: 10
+        }, {
+          // This mirrors a request completing after a second click. The host
+          // normally reuses startContext; the Worker also keeps it authoritative.
+          commandType: 'add',
+          resourceId: 'late-resource',
+          draftUuid: 'late-resource-draft',
+          errorDraftUuid: 'late-resource-error-draft',
+          context: laterContext,
+          params,
+          netStatus,
+          eventTime: 20
+        }]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-resource-keeps-start-action',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(2);
+      let resourceLine = '';
+      let errorLine = '';
+      for (let i = 0; i < drafts.length; i++) {
+        const draft = drafts[i] as Record<string, object>;
+        const uuid = String(draft['uuid']);
+        if (uuid === 'late-resource-draft') {
+          resourceLine = String(draft['dataString']);
+        } else if (uuid === 'late-resource-error-draft') {
+          errorLine = String(draft['dataString']);
+        }
+      }
+      expect(resourceLine.includes('action_id=action-first')).assertTrue();
+      expect(resourceLine.includes('action_id=action-later')).assertFalse();
+      expect(errorLine.includes('action_id=action-first')).assertTrue();
+      expect(errorLine.includes('action_id=action-later')).assertFalse();
+      expect(errorLine.includes('memory_total=8GB')).assertFalse();
+      expect(errorLine.includes('locale=zh-Hans-CN')).assertFalse();
+      expect(errorLine.includes('memory_use="51.25"')).assertFalse();
+      expect(errorLine.includes('cpu_use="12.5"')).assertFalse();
+      expect(errorLine.includes('battery_use="80"')).assertFalse();
+      expect(resourceLine.includes('memory_total=8GB')).assertFalse();
+      expect(resourceLine.includes('locale=zh-Hans-CN')).assertFalse();
     });
 
     it('eventRumResourceAndCounterReplayShouldSurviveFreshWorkerState', 0, () => {
@@ -1181,6 +1410,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const properties = new Object() as Record<string, object>;
       properties['custom_text'] = customText;
       properties['custom_json'] = customJson;
+      properties['duration'] = new String('must-not-override-sdk-duration');
+      properties['app_launch_type'] = new String('foreground');
+      const launchPhase: SDKCompletedActionLaunchPhaseTestValue = { start: 0, duration: 20 };
+      properties['app_pre_application_init_time'] = launchPhase;
       const dynamicTags = new Object() as SDKStringRecord;
       dynamicTags['env'] = 'test';
       const completedAction = new Object() as SDKRumCompletedActionDTO;
@@ -1191,7 +1424,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.dynamicTags = dynamicTags;
       completedAction.actionId = 'action-1';
       completedAction.actionName = 'tap';
-      completedAction.actionType = 'click';
+      completedAction.actionType = 'launch_cold';
       completedAction.rumAppId = 'gc_app_harmonyos_demo';
       completedAction.sessionId = 'session-1';
       completedAction.viewId = 'view-1';
@@ -1206,6 +1439,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const batch: SDKRumCompletedActionBatchDTO = {
         actions: [completedAction]
       };
+      const lineContext = createRumWorkerLineContext();
+      lineContext.rumStaticFields['duration'] = 'must-not-override-sdk-duration-from-context';
+      lineContext.rumStaticFields['app_launch_type'] = 'must-not-override-cold-launch-type';
+      batch.lineContext = lineContext;
       const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -1223,7 +1460,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(record['measurement'])).assertEqual('action');
       expect(String(record['uuid'])).assertEqual('action-sync-uuid');
       expect(String(tags['action_id'])).assertEqual('action-1');
-      expect(String(tags['action_type'])).assertEqual('click');
+      expect(String(tags['action_type'])).assertEqual('launch_cold');
       expect(String(tags['app_id'])).assertEqual('gc_app_harmonyos_demo');
       expect(String(tags['view_id'])).assertEqual('view-1');
       expect(String(fields['duration'])).assertEqual('42');
@@ -1232,9 +1469,14 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(fields['action_resource_count'])).assertEqual('3');
       expect(String(fields['custom_text'])).assertEqual('fast');
       expect(String(fields['custom_json']).includes('nested')).assertTrue();
+      expect(String(fields['app_launch_type'])).assertEqual('foreground');
+      expect(String(fields['app_pre_application_init_time'])).assertEqual('{"start":0,"duration":20}');
+      const syncDrafts = getPayloadArray(response.payload, 'syncDrafts');
+      const lineProtocol = String((syncDrafts[0] as Record<string, object>)['dataString']);
+      expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
     });
 
-    it('dataUploadCommandShouldFormatBodyInsideUploadPoolWithoutDeadlock', 0, async () => {
+    it('dataUploadCommandShouldKeepSdkDataIdStableInsideUploadPool', 0, async () => {
       const row: SDKUploadRowDTO = {
         id: 1,
         dataType: 'log',
@@ -1259,8 +1501,38 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const response = await executeWorkerCommandForUnit(request);
       expect(response.ok).assertTrue();
       const body = getPayloadString(response.payload, 'body');
-      expect(body.includes('pkg-1.uuid-1')).assertTrue();
+      expect(body.includes('sdk_data_id=pkg-1.uuid-1')).assertTrue();
       expect(body.includes('message=\"hello\"')).assertTrue();
+    });
+
+    it('dataUploadCommandShouldOnlyPrefixSdkDataIdWhenResourceIdMatchesRowUuid', 0, async () => {
+      const resourceUuid = '64697047c13d4ac8ae1a64aa1d364d39';
+      const row: SDKUploadRowDTO = {
+        id: 2,
+        dataType: 'rum_app',
+        dataString: `resource,resource_id=${resourceUuid},sdk_data_id=${resourceUuid} status=404i 123`,
+        uuid: resourceUuid,
+        time: 123
+      };
+      const page: SDKUploadPageDTO = {
+        dataType: 'rum_app',
+        rows: [row],
+        packageId: 'pkg-2'
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'upload-resource-id',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_FORMAT_BODY,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: page as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const body = getPayloadString(response.payload, 'body');
+      expect(body.includes(`resource_id=${resourceUuid}`)).assertTrue();
+      expect(body.includes(`sdk_data_id=pkg-2.${resourceUuid}`)).assertTrue();
+      expect(body.includes(`resource_id=pkg-2.${resourceUuid}`)).assertFalse();
     });
 
     it('dataUploadSoftTimeoutShouldDestroyStalledWorkerRequest', 0, async () => {
@@ -1603,8 +1875,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(httpExecutor.lastRequest !== null).assertTrue();
       expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.includes(
         `${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(createDataUploadHeaders(httpExecutor.lastRequest as SDKUploadHttpRequestDTO)['X-Pkg-Id']).assertEqual(
+        `rumm-${executed.packageId}`);
       expect(executed.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
       expect(executed.reInsertRows.length).assertEqual(1);
+      expect(executed.reInsertRows[0].uuid).assertEqual(row.uuid);
+      expect(executed.reInsertRows[0].dataString.includes(
+        `sdk_data_id=${executed.packageId}.retry-uuid`)).assertTrue();
       expect(executed.retryCount).assertEqual(1);
       expect(executed.delayMs).assertEqual(500);
       expect(executed.shouldContinueDataType).assertFalse();
@@ -1632,6 +1909,25 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(committed.shouldContinueDataType).assertFalse();
       expect(committed.roundHasMoreData).assertTrue();
 
+      const retryExecutePayload: SDKUploadExecutePageDTO = {
+        roundId: start.roundId,
+        dataType: 'log',
+        rows: executed.reInsertRows,
+        httpConfig: executePayload.httpConfig
+      };
+      const retryExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'upload-retry-execute-page',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: retryExecutePayload as Object as SDKWorkerPayload
+      }, unitWorkerStates[SDKDedicatedPoolType.DATA_UPLOAD], httpExecutor);
+      expect(retryExecuteResponse.ok).assertTrue();
+      const retried = retryExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      expect(retried.bodyPreview.includes(`sdk_data_id=${executed.packageId}.retry-uuid`)).assertTrue();
+      expect(retried.bodyPreview.includes(`sdk_data_id=${retried.packageId}.retry-uuid`)).assertFalse();
+
       const finishPayload: SDKUploadRoundFinishDTO = { roundId: start.roundId };
       const finishResponse = await executeWorkerCommandForUnit({
         id: 'upload-consume-finish',
@@ -1646,6 +1942,464 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(finished.consumedRows).assertEqual(1);
       expect(finished.hasMoreData).assertTrue();
       expect(finished.errorCount).assertEqual(1);
+    });
+
+    it('dataUploadWorkerShouldReusePersistedPackageAfterHttpRestart', 0, async () => {
+      const ownerId = 'persisted-package-restart-owner';
+      const rawRow: SDKUploadRowDTO = {
+        id: 91,
+        dataType: 'log',
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=restart-uuid value=1i 100',
+        uuid: 'restart-uuid',
+        time: 100
+      };
+      const httpConfig: SDKUploadHttpConfigDTO = {
+        datakitUrl: 'https://localhost',
+        datawayUrl: '',
+        clientToken: '',
+        model: 'logging_v1',
+        deviceTimeMs: 100,
+        connectTimeoutMs: 60_000,
+        readTimeoutMs: 60_000,
+        softTimeoutMs: 125_000,
+        compressIntakeRequests: false
+      };
+      const firstState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'PersistedPackageFirstWorker', 'unit-worker');
+      const firstStartResponse = handleSDKWorkerRequest({
+        id: 'persisted-package-first-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId,
+          taskName: 'persisted-package-first-round',
+          pageSize: 3,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, firstState);
+      const firstStart = firstStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const firstPrepareResponse = handleSDKWorkerRequest({
+        id: 'persisted-package-first-prepare',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: firstStart.roundId,
+          dataType: 'log',
+          rows: [rawRow]
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, firstState);
+      const firstPrepared = firstPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+
+      expect(firstPrepareResponse.ok).assertTrue();
+      expect(firstPrepared.needsPersistence).assertTrue();
+      expect(firstPrepared.packageId.length > 0).assertTrue();
+      expect(firstPrepared.rows[0].dataString.includes(
+        `sdk_data_id=${firstPrepared.packageId}.restart-uuid`)).assertTrue();
+
+      // The Host persists firstPrepared.rows atomically before this request.
+      // Do not ACK the result: this models a process death after HTTP started.
+      const firstHttpExecutor = new RetryUploadHttpExecutor(500);
+      const firstExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'persisted-package-first-http',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: firstStart.roundId,
+          dataType: 'log',
+          rows: firstPrepared.rows,
+          packageId: firstPrepared.packageId,
+          sdkDataIdPersisted: true,
+          httpConfig
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, firstState, firstHttpExecutor);
+      const firstExecuted = firstExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      const firstRequest = firstHttpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(firstExecuteResponse.ok).assertTrue();
+      expect(firstExecuted.dbAction).assertEqual(SDKUploadDbActionDTO.NONE);
+      expect(createDataUploadHeaders(firstRequest)['X-Pkg-Id']).assertEqual(`rumm-${firstPrepared.packageId}`);
+      expect(firstRequest.body.includes(`sdk_data_id=${firstPrepared.packageId}.restart-uuid`)).assertTrue();
+
+      const restartedState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'PersistedPackageRestartedWorker', 'unit-worker');
+      const restartedStartResponse = handleSDKWorkerRequest({
+        id: 'persisted-package-restart-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId,
+          taskName: 'persisted-package-restart-round',
+          pageSize: 3,
+          syncSleepTime: 0,
+          checkpoint: firstStart.checkpoint
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, restartedState);
+      const restartedStart = restartedStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const restartedPrepareResponse = handleSDKWorkerRequest({
+        id: 'persisted-package-restart-prepare',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: restartedStart.roundId,
+          dataType: 'log',
+          // This represents the durable cache after the first pre-HTTP write.
+          rows: firstPrepared.rows
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, restartedState);
+      const restartedPrepared = restartedPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+      const restartedHttpExecutor = new RetryUploadHttpExecutor(200);
+      const restartedExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'persisted-package-restart-http',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: restartedStart.roundId,
+          dataType: 'log',
+          rows: restartedPrepared.rows,
+          packageId: restartedPrepared.packageId,
+          sdkDataIdPersisted: true,
+          httpConfig
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, restartedState, restartedHttpExecutor);
+      const restartedRequest = restartedHttpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(restartedPrepareResponse.ok).assertTrue();
+      expect(restartedPrepared.needsPersistence).assertFalse();
+      expect(restartedPrepared.packageId).assertEqual(firstPrepared.packageId);
+      expect(restartedExecuteResponse.ok).assertTrue();
+      expect(createDataUploadHeaders(restartedRequest)['X-Pkg-Id']).assertEqual(`rumm-${firstPrepared.packageId}`);
+      expect(restartedRequest.body.includes(`sdk_data_id=${firstPrepared.packageId}.restart-uuid`)).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldUseSdkDataIdWhenLegacyRowUuidDiffers', 0, async () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'LegacySdkDataIdWorker', 'unit-worker');
+      const httpConfig: SDKUploadHttpConfigDTO = {
+        datakitUrl: 'https://localhost',
+        datawayUrl: '',
+        clientToken: '',
+        model: 'logging_v1',
+        deviceTimeMs: 100,
+        connectTimeoutMs: 60_000,
+        readTimeoutMs: 60_000,
+        softTimeoutMs: 125_000,
+        compressIntakeRequests: false
+      };
+      const startResponse = handleSDKWorkerRequest({
+        id: 'legacy-sdk-data-id-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId: 'legacy-sdk-data-id-owner',
+          taskName: 'legacy-sdk-data-id-round',
+          pageSize: 1,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const prepareResponse = handleSDKWorkerRequest({
+        id: 'legacy-sdk-data-id-prepare',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: [{
+            id: 92,
+            dataType: 'log',
+            dataString: 'df_rum_harmonyos_log,sdk_data_id=line-uuid value=1i 100',
+            // Legacy rows can carry an RDB UUID different from the line tag.
+            uuid: 'rdb-uuid',
+            time: 100
+          }]
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, state);
+      const prepared = prepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+      const httpExecutor = new RetryUploadHttpExecutor(200);
+      const executeResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'legacy-sdk-data-id-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: prepared.rows,
+          packageId: prepared.packageId,
+          sdkDataIdPersisted: true,
+          httpConfig
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, state, httpExecutor);
+      const executed = executeResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      const commitResponse = handleSDKWorkerRequest({
+        id: 'legacy-sdk-data-id-commit',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          attemptId: executed.attemptId,
+          dbSucceeded: true
+        } as SDKUploadCommitPageDTO as Object as SDKWorkerPayload
+      }, state);
+
+      expect(prepareResponse.ok).assertTrue();
+      expect(prepared.needsPersistence).assertTrue();
+      expect(prepared.rows[0].dataString.includes(`sdk_data_id=${prepared.packageId}.line-uuid`)).assertTrue();
+      expect(executeResponse.ok).assertTrue();
+      expect(executed.attemptId.length > 0).assertTrue();
+      const retryRequest = httpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+      expect(retryRequest.body.includes(`sdk_data_id=${prepared.packageId}.line-uuid`)).assertTrue();
+      expect(commitResponse.ok).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldWrapNonStandardSdkDataIdOnlyOnce', 0, async () => {
+      const ownerId = 'non-standard-sdk-data-id-owner';
+      const legacyRow: SDKUploadRowDTO = {
+        id: 93,
+        dataType: 'log',
+        // This old raw value contains dots, but is not a standard P prefix.
+        dataString: 'df_rum_harmonyos_log,sdk_data_id=legacy.prefix.legacy-uuid value=1i 100',
+        uuid: 'legacy-uuid',
+        time: 100
+      };
+      const httpConfig: SDKUploadHttpConfigDTO = {
+        datakitUrl: 'https://localhost',
+        datawayUrl: '',
+        clientToken: '',
+        model: 'logging_v1',
+        deviceTimeMs: 100,
+        connectTimeoutMs: 60_000,
+        readTimeoutMs: 60_000,
+        softTimeoutMs: 125_000,
+        compressIntakeRequests: false
+      };
+      const firstState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'NonStandardSdkDataIdFirstWorker', 'unit-worker');
+      const firstStartResponse = handleSDKWorkerRequest({
+        id: 'non-standard-sdk-data-id-first-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId,
+          taskName: 'non-standard-sdk-data-id-first-round',
+          pageSize: 1,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, firstState);
+      const firstStart = firstStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const firstPrepareResponse = handleSDKWorkerRequest({
+        id: 'non-standard-sdk-data-id-first-prepare',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: firstStart.roundId,
+          dataType: 'log',
+          rows: [legacyRow]
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, firstState);
+      const firstPrepared = firstPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+      const expectedSdkDataId = `${firstPrepared.packageId}.legacy.prefix.legacy-uuid`;
+
+      expect(firstPrepareResponse.ok).assertTrue();
+      expect(firstPrepared.needsPersistence).assertTrue();
+      expect(firstPrepared.rows[0].dataString.includes(`sdk_data_id=${expectedSdkDataId}`)).assertTrue();
+
+      const firstHttpExecutor = new RetryUploadHttpExecutor(200);
+      const firstExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'non-standard-sdk-data-id-first-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: firstStart.roundId,
+          dataType: 'log',
+          rows: firstPrepared.rows,
+          packageId: firstPrepared.packageId,
+          sdkDataIdPersisted: true,
+          httpConfig
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, firstState, firstHttpExecutor);
+      const firstExecuted = firstExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      const firstRequest = firstHttpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(firstExecuteResponse.ok).assertTrue();
+      expect(firstExecuted.attemptId.length > 0).assertTrue();
+      expect(createDataUploadHeaders(firstRequest)['X-Pkg-Id']).assertEqual(`rumm-${firstPrepared.packageId}`);
+      expect(firstRequest.body.includes(`sdk_data_id=${expectedSdkDataId}`)).assertTrue();
+
+      // The persisted first-attempt value must survive a process restart
+      // without another package prefix being appended.
+      const restartedState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'NonStandardSdkDataIdRestartedWorker', 'unit-worker');
+      const restartedStartResponse = handleSDKWorkerRequest({
+        id: 'non-standard-sdk-data-id-restart-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId,
+          taskName: 'non-standard-sdk-data-id-restart-round',
+          pageSize: 1,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, restartedState);
+      const restartedStart = restartedStartResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const restartedPrepareResponse = handleSDKWorkerRequest({
+        id: 'non-standard-sdk-data-id-restart-prepare',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: restartedStart.roundId,
+          dataType: 'log',
+          rows: firstPrepared.rows
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, restartedState);
+      const restartedPrepared = restartedPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+      const restartedHttpExecutor = new RetryUploadHttpExecutor(200);
+      const restartedExecuteResponse = await handleSDKDataUploadWorkerRequest({
+        id: 'non-standard-sdk-data-id-restart-execute',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_EXECUTE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: restartedStart.roundId,
+          dataType: 'log',
+          rows: restartedPrepared.rows,
+          packageId: restartedPrepared.packageId,
+          sdkDataIdPersisted: true,
+          httpConfig
+        } as SDKUploadExecutePageDTO as Object as SDKWorkerPayload
+      }, restartedState, restartedHttpExecutor);
+      const restartedExecuted = restartedExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
+      const restartedRequest = restartedHttpExecutor.lastRequest as SDKUploadHttpRequestDTO;
+
+      expect(restartedPrepareResponse.ok).assertTrue();
+      expect(restartedPrepared.needsPersistence).assertFalse();
+      expect(restartedPrepared.packageId).assertEqual(firstPrepared.packageId);
+      expect(restartedPrepared.rows[0].dataString.includes(`sdk_data_id=${expectedSdkDataId}`)).assertTrue();
+      expect(restartedExecuteResponse.ok).assertTrue();
+      expect(restartedExecuted.attemptId.length > 0).assertTrue();
+      expect(createDataUploadHeaders(restartedRequest)['X-Pkg-Id']).assertEqual(`rumm-${firstPrepared.packageId}`);
+      expect(restartedRequest.body.includes(`sdk_data_id=${expectedSdkDataId}`)).assertTrue();
+    });
+
+    it('dataUploadWorkerShouldKeepHistoricalPackagesAndRawRowsSeparate', 0, () => {
+      const state = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.DATA_UPLOAD, 'UploadPackageGroupingWorker', 'unit-worker');
+      const startResponse = handleSDKWorkerRequest({
+        id: 'upload-package-grouping-start',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_CONSUME,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          ownerId: 'upload-package-grouping-owner',
+          taskName: 'upload-package-grouping-round',
+          pageSize: 3,
+          syncSleepTime: 0
+        } as SDKUploadRoundStartDTO as Object as SDKWorkerPayload
+      }, state);
+      const start = startResponse.payload as Object as SDKUploadRoundStartResultDTO;
+      const packageOne = '0.first.1.persistedOne';
+      const packageTwo = '0.second.1.persistedTwo';
+      const firstPrepareResponse = handleSDKWorkerRequest({
+        id: 'upload-package-grouping-first',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: [
+            {
+              id: 101,
+              dataType: 'log',
+              dataString: `df_rum_harmonyos_log,sdk_data_id=${packageOne}.persisted-one value=1i 100`,
+              uuid: 'persisted-one',
+              time: 100
+            },
+            {
+              id: 102,
+              dataType: 'log',
+              dataString: `df_rum_harmonyos_log,sdk_data_id=${packageTwo}.persisted-two value=1i 101`,
+              uuid: 'persisted-two',
+              time: 101
+            },
+            {
+              id: 103,
+              dataType: 'log',
+              dataString: 'df_rum_harmonyos_log,sdk_data_id=raw-three value=1i 102',
+              uuid: 'raw-three',
+              time: 102
+            }
+          ]
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, state);
+      const firstPrepared = firstPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+
+      expect(firstPrepareResponse.ok).assertTrue();
+      expect(firstPrepared.packageId).assertEqual(packageOne);
+      expect(firstPrepared.rows.length).assertEqual(1);
+      expect(firstPrepared.needsPersistence).assertFalse();
+      expect(firstPrepared.deferredRows).assertEqual(2);
+      expect(firstPrepared.bodyPreview.includes(`sdk_data_id=${packageOne}.persisted-one`)).assertTrue();
+      expect(firstPrepared.bodyPreview.includes(packageTwo)).assertFalse();
+      expect(firstPrepared.bodyPreview.includes('raw-three')).assertFalse();
+
+      const rawPrepareResponse = handleSDKWorkerRequest({
+        id: 'upload-package-grouping-raw',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_PREPARE_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: {
+          roundId: start.roundId,
+          dataType: 'log',
+          rows: [{
+            id: 103,
+            dataType: 'log',
+            dataString: 'df_rum_harmonyos_log,sdk_data_id=raw-three value=1i 102',
+            uuid: 'raw-three',
+            time: 102
+          }]
+        } as SDKUploadPreparePageDTO as Object as SDKWorkerPayload
+      }, state);
+      const rawPrepared = rawPrepareResponse.payload as Object as SDKUploadPreparePageResultDTO;
+
+      expect(rawPrepareResponse.ok).assertTrue();
+      expect(rawPrepared.packageId === packageOne).assertFalse();
+      expect(rawPrepared.packageId === packageTwo).assertFalse();
+      expect(rawPrepared.needsPersistence).assertTrue();
+      expect(rawPrepared.bodyPreview.includes(`sdk_data_id=${rawPrepared.packageId}.raw-three`)).assertTrue();
     });
 
     it('dataUploadWorkerShouldStopAutomaticRetryAfterConfiguredLimit', 0, async () => {

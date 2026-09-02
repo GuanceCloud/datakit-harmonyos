@@ -9,8 +9,11 @@ FT_SDK_PRODUCT_NAME="${FT_SDK_PRODUCT_NAME:-ft_sdk}"
 FT_SDK_EXT_PRODUCT_NAME="${FT_SDK_EXT_PRODUCT_NAME:-ft_sdk_ext}"
 FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
-BUILD_MODE="${BUILD_MODE:-release}"
+BUILD_MODE="${BUILD_MODE:-debug}"
 MODULE_TYPE="${1:-agent}"
+# An explicit OHPM dist-tag to update after all selected modules publish
+# successfully. Leave it unset to publish without changing any existing tag.
+OHPM_PUBLISH_TAG_VALUE="${OHPM_PUBLISH_TAG:-${PUBLISH_TAG:-}}"
 OHPM_PUBLISH_ID_VALUE="${OHPM_PUBLISH_ID:-${PUBLISH_ID:-}}"
 OHPM_KEY_PATH_VALUE="${OHPM_KEY_PATH:-${KEY_PATH:-}}"
 OHPM_KEY_PASSPHRASE_VALUE="${OHPM_KEY_PASSPHRASE:-${KEY_PASSPHRASE:-}}"
@@ -108,6 +111,11 @@ trap cleanup EXIT
 read_version() {
   local package_json_path="$1"
   sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json_path" | head -n 1
+}
+
+read_package_name() {
+  local package_json_path="$1"
+  sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json_path" | head -n 1
 }
 
 ensure_publish_id() {
@@ -411,6 +419,18 @@ publish_har() {
   "$OHPM_BIN" publish "$har_path"
 }
 
+update_publish_tag() {
+  local package_name="$1"
+  local package_version="$2"
+  if [[ -z "$OHPM_PUBLISH_TAG_VALUE" ]]; then
+    return
+  fi
+
+  echo "Updating ${OHPM_PUBLISH_TAG_VALUE} to ${package_name}@${package_version}"
+  "$OHPM_BIN" dist-tags update "${package_name}@${package_version}" "$OHPM_PUBLISH_TAG_VALUE" \
+    --publish_registry "$REGISTRY"
+}
+
 publish_module() {
   local module_name="$1"
   local product_name
@@ -441,6 +461,16 @@ publish_module() {
   fi
 
   publish_har "$staged_har"
+  local package_json_path="$ROOT_DIR/${module_name}/oh-package.json5"
+  local package_name
+  package_name="$(read_package_name "$package_json_path")"
+  local package_version
+  package_version="$(read_version "$package_json_path")"
+  if [[ -z "$package_name" || -z "$package_version" ]]; then
+    echo "Error: unable to read package name or version from $package_json_path"
+    exit 1
+  fi
+  PUBLISHED_PACKAGES+=("${package_name}@${package_version}")
 }
 
 main() {
@@ -450,6 +480,8 @@ main() {
   set_key_passphrase
   ensure_ssh_agent
   set_registry
+
+  PUBLISHED_PACKAGES=()
 
   case "$MODULE_TYPE" in
     agent)
@@ -468,6 +500,16 @@ main() {
       publish_module "ft_native"
       ;;
   esac
+
+  # Move an explicitly requested tag only after the entire selected group has
+  # been published successfully.
+  if [[ -n "$OHPM_PUBLISH_TAG_VALUE" ]]; then
+    for package_spec in "${PUBLISHED_PACKAGES[@]}"; do
+      local package_name="${package_spec%@*}"
+      local package_version="${package_spec##*@}"
+      update_publish_tag "$package_name" "$package_version"
+    done
+  fi
 
   echo "Publish completed successfully for ${MODULE_TYPE}"
 }

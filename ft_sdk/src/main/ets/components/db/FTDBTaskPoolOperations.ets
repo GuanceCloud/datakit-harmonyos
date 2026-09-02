@@ -804,6 +804,13 @@ async function queryUploadDataInTaskPool(
         row.customDataType = storedType;
       }
       const rowBytes = estimateUploadTransportRowBytes(row);
+      if (rowBytes > maxBytes) {
+        // This row can never cross the Host-to-Worker transport boundary.
+        // Keep it cached, but do not let it block later uploadable rows.
+        result.hasMore = true;
+        result.byteLimitReached = true;
+        continue;
+      }
       if (result.byteCount + rowBytes > maxBytes) {
         result.hasMore = true;
         result.byteLimitReached = true;

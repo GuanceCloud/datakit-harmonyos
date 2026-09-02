@@ -1,4 +1,6 @@
 import { http } from '@kit.NetworkKit';
+import cryptoFramework from '@ohos.security.cryptoFramework';
+import { util } from '@kit.ArkTS';
 import { FTSDKConfig } from '../Configs';
 import { Constants } from '../Constants';
 import { HttpBuilder } from '../http/HttpBuilder';
@@ -6,11 +8,24 @@ import { FTInnerLogger } from '../log/FTLogger';
 import {
   RemoteDataFilterHttpClient,
   RemoteDataFilterHttpResponse,
+  RemoteDataFilterHash,
   RemoteDataFilterScheduler
 } from './RemoteDataFilterTypes';
 
 const TAG = 'FTRemoteDataFilterManager';
 const FALLBACK_REFRESH_DELAY_MS = 10_000;
+
+function defaultMd5(value: string): string {
+  const md = cryptoFramework.createMd('MD5');
+  const encoder = util.TextEncoder.create('utf-8');
+  md.updateSync({ data: encoder.encodeInto(value) });
+  const digest = md.digestSync().data;
+  let result = '';
+  for (let index = 0; index < digest.length; index++) {
+    result += digest[index].toString(16).padStart(2, '0');
+  }
+  return result;
+}
 
 class DefaultRemoteDataFilterHttpClient implements RemoteDataFilterHttpClient {
   async fetch(config: FTSDKConfig): Promise<RemoteDataFilterHttpResponse> {
@@ -52,24 +67,29 @@ export class FTRemoteDataFilterManager {
   private readonly onFiltersApplied: (filters: Map<string, Array<string>>) => void;
   private readonly httpClient: RemoteDataFilterHttpClient;
   private readonly scheduler: RemoteDataFilterScheduler;
+  private readonly hash: RemoteDataFilterHash;
   private timerId: number | null = null;
   private running: boolean = false;
   private closed: boolean = false;
   private endpointGeneration: number = 0;
   private refreshPending: boolean = false;
+  private lastPayloadMd5: string | null = null;
+  private lastRefreshDelayMs: number = FALLBACK_REFRESH_DELAY_MS;
 
   public constructor(
     config: FTSDKConfig,
     endpointAvailable: () => boolean,
     onFiltersApplied: (filters: Map<string, Array<string>>) => void,
     httpClient: RemoteDataFilterHttpClient = new DefaultRemoteDataFilterHttpClient(),
-    scheduler: RemoteDataFilterScheduler = new DefaultRemoteDataFilterScheduler()
+    scheduler: RemoteDataFilterScheduler = new DefaultRemoteDataFilterScheduler(),
+    hash: RemoteDataFilterHash = defaultMd5
   ) {
     this.config = config;
     this.endpointAvailable = endpointAvailable;
     this.onFiltersApplied = onFiltersApplied;
     this.httpClient = httpClient;
     this.scheduler = scheduler;
+    this.hash = hash;
   }
 
   /** Start the first pull immediately when an intake endpoint is configured. */
@@ -87,6 +107,8 @@ export class FTRemoteDataFilterManager {
     if (this.closed) {
       return Promise.resolve();
     }
+    this.lastPayloadMd5 = null;
+    this.lastRefreshDelayMs = FALLBACK_REFRESH_DELAY_MS;
     this.onFiltersApplied(new Map<string, Array<string>>());
     return this.requestRefresh();
   }
@@ -121,11 +143,20 @@ export class FTRemoteDataFilterManager {
         this.scheduleRefresh(FALLBACK_REFRESH_DELAY_MS);
         return;
       }
+      const payloadMd5 = this.hash(response.body);
+      if (payloadMd5 === this.lastPayloadMd5) {
+        // Identical bodies imply the same server-provided pull_interval, so
+        // preserve the requested cadence without parsing or reapplying rules.
+        this.scheduleRefresh(this.lastRefreshDelayMs);
+        return;
+      }
       const payload = FTRemoteDataFilterManager.parsePayload(response.body);
       if (payload === null) {
         this.scheduleRefresh(FALLBACK_REFRESH_DELAY_MS);
         return;
       }
+      this.lastPayloadMd5 = payloadMd5;
+      this.lastRefreshDelayMs = payload.refreshDelayMs;
       this.onFiltersApplied(payload.filters);
       this.scheduleRefresh(payload.refreshDelayMs);
     } catch (error) {

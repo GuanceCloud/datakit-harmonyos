@@ -49,6 +49,13 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
 `@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
+For cold-launch phase timing, initialize SDK/RUM at `AbilityStage` (and any
+background Service/push entry), then integrate the core hooks in `AbilityStage`
+and the first `UIAbility`; API 22 applications also use `ft_sdk_ext` to observe
+the real first draw before `loadContent()`. See the module [cold-launch timing
+guide](ft_sdk/README.md#cold-launch-timing) and [API 22 first-frame
+guide](ft_sdk_ext/README.md#api-22-first-frame-cold-launch-timing).
+
 ## Bytecode HAR Integration
 
 SDK HARs are configured to build as bytecode HARs. An application that depends on any of these packages must enable normalized OHMUrl in its root `build-profile.json5`:
@@ -154,6 +161,77 @@ The plugin rewrites direct calls in the application's `src/main/ets` sources wit
 | Plugin absent | Disabled; the SDK emits one diagnostic after log configuration | Controlled by `setEnableCustomLog(...)` |
 
 Without the plugin, the SDK deliberately does not pretend to collect console logs. Use `FTLogger` for manual reporting, or add the plugin when automatic coverage is required. See the [core SDK guide](ft_sdk/README.md#automatic-console-and-hilog-collection) for verification steps and HiLog privacy behavior.
+
+## Automatic View Filtering
+
+When automatic View tracking is enabled, Router pages and `Navigation`
+destinations can be independently renamed or filtered. Return a `HandlerView`
+to collect the automatic View; return `null` to skip it. With no handler set,
+the SDK keeps the default behavior and reports the final route segment.
+
+```ts
+import {
+  FTRUMConfig,
+  FTViewRouterTrackingHandler,
+  FTViewNavigationTrackingHandler,
+  HandlerView
+} from '@guancecloud/ft_sdk/Index'
+
+const routerHandler: FTViewRouterTrackingHandler = {
+  resolveHandlerView: (routeName: string): HandlerView | null => {
+    if (routeName === 'LoginPage') {
+      return null // Do not collect this Router page
+    }
+    return new HandlerView(`Router_${routeName}`)
+  }
+}
+
+const navigationHandler: FTViewNavigationTrackingHandler = {
+  resolveHandlerView: (destinationName: string): HandlerView | null => {
+    return destinationName === 'OrderDetail'
+      ? new HandlerView('Order Detail')
+      : null
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserView(true)
+  .setViewRouterTrackingHandler(routerHandler)
+  .setViewNavigationTrackingHandler(navigationHandler)
+```
+
+## Automatic Action Filtering
+
+When automatic Action tracking is enabled, configure
+`FTRUMConfig.setActionTrackingHandler(...)` to filter click Actions.
+The handler is called for each automatically tracked user operation. Return
+`null` to skip collection; return `undefined` to continue through the SDK's
+original automatic Action collection path, including name, properties,
+position, and View association.
+
+```ts
+import {
+  ActionEventWrapper,
+  FTActionTrackingHandler,
+  FTRUMConfig
+} from '@guancecloud/ft_sdk/Index'
+
+const actionHandler: FTActionTrackingHandler = {
+  resolveHandlerAction: (event: ActionEventWrapper): null | undefined => {
+    // Do not collect clicks from this component.
+    if (event.getSource()?.getId() === 'ignore_action_view') {
+      return null
+    }
+
+    // Continue through the original automatic Action collection path.
+    return undefined
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserAction(true)
+  .setActionTrackingHandler(actionHandler)
+```
 
 ## SDK Debug Logs
 

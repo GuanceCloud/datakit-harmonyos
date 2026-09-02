@@ -46,8 +46,10 @@ import {
   SDKWorkerResponse
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
+import { DeviceUtils } from '../utils/DeviceUtils';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
+import { ErrorMonitorType } from './enum/ErrorMonitorType';
 import { DeviceMetricsMonitorType } from './enum/DeviceMetricsMonitorType';
 import { Context } from '@kit.AbilityKit';
 import { RunnerCompleteCallBack } from './callback/RunnerCompleteCallBack';
@@ -141,6 +143,8 @@ interface ErrorTags {
   error_source?: string;
   error_type?: string;
   error_situation?: string;
+  memory_total?: string;
+  locale?: string;
 }
 
 /**
@@ -149,11 +153,14 @@ interface ErrorTags {
 interface ErrorFields {
   error_message?: string;
   error_stack?: string;
-  memory_total?: string;
   memory_use?: number;
   cpu_use?: number;
   battery_use?: number;
-  locale?: string;
+}
+
+interface ErrorDeviceData {
+  tags: SDKStringRecord;
+  fields: Record<string, object>;
 }
 
 /**
@@ -206,6 +213,14 @@ interface PendingRumResourceWorkerCommand {
 
 interface PendingRumErrorWorkerCommand {
   payload: SDKRumErrorCommandDTO;
+}
+
+/** A closed-in-memory Action waiting for its resource counters to settle in RDB. */
+interface PendingActionCloseState {
+  actionBean: ActionBean;
+  forceClose: boolean;
+  closeInFlight: boolean;
+  waitingForResource: boolean;
 }
 
 interface RumSemanticJournalEntry {
@@ -319,8 +334,17 @@ export class FTRUMInnerManager {
   private pendingResourceCommands: PendingRumResourceWorkerCommand[] = [];
   private pendingErrorCommands: PendingRumErrorWorkerCommand[] = [];
   private resourceContextById: Map<string, SDKRumResourceContextDTO> = new Map();
+  /** Resource IDs with an accepted start command; guards duplicate interceptors. */
+  private startedResourceIds: Set<string> = new Set();
+  private startedResourceActionIds: Map<string, string> = new Map();
   private resourceContentSubmittedIds: Set<string> = new Set();
+  private resourceNetStateSubmittedIds: Set<string> = new Set();
   private resourceStoppedIds: Set<string> = new Set();
+  /** Actions that are closed to new events but not yet durably closed in RDB. */
+  private pendingActionCloseStates: Map<string, PendingActionCloseState> = new Map();
+  private pendingActionCloseRetryTimer: number | null = null;
+  /** Allows an early close request to await the initial Action insert. */
+  private pendingActionInsertions: Map<string, Promise<boolean>> = new Map();
   /**
    * Commands that own volatile Resource/Counter state remain journaled until a
    * counter-flush barrier is applied to DB. A Worker response alone is not a
@@ -357,6 +381,7 @@ export class FTRUMInnerManager {
   private static readonly RUM_RESOURCE_DRAFT_HIGH_WATERMARK: number = 5000;
   private static readonly RUM_JOURNAL_COMPACTION_MIN_PREFIX: number = 128;
   private static readonly RUM_STATE_EVICTION_LOG_INTERVAL_MS: number = 10000;
+  private static readonly PENDING_ACTION_CLOSE_RETRY_MS: number = 100;
   private lastRumStateEvictionLogAt: number = 0;
   
   // Frequency protection
@@ -474,7 +499,8 @@ export class FTRUMInnerManager {
     }
   }
 
-  public markRumResourcesCompleted(resourceIds: string[]): void {
+  public markRumResourcesCompleted(resourceIds: string[], counterDeltasApplied: boolean = false): void {
+    let releasedResourceLifecycle = false;
     for (let i = 0; i < resourceIds.length; i++) {
       const resourceId = resourceIds[i];
       if (resourceId && resourceId.length > 0) {
@@ -482,7 +508,17 @@ export class FTRUMInnerManager {
         // Only the resources explicitly completed by this worker response are
         // considered for cleanup. Do not scan every outstanding draft here.
         this.cleanupCompletedResourceDraftId(resourceId);
+        if (counterDeltasApplied) {
+          // This response carried the matching counter barrier, which was
+          // committed before this callback. It is now safe to release the
+          // Host-side guard for this Resource.
+          this.clearResourceLifecycleRegistration(resourceId);
+          releasedResourceLifecycle = true;
+        }
       }
+    }
+    if (releasedResourceLifecycle) {
+      this.retryPendingActionClosures(true);
     }
     this.pruneCommittedRumSemanticPrefix();
   }
@@ -661,9 +697,55 @@ export class FTRUMInnerManager {
     }
     this.resourceDraftIdsById.delete(resourceId);
     this.resourceContentSubmittedIds.delete(resourceId);
+    this.resourceNetStateSubmittedIds.delete(resourceId);
     this.resourceStoppedIds.delete(resourceId);
     this.resourceContextById.delete(resourceId);
     this.completedRumResourceIds.delete(resourceId);
+  }
+
+  private clearResourceLifecycleRegistration(resourceId: string): void {
+    this.startedResourceIds.delete(resourceId);
+    this.startedResourceActionIds.delete(resourceId);
+  }
+
+  private hasStartedResourceForAction(actionId: string): boolean {
+    if (!actionId || actionId.length === 0) {
+      return false;
+    }
+    const resourceActionIds = Array.from(this.startedResourceActionIds.values());
+    for (let i = 0; i < resourceActionIds.length; i++) {
+      if (resourceActionIds[i] === actionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Releases completed Resources once a later counter-flush reaches RDB. */
+  private releaseCompletedResourceLifecycleRegistrations(
+    deltas: SDKRumCounterDeltaDTO[]
+  ): boolean {
+    const actionIds = new Set<string>();
+    for (let i = 0; i < deltas.length; i++) {
+      const actionId = deltas[i].actionId;
+      if (actionId && actionId.length > 0) {
+        actionIds.add(actionId);
+      }
+    }
+    if (actionIds.size === 0) {
+      return false;
+    }
+    let released = false;
+    const completedResourceIds = Array.from(this.completedRumResourceIds.values());
+    for (let i = 0; i < completedResourceIds.length; i++) {
+      const resourceId = completedResourceIds[i];
+      const actionId = this.startedResourceActionIds.get(resourceId);
+      if (actionId && actionIds.has(actionId)) {
+        this.clearResourceLifecycleRegistration(resourceId);
+        released = true;
+      }
+    }
+    return released;
   }
 
   private hasPendingOrJournaledResource(resourceId: string): boolean {
@@ -716,8 +798,10 @@ export class FTRUMInnerManager {
       }
       this.resourceDraftIdsById.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
+      this.clearResourceLifecycleRegistration(resourceId);
       if (this.resourceContentSubmittedIds.has(resourceId) && this.resourceStoppedIds.has(resourceId)) {
         this.resourceContentSubmittedIds.delete(resourceId);
+        this.resourceNetStateSubmittedIds.delete(resourceId);
         this.resourceStoppedIds.delete(resourceId);
         this.resourceContextById.delete(resourceId);
       }
@@ -764,7 +848,9 @@ export class FTRUMInnerManager {
         continue;
       }
       this.resourceDraftIdsById.delete(resourceId);
+      this.clearResourceLifecycleRegistration(resourceId);
       this.resourceContentSubmittedIds.delete(resourceId);
+      this.resourceNetStateSubmittedIds.delete(resourceId);
       this.resourceStoppedIds.delete(resourceId);
       this.resourceContextById.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
@@ -1116,8 +1202,14 @@ export class FTRUMInnerManager {
       // EVENT_CONSUMER returns finalized, zero-filtered View/Action deltas.
       const taskPoolDeltas = deltas as Object as FTDBTaskPoolRumCounterDeltaDTO[];
       await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, taskPoolDeltas);
+      const releasedResourceLifecycle = this.releaseCompletedResourceLifecycleRegistrations(deltas);
       if (payload.needsActionCloseCheck === true) {
         this.checkActionClose();
+      }
+      if (payload.needsActionCloseCheck === true || releasedResourceLifecycle) {
+        // A closed Action may no longer be active after the next click. Retry
+        // its own close transition once the resource decrement is durable.
+        this.retryPendingActionClosures(true);
       }
       if (payload.needsRumDataGenerate === true) {
         this.generateRumData();
@@ -1585,81 +1677,40 @@ export class FTRUMInnerManager {
       // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
       const extraAttr = viewBean.getExtraAttr();
       
-      // Define MonitorValue interface locally (same as in ViewBean.ets)
-      interface MonitorValue {
-        value: string;
-      }
-      
       // CPU monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.CPU)) {
         const cpuTickCountPerSecond = extraAttr.get("cpu_tick_count_per_second");
         const cpuTickCount = extraAttr.get("cpu_tick_count");
-        if (cpuTickCountPerSecond) {
-          const monitorValue = cpuTickCountPerSecond as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            fieldsMap.set(Constants.KEY_CPU_TICK_COUNT_PER_SECOND, monitorValue.value);
-          }
-        }
-        if (cpuTickCount) {
-          const monitorValue = cpuTickCount as MonitorValue;
-          if (monitorValue && monitorValue.value && Number.parseFloat(monitorValue.value) > -1) {
-            fieldsMap.set(Constants.KEY_CPU_TICK_COUNT, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(
+          fieldsMap,
+          Constants.KEY_CPU_TICK_COUNT_PER_SECOND,
+          cpuTickCountPerSecond
+        );
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_CPU_TICK_COUNT, cpuTickCount);
       }
       
       // Memory monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.MEMORY)) {
-        const memoryMax = extraAttr.get(Constants.KEY_BATTERY_CURRENT_MAX);
-        const memoryAvg = extraAttr.get(Constants.KEY_BATTERY_CURRENT_AVG);
-        if (memoryMax) {
-          const monitorValue = memoryMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_MEMORY_MAX, monitorValue.value);
-          }
-        }
-        if (memoryAvg) {
-          const monitorValue = memoryAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_MEMORY_AVG, monitorValue.value);
-          }
-        }
+        const memoryMax = extraAttr.get(Constants.KEY_MEMORY_MAX);
+        const memoryAvg = extraAttr.get(Constants.KEY_MEMORY_AVG);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_MEMORY_MAX, memoryMax);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_MEMORY_AVG, memoryAvg);
       }
       
       // Battery monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.BATTERY)) {
         const batteryCurrentAvg = extraAttr.get(Constants.KEY_BATTERY_CURRENT_AVG);
         const batteryCurrentMax = extraAttr.get(Constants.KEY_BATTERY_CURRENT_MAX);
-        if (batteryCurrentAvg) {
-          const monitorValue = batteryCurrentAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_BATTERY_CURRENT_AVG, monitorValue.value);
-          }
-        }
-        if (batteryCurrentMax) {
-          const monitorValue = batteryCurrentMax as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_BATTERY_CURRENT_MAX, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_BATTERY_CURRENT_AVG, batteryCurrentAvg, true);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_BATTERY_CURRENT_MAX, batteryCurrentMax, true);
       }
       
       // FPS monitoring (aligned with Android: if (FTMonitorManager.get().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)))
       if (FTMonitorManager.getInstance().isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
         const fpsAvg = extraAttr.get("fps_avg");
         const fpsMini = extraAttr.get("fps_mini");
-        if (fpsAvg) {
-          const monitorValue = fpsAvg as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_FPS_AVG, monitorValue.value);
-          }
-        }
-        if (fpsMini) {
-          const monitorValue = fpsMini as MonitorValue;
-          if (monitorValue && monitorValue.value) {
-            fieldsMap.set(Constants.KEY_FPS_MINI, monitorValue.value);
-          }
-        }
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_FPS_AVG, fpsAvg);
+        this.appendNumericViewMetricField(fieldsMap, Constants.KEY_FPS_MINI, fpsMini);
       }
       
       // Session error timestamp (aligned with Android: if (bean.getLastErrorTime() > 0))
@@ -1692,14 +1743,14 @@ export class FTRUMInnerManager {
           const value = properties[key];
           // Only add primitive types to avoid [object Object] issues
           if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-            fieldsMap.set(`view_property_${key}`, String(value));
+            fieldsMap.set(key, String(value));
           } else if (typeof value === 'object' && value !== null) {
             // If object has 'value' property (like MonitorValue), extract it directly
             if (value['value'] !== undefined) {
-              fieldsMap.set(`view_property_${key}`, String(value['value']));
+              fieldsMap.set(key, String(value['value']));
             } else {
               // Convert other objects to JSON string
-              fieldsMap.set(`view_property_${key}`, JSON.stringify(value));
+              fieldsMap.set(key, JSON.stringify(value));
             }
           }
         }
@@ -1736,6 +1787,28 @@ export class FTRUMInnerManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
       // Remove from both sets if insert failed, so it can be retried
+    }
+  }
+
+  /**
+   * Monitor samples begin as primitive numbers in ActiveViewBean, then are
+   * persisted by ViewBean as `{ value: string }`. Accept both representations
+   * so a View can be serialized before or after its database round trip.
+   */
+  private appendNumericViewMetricField(
+    fieldsMap: Map<string, string>,
+    fieldName: string,
+    rawValue: object | undefined,
+    allowNegative: boolean = false
+  ): void {
+    if (rawValue === undefined || rawValue === null) {
+      return;
+    }
+    const monitorValue = rawValue as MonitorValue;
+    const scalarValue = monitorValue.value === undefined ? rawValue : monitorValue.value;
+    const value = Number.parseFloat(String(scalarValue));
+    if (Number.isFinite(value) && (allowNegative || value >= 0)) {
+      fieldsMap.set(fieldName, String(value));
     }
   }
 
@@ -1821,13 +1894,22 @@ export class FTRUMInnerManager {
       clearTimeout(this.rumSemanticReplayTimer);
       this.rumSemanticReplayTimer = null;
     }
+    if (this.pendingActionCloseRetryTimer !== null) {
+      clearTimeout(this.pendingActionCloseRetryTimer);
+      this.pendingActionCloseRetryTimer = null;
+    }
     this.pendingRumCounterUpdates.clear();
     this.pendingCompletedActions = [];
     this.pendingResourceCommands = [];
     this.pendingErrorCommands = [];
     this.resourceContextById.clear();
+    this.startedResourceIds.clear();
+    this.startedResourceActionIds.clear();
     this.resourceContentSubmittedIds.clear();
+    this.resourceNetStateSubmittedIds.clear();
     this.resourceStoppedIds.clear();
+    this.pendingActionCloseStates.clear();
+    this.pendingActionInsertions.clear();
     this.rumSemanticJournal = [];
     this.rumSemanticJournalHead = 0;
     this.rumSemanticJournalByRequestId.clear();
@@ -2223,6 +2305,10 @@ export class FTRUMInnerManager {
       // Set tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       
+      // Begin the View-scoped device metrics collection before the View is persisted.
+      FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
+      this.collectInitialViewMetrics(this.activeView);
+
       // Initialize view
       this.initView(this.activeView);
       this.generateRumData();
@@ -2276,9 +2362,6 @@ export class FTRUMInnerManager {
       
       // Update tags
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
-      
-      // Attach monitor data
-      FTMonitorManager.getInstance().attachMonitorData(this.activeView);
       
       // Close view
       this.activeView.close();
@@ -2913,11 +2996,18 @@ export class FTRUMInnerManager {
    */
   public startResource(resourceId: string, property: Record<string, object> = {}): void {
     try {
+      if (this.startedResourceIds.has(resourceId)) {
+        FTInnerLogger.d(TAG, `Duplicate resource start ignored: ${resourceId}`);
+        return;
+      }
       // Refresh session
       this.checkSessionRefresh(true);
 
       const context = this.createCurrentResourceContext();
+      this.startedResourceIds.add(resourceId);
+      this.startedResourceActionIds.set(resourceId, context.actionId);
       this.resourceContentSubmittedIds.delete(resourceId);
+      this.resourceNetStateSubmittedIds.delete(resourceId);
       this.resourceStoppedIds.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
       this.resourceDraftIdsById.delete(resourceId);
@@ -2954,6 +3044,10 @@ export class FTRUMInnerManager {
     property: Record<string, object> = {}
   ): void {
     try {
+      if (this.resourceStoppedIds.has(resourceId)) {
+        FTInnerLogger.d(TAG, `Duplicate resource stop ignored: ${resourceId}`);
+        return;
+      }
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext(fallbackActionId);
       this.updateResourceContextMemoryOnStop(context);
@@ -3008,6 +3102,26 @@ export class FTRUMInnerManager {
         FTInnerLogger.d(TAG, ` Session will not collect error data: sessionId=${this.sessionId}, collectType=DROP`);
         return;
       }
+
+      const errorDeviceData = this.getErrorDeviceData();
+      const monitorFields = errorDeviceData.fields;
+      let effectiveProperty: Record<string, object> | null = actualProperty;
+      const monitorFieldKeys = Object.keys(monitorFields);
+      if (monitorFieldKeys.length > 0) {
+        const mergedProperty: Record<string, object> = {};
+        if (actualProperty !== null) {
+          const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+          for (let i = 0; i < propertyKeys.length; i++) {
+            const key = propertyKeys[i];
+            mergedProperty[key] = actualProperty[key];
+          }
+        }
+        for (let i = 0; i < monitorFieldKeys.length; i++) {
+          const key = monitorFieldKeys[i];
+          mergedProperty[key] = monitorFields[key];
+        }
+        effectiveProperty = mergedProperty;
+      }
       
 	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
 	        // Exclude the scenario of reporting the last native crash error
@@ -3033,10 +3147,11 @@ export class FTRUMInnerManager {
 	          log,
 	          message,
 	          errorType,
-	          errorSource: ErrorSource.LOGGER.toString(),
-	          appState: state.toString(),
-          property: this.propertyToRecord(actualProperty),
-	          time: actualDateline,
+          errorSource: ErrorSource.LOGGER.toString(),
+          appState: state.toString(),
+          property: this.propertyToRecord(effectiveProperty),
+          deviceTags: errorDeviceData.tags,
+          time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
 	        }, 'rum.error');
@@ -3062,6 +3177,12 @@ export class FTRUMInnerManager {
       // Layer 3: RUM association
       this.attachRUMRelative(allTags,true)
 
+      const errorDeviceTagKeys = Object.keys(errorDeviceData.tags);
+      for (let i = 0; i < errorDeviceTagKeys.length; i++) {
+        const key = errorDeviceTagKeys[i];
+        allTags[key] = errorDeviceData.tags[key];
+      }
+
       // Layer 4: Error-specific tags
       if (errorTagsData.error_source) allTags[Constants.KEY_RUM_ERROR_SOURCE] = errorTagsData.error_source;
       if (errorTagsData.error_type) allTags[Constants.KEY_RUM_ERROR_TYPE] = errorTagsData.error_type;
@@ -3080,11 +3201,11 @@ export class FTRUMInnerManager {
       if (errorFieldsData.error_stack) allFields[Constants.KEY_RUM_ERROR_STACK] = errorFieldsData.error_stack;
 
       // Handle additional properties
-      if (actualProperty != null) {
-        const propertyKeys = FTRUMInnerManager.getObjectKeys(actualProperty);
+      if (effectiveProperty != null) {
+        const propertyKeys = FTRUMInnerManager.getObjectKeys(effectiveProperty);
         for (let i = 0; i < propertyKeys.length; i++) {
           const key = propertyKeys[i];
-          const obj = (actualProperty as Record<string, object>)[key];
+          const obj = (effectiveProperty as Record<string, object>)[key];
           // Extract value from PropertyWrapper objects (which have a .value property)
           if (obj && typeof obj === 'object') {
             try {
@@ -3139,14 +3260,25 @@ export class FTRUMInnerManager {
    */
   public addResource(resourceId: string, params: ResourceParams, netStatusBean: NetStatusBean): void {
     try {
-      const context = this.createCurrentResourceContext();
-      this.resourceContextById.set(resourceId, context);
+      if (this.resourceContentSubmittedIds.has(resourceId)) {
+        FTInnerLogger.d(TAG, `Duplicate resource content ignored: ${resourceId}`);
+        return;
+      }
+      // A resource can finish after another action starts. Keep the context
+      // captured when this resource started so its resource and network-error
+      // events remain associated with the initiating action.
+      const storedContext = this.resourceContextById.get(resourceId);
+      const context = storedContext || this.createCurrentResourceContext();
+      if (!storedContext) {
+        this.resourceContextById.set(resourceId, context);
+      }
       const collectType = this.checkSessionWillCollect(context.sessionId);
+      const resourceParams = this.createResourceParamsDTO(resourceId, params);
       this.submitResourceWorkerCommand({
         commandType: 'add',
         resourceId,
         context,
-        params: this.createResourceParamsDTO(resourceId, params),
+        params: resourceParams,
         netStatus: this.createResourceNetStatusDTO(netStatusBean),
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
@@ -3154,6 +3286,7 @@ export class FTRUMInnerManager {
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.add');
       this.markResourceContentSubmitted(resourceId);
+      this.resourceNetStateSubmittedIds.add(resourceId);
     } catch (error) {
       FTInnerLogger.e(TAG, `Error adding resource data for ${resourceId}: ${error}`);
     }
@@ -3168,15 +3301,20 @@ export class FTRUMInnerManager {
    */
   public setTransformContent(resourceId: string, params: ResourceParams): void {
     try {
+      if (this.resourceContentSubmittedIds.has(resourceId)) {
+        FTInnerLogger.d(TAG, `Duplicate resource content ignored: ${resourceId}`);
+        return;
+      }
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext();
       this.resourceContextById.set(resourceId, context);
       const collectType = this.checkSessionWillCollect(context.sessionId);
+      const resourceParams = this.createResourceParamsDTO(resourceId, params);
       this.submitResourceWorkerCommand({
         commandType: 'setContent',
         resourceId,
         context,
-        params: this.createResourceParamsDTO(resourceId, params),
+        params: resourceParams,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
@@ -3213,6 +3351,10 @@ export class FTRUMInnerManager {
    */
   public setNetState(resourceId: string, netStatusBean: NetStatusBean): void {
     try {
+      if (this.resourceNetStateSubmittedIds.has(resourceId)) {
+        FTInnerLogger.d(TAG, `Duplicate resource network state ignored: ${resourceId}`);
+        return;
+      }
       FTInnerLogger.d(TAG, `setNetState: resourceId=${resourceId}, netStatus=${JSON.stringify(netStatusBean.toJSON())}`);
       const storedContext = this.resourceContextById.get(resourceId);
       const context = storedContext || this.createCurrentResourceContext();
@@ -3225,6 +3367,7 @@ export class FTRUMInnerManager {
         eventTime: Utils.getCurrentNanoTime(),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.net');
+      this.resourceNetStateSubmittedIds.add(resourceId);
     } catch (error) {
       FTInnerLogger.e(TAG, `Error setting network status for ${resourceId}: ${error}`);
     }
@@ -3384,8 +3527,8 @@ export class FTRUMInnerManager {
             }
           }
           this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
-          // FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
-          FTMonitorManager.getInstance().attachMonitorData(this.activeView);
+          FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
+          this.collectInitialViewMetrics(this.activeView);
           this.initView(this.activeView);
           
           FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
@@ -3492,6 +3635,16 @@ export class FTRUMInnerManager {
     }
   }
 
+  /**
+   * Match Android's create-view behavior without blocking navigation on the
+   * Worker round trip. A final snapshot is still captured before View close.
+   */
+  private collectInitialViewMetrics(activeViewBean: ActiveViewBean): void {
+    void FTMonitorManager.getInstance().attachMonitorData(activeViewBean, false).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Failed to capture initial View metrics: ${error.message}`);
+    });
+  }
+
   private async initViewAsync(context: Context, viewBean: ViewBean): Promise<void> {
     try {
       const result = await FTDBTaskPoolExecutor.upsertRumView(context, viewBean);
@@ -3511,7 +3664,8 @@ export class FTRUMInnerManager {
    */
   private async closeView(activeViewBean: ActiveViewBean): Promise<void> {
     try {
-      // Remove monitor first
+      // Capture the final View-scoped sample before stopping its monitor.
+      await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
       FTMonitorManager.getInstance().removeMonitor(activeViewBean.getId());
       
       // Convert to ViewBean to get closure data
@@ -3611,14 +3765,22 @@ export class FTRUMInnerManager {
   }
 
   private async insertRumActionAsync(context: Context, actionBean: ActionBean, actionName: string): Promise<void> {
+    const actionId = actionBean.getId();
+    const insertion = FTDBTaskPoolExecutor.insertRumAction(context, actionBean).catch((error: Error): boolean => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-ERROR] Error in RUM DB taskpool: ${errorMessage}`);
+      return false;
+    });
+    this.pendingActionInsertions.set(actionId, insertion);
     try {
-      const result = await FTDBTaskPoolExecutor.insertRumAction(context, actionBean);
+      const result = await insertion;
       if (!result) {
         FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-5] startAction insertion failed: ${actionName}`);
       }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-ERROR] Error in RUM DB taskpool: ${errorMessage}`);
+    } finally {
+      if (this.pendingActionInsertions.get(actionId) === insertion) {
+        this.pendingActionInsertions.delete(actionId);
+      }
     }
   }
   
@@ -3629,38 +3791,135 @@ export class FTRUMInnerManager {
   private closeAction(activeActionBean: ActiveActionBean, isTimeout: boolean): void {
     try {
       const actionBean = activeActionBean.convertToActionBean();
-
-      // Close action in database asynchronously, then generate RUM data after completion
-      // This ensures the action is written to database before querying
-      // Aligned with Android: if timeout, force=true; otherwise, force=false (will check pending_resource in database)
-      if (this.context) {
-        this.closeRumActionAsync(this.context, actionBean, isTimeout);
+      const actionId = actionBean.getId();
+      const pending = this.pendingActionCloseStates.get(actionId);
+      if (pending) {
+        pending.forceClose = pending.forceClose || isTimeout;
       } else {
-        // If no context, still try to generate RUM data (may have other actions to process)
-        this.generateRumData();
+        this.pendingActionCloseStates.set(actionId, {
+          actionBean,
+          forceClose: isTimeout,
+          closeInFlight: false,
+          waitingForResource: false
+        });
       }
-      
+      this.tryClosePendingAction(actionId);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action: ${error}`);
     }
   }
 
-  private async closeRumActionAsync(context: Context, actionBean: ActionBean, isTimeout: boolean): Promise<void> {
-    try {
-      await FTDBTaskPoolExecutor.closeRumAction(
-        context,
-        actionBean.getId(),
-        actionBean.getDuration(),
-        isTimeout
-      );
-      // Generate RUM data after action is closed in database.
+  private async tryClosePendingAction(actionId: string): Promise<void> {
+    const pending = this.pendingActionCloseStates.get(actionId);
+    if (!pending || pending.closeInFlight) {
+      return;
+    }
+    if (!this.context) {
+      this.pendingActionCloseStates.delete(actionId);
       this.generateRumData();
+      return;
+    }
+
+    // A resource is registered synchronously on the Host, before its worker
+    // counter delta reaches RDB. Do not close the Action in that gap.
+    if (!pending.forceClose && this.hasStartedResourceForAction(actionId)) {
+      pending.waitingForResource = true;
+      this.schedulePendingActionCloseRetry();
+      return;
+    }
+
+    pending.closeInFlight = true;
+    try {
+      const insertion = this.pendingActionInsertions.get(actionId);
+      if (insertion) {
+        const inserted = await insertion;
+        if (!inserted) {
+          FTInnerLogger.e(TAG, `Action insert failed before close: ${actionId}`);
+          this.pendingActionCloseStates.delete(actionId);
+          return;
+        }
+      }
+
+      const closeResult = await FTDBTaskPoolExecutor.closeRumAction(
+        this.context,
+        actionId,
+        pending.actionBean.getDuration(),
+        pending.forceClose
+      );
+      if (closeResult.wasClosed) {
+        this.pendingActionCloseStates.delete(actionId);
+        // Generate the Action only after its close transition is durable.
+        this.generateRumData();
+        return;
+      }
+
+      pending.waitingForResource = closeResult.hadPendingResource;
+      this.schedulePendingActionCloseRetry();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action in database: ${errorMessage}`);
-      // Still try to generate RUM data even if closeAction failed.
-      this.generateRumData();
+      this.schedulePendingActionCloseRetry();
+    } finally {
+      const current = this.pendingActionCloseStates.get(actionId);
+      if (current) {
+        current.closeInFlight = false;
+      }
     }
+  }
+
+  private retryPendingActionClosures(afterResourceCounterCommit: boolean = false): void {
+    const now = Utils.getCurrentNanoTime();
+    const pendingStates = Array.from(this.pendingActionCloseStates.entries());
+    for (let i = 0; i < pendingStates.length; i++) {
+      const actionId = pendingStates[i][0];
+      const pending = pendingStates[i][1];
+      if (!pending.forceClose &&
+        now - pending.actionBean.getStartTime() >= ActiveActionBean.ACTION_NEED_WAIT_TIME_OUT) {
+        pending.forceClose = true;
+        pending.waitingForResource = false;
+      }
+      if (pending.waitingForResource && !pending.forceClose && !afterResourceCounterCommit) {
+        continue;
+      }
+      pending.waitingForResource = false;
+      this.tryClosePendingAction(actionId);
+    }
+    if (this.pendingActionCloseStates.size > 0) {
+      this.schedulePendingActionCloseRetry();
+    }
+  }
+
+  private schedulePendingActionCloseRetry(): void {
+    if (this.pendingActionCloseStates.size === 0 || this.pendingActionCloseRetryTimer !== null) {
+      return;
+    }
+    const now = Utils.getCurrentNanoTime();
+    const pendingStates = Array.from(this.pendingActionCloseStates.values());
+    let delayMs = FTRUMInnerManager.PENDING_ACTION_CLOSE_RETRY_MS;
+    let allWaitingForResource = pendingStates.length > 0;
+    for (let i = 0; i < pendingStates.length; i++) {
+      const pending = pendingStates[i];
+      if (!pending.waitingForResource || pending.forceClose) {
+        allWaitingForResource = false;
+        break;
+      }
+      const remainingNs = pending.actionBean.getStartTime() +
+        ActiveActionBean.ACTION_NEED_WAIT_TIME_OUT - now;
+      const remainingMs = Math.max(1, Math.ceil(remainingNs / 1000000));
+      if (i === 0 || remainingMs < delayMs) {
+        delayMs = remainingMs;
+      }
+    }
+    // Resource completion wakes the state machine through the counter-flush
+    // callback. When every Action is only waiting for a resource, sleep until
+    // its force-close deadline instead of polling the database.
+    if (!allWaitingForResource) {
+      delayMs = FTRUMInnerManager.PENDING_ACTION_CLOSE_RETRY_MS;
+    }
+    this.pendingActionCloseRetryTimer = setTimeout(() => {
+      this.pendingActionCloseRetryTimer = null;
+      this.retryPendingActionClosures();
+    }, delayMs) as number;
   }
   
   /**
@@ -4243,6 +4502,10 @@ export class FTRUMInnerManager {
         clearTimeout(this.rumSemanticReplayTimer);
         this.rumSemanticReplayTimer = null;
       }
+      if (this.pendingActionCloseRetryTimer !== null) {
+        clearTimeout(this.pendingActionCloseRetryTimer);
+        this.pendingActionCloseRetryTimer = null;
+      }
       this.flushErrorWorkerCommandBatch('rum.shutdown');
       this.flushResourceWorkerCommandBatch('rum.shutdown');
       this.flushCompletedActionWorkerBatch('rum.shutdown');
@@ -4250,8 +4513,13 @@ export class FTRUMInnerManager {
       this.pendingResourceCommands = [];
       this.pendingErrorCommands = [];
       this.resourceContextById.clear();
+      this.startedResourceIds.clear();
+      this.startedResourceActionIds.clear();
       this.resourceContentSubmittedIds.clear();
+      this.resourceNetStateSubmittedIds.clear();
       this.resourceStoppedIds.clear();
+      this.pendingActionCloseStates.clear();
+      this.pendingActionInsertions.clear();
       this.rumSemanticJournal = [];
       this.rumSemanticJournalHead = 0;
       this.rumSemanticJournalByRequestId.clear();
@@ -4671,10 +4939,7 @@ export class FTRUMInnerManager {
   }
 
   /**
-   * Build Error-specific fields
-   * Note: This method is called from addError which is async, 
-   * so we don't populate device info here to avoid double async calls.
-   * Device info should be gathered in the caller.
+   * Build Error-specific fields.
    * @param message Error message
    * @param log Error stack trace
    * @returns Error fields object
@@ -4683,9 +4948,28 @@ export class FTRUMInnerManager {
     const fields: ErrorFields = {};
     fields.error_message = message;
     fields.error_stack = log;
-    // Note: memory_total, memory_use, cpu_use, battery_use, locale 
-    // should be populated in the caller (addError method)
     return fields;
+  }
+
+  /** Capture Error-only device tags and monitor fields on the host thread. */
+  private getErrorDeviceData(): ErrorDeviceData {
+    const tags: SDKStringRecord = {};
+    const locale = DeviceUtils.getSystemLocale();
+    if (locale.length > 0) {
+      tags[Constants.KEY_DEVICE_LOCALE] = locale;
+    }
+
+    if (FTMonitorManager.getInstance().isErrorMonitorType(ErrorMonitorType.MEMORY)) {
+      const memoryTotalGB = DeviceUtils.getMemoryTotalGB();
+      if (memoryTotalGB > 0) {
+        tags[Constants.KEY_MEMORY_TOTAL] = `${memoryTotalGB}GB`;
+      }
+    }
+
+    return {
+      tags,
+      fields: FTMonitorManager.getInstance().getErrorMonitorData()
+    };
   }
 
 }
