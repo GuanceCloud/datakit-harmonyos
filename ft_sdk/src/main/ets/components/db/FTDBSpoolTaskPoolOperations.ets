@@ -14,7 +14,10 @@ enum FTDBSpoolTaskPoolCommand {
   PREPARE_REPLAY = 'prepareReplay',
   ACK_REPLAY = 'ackReplay',
   CLEAR = 'clear',
-  REMOVE_BY_UUIDS = 'removeByUuids'
+  REMOVE_BY_UUIDS = 'removeByUuids',
+  READ_PAGE = 'readPage',
+  HAS_MARKER = 'hasMarker',
+  WRITE_MARKER = 'writeMarker'
 }
 
 interface FTDBSpoolTaskPoolRequest {
@@ -31,6 +34,8 @@ interface FTDBSpoolTaskPoolRequest {
   recordLimit?: number;
   maxCapacityBytes?: number;
   uuids?: string[];
+  readPath?: string;
+  markerPath?: string;
 }
 
 interface FTDBSpoolRecordDTO {
@@ -57,6 +62,7 @@ interface FTDBSpoolTaskPoolResponse {
   inflightBytes: number;
   hasMoreRecords: boolean;
   removedRecords: number;
+  markerExists: boolean;
   errorMessage: string;
 }
 
@@ -87,6 +93,12 @@ export async function runFTDBSpoolTaskPoolExecute(requestObject: Object): Promis
         return await clearSpoolFiles(request);
       case FTDBSpoolTaskPoolCommand.REMOVE_BY_UUIDS:
         return await removeSpoolRecordsByUuids(request);
+      case FTDBSpoolTaskPoolCommand.READ_PAGE:
+        return await readSpoolPage(request);
+      case FTDBSpoolTaskPoolCommand.HAS_MARKER:
+        return await hasMarker(request);
+      case FTDBSpoolTaskPoolCommand.WRITE_MARKER:
+        return await writeMarker(request);
       default:
         return createErrorResponse(`Unsupported Spool TaskPool command: ${request.command}`) as Object;
     }
@@ -235,6 +247,52 @@ async function removeSpoolRecordsByUuids(request: FTDBSpoolTaskPoolRequest): Pro
   return response as Object;
 }
 
+async function readSpoolPage(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  const path = request.readPath || '';
+  if (!path || !(await pathExists(path))) {
+    return createSuccessResponse() as Object;
+  }
+  const page = readSpoolRecordsPage(
+    path,
+    Math.max(0, request.byteOffset || 0),
+    Math.max(1, request.recordLimit || 256)
+  );
+  const response = createSuccessResponse();
+  response.records = page.records;
+  response.batchFileRecords = page.fileRecords;
+  response.skippedRecords = page.skippedRecords;
+  response.pageStartByteOffset = Math.max(0, request.byteOffset || 0);
+  response.nextByteOffset = page.nextByteOffset;
+  response.inflightBytes = page.fileSize;
+  response.hasMoreRecords = page.nextByteOffset < page.fileSize;
+  return response as Object;
+}
+
+async function hasMarker(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  const response = createSuccessResponse();
+  response.markerExists = !!request.markerPath && await pathExists(request.markerPath);
+  return response as Object;
+}
+
+async function writeMarker(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  if (!request.markerPath) {
+    return createErrorResponse('Marker path is required') as Object;
+  }
+  await ensureSpoolDirectory(request.spoolDir);
+  const file = await fileIo.open(
+    request.markerPath,
+    fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE
+  );
+  try {
+    await fileIo.write(file.fd, 'complete');
+  } finally {
+    await fileIo.close(file);
+  }
+  const response = createSuccessResponse();
+  response.markerExists = true;
+  return response as Object;
+}
+
 async function createPendingResponse(request: FTDBSpoolTaskPoolRequest): Promise<FTDBSpoolTaskPoolResponse> {
   const response = createSuccessResponse();
   response.pendingRecords = await countAllPendingRecords(request);
@@ -261,6 +319,7 @@ function createSuccessResponse(): FTDBSpoolTaskPoolResponse {
     inflightBytes: 0,
     hasMoreRecords: false,
     removedRecords: 0,
+    markerExists: false,
     errorMessage: ''
   };
 }

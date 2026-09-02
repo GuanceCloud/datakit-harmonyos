@@ -484,6 +484,11 @@ export default function configUnitTest() {
       expect(fileShadowConfig.isFileDataStoreEnabled()).assertTrue();
       expect(fileShadowConfig.isUseFileDataStore()).assertFalse();
       expect(fileShadowConfig.isFileDataStoreShadow()).assertTrue();
+
+      const migrationConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableFileDataStore()
+        .setNeedTransformOldCache(true);
+      expect(migrationConfig.isNeedTransformOldCache()).assertTrue();
     });
 
     it('sdkOptionsShouldApplyToManagers', 0, () => {

@@ -165,6 +165,7 @@ interface FTDBTaskPoolRequest {
   limit?: number;
   maxBytes?: number;
   newestFirst?: boolean;
+  afterId?: number;
   records?: SyncDataJSON[];
   options?: FTDBTaskPoolWriteOptions;
   policy?: FTDBTaskPoolCachePolicySnapshot;
@@ -274,7 +275,8 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
             rdbStore,
             request.dataTypes || [],
             normalizeLimit(request.limit),
-            request.newestFirst === true
+            request.newestFirst === true,
+            request.afterId === undefined ? -1 : Math.max(0, request.afterId)
           )
         } as FTDBTaskPoolResponse as Object;
       case FTDBTaskPoolCommand.QUERY_UPLOAD_DATA: {
@@ -725,10 +727,16 @@ async function querySyncDataInTaskPool(
   rdbStore: relationalStore.RdbStore,
   dataTypes: string[],
   limit: number,
-  newestFirst: boolean
+  newestFirst: boolean,
+  afterId: number = -1
 ): Promise<SyncDataJSON[]> {
   const predicates = buildTypePredicates(dataTypes);
-  if (newestFirst) {
+  if (afterId >= 0) {
+    if (afterId > 0) {
+      predicates.greaterThan(FTSQL.RECORD_COLUMN_ID, afterId);
+    }
+    predicates.orderByAsc(FTSQL.RECORD_COLUMN_ID);
+  } else if (newestFirst) {
     predicates.orderByDesc(FTSQL.RECORD_COLUMN_TM);
   } else {
     predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);

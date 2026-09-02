@@ -4,6 +4,7 @@ import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
 import { SyncDataJSON } from './bean/SyncData';
 import { FTDBSpoolPaths, FTDBSpoolTaskPoolExecutor } from './FTDBSpoolTaskPoolExecutor';
+import { FTDBTaskPoolExecutor } from './FTDBTaskPoolExecutor';
 
 export type FTFileDataStoreMode = 'sqlite' | 'shadow' | 'file';
 
@@ -16,6 +17,12 @@ export interface FTFileDataStoreStatus {
   capacityBytes: number;
   rejectedRecords: number;
   lastError: string;
+}
+
+export interface FTFileDataStoreProjectionPage {
+  records: SyncDataJSON[];
+  hasMore: boolean;
+  nextByteOffset: number;
 }
 
 const TAG = 'FTFileDataStore';
@@ -40,6 +47,7 @@ export class FTFileDataStore {
   private primary: boolean = false;
   private shadow: boolean = false;
   private capacityBytes: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
+  private migrationMarkerPath: string = '';
   private paths: FTDBSpoolPaths = {
     spoolDir: '',
     activePath: '',
@@ -84,6 +92,7 @@ export class FTFileDataStore {
       inflightPath: this.joinPath(storeDir, FTFileDataStore.INFLIGHT_FILE_NAME),
       legacyPath: this.joinPath(storeDir, FTFileDataStore.LEGACY_FILE_NAME)
     };
+    this.migrationMarkerPath = this.joinPath(storeDir, 'sqlite_migration_v1.complete');
     this.initialized = true;
     this.lastError = '';
     this.initPromise = this.initializeState();
@@ -174,6 +183,81 @@ export class FTFileDataStore {
     this.lastError = '';
   }
 
+  /**
+   * Copy the legacy SQLite pending queue to FileStore once. This is opt-in via
+   * FTSDKConfig.setNeedTransformOldCache(true) so existing applications retain
+   * their current SQLite behavior until they choose a migration.
+   */
+  public async migrateLegacySqlite(context: Context): Promise<number> {
+    if (!this.isPrimary()) {
+      return 0;
+    }
+    await this.awaitInitialized();
+    if (this.migrationMarkerPath && await FTDBSpoolTaskPoolExecutor.hasMarker(this.paths, this.migrationMarkerPath)) {
+      return 0;
+    }
+
+    const pageSize = 256;
+    let afterId = 0;
+    let migrated = 0;
+    while (true) {
+      const rows = await FTDBTaskPoolExecutor.querySyncDataAfterId(context, afterId, pageSize);
+      if (rows.length === 0) {
+        break;
+      }
+      const records: SyncDataJSON[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        records.push(rows[i].toJSON());
+      }
+      const appended = await this.appendSyncDataJSON('sqlite.migration', records);
+      if (appended !== records.length) {
+        throw new Error(`FileStore migration persisted ${appended}/${records.length} records`);
+      }
+      migrated += appended;
+      afterId = rows[rows.length - 1].getId();
+      if (rows.length < pageSize) {
+        break;
+      }
+    }
+    if (this.migrationMarkerPath) {
+      await FTDBSpoolTaskPoolExecutor.writeMarker(this.paths, this.migrationMarkerPath);
+    }
+    FTInnerLogger.i(TAG, `Migrated ${migrated} SQLite cache record(s) to FileStore`);
+    return migrated;
+  }
+
+  /**
+   * Replay durable FileStore rows into the SQLite upload index after startup.
+   * The supplied projector must use UUID upsert semantics; source files are
+   * intentionally retained until the normal upload commit removes them.
+   */
+  public async projectToSqlite(projector: (records: SyncDataJSON[]) => Promise<void>): Promise<number> {
+    if (!this.isPrimary()) {
+      return 0;
+    }
+    await this.awaitInitialized();
+    const paths = [this.paths.legacyPath, this.paths.inflightPath, this.paths.activePath];
+    let projected = 0;
+    for (let pathIndex = 0; pathIndex < paths.length; pathIndex++) {
+      let byteOffset = 0;
+      while (true) {
+        const page = await this.readProjectionPage(paths[pathIndex], byteOffset);
+        if (page.records.length > 0) {
+          await projector(page.records);
+          projected += page.records.length;
+        }
+        if (!page.hasMore) {
+          break;
+        }
+        if (page.nextByteOffset <= byteOffset) {
+          throw new Error(`FileStore projection cursor did not advance: path=${paths[pathIndex]}, offset=${byteOffset}`);
+        }
+        byteOffset = page.nextByteOffset;
+      }
+    }
+    return projected;
+  }
+
   public getStatus(): FTFileDataStoreStatus {
     return {
       initialized: this.initialized,
@@ -196,6 +280,22 @@ export class FTFileDataStore {
     } catch (error) {
       this.recordError(`FileStore init failed: ${this.toErrorMessage(error)}`);
     }
+  }
+
+  private async readProjectionPage(path: string, byteOffset: number): Promise<FTFileDataStoreProjectionPage> {
+    if (!path) {
+      return { records: [], hasMore: false, nextByteOffset: byteOffset };
+    }
+    const response = await FTDBSpoolTaskPoolExecutor.readPage(this.paths, path, byteOffset, 256);
+    const records: SyncDataJSON[] = [];
+    for (let i = 0; i < response.records.length; i++) {
+      records.push(response.records[i].data);
+    }
+    return {
+      records,
+      hasMore: response.hasMoreRecords,
+      nextByteOffset: response.nextByteOffset
+    };
   }
 
   private async awaitInitialized(): Promise<void> {

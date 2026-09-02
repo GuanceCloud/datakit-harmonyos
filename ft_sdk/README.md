@@ -255,6 +255,38 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `V` and `D` output all SDK diagnostics. `I`, `W`, and `E` only output the selected severity and higher. The diagnostics cover the masked endpoint, RUM/Log/Trace configuration, Resource lifecycle, and data upload outcomes.
 
+## Cache Governance and FileStore Migration
+
+The default cache remains SQLite with the existing per-type record-count limits. Enable a byte limit when one shared cache budget is preferred. `DISCARD` preserves existing pending data and rejects new data at the limit; `DISCARD_OLDEST` removes the oldest pending records first.
+
+```ts
+import { CacheDiscard, FTSDKConfig } from '@guancecloud/ft_sdk/Index'
+
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .enableLimitWithCacheSize(100 * 1024 * 1024)
+  .setCacheDiscard(CacheDiscard.DISCARD_OLDEST)
+```
+
+`enableLimitWithDbSize`, `setDbCacheLimit`, and `setDbCacheDiscard` are retained as compatibility aliases. When a byte limit is enabled, the Log and RUM record-count limits do not participate in cache admission.
+
+FileStore rollout is opt-in. Start with shadow mode, which retains SQLite as the upload index while mirroring accepted records to `files/ft_sdk_file_store`. Uploaded and cleared records are removed from the mirror as well.
+
+```ts
+const shadowConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setUseFileDataStore(false)
+  .setFileDataStoreShadow(true)
+```
+
+After validating shadow data, enable FileStore as the primary durable store. SQLite remains a compatible upload index and is rebuilt from FileStore at startup when necessary. To copy an existing SQLite pending queue on the first FileStore launch, explicitly opt in to the one-time migration.
+
+```ts
+const fileStoreConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .enableFileDataStore()
+  .setNeedTransformOldCache(true)
+```
+
+Do not enable the migration flag until the shadow-mode upload results have been checked in the target app. `FTSDK.clearAllData()` removes SQLite data, the DB-failure spool, and FileStore pending files together.
+
 ## Remote Configuration and Runtime Endpoint
 
 Remote configuration is opt-in. After RUM is installed, the SDK fetches `v1/env_variable` using the RUM app ID, caches a valid response, and applies the Android-compatible fields on the next initialization or, where supported, immediately. The default refresh interval is 12 hours.

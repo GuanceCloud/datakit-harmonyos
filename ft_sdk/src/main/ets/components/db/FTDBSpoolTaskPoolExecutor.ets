@@ -9,7 +9,10 @@ enum FTDBSpoolTaskPoolCommand {
   PREPARE_REPLAY = 'prepareReplay',
   ACK_REPLAY = 'ackReplay',
   CLEAR = 'clear',
-  REMOVE_BY_UUIDS = 'removeByUuids'
+  REMOVE_BY_UUIDS = 'removeByUuids',
+  READ_PAGE = 'readPage',
+  HAS_MARKER = 'hasMarker',
+  WRITE_MARKER = 'writeMarker'
 }
 
 export interface FTDBSpoolPaths {
@@ -36,6 +39,8 @@ interface FTDBSpoolTaskPoolRequest extends FTDBSpoolPaths {
   recordLimit?: number;
   maxCapacityBytes?: number;
   uuids?: string[];
+  readPath?: string;
+  markerPath?: string;
 }
 
 export interface FTDBSpoolTaskPoolResponse {
@@ -55,6 +60,7 @@ export interface FTDBSpoolTaskPoolResponse {
   inflightBytes: number;
   hasMoreRecords: boolean;
   removedRecords: number;
+  markerExists: boolean;
   errorMessage: string;
 }
 
@@ -117,6 +123,32 @@ export class FTDBSpoolTaskPoolExecutor {
     request.uuids = uuids;
     request.maxCapacityBytes = Math.max(1, Math.floor(maxCapacityBytes));
     return await FTDBSpoolTaskPoolExecutor.execute(request);
+  }
+
+  public static async readPage(
+    paths: FTDBSpoolPaths,
+    readPath: string,
+    byteOffset: number = 0,
+    recordLimit: number = 256
+  ): Promise<FTDBSpoolTaskPoolResponse> {
+    const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.READ_PAGE, paths);
+    request.readPath = readPath;
+    request.byteOffset = Math.max(0, Math.floor(byteOffset));
+    request.recordLimit = Math.max(1, Math.floor(recordLimit));
+    return await FTDBSpoolTaskPoolExecutor.execute(request);
+  }
+
+  public static async hasMarker(paths: FTDBSpoolPaths, markerPath: string): Promise<boolean> {
+    const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.HAS_MARKER, paths);
+    request.markerPath = markerPath;
+    const response = await FTDBSpoolTaskPoolExecutor.execute(request);
+    return response.markerExists === true;
+  }
+
+  public static async writeMarker(paths: FTDBSpoolPaths, markerPath: string): Promise<void> {
+    const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.WRITE_MARKER, paths);
+    request.markerPath = markerPath;
+    await FTDBSpoolTaskPoolExecutor.execute(request);
   }
 
   private static createRequest(

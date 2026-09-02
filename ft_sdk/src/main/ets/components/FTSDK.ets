@@ -31,6 +31,7 @@ import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
 import { FTFileDataStore } from "./db/FTFileDataStore";
+import { SyncData } from "./db/bean/SyncData";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
@@ -477,7 +478,41 @@ export class FTSDK {
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
-      FTFileDataStore.getInstance().init(context, config);
+      const fileDataStore = FTFileDataStore.getInstance();
+      fileDataStore.init(context, config);
+      if (fileDataStore.isPrimary()) {
+        const projectFileStore = async (): Promise<void> => {
+          if (config.isNeedTransformOldCache()) {
+            await fileDataStore.migrateLegacySqlite(context);
+          }
+          const projected = await fileDataStore.projectToSqlite(async (records) => {
+            const rows: SyncData[] = [];
+            for (let i = 0; i < records.length; i++) {
+              rows.push(SyncData.fromJSON(records[i]));
+            }
+            const result = await FTDBManager.getInstance(context).writeSyncDataAtomically(
+              'fileStore.startup.projection',
+              rows,
+              {
+                applyCachePolicy: false,
+                forceTransaction: rows.length > 1,
+                updateOrInsertByUuid: true,
+                skipFailureFallback: true,
+                skipFileDataStore: true
+              }
+            );
+            if (!result.success) {
+              throw new Error(result.errorMessage || 'FileStore projection DB write failed');
+            }
+          });
+          if (projected > 0) {
+            FTInnerLogger.i(TAG, `FileStore projected ${projected} record(s) into SQLite upload index`);
+          }
+        };
+        projectFileStore().catch((error: Error) => {
+          FTInnerLogger.e(TAG, `FileStore startup recovery failed: ${error.message}`);
+        });
+      }
       const spoolManager = FTDBSpoolManager.getInstance();
       spoolManager.init(context);
       spoolManager.replay(context, "sdk.init").catch((error: Error) => {

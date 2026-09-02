@@ -164,6 +164,7 @@ interface FTDBTaskPoolRequest {
   limit?: number;
   maxBytes?: number;
   newestFirst?: boolean;
+  afterId?: number;
   records?: SyncDataJSON[];
   drafts?: FTDBTaskPoolSyncDraftDTO[];
   fallbackDataType?: string;
@@ -257,6 +258,27 @@ export class FTDBTaskPoolExecutor {
       dataTypes,
       limit,
       newestFirst
+    });
+    const rows = response.rows || [];
+    const result: SyncData[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      result.push(SyncData.fromJSON(rows[i]));
+    }
+    return result;
+  }
+
+  /** Read a stable ascending page for FileStore migration. */
+  public static async querySyncDataAfterId(
+    context: Context,
+    afterId: number,
+    limit: number
+  ): Promise<SyncData[]> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.QUERY_SYNC_DATA,
+      dataTypes: [],
+      limit,
+      newestFirst: false,
+      afterId: Math.max(0, Math.floor(afterId))
     });
     const rows = response.rows || [];
     const result: SyncData[] = [];

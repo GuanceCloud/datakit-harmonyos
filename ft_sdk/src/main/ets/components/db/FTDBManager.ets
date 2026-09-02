@@ -55,6 +55,8 @@ export interface SyncDataWriteOptions {
   lastErrorTimeLine?: number;
   /** Replay must not recursively spool the same inflight batch on DB failure. */
   skipFailureFallback?: boolean;
+  /** FileStore recovery projects rows into SQLite without mirroring them back. */
+  skipFileDataStore?: boolean;
 }
 
 export interface SyncDataWriteFailureFallback {
@@ -1087,7 +1089,7 @@ export class FTDBManager extends DBManager {
     const dataToWrite = this.filterTaskPoolDuplicates(dataList, reInsert, updateOrInsertByUuid, result);
     const fileStoreRecords = this.toSyncDataJSONList(dataToWrite);
     const fileDataStore = FTFileDataStore.getInstance();
-    if (fileDataStore.isPrimary()) {
+    if (options.skipFileDataStore !== true && fileDataStore.isPrimary()) {
       const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
       if (persisted !== dataToWrite.length) {
         result.success = false;
@@ -1181,9 +1183,9 @@ export class FTDBManager extends DBManager {
 
     if (!result.success) {
       await this.persistFailedSyncData(source, fileStoreRecords, options, result);
-    } else if (fileDataStore.isPrimary() && result.dropped > 0) {
+    } else if (options.skipFileDataStore !== true && fileDataStore.isPrimary() && result.dropped > 0) {
       await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
-    } else if (!fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
+    } else if (options.skipFileDataStore !== true && !fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
       try {
         await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
       } catch (error) {
@@ -1223,7 +1225,7 @@ export class FTDBManager extends DBManager {
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const fileDataStore = FTFileDataStore.getInstance();
     const fileStoreRecords = this.syncDraftsToSyncDataJSON(drafts, fallbackDataType);
-    if (fileDataStore.isPrimary()) {
+    if (options.skipFileDataStore !== true && fileDataStore.isPrimary()) {
       const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
       if (persisted !== fileStoreRecords.length) {
         result.success = false;
@@ -1300,9 +1302,9 @@ export class FTDBManager extends DBManager {
         options,
         result
       );
-    } else if (fileDataStore.isPrimary() && result.dropped > 0) {
+    } else if (options.skipFileDataStore !== true && fileDataStore.isPrimary() && result.dropped > 0) {
       await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
-    } else if (!fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
+    } else if (options.skipFileDataStore !== true && !fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
       try {
         await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
       } catch (error) {

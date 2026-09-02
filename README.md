@@ -257,6 +257,8 @@ Configure both callbacks before `FTSDK.install(...)`. The core-package guide inc
 - `@guancecloud/ft_sdk_ext`: add when you need HarmonyOS `HttpInterceptor` chain integration
 - `@guancecloud/ft_native`: add when you need native crash monitoring through the implicit `libftnativecrash.so` integration
 
+The core SDK also provides shared cache-size governance and an opt-in SQLite-to-FileStore migration path; see [Cache Governance and FileStore Migration](ft_sdk/README.md#cache-governance-and-filestore-migration).
+
 ## Native Crash Monitoring
 
 ```ts
