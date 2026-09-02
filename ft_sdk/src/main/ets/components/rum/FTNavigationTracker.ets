@@ -5,6 +5,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfig } from '../Configs';
 import { Utils } from '../utils/Utils';
 import { HandlerView } from './bean/HandlerView';
+import { FTViewTrackingType } from './enum/FTViewTrackingType';
 
 const TAG = 'FTNavigationTracker';
 
@@ -256,7 +257,7 @@ export class FTNavigationTracker {
    * the existing automatic behavior and collect the normalized route name.
    */
   private resolveRouterHandlerView(routeName: string): HandlerView | null {
-    const handler = this.rumConfig?.getViewRouterTrackingHandler() ?? null;
+    const handler = this.rumConfig?.getViewTrackingHandler(FTViewTrackingType.ROUTER) ?? null;
     if (handler === null) {
       return new HandlerView(routeName);
     }
@@ -273,7 +274,7 @@ export class FTNavigationTracker {
    * keep the existing automatic behavior and collect the normalized name.
    */
   private resolveNavigationHandlerView(destinationName: string): HandlerView | null {
-    const handler = this.rumConfig?.getViewNavigationTrackingHandler() ?? null;
+    const handler = this.rumConfig?.getViewTrackingHandler(FTViewTrackingType.NAVIGATION) ?? null;
     if (handler === null) {
       return new HandlerView(destinationName);
     }

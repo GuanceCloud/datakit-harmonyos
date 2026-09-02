@@ -11,8 +11,8 @@ import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobal
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
 import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
-import { FTViewNavigationTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
-import { FTViewRouterTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
+import { FTViewTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewTrackingHandler';
+import { FTViewTrackingType } from '../../../main/ets/components/rum/enum/FTViewTrackingType';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -218,7 +218,7 @@ class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
   }
 }
 
-class FilteringRouterTrackingHandler implements FTViewRouterTrackingHandler {
+class FilteringRouterTrackingHandler implements FTViewTrackingHandler {
   public resolvedRouteNames: string[] = [];
 
   resolveHandlerView(routeName: string): HandlerView | null {
@@ -232,7 +232,7 @@ class FilteringRouterTrackingHandler implements FTViewRouterTrackingHandler {
   }
 }
 
-class FilteringNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+class FilteringNavigationTrackingHandler implements FTViewTrackingHandler {
   public resolvedDestinationNames: string[] = [];
 
   resolveHandlerView(destinationName: string): HandlerView | null {
@@ -246,7 +246,7 @@ class FilteringNavigationTrackingHandler implements FTViewNavigationTrackingHand
   }
 }
 
-class EmptyViewNameNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+class EmptyViewNameNavigationTrackingHandler implements FTViewTrackingHandler {
   resolveHandlerView(_destinationName: string): HandlerView | null {
     return new HandlerView('   ');
   }
@@ -383,7 +383,8 @@ export default function autoTrackDeviceTest() {
 
     it('routerHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
       const handler = new FilteringRouterTrackingHandler();
-      const rumConfig = buildRumConfig(true, false).setViewRouterTrackingHandler(handler);
+      const rumConfig = buildRumConfig(true, false)
+        .setViewTrackingHandler(handler, FTViewTrackingType.ROUTER);
       const routeName = 'pages/account/HandledRouterPage';
       const viewName = 'custom_router_HandledRouterPage';
       initializeAutoTrack(context, uiContext, rumConfig);
@@ -406,7 +407,7 @@ export default function autoTrackDeviceTest() {
       await DBAssert.resetAll();
       const filteredHandler = new FilteringRouterTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
-        .setViewRouterTrackingHandler(filteredHandler));
+        .setViewTrackingHandler(filteredHandler, FTViewTrackingType.ROUTER));
       await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 0);
       await WaitUtils.delay(120);
       await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 2);
@@ -462,7 +463,8 @@ export default function autoTrackDeviceTest() {
 
     it('navigationHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
-      const rumConfig = buildRumConfig(true, false).setViewNavigationTrackingHandler(handler);
+      const rumConfig = buildRumConfig(true, false)
+        .setViewTrackingHandler(handler, FTViewTrackingType.NAVIGATION);
       const destinationName = 'pages/account/HandledNavigationDestination';
       const viewName = 'custom_navigation_HandledNavigationDestination';
       initializeAutoTrack(context, uiContext, rumConfig);
@@ -483,7 +485,7 @@ export default function autoTrackDeviceTest() {
       await DBAssert.resetAll();
       const filteredHandler = new FilteringNavigationTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
-        .setViewNavigationTrackingHandler(filteredHandler));
+        .setViewTrackingHandler(filteredHandler, FTViewTrackingType.NAVIGATION));
       await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
       await WaitUtils.delay(500);
 
@@ -494,7 +496,7 @@ export default function autoTrackDeviceTest() {
 
     it('navigationHandlerEmptyViewNameShouldSkipAutomaticView', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
-        .setViewNavigationTrackingHandler(new EmptyViewNameNavigationTrackingHandler()));
+        .setViewTrackingHandler(new EmptyViewNameNavigationTrackingHandler(), FTViewTrackingType.NAVIGATION));
 
       await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/BlankNavigationDestination');
       await WaitUtils.delay(300);
@@ -506,7 +508,7 @@ export default function autoTrackDeviceTest() {
     it('filteredDestinationShouldCloseThePreviousAutomaticView', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
-        .setViewNavigationTrackingHandler(handler));
+        .setViewTrackingHandler(handler, FTViewTrackingType.NAVIGATION));
 
       await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/TrackedNavigationDestination');
       await WaitUtils.delay(120);
@@ -522,7 +524,7 @@ export default function autoTrackDeviceTest() {
     it('filteredNavigationShouldNotBlockSameNamedRouterView', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
-        .setViewNavigationTrackingHandler(handler));
+        .setViewTrackingHandler(handler, FTViewTrackingType.NAVIGATION));
 
       await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/IgnoredNavigationDestination');
       await uiContext.observer.emitRouterPageUpdate('pages/IgnoredNavigationDestination', 0);

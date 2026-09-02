@@ -7,8 +7,8 @@ import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
-import { FTViewRouterTrackingHandler } from "./rum/handler/FTViewRouterTrackingHandler";
-import { FTViewNavigationTrackingHandler } from "./rum/handler/FTViewNavigationTrackingHandler";
+import { FTViewTrackingHandler } from "./rum/handler/FTViewTrackingHandler";
+import { FTViewTrackingType } from "./rum/enum/FTViewTrackingType";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
@@ -92,8 +92,8 @@ export class FTRUMConfig {
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
-  private viewRouterTrackingHandler: FTViewRouterTrackingHandler | null = null;
-  private viewNavigationTrackingHandler: FTViewNavigationTrackingHandler | null = null;
+  private viewRouterTrackingHandler: FTViewTrackingHandler | null = null;
+  private viewNavigationTrackingHandler: FTViewTrackingHandler | null = null;
   private rumCacheLimitCount: number = Constants.DEFAULT_DB_RUM_CACHE_NUM;
   private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
@@ -308,45 +308,55 @@ export class FTRUMConfig {
   }
 
   /**
-   * Get the Router page View tracking handler.
+   * Customize automatic Router page and Navigation destination View collection.
    *
-   * A configured handler can rename an automatic Router View and attach custom
-   * properties. Returning null from the handler skips the route entirely.
-   */
-  public getViewRouterTrackingHandler(): FTViewRouterTrackingHandler | null {
-    return this.viewRouterTrackingHandler;
-  }
-
-  /**
-   * Customize automatic Router page View collection.
+   * Requires setEnableTraceUserView(true). The target controls whether the
+   * handler applies to Router pages, Navigation destinations, or both. When
+   * the handler is null, the selected target keeps the default final-route-
+   * segment View name.
    *
-   * Requires setEnableTraceUserView(true). When the handler is null, Router
-   * pages keep the default final-route-segment View name.
+   * @param handler Handler used to rename, enrich, or filter automatic Views.
+   * @param type Automatic View source to configure. Defaults to ALL.
+   * @returns FTRUMConfig instance for method chaining.
    */
-  public setViewRouterTrackingHandler(handler: FTViewRouterTrackingHandler | null): FTRUMConfig {
-    this.viewRouterTrackingHandler = handler;
+  public setViewTrackingHandler(
+    handler: FTViewTrackingHandler | null,
+    type: FTViewTrackingType = FTViewTrackingType.ALL
+  ): FTRUMConfig {
+    switch (type) {
+      case FTViewTrackingType.ROUTER:
+        this.viewRouterTrackingHandler = handler;
+        break;
+      case FTViewTrackingType.NAVIGATION:
+        this.viewNavigationTrackingHandler = handler;
+        break;
+      case FTViewTrackingType.ALL:
+        this.viewRouterTrackingHandler = handler;
+        this.viewNavigationTrackingHandler = handler;
+        break;
+    }
     return this;
   }
 
   /**
-   * Get the Navigation destination View tracking handler.
+   * Get the handler configured for an automatic View source.
    *
-   * A configured handler can rename an automatic Navigation View and attach
-   * custom properties. Returning null from the handler skips the destination.
+   * For ALL, returns the common handler only when Router and Navigation use
+   * the same instance. It returns null when the two targets are configured
+   * independently.
    */
-  public getViewNavigationTrackingHandler(): FTViewNavigationTrackingHandler | null {
-    return this.viewNavigationTrackingHandler;
-  }
-
-  /**
-   * Customize automatic Navigation destination View collection.
-   *
-   * Requires setEnableTraceUserView(true). When the handler is null,
-   * destinations keep the default final-route-segment View name.
-   */
-  public setViewNavigationTrackingHandler(handler: FTViewNavigationTrackingHandler | null): FTRUMConfig {
-    this.viewNavigationTrackingHandler = handler;
-    return this;
+  public getViewTrackingHandler(type: FTViewTrackingType): FTViewTrackingHandler | null {
+    switch (type) {
+      case FTViewTrackingType.ROUTER:
+        return this.viewRouterTrackingHandler;
+      case FTViewTrackingType.NAVIGATION:
+        return this.viewNavigationTrackingHandler;
+      case FTViewTrackingType.ALL:
+        return this.viewRouterTrackingHandler === this.viewNavigationTrackingHandler
+          ? this.viewRouterTrackingHandler
+          : null;
+    }
+    return null;
   }
 
   /**

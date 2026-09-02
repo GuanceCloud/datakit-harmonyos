@@ -47,8 +47,8 @@ import {
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
-import { FTViewNavigationTrackingHandler } from '../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
-import { FTViewRouterTrackingHandler } from '../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
+import { FTViewTrackingHandler } from '../../main/ets/components/rum/handler/FTViewTrackingHandler';
+import { FTViewTrackingType } from '../../main/ets/components/rum/enum/FTViewTrackingType';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -394,29 +394,39 @@ export default function configUnitTest() {
       expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);
     });
 
-    it('rumConfigShouldStoreAutomaticViewTrackingHandlers', 0, () => {
-      const routerHandler: FTViewRouterTrackingHandler = {
+    it('rumConfigShouldStoreAutomaticViewTrackingHandlersByType', 0, () => {
+      const routerHandler: FTViewTrackingHandler = {
         resolveHandlerView: (routeName: string): HandlerView | null => {
           return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
         }
       };
-      const navigationHandler: FTViewNavigationTrackingHandler = {
+      const navigationHandler: FTViewTrackingHandler = {
         resolveHandlerView: (destinationName: string): HandlerView | null => {
           return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
         }
       };
       const rumConfig = new FTRUMConfig()
-        .setViewRouterTrackingHandler(routerHandler)
-        .setViewNavigationTrackingHandler(navigationHandler);
+        .setViewTrackingHandler(routerHandler, FTViewTrackingType.ROUTER)
+        .setViewTrackingHandler(navigationHandler, FTViewTrackingType.NAVIGATION);
 
-      expect(rumConfig.getViewRouterTrackingHandler() === routerHandler).assertTrue();
-      expect(rumConfig.getViewNavigationTrackingHandler() === navigationHandler).assertTrue();
-      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('Home')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER) === routerHandler).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION) === navigationHandler).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === null).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('Home')?.getViewName() ?? '')
         .assertEqual('router_Home');
-      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('IgnoredRoute') === null).assertTrue();
-      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('Detail')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('IgnoredRoute') === null)
+        .assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('Detail')?.getViewName() ?? '')
         .assertEqual('navigation_Detail');
-      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('IgnoredDestination') === null).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('IgnoredDestination') === null)
+        .assertTrue();
+
+      const allHandler: FTViewTrackingHandler = {
+        resolveHandlerView: (viewName: string): HandlerView | null => new HandlerView(`all_${viewName}`)
+      };
+      const allConfig = new FTRUMConfig()
+        .setViewTrackingHandler(allHandler, FTViewTrackingType.ALL);
+      expect(allConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === allHandler).assertTrue();
     });
 
     it('sdkConfigShouldStoreCacheOptions', 0, () => {

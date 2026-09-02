@@ -18,8 +18,8 @@ import {
   FTSDK,
   FTSDKConfig,
   FTTraceConfig,
-  FTViewNavigationTrackingHandler,
-  FTViewRouterTrackingHandler,
+  FTViewTrackingHandler,
+  FTViewTrackingType,
   HandlerView,
   LogCacheDiscard,
   Status,
@@ -116,27 +116,15 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
   }
 }
 
-class DemoRouterViewTrackingHandler implements FTViewRouterTrackingHandler {
-  resolveHandlerView(routeName: string): HandlerView | null {
-    const normalizedRouteName = routeName.trim();
-    if (normalizedRouteName.length === 0 || /^\d+$/.test(normalizedRouteName) ||
-      normalizedRouteName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
-      DemoLogger.i(LOG_TAG, `Router View filtered: ${routeName}`);
+class DemoViewTrackingHandler implements FTViewTrackingHandler {
+  resolveHandlerView(viewName: string): HandlerView | null {
+    const normalizedViewName = viewName.trim();
+    if (normalizedViewName.length === 0 || /^\d+$/.test(normalizedViewName) ||
+      normalizedViewName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
+      DemoLogger.i(LOG_TAG, `Automatic View filtered: ${viewName}`);
       return null;
     }
-    return new HandlerView(routeName);
-  }
-}
-
-class DemoNavigationViewTrackingHandler implements FTViewNavigationTrackingHandler {
-  resolveHandlerView(destinationName: string): HandlerView | null {
-    const normalizedDestinationName = destinationName.trim();
-    if (normalizedDestinationName.length === 0 || /^\d+$/.test(normalizedDestinationName) ||
-      normalizedDestinationName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
-      DemoLogger.i(LOG_TAG, `Navigation View filtered: ${destinationName}`);
-      return null;
-    }
-    return new HandlerView(destinationName);
+    return new HandlerView(viewName);
   }
 }
 
@@ -723,8 +711,7 @@ export default class EntryAbility extends UIAbility {
         .setEnableTraceUserResource(true)
         .setEnableTrackAppANR(true)
         .setEnableTrackAppUIBlock(true,300)
-        .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
-        .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
+        .setViewTrackingHandler(new DemoViewTrackingHandler(), FTViewTrackingType.ALL)
         .setActionTrackingHandler(new DemoActionTrackingHandler())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)

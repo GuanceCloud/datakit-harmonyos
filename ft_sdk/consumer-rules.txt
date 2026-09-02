@@ -43,8 +43,8 @@ FTTraceInterceptor
 FTTraceManager
 FTTraceRequestContext
 FTActionTrackingHandler
-FTViewNavigationTrackingHandler
-FTViewRouterTrackingHandler
+FTViewTrackingHandler
+FTViewTrackingType
 FTWebViewHandler
 FT_SDK_EXTENSION_CONTRACT_VERSION
 HAR_VERSION
@@ -76,6 +76,7 @@ createFTRCPTrackConfig
 # Public SDK methods, fields, and enum members called from the integrating app.
 -keep-property-name
 ALL
+NAVIGATION
 ANR_CRASH
 ANR_ERROR
 BACKGROUND
@@ -157,6 +158,7 @@ PACKAGE_UUID
 PRE
 PROD
 RARE
+ROUTER
 RUN
 SAMPLING
 SCROLL
@@ -337,8 +339,7 @@ getTraceTypeEnum
 getValue
 getVersion
 getViewName
-getViewNavigationTrackingHandler
-getViewRouterTrackingHandler
+getViewTrackingHandler
 handleWebViewData
 hasHandler
 headers
@@ -554,8 +555,7 @@ setTraceSampleRate
 setTraceType
 setUrl
 setValue
-setViewNavigationTrackingHandler
-setViewRouterTrackingHandler
+setViewTrackingHandler
 setWebView
 shutDown
 singleFileMaxSize

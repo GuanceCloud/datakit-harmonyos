@@ -183,39 +183,31 @@ first-UIAbility-creation-to-first-frame/`launch_cold.duration` scenario without 
 ## Automatic View Filtering
 
 When automatic View tracking is enabled, Router pages and `Navigation`
-destinations can be independently renamed or filtered. Return a `HandlerView`
-to collect the automatic View; return `null` to skip it. With no handler set,
-the SDK keeps the default behavior and reports the final route segment.
+destinations can be renamed or filtered with one handler. Choose whether it
+applies to `ROUTER`, `NAVIGATION`, or `ALL`. Return a `HandlerView` to collect
+the automatic View; return `null` to skip it. With no handler set, the SDK
+keeps the default behavior and reports the final route segment.
 
 ```ts
 import {
   FTRUMConfig,
-  FTViewRouterTrackingHandler,
-  FTViewNavigationTrackingHandler,
+  FTViewTrackingHandler,
+  FTViewTrackingType,
   HandlerView
 } from '@guancecloud/ft_sdk/Index'
 
-const routerHandler: FTViewRouterTrackingHandler = {
-  resolveHandlerView: (routeName: string): HandlerView | null => {
-    if (routeName === 'LoginPage') {
-      return null // Do not collect this Router page
+const automaticViewHandler: FTViewTrackingHandler = {
+  resolveHandlerView: (viewName: string): HandlerView | null => {
+    if (viewName === 'LoginPage') {
+      return null // Do not collect this automatic View
     }
-    return new HandlerView(`Router_${routeName}`)
-  }
-}
-
-const navigationHandler: FTViewNavigationTrackingHandler = {
-  resolveHandlerView: (destinationName: string): HandlerView | null => {
-    return destinationName === 'OrderDetail'
-      ? new HandlerView('Order Detail')
-      : null
+    return new HandlerView(`View_${viewName}`)
   }
 }
 
 const rumConfig = new FTRUMConfig()
   .setEnableTraceUserView(true)
-  .setViewRouterTrackingHandler(routerHandler)
-  .setViewNavigationTrackingHandler(navigationHandler)
+  .setViewTrackingHandler(automaticViewHandler, FTViewTrackingType.ALL)
 ```
 
 ## Automatic Action Filtering

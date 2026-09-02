@@ -52,8 +52,8 @@ export { ActionEventWrapper } from './src/main/ets/components/rum/bean/ActionEve
 export { HandlerView } from './src/main/ets/components/rum/bean/HandlerView';
 export { ActionSourceType } from './src/main/ets/components/rum/enum/ActionSourceType';
 export { FTActionTrackingHandler } from './src/main/ets/components/rum/handler/FTActionTrackingHandler';
-export { FTViewRouterTrackingHandler } from './src/main/ets/components/rum/handler/FTViewRouterTrackingHandler';
-export { FTViewNavigationTrackingHandler } from './src/main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
+export { FTViewTrackingHandler } from './src/main/ets/components/rum/handler/FTViewTrackingHandler';
+export { FTViewTrackingType } from './src/main/ets/components/rum/enum/FTViewTrackingType';
 
 // ============================================================================
 // Logger
