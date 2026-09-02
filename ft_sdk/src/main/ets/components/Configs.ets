@@ -1,5 +1,5 @@
 import { Constants } from "./Constants";
-import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
+import { CacheDiscard, DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
 import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
@@ -764,10 +764,11 @@ export class FTSDKConfig {
   private mEnableDataIntegerCompatible: boolean = false;
 
 
-  // Cache limit configurations
-  private dbCacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
-  private limitWithDbSize: boolean = false;
-  private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
+  // SDK-wide telemetry cache limit configurations. The legacy `db*` API is
+  // retained below as aliases so existing integrations keep their behavior.
+  private cacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
+  private limitWithCacheSize: boolean = false;
+  private cacheDiscard: string = CacheDiscard.DISCARD;
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
   private enableInnerLogFile: boolean = false;
   private innerLogFileConfig: FTInnerLogFileConfig = {};
@@ -1269,24 +1270,57 @@ export class FTSDKConfig {
   }
 
   /**
-   * Enable database size limit.
-   * Default limit is 100MB. When dbSize is provided, the minimum is 30MB.
-   * When enabled, the database size policy takes priority over the log/RUM count limits
-   * configured by FTLoggerConfig.setLogCacheLimitCount(...) and FTRUMConfig.setRumCacheLimitCount(...).
+   * Enable the SDK-wide telemetry cache byte limit.
+   *
+   * The default is 100MB and a custom value is clamped to 30MB. When this is
+   * enabled, log and RUM record-count limits are not used for admission.
+   */
+  enableLimitWithCacheSize(cacheSize?: number): FTSDKConfig {
+    if (cacheSize !== undefined) {
+      this.cacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, cacheSize);
+    }
+    this.limitWithCacheSize = true;
+    return this;
+  }
+
+  /** Whether the SDK-wide telemetry cache byte limit is enabled. */
+  isLimitWithCacheSize(): boolean {
+    return this.limitWithCacheSize;
+  }
+
+  /** Get the SDK-wide telemetry cache byte limit. */
+  getCacheLimit(): number {
+    return this.cacheLimit;
+  }
+
+  /** Get the strategy applied when the SDK-wide cache limit is reached. */
+  getCacheDiscard(): string {
+    return this.cacheDiscard;
+  }
+
+  /**
+   * Set the strategy applied when the SDK-wide cache limit is reached.
+   * `DISCARD` rejects new telemetry and `DISCARD_OLDEST` makes room by
+   * evicting the oldest pending telemetry first.
+   */
+  setCacheDiscard(strategy: string | CacheDiscard): FTSDKConfig {
+    this.cacheDiscard = String(strategy) === CacheDiscard.DISCARD_OLDEST ?
+      CacheDiscard.DISCARD_OLDEST : CacheDiscard.DISCARD;
+    return this;
+  }
+
+  /**
+   * @deprecated Use enableLimitWithCacheSize(cacheSize).
    */
   enableLimitWithDbSize(dbSize?: number): FTSDKConfig {
-    if (dbSize !== undefined) {
-      this.dbCacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, dbSize);
-    }
-    this.limitWithDbSize = true;
-    return this;
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
    * Set database cache limit with custom size.
    */
   setDbCacheLimit(dbSize: number): FTSDKConfig {
-    return this.enableLimitWithDbSize(dbSize);
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
@@ -1294,7 +1328,7 @@ export class FTSDKConfig {
    * @deprecated Kept for old DB cache compatibility.
    */
   isLimitWithDbSize(): boolean {
-    return this.limitWithDbSize;
+    return this.isLimitWithCacheSize();
   }
 
   /**
@@ -1302,22 +1336,21 @@ export class FTSDKConfig {
    * @deprecated Kept for old DB cache compatibility.
    */
   getDbCacheLimit(): number {
-    return this.dbCacheLimit;
+    return this.getCacheLimit();
   }
 
   /**
    * Get database cache discard strategy
    */
   getDBCacheDiscard(): string {
-    return this.dbCacheDiscard;
+    return this.getCacheDiscard();
   }
 
   /**
    * Set database cache discard strategy
    */
   setDbCacheDiscard(strategy: string | DBCacheDiscard): FTSDKConfig {
-    this.dbCacheDiscard = String(strategy);
-    return this;
+    return this.setCacheDiscard(String(strategy));
   }
 }
 

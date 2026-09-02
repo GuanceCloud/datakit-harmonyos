@@ -57,6 +57,18 @@ class ConfigRecordImpl implements ConfigRecord {
     this.config = config;
   }
 
+  isLimitWithCacheSize(): boolean {
+    return this.config.isLimitWithCacheSize();
+  }
+
+  getCacheLimit(): number {
+    return this.config.getCacheLimit();
+  }
+
+  getCacheDiscard(): string {
+    return this.config.getCacheDiscard();
+  }
+
   isLimitWithDbSize(): boolean {
     return this.config.isLimitWithDbSize();
   }

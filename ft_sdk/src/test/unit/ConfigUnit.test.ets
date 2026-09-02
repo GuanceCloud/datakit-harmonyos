@@ -15,6 +15,7 @@ import {
 import { Constants } from '../../main/ets/components/Constants';
 import {
   DataType,
+  CacheDiscard,
   DBCacheDiscard,
   DetectFrequency,
   EnvType,
@@ -60,6 +61,18 @@ class TestConfigRecord implements ConfigRecord {
 
   constructor(config: FTSDKConfig) {
     this.config = config;
+  }
+
+  isLimitWithCacheSize(): boolean {
+    return this.config.isLimitWithCacheSize();
+  }
+
+  getCacheLimit(): number {
+    return this.config.getCacheLimit();
+  }
+
+  getCacheDiscard(): string {
+    return this.config.getCacheDiscard();
   }
 
   isLimitWithDbSize(): boolean {
@@ -448,6 +461,17 @@ export default function configUnitTest() {
         .setDbCacheLimit(1);
       expect(legacyLimitConfig.isLimitWithDbSize()).assertTrue();
       expect(legacyLimitConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+
+      const cacheConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableLimitWithCacheSize(1)
+        .setCacheDiscard(CacheDiscard.DISCARD_OLDEST);
+      expect(cacheConfig.isLimitWithCacheSize()).assertTrue();
+      expect(cacheConfig.getCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cacheConfig.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
+      // Legacy readers expose exactly the same configured state.
+      expect(cacheConfig.isLimitWithDbSize()).assertTrue();
+      expect(cacheConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cacheConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
     });
 
     it('sdkOptionsShouldApplyToManagers', 0, () => {

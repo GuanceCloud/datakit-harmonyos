@@ -88,6 +88,7 @@ export {
 export {
   EnvType,
   SyncPageSize,
+  CacheDiscard,
   LogCacheDiscard,
   RUMCacheDiscard,
   DBCacheDiscard,

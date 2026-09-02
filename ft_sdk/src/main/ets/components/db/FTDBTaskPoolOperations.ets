@@ -1,7 +1,7 @@
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { Constants } from '../Constants';
-import { DBCacheDiscard, DataType } from '../enum/Enums';
+import { CacheDiscard, DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTDBConfig } from './FTDBConfig';
 import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
@@ -57,9 +57,9 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithDbSize: boolean;
-  dbLimitSize: number;
-  dbCacheDiscard: string;
+  enableLimitWithCacheSize: boolean;
+  cacheLimitSize: number;
+  cacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */
@@ -545,9 +545,9 @@ function defaultWriteOptions(): FTDBTaskPoolWriteOptions {
 
 function defaultCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
   return {
-    enableLimitWithDbSize: false,
-    dbLimitSize: 0,
-    dbCacheDiscard: DBCacheDiscard.DISCARD,
+    enableLimitWithCacheSize: false,
+    cacheLimitSize: 0,
+    cacheDiscard: CacheDiscard.DISCARD,
     logLimitCount: 0,
     rumLimitCount: 0,
     logCount: 0,
@@ -875,14 +875,24 @@ async function getCurrentDbSizeInTaskPool(
 ): Promise<number> {
   const startTime = Date.now();
   const resultSet = await rdbStore.querySql("PRAGMA page_count");
+  let pageCount = 0;
   try {
     if (resultSet && resultSet.goToFirstRow()) {
-      const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
-      return pageCount * 4096;
+      pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
+    }
+  } finally {
+    resultSet?.close();
+  }
+
+  const pageSizeResultSet = await rdbStore.querySql("PRAGMA page_size");
+  try {
+    if (pageSizeResultSet && pageSizeResultSet.goToFirstRow()) {
+      const pageSize = pageSizeResultSet.getLong(pageSizeResultSet.getColumnIndex("page_size"));
+      return Math.max(0, pageCount) * Math.max(0, pageSize);
     }
     return 0;
   } finally {
-    resultSet?.close();
+    pageSizeResultSet?.close();
     timing.sizeCheckMs += Math.max(0, Date.now() - startTime);
   }
 }
@@ -1007,16 +1017,16 @@ async function resolveAllowedInsertCount(
   const dataTypes = category === FTDBTaskPoolCacheCategory.LOG ?
     [DataType.LOG.toString()] : [DataType.RUM_APP.toString(), DataType.RUM_WEBVIEW.toString()];
 
-  if (policy.enableLimitWithDbSize) {
+  if (policy.enableLimitWithCacheSize) {
     const currentSize = await getCurrentDbSizeInTaskPool(rdbStore, timing);
-    if (currentSize < Math.max(0, policy.dbLimitSize)) {
+    if (currentSize < Math.max(0, policy.cacheLimitSize)) {
       return requested;
     }
-    if (policy.dbCacheDiscard === DBCacheDiscard.DISCARD_OLDEST) {
+    if (policy.cacheDiscard === CacheDiscard.DISCARD_OLDEST) {
       const cleanupStart = Date.now();
       const deleted = await deleteOldestSyncDataInTaskPool(
         rdbStore,
-        dataTypes,
+        [],
         Constants.DB_OLD_CACHE_REMOVE_COUNT,
         timing
       );

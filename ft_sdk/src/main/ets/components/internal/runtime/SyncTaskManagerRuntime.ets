@@ -18,6 +18,9 @@ import {
 import { Utils } from '../../utils/Utils';
 
 export interface SyncTaskConfigRecord {
+  isLimitWithCacheSize: () => boolean;
+  getCacheLimit: () => number;
+  getCacheDiscard: () => string;
   isLimitWithDbSize: () => boolean;
   getDbCacheLimit: () => number;
   getDBCacheDiscard: () => string;

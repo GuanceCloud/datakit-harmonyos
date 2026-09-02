@@ -50,9 +50,9 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithDbSize: boolean;
-  dbLimitSize: number;
-  dbCacheDiscard: string;
+  enableLimitWithCacheSize: boolean;
+  cacheLimitSize: number;
+  cacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */

@@ -548,9 +548,9 @@ export class FTDBManager extends DBManager {
   private createTaskPoolCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
     const cachePolicy = FTDBCachePolicy.getInstance();
     return {
-      enableLimitWithDbSize: cachePolicy.isEnableLimitWithDbSize(),
-      dbLimitSize: cachePolicy.getDbLimitSize(),
-      dbCacheDiscard: cachePolicy.getDBCacheDiscard(),
+      enableLimitWithCacheSize: cachePolicy.isEnableLimitWithCacheSize(),
+      cacheLimitSize: cachePolicy.getCacheLimitSize(),
+      cacheDiscard: cachePolicy.getCacheDiscard(),
       logLimitCount: cachePolicy.getLogLimitCount(),
       rumLimitCount: cachePolicy.getRumLimitCount(),
       logCount: cachePolicy.getLogCount(),
@@ -649,15 +649,24 @@ export class FTDBManager extends DBManager {
   ): Promise<number> {
     const executeStartTime = Date.now();
     const resultSet = await rdbStore.querySql("PRAGMA page_count");
+    let pageCount = 0;
     try {
       if (resultSet && resultSet.goToFirstRow()) {
-        const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
-        const pageSize = 4096;
-        return pageCount * pageSize;
+        pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
+      }
+    } finally {
+      resultSet?.close();
+    }
+
+    const pageSizeResultSet = await rdbStore.querySql("PRAGMA page_size");
+    try {
+      if (pageSizeResultSet && pageSizeResultSet.goToFirstRow()) {
+        const pageSize = pageSizeResultSet.getLong(pageSizeResultSet.getColumnIndex("page_size"));
+        return Math.max(0, pageCount) * Math.max(0, pageSize);
       }
       return 0;
     } finally {
-      resultSet?.close();
+      pageSizeResultSet?.close();
       this.addWriteExecuteTime(timing, executeStartTime);
     }
   }
@@ -760,7 +769,7 @@ export class FTDBManager extends DBManager {
 
       if (String(cachePolicy.getDBCacheDiscard()) === DBCacheDiscard.DISCARD_OLDEST) {
         this.addWriteComputeTime(timing, sizePolicyStartTime);
-        const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT, timing);
+        const deleted = await this.deleteOldestDataLocked(rdbStore, [], Constants.DB_OLD_CACHE_REMOVE_COUNT, timing);
         const deletedPolicyStartTime = Date.now();
         result.deletedOld += deleted;
         this.addCacheCountDelta(countDelta, category, -deleted);
