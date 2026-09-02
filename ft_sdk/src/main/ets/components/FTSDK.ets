@@ -30,6 +30,7 @@ import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
+import { FTFileDataStore } from "./db/FTFileDataStore";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
@@ -476,6 +477,7 @@ export class FTSDK {
     if (context) {
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
+      FTFileDataStore.getInstance().init(context, config);
       const spoolManager = FTDBSpoolManager.getInstance();
       spoolManager.init(context);
       spoolManager.replay(context, "sdk.init").catch((error: Error) => {
@@ -1080,6 +1082,7 @@ export class FTSDK {
 
       await FTDBManager.getInstance(context).delete();
       await FTDBSpoolManager.getInstance().clear();
+      await FTFileDataStore.getInstance().clear();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {

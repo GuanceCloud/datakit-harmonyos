@@ -472,6 +472,18 @@ export default function configUnitTest() {
       expect(cacheConfig.isLimitWithDbSize()).assertTrue();
       expect(cacheConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
       expect(cacheConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
+
+      const filePrimaryConfig = FTSDKConfig.builder(TEST_FAKE_URL).enableFileDataStore();
+      expect(filePrimaryConfig.isFileDataStoreEnabled()).assertTrue();
+      expect(filePrimaryConfig.isUseFileDataStore()).assertTrue();
+      expect(filePrimaryConfig.isFileDataStoreShadow()).assertFalse();
+
+      const fileShadowConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setUseFileDataStore(false)
+        .setFileDataStoreShadow(true);
+      expect(fileShadowConfig.isFileDataStoreEnabled()).assertTrue();
+      expect(fileShadowConfig.isUseFileDataStore()).assertFalse();
+      expect(fileShadowConfig.isFileDataStoreShadow()).assertTrue();
     });
 
     it('sdkOptionsShouldApplyToManagers', 0, () => {

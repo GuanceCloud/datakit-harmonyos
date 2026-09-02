@@ -80,6 +80,7 @@ export interface FTDBTaskPoolWriteResult {
   dropped: number;
   duplicateSkipped: number;
   deletedOld: number;
+  acceptedUuids: string[];
   errorMessage: string;
 }
 

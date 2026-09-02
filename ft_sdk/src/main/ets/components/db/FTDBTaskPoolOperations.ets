@@ -87,6 +87,8 @@ export interface FTDBTaskPoolWriteResult {
   dropped: number;
   duplicateSkipped: number;
   deletedOld: number;
+  /** UUIDs accepted by the DB transaction, used to keep FileStore in sync. */
+  acceptedUuids: string[];
   errorMessage: string;
 }
 
@@ -589,6 +591,7 @@ function createWriteResult(source: string, requested: number): FTDBTaskPoolWrite
     dropped: 0,
     duplicateSkipped: 0,
     deletedOld: 0,
+    acceptedUuids: [],
     errorMessage: ''
   };
 }
@@ -1145,6 +1148,7 @@ async function insertPreparedSyncData(
     addInsertTime(timing, executeStart);
     if (Number(rowId) > 0) {
       result.inserted++;
+      addAcceptedRows(result, records, 1);
       if (countInserted) {
         addInsertedCountDelta(delta, records, 1);
       }
@@ -1165,6 +1169,7 @@ async function insertPreparedSyncData(
   addInsertTime(timing, executeStart);
   const insertedRows = Math.max(0, inserted);
   result.inserted += insertedRows;
+  addAcceptedRows(result, records, insertedRows);
   if (countInserted) {
     addInsertedCountDelta(delta, records, insertedRows);
   }
@@ -1202,6 +1207,7 @@ async function writeSyncDataBody(
       const updated = await updatePreparedSyncDataByUuid(rdbStore, upsertRows[i], timing);
       if (updated > 0) {
         result.updated += updated;
+        addAcceptedRows(result, [upsertRows[i]], 1);
       } else {
         rowsToInsert.push(upsertRows[i]);
       }
@@ -1246,6 +1252,16 @@ function deduplicateRowsForUpsert(
   return rows;
 }
 
+function addAcceptedRows(result: FTDBTaskPoolWriteResult, rows: SyncDataJSON[], count: number): void {
+  const accepted = Math.min(rows.length, Math.max(0, count));
+  for (let i = 0; i < accepted; i++) {
+    const uuid = rows[i].uuid;
+    if (uuid && uuid.length > 0) {
+      result.acceptedUuids.push(uuid);
+    }
+  }
+}
+
 async function writeSyncDataInTaskPool(
   rdbStore: relationalStore.RdbStore,
   source: string,
@@ -1286,6 +1302,7 @@ async function writeSyncDataInTaskPool(
     result.dropped = 0;
     result.duplicateSkipped = 0;
     result.deletedOld = 0;
+    result.acceptedUuids = [];
     // Cache deltas were computed inside the transaction and must not escape a rollback.
     delta.log = 0;
     delta.rum = 0;

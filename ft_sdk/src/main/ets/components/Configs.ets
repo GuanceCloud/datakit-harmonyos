@@ -769,6 +769,11 @@ export class FTSDKConfig {
   private cacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
   private limitWithCacheSize: boolean = false;
   private cacheDiscard: string = CacheDiscard.DISCARD;
+  // FileStore is opt-in. Shadow mode keeps SQLite as the read/upload index
+  // while mirroring accepted telemetry to FileStore for migration validation.
+  private fileDataStoreEnabled: boolean = false;
+  private useFileDataStore: boolean = false;
+  private fileDataStoreShadow: boolean = false;
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
   private enableInnerLogFile: boolean = false;
   private innerLogFileConfig: FTInnerLogFileConfig = {};
@@ -1307,6 +1312,51 @@ export class FTSDKConfig {
     this.cacheDiscard = String(strategy) === CacheDiscard.DISCARD_OLDEST ?
       CacheDiscard.DISCARD_OLDEST : CacheDiscard.DISCARD;
     return this;
+  }
+
+  /**
+   * Enable FileStore as the primary durable telemetry cache.
+   * SQLite remains an upload index during the staged migration so existing
+   * upload and filtering behavior remains compatible.
+   */
+  enableFileDataStore(): FTSDKConfig {
+    this.fileDataStoreEnabled = true;
+    this.useFileDataStore = true;
+    return this;
+  }
+
+  /** Select FileStore (`true`) or SQLite (`false`) as the durable cache mode. */
+  setUseFileDataStore(useFileDataStore: boolean): FTSDKConfig {
+    this.fileDataStoreEnabled = this.fileDataStoreEnabled || useFileDataStore;
+    this.useFileDataStore = useFileDataStore;
+    return this;
+  }
+
+  /** Whether FileStore is enabled for primary or shadow persistence. */
+  isFileDataStoreEnabled(): boolean {
+    return this.fileDataStoreEnabled || this.fileDataStoreShadow;
+  }
+
+  /** Whether FileStore is the primary durable cache. */
+  isUseFileDataStore(): boolean {
+    return this.useFileDataStore;
+  }
+
+  /**
+   * Mirror SQLite-accepted telemetry to FileStore without changing the
+   * read/upload path. This is intended for a safe staged migration.
+   */
+  setFileDataStoreShadow(enabled: boolean): FTSDKConfig {
+    this.fileDataStoreShadow = enabled;
+    if (enabled) {
+      this.fileDataStoreEnabled = true;
+    }
+    return this;
+  }
+
+  /** Whether SQLite writes are mirrored to FileStore. */
+  isFileDataStoreShadow(): boolean {
+    return this.fileDataStoreShadow;
   }
 
   /**

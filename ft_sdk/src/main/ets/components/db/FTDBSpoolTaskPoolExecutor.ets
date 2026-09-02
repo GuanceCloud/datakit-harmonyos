@@ -8,7 +8,8 @@ enum FTDBSpoolTaskPoolCommand {
   APPEND = 'append',
   PREPARE_REPLAY = 'prepareReplay',
   ACK_REPLAY = 'ackReplay',
-  CLEAR = 'clear'
+  CLEAR = 'clear',
+  REMOVE_BY_UUIDS = 'removeByUuids'
 }
 
 export interface FTDBSpoolPaths {
@@ -34,6 +35,7 @@ interface FTDBSpoolTaskPoolRequest extends FTDBSpoolPaths {
   byteOffset?: number;
   recordLimit?: number;
   maxCapacityBytes?: number;
+  uuids?: string[];
 }
 
 export interface FTDBSpoolTaskPoolResponse {
@@ -52,6 +54,7 @@ export interface FTDBSpoolTaskPoolResponse {
   nextByteOffset: number;
   inflightBytes: number;
   hasMoreRecords: boolean;
+  removedRecords: number;
   errorMessage: string;
 }
 
@@ -103,6 +106,17 @@ export class FTDBSpoolTaskPoolExecutor {
     return await FTDBSpoolTaskPoolExecutor.execute(
       FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.CLEAR, paths)
     );
+  }
+
+  public static async removeByUuids(
+    paths: FTDBSpoolPaths,
+    uuids: string[],
+    maxCapacityBytes: number = FT_DB_SPOOL_MAX_BYTES
+  ): Promise<FTDBSpoolTaskPoolResponse> {
+    const request = FTDBSpoolTaskPoolExecutor.createRequest(FTDBSpoolTaskPoolCommand.REMOVE_BY_UUIDS, paths);
+    request.uuids = uuids;
+    request.maxCapacityBytes = Math.max(1, Math.floor(maxCapacityBytes));
+    return await FTDBSpoolTaskPoolExecutor.execute(request);
   }
 
   private static createRequest(

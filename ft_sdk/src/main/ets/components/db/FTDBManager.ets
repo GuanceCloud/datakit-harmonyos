@@ -19,6 +19,7 @@ import { ActionBean } from './bean/ActionBean';
 import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
+import { FTFileDataStore } from './FTFileDataStore';
 import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
 
@@ -1084,13 +1085,26 @@ export class FTDBManager extends DBManager {
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const dataToWrite = this.filterTaskPoolDuplicates(dataList, reInsert, updateOrInsertByUuid, result);
+    const fileStoreRecords = this.toSyncDataJSONList(dataToWrite);
+    const fileDataStore = FTFileDataStore.getInstance();
+    if (fileDataStore.isPrimary()) {
+      const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
+      if (persisted !== dataToWrite.length) {
+        result.success = false;
+        result.dropped += Math.max(0, dataToWrite.length - persisted);
+        result.errorMessage = `FileStore persisted ${persisted}/${dataToWrite.length} record(s)`;
+        await this.persistFailedSyncData(source, fileStoreRecords, options, result);
+        return result;
+      }
+    }
     if (FTDBManager.consumeForcedSyncDataWriteFailure()) {
       result.success = false;
       result.errorMessage = 'Forced sync-data DB write failure';
-      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+      await this.persistFailedSyncData(source, fileStoreRecords, options, result);
       return result;
     }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
+    let acceptedFileRows: SyncDataJSON[] = [];
 
     try {
       if (dataToWrite.length > 0) {
@@ -1121,6 +1135,7 @@ export class FTDBManager extends DBManager {
         result.deletedOld += taskPoolResult.deletedOld;
         result.duplicateSkipped += taskPoolResult.duplicateSkipped;
         result.errorMessage = taskPoolResult.errorMessage;
+        acceptedFileRows = this.filterFileStoreRowsByUuids(fileStoreRecords, taskPoolResult.acceptedUuids);
         if (result.success && result.inserted + result.updated > 0) {
           this.markTaskPoolDataAsInserted(dataToWrite, reInsert);
         }
@@ -1165,7 +1180,15 @@ export class FTDBManager extends DBManager {
     }
 
     if (!result.success) {
-      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+      await this.persistFailedSyncData(source, fileStoreRecords, options, result);
+    } else if (fileDataStore.isPrimary() && result.dropped > 0) {
+      await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
+    } else if (!fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
+      try {
+        await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
+      } catch (error) {
+        FTInnerLogger.e(TAG, `FileStore shadow append failed: ${String(error)}`);
+      }
     }
 
     return result;
@@ -1198,7 +1221,20 @@ export class FTDBManager extends DBManager {
     let dbLaneWaitTime = Math.max(0, options.dbLaneWaitMs || 0);
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
+    const fileDataStore = FTFileDataStore.getInstance();
+    const fileStoreRecords = this.syncDraftsToSyncDataJSON(drafts, fallbackDataType);
+    if (fileDataStore.isPrimary()) {
+      const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
+      if (persisted !== fileStoreRecords.length) {
+        result.success = false;
+        result.dropped += Math.max(0, fileStoreRecords.length - persisted);
+        result.errorMessage = `FileStore persisted ${persisted}/${fileStoreRecords.length} draft(s)`;
+        await this.persistFailedSyncData(source, fileStoreRecords, options, result);
+        return result;
+      }
+    }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
+    let acceptedFileRows: SyncDataJSON[] = [];
 
     try {
       if (options.applyCachePolicy === true) {
@@ -1229,6 +1265,7 @@ export class FTDBManager extends DBManager {
       result.deletedOld += taskPoolResult.deletedOld;
       result.duplicateSkipped += taskPoolResult.duplicateSkipped;
       result.errorMessage = taskPoolResult.errorMessage;
+      acceptedFileRows = this.filterFileStoreRowsByUuids(fileStoreRecords, taskPoolResult.acceptedUuids);
     } catch (error) {
       result.success = false;
       result.errorMessage = String(error);
@@ -1263,6 +1300,14 @@ export class FTDBManager extends DBManager {
         options,
         result
       );
+    } else if (fileDataStore.isPrimary() && result.dropped > 0) {
+      await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
+    } else if (!fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
+      try {
+        await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
+      } catch (error) {
+        FTInnerLogger.e(TAG, `FileStore shadow draft append failed: ${String(error)}`);
+      }
     }
 
     return result;
@@ -1307,6 +1352,37 @@ export class FTDBManager extends DBManager {
       }
     }
     return rows;
+  }
+
+  private filterFileStoreRowsByUuids(records: SyncDataJSON[], acceptedUuids: string[]): SyncDataJSON[] {
+    const accepted: Set<string> = new Set<string>();
+    for (let i = 0; i < acceptedUuids.length; i++) {
+      if (acceptedUuids[i] && acceptedUuids[i].length > 0) {
+        accepted.add(acceptedUuids[i]);
+      }
+    }
+    const filtered: SyncDataJSON[] = [];
+    for (let i = 0; i < records.length; i++) {
+      if (accepted.has(records[i].uuid)) {
+        filtered.push(records[i]);
+      }
+    }
+    return filtered;
+  }
+
+  private collectUnacceptedFileStoreUuids(records: SyncDataJSON[], acceptedRows: SyncDataJSON[]): string[] {
+    const accepted: Set<string> = new Set<string>();
+    for (let i = 0; i < acceptedRows.length; i++) {
+      accepted.add(acceptedRows[i].uuid);
+    }
+    const rejected: string[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const uuid = records[i].uuid;
+      if (uuid && !accepted.has(uuid)) {
+        rejected.push(uuid);
+      }
+    }
+    return rejected;
   }
 
   private syncDraftsToSyncDataJSON(
