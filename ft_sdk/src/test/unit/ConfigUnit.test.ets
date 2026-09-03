@@ -792,6 +792,20 @@ export default function configUnitTest() {
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
     });
 
+    it('consoleCaptureShouldSkipSilentlyBeforeLogConfigIsInstalled', 0, () => {
+      const logManager = TrackLogManager.getInstance();
+      const delegate = new RecordingConsoleDelegate();
+
+      FTConsoleLogBridge.console('log', (): void => delegate.log('pre-init console'), 'pre-init console');
+      FTConsoleLogBridge.hilog('info', 0, 'pre-init', '%{public}s',
+        (): void => delegate.info('pre-init hilog'), 'pre-init hilog');
+
+      expect(delegate.callCount).assertEqual(2);
+      expect(logManager.getQueueStatus().submittedCount).assertEqual(0);
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(0);
+      expect(logManager.getQueueStatus().filteredCount).assertEqual(0);
+    });
+
     it('remoteConfigShouldKeepAndroidCompatibleDefaults', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL);
 

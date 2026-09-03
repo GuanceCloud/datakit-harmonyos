@@ -70,6 +70,13 @@ export class FTConsoleLogBridge {
   private static captureHiLog(level: ConsoleLogLevel, domain: number, tag: string, format: string,
     args: Object[]): void {
     try {
+      // Application startup can emit console/HiLog calls before FTSDK installs
+      // its log configuration. Keep the original output, but do not send those
+      // calls to TrackLogManager: it would discard them and print an internal
+      // "Log config not set" message for every startup log.
+      if (!FTConsoleLogBridge.isLogConfigInstalled()) {
+        return;
+      }
       const logBean = FTConsoleLogBridge.createLogBean(level,
         FTConsoleLogBridge.formatHiLogMessage(format, args));
       logBean.addTag('log_source', new StringWrapper('hilog'));
@@ -83,12 +90,19 @@ export class FTConsoleLogBridge {
 
   private static captureConsole(level: ConsoleLogLevel, args: Object[]): void {
     try {
+      if (!FTConsoleLogBridge.isLogConfigInstalled()) {
+        return;
+      }
       const logBean = FTConsoleLogBridge.createLogBean(level, FTConsoleLogBridge.formatConsoleMessage(args));
       logBean.addTag('log_source', new StringWrapper('console'));
       TrackLogManager.getInstance().trackConsoleLog(logBean);
     } catch (error) {
       FTInnerLogger.w(TAG, `Failed to capture console log: ${String(error)}`);
     }
+  }
+
+  private static isLogConfigInstalled(): boolean {
+    return TrackLogManager.getInstance().getLogConfig() !== null;
   }
 
   private static createLogBean(level: ConsoleLogLevel, content: string): LogBean {
