@@ -42,6 +42,10 @@ const HILOG_MODULES: string[] = ['@ohos.hilog', '@kit.PerformanceAnalysisKit'];
 const CONSOLE_LEVELS: string[] = ['log', 'debug', 'info', 'warn', 'error', 'trace'];
 const HILOG_LEVELS: string[] = ['debug', 'info', 'warn', 'error', 'fatal'];
 const BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
+// Hvigor can read a source file through more than one compiler layer in an
+// incremental/daemon build. Keep a marker in the in-memory result so a later
+// reader does not wrap the original console/HiLog call a second time.
+const TRANSFORM_MARKER = '/* guance-console-log-transform:instrumented */';
 
 let patchedFileSystem: any = null;
 let originalReadFile: ((fileName: string, options?: any) => any) | null = null;
@@ -247,7 +251,7 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
 }
 
 function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
-  if (!isApplicationArkTsSource(id)) {
+  if (!isApplicationArkTsSource(id) || code.includes(TRANSFORM_MARKER)) {
     return code;
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -260,7 +264,8 @@ function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
   const transformedCode = renderCandidates(code, candidates, bridgeName, 0, code.length);
   const insertionOffset = findImportInsertionOffset(ts, sourceFile);
   const transformedInsertionOffset = renderCandidates(code, candidates, bridgeName, 0, insertionOffset).length;
-  const bridgeImport = `\nimport { FTConsoleLogBridge as ${bridgeName} } from '${BRIDGE_IMPORT}';\n` +
+  const bridgeImport = `\n${TRANSFORM_MARKER}\n` +
+    `import { FTConsoleLogBridge as ${bridgeName} } from '${BRIDGE_IMPORT}';\n` +
     `${bridgeName}.markCompilerPluginInstalled();\n`;
   return transformedCode.slice(0, transformedInsertionOffset) + bridgeImport +
     transformedCode.slice(transformedInsertionOffset);
