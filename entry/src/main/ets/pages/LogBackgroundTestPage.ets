@@ -33,6 +33,7 @@ export struct LogBackgroundTestPage {
     try {
       const logConfig = new FTLoggerConfig();
       logConfig.setEnableCustomLog(true);
+      logConfig.setEnableConsoleLog(true);
       logConfig.setPrintCustomLogToConsole(true);
       logConfig.setSamplingRate(1.0);
       logConfig.setServiceName("harmonyos_log_test");
@@ -237,9 +238,10 @@ export struct LogBackgroundTestPage {
       FTLogger.logBackground("Console output test - INFO", Status.INFO);
       FTLogger.logBackground("Console output test - WARN", Status.WARN);
       FTLogger.logBackground("Console output test - ERROR", Status.ERROR);
+      console.log('ft-demo','Console output test - log')
       
-      this.addTestResult("✅ Console output test completed: 3 logs sent");
-      this.logCount += 3;
+      this.addTestResult("✅ Console output test completed: 3 manual logs sent; 1 console log captured automatically");
+      this.logCount += 4;
     } catch (error) {
       this.addTestResult(`❌ Console output test failed: ${error}`);
     }

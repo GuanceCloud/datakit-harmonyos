@@ -34,7 +34,11 @@ import {
   preInitChainClient,
   preInitChainClientInfo,
   preInitCompatClient,
-  preInitCompatClientInfo
+  preInitCompatClientInfo,
+  preInitControlChainClientInfo,
+  PreInitAxiosSmokeExecutionMode,
+  PreInitAxiosSmokeUrls,
+  runPreInitAxiosSmokeTestsWithMode
 } from '../utils/PreInitAxiosClients';
 
 const TAG = "HttpAutoTrackTestPage";
@@ -922,6 +926,46 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
+  private buildPreInitSmokeTestUrl(mode: 'compat' | 'chain'): string {
+    const traceUrl = this.storedTraceUrl.trim();
+    const source = mode === 'compat' ? 'entry-preinit-compat' : 'entry-preinit-chain';
+    if (traceUrl.length > 0) {
+      return `${traceUrl}${traceUrl.includes('?') ? '&' : '?'}from=${source}`;
+    }
+    return `https://httpbin.org/get?from=${source}`;
+  }
+
+  async testSharedPreInitAxiosSmokeSuite() {
+    const executionMode: PreInitAxiosSmokeExecutionMode = 'parallel';
+    const urls: PreInitAxiosSmokeUrls = {
+      compatUrl: this.buildPreInitSmokeTestUrl('compat'),
+      chainUrl: this.buildPreInitSmokeTestUrl('chain')
+    };
+    this.addTestResult(
+      `▶ Running pre-init Axios smoke suite: mode=${executionMode}, compatAt=${preInitCompatClientInfo.createdAt}, ` +
+      `chainAt=${preInitChainClientInfo.createdAt}, controlAt=${preInitControlChainClientInfo.createdAt}`
+    );
+
+    try {
+      const results = await runPreInitAxiosSmokeTestsWithMode(urls, executionMode);
+      for (let index = 0; index < results.length; index++) {
+        const result = results[index];
+        this.requestCount++;
+        if (result.success) {
+          this.successCount++;
+          this.addTestResult(`✅ Pre-init ${result.mode}: status=${result.statusCode}, bodyLength=${result.bodyLength}`);
+        } else {
+          this.errorCount++;
+          this.addTestResult(`❌ Pre-init ${result.mode}: ${result.errorMessage || 'unknown error'}`);
+        }
+      }
+    } catch (error) {
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Pre-init Axios smoke suite failed: ${err.message || String(error)}`);
+    }
+  }
+
   /**
    * Clear test results
    */
@@ -1013,10 +1057,17 @@ export struct HttpAutoTrackTestPage {
             .margin({ bottom: 10 })
             .width('100%')
 
-          Text(`Shared pre-init clients are created at module load before FTSDK.initFTSDK() runs. CompatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`)
+          Text(`Shared Axios clients are created when this test page is loaded. CompatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`)
             .fontSize(12)
             .margin({ bottom: 10 })
             .width('100%')
+
+          Button('Run Shared Pre-init Axios Smoke Suite (5)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#4A148C')
+            .onClick(() => this.testSharedPreInitAxiosSmokeSuite())
+            .customProperty('test-shared-preinit-smoke-suite-btn', 'Run Shared Pre-init Axios Smoke Suite (5)')
 
           Button('Use Shared Pre-init Axios (Compat)')
             .width('100%')

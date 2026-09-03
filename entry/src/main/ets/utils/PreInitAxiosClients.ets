@@ -167,11 +167,6 @@ export const preInitControlChainClientInfo: PreInitAxiosClientInfo = {
   forcedResource: false
 };
 
-DemoLogger.i(
-  TAG,
-  `Pre-init axios clients created: compatAt=${compatCreatedAt}, chainAt=${chainCreatedAt}, controlChainAt=${controlChainCreatedAt}, forcedTrace=true, forcedResource=true`
-);
-
 async function executeSmokeRequest(client: AxiosInstance, url: string,
   mode: 'compat' | 'chain' | 'chain-control'): Promise<PreInitAxiosSmokeTestResult> {
   try {

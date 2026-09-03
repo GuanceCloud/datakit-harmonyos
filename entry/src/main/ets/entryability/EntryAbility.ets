@@ -31,19 +31,10 @@ import {
 import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
-import {
-  runPreInitAxiosSmokeTestsWithMode,
-  PreInitAxiosSmokeExecutionMode,
-  PreInitAxiosSmokeUrls,
-  preInitControlChainClientInfo,
-  preInitChainClientInfo,
-  preInitCompatClientInfo
-} from '../utils/PreInitAxiosClients';
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
 export const RUNTIME_CONFIG_PREFERENCES_NAME = PREFERENCES_NAME;
-const PRE_INIT_SMOKE_EXECUTION_MODE: PreInitAxiosSmokeExecutionMode = 'sequential';
 // Local-only defaults for manually validating SDK upload proxy and custom DNS.
 // They can be overridden through launch parameters. Keep the test disabled by
 // default so a normal Demo launch always uses its configured DataKit/DataWay URL.
@@ -238,8 +229,6 @@ export default class EntryAbility extends UIAbility {
     FTSDK.recordAppFirstUIAbilityCreate();
     this.coldLaunchTestWant = want;
     this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
-    DemoLogger.e("log test", `onCreate `);
-    console.log("log test,onCreate")
     this.logAppMemoryLimitOnMainThread();
 
     try {
@@ -247,7 +236,6 @@ export default class EntryAbility extends UIAbility {
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to load runtime config: ${error}`);
     }
-    this.verifyPreInitAxiosClients();
     this.initFTSDK();
   }
 
@@ -368,9 +356,7 @@ export default class EntryAbility extends UIAbility {
         DemoLogger.w(LOG_TAG, `Failed to persist runtime config: ${JSON.stringify(error)}`);
       });
 
-      DemoLogger.i(
-        LOG_TAG,
-        `Runtime config loaded from launch parameters datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
+      DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
       return runtimeConfig;
     }
 
@@ -427,11 +413,38 @@ export default class EntryAbility extends UIAbility {
     await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
     this.updateRuntimeConfigStorage(runtimeConfig);
 
-    DemoLogger.i(
-      LOG_TAG,
-      `Runtime config loaded datakitUrl=${runtimeConfig.datakitUrl}, datawayUrl=${runtimeConfig.datawayUrl}, webViewUrl=${runtimeConfig.webViewUrl}, traceUrl=${runtimeConfig.traceUrl}, appId=${runtimeConfig.appId}, networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}, networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`);
+    DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
 
     return runtimeConfig;
+  }
+
+  /**
+   * This startup-only diagnostic runs before installLogConfig: it remains in
+   * local HiLog but is not automatically uploaded. Print only the final
+   * resolved configuration, with clientToken masked.
+   */
+  private formatRuntimeConfigLog(runtimeConfig: RuntimeConfig): string {
+    const resolvedValues: string[] = [
+      `datakitUrl=${runtimeConfig.datakitUrl}`,
+      `datawayUrl=${runtimeConfig.datawayUrl}`,
+      `webViewUrl=${runtimeConfig.webViewUrl}`,
+      `traceUrl=${runtimeConfig.traceUrl}`,
+      `clientToken=${this.maskClientToken(runtimeConfig.clientToken)}`,
+      `autoSync=${runtimeConfig.autoSync}`,
+      `networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}`,
+      `networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`,
+      `networkRouteTestHost=${runtimeConfig.networkRouteTestHost}`,
+      `remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`,
+      `localDataFilterEnabled=${runtimeConfig.localDataFilterEnabled}`,
+      `localDataFilterLogRule=${runtimeConfig.localDataFilterLogRule}`,
+      `localDataFilterRumRule=${runtimeConfig.localDataFilterRumRule}`,
+      `appId=${runtimeConfig.appId}`
+    ];
+    return `Runtime config loaded resolved={${resolvedValues.join(', ')}}`;
+  }
+
+  private maskClientToken(token: string): string {
+    return token.length === 0 ? '<empty>' : `<masked:length=${token.length}>`;
   }
 
   private async resolveRuntimeValue(
@@ -539,70 +552,8 @@ export default class EntryAbility extends UIAbility {
       filters.set('rum', [rumRule]);
     }
     const enabled = this.isLocalDataFilterEnabled();
-    DemoLogger.i(LOG_TAG,
-      `Local data filter startup config: enabled=${enabled}, loggingRules=${logRule.length > 0 ? 1 : 0}, rumRules=${rumRule.length > 0 ? 1 : 0}`);
+
     return sdkConfig.setEnableDataFilter(enabled).setDataFilters(filters);
-  }
-
-  /**
-   * Verify the axios/http clients that were created at module-load time before FTSDK.initFTSDK().
-   * This smoke test is intentionally executed before SDK install so we can compare:
-   * 1. compat axios interceptor mode
-   * 2. axios + NetworkKit interceptorChain mode
-   * 3. the plain control chain created without FT interceptors
-   *
-   * The requests use distinct query markers so the resulting resource/trace logs can be
-   * mapped back to the exact pre-init path that produced them.
-   */
-  private async verifyPreInitAxiosClients(): Promise<void> {
-    const compatSmokeTestUrl = this.resolvePreInitCompatSmokeTestUrl();
-    const chainSmokeTestUrl = this.resolvePreInitChainSmokeTestUrl();
-    DemoLogger.i(
-      LOG_TAG,
-      `Pre-init axios clients already created before SDK init: compatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`
-    );
-    DemoLogger.i(
-      LOG_TAG,
-      `Running pre-init axios smoke tests before FTSDK.install: executionMode=${PRE_INIT_SMOKE_EXECUTION_MODE}, compatUrl=${compatSmokeTestUrl}, chainUrl=${chainSmokeTestUrl}, compatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}, chainControlAt=${preInitControlChainClientInfo.createdAt}`
-    );
-
-    try {
-      const smokeUrls: PreInitAxiosSmokeUrls = {
-        compatUrl: compatSmokeTestUrl,
-        chainUrl: chainSmokeTestUrl
-      };
-      // Keep execution order stable so startup logs are easier to compare across modes.
-      const results = await runPreInitAxiosSmokeTestsWithMode(smokeUrls, "parallel");
-      const summary = results.map((result) =>
-        result.success
-          ? `${result.mode}=ok(status=${result.statusCode},body=${result.bodyLength})`
-          : `${result.mode}=fail(error=${result.errorMessage})`
-      ).join(', ');
-      DemoLogger.i(LOG_TAG, `Pre-init axios smoke test finished before SDK init: ${summary}`);
-    } catch (error) {
-      DemoLogger.e(LOG_TAG, `Pre-init axios smoke test crashed unexpectedly before SDK init: ${error}`);
-    }
-  }
-
-  private resolvePreInitCompatSmokeTestUrl(): string {
-    return this.buildPreInitSmokeTestUrl('compat');
-  }
-
-  private resolvePreInitChainSmokeTestUrl(): string {
-    return this.buildPreInitSmokeTestUrl('chain');
-  }
-
-  private buildPreInitSmokeTestUrl(mode: 'compat' | 'chain'): string {
-    const traceUrl = this.runtimeConfig.traceUrl.trim();
-    if (traceUrl.length > 0) {
-      const smokeSource = mode === 'compat' ? 'entry-preinit-compat' : 'entry-preinit-chain';
-      return `${traceUrl}${traceUrl.includes('?') ? '&' : '?'}from=${smokeSource}`;
-    }
-
-    if (mode === 'compat') {
-      return 'https://httpbin.org/get?from=entry-preinit-compat';
-    }
-    return 'https://httpbin.org/get?from=entry-preinit-chain';
   }
 
   private initFTSDK():void{
@@ -675,9 +626,7 @@ export default class EntryAbility extends UIAbility {
         // Modifier Test page for a reproducible masking verification flow.
         .setDataModifier(new DemoDataModifier())
         .setLineDataModifier(new DemoLineDataModifier());
-      if (remoteConfigTestEnabled) {
-        DemoLogger.i(LOG_TAG, 'Remote configuration test enabled: refresh interval=0 seconds');
-      }
+
       sdkConfig = this.applyLocalDataFilterConfig(sdkConfig);
       if (networkRouteTestEnabled && networkRouteTestMode === 'proxy') {
         sdkConfig = sdkConfig.setProxy({
@@ -691,7 +640,6 @@ export default class EntryAbility extends UIAbility {
       }
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
-      DemoLogger.i(LOG_TAG, "SDK install completed");
 
       // Initialize log configuration
       const logConfig = new FTLoggerConfig()
@@ -706,7 +654,7 @@ export default class EntryAbility extends UIAbility {
       FTSDK.installLogConfig(logConfig);
 
       // Test log sampling rate
-      DemoLogger.i(LOG_TAG, "Testing log sampling rate 1.0 (100%)");
+      DemoLogger.i(LOG_TAG, "Log config completed");
 
       // Initialize RUM configuration
       if (appId.length === 0) {
@@ -741,7 +689,6 @@ export default class EntryAbility extends UIAbility {
       userData.addExt("ft_key", "ft_value");
 
       FTSDK.bindRumUserData(userData);
-      DemoLogger.i(LOG_TAG, "User data bound successfully with persistence");
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()
@@ -750,8 +697,6 @@ export default class EntryAbility extends UIAbility {
         .setEnableLinkRUMData(true)
         .setTraceType(TraceType.DDTRACE);
       FTSDK.installTraceConfig(traceConfig);
-
-      DemoLogger.i(LOG_TAG, "SDK initialized successfully - BEFORE loadContent");
 
     } catch (error) {
       DemoLogger.e(LOG_TAG, `SDK initialization failed: ${error}`);
@@ -779,16 +724,13 @@ export default class EntryAbility extends UIAbility {
     startSecondaryAfterFirstFrame: () => void
   ): void {
     windowStage.loadContent('pages/Index', (err) => {
-      DemoLogger.i(LOG_TAG, "loadContent callback called");
       if (err.code) {
         DemoLogger.e(LOG_TAG, `loadContent failed: ${err.code}`);
         return;
       }
       if (!firstFrameListenerRegistered) {
-        DemoLogger.i(LOG_TAG, "Registering first-frame listener from successful loadContent callback");
         observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
       }
-      DemoLogger.i(LOG_TAG, "Content loaded successfully");
     });
   }
 
