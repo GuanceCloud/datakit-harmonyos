@@ -1,6 +1,5 @@
 import { AppServiceExtensionAbility, Want } from '@kit.AbilityKit';
 import rpc from "@ohos.rpc";
-import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import {
   createDefaultStressTestConfig,
   StressTestConfig,
@@ -39,9 +38,8 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
   onCreate(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onCreate");
-    // AppService may be the only Ability created by a cold process. Reuse the
-    // same application-initialization and visibility-snapshot hook, then bootstrap RUM from persisted/Want config.
-    FTSDK.recordAppApplicationInit(this.context);
+    // The Hvigor plugin records the cold-launch lifecycle boundary. Bootstrap
+    // RUM from persisted/Want config when this AppService needs RUM data.
     initializeDemoColdLaunchRum(this.context, 'StressServiceAbility', want);
     markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'onCreate');
     this.handleRequest(want, 0);

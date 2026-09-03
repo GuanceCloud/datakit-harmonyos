@@ -1,5 +1,5 @@
 # Changelog
 
-## 0.1.15
+## 0.1.17
 
-- Initial standalone Hvigor tool package for automatic console and HiLog collection.
+- Added compiler instrumentation for automatic console/HiLog and cold-launch tracking.

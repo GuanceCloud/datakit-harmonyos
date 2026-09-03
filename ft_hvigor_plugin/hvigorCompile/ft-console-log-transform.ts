@@ -23,6 +23,12 @@ interface CompilePluginContext {
   };
 }
 
+interface SharedSourceTransformRegistry {
+  originalReadFile: (fileName: string, options?: any) => any;
+  buffer: any;
+  transforms: Map<string, (fileName: string, code: string) => string>;
+}
+
 interface TransformCandidate {
   start: number;
   end: number;
@@ -46,9 +52,10 @@ const BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
 // incremental/daemon build. Keep a marker in the in-memory result so a later
 // reader does not wrap the original console/HiLog call a second time.
 const TRANSFORM_MARKER = '/* guance-console-log-transform:instrumented */';
+const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
+const TRANSFORM_ID = 'guance-console-log-transform';
 
-let patchedFileSystem: any = null;
-let originalReadFile: ((fileName: string, options?: any) => any) | null = null;
+let registeredFileSystem: any = null;
 
 function isApplicationArkTsSource(id: string): boolean {
   return (id.endsWith('.ets') || id.endsWith('.ts')) && id.includes('/src/main/ets/') &&
@@ -272,34 +279,50 @@ function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
 }
 
 function installSourceReader(context: CompilePluginContext): void {
-  if (patchedFileSystem !== null) {
+  if (registeredFileSystem !== null) {
     return;
   }
 
   const typeScriptPath = `${context.share.projectConfig.etsLoaderPath}/node_modules/typescript`;
   const ts = require.main.require(typeScriptPath);
   const fileSystem = require.main.require('fs');
-  const buffer = require.main.require('buffer');
-  const readFile = fileSystem.readFileSync as (fileName: string, options?: any) => any;
-  patchedFileSystem = fileSystem;
-  originalReadFile = readFile;
-  fileSystem.readFileSync = (fileName: string, options?: any): any => {
-    const content = readFile(fileName, options);
-    if (typeof fileName !== 'string' || !isApplicationArkTsSource(fileName)) {
-      return content;
-    }
-    const code = typeof content === 'string' ? content : content.toString();
-    const transformedCode = rewriteSource(ts, fileName, code);
-    return typeof content === 'string' ? transformedCode : buffer.Buffer.from(transformedCode);
-  };
+  let registry = fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
+  if (!registry) {
+    registry = {
+      originalReadFile: fileSystem.readFileSync as (fileName: string, options?: any) => any,
+      buffer: require.main.require('buffer'),
+      transforms: new Map<string, (fileName: string, code: string) => string>()
+    };
+    fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] = registry;
+    fileSystem.readFileSync = (fileName: string, options?: any): any => {
+      const content = registry!.originalReadFile(fileName, options);
+      if (typeof fileName !== 'string' || !isApplicationArkTsSource(fileName)) {
+        return content;
+      }
+      let transformedCode = typeof content === 'string' ? content : content.toString();
+      registry!.transforms.forEach((transform: (id: string, code: string) => string) => {
+        transformedCode = transform(fileName, transformedCode);
+      });
+      return typeof content === 'string' ? transformedCode : registry!.buffer.Buffer.from(transformedCode);
+    };
+  }
+  registry.transforms.set(TRANSFORM_ID, (fileName: string, code: string) => rewriteSource(ts, fileName, code));
+  registeredFileSystem = fileSystem;
 }
 
 function restoreSourceReader(): void {
-  if (patchedFileSystem !== null && originalReadFile !== null) {
-    patchedFileSystem.readFileSync = originalReadFile;
+  if (registeredFileSystem === null) {
+    return;
   }
-  patchedFileSystem = null;
-  originalReadFile = null;
+  const registry = registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
+  if (registry) {
+    registry.transforms.delete(TRANSFORM_ID);
+    if (registry.transforms.size === 0) {
+      registeredFileSystem.readFileSync = registry.originalReadFile;
+      delete registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY];
+    }
+  }
+  registeredFileSystem = null;
 }
 
 export default {

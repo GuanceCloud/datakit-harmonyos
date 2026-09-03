@@ -55,38 +55,12 @@ const interceptorChain = createFTHttpInterceptorChain({
 })
 ```
 
-## API 22 First-frame Cold Launch Timing
+## Cold-launch First-frame Timing
 
-On API 22, first call `observeFTAppFirstFrame()` at the beginning of the first
-`UIAbility.onWindowStageCreate()` and before `loadContent()`. Some devices do
-not permit the listener until the content-loading operation has completed. If
-the first registration returns `false`, make one further attempt from the
-successful `loadContent()` callback. The SDK only accepts an event whose
-`firstDrawFrame` is `true`; a late registration that receives later frames does
-not produce a synthetic T3.
-
-```ts
-import UIAbility from '@ohos.app.ability.UIAbility'
-import window from '@ohos.window'
-import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index'
-
-export class EntryAbility extends UIAbility {
-  async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
-    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage)
-    windowStage.loadContent('pages/Index', (error) => {
-      if (!error.code && !firstFrameListenerRegistered) {
-        observeFTAppFirstFrame(windowStage)
-      }
-    })
-  }
-}
-```
-
-The observer deliberately uses the callback-arrival value of
-`systemDateTime.getUptime(TimeType.STARTUP, true)` rather than
-`FrameMetrics.vsyncTimestamp` until their clock origins have been confirmed on
-an API 22 device. It is a real first-draw signal, but avoids mixing time bases
-in phase durations.
+Cold-launch first-frame observation is injected automatically by the Guance
+Hvigor compiler plugin. Do not call `observeFTAppFirstFrame()` from application
+code. On API 22 and later the plugin records the real first draw; earlier API
+levels omit the first-frame phase.
 
 ## Dependency
 
@@ -95,8 +69,7 @@ in phase durations.
 
 ## Requirements
 
-- HarmonyOS project using NetworkKit interceptor-chain APIs, or API 22
-  first-frame metrics for cold-launch timing
+- HarmonyOS project using NetworkKit interceptor-chain APIs
 - This package is an addition to the core SDK, not a replacement for it
 
 ## Documentation

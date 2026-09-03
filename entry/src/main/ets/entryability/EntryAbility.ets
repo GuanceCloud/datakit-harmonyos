@@ -28,7 +28,7 @@ import {
   UserData,
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
-import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
+import { FTColdLaunchBridge } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 
@@ -226,7 +226,6 @@ export default class EntryAbility extends UIAbility {
   };
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
-    FTSDK.recordAppFirstUIAbilityCreate();
     this.coldLaunchTestWant = want;
     this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     this.logAppMemoryLimitOnMainThread();
@@ -707,29 +706,24 @@ export default class EntryAbility extends UIAbility {
     const startSecondaryAfterFirstFrame = (): void => {
       void this.startSecondaryLaunchAbilityIfRequested();
     };
-    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
+    FTColdLaunchBridge.onFirstFrameRecorded(startSecondaryAfterFirstFrame);
     if (this.coldStartDelayMs > 0) {
       DemoLogger.i(LOG_TAG, `Demo cold-start delay enabled: ${this.coldStartDelayMs}ms before loadContent`);
       setTimeout(() => {
-        this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+        this.loadEntryContent(windowStage);
       }, this.coldStartDelayMs);
       return;
     }
-    this.loadEntryContent(windowStage, firstFrameListenerRegistered, startSecondaryAfterFirstFrame);
+    this.loadEntryContent(windowStage);
   }
 
   private loadEntryContent(
-    windowStage: window.WindowStage,
-    firstFrameListenerRegistered: boolean,
-    startSecondaryAfterFirstFrame: () => void
+    windowStage: window.WindowStage
   ): void {
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         DemoLogger.e(LOG_TAG, `loadContent failed: ${err.code}`);
         return;
-      }
-      if (!firstFrameListenerRegistered) {
-        observeFTAppFirstFrame(windowStage, startSecondaryAfterFirstFrame);
       }
     });
   }

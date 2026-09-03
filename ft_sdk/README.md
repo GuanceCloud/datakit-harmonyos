@@ -98,9 +98,9 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
-## Automatic Console and HiLog Collection
+## Hvigor Compiler Plugin
 
-`FTLoggerConfig.setEnableConsoleLog(...)` aligns with Android: it controls automatic application-console collection, but requires the Guance Hvigor compiler plugin. `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.
+The Guance Hvigor compiler plugin provides automatic console/HiLog collection and cold-launch lifecycle tracking. `FTLoggerConfig.setEnableConsoleLog(...)` controls automatic application-console collection; `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.
 
 ### Install the Hvigor Plugin
 
@@ -116,10 +116,11 @@ export default {
 }
 ```
 
-The plugin instruments direct calls in the application module's `src/main/ets` code. It does not rewrite source files on disk and does not instrument SDK dependencies. Supported calls are:
+The plugin instruments application code in `src/main/ets` without rewriting source files on disk or SDK dependencies. It supports:
 
 - `console.log`, `debug`, `info`, `warn`, `error`, and `trace`
 - `hilog.debug`, `info`, `warn`, `error`, and `fatal` when `hilog` is imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`
+- Cold-launch boundaries in `AbilityStage`, `UIAbility`, and other Ability `onCreate()` methods; `UIAbility.onWindowStageCreate()` also receives automatic first-frame observation.
 
 Use the same source-release version as the `@guancecloud/ft_sdk` package. The transformed call evaluates its arguments once, queues the Guance log, and keeps the original console/HiLog output.
 
@@ -151,40 +152,13 @@ the process-start boundary to the first rendered frame;
 the Action timestamp remains an epoch timestamp for compatibility with the
 existing data pipeline.
 
-Record the earliest available boundaries in the host app. The optional
-application-start timestamp hook is useful only when the SDK module is loaded
-after the host's own startup boundary; do not pass `Date.now()` or a wall-clock
-value.
-
-```ts
-import AbilityStage from '@ohos.app.ability.AbilityStage'
-import UIAbility from '@ohos.app.ability.UIAbility'
-import { FTSDK } from '@guancecloud/ft_sdk/Index'
-
-export class AppStage extends AbilityStage {
-  onCreate(): void {
-    // Record application initialization. The SDK also snapshots this process's current visibility through
-    // ApplicationContext.getRunningProcessInformation().
-    FTSDK.recordAppApplicationInit(this.context)
-
-    // Also initialize FTSDK/RUM here from the app's already-available
-    // persisted/static configuration when this process can start with no UI.
-  }
-}
-
-export class EntryAbility extends UIAbility {
-  onCreate(): void {
-    // Record the first UIAbility creation.
-    FTSDK.recordAppFirstUIAbilityCreate()
-  }
-}
-```
-
-Set the AbilityStage file as the module `srcEntry`. The core package does not
-invent a first-frame time: API 22 applications should additionally install
-`@guancecloud/ft_sdk_ext` and register its observer before `loadContent()`.
-Without the extension, `app_first_frame_init_time` is absent rather than being
-approximated with `onWindowStageCreate()`.
+Enable the Guance Hvigor compiler plugin described above and keep the
+`AbilityStage` file as the module `srcEntry`. The plugin injects application
+initialization, first-UIAbility creation, and first-frame observation at build
+time; do not call `FTSDK.recordAppApplicationInit(...)`,
+`recordAppFirstUIAbilityCreate(...)`, or `recordAppFirstFrame(...)` from host
+application code. API 22 and later records the real first draw. On earlier API
+levels, the first-frame phase is omitted rather than approximated.
 
 Foreground launches emit these Action Fields only when each pair of boundaries
 is present and strictly increasing:
@@ -214,9 +188,7 @@ Action. Hot-start Actions do not carry these cold-launch fields.
 RUM must be initialized before the first UI frame. For AppService/push entries,
 initialize it from AbilityStage or the entry itself when those processes also
 need RUM data; a background-only process does not emit `launch_cold` in this
-case. The Demo shows this with its AbilityStage and
-`StressServiceAbility` bootstrap, using persisted runtime settings or
-equivalent AppService Want parameters.
+case.
 
 The repository Demo accepts the non-persistent launch parameter
 `coldStartDelayMs` (capped at 30,000 ms). For example, use `5000` on a cold

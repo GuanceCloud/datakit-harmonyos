@@ -1,11 +1,12 @@
 {
   "name": "@guancecloud/ft-hvigor-plugin",
-  "version": "0.1.15",
-  "description": "Guance HarmonyOS Hvigor plugin for automatic console and HiLog collection.",
+  "version": "0.1.17-alpha01",
+  "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
   "files": [
     "index.js",
     "hvigorCompile/ft-console-log-transform.ts",
+    "hvigorCompile/ft-cold-launch-transform.ts",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

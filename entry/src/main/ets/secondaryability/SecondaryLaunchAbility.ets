@@ -2,8 +2,7 @@ import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import window from '@ohos.window';
-import { FTSDK } from '@guancecloud/ft_sdk/Index';
-import { observeFTAppFirstFrame } from '@guancecloud/ft_sdk_ext/Index';
+import { FTColdLaunchBridge, FTSDK } from '@guancecloud/ft_sdk/Index';
 import { KEY_COLD_LAUNCH_NEXT_UI_ABILITY } from '../entryability/EntryAbility';
 import { initializeDemoColdLaunchRum } from '../utils/DemoColdLaunchRumInitializer';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -20,7 +19,6 @@ export default class SecondaryLaunchAbility extends UIAbility {
   private entryLaunchStarted: boolean = false;
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
-    FTSDK.recordAppFirstUIAbilityCreate();
     this.coldLaunchTestWant = want;
     await initializeDemoColdLaunchRum(this.context, TAG, want);
     DemoLogger.i(TAG, `onCreate: launchReason=${launchParam.launchReason}`);
@@ -66,14 +64,11 @@ export default class SecondaryLaunchAbility extends UIAbility {
     const startEntryAfterFirstFrame = (): void => {
       void this.startEntryAbilityIfRequested();
     };
-    const firstFrameListenerRegistered = observeFTAppFirstFrame(windowStage, startEntryAfterFirstFrame);
+    FTColdLaunchBridge.onFirstFrameRecorded(startEntryAfterFirstFrame);
     windowStage.loadContent('pages/SecondaryLaunchAbilityPage', (error) => {
       if (error.code) {
         DemoLogger.e(TAG, `loadContent failed: ${error.code}`);
         return;
-      }
-      if (!firstFrameListenerRegistered) {
-        observeFTAppFirstFrame(windowStage, startEntryAfterFirstFrame);
       }
       DemoLogger.i(TAG, 'SecondaryLaunchAbility content loaded');
     });

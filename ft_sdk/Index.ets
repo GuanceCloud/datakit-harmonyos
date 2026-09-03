@@ -65,6 +65,10 @@ export { FTLogger } from './src/main/ets/components/log/FTLogger';
 // Applications should continue to use FTLogger for manual logs.
 export { FTConsoleLogBridge } from './src/main/ets/components/log/FTConsoleLogBridge';
 
+// Runtime contract used only by the Guance Hvigor compiler plugin.
+// Cold-launch lifecycle boundaries are injected automatically.
+export { FTColdLaunchBridge } from './src/main/ets/components/monitor/FTColdLaunchBridge';
+
 // ============================================================================
 // Trace Manager
 // ============================================================================

@@ -49,12 +49,10 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
 `@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
-For cold-launch phase timing, initialize SDK/RUM at `AbilityStage` (and any
-background Service/push entry), then integrate the core hooks in `AbilityStage`
-and the first `UIAbility`; API 22 applications also use `ft_sdk_ext` to observe
-the real first draw before `loadContent()`. See the module [cold-launch timing
-guide](ft_sdk/README.md#cold-launch-timing) and [API 22 first-frame
-guide](ft_sdk_ext/README.md#api-22-first-frame-cold-launch-timing).
+For cold-launch phase timing, enable the Guance Hvigor compiler plugin. It
+injects the required Ability lifecycle and first-frame hooks during the build,
+so the host application does not add timing calls. See the module
+[cold-launch timing guide](ft_sdk/README.md#cold-launch-timing).
 
 ## Bytecode HAR Integration
 
