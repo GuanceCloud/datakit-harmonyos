@@ -288,17 +288,16 @@ export class ANRDetectManager {
     }
     this.anrStats.startTime = Date.now();
     this.isInitialized = true;
-    FTInnerLogger.i(TAG, 'ANR detect manager initialized successfully');
   }
 
-  public startMonitoring(): void {
+  public startMonitoring(): boolean {
     if (!this.isInitialized) {
       FTInnerLogger.e(TAG, 'ANR detect manager not initialized');
-      return;
+      return false;
     }
     if (this.isMonitoring) {
       FTInnerLogger.d(TAG, `Skip starting ANR monitoring, isMonitoring=${this.isMonitoring}`);
-      return;
+      return true;
     }
 
     try {
@@ -327,9 +326,10 @@ export class ANRDetectManager {
         }
       });
       this.isMonitoring = true;
-      FTInnerLogger.i(TAG, `ANR monitoring is now active, watcher=${WATCHER_NAME}`);
+      return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to start ANR monitoring: ${String(error)}`);
+      return false;
     }
   }
 

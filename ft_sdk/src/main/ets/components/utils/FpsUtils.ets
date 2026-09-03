@@ -62,7 +62,6 @@ export class FpsUtils {
       this.isInitialized = true;
       this.currentFps = 0;
       this.resetFrameWindow();
-      FTInnerLogger.d(TAG, "FPS monitoring initialized successfully");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize FPS monitoring: ${error}`);
       this.isInitialized = false;
@@ -72,18 +71,19 @@ export class FpsUtils {
   /**
    * Start FPS monitoring
    */
-  public start(): void {
+  public start(): boolean {
     if (!this.isInitialized) {
       FTInnerLogger.w(TAG, "FPS monitoring not initialized");
-      return;
+      return false;
     }
 
     try {
       this.resetFrameWindow();
       this.displaySyncInstance?.start();
-      FTInnerLogger.d(TAG, "FPS monitoring started");
+      return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to start FPS monitoring: ${error}`);
+      return false;
     }
   }
 
@@ -94,7 +94,6 @@ export class FpsUtils {
     try {
       this.displaySyncInstance?.stop();
       this.resetFrameWindow();
-      FTInnerLogger.d(TAG, "FPS monitoring stopped");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to stop FPS monitoring: ${error}`);
     }

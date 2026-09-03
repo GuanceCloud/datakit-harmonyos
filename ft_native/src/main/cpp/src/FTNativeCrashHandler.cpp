@@ -142,7 +142,7 @@ static std::string readMemoryMaps() {
             lineCount++;
         }
         fclose(fp);
-        OH_LOG_INFO(LogType::LOG_APP,  "Read %{public}d lines from /proc/self/maps", lineCount);
+        OH_LOG_DEBUG(LogType::LOG_APP,  "Read %{public}d lines from /proc/self/maps", lineCount);
     } else {
         OH_LOG_ERROR(LogType::LOG_APP,  "Failed to open /proc/self/maps");
         mapsContent = "Unable to read memory maps";
@@ -155,7 +155,7 @@ static std::string readMemoryMaps() {
  * Uses collected runtime logs instead of system hilog command
  */
 static std::string readHiLog() {
-    OH_LOG_INFO(LogType::LOG_APP,  "Collecting runtime logs for crash report");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "Collecting runtime logs for crash report");
 
     // Use collected runtime logs - this is more reliable than shell commands
     std::string collectedLogs = FTNativeCrashHandler::getCollectedLogs(500);
@@ -165,7 +165,7 @@ static std::string readHiLog() {
         return "";
     }
 
-    OH_LOG_INFO(LogType::LOG_APP,  "Collected %{public}zu bytes of runtime logs", collectedLogs.length());
+    OH_LOG_DEBUG(LogType::LOG_APP,  "Collected %{public}zu bytes of runtime logs", collectedLogs.length());
     return collectedLogs;
 }
 
@@ -186,7 +186,7 @@ static std::string readCrashFaultLog() {
     for (int i = 0; crashLogPaths[i] != nullptr; i++) {
         FILE* fp = fopen(crashLogPaths[i], "r");
         if (fp != nullptr) {
-            OH_LOG_INFO(LogType::LOG_APP,  "Reading crash log from %{public}s", crashLogPaths[i]);
+            OH_LOG_DEBUG(LogType::LOG_APP,  "Reading crash log from %{public}s", crashLogPaths[i]);
 
             // Read the entire file
             std::string content;
@@ -202,7 +202,7 @@ static std::string readCrashFaultLog() {
     // If direct file read fails, try using the faultlog command if available
     FILE* pipe = popen("cat /data/log/faultlog/fault_temp_log.txt 2>/dev/null", "r");
     if (pipe != nullptr) {
-        OH_LOG_INFO(LogType::LOG_APP,  "Reading crash log via cat command");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "Reading crash log via cat command");
 
         std::string content;
         char line[1024];
@@ -241,7 +241,7 @@ FTNativeCrashHandler::~FTNativeCrashHandler() {
 
 bool FTNativeCrashHandler::initialize(napi_env env) {
     if (initialized_) {
-        OH_LOG_INFO(LogType::LOG_APP,  "FTNativeCrashHandler already initialized");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "FTNativeCrashHandler already initialized");
         return true;
     }
 
@@ -249,21 +249,17 @@ bool FTNativeCrashHandler::initialize(napi_env env) {
 
     // Register signal handlers with proper chaining
     // This ensures we can capture crashes and still pass them to other handlers
-    if (FTSignalHandler::registerHandlers()) {
-        OH_LOG_INFO(LogType::LOG_APP,  "Signal handlers registered successfully");
-    } else {
+    if (!FTSignalHandler::registerHandlers()) {
         OH_LOG_WARN(LogType::LOG_APP,  "Failed to register signal handlers, continuing without them");
     }
 
     initialized_ = true;
-    OH_LOG_INFO(LogType::LOG_APP,  "FTNativeCrashHandler initialized successfully");
     return true;
 }
 
 void FTNativeCrashHandler::setCrashCallback(std::shared_ptr<NativeCrashCallback> callback) {
     std::lock_guard<std::mutex> lock(g_instanceMutex);
     callback_ = callback;
-    OH_LOG_INFO(LogType::LOG_APP,  "Crash callback set successfully");
 }
 
 std::shared_ptr<NativeCrashCallback> FTNativeCrashHandler::getCrashCallback() const {
@@ -274,7 +270,7 @@ std::shared_ptr<NativeCrashCallback> FTNativeCrashHandler::getCrashCallback() co
 static void OnCrashEventReceive(const char* domain,
                                 const struct HiAppEvent_AppEventGroup* appEventGroups,
                                 uint32_t groupLen) {
-    OH_LOG_INFO(LogType::LOG_APP,  "OnCrashEventReceive called, groupLen=%{public}u", groupLen);
+    OH_LOG_DEBUG(LogType::LOG_APP,  "OnCrashEventReceive called, groupLen=%{public}u", groupLen);
 
     auto& handler = FTNativeCrashHandler::getInstance();
 
@@ -282,7 +278,7 @@ static void OnCrashEventReceive(const char* domain,
         for (uint32_t j = 0; j < appEventGroups[i].infoLen; ++j) {
             const auto& eventInfo = appEventGroups[i].appEventInfos[j];
 
-            OH_LOG_INFO(LogType::LOG_APP, 
+            OH_LOG_DEBUG(LogType::LOG_APP,
                        "Received event: domain=%{public}s, name=%{public}s, type=%{public}d",
                        eventInfo.domain, eventInfo.name, eventInfo.type);
 
@@ -290,7 +286,7 @@ static void OnCrashEventReceive(const char* domain,
             if (strcmp(eventInfo.domain, "OS") == 0 &&
                 strcmp(eventInfo.name, "APP_CRASH") == 0) {
 
-                OH_LOG_INFO(LogType::LOG_APP,  "Processing crash event, params=%{public}s",
+                OH_LOG_DEBUG(LogType::LOG_APP,  "Processing crash event, params=%{public}s",
                            eventInfo.params);
 
                 // Helper function to extract string value from JSON
@@ -345,9 +341,9 @@ static void OnCrashEventReceive(const char* domain,
                 std::string paramsStr = eventInfo.params;
 
                 // Log the raw JSON data for debugging
-                OH_LOG_INFO(LogType::LOG_APP,  "=== RAW CRASH DATA START ===");
-                OH_LOG_INFO(LogType::LOG_APP,  "%{public}s", paramsStr.c_str());
-                OH_LOG_INFO(LogType::LOG_APP,  "=== RAW CRASH DATA END ===");
+                OH_LOG_DEBUG(LogType::LOG_APP,  "=== RAW CRASH DATA START ===");
+                OH_LOG_DEBUG(LogType::LOG_APP,  "%{public}s", paramsStr.c_str());
+                OH_LOG_DEBUG(LogType::LOG_APP,  "=== RAW CRASH DATA END ===");
 
                 // Parse crash data from JSON
                 NativeCrashData crashData;
@@ -405,7 +401,7 @@ static void OnCrashEventReceive(const char* domain,
                                 }
                                 if (valueEnd > valueStart) {
                                     crashData.memoryNearRegisters = paramsStr.substr(valueStart, valueEnd - valueStart);
-                                    OH_LOG_INFO(LogType::LOG_APP,  "Extracted memory_near_registers, length=%{public}zu", crashData.memoryNearRegisters.length());
+                                    OH_LOG_DEBUG(LogType::LOG_APP,  "Extracted memory_near_registers, length=%{public}zu", crashData.memoryNearRegisters.length());
                                 }
                             } else {
                                 // Try object or array format
@@ -430,7 +426,7 @@ static void OnCrashEventReceive(const char* domain,
                                                 bracketCount--;
                                                 if (bracketCount == 0) {
                                                     crashData.memoryNearRegisters = paramsStr.substr(tempStart, i - tempStart + 1);
-                                                    OH_LOG_INFO(LogType::LOG_APP,  "Extracted memory_near_registers (object/array), length=%{public}zu", crashData.memoryNearRegisters.length());
+                                                    OH_LOG_DEBUG(LogType::LOG_APP,  "Extracted memory_near_registers (object/array), length=%{public}zu", crashData.memoryNearRegisters.length());
                                                     break;
                                                 }
                                             }
@@ -475,7 +471,7 @@ static void OnCrashEventReceive(const char* domain,
                                 }
                                 if (valueEnd > valueStart) {
                                     crashData.maps = paramsStr.substr(valueStart, valueEnd - valueStart);
-                                    OH_LOG_INFO(LogType::LOG_APP,  "Extracted maps, length=%{public}zu", crashData.maps.length());
+                                    OH_LOG_DEBUG(LogType::LOG_APP,  "Extracted maps, length=%{public}zu", crashData.maps.length());
                                 }
                             } else {
                                 // Try array format
@@ -497,7 +493,7 @@ static void OnCrashEventReceive(const char* domain,
                                                 bracketCount--;
                                                 if (bracketCount == 0) {
                                                     crashData.maps = paramsStr.substr(tempStart, i - tempStart + 1);
-                                                    OH_LOG_INFO(LogType::LOG_APP,  "Extracted maps (array), length=%{public}zu", crashData.maps.length());
+                                                    OH_LOG_DEBUG(LogType::LOG_APP,  "Extracted maps (array), length=%{public}zu", crashData.maps.length());
                                                     break;
                                                 }
                                             }
@@ -552,13 +548,13 @@ static void OnCrashEventReceive(const char* domain,
                                     pos += 1;
                                 }
                                 crashData.hilog = hilogContent;
-                                OH_LOG_INFO(LogType::LOG_APP,  "Extracted hilog, length=%{public}zu", crashData.hilog.length());
+                                OH_LOG_DEBUG(LogType::LOG_APP,  "Extracted hilog, length=%{public}zu", crashData.hilog.length());
                             }
                         }
                     }
                 }
 
-                OH_LOG_INFO(LogType::LOG_APP, 
+                OH_LOG_DEBUG(LogType::LOG_APP,
                            "Parsed crash data: pid=%{public}d, uid=%{public}d, bundle=%{public}s, version=%{public}s",
                            crashData.pid, crashData.uid, crashData.bundleName.c_str(), crashData.bundleVersion.c_str());
 
@@ -568,16 +564,16 @@ static void OnCrashEventReceive(const char* domain,
                 // Simple crash_type detection
                 if (paramsStr.find("\"crash_type\":\"NativeCrash\"") != std::string::npos) {
                     crashTypeStr = "NativeCrash";
-                    OH_LOG_INFO(LogType::LOG_APP,  "Detected NATIVE crash (C++)");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "Detected NATIVE crash (C++)");
                 } else if (paramsStr.find("\"crash_type\":\"JsError\"") != std::string::npos) {
                     crashTypeStr = "JsError";
-                    OH_LOG_INFO(LogType::LOG_APP,  "Detected JS crash");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "Detected JS crash");
                 }
 
                 crashData.crashType = crashTypeStr;
 
                 // Log availability of optional crash data fields
-                OH_LOG_INFO(LogType::LOG_APP,  "memory_near_registers: %{public}s, maps: %{public}s, hilog: %{public}s",
+                OH_LOG_DEBUG(LogType::LOG_APP,  "memory_near_registers: %{public}s, maps: %{public}s, hilog: %{public}s",
                            crashData.memoryNearRegisters.empty() ? "NOT FOUND" : "FOUND",
                            crashData.maps.empty() ? "NOT FOUND" : "FOUND",
                            crashData.hilog.empty() ? "NOT FOUND" : "FOUND");
@@ -586,7 +582,7 @@ static void OnCrashEventReceive(const char* domain,
                 if (crashData.memoryNearRegisters.empty()) {
                     crashData.memoryNearRegisters = readCrashFaultLog();
                     if (!crashData.memoryNearRegisters.empty()) {
-                        OH_LOG_INFO(LogType::LOG_APP,  "Read crash fault log from system as fallback");
+                        OH_LOG_DEBUG(LogType::LOG_APP,  "Read crash fault log from system as fallback");
                     } else {
                         OH_LOG_WARN(LogType::LOG_APP,  "Memory near registers not available (requires crash signal handler context)");
                     }
@@ -595,14 +591,14 @@ static void OnCrashEventReceive(const char* domain,
                 // Fallback: If maps was not found in JSON, try reading from /proc/self/maps
                 if (crashData.maps.empty()) {
                     crashData.maps = readMemoryMaps();
-                    OH_LOG_INFO(LogType::LOG_APP,  "Read memory maps from /proc/self/maps as fallback");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "Read memory maps from /proc/self/maps as fallback");
                 }
 
                 // Fallback: If hilog was not found in JSON, try reading from hilog command
                 if (crashData.hilog.empty()) {
                     crashData.hilog = readHiLog();
                     if (!crashData.hilog.empty()) {
-                        OH_LOG_INFO(LogType::LOG_APP,  "Read hilog from system as fallback");
+                        OH_LOG_DEBUG(LogType::LOG_APP,  "Read hilog from system as fallback");
                     } else {
                         OH_LOG_WARN(LogType::LOG_APP,  "Hilog not available in crash data and unable to read from system");
                     }
@@ -611,21 +607,21 @@ static void OnCrashEventReceive(const char* domain,
                 // Notify callback if available
                 // ONLY callback for NATIVE crashes, not JavaScript crashes
                 // JavaScript crashes are handled by errorManager in FTExceptionHandler
-                OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> About to get crash callback...");
+                OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> About to get crash callback...");
                 std::lock_guard<std::mutex> lock(g_instanceMutex);
                 auto callback = handler.getCrashCallback();
-                OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> Callback retrieved: %{public}s", callback ? "VALID" : "NULL");
+                OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> Callback retrieved: %{public}s", callback ? "VALID" : "NULL");
 
                 // Filter: Only process native crashes, skip JavaScript crashes
                 if (strcmp(crashTypeStr, "JsError") == 0) {
-                    OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** SKIPPING JS CRASH *** (handled by errorManager)");
-                    OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> JavaScript crashes should be handled by FTExceptionHandler, not FTNativeCrashHandler");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** SKIPPING JS CRASH *** (handled by errorManager)");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> JavaScript crashes should be handled by FTExceptionHandler, not FTNativeCrashHandler");
                 } else if (callback) {
-                    OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** CALLING ARKTS CALLBACK *** for NATIVE crash: type=%{public}s", crashTypeStr);
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** CALLING ARKTS CALLBACK *** for NATIVE crash: type=%{public}s", crashTypeStr);
                     callback->onNativeCrash(crashData);
-                    OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** ARKTS CALLBACK RETURNED ***");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** ARKTS CALLBACK RETURNED ***");
                 } else {
-                    OH_LOG_INFO(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** NO CALLBACK SET *** crash data not sent to ArkTS layer");
+                    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-CRASH-CALLBACK> *** NO CALLBACK SET *** crash data not sent to ArkTS layer");
                 }
             }
         }
@@ -639,7 +635,7 @@ bool FTNativeCrashHandler::startWatching() {
     }
 
     if (watcher_ != nullptr) {
-        OH_LOG_INFO(LogType::LOG_APP,  "Watcher already started");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "Watcher already started");
         return true;
     }
 
@@ -689,20 +685,17 @@ bool FTNativeCrashHandler::startWatching() {
         return false;
     }
 
-    OH_LOG_INFO(LogType::LOG_APP,  "Native crash watcher started successfully");
     return true;
 }
 
 void FTNativeCrashHandler::stopWatching() {
     // Unregister signal handlers and restore old handlers
     FTSignalHandler::unregisterHandlers();
-    OH_LOG_INFO(LogType::LOG_APP,  "Signal handlers unregistered");
 
     if (watcher_ != nullptr) {
         OH_HiAppEvent_RemoveWatcher(static_cast<HiAppEvent_Watcher*>(watcher_));
         OH_HiAppEvent_DestroyWatcher(static_cast<HiAppEvent_Watcher*>(watcher_));
         watcher_ = nullptr;
-        OH_LOG_INFO(LogType::LOG_APP,  "Native crash watcher stopped");
     }
 }
 

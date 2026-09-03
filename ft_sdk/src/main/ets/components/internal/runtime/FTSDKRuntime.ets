@@ -13,7 +13,7 @@ import { Utils } from '../../utils/Utils';
 
 export interface FTSDKAnrManager {
   initialize(): void;
-  startMonitoring(): void;
+  startMonitoring(): boolean;
   shutdown(): void;
 }
 

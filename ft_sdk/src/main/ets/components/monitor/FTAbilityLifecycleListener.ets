@@ -115,21 +115,18 @@ export class FTAbilityLifecycleListener {
    * This should be called during SDK initialization
    */
   public register(): void {
-    FTInnerLogger.i(TAG, "register() called - starting registration process");
     if (this.isRegistered) {
       FTInnerLogger.w(TAG, "Lifecycle listener is already registered");
       return;
     }
 
     try {
-      FTInnerLogger.d(TAG, "Getting ApplicationContext from Utils...");
       // First check if we can get AbilityContext
       const abilityContext = Utils.getAbilityContext();
       if (!abilityContext) {
         FTInnerLogger.w(TAG, "AbilityContext is not available, cannot get ApplicationContext");
         return;
       }
-      FTInnerLogger.d(TAG, "AbilityContext obtained, getting ApplicationContext...");
       
       // Then get ApplicationContext from AbilityContext
       const applicationContext = abilityContext.getApplicationContext();
@@ -137,7 +134,6 @@ export class FTAbilityLifecycleListener {
         FTInnerLogger.w(TAG, "ApplicationContext is not available, cannot register lifecycle listener");
         return;
       }
-      FTInnerLogger.d(TAG, "ApplicationContext obtained successfully");
       this.registerApplicationStateListener(applicationContext as Object);
 
       // Create lifecycle callback
@@ -156,7 +152,6 @@ export class FTAbilityLifecycleListener {
           try {
             const mainWindow = windowStage.getMainWindowSync();
             FTSDK.onWindowStageActive(mainWindow);
-            FTInnerLogger.d(TAG, "MainWindow cached on window stage active for automatic UI feature initialization");
           } catch (error) {
             FTInnerLogger.w(TAG, `Failed to cache MainWindow on window stage active: ${String(error)}`);
             FTSDK.onWindowStageActive();
@@ -171,7 +166,6 @@ export class FTAbilityLifecycleListener {
           this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
         },
         onAbilityForeground: (ability: UIAbility) => {
-          FTInnerLogger.d(TAG, `onAbilityForeground: UIAbility lifecycle event`);
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
           FTSDK.recordAppLaunchApplicationForeground();
@@ -180,16 +174,16 @@ export class FTAbilityLifecycleListener {
           if (this.sleepCheckTimer !== null) {
             clearTimeout(this.sleepCheckTimer);
             this.sleepCheckTimer = null;
-            FTInnerLogger.d(TAG, "Cleared sleep check timer - app returned to foreground");
           }
           
           // Record start time for potential hot start
           // Similar to Android's LifeCircleTraceCallback.onPreStart()
           const appStartCounter = FTAppStartCounter.getInstance();
           const config = FTSDK.getRumConfig();
-          FTInnerLogger.d(TAG, `onAbilityForeground: alreadySleep=${this.alreadySleep}, isInited=${appStartCounter.isInited()}`);
-          
-          if (this.alreadySleep && appStartCounter.isInited()) {
+          const isHotStart: boolean = this.alreadySleep && appStartCounter.isInited();
+          FTInnerLogger.d(TAG, `App foregrounded: slept=${this.alreadySleep}, hotStart=${isHotStart}`);
+
+          if (isHotStart) {
             // Keep the Android hot-start refresh behaviour even when no UI
             // tracking feature is enabled and this listener exists solely for
             // remote configuration.
@@ -201,7 +195,6 @@ export class FTAbilityLifecycleListener {
             const startTime = Utils.getCurrentNanoTime();
             this.startTimeNanoTime = startTime;
             this.startClockTimeNano = FTAppLaunchTracker.getStartupUptimeNs();
-            FTInnerLogger.d(TAG, `App returning from background, hot start detected - startTime=${this.startTimeNanoTime}`);
             
             // Calculate hot start duration after a short delay to ensure UI is ready
             // Use setTimeout to delay the calculation, similar to waiting for onAbilityWindowStageCreate
@@ -213,9 +206,7 @@ export class FTAbilityLifecycleListener {
                 if (hotStartDuration > 0 && config && config.isEnableTraceUserAction()) {
                   // Upload hot start data //FIXME do not call in first cold launch
                   appStartCounter.hotStart(hotStartDuration, this.startTimeNanoTime);
-                  FTInnerLogger.d(TAG, `Hot start calculated and uploaded from onAbilityForeground: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms)`);
-                } else {
-                  FTInnerLogger.d(TAG, `Hot start detected but RUM or action tracking is disabled, skipping upload`);
+                  FTInnerLogger.d(TAG, `Hot start recorded: durationMs=${hotStartDuration / 1000000}`);
                 }
                 
                 // Reset start time after upload
@@ -230,12 +221,7 @@ export class FTAbilityLifecycleListener {
               }
             }, 100); // 100ms delay to ensure UI is ready
           } else {
-            // Reset alreadySleep if app returns to foreground before 10 seconds
-            if (this.alreadySleep) {
-              FTInnerLogger.d(TAG, `alreadySleep was true but isInited is false, resetting alreadySleep`);
-            } else {
-              FTInnerLogger.d(TAG, `App returned to foreground before 10 seconds, resetting alreadySleep`);
-            }
+            // Reset alreadySleep if app returns to foreground before 10 seconds.
             this.alreadySleep = false;
           }
         },
@@ -249,7 +235,6 @@ export class FTAbilityLifecycleListener {
           
           // Schedule check for long time sleep (10 seconds)
           // Similar to Android's LifeCircleTraceCallback.onEnterBackground()
-          FTInnerLogger.d(TAG, `onAbilityBackground: Scheduling sleep check after ${FTAbilityLifecycleListener.DELAY_SLEEP_MILLIS}ms`);
           this.scheduleSleepCheck();
         },
         onAbilityDestroy: (ability: UIAbility) => {
@@ -269,21 +254,17 @@ export class FTAbilityLifecycleListener {
         on(type: string, callback: AbilityLifecycleCallback): number;
       }
       
-      FTInnerLogger.d(TAG, "Attempting to register lifecycle callback using on('abilityLifecycle')...");
       const appContext = applicationContext as ApplicationContextWithOn;
-      FTInnerLogger.d(TAG, `appContext type check: ${typeof appContext}, has 'on' method: ${typeof appContext.on === 'function'}`);
       if (appContext && typeof appContext.on === 'function') {
-        FTInnerLogger.d(TAG, "Calling appContext.on('abilityLifecycle', callback)...");
         this.lifecycleId = appContext.on('abilityLifecycle', this.lifecycleCallback);
         this.isRegistered = true;
-        FTInnerLogger.i(TAG, `✅ Successfully registered lifecycle callback via on('abilityLifecycle'), lifecycleId=${this.lifecycleId}`);
+        FTInnerLogger.d(TAG, `UIAbility lifecycle listener registered: lifecycleId=${this.lifecycleId}`);
       } else {
-        FTInnerLogger.w(TAG, "❌ ApplicationContext.on('abilityLifecycle') API not available, lifecycle monitoring disabled");
-        FTInnerLogger.w(TAG, `   appContext exists: ${appContext !== null && appContext !== undefined}, has 'on' method: ${typeof appContext?.on === 'function'}`);
+        FTInnerLogger.w(TAG,
+          `ApplicationContext.on('abilityLifecycle') unavailable; lifecycle monitoring disabled: ` +
+          `appContext=${appContext !== null && appContext !== undefined}, hasOn=${typeof appContext?.on === 'function'}`);
         return;
       }
-
-      FTInnerLogger.i(TAG, "UIAbility lifecycle listener registered successfully");
 
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to register lifecycle listener: ${String(error)}`);
@@ -416,7 +397,6 @@ export class FTAbilityLifecycleListener {
       if (FTSDK.isViewTrackingEnabled()) {
         const rumManager = FTRUMGlobalManager.getInstance();
         await rumManager.stopView();
-        FTInnerLogger.d(TAG, `stopView called in ${context}`);
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Error calling stopView in ${context}: ${String(error)}`);
@@ -477,7 +457,7 @@ export class FTAbilityLifecycleListener {
       this.sleepCheckTimer = null;
     }, FTAbilityLifecycleListener.DELAY_SLEEP_MILLIS);
     
-    FTInnerLogger.d(TAG, `Scheduled sleep check after ${FTAbilityLifecycleListener.DELAY_SLEEP_MILLIS}ms`);
+    FTInnerLogger.d(TAG, `Sleep check scheduled: delayMs=${FTAbilityLifecycleListener.DELAY_SLEEP_MILLIS}`);
   }
   
   /**
@@ -490,14 +470,11 @@ export class FTAbilityLifecycleListener {
    */
   private checkLongTimeSleep(): void {
     const appStartCounter = FTAppStartCounter.getInstance();
-    FTInnerLogger.d(TAG, `checkLongTimeSleep: isInited=${appStartCounter.isInited()}, sleepCheckTimer=${this.sleepCheckTimer}`);
     if (appStartCounter.isInited()) {
       // App was initialized, and we're here after 10 seconds delay
       // This means app has been in background for >10 seconds
       this.alreadySleep = true;
-      FTInnerLogger.d(TAG, "App has been in background for >10s, marked as alreadySleep=true");
-    } else {
-      FTInnerLogger.d(TAG, "App not initialized yet, cannot mark as alreadySleep");
+      FTInnerLogger.d(TAG, "App remained in background for >10s; sleep state enabled");
     }
   }
 }

@@ -263,10 +263,6 @@ bool FTSignalHandler::registerHandlers() {
                         "Failed to register handler for %{public}s (%{public}d): %{public}s",
                         getSignalName(sig), sig, strerror(errno));
             s_oldActions[sig].sa_handler = nullptr;
-        } else {
-            OH_LOG_INFO(LogType::LOG_APP, 
-                       "Registered signal handler for %{public}s (%{public}d)",
-                       getSignalName(sig), sig);
         }
     }
 
@@ -286,11 +282,7 @@ void FTSignalHandler::unregisterHandlers() {
         if (s_oldActions[sig].sa_handler != nullptr ||
             s_oldActions[sig].sa_sigaction != nullptr) {
             // Restore old handler
-            if (sigaction(sig, &s_oldActions[sig], nullptr) == 0) {
-                OH_LOG_INFO(LogType::LOG_APP, 
-                           "Restored old handler for %{public}s (%{public}d)",
-                           getSignalName(sig), sig);
-            }
+            sigaction(sig, &s_oldActions[sig], nullptr);
         }
 
         // Clear old handler

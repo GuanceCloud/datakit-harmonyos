@@ -39,7 +39,6 @@ export class FTTraceConfigManager {
     try {
 
       this.config = config;
-      FTInnerLogger.d(TAG, `Trace config initialized: samplingRate=${config.getSamplingRate()}, traceType=${config.getTraceType()}, enableAutoTrace=${config.isEnableAutoTrace()}`);
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize trace config: ${error}`);

@@ -62,8 +62,11 @@ export class FTUIBlockManager {
     // background callbacks still close this gate immediately.
     this.isAppInForeground = true;
     this.isRunning = true;
-    this.subscribeToMainThreadJankEvents();
-    FTInnerLogger.i(TAG, `[FT-UI-BLOCK] UI block detection started with threshold: ${blockDurationMs}ms`);
+    if (!this.subscribeToMainThreadJankEvents()) {
+      this.isRunning = false;
+      return;
+    }
+    FTInnerLogger.d(TAG, `[FT-UI-BLOCK] UI Block monitoring ready: thresholdMs=${blockDurationMs}`);
   }
 
   /**
@@ -87,7 +90,7 @@ export class FTUIBlockManager {
     }
   }
 
-  private subscribeToMainThreadJankEvents(): void {
+  private subscribeToMainThreadJankEvents(): boolean {
     try {
       const holder = hiAppEvent.addWatcher({
         name: this.appEventWatcherName,
@@ -101,11 +104,12 @@ export class FTUIBlockManager {
       });
       if (holder === null) {
         FTInnerLogger.e(TAG, '[FT-UI-BLOCK] hiAppEvent.addWatcher returned null');
-        return;
+        return false;
       }
-      FTInnerLogger.i(TAG, `[FT-UI-BLOCK] MAIN_THREAD_JANK watcher registered: ${this.appEventWatcherName}`);
+      return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `[FT-UI-BLOCK] Failed to subscribe to MAIN_THREAD_JANK events: ${String(error)}`);
+      return false;
     }
   }
 

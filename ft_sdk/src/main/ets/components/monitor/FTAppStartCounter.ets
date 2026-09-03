@@ -57,8 +57,6 @@ export class FTAppStartCounter {
    * Android calls: FTRUMInnerManager.get().addAction(actionName, actionType, duration, startTime, property)
    */
   public hotStart(hotStartDuration: number, startTime: number): void {
-    FTInnerLogger.i(TAG, `hotStart() called: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms), startTime=${startTime}`);
-    
     // Get RUM config from FTSDK (aligned with Android: FTRUMConfigManager.get().getConfig())
     const config = FTSDK.getRumConfig();
     
@@ -75,7 +73,6 @@ export class FTAppStartCounter {
     if (innerManager) {
       // Directly call innerManager.addAction with startTime parameter
       // This matches Android's implementation: addAction(actionName, actionType, duration, startTime, property)
-      FTInnerLogger.i(TAG, `Uploading hot start action: actionName=${Constants.ACTION_NAME_LAUNCH_HOT}, actionType=${Constants.ACTION_TYPE_LAUNCH_HOT}`);
       innerManager.addAction(
         Constants.ACTION_NAME_LAUNCH_HOT,
         Constants.ACTION_TYPE_LAUNCH_HOT,
@@ -83,7 +80,6 @@ export class FTAppStartCounter {
         startTime,  // Use provided startTime instead of currentTime
         {}
       );
-      FTInnerLogger.i(TAG, `✅ Hot start uploaded successfully: duration=${hotStartDuration}ns (${hotStartDuration / 1000000}ms), startTime=${startTime}`);
     } else {
       FTInnerLogger.e(TAG, "FTRUMInnerManager is not available, cannot upload hot start data");
     }

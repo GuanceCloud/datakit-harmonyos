@@ -22,7 +22,7 @@ struct CrashDataWrapper {
 
 // Thread-safe function call to JavaScript
 static void CallJs(napi_env env, napi_value jsCallback, void* context, void* data) {
-    OH_LOG_INFO(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** CallJs CALLBACK INVOKED ***");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** CallJs CALLBACK INVOKED ***");
 
     if (env == nullptr) {
         OH_LOG_ERROR(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** env is NULL ***");
@@ -39,7 +39,7 @@ static void CallJs(napi_env env, napi_value jsCallback, void* context, void* dat
         return;
     }
 
-    OH_LOG_INFO(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> All parameters valid, creating crash object...");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> All parameters valid, creating crash object...");
 
     CrashDataWrapper* crashDataWrapper = static_cast<CrashDataWrapper*>(data);
 
@@ -152,14 +152,14 @@ static void CallJs(napi_env env, napi_value jsCallback, void* context, void* dat
                            &hilogValue);
     napi_set_named_property(env, crashObj, "hilog", hilogValue);
 
-    OH_LOG_INFO(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> Crash object created, calling JavaScript callback...");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> Crash object created, calling JavaScript callback...");
 
     // Call JavaScript callback
     napi_value argv[] = {crashObj};
     napi_status callStatus = napi_call_function(env, undefined, jsCallback, 1, argv, nullptr);
 
     if (callStatus == napi_ok) {
-        OH_LOG_INFO(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** JavaScript callback called SUCCESSFULLY ***");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** JavaScript callback called SUCCESSFULLY ***");
     } else {
         OH_LOG_ERROR(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** JavaScript callback call FAILED: %{public}d ***", callStatus);
     }
@@ -167,7 +167,7 @@ static void CallJs(napi_env env, napi_value jsCallback, void* context, void* dat
     // Clean up
     delete crashDataWrapper;
 
-    OH_LOG_INFO(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** CallJs COMPLETED ***");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NATIVE-NAPI-CALLJS> *** CallJs COMPLETED ***");
 }
 
 // Finalizer for thread-safe function
@@ -182,7 +182,7 @@ static void FinalizeJs(napi_env env, void* data, void* hint) {
 class CrashCallbackImpl : public NativeCrashCallback {
 public:
     void onNativeCrash(const NativeCrashData& crashData) override {
-        OH_LOG_INFO(LogType::LOG_APP, 
+        OH_LOG_DEBUG(LogType::LOG_APP,
                    "<FT-NAPI-CALLBACK> CrashCallbackImpl::onNativeCrash called, crashType=%{public}s",
                    crashData.crashType.c_str());
 
@@ -191,7 +191,7 @@ public:
             return;
         }
 
-        OH_LOG_INFO(LogType::LOG_APP,  "<FT-NAPI-CALLBACK> Thread-safe function is valid, calling napi_call_threadsafe_function...");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NAPI-CALLBACK> Thread-safe function is valid, calling napi_call_threadsafe_function...");
 
         CrashDataWrapper* wrapper = new CrashDataWrapper();
         wrapper->crashData = crashData;
@@ -203,7 +203,7 @@ public:
         );
 
         if (status == napi_ok) {
-            OH_LOG_INFO(LogType::LOG_APP,  "<FT-NAPI-CALLBACK> *** napi_call_threadsafe_function SUCCESS ***");
+            OH_LOG_DEBUG(LogType::LOG_APP,  "<FT-NAPI-CALLBACK> *** napi_call_threadsafe_function SUCCESS ***");
         } else {
             OH_LOG_ERROR(LogType::LOG_APP,  "<FT-NAPI-CALLBACK> *** napi_call_threadsafe_function FAILED: %{public}d ***", status);
             delete wrapper;
@@ -213,8 +213,6 @@ public:
 
 // NAPI: Initialize native crash handler
 static napi_value InitNativeCrashHandler(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LogType::LOG_APP,  "InitNativeCrashHandler called");
-
     auto& handler = FTNativeCrashHandler::getInstance();
     bool success = handler.initialize(env);
 
@@ -251,12 +249,10 @@ static napi_value SetCrashCallback(napi_env env, napi_callback_info info) {
     napi_create_string_utf8(env, "FTCrashCallbackResource", NAPI_AUTO_LENGTH, &asyncResourceName);
 
     if (g_threadSafeFunction != nullptr) {
-        OH_LOG_INFO(LogType::LOG_APP,  "Releasing existing thread-safe function");
+        OH_LOG_DEBUG(LogType::LOG_APP,  "Releasing existing thread-safe function");
         napi_release_threadsafe_function(g_threadSafeFunction, napi_tsfn_release);
         g_threadSafeFunction = nullptr;
     }
-
-    OH_LOG_INFO(LogType::LOG_APP,  "Creating thread-safe function...");
 
     napi_status status = napi_create_threadsafe_function(
         env,
@@ -279,9 +275,6 @@ static napi_value SetCrashCallback(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    OH_LOG_INFO(LogType::LOG_APP,  "Thread-safe function created successfully");
-    OH_LOG_INFO(LogType::LOG_APP,  "g_threadSafeFunction pointer: %{public}p", g_threadSafeFunction);
-
     // Set the callback in C++ handler
     auto callbackImpl = std::make_shared<CrashCallbackImpl>();
     FTNativeCrashHandler::getInstance().setCrashCallback(callbackImpl);
@@ -293,7 +286,7 @@ static napi_value SetCrashCallback(napi_env env, napi_callback_info info) {
 
 // NAPI: Clear crash callback from JavaScript
 static napi_value ClearCrashCallback(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LogType::LOG_APP,  "ClearCrashCallback called");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "ClearCrashCallback called");
 
     auto& handler = FTNativeCrashHandler::getInstance();
     handler.setCrashCallback(nullptr);
@@ -310,8 +303,6 @@ static napi_value ClearCrashCallback(napi_env env, napi_callback_info info) {
 
 // NAPI: Start watching crash events
 static napi_value StartWatching(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LogType::LOG_APP,  "StartWatching called");
-
     auto& handler = FTNativeCrashHandler::getInstance();
     bool success = handler.startWatching();
 
@@ -322,7 +313,7 @@ static napi_value StartWatching(napi_env env, napi_callback_info info) {
 
 // NAPI: Stop watching crash events
 static napi_value StopWatching(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LogType::LOG_APP,  "StopWatching called");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "StopWatching called");
 
     auto& handler = FTNativeCrashHandler::getInstance();
     handler.stopWatching();
@@ -448,7 +439,7 @@ static napi_value SetMaxLogSize(napi_env env, napi_callback_info info) {
 
 // NAPI: Get native crash handler version
 static napi_value GetVersion(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LogType::LOG_APP,  "GetVersion called");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "GetVersion called");
 
     std::string version = FTNativeCrashHandler::getVersion();
 
@@ -461,7 +452,7 @@ static napi_value GetVersion(napi_env env, napi_callback_info info) {
 EXTERN_C_START
 
 static napi_value Init(napi_env env, napi_value exports) {
-    OH_LOG_INFO(LogType::LOG_APP,  "Initializing FT Native Crash NAPI module");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "Initializing FT Native Crash NAPI module");
 
     napi_property_descriptor desc[] = {
         {"initNativeCrashHandler", nullptr, InitNativeCrashHandler, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -494,7 +485,7 @@ static napi_module ftNativeCrashModule = {
 };
 
 extern "C" __attribute__((constructor)) void RegisterFTNativeCrashModule(void) {
-    OH_LOG_INFO(LogType::LOG_APP,  "Registering FT Native Crash module");
+    OH_LOG_DEBUG(LogType::LOG_APP,  "Registering FT Native Crash module");
     napi_module_register(&ftNativeCrashModule);
 }
 

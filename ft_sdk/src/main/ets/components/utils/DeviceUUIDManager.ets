@@ -149,8 +149,8 @@ export class DeviceUUIDManager {
       return this.randomUUID;
     }
 
-    // If not found in cache, create new one synchronously (should not happen if initRandomUUID() was called)
-    FTInnerLogger.w(TAG, ` Random UUID not found in cache, creating a new one`);
+    // On first install, or when no cache is available, create a random UUID synchronously.
+    FTInnerLogger.d(TAG, `Random UUID not found in cache; creating a new one`);
     // Generate UUID synchronously and save asynchronously (same logic as initRandomUUID)
     const uuid = Utils.generateUUID();
     this.randomUUID = "ft.rd_" + uuid;

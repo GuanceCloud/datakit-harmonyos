@@ -70,6 +70,9 @@ const PROCESS_STATE_BACKGROUND = 3;
 
 export class FTSDK {
   private static ftSdk: FTSDK | null;
+  // Native module version is immutable for the process. Cache only successful
+  // reads so a transient load failure can still be retried later.
+  private static nativeCrashVersion: string | null = null;
   private static anrDetectManager: FTSDKAnrManager | null = null;
   private static rumConfig: FTRUMConfig | null = null;
   private static uiFeaturesInitialized: boolean = false;
@@ -183,6 +186,7 @@ export class FTSDK {
     FTSDK.resetInitializationSeparatorState();
     FTSDK.autoActionTrackingEnabled = true;
     FTSDK.cachedPACKAGE_UUID = null;
+    FTSDK.nativeCrashVersion = null;
   }
 
   private static resetInitializationSeparatorState(): void {
@@ -424,7 +428,6 @@ export class FTSDK {
     } catch (e) {
       FTInnerLogger.e(TAG, `FTSDK initialization failed:\n${e.stack || e.message}`);
     }
-    FTInnerLogger.d(TAG, "FTSDK.install completed");
   }
 
   initFTConfig(config: FTSDKConfig): void {
@@ -474,7 +477,7 @@ export class FTSDK {
 
     // Initialize sync task manager
     if (context) {
-      FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
+      FTInnerLogger.d(TAG, "Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
       const spoolManager = FTDBSpoolManager.getInstance();
       spoolManager.init(context);
@@ -511,37 +514,38 @@ export class FTSDK {
     if (FTSDK.baseCapabilitiesReady) {
       FTLogSeparator.initialization(TAG, "基础能力就绪");
     }
-
-    // Print debug log
-    FTInnerLogger.d(TAG, "FTSDK.initFTConfig complete");
     FTSDK.tryPrintInitializationCompleteSeparator();
   }
 
   static installLogConfig(logConfig: FTLoggerConfig): void {
     try {
-      if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
-        logConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
-        FTSDK.remoteConfigManager?.mergeLogConfigFromCache(logConfig);
+      if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+        FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
+        return;
       }
-      // Initialize TrackLogManager
-      TrackLogManager.getInstance().setLogConfig(logConfig);
-      FTDBCachePolicy.getInstance().updateLogCacheLimitCount(logConfig.getLogCacheLimitCount());
-      FTDBCachePolicy.getInstance().updateLogCacheDiscardStrategy(logConfig.getLogCacheDiscardStrategy());
+
+      logConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
+      FTSDK.remoteConfigManager?.mergeLogConfigFromCache(logConfig);
+      const cachePolicy = FTDBCachePolicy.getInstance();
+      cachePolicy.updateLogCacheLimitCount(logConfig.getLogCacheLimitCount());
+      cachePolicy.updateLogCacheDiscardStrategy(logConfig.getLogCacheDiscardStrategy());
+      const effectiveCachePolicy: string = FTSDK.formatEffectiveCachePolicy(
+        cachePolicy,
+        'log',
+        logConfig.getLogCacheLimitCount(),
+        String(logConfig.getLogCacheDiscardStrategy())
+      );
 
       // Initialize FTTrackInner log configuration
-      if (FTSDK.ftSdk) {
-        FTTrackInner.getInstance().initLogConfig(logConfig);
-        FTSDK.logConfigReady = true;
-        FTLogSeparator.initialization(TAG, "Log 配置完成");
-        FTInnerLogger.d(TAG,
-          `installLogConfig completed: serviceName=${logConfig.getServiceName()}, samplingRate=${logConfig.getSamplingRate()}, ` +
-          `enableCustomLog=${logConfig.isEnableCustomLog()}, enableLinkRumData=${logConfig.isEnableLinkRumData()}, ` +
-          `enableConsoleLog=${logConfig.isEnableConsoleLog()}, printCustomLogToConsole=${logConfig.isPrintCustomLogToConsole()}, ` +
-          `logLevelFilters=${logConfig.getLogLevelFilters().join('|')}, logCacheLimitCount=${logConfig.getLogCacheLimitCount()}, ` +
-          `logCacheDiscardStrategy=${logConfig.getLogCacheDiscardStrategy()}`);
-      }else{
-        FTInnerLogger.e(TAG, `installLogConfig failed: FTSDK.install not call`);
-      }
+      FTTrackInner.getInstance().initLogConfig(logConfig);
+      FTSDK.logConfigReady = true;
+      FTLogSeparator.initialization(TAG, "Log 配置完成");
+      FTInnerLogger.d(TAG,
+        `installLogConfig completed: serviceName=${logConfig.getServiceName()}, samplingRate=${logConfig.getSamplingRate()}, ` +
+        `enableCustomLog=${logConfig.isEnableCustomLog()}, enableLinkRumData=${logConfig.isEnableLinkRumData()}, ` +
+        `enableConsoleLog=${logConfig.isEnableConsoleLog()}, printCustomLogToConsole=${logConfig.isPrintCustomLogToConsole()}, ` +
+        `logLevelFilters=${logConfig.getLogLevelFilters().join('|')}, ` +
+        `cachePolicy={${effectiveCachePolicy}}`);
 
       FTSDK.tryPrintInitializationCompleteSeparator();
 
@@ -596,8 +600,15 @@ export class FTSDK {
 
     FTSDK.initRUMGlobalContext(rumConfig);
     FTRUMConfigManager.getInstance().initWithConfig(rumConfig);
-    FTDBCachePolicy.getInstance().updateRumCacheLimitCount(rumConfig.getRumCacheLimitCount());
-    FTDBCachePolicy.getInstance().updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
+    const cachePolicy = FTDBCachePolicy.getInstance();
+    cachePolicy.updateRumCacheLimitCount(rumConfig.getRumCacheLimitCount());
+    cachePolicy.updateRumCacheDiscardStrategy(rumConfig.getRumCacheDiscardStrategy());
+    const effectiveCachePolicy: string = FTSDK.formatEffectiveCachePolicy(
+      cachePolicy,
+      'rum',
+      rumConfig.getRumCacheLimitCount(),
+      String(rumConfig.getRumCacheDiscardStrategy())
+    );
     // Initialize the RUM inner manager with the supplied configuration.
     FTRUMInnerManager.getInstance().initParams(rumConfig);
 
@@ -614,7 +625,6 @@ export class FTSDK {
     if (FTSDK.requiresLifecycleListenerInternal(rumConfig)) {
       try {
         getFTSDKRuntime().registerLifecycleListener();
-        FTInnerLogger.i(TAG, "UIAbility lifecycle listener registered for automatic UI feature initialization");
       } catch (error) {
         FTInnerLogger.w(TAG, `Failed to register UIAbility lifecycle listener: ${String(error)}`);
       }
@@ -635,13 +645,11 @@ export class FTSDK {
     // Initialize exception handler for crash tracking.
     if (rumConfig.isEnableTrackAppCrash()) {
       getFTSDKRuntime().initExceptionHandler(rumConfig);
-      FTInnerLogger.d(TAG, "FTExceptionHandler initialized for crash tracking");
     }
 
     // Initialize UI block detection.
     if (rumConfig.isEnableTrackAppUIBlock()) {
       getFTSDKRuntime().startUIBlockManager(rumConfig);
-      FTInnerLogger.d(TAG, "FTUIBlockManager initialized for UI block detection");
     } else {
       FTUIBlockManager.getInstance().release();
     }
@@ -666,7 +674,7 @@ export class FTSDK {
       `enableTraceUserAction=${rumConfig.isEnableTraceUserAction()}, enableTraceUserResource=${rumConfig.isEnableTraceUserResource()}, ` +
       `enableTraceWebView=${rumConfig.isEnableTraceWebView()}, enableTrackAppCrash=${rumConfig.isEnableTrackAppCrash()}, ` +
       `enableTrackAppANR=${rumConfig.isEnableTrackAppANR()}, enableTrackAppUIBlock=${rumConfig.isEnableTrackAppUIBlock()}, ` +
-      `rumCacheLimitCount=${rumConfig.getRumCacheLimitCount()}, rumCacheDiscardStrategy=${rumConfig.getRumCacheDiscardStrategy()}`);
+      `cachePolicy={${effectiveCachePolicy}}`);
     FTSDK.tryPrintInitializationCompleteSeparator();
 
     FTSDK.startRemoteConfigIfPossible(rumConfig.getRumAppId());
@@ -680,6 +688,18 @@ export class FTSDK {
 
     FTInnerLogger.d(TAG,
       `serverUrl ==>\nDataway Url:${config.getDatawayUrl()},clientToken:${FTSDK.maskHalfCharacter(config.getClientToken())}`);
+  }
+
+  private static formatEffectiveCachePolicy(
+    cachePolicy: FTDBCachePolicy,
+    dataType: string,
+    countLimit: number,
+    countDiscardStrategy: string
+  ): string {
+    if (cachePolicy.isEnableLimitWithDbSize()) {
+      return `mode=db_size, dbLimitSize=${cachePolicy.getDbLimitSize()}, dbCacheDiscard=${cachePolicy.getDBCacheDiscard()}`;
+    }
+    return `mode=count, ${dataType}CacheLimitCount=${countLimit}, ${dataType}CacheDiscardStrategy=${countDiscardStrategy}`;
   }
 
   private static maskHalfCharacter(value: string): string {
@@ -881,8 +901,16 @@ export class FTSDK {
   }
 
   private static getNativeCrashVersion(): string {
+    if (FTSDK.nativeCrashVersion !== null) {
+      return FTSDK.nativeCrashVersion;
+    }
+
     try {
-      return ftnativecrash.getVersion();
+      const nativeVersion: string = ftnativecrash.getVersion();
+      if (nativeVersion.length > 0) {
+        FTSDK.nativeCrashVersion = nativeVersion;
+      }
+      return nativeVersion;
     } catch (e) {
       FTInnerLogger.e(TAG, `not ftnativecrash include`);
       return "";
@@ -938,18 +966,19 @@ export class FTSDK {
 
     try {
       const rumConfig = FTSDK.rumConfig;
+      let actionTrackingInitialized: boolean = false;
+      let navigationTrackingInitialized: boolean = false;
+      let anrMonitoringInitialized: boolean = false;
       // Initialize action tracker only when explicitly enabled
       if (rumConfig) {
         if (FTSDK.autoActionTrackingEnabled) {
           getFTSDKRuntime().initActionTracker(uiContext, rumConfig);
-          FTInnerLogger.d(TAG, "Action tracker initialized successfully");
-        } else {
-          FTInnerLogger.i(TAG, "Auto action tracking is disabled; skipping FTActionTracker init");
+          actionTrackingInitialized = true;
         }
         // Initialize navigation tracker (automatic view start/stop from navigation/router events)
         // Navigation tracking is initialized only when View tracking is enabled.
         getFTSDKRuntime().initNavigationTracker(uiContext, rumConfig);
-        FTInnerLogger.d(TAG, "Navigation tracker initialized successfully");
+        navigationTrackingInitialized = true;
       } else {
         FTInnerLogger.w(TAG, "RUM config not available, skipping action tracker initialization");
         return;
@@ -965,18 +994,17 @@ export class FTSDK {
 
       if (enableANRMonitoring) {
         FTSDK.anrDetectManager.initialize();
-        FTSDK.anrDetectManager.startMonitoring();
-        FTInnerLogger.i(TAG, `ANR monitoring initialized: anr=${enableANRMonitoring}`);
-      } else {
-        FTInnerLogger.d(TAG, "ANR monitoring skipped: ANR monitoring is disabled");
+        anrMonitoringInitialized = FTSDK.anrDetectManager.startMonitoring();
       }
 
       FTSDK.uiFeaturesInitialized = true;
       FTSDK.pendingUIFeatureInit = false;
       FTSDK.uiFeatureInitRetryCount = 0;
       FTSDK.uiPhaseResolved = true;
+      FTInnerLogger.d(TAG,
+        `UI runtime features ready: action=${actionTrackingInitialized}, ` +
+        `navigation=${navigationTrackingInitialized}, anr=${anrMonitoringInitialized}`);
       FTLogSeparator.initialization(TAG, "UI 能力就绪");
-      FTInnerLogger.i(TAG, "UI features (action tracker and ANR monitor) initialized successfully");
       FTSDK.tryPrintInitializationCompleteSeparator();
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to initialize UI features: ${error}`);
@@ -1098,9 +1126,8 @@ export class FTSDK {
         return;
       }
 
-      FTInnerLogger.d(TAG, "flushSyncData requested");
       FTTrackInner.getInstance().flushPendingWorkerDataBeforeUpload().then(() => {
-        FTInnerLogger.d(TAG, "flushSyncData worker queues drained, scheduling sync poll");
+        FTInnerLogger.d(TAG, "Pending worker data drained; scheduling sync poll");
         SyncTaskManager.getInstance().executePoll(false);  // Execute immediately after worker queues drain.
       }).catch((error: Error) => {
         FTInnerLogger.e(TAG, `flushSyncData worker queue drain failed, scheduling sync poll: ${error.message}`);

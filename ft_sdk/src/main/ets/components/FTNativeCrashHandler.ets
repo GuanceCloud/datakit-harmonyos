@@ -78,7 +78,6 @@ export class FTNativeCrashHandler {
       FTInnerLogger.i(TAG, "=== Native Crash Handler Initialization Start ===");
       const nativeModule = FTNativeCrashHandler.runtime.getNativeCrashModule();
       const initResult: boolean = nativeModule.initNativeCrashHandler();
-      FTInnerLogger.i(TAG, `initNativeCrashHandler result: ${initResult}`);
       if (!initResult) {
         FTInnerLogger.e(TAG, "Failed to initialize native crash handler");
         return false;
@@ -90,7 +89,6 @@ export class FTNativeCrashHandler {
         });
       };
       const callbackResult: boolean = nativeModule.setCrashCallback(callback);
-      FTInnerLogger.i(TAG, `setCrashCallback result: ${callbackResult}`);
       if (!callbackResult) {
         FTInnerLogger.e(TAG, "Failed to bind native crash callback");
         this.clearCrashCallbackSafely();
@@ -106,6 +104,7 @@ export class FTNativeCrashHandler {
         return false;
       }
 
+      FTInnerLogger.d(TAG, "Native crash handler ready: callback=true, watcher=true");
       FTInnerLogger.i(TAG, "=== Native Crash Handler Initialized Successfully ===");
       return true;
     } catch (error) {
@@ -132,7 +131,6 @@ export class FTNativeCrashHandler {
       const result: boolean = FTNativeCrashHandler.runtime.getNativeCrashModule().startWatching();
       if (result) {
         this.isWatching = true;
-        FTInnerLogger.i(TAG, "Started watching crash events");
       } else {
         FTInnerLogger.e(TAG, "Failed to start watching crash events");
       }

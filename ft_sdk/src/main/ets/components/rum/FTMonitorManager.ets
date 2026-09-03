@@ -74,9 +74,11 @@ export class FTMonitorManager {
     }
     if (this.isDeviceMetricsMonitorType(DeviceMetricsMonitorType.FPS)) {
       try {
-        await FpsUtils.getInstance().init();
-        FpsUtils.getInstance().start();
-        FTInnerLogger.d(TAG, 'FPS monitoring initialized and started');
+        const fpsUtils = FpsUtils.getInstance();
+        await fpsUtils.init();
+        if (fpsUtils.start()) {
+          FTInnerLogger.d(TAG, 'FPS monitoring ready');
+        }
       } catch (error) {
         FTInnerLogger.e(TAG, `Failed to initialize FPS monitoring: ${String(error)}`);
       }
@@ -99,7 +101,6 @@ export class FTMonitorManager {
   }
 
   public addMonitor(viewId: string): void {
-    FTInnerLogger.d(TAG, `addMonitor: ${viewId}, remain count: ${this.runnerMap.size}`);
     if (this.deviceMetricsMonitorType === DEVICE_METRICS_MONITOR_NO_SET) {
       return;
     }
@@ -189,7 +190,6 @@ export class FTMonitorManager {
         FpsUtils.getInstance().stop();
       }
     }
-    FTInnerLogger.d(TAG, `Device metrics app foreground=${isForeground}`);
     if (isForeground) {
       this.runnerMap.forEach((runner) => {
         runner.resumeInForeground();

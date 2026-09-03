@@ -105,9 +105,7 @@ export class FTExceptionHandler {
           return;
         }
 
-        if (enabled) {
-          FTInnerLogger.i(TAG, "Native crash handler initialized and started");
-        } else {
+        if (!enabled) {
           this.shutdownNativeCrashAdapter();
           FTInnerLogger.i(TAG, "Native crash monitoring not available (native module initialization returned false)");
         }

@@ -62,7 +62,6 @@ export class FTDBCachePolicy {
   private logLock: Record<string, boolean> = {};
 
   private constructor() {
-    this.resetCountInitialization();
   }
 
   public static getInstance(): FTDBCachePolicy {
@@ -156,7 +155,6 @@ export class FTDBCachePolicy {
     this.rumCacheDiscardStrategy = RUMCacheDiscard.DISCARD;
     this.resetCountInitialization();
 
-    FTInnerLogger.d(TAG, `SDK params initialized: enableLimitWithDbSize=${this.enableLimitWithDbSize}, dbLimitSize=${this.dbLimitSize}, logLimitCount=${this.logLimitCount}, rumLimitCount=${this.rumLimitCount}`);
   }
 
   /**
@@ -599,11 +597,9 @@ export class FTDBCachePolicy {
    */
   public updateLogCacheLimitCount(logCacheLimitCount: number): void {
     if (this.enableLimitWithDbSize) {
-      FTInnerLogger.d(TAG, `Log cache limit count ignored because DB size limit is enabled`);
       return;
     }
     this.logLimitCount = logCacheLimitCount;
-    FTInnerLogger.d(TAG, `Log cache limit count updated: ${this.logLimitCount}`);
   }
 
   /**
@@ -614,11 +610,9 @@ export class FTDBCachePolicy {
    */
   public updateRumCacheLimitCount(rumCacheLimitCount: number): void {
     if (this.enableLimitWithDbSize) {
-      FTInnerLogger.d(TAG, `RUM cache limit count ignored because DB size limit is enabled`);
       return;
     }
     this.rumLimitCount = rumCacheLimitCount;
-    FTInnerLogger.d(TAG, `RUM cache limit count updated: ${this.rumLimitCount}`);
   }
 
   /**
@@ -628,7 +622,6 @@ export class FTDBCachePolicy {
     this.logCacheDiscardStrategy =
       String(logCacheDiscardStrategy) === LogCacheDiscard.DISCARD_OLDEST ? LogCacheDiscard.DISCARD_OLDEST :
         LogCacheDiscard.DISCARD;
-    FTInnerLogger.d(TAG, `Log cache discard strategy updated: ${this.logCacheDiscardStrategy}`);
   }
 
   /**
@@ -636,7 +629,6 @@ export class FTDBCachePolicy {
    */
   public updateRumCacheDiscardStrategy(rumCacheDiscardStrategy: RUMCacheDiscard): void {
     this.rumCacheDiscardStrategy = rumCacheDiscardStrategy;
-    FTInnerLogger.d(TAG, `RUM cache discard strategy updated: ${this.rumCacheDiscardStrategy}`);
   }
 
   /**

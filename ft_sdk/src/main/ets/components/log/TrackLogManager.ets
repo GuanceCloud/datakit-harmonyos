@@ -113,8 +113,6 @@ export class TrackLogManager {
   public setLogConfig(config: FTLoggerConfig): void {
     this.logConfig = config;
     this.ensureMailboxHandler();
-    FTInnerLogger.d(TAG,
-      `Log config updated: samplingRate=${config.getSamplingRate()}, enableCustomLog=${config.isEnableCustomLog()}`);
   }
 
   /**

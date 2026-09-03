@@ -144,7 +144,7 @@ interface SDKWorkerDrainBarrierPayload {
   source: string;
 }
 
-interface RumDraftWriteLogGroup {
+interface DataWriteLogGroup {
   measurement: string;
   dataType: string;
   count: number;
@@ -527,7 +527,6 @@ class FTTrackInner {
     this.trackLogManager.forceFlush(false);
     await this.waitForWorkerMailboxBarriers('upload.beforeQuery', timeoutMs);
     await this.waitForWorkerMailboxAndDbWrites(timeoutMs);
-    FTInnerLogger.d(TAG, `flush pending worker data drained before upload: timeoutMs=${timeoutMs}`);
   }
 
   private flushAllRumWorkerEventBatches(source: string): void {
@@ -1028,7 +1027,7 @@ class FTTrackInner {
     const result = this.getWriteAffectedCount(writeResult) > 0;
     const firstUuid = normalizedDrafts[0].uuid;
 
-    this.logCompletedRumDraftWrites(measurement, dataType, normalizedDrafts, writeResult);
+    this.logCompletedDraftWrites(measurement, dataType, normalizedDrafts, writeResult);
 
     if (result && customDataType && customDataType.length > 0) {
       FTInnerLogger.d(TAG,
@@ -1053,7 +1052,7 @@ class FTTrackInner {
       (writeResult.fallbackPersisted || 0) >= writeResult.requested);
   }
 
-  private logCompletedRumDraftWrites(
+  private logCompletedDraftWrites(
     fallbackMeasurement: string,
     fallbackDataType: DataType,
     drafts: SDKSyncDataDraftDTO[],
@@ -1063,8 +1062,22 @@ class FTTrackInner {
       return;
     }
 
-    const groups = this.buildRumDraftWriteLogGroups(fallbackMeasurement, fallbackDataType, drafts);
-    const uuidSample = this.buildRumDraftUuidSample(drafts, 3);
+    const groups = this.buildDraftWriteLogGroups(fallbackMeasurement, fallbackDataType, drafts);
+    const uuidSample = this.buildDraftUuidSample(drafts, 3);
+    this.logCompletedDataWrite(writeResult, groups, uuidSample);
+  }
+
+  private logCompletedPreparedLogWrites(records: SyncData[], writeResult: SyncDataWriteResult | null): void {
+    if (!writeResult || this.getWriteAffectedCount(writeResult) === 0 || records.length === 0) {
+      return;
+    }
+
+    const groups = this.buildSyncDataWriteLogGroups(records);
+    const uuidSample = this.buildSyncDataUuidSample(records, 3);
+    this.logCompletedDataWrite(writeResult, groups, uuidSample);
+  }
+
+  private logCompletedDataWrite(writeResult: SyncDataWriteResult, groups: string, uuidSample: string): void {
     FTLogSeparator.data(TAG, "数据入库");
     FTInnerLogger.d(TAG,
       `syncDataBackground:batch requested=${writeResult.requested},inserted=${writeResult.inserted},` +
@@ -1072,12 +1085,12 @@ class FTTrackInner {
         `groups=${groups},uuid_sample=${uuidSample}`);
   }
 
-  private buildRumDraftWriteLogGroups(
+  private buildDraftWriteLogGroups(
     fallbackMeasurement: string,
     fallbackDataType: DataType,
     drafts: SDKSyncDataDraftDTO[]
   ): string {
-    const groups: RumDraftWriteLogGroup[] = [];
+    const groups: DataWriteLogGroup[] = [];
     for (let i = 0; i < drafts.length; i++) {
       const draft = drafts[i];
       const measurement = this.getDraftMeasurement(draft, fallbackMeasurement);
@@ -1103,7 +1116,7 @@ class FTTrackInner {
     return parts.join('|');
   }
 
-  private buildRumDraftUuidSample(drafts: SDKSyncDataDraftDTO[], maxCount: number): string {
+  private buildDraftUuidSample(drafts: SDKSyncDataDraftDTO[], maxCount: number): string {
     const samples: string[] = [];
     const count = Math.min(Math.max(0, maxCount), drafts.length);
     for (let i = 0; i < count; i++) {
@@ -1112,6 +1125,63 @@ class FTTrackInner {
       }
     }
     return samples.join('|');
+  }
+
+  private buildSyncDataWriteLogGroups(records: SyncData[]): string {
+    const groups: DataWriteLogGroup[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const measurement = this.getSyncDataMeasurement(record);
+      const dataType = record.getCustomDataTypeString() || record.getDataType().toString();
+      let matchedIndex = -1;
+      for (let j = 0; j < groups.length; j++) {
+        if (groups[j].measurement === measurement && groups[j].dataType === dataType) {
+          matchedIndex = j;
+          break;
+        }
+      }
+      if (matchedIndex >= 0) {
+        groups[matchedIndex].count++;
+      } else {
+        groups.push({ measurement, dataType, count: 1 });
+      }
+    }
+
+    const parts: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      parts.push(`${groups[i].measurement}/${groups[i].dataType}:${groups[i].count}`);
+    }
+    return parts.join('|');
+  }
+
+  private buildSyncDataUuidSample(records: SyncData[], maxCount: number): string {
+    const samples: string[] = [];
+    const count = Math.min(Math.max(0, maxCount), records.length);
+    for (let i = 0; i < count; i++) {
+      const uuid = records[i].getUuid();
+      if (uuid.length > 0) {
+        samples.push(uuid);
+      }
+    }
+    return samples.join('|');
+  }
+
+  private getSyncDataMeasurement(record: SyncData): string {
+    const dataString = record.getDataString();
+    const commaIndex = dataString.indexOf(',');
+    const spaceIndex = dataString.indexOf(' ');
+    let measurementEndIndex = -1;
+    if (commaIndex > 0 && spaceIndex > 0) {
+      measurementEndIndex = Math.min(commaIndex, spaceIndex);
+    } else if (commaIndex > 0) {
+      measurementEndIndex = commaIndex;
+    } else if (spaceIndex > 0) {
+      measurementEndIndex = spaceIndex;
+    }
+    if (measurementEndIndex > 0) {
+      return dataString.substring(0, measurementEndIndex);
+    }
+    return Constants.FT_LOG_DEFAULT_MEASUREMENT;
   }
 
   private getDraftMeasurement(draft: SDKSyncDataDraftDTO, fallbackMeasurement: string): string {
@@ -1185,7 +1255,7 @@ class FTTrackInner {
       const writeResult = await this.writeWorkerDraftsToDb('data.prepare.logWorkerDraftBatch', drafts, DataType.LOG);
       const affected = this.getWriteAffectedCount(writeResult);
       if (affected > 0) {
-        FTLogSeparator.data(TAG, "数据入库");
+        this.logCompletedDraftWrites(Constants.FT_LOG_DEFAULT_MEASUREMENT, DataType.LOG, drafts, writeResult);
       }
       if (affected > 0 && !isSilence) {
         this.syncTaskManager.executeSyncPoll();
@@ -1356,12 +1426,10 @@ class FTTrackInner {
     this.refreshWorkerLineProtocolContextSnapshot();
     this.syncLineProtocolContextToDefaultWorkers();
 
-    // Also set to TrackLogManager
+    // Configure the shared log manager after the log context is ready.
     this.trackLogManager.setLogConfig(config);
 
     FTConsoleLogBridge.onLogConfigInstalled(config);
-
-    FTInnerLogger.i(TAG, "FTTrackInner log config initialized");
   }
 
   /**
@@ -1371,7 +1439,6 @@ class FTTrackInner {
     this.dataHelper.initRUMConfig(config);
     this.refreshWorkerLineProtocolContextSnapshot();
     this.syncLineProtocolContextToDefaultWorkers();
-    FTInnerLogger.i(TAG, "FTTrackInner RUM config initialized");
   }
 
   /**
@@ -1966,9 +2033,7 @@ class FTTrackInner {
       this.rollbackReservedCacheCounts(cacheDecision, writeResult.inserted, dbDeletedOld);
       const mergedResult = this.mergeCachePolicyDecision(writeResult, filterDecision.records.length, cacheDecision);
       const result = this.mergeLocalDataFilterResult(mergedResult, records.length, filterDecision.filtered);
-      if (this.getWriteAffectedCount(result) > 0) {
-        FTLogSeparator.data(TAG, "数据入库");
-      }
+      this.logCompletedPreparedLogWrites(records, result);
       return result;
     } catch (error) {
       this.rollbackReservedCacheCounts(cacheDecision, 0, 0);

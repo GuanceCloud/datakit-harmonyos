@@ -2033,8 +2033,6 @@ export class FTRUMInnerManager {
       await store.put(FTRUMInnerManager.KEY_VIEW_REFERRER, snapshot.viewReferrer);
       await store.put(FTRUMInnerManager.KEY_SESSION_ID, snapshot.sessionId);
       await store.flush();
-      FTInnerLogger.d(TAG,
-        `RUM context saved: viewId=${snapshot.viewId}, viewName=${snapshot.viewName}, sessionId=${snapshot.sessionId}`);
     };
     this.rumContextPersistChain = this.rumContextPersistChain.then(persist).catch((error: Error) => {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2147,7 +2145,6 @@ export class FTRUMInnerManager {
       this.closeAllActionAndViewAsync(this.context);
     }
     
-    FTInnerLogger.i(TAG, `RUM params initialized: sessionId=${this.sessionId}, samplingRate=${this.sampleRate}, sessionErrorSampleRate=${this.sessionErrorSampleRate}`);
   }
 
   private async closeAllActionAndViewAsync(context: Context): Promise<void> {
@@ -2201,8 +2198,6 @@ export class FTRUMInnerManager {
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
-        FTInnerLogger.d(TAG, `startView begin: ${viewName}`);
-      
       // Save previous view name before updating viewList (for referrer calculation)
       // This ensures we can use the previous active view as referrer even if viewList is empty
       // Note: Even if activeView is closed (isClose()=true), we should still use its viewName as previousViewName
@@ -2315,7 +2310,8 @@ export class FTRUMInnerManager {
       // Save RUM context to preferences for crash recovery
       this.saveRumContext();
 
-      FTInnerLogger.d(TAG, `startView success: ${viewName}, referrer=${viewReferrer}, loadTime=${loadTime}, id=${this.activeView.getId()}`);
+      FTInnerLogger.d(TAG,
+        `View started: name=${viewName}, referrer=${viewReferrer}, loadTimeNs=${loadTime}, id=${this.activeView.getId()}`);
 
       } catch (error) {
         FTInnerLogger.e(TAG, `[ERROR] Error starting view ${viewName}: ${error}`);
@@ -2339,14 +2335,14 @@ export class FTRUMInnerManager {
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
       if (!this.activeView) {
-        FTInnerLogger.w(TAG, " stopView ignored: no active view");
+        FTInnerLogger.w(TAG, "stopView ignored: no active view");
         return;
       }
       
       // Idempotency check: if view is already closed, skip to prevent duplicate processing
       // This handles cases where stopView() is called multiple times (e.g., onBackground + onDestroy)
       if (this.activeView.isClose()) {
-        FTInnerLogger.d(TAG, ` stopView skipped closed view: ${this.activeView.getViewName()}`);
+        FTInnerLogger.d(TAG, `stopView skipped closed view: ${this.activeView.getViewName()}`);
         return;
       }
       
@@ -3408,7 +3404,6 @@ export class FTRUMInnerManager {
   public recordViewLoadTimeInternal(viewName: string, loadTime: number): void {
     if (viewName && viewName.length > 0 && loadTime > 0) {
       this.preActivityDuration.set(viewName, loadTime);
-      FTInnerLogger.d(TAG, `recordViewLoadTimeInternal: recorded load time for ${viewName}: ${loadTime / 1000000}ms (${loadTime}ns)`);
       
       // If activeView already exists, update it with the recorded loadTime.
       // This handles load-time records that arrive after a manual startView call.
@@ -3417,9 +3412,7 @@ export class FTRUMInnerManager {
       if (this.activeView && this.activeView.getViewName() === viewName) {
         // Always update loadTime if activeView exists, even if it's not -1
         // This ensures loadTime is preserved even if startView is called multiple times
-        const oldLoadTime = this.activeView.getLoadTime();
         this.activeView.setLoadTime(loadTime);
-        FTInnerLogger.d(TAG, `recordViewLoadTimeInternal: updated activeView loadTime for ${viewName}: ${oldLoadTime}ns -> ${loadTime}ns (${loadTime / 1000000}ms)`);
       }
     } else {
       FTInnerLogger.w(TAG, `recordViewLoadTimeInternal: invalid parameters, viewName=${viewName}, loadTime=${loadTime}`);
@@ -3435,7 +3428,6 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(resumeKey)) {
       const loadTime = this.preActivityDuration.get(resumeKey)!;
       this.preActivityDuration.delete(resumeKey);
-      FTInnerLogger.d(TAG, `Using resume time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     
@@ -3443,7 +3435,6 @@ export class FTRUMInnerManager {
     if (this.preActivityDuration.has(viewName)) {
       const loadTime = this.preActivityDuration.get(viewName)!;
       this.preActivityDuration.delete(viewName);
-      FTInnerLogger.d(TAG, `Using create time for ${viewName}: ${loadTime / 1000000}ms`);
       return loadTime;
     }
     
@@ -3648,9 +3639,7 @@ export class FTRUMInnerManager {
   private async initViewAsync(context: Context, viewBean: ViewBean): Promise<void> {
     try {
       const result = await FTDBTaskPoolExecutor.upsertRumView(context, viewBean);
-      if (result) {
-        FTInnerLogger.d(TAG, `View initialized in database successfully`);
-      } else {
+      if (!result) {
         FTInnerLogger.e(TAG, `View initialization in database failed`);
       }
     } catch (error) {

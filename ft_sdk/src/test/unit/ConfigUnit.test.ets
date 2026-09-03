@@ -103,8 +103,9 @@ class FakeAnrManager implements FTSDKAnrManager {
     this.initializeCount++;
   }
 
-  startMonitoring(): void {
+  startMonitoring(): boolean {
     this.startMonitoringCount++;
+    return true;
   }
 
   shutdown(): void {

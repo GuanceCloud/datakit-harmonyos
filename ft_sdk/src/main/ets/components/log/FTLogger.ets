@@ -196,6 +196,17 @@ export class FTInnerLogger {
   }
 
   static i(tag: string, message: string): void {
+    // SDK-internal successful-path diagnostics used to be emitted as INFO.
+    // Keep this legacy entry point for source compatibility, but align with
+    // Android by writing those diagnostics at DEBUG level.
+    FTInnerLogger.d(tag, message);
+  }
+
+  /**
+   * Emit a user-supplied custom log at INFO level. This is intentionally
+   * separate from the SDK-internal i() compatibility method above.
+   */
+  static userInfo(tag: string, message: string): void {
     if (!FTInnerLogger.isLogEnabled(SDKLogLevel.I)) {
       return;
     }
@@ -548,7 +559,7 @@ export class FTLogger {
       if (statusObj) {
         switch (statusObj) {
           case Status.INFO:
-            FTInnerLogger.i(TAG, message);
+            FTInnerLogger.userInfo(TAG, message);
             break;
           case Status.WARN:
             FTInnerLogger.w(TAG, message);
@@ -565,7 +576,7 @@ export class FTLogger {
             break;
         }
       } else {
-        FTInnerLogger.i(TAG, message);
+        FTInnerLogger.userInfo(TAG, message);
       }
     }
     
