@@ -1006,7 +1006,8 @@ function completeAxiosResource(
     resourceParams.setResponseContentLength(contentLength);
   }
 
-  const metricValue: PerformanceMetricValue = { value: (Date.now() - state.startTime) * 1000000 };
+  const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * MS_TO_NS;
+  const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
   resourceParams.addProperty('resourceLoad', metricValue);
 
   if (errorMessage) {
@@ -1016,7 +1017,12 @@ function completeAxiosResource(
     resourceParams.setRequestErrorStack(errorStack);
   }
 
+  const netStatusBean = new NetStatusBean();
+  netStatusBean.setHoleRequestTime(resourceLoadNs);
+  FTInnerLogger.d(TAG,
+    `[Axios-Resource] Completed resourceId=${state.resourceId}, status=${status}, failed=${errorMessage ? 'true' : 'false'}, durationNs=${resourceLoadNs}`);
   FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
+  FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
   FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
 }
 

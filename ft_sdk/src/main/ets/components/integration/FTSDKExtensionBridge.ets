@@ -1,6 +1,7 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
+import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { ResourceParams } from '../rum/bean/ResourceParams';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
 import { DefaultFTTraceInterceptor, FTTraceInterceptor } from '../trace/FTTraceInterceptor';
@@ -421,7 +422,8 @@ export class FTSDKExtensionBridge {
       resourceParams.setResponseContentLength(contentLength);
     }
 
-    const metricValue: PerformanceMetricValue = { value: (Date.now() - state.startTime) * 1000000 };
+    const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
+    const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
     resourceParams.addProperty('resourceLoad', metricValue);
 
     if (response.errorMessage) {
@@ -433,7 +435,12 @@ export class FTSDKExtensionBridge {
       resourceParams.setRequestErrorStack(response.errorStack);
     }
 
+    const netStatusBean = new NetStatusBean();
+    netStatusBean.setHoleRequestTime(resourceLoadNs);
+    FTInnerLogger.d(TAG,
+      `[Extension-Resource] Completed resourceId=${state.resourceId}, status=${response.statusCode || 0}, durationNs=${resourceLoadNs}`);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
+    FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
     FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
   }
 
@@ -451,9 +458,15 @@ export class FTSDKExtensionBridge {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
-    const metricValue: PerformanceMetricValue = { value: Math.max(Date.now() - state.startTime, 1) * 1000000 };
+    const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
+    const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
     resourceParams.addProperty('resourceLoad', metricValue);
+    const netStatusBean = new NetStatusBean();
+    netStatusBean.setHoleRequestTime(resourceLoadNs);
+    FTInnerLogger.d(TAG,
+      `[Extension-Resource] Failed resourceId=${state.resourceId}, durationNs=${resourceLoadNs}`);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
+    FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
     FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
   }
 
