@@ -1,5 +1,6 @@
 import { systemDateTime } from '@kit.BasicServicesKit';
 import { FTSDK } from '../FTSDK';
+import { FTConsoleLogBridge } from '../log/FTConsoleLogBridge';
 import { FTInnerLogger } from '../log/FTLogger';
 
 const TAG = 'FTColdLaunchBridge';
@@ -25,8 +26,14 @@ interface FTColdLaunchWindowStage {
  */
 export class FTColdLaunchBridge {
   private static firstFrameListeners: Array<() => void> = [];
+  private static observedWindowStages: Object[] = [];
 
   public static recordApplicationInit(context?: Object): void {
+    // Cold-launch instrumentation is loaded by the same Hvigor tool package
+    // as console/HiLog instrumentation. Mark it before application code
+    // installs the log configuration, even if this source has no console call
+    // for the console transform to rewrite.
+    FTConsoleLogBridge.markCompilerPluginInstalled();
     FTSDK.recordAppApplicationInit(context);
   }
 
@@ -44,7 +51,10 @@ export class FTColdLaunchBridge {
    * The structural interfaces keep the core HAR compatible with applications
    * built against API levels where frame-metrics types are unavailable.
    */
-  public static observeFirstFrame(windowStage: Object): void {
+  public static observeFirstFrame(windowStage: Object): boolean {
+    if (FTColdLaunchBridge.hasObservedWindowStage(windowStage)) {
+      return true;
+    }
     try {
       const mainWindow = (windowStage as FTColdLaunchWindowStage).getMainWindowSync();
       const callback = (frameMetrics: FTColdLaunchFrameMetrics): void => {
@@ -66,11 +76,19 @@ export class FTColdLaunchBridge {
         FTColdLaunchBridge.notifyFirstFrameRecorded();
       };
       mainWindow.on('frameMetricsMeasured', callback);
+      FTColdLaunchBridge.observedWindowStages.push(windowStage);
+      return true;
     } catch (error) {
       // Frame metrics are not available on every compatible API level. The
       // remaining cold-launch boundaries are still collected in that case.
       FTInnerLogger.d(TAG, `First-frame observation is unavailable: ${String(error)}`);
+      return false;
     }
+  }
+
+  private static hasObservedWindowStage(windowStage: Object): boolean {
+    return FTColdLaunchBridge.observedWindowStages.some((observedWindowStage: Object) =>
+      observedWindowStage === windowStage);
   }
 
   private static notifyFirstFrameRecorded(): void {

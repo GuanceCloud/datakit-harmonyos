@@ -158,6 +158,57 @@ function classIndentation(code: string, classDeclaration: any): string {
   return match ? match[0] : '';
 }
 
+function blockIndentation(code: string, block: any): string {
+  const blockStart = block.getStart();
+  const lineStart = code.lastIndexOf('\n', blockStart) + 1;
+  const match = code.slice(lineStart, blockStart).match(/^\s*/);
+  return (match ? match[0] : '') + '  ';
+}
+
+function collectWindowStageParameterNames(ts: TypeScriptApi, sourceFile: any, method: any): Set<string> {
+  const names = new Set<string>();
+  method.parameters.forEach((parameter: any) => {
+    if (!ts.isIdentifier(parameter.name)) {
+      return;
+    }
+    const typeText = parameter.type ? parameter.type.getText(sourceFile) : '';
+    if (parameter.name.text === 'windowStage' || typeText.includes('WindowStage')) {
+      names.add(parameter.name.text);
+    }
+  });
+  return names;
+}
+
+function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, code: string,
+  method: any, bridgeName: string, windowStageNames: Set<string>): ColdLaunchInjection[] {
+  const injections: ColdLaunchInjection[] = [];
+  visit(ts, method.body, (node: any) => {
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+      return;
+    }
+    const delegate = node.expression.expression;
+    if (!ts.isIdentifier(delegate) || !windowStageNames.has(delegate.text) ||
+      node.expression.name.text !== 'loadContent' || node.arguments.length === 0) {
+      return;
+    }
+    const windowStageName = delegate.text;
+    const callback = node.arguments[node.arguments.length - 1];
+    if ((!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) || !ts.isBlock(callback.body)) {
+      return;
+    }
+    const indentation = blockIndentation(code, callback.body);
+    const errorParameter = callback.parameters.length > 0 && ts.isIdentifier(callback.parameters[0].name)
+      ? callback.parameters[0].name.text : null;
+    const retry = `${bridgeName}.observeFirstFrame(${windowStageName});`;
+    const content = errorParameter === null
+      ? `\n${indentation}${retry}`
+      : `\n${indentation}if (!${errorParameter} || !${errorParameter}.code) {\n` +
+        `${indentation}  ${retry}\n${indentation}}`;
+    injections.push({ position: callback.body.getStart(sourceFile) + 1, content });
+  });
+  return injections;
+}
+
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
   bridgeName: string): ColdLaunchInjection[] {
   const injections: ColdLaunchInjection[] = [];
@@ -193,11 +244,24 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       if (!ts.isIdentifier(windowStageParameter.name)) {
         return;
       }
+      const windowStageName = windowStageParameter.name.text;
       injections.push({
         position,
-        content: `\n${indentation}${bridgeName}.observeFirstFrame(${windowStageParameter.name.text});`
+        content: `\n${indentation}${bridgeName}.observeFirstFrame(${windowStageName});`
       });
     });
+    if (kind === 'ui') {
+      node.members.forEach((member: any) => {
+        if (!ts.isMethodDeclaration(member) || !member.body) {
+          return;
+        }
+        const windowStageNames = collectWindowStageParameterNames(ts, sourceFile, member);
+        if (windowStageNames.size > 0) {
+          injections.push(...createFirstFrameRetryInjections(
+            ts, sourceFile, code, member, bridgeName, windowStageNames));
+        }
+      });
+    }
     if (kind === 'stage' && !hasOnCreate) {
       const indentation = classIndentation(code, node);
       injections.push({
