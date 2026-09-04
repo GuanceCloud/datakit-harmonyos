@@ -140,9 +140,10 @@ export class FTTraceManager {
       return;
     }
     
+    const operation = this.handlerMap.has(key) ? 'updated' : 'added';
     const container = new FTTraceManagerContainer(handler, traceContext);
     this.handlerMap.put(key, container);
-    FTInnerLogger.d(TAG, `Added trace handler for key: ${key}`);
+    FTInnerLogger.d(TAG, `Trace handler ${operation}: key=${key}`);
   }
 
   public putTraceContext(key: string, traceContext: FTTraceContext): void {
@@ -151,7 +152,10 @@ export class FTTraceManager {
       return;
     }
 
-    this.putTraceHandler(key, new FTTraceHandler(), traceContext);
+    const operation = this.handlerMap.has(key) ? 'updated' : 'added';
+    const container = new FTTraceManagerContainer(new FTTraceHandler(), traceContext);
+    this.handlerMap.put(key, container);
+    FTInnerLogger.d(TAG, `Trace context ${operation}: key=${key}`);
   }
 
   private createTraceContext(

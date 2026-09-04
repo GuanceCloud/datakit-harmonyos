@@ -27,7 +27,12 @@ export class FTConsoleLogBridge {
    * Called by transformed application modules. It is intentionally idempotent.
    */
   public static markCompilerPluginInstalled(): void {
+    if (FTConsoleLogBridge.compilerPluginInstalled) {
+      return;
+    }
     FTConsoleLogBridge.compilerPluginInstalled = true;
+    FTInnerLogger.d(TAG,
+      'Guance Hvigor compiler plugin detected; Console/HiLog automatic collection is available when enabled.');
   }
 
   /**
