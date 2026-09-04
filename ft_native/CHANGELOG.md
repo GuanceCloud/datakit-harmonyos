@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-09-05
+- Optimized native crash-monitoring diagnostics by moving verbose normal-path logs to Debug and removing redundant lifecycle logs. No API or crash-collection behavior changed.
+
 ## [0.1.1] - 2026-07-29
 - `ft_native` 0.1.1 replaces the Debug-built 0.1.0 distribution with a production HAR built in Release mode (`debug: false`).
 - The release artifact uses ArkTS bytecode packaging and ArkGuard obfuscation, while consumer rules preserve the native crash-monitoring public API for host applications that enable obfuscation.

@@ -1,6 +1,6 @@
 {
   "name": "@guancecloud/ft-hvigor-plugin",
-  "version": "0.1.17-alpha01",
+  "version": "0.1.0",
   "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
   "files": [
