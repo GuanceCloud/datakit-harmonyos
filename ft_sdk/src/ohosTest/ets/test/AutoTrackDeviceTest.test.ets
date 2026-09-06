@@ -128,65 +128,83 @@ class FakeFrameNode {
 }
 
 class FakeUIObserver {
-  private routerPageUpdateCallback: RouterPageCallback | null = null;
-  private navDestinationSwitchCallback: NavDestinationSwitchCallback | null = null;
-  private willClickCallback: WillClickCallback | null = null;
+  private routerPageUpdateCallbacks: RouterPageCallback[] = [];
+  private navDestinationSwitchCallbacks: NavDestinationSwitchCallback[] = [];
+  private willClickCallbacks: WillClickCallback[] = [];
 
   on(eventName: string, callback: Object): void {
     if (eventName === 'routerPageUpdate') {
-      this.routerPageUpdateCallback = callback as Object as RouterPageCallback;
+      this.routerPageUpdateCallbacks.push(callback as Object as RouterPageCallback);
       return;
     }
     if (eventName === 'navDestinationSwitch') {
-      this.navDestinationSwitchCallback = callback as Object as NavDestinationSwitchCallback;
+      this.navDestinationSwitchCallbacks.push(callback as Object as NavDestinationSwitchCallback);
       return;
     }
     if (eventName === 'willClick') {
-      this.willClickCallback = callback as Object as WillClickCallback;
+      this.willClickCallbacks.push(callback as Object as WillClickCallback);
     }
+  }
+
+  off(eventName: string, callback?: Object): void {
+    if (eventName === 'routerPageUpdate') {
+      this.routerPageUpdateCallbacks = this.routerPageUpdateCallbacks.filter((registered: RouterPageCallback) => {
+        return callback !== undefined && registered !== callback;
+      });
+    }
+    if (eventName === 'navDestinationSwitch') {
+      this.navDestinationSwitchCallbacks = this.navDestinationSwitchCallbacks.filter((registered: NavDestinationSwitchCallback) => {
+        return callback !== undefined && registered !== callback;
+      });
+    }
+    if (eventName === 'willClick') {
+      this.willClickCallbacks = this.willClickCallbacks.filter((registered: WillClickCallback) => {
+        return callback !== undefined && registered !== callback;
+      });
+    }
+  }
+
+  getRouterPageUpdateCallbackCount(): number {
+    return this.routerPageUpdateCallbacks.length;
+  }
+
+  getNavDestinationSwitchCallbackCount(): number {
+    return this.navDestinationSwitchCallbacks.length;
+  }
+
+  getWillClickCallbackCount(): number {
+    return this.willClickCallbacks.length;
   }
 
   hasRouterPageUpdateCallback(): boolean {
-    return this.routerPageUpdateCallback !== null;
+    return this.routerPageUpdateCallbacks.length > 0;
   }
 
   hasNavDestinationSwitchCallback(): boolean {
-    return this.navDestinationSwitchCallback !== null;
+    return this.navDestinationSwitchCallbacks.length > 0;
   }
 
   hasWillClickCallback(): boolean {
-    return this.willClickCallback !== null;
+    return this.willClickCallbacks.length > 0;
   }
 
   async emitRouterPageUpdate(name: string, state: number): Promise<void> {
-    if (!this.routerPageUpdateCallback) {
-      return;
-    }
     const info = new FakeRouterPageInfo(name, state);
-    const result = this.routerPageUpdateCallback(info as Object as uiObserver.RouterPageInfo);
-    if (result instanceof Promise) {
-      await result;
+    for (const callback of this.routerPageUpdateCallbacks.slice()) {
+      await callback(info as Object as uiObserver.RouterPageInfo);
     }
   }
 
   async emitNavDestinationSwitch(fromName: string, toName: string): Promise<void> {
-    if (!this.navDestinationSwitchCallback) {
-      return;
-    }
     const info = new FakeNavDestinationSwitchInfo(new FakeNavDestinationInfo(fromName), new FakeNavDestinationInfo(toName));
-    const result = this.navDestinationSwitchCallback(info as Object as uiObserver.NavDestinationSwitchInfo);
-    if (result instanceof Promise) {
-      await result;
+    for (const callback of this.navDestinationSwitchCallbacks.slice()) {
+      await callback(info as Object as uiObserver.NavDestinationSwitchInfo);
     }
   }
 
   async emitWillClick(node: FakeFrameNode): Promise<void> {
-    if (!this.willClickCallback) {
-      return;
-    }
-    const result = this.willClickCallback(new EmptyClickEvent(), node as Object as FrameNode);
-    if (result instanceof Promise) {
-      await result;
+    for (const callback of this.willClickCallbacks.slice()) {
+      await callback(new EmptyClickEvent(), node as Object as FrameNode);
     }
   }
 }
@@ -200,7 +218,10 @@ class FakeUIContext {
 }
 
 class FilteringActionTrackingHandler implements FTActionTrackingHandler {
+  public resolvedCount: number = 0;
+
   resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
+    this.resolvedCount++;
     const source = actionEventWrapper.getSource();
     if (source?.getId() === 'ignore_action_view') {
       return null;
@@ -344,6 +365,77 @@ export default function autoTrackDeviceTest() {
       collector.stop();
       await SdkTestLifecycle.resetRuntimeState();
       await DBAssert.cleanupAll();
+    });
+
+    it('autoTrackDestroyShouldRemoveOnlySdkCallbacks', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, true));
+      let appRouterCallbackCount = 0;
+      let appNavigationCallbackCount = 0;
+      let appClickCallbackCount = 0;
+      uiContext.observer.on('routerPageUpdate', (_info: uiObserver.RouterPageInfo): void => {
+        appRouterCallbackCount++;
+      });
+      uiContext.observer.on('navDestinationSwitch', (_info: uiObserver.NavDestinationSwitchInfo): void => {
+        appNavigationCallbackCount++;
+      });
+      uiContext.observer.on('willClick', (_event: Object, _node?: FrameNode): void => {
+        appClickCallbackCount++;
+      });
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(2);
+      expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(2);
+      expect(uiContext.observer.getWillClickCallbackCount()).assertEqual(2);
+
+      FTNavigationTracker.getInstance().destroy();
+      FTNavigationTracker.getInstance().destroy();
+      FTActionTracker.getInstance().destroy();
+      FTActionTracker.getInstance().destroy();
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(1);
+      expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(1);
+      expect(uiContext.observer.getWillClickCallbackCount()).assertEqual(1);
+      await uiContext.observer.emitRouterPageUpdate('pages/AppRouterPage', 0);
+      await uiContext.observer.emitNavDestinationSwitch('pages/AppSource', 'pages/AppDestination');
+      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'app_button', 9001));
+      expect(appRouterCallbackCount).assertEqual(1);
+      expect(appNavigationCallbackCount).assertEqual(1);
+      expect(appClickCallbackCount).assertEqual(1);
+    });
+
+    it('navigationReinitializationShouldNotDuplicateObservers', 0, async () => {
+      const routerHandler = new FilteringRouterTrackingHandler();
+      const navigationHandler = new FilteringNavigationTrackingHandler();
+      const rumConfig = buildRumConfig(true, false)
+        .setViewRouterTrackingHandler(routerHandler)
+        .setViewNavigationTrackingHandler(navigationHandler);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      for (let i = 0; i < 2; i++) {
+        FTNavigationTracker.getInstance().destroy();
+        expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+        expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(0);
+        FTNavigationTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
+      }
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(1);
+      expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(1);
+      await uiContext.observer.emitRouterPageUpdate('pages/IgnoredRouterPage', 0);
+      await uiContext.observer.emitNavDestinationSwitch('pages/Source', 'pages/IgnoredNavigationDestination');
+      expect(routerHandler.resolvedRouteNames.length).assertEqual(1);
+      expect(navigationHandler.resolvedDestinationNames.length).assertEqual(1);
+    });
+
+    it('actionReinitializationShouldNotDuplicateObserversOrKeepClickDebounce', 0, async () => {
+      const handler = new FilteringActionTrackingHandler();
+      const rumConfig = buildRumConfig(false, true, handler);
+      const button = new FakeFrameNode('Button', 'ignore_action_view', 9002);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitWillClick(button);
+      expect(handler.resolvedCount).assertEqual(1);
+      for (let i = 0; i < 2; i++) {
+        FTActionTracker.getInstance().destroy();
+        expect(uiContext.observer.getWillClickCallbackCount()).assertEqual(0);
+        FTActionTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
+        expect(uiContext.observer.getWillClickCallbackCount()).assertEqual(1);
+        await uiContext.observer.emitWillClick(button);
+        expect(handler.resolvedCount).assertEqual(i + 2);
+      }
     });
 
     it('routerPageShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {

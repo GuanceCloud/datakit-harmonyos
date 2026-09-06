@@ -1,4 +1,4 @@
-import { UIContext, uiObserver } from '@kit.ArkUI';
+import { UIContext, UIObserver, uiObserver } from '@kit.ArkUI';
 import { FTRUMGlobalManager } from './FTRUMGlobalManager';
 import { FTRUMInnerManager } from './FTRUMInnerManager';
 import { FTInnerLogger } from '../log/FTLogger';
@@ -10,8 +10,14 @@ const TAG = 'FTNavigationTracker';
 
 export class FTNavigationTracker {
   private static instance: FTNavigationTracker | null = null;
-  private uiContext: UIContext | null = null;
+  private uiObserver: UIObserver | null = null;
   private rumConfig: FTRUMConfig | null = null;
+  private readonly navDestinationSwitchCallback = (info: uiObserver.NavDestinationSwitchInfo): void => {
+    this.handleSwitchNav(info);
+  };
+  private readonly routerPageUpdateCallback = (info: uiObserver.RouterPageInfo): void => {
+    this.handleSwitchRouter(info);
+  };
   // The View name currently reported to RUM. It can differ from the route name
   // when an application configures an automatic View tracking handler.
   private currentViewName: string = '';
@@ -45,7 +51,6 @@ export class FTNavigationTracker {
     if (this.inited) {
       return;
     }
-    this.uiContext = uiContext;
     this.rumConfig = rumConfig;
     
     // Check if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks.onActivityResumed)
@@ -59,20 +64,29 @@ export class FTNavigationTracker {
       return;
     }
 
-    observer.on('navDestinationSwitch', (info: uiObserver.NavDestinationSwitchInfo) => {
-      this.handleSwitchNav(info);
-    });
-
-    observer.on('routerPageUpdate', (info: uiObserver.RouterPageInfo) => {
-      this.handleSwitchRouter(info);
-    });
+    this.uiObserver = observer;
+    observer.on('navDestinationSwitch', this.navDestinationSwitchCallback);
+    observer.on('routerPageUpdate', this.routerPageUpdateCallback);
 
     this.inited = true;
   }
 
   public destroy(): void {
-    this.uiContext = null;
+    const observer = this.uiObserver;
+    this.uiObserver = null;
     this.rumConfig = null;
+    if (observer) {
+      try {
+        observer.off('navDestinationSwitch', this.navDestinationSwitchCallback);
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Failed to remove Navigation observer: ${error}`);
+      }
+      try {
+        observer.off('routerPageUpdate', this.routerPageUpdateCallback);
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Failed to remove Router observer: ${error}`);
+      }
+    }
     this.currentViewName = '';
     this.currentRouteName = '';
     this.lastNavigationSwitchTs = 0;

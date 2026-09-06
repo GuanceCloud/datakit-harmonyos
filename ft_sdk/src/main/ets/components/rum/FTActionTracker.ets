@@ -34,6 +34,9 @@ export class FTActionTracker {
   private isInitialized: boolean = false;
   private uiObserver: UIObserver | null = null;
   private rumConfig: FTRUMConfig | null = null;
+  private readonly willClickCallback = (_event: Object, node?: FrameNode): void => {
+    this.handleClickEvent(node);
+  };
   
   // Map to track processed click events to prevent duplicate actions
   // This prevents the same click event from being processed multiple times
@@ -85,9 +88,7 @@ export class FTActionTracker {
       // Register willClick listener
       // Removed high-frequency info log to reduce log output
       // FTInnerLogger.i(TAG, `[ACTION-TRACK] Registering willClick listener on UIObserver`);
-      this.uiObserver.on('willClick', (event: Object, node?: FrameNode) => {
-        this.handleClickEvent(node);
-      });
+      this.uiObserver.on('willClick', this.willClickCallback);
 
       this.isInitialized = true;
       // Removed high-frequency info log to reduce log output
@@ -485,21 +486,15 @@ export class FTActionTracker {
    * Clean up and unregister listeners, release UIContext reference
    */
   public destroy(): void {
+    const observer = this.uiObserver;
+    this.uiObserver = null;
+    this.isInitialized = false;
+    this.rumConfig = null;
+    this.processedClickIds.clear();
     try {
-      // Clear UIObserver reference
-      if (this.uiObserver) {
-        // UIObserver doesn't have an explicit off method in HarmonyOS API
-        // The listener will be automatically cleaned up when UI context is destroyed
-        this.uiObserver = null;
+      if (observer) {
+        observer.off('willClick', this.willClickCallback);
       }
-
-      // Clear UIContext reference (implicitly through rumConfig if needed)
-      // Note: We don't directly store UIContext, but clearing uiObserver should be sufficient
-      
-      // Reset initialization state
-      this.isInitialized = false;
-      this.rumConfig = null;
-      
       FTInnerLogger.d(TAG, "Action tracker destroyed, all references released");
     } catch (error) {
       FTInnerLogger.e(TAG, `Error destroying action tracker: ${error}`);
