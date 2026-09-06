@@ -64,6 +64,13 @@ export const KEY_DATAKIT_URL = "datakitUrl";
 export const KEY_DATAWAY_URL = "datawayUrl";
 export const KEY_CLIENT_TOKEN = "clientToken";
 export const KEY_AUTO_SYNC = "autoSync";
+/**
+ * Test-only launch marker. A transient configuration updates this process but
+ * must never be merged into or written to the Demo's preferences.
+ */
+export const KEY_RUNTIME_CONFIG_TRANSIENT = "runtimeConfigTransient";
+/** Load the saved Demo baseline without writing preferences during test bootstrap. */
+export const KEY_RUNTIME_CONFIG_TEST_BOOTSTRAP = "runtimeConfigTestBootstrap";
 export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
 export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
 export const KEY_NETWORK_ROUTE_TEST_HOST = "networkRouteTestHost";
@@ -79,7 +86,7 @@ export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
 export const KEY_COLD_LAUNCH_NEXT_UI_ABILITY = "coldLaunchNextUIAbility";
 const MAX_COLD_START_DELAY_MS = 30_000;
 
-interface RuntimeConfig {
+export interface RuntimeConfig {
   datakitUrl: string;
   datawayUrl: string;
   webViewUrl: string;
@@ -201,10 +208,14 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
  * Behavior:
  * - Parameters passed in onCreate are persisted to preferences.
  * - If a parameter is empty or omitted, the persisted value is used instead.
+ * - When runtimeConfigTransient=true is supplied by the UI-test launcher,
+ *   parameters apply only to that test process and are never persisted.
  * - SDK upload uses DataKit when datakitUrl is configured; DataWay is used only as fallback.
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {
+  private installedSDKConfig: FTSDKConfig | null = null;
+  private runtimeConfigReady: boolean = false;
   private coldStartDelayMs: number = 0;
   private coldLaunchTestWant: Want | null = null;
   private secondaryLaunchStarted: boolean = false;
@@ -230,12 +241,47 @@ export default class EntryAbility extends UIAbility {
     this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     this.logAppMemoryLimitOnMainThread();
 
+    const testBootstrap = this.readWantString(want, KEY_RUNTIME_CONFIG_TEST_BOOTSTRAP, '') === 'true';
     try {
-      this.runtimeConfig = await this.loadRuntimeConfig(want);
+      this.runtimeConfig = await this.loadRuntimeConfig(want, !testBootstrap);
     } catch (error) {
       DemoLogger.e(LOG_TAG, `Failed to load runtime config: ${error}`);
     }
-    this.initFTSDK();
+    this.initFTSDK(testBootstrap);
+    this.runtimeConfigReady = true;
+  }
+
+  /** Demo-only hooks used by ohosTest; no SDK public configuration API is added. */
+  public isRuntimeConfigReadyForTest(): boolean {
+    return this.runtimeConfigReady;
+  }
+
+  public getRuntimeConfigForTest(): RuntimeConfig {
+    return this.runtimeConfig;
+  }
+
+  public getSDKConfigForTest(): FTSDKConfig | null {
+    return this.installedSDKConfig;
+  }
+
+  public async applyRuntimeConfigForTest(want: Want): Promise<void> {
+    if (!this.isTransientRuntimeConfig(want)) {
+      throw new Error('UI tests must supply a transient runtime configuration');
+    }
+    // Explicitly awaited by the test fixture, including when startAbility
+    // reused an existing UIAbility and onCreate did not execute again.
+    this.runtimeConfig = await this.loadRuntimeConfig(want);
+    this.installedSDKConfig = null;
+    this.initFTSDK(true);
+    if (this.installedSDKConfig === null) {
+      throw new Error('Failed to install the transient test SDK configuration');
+    }
+  }
+
+  public restoreRuntimeConfigForTest(runtimeConfig: RuntimeConfig, sdkConfig: FTSDKConfig | null): void {
+    this.runtimeConfig = runtimeConfig;
+    this.installedSDKConfig = sdkConfig;
+    this.updateRuntimeConfigStorage(runtimeConfig);
   }
 
   private logAppMemoryLimitOnMainThread(): void {
@@ -315,7 +361,7 @@ export default class EntryAbility extends UIAbility {
     // No manual stopView() call needed - SDK's FTAbilityLifecycleListener handles this
   }
 
-  private async loadRuntimeConfig(want: Want): Promise<RuntimeConfig> {
+  private async loadRuntimeConfig(want: Want, persist: boolean = true): Promise<RuntimeConfig> {
     const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
     const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
     const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
@@ -349,11 +395,21 @@ export default class EntryAbility extends UIAbility {
       appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
     };
 
+    // UI tests need to use real, caller-supplied endpoints without changing
+    // the endpoint that a developer has saved in the Demo. Resolve neither
+    // missing fields nor preferences in this mode: a stale Dataway value, for
+    // example, must not override a transient DataKit test endpoint.
+    if (this.isTransientRuntimeConfig(want)) {
+      this.updateRuntimeConfigStorage(runtimeConfig);
+      DemoLogger.i(LOG_TAG, `Runtime config loaded transiently (not persisted): ${this.formatRuntimeConfigLog(runtimeConfig)}`);
+      return runtimeConfig;
+    }
+
     if (!this.hasMissingRuntimeConfig(runtimeConfig)) {
       this.updateRuntimeConfigStorage(runtimeConfig);
-      this.persistRuntimeConfig(runtimeConfig).catch((error: Error) => {
-        DemoLogger.w(LOG_TAG, `Failed to persist runtime config: ${JSON.stringify(error)}`);
-      });
+      if (persist) {
+        await this.persistRuntimeConfig(runtimeConfig);
+      }
 
       DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
       return runtimeConfig;
@@ -409,12 +465,19 @@ export default class EntryAbility extends UIAbility {
     );
     runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
 
-    await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
+    if (persist) {
+      await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
+    }
     this.updateRuntimeConfigStorage(runtimeConfig);
 
     DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
 
     return runtimeConfig;
+  }
+
+  private isTransientRuntimeConfig(want: Want): boolean {
+    const value = this.readWantString(want, KEY_RUNTIME_CONFIG_TRANSIENT, "").trim().toLowerCase();
+    return value === "true" || value === "1" || value === "on";
   }
 
   /**
@@ -555,7 +618,7 @@ export default class EntryAbility extends UIAbility {
     return sdkConfig.setEnableDataFilter(enabled).setDataFilters(filters);
   }
 
-  private initFTSDK():void{
+  private initFTSDK(testSession: boolean = false):void{
     try {
       // Get the Context - use this.context instead of getContext(this)
       const context = this.context;
@@ -639,6 +702,7 @@ export default class EntryAbility extends UIAbility {
       }
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
+      this.installedSDKConfig = sdkConfig;
 
       // Initialize log configuration
       const logConfig = new FTLoggerConfig()
@@ -687,7 +751,9 @@ export default class EntryAbility extends UIAbility {
       userData.setEmail("harmonyos@guance.com");
       userData.addExt("ft_key", "ft_value");
 
-      FTSDK.bindRumUserData(userData);
+      if (!testSession) {
+        FTSDK.bindRumUserData(userData);
+      }
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()

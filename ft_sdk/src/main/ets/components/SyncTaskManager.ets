@@ -394,6 +394,14 @@ export class SyncTaskManager {
   private preferencesInitPromise: Promise<void> | null = null;
   private uploadWorkerExecutor = new DataUploadWorkerExecutor();
   private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private lastUploadResult: UploadTaskResultStatus = {
+    sequence: 0,
+    httpAttemptCount: 0,
+    successfulHttpResponseCount: 0,
+    failedHttpResponseCount: 0,
+    lastHttpStatusCode: 0,
+    errorCount: 0
+  };
   private constructor() {
   }
 
@@ -556,6 +564,7 @@ export class SyncTaskManager {
     try {
       const consumeResult = await this.executeDataUploadWorkerConsume(taskName);
       this.errorCount = consumeResult.errorCount;
+      this.recordUploadResult(consumeResult);
       if (consumeResult.retryLimitReached) {
         // The failed data is retained for a future external trigger. A retry
         // budget exhaustion must be terminal for the current scheduling chain
@@ -576,6 +585,7 @@ export class SyncTaskManager {
     } catch (error) {
       this.uploadRunning = false;
       this.running = false;
+      this.recordFailedUploadResult();
       FTInnerLogger.e(TAG, `Sync Poll Failed: name=${taskName}, error=${error as string}`);
     } finally {
       const shouldReschedule = this.uploadNeedReschedule;
@@ -595,6 +605,28 @@ export class SyncTaskManager {
     const options = this.createDataUploadConsumeOptions(taskName);
     const capabilities = this.createDataUploadCapabilities();
     return await this.uploadWorkerExecutor.consume(capabilities, options);
+  }
+
+  private recordUploadResult(result: DataUploadConsumeResult): void {
+    this.lastUploadResult = {
+      sequence: this.lastUploadResult.sequence + 1,
+      httpAttemptCount: result.httpAttemptCount,
+      successfulHttpResponseCount: result.successfulHttpResponseCount,
+      failedHttpResponseCount: result.failedHttpResponseCount,
+      lastHttpStatusCode: result.lastHttpStatusCode,
+      errorCount: result.errorCount
+    };
+  }
+
+  private recordFailedUploadResult(): void {
+    this.lastUploadResult = {
+      sequence: this.lastUploadResult.sequence + 1,
+      httpAttemptCount: 0,
+      successfulHttpResponseCount: 0,
+      failedHttpResponseCount: 1,
+      lastHttpStatusCode: 0,
+      errorCount: Math.max(1, this.errorCount)
+    };
   }
 
   private createDataUploadConsumeOptions(taskName: string): DataUploadConsumeOptions {
@@ -833,7 +865,8 @@ export class SyncTaskManager {
       pageSize: this.pageSize,
       dataSyncMaxRetryCount: this.dataSyncMaxRetryCount,
       syncSleepTime: this.syncSleepTime,
-      uploadLaneStatus: this.getUploadLaneStatus()
+      uploadLaneStatus: this.getUploadLaneStatus(),
+      lastUploadResult: this.lastUploadResult
     };
   }
 
@@ -851,6 +884,17 @@ export interface SyncTaskManagerStatus {
   dataSyncMaxRetryCount: number;
   syncSleepTime: number;
   uploadLaneStatus: UploadLaneStatus;
+  lastUploadResult: UploadTaskResultStatus;
+}
+
+/** Most recent upload-consume round, exposed for diagnostics and device tests. */
+export interface UploadTaskResultStatus {
+  sequence: number;
+  httpAttemptCount: number;
+  successfulHttpResponseCount: number;
+  failedHttpResponseCount: number;
+  lastHttpStatusCode: number;
+  errorCount: number;
 }
 
 export interface UploadLaneStatus {

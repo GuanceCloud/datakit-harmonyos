@@ -45,6 +45,14 @@ export interface DataUploadConsumeResult {
   /** A retryable request exhausted this round's configured retry budget. */
   retryLimitReached: boolean;
   errorCount: number;
+  /** Number of HTTP requests actually issued during this consume round. */
+  httpAttemptCount: number;
+  /** HTTP requests whose response was in the 2xx range. */
+  successfulHttpResponseCount: number;
+  /** HTTP requests that did not receive a 2xx response. */
+  failedHttpResponseCount: number;
+  /** Last HTTP response code observed by this consume round; 0 means no request. */
+  lastHttpStatusCode: number;
   metrics?: DataUploadConsumeMetrics;
 }
 

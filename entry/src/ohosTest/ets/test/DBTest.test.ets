@@ -1,6 +1,9 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBTaskPoolExecutor';
+import { DatabaseHelper } from '@guancecloud/ft_sdk/src/main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '@guancecloud/ft_sdk/src/main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
@@ -49,9 +52,11 @@ class SchemaProbeCallback implements DataBaseCallBack {
 
 export default function dbTest() {
   describe('EntrySDKDBTest', () => {
+    let context: Context;
     let dbManager: FTDBManager;
 
     beforeEach(async () => {
+      context = await EntryDBAssert.getAppContext();
       dbManager = await EntryDBAssert.getManager();
       await dbManager.resetDatabase();
     });
@@ -64,15 +69,16 @@ export default function dbTest() {
       const syncData = createLogSyncData('entry-single-insert');
 
       const inserted = await dbManager.insertFtOperation(syncData);
-      const countAfterInsert = await dbManager.queryTotalCount([DataType.LOG]);
-      const queried = await dbManager.queryFtOperation([DataType.LOG], 10);
-      await dbManager.deleteFtOperation(queried);
-      const countAfterDelete = await dbManager.queryTotalCount([DataType.LOG]);
+      const countAfterInsert = await FTDBTaskPoolExecutor.queryTotalCount(context, [DataType.LOG]);
+      const queried = await EntryDBAssert.querySyncRecords([DataType.LOG], 10);
+      const deleted = await FTDBTaskPoolExecutor.deleteSyncRows(context, queried);
+      const countAfterDelete = await FTDBTaskPoolExecutor.queryTotalCount(context, [DataType.LOG]);
 
       expect(inserted).assertTrue();
       expect(countAfterInsert).assertEqual(1);
       expect(queried.length).assertEqual(1);
       expect(queried[0].getDataString().includes('entry-single-insert')).assertTrue();
+      expect(deleted).assertEqual(1);
       expect(countAfterDelete).assertEqual(0);
     });
 
@@ -81,26 +87,31 @@ export default function dbTest() {
       const second = createLogSyncData('entry-batch-2', TEST_NOW_NS + 2);
       const third = createRumSyncData('entry-rum-1', TEST_NOW_NS + 3);
 
-      const inserted = await dbManager.insertFtOptList([first, second, third]);
-      const queried = await dbManager.queryFtOperation([], 10);
-      await dbManager.deleteFtOperation(queried);
-      const countAfterDelete = await dbManager.queryTotalCount([]);
+      const inserted = await dbManager.writeSyncDataAtomically('EntrySDKDBTest.batch', [first, second, third]);
+      const queried = await EntryDBAssert.querySyncRecords([], 10);
+      const deleted = await FTDBTaskPoolExecutor.deleteSyncRows(context, queried);
+      const countAfterDelete = await FTDBTaskPoolExecutor.queryTotalCount(context, []);
 
-      expect(inserted).assertTrue();
+      expect(inserted.success).assertTrue();
+      expect(inserted.inserted).assertEqual(3);
       expect(queried.length).assertEqual(3);
+      expect(deleted).assertEqual(3);
       expect(countAfterDelete).assertEqual(0);
     });
 
     it('sdkDatabaseShouldDeleteOldestDataOnly', 0, async () => {
-      await dbManager.insertFtOptList([
+      const inserted = await dbManager.writeSyncDataAtomically('EntrySDKDBTest.oldest', [
         createLogSyncData('entry-oldest', TEST_NOW_NS + 1),
         createLogSyncData('entry-middle', TEST_NOW_NS + 2),
         createLogSyncData('entry-newest', TEST_NOW_NS + 3)
       ]);
 
-      await dbManager.deleteOldestData(DataType.LOG, 2);
-      const remaining = await dbManager.queryFtOperation([DataType.LOG], 10);
+      const deleted = await FTDBTaskPoolExecutor.deleteOldestSyncData(context, [DataType.LOG], 2);
+      const remaining = await EntryDBAssert.querySyncRecords([DataType.LOG], 10);
 
+      expect(inserted.success).assertTrue();
+      expect(inserted.inserted).assertEqual(3);
+      expect(deleted).assertEqual(2);
       expect(remaining.length).assertEqual(1);
       expect(remaining[0].getDataString().includes('entry-newest')).assertTrue();
     });
@@ -108,7 +119,8 @@ export default function dbTest() {
     it('dbSchemaShouldExist', 0, async () => {
       const callback = new SchemaProbeCallback();
 
-      await dbManager.executeWithDB(false, callback);
+      const rdbStore = await DatabaseHelper.getInstance(context).initDatabase();
+      await callback.run(rdbStore);
 
       expect(callback.hasViewMigrationColumns).assertTrue();
       expect(callback.hasSyncDataFlatTable).assertTrue();

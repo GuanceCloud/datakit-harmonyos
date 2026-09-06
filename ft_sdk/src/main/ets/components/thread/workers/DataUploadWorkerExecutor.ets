@@ -48,6 +48,10 @@ interface DataUploadConsumeState {
   retryableFailure: boolean;
   retryLimitReached: boolean;
   errorCount: number;
+  httpAttemptCount: number;
+  successfulHttpResponseCount: number;
+  failedHttpResponseCount: number;
+  lastHttpStatusCode: number;
   startedAt: number;
   metrics: DataUploadConsumeMetrics;
 }
@@ -150,6 +154,10 @@ export class DataUploadWorkerExecutor {
       retryableFailure: false,
       retryLimitReached: false,
       errorCount: 0,
+      httpAttemptCount: 0,
+      successfulHttpResponseCount: 0,
+      failedHttpResponseCount: 0,
+      lastHttpStatusCode: 0,
       startedAt: capabilities.getCurrentTimeMs(),
       metrics: {
         totalMs: 0,
@@ -180,6 +188,10 @@ export class DataUploadWorkerExecutor {
       retryableFailure: state.retryableFailure,
       retryLimitReached: state.retryLimitReached,
       errorCount: state.errorCount,
+      httpAttemptCount: state.httpAttemptCount,
+      successfulHttpResponseCount: state.successfulHttpResponseCount,
+      failedHttpResponseCount: state.failedHttpResponseCount,
+      lastHttpStatusCode: state.lastHttpStatusCode,
       metrics: state.metrics
     };
   }
@@ -316,6 +328,15 @@ export class DataUploadWorkerExecutor {
       ) as Object as SDKUploadExecutePageResultDTO;
       state.metrics.computeMs += Math.max(0, executed.computeMs);
       state.metrics.httpMs += Math.max(0, executed.httpResult.elapsedMs);
+      if (executed.shouldUpload) {
+        state.httpAttemptCount++;
+        state.lastHttpStatusCode = executed.httpResult.code;
+        if (executed.successfulResponse) {
+          state.successfulHttpResponseCount++;
+        } else {
+          state.failedHttpResponseCount++;
+        }
+      }
 
       // An empty execution has no Worker-side pending page and therefore no
       // attempt to acknowledge. This can happen when a concurrently filtered

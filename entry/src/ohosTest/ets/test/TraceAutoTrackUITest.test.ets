@@ -45,5 +45,61 @@ export default function traceAutoTrackUITest() {
 
       await UiTestUtils.pressBack(driver);
     });
+
+    it('axiosCompatShouldSerializeResourceAfterResponse', 0, async () => {
+      await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
+      const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
+      expect(interceptorReady).assertTrue();
+      await UiTestUtils.clickText(driver, 'Test Axios GET (Compat)');
+
+      const record = await EntryDBAssert.waitForRecentSyncRecordContainingAny(
+        DataType.RUM_APP,
+        [
+          'resource',
+          'resource_url=https://httpbin.org/get?from',
+          'resource_method=GET',
+          'resource_status=200',
+          'duration='
+        ],
+        [],
+        15000
+      );
+
+      if (record === null) {
+        throw new Error(
+          `Expected serialized Axios Compat resource record.\nCurrent sync_data_flat records:\n${await EntryDBAssert.dumpSyncRecords()}`
+        );
+      }
+
+      await UiTestUtils.pressBack(driver);
+    });
+
+    it('axiosChainShouldSerializeResourceAfterResponse', 0, async () => {
+      await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
+      const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
+      expect(interceptorReady).assertTrue();
+      await UiTestUtils.clickText(driver, 'Test Axios GET (Chain)');
+
+      const record = await EntryDBAssert.waitForRecentSyncRecordContainingAny(
+        DataType.RUM_APP,
+        [
+          'resource',
+          'resource_url=https://httpbin.org/get?from',
+          'resource_method=GET',
+          'resource_status=200',
+          'duration='
+        ],
+        [],
+        15000
+      );
+
+      if (record === null) {
+        throw new Error(
+          `Expected serialized Axios Chain resource record.\nCurrent sync_data_flat records:\n${await EntryDBAssert.dumpSyncRecords()}`
+        );
+      }
+
+      await UiTestUtils.pressBack(driver);
+    });
   });
 }

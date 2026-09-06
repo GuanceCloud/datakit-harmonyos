@@ -1,6 +1,7 @@
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { Context } from '@kit.AbilityKit';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { ViewBean } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/ActionBean';
@@ -31,6 +32,10 @@ export class EntryDBAssert {
   static async cleanupAll(): Promise<void> {
     const dbManager = await EntryDBAssert.getManager();
     await dbManager.delete();
+  }
+
+  static async querySyncRecords(types: DataType[], limit: number = 100, newestFirst: boolean = false): Promise<SyncData[]> {
+    return await FTDBTaskPoolExecutor.querySyncData(await EntryDBAssert.getAppContext(), types, limit, newestFirst);
   }
 
   static async waitForViewMatching(candidates: string[], timeoutMs: number = 6000): Promise<ViewBean | null> {
@@ -69,7 +74,7 @@ export class EntryDBAssert {
 
   static async waitForWebViewPayload(timeoutMs: number = 6000): Promise<boolean> {
     return await EntryWaitUtils.waitUntil(async () => {
-      const records = await (await EntryDBAssert.getManager()).queryFtOperation([DataType.RUM_WEBVIEW], 100);
+      const records = await EntryDBAssert.querySyncRecords([DataType.RUM_WEBVIEW]);
       return records.length > 0;
     }, timeoutMs);
   }
@@ -77,7 +82,7 @@ export class EntryDBAssert {
   static async waitForSyncRecordContaining(type: DataType, fragments: string[], timeoutMs: number = 6000): Promise<SyncData | null> {
     let matched: SyncData | null = null;
     const found = await EntryWaitUtils.waitUntil(async () => {
-      const records = await (await EntryDBAssert.getManager()).queryFtOperation([type], 100);
+      const records = await EntryDBAssert.querySyncRecords([type]);
       for (const record of records) {
         let containsAll = true;
         for (const fragment of fragments) {
@@ -104,9 +109,8 @@ export class EntryDBAssert {
   ): Promise<SyncData | null> {
     let matched: SyncData | null = null;
     const found = await EntryWaitUtils.waitUntil(async () => {
-      const manager = await EntryDBAssert.getManager();
-      const records = await manager.queryFtOperation([type], 1000, true);
-      const fallbackRecords = await manager.queryFtOperation([], 1000, true);
+      const records = await EntryDBAssert.querySyncRecords([type], 1000, true);
+      const fallbackRecords = await EntryDBAssert.querySyncRecords([], 1000, true);
       const candidates = records.concat(fallbackRecords);
 
       for (const record of candidates) {
@@ -149,9 +153,8 @@ export class EntryDBAssert {
   ): Promise<SyncData | null> {
     let matched: SyncData | null = null;
     const found = await EntryWaitUtils.waitUntil(async () => {
-      const manager = await EntryDBAssert.getManager();
-      const records = await manager.queryFtOperation([type], 1000, true);
-      const fallbackRecords = await manager.queryFtOperation([], 1000, true);
+      const records = await EntryDBAssert.querySyncRecords([type], 1000, true);
+      const fallbackRecords = await EntryDBAssert.querySyncRecords([], 1000, true);
       const candidates = records.concat(fallbackRecords);
 
       for (const record of candidates) {
@@ -190,8 +193,7 @@ export class EntryDBAssert {
   }
 
   static async dumpSyncRecords(limit: number = 20): Promise<string> {
-    const manager = await EntryDBAssert.getManager();
-    const records = await manager.queryFtOperation([], limit, true);
+    const records = await EntryDBAssert.querySyncRecords([], limit, true);
     if (records.length === 0) {
       return '<empty>';
     }
