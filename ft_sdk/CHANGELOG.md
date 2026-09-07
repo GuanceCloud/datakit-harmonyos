@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.17-alpha01] - 2026-09-02
+- Optimized remote data-filter refreshes: check `pull_interval` when uploads start, parse numeric intervals as nanoseconds, and skip unchanged payload processing.
+- Replaced the separate Router and Navigation View tracking handlers with `FTRUMConfig.setViewTrackingHandler(handler, type)`, which supports `ROUTER`, `NAVIGATION`, and `ALL` targets.
+
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
 - Aligned Error and View device metrics with Android: Error memory, CPU, and battery values are percentage-based and use Android-compatible calculations; Error `locale` now uses Android `Locale.toString()` format; View memory remains bytes, battery current remains mA (including Android-compatible negative-current maxima), CPU fields remain process clock ticks/ticks per second, and FPS uses one-second frame windows.
