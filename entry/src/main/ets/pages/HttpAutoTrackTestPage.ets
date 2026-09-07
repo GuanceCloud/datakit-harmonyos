@@ -28,7 +28,7 @@ import axios, {
 import { BusinessError } from '@kit.BasicServicesKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
-import { KEY_TRACE_URL } from '../entryability/EntryAbility';
+import { KEY_RESOURCE_TEST_URL, KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
   preInitChainClient,
@@ -80,6 +80,7 @@ export struct HttpAutoTrackTestPage {
   @State successCount: number = 0;
   @State errorCount: number = 0;
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
+  @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
 
   aboutToAppear() {
     this.checkAutoTrackStatus();
@@ -87,7 +88,8 @@ export struct HttpAutoTrackTestPage {
 
   private createRCPSession(baseAddress?: string): rcp.Session {
     return rcp.createSession(createFTRCPTrackConfig({
-      baseAddress: baseAddress
+      baseAddress: baseAddress,
+      requestConfiguration: { transfer: { timeout: { connectMs: 10000, transferMs: 10000 } } }
     }));
   }
 
@@ -209,10 +211,14 @@ export struct HttpAutoTrackTestPage {
     return this.storedTraceUrl.trim();
   }
 
+  private getResourceTestUrl(source: string, fallback: string): string {
+    return this.resourceTestUrl.trim() || fallback;
+  }
+
   private getAxiosRequestUrl(method: AxiosHttpMethod, mode: AxiosAutoTrackMode): string {
     const from = mode === 'chain' ? 'axios-chain' : 'axios-adapter';
     if (method === 'get') {
-      return `https://httpbin.org/get?from=${from}`;
+      return this.getResourceTestUrl(`axios-${mode}`, `https://httpbin.org/get?from=${from}`);
     }
     if (method === 'delete') {
       return `https://httpbin.org/delete?from=${from}`;
@@ -273,8 +279,13 @@ export struct HttpAutoTrackTestPage {
       const session = this.createRCPSession();
 
       // Send GET request (should be automatically intercepted)
-      const request = new rcp.Request('https://httpbin.org/get', 'GET');
-      const response = await session.fetch(request);
+      const request = new rcp.Request(this.getResourceTestUrl('rcp', 'https://httpbin.org/get'), 'GET');
+      let response: rcp.Response;
+      try {
+        response = await session.fetch(request);
+      } finally {
+        session.close();
+      }
 
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -561,8 +572,10 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const response = await this.executeHttpRequest('https://httpbin.org/get', {
+      const response = await this.executeHttpRequest(this.getResourceTestUrl('network-http', 'https://httpbin.org/get'), {
         method: http.RequestMethod.GET,
+        connectTimeout: 10000,
+        readTimeout: 10000,
         header: {
           'Accept': 'application/json'
         }

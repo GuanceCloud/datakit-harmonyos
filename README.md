@@ -311,6 +311,42 @@ const rumConfig = new FTRUMConfig()
 
 Add `@guancecloud/ft_native` to the application dependencies so `libftnativecrash.so` is packaged with the app. When crash tracking is enabled, `ft_sdk` initializes the native crash module internally.
 
+## Demo runtime configuration
+
+Entry tests and the Demo use **one set of startup arguments and Preferences** in
+`entry_ability_runtime_config`. The test launcher only forwards explicitly supplied
+app arguments to `EntryAbility`; it does not inject defaults or resolve a second
+configuration. Both entry points apply `explicit argument > saved value > Demo
+default`, validate the result, and persist changed values. An empty string clears
+that string setting. Launching again without arguments restores the saved result,
+including automatic upload and sampling rates.
+
+An explicit DataKit URL selects DataKit and clears the saved Dataway URL/token;
+an explicit Dataway URL selects Dataway and can reuse the saved token. Do not
+supply two non-empty endpoints together. There is no fallback localhost intake
+or synthetic RUM app ID. Startup logs show value sources and mask the token.
+Tests requiring upload report missing or invalid endpoints instead of inventing one.
+
+| Shared startup argument | Default when not saved / behavior |
+| --- | --- |
+| `datakitUrl` | Empty; DataKit upload endpoint |
+| `datawayUrl`, `clientToken` | Empty; Dataway upload endpoint and token |
+| `appId` | Empty; RUM application ID required for RUM tests |
+| `webViewUrl`, `traceUrl` | Empty; Demo WebView and trace request targets |
+| `resourceTestUrl` | Empty; each Demo GET button uses its own fallback target |
+| `autoSync` | `true`; persisted automatic upload switch |
+| `logSamplingRate`, `rumSamplingRate`, `errorSamplingRate`, `traceSamplingRate` | `1`; persisted rates from `0` to `1` |
+| `localDataFilterEnabled` | `true`; persisted local filtering switch |
+| `localDataFilterLogRule`, `localDataFilterRumRule` | Empty; persisted filter expressions |
+| `remoteConfigTestEnabled` | `false`; Demo remote-configuration debugging switch |
+| `networkRouteTestEnabled`, `networkRouteTestMode`, `networkRouteTestHost` | `false`, `proxy`, empty; shared network route test configuration |
+
+Boolean startup arguments accept `true`/`false`, `1`/`0`, or `on`/`off`.
+Invalid flags and sampling rates report their parameter name before saving.
+The former `entry...` aliases for these app settings and `entryUsePersistedConfig`
+are removed. Use the same names for both Demo and instrument-test launches.
+
+
 ## Release Checklist
 
 - Ensure package names, versions, descriptions, author, and license in each module `oh-package.json5` are correct before `ohpm publish`.

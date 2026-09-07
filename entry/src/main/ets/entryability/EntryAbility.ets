@@ -1,3 +1,4 @@
+import { ENTRY_RUNTIME_KEYS, resolveEntryRuntimeConfig } from '../utils/EntryRuntimeConfig';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
@@ -5,7 +6,6 @@ import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import { hidebug } from '@kit.PerformanceAnalysisKit';
 import {
-  DBCacheDiscard,
   DetectFrequency,
   DeviceMetricsMonitorType,
   EnvType,
@@ -35,12 +35,7 @@ import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDem
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
 export const RUNTIME_CONFIG_PREFERENCES_NAME = PREFERENCES_NAME;
-// Local-only defaults for manually validating SDK upload proxy and custom DNS.
-// They can be overridden through launch parameters. Keep the test disabled by
-// default so a normal Demo launch always uses its configured DataKit/DataWay URL.
-const DEFAULT_NETWORK_ROUTE_TEST_ENABLED = false;
-const DEFAULT_NETWORK_ROUTE_TEST_MODE: 'proxy' | 'dns' = 'proxy';
-const DEFAULT_REMOTE_CONFIG_TEST_ENABLED = false;
+// Endpoints used by the optional upload proxy / custom DNS demo.
 const NETWORK_ROUTE_TEST_UPLOAD_PORT = 9529;
 const NETWORK_ROUTE_TEST_PROXY_PORT = 8080;
 const NETWORK_ROUTE_TEST_DNS_HOSTNAME = 'ft-upload.sdk-test.invalid';
@@ -63,18 +58,8 @@ export const KEY_TRACE_URL = "traceUrl";
 export const KEY_DATAKIT_URL = "datakitUrl";
 export const KEY_DATAWAY_URL = "datawayUrl";
 export const KEY_CLIENT_TOKEN = "clientToken";
-export const KEY_AUTO_SYNC = "autoSync";
-/**
- * Test-only launch marker. A transient configuration updates this process but
- * must never be merged into or written to the Demo's preferences.
- */
-export const KEY_RUNTIME_CONFIG_TRANSIENT = "runtimeConfigTransient";
-/** Load the saved Demo baseline without writing preferences during test bootstrap. */
-export const KEY_RUNTIME_CONFIG_TEST_BOOTSTRAP = "runtimeConfigTestBootstrap";
-export const KEY_NETWORK_ROUTE_TEST_ENABLED = "networkRouteTestEnabled";
-export const KEY_NETWORK_ROUTE_TEST_MODE = "networkRouteTestMode";
-export const KEY_NETWORK_ROUTE_TEST_HOST = "networkRouteTestHost";
-export const KEY_REMOTE_CONFIG_TEST_ENABLED = "remoteConfigTestEnabled";
+/** GET endpoint shared by the HTTP demo page and test launch configuration. */
+export const KEY_RESOURCE_TEST_URL = "resourceTestUrl";
 export const KEY_LOCAL_DATA_FILTER_ENABLED = "localDataFilterEnabled";
 export const KEY_LOCAL_DATA_FILTER_LOG_RULE = "localDataFilterLogRule";
 export const KEY_LOCAL_DATA_FILTER_RUM_RULE = "localDataFilterRumRule";
@@ -86,22 +71,6 @@ export const KEY_COLD_START_DELAY_MS = "coldStartDelayMs";
 export const KEY_COLD_LAUNCH_NEXT_UI_ABILITY = "coldLaunchNextUIAbility";
 const MAX_COLD_START_DELAY_MS = 30_000;
 
-export interface RuntimeConfig {
-  datakitUrl: string;
-  datawayUrl: string;
-  webViewUrl: string;
-  traceUrl: string;
-  clientToken: string;
-  autoSync: string;
-  networkRouteTestEnabled: string;
-  networkRouteTestMode: string;
-  networkRouteTestHost: string;
-  remoteConfigTestEnabled: string;
-  localDataFilterEnabled: string;
-  localDataFilterLogRule: string;
-  localDataFilterRumRule: string;
-  appId: string;
-}
 
 class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
   onConfigSuccessFetched(configBean: RemoteConfigBean, jsonConfig: string): RemoteConfigBean | null {
@@ -203,85 +172,32 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
  * --ps localDataFilterLogRule "{ message match ['.*password.*'] }"
  *
  * 10. Full example:
- * --ps datakitUrl http\://10.0.0.1\:9529 --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id --ps remoteConfigTestEnabled true
+ * --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id --ps remoteConfigTestEnabled true
  *
  * Behavior:
  * - Parameters passed in onCreate are persisted to preferences.
- * - If a parameter is empty or omitted, the persisted value is used instead.
- * - When runtimeConfigTransient=true is supplied by the UI-test launcher,
- *   parameters apply only to that test process and are never persisted.
- * - SDK upload uses DataKit when datakitUrl is configured; DataWay is used only as fallback.
+ * - Omitted parameters use saved values; explicit empty string parameters clear saved strings.
+ * - Demo and UI tests use the same names, defaults, validation and persistence.
+ * - An explicit upload URL selects DataKit or Dataway and clears the other mode.
  * - SDK, WebView, and trace test pages all read from the same persisted runtime config.
  */
 export default class EntryAbility extends UIAbility {
-  private installedSDKConfig: FTSDKConfig | null = null;
-  private runtimeConfigReady: boolean = false;
   private coldStartDelayMs: number = 0;
   private coldLaunchTestWant: Want | null = null;
   private secondaryLaunchStarted: boolean = false;
-  private runtimeConfig: RuntimeConfig = {
-    datakitUrl: "",
-    datawayUrl: "",
-    webViewUrl: "",
-    traceUrl: "",
-    clientToken: "",
-    autoSync: "",
-    networkRouteTestEnabled: "",
-    networkRouteTestMode: "",
-    networkRouteTestHost: "",
-    remoteConfigTestEnabled: "",
-    localDataFilterEnabled: "",
-    localDataFilterLogRule: "",
-    localDataFilterRumRule: "",
-    appId: ""
-  };
+  private runtimeConfig: Record<string, string> = resolveEntryRuntimeConfig({}, {});
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
     this.coldLaunchTestWant = want;
     this.coldStartDelayMs = this.resolveColdStartDelayMs(want);
     this.logAppMemoryLimitOnMainThread();
-
-    const testBootstrap = this.readWantString(want, KEY_RUNTIME_CONFIG_TEST_BOOTSTRAP, '') === 'true';
     try {
-      this.runtimeConfig = await this.loadRuntimeConfig(want, !testBootstrap);
+      this.runtimeConfig = await this.loadRuntimeConfig(want);
+      this.initFTSDK();
     } catch (error) {
-      DemoLogger.e(LOG_TAG, `Failed to load runtime config: ${error}`);
+      const message = error instanceof Error ? error.message : String(error);
+      DemoLogger.e(LOG_TAG, `Runtime configuration failed: ${message}`);
     }
-    this.initFTSDK(testBootstrap);
-    this.runtimeConfigReady = true;
-  }
-
-  /** Demo-only hooks used by ohosTest; no SDK public configuration API is added. */
-  public isRuntimeConfigReadyForTest(): boolean {
-    return this.runtimeConfigReady;
-  }
-
-  public getRuntimeConfigForTest(): RuntimeConfig {
-    return this.runtimeConfig;
-  }
-
-  public getSDKConfigForTest(): FTSDKConfig | null {
-    return this.installedSDKConfig;
-  }
-
-  public async applyRuntimeConfigForTest(want: Want): Promise<void> {
-    if (!this.isTransientRuntimeConfig(want)) {
-      throw new Error('UI tests must supply a transient runtime configuration');
-    }
-    // Explicitly awaited by the test fixture, including when startAbility
-    // reused an existing UIAbility and onCreate did not execute again.
-    this.runtimeConfig = await this.loadRuntimeConfig(want);
-    this.installedSDKConfig = null;
-    this.initFTSDK(true);
-    if (this.installedSDKConfig === null) {
-      throw new Error('Failed to install the transient test SDK configuration');
-    }
-  }
-
-  public restoreRuntimeConfigForTest(runtimeConfig: RuntimeConfig, sdkConfig: FTSDKConfig | null): void {
-    this.runtimeConfig = runtimeConfig;
-    this.installedSDKConfig = sdkConfig;
-    this.updateRuntimeConfigStorage(runtimeConfig);
   }
 
   private logAppMemoryLimitOnMainThread(): void {
@@ -361,123 +277,30 @@ export default class EntryAbility extends UIAbility {
     // No manual stopView() call needed - SDK's FTAbilityLifecycleListener handles this
   }
 
-  private async loadRuntimeConfig(want: Want, persist: boolean = true): Promise<RuntimeConfig> {
-    const autoSyncParam = want.parameters?.[KEY_AUTO_SYNC];
-    const networkRouteTestEnabledParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_ENABLED];
-    const networkRouteTestModeParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_MODE];
-    const networkRouteTestHostParam = want.parameters?.[KEY_NETWORK_ROUTE_TEST_HOST];
-    const remoteConfigTestEnabledParam = want.parameters?.[KEY_REMOTE_CONFIG_TEST_ENABLED];
-    const localDataFilterEnabledParam = want.parameters?.[KEY_LOCAL_DATA_FILTER_ENABLED];
-    const runtimeConfig: RuntimeConfig = {
-      datakitUrl: (want.parameters?.[KEY_DATAKIT_URL] as string | null | undefined) ?? "",
-      datawayUrl: (want.parameters?.[KEY_DATAWAY_URL] as string | null | undefined) ?? "",
-      webViewUrl: (want.parameters?.[KEY_WEB_VIEW_URL] as string | null | undefined) ?? "",
-      traceUrl: (want.parameters?.[KEY_TRACE_URL] as string | null | undefined) ?? "",
-      clientToken: (want.parameters?.[KEY_CLIENT_TOKEN] as string | null | undefined) ?? "",
-      autoSync: autoSyncParam === undefined || autoSyncParam === null ? "" : String(autoSyncParam),
-      networkRouteTestEnabled: networkRouteTestEnabledParam === undefined || networkRouteTestEnabledParam === null
-        ? ""
-        : String(networkRouteTestEnabledParam),
-      networkRouteTestMode: networkRouteTestModeParam === undefined || networkRouteTestModeParam === null
-        ? ""
-        : String(networkRouteTestModeParam),
-      networkRouteTestHost: networkRouteTestHostParam === undefined || networkRouteTestHostParam === null
-        ? ""
-        : String(networkRouteTestHostParam),
-      remoteConfigTestEnabled: remoteConfigTestEnabledParam === undefined || remoteConfigTestEnabledParam === null
-        ? ""
-        : String(remoteConfigTestEnabledParam),
-      localDataFilterEnabled: localDataFilterEnabledParam === undefined || localDataFilterEnabledParam === null
-        ? ""
-        : String(localDataFilterEnabledParam),
-      localDataFilterLogRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_LOG_RULE] as string | null | undefined) ?? "",
-      localDataFilterRumRule: (want.parameters?.[KEY_LOCAL_DATA_FILTER_RUM_RULE] as string | null | undefined) ?? "",
-      appId: (want.parameters?.[KEY_APP_ID] as string | null | undefined) ?? ""
-    };
-
-    // UI tests need to use real, caller-supplied endpoints without changing
-    // the endpoint that a developer has saved in the Demo. Resolve neither
-    // missing fields nor preferences in this mode: a stale Dataway value, for
-    // example, must not override a transient DataKit test endpoint.
-    if (this.isTransientRuntimeConfig(want)) {
-      this.updateRuntimeConfigStorage(runtimeConfig);
-      DemoLogger.i(LOG_TAG, `Runtime config loaded transiently (not persisted): ${this.formatRuntimeConfigLog(runtimeConfig)}`);
-      return runtimeConfig;
+  private async loadRuntimeConfig(want: Want): Promise<Record<string, string>> {
+    const store = await preferences.getPreferences(this.context, PREFERENCES_NAME);
+    const saved: Record<string, string> = {};
+    const incoming: Record<string, string> = {};
+    for (const key of ENTRY_RUNTIME_KEYS) {
+      saved[key] = String(await store.get(key, ''));
+      const value = want.parameters?.[key];
+      if (value !== undefined && value !== null) incoming[key] = String(value);
     }
-
-    if (!this.hasMissingRuntimeConfig(runtimeConfig)) {
-      this.updateRuntimeConfigStorage(runtimeConfig);
-      if (persist) {
-        await this.persistRuntimeConfig(runtimeConfig);
+    const config = resolveEntryRuntimeConfig(incoming, saved);
+    const sources: string[] = [];
+    let changed = false;
+    for (const key of ENTRY_RUNTIME_KEYS) {
+      sources.push(`${key}:${incoming[key] !== undefined ? 'argument' : (saved[key].length > 0 ? 'preferences' : 'default')}`);
+      if (saved[key] !== config[key]) {
+        await store.put(key, config[key]);
+        changed = true;
       }
-
-      DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
-      return runtimeConfig;
+      AppStorage.setOrCreate(key, config[key]);
     }
-
-    const preferencesStore = await preferences.getPreferences(this.context, PREFERENCES_NAME);
-    runtimeConfig.datakitUrl = await this.resolveRuntimeValue(preferencesStore, KEY_DATAKIT_URL, runtimeConfig.datakitUrl, "");
-    runtimeConfig.datawayUrl = await this.resolveRuntimeValue(preferencesStore, KEY_DATAWAY_URL, runtimeConfig.datawayUrl, "");
-    runtimeConfig.webViewUrl = await this.resolveRuntimeValue(preferencesStore, KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl, "");
-    runtimeConfig.traceUrl = await this.resolveRuntimeValue(preferencesStore, KEY_TRACE_URL, runtimeConfig.traceUrl, "");
-    runtimeConfig.clientToken = await this.resolveRuntimeValue(preferencesStore, KEY_CLIENT_TOKEN, runtimeConfig.clientToken, "");
-    runtimeConfig.networkRouteTestEnabled = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_NETWORK_ROUTE_TEST_ENABLED,
-      runtimeConfig.networkRouteTestEnabled,
-      ""
-    );
-    runtimeConfig.networkRouteTestMode = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_NETWORK_ROUTE_TEST_MODE,
-      runtimeConfig.networkRouteTestMode,
-      ""
-    );
-    runtimeConfig.networkRouteTestHost = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_NETWORK_ROUTE_TEST_HOST,
-      runtimeConfig.networkRouteTestHost,
-      ""
-    );
-    runtimeConfig.remoteConfigTestEnabled = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_REMOTE_CONFIG_TEST_ENABLED,
-      runtimeConfig.remoteConfigTestEnabled,
-      ""
-    );
-    runtimeConfig.localDataFilterEnabled = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_LOCAL_DATA_FILTER_ENABLED,
-      runtimeConfig.localDataFilterEnabled,
-      "true"
-    );
-    runtimeConfig.localDataFilterLogRule = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_LOCAL_DATA_FILTER_LOG_RULE,
-      runtimeConfig.localDataFilterLogRule,
-      ""
-    );
-    runtimeConfig.localDataFilterRumRule = await this.resolveRuntimeValue(
-      preferencesStore,
-      KEY_LOCAL_DATA_FILTER_RUM_RULE,
-      runtimeConfig.localDataFilterRumRule,
-      ""
-    );
-    runtimeConfig.appId = await this.resolveRuntimeValue(preferencesStore, KEY_APP_ID, runtimeConfig.appId, "");
-
-    if (persist) {
-      await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
-    }
-    this.updateRuntimeConfigStorage(runtimeConfig);
-
-    DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(runtimeConfig));
-
-    return runtimeConfig;
-  }
-
-  private isTransientRuntimeConfig(want: Want): boolean {
-    const value = this.readWantString(want, KEY_RUNTIME_CONFIG_TRANSIENT, "").trim().toLowerCase();
-    return value === "true" || value === "1" || value === "on";
+    if (changed) await store.flush();
+    DemoLogger.i(LOG_TAG, `Runtime config sources: ${sources.join(', ')}`);
+    DemoLogger.i(LOG_TAG, this.formatRuntimeConfigLog(config));
+    return config;
   }
 
   /**
@@ -485,122 +308,17 @@ export default class EntryAbility extends UIAbility {
    * local HiLog but is not automatically uploaded. Print only the final
    * resolved configuration, with clientToken masked.
    */
-  private formatRuntimeConfigLog(runtimeConfig: RuntimeConfig): string {
-    const resolvedValues: string[] = [
-      `datakitUrl=${runtimeConfig.datakitUrl}`,
-      `datawayUrl=${runtimeConfig.datawayUrl}`,
-      `webViewUrl=${runtimeConfig.webViewUrl}`,
-      `traceUrl=${runtimeConfig.traceUrl}`,
-      `clientToken=${this.maskClientToken(runtimeConfig.clientToken)}`,
-      `autoSync=${runtimeConfig.autoSync}`,
-      `networkRouteTestEnabled=${runtimeConfig.networkRouteTestEnabled}`,
-      `networkRouteTestMode=${runtimeConfig.networkRouteTestMode}`,
-      `networkRouteTestHost=${runtimeConfig.networkRouteTestHost}`,
-      `remoteConfigTestEnabled=${runtimeConfig.remoteConfigTestEnabled}`,
-      `localDataFilterEnabled=${runtimeConfig.localDataFilterEnabled}`,
-      `localDataFilterLogRule=${runtimeConfig.localDataFilterLogRule}`,
-      `localDataFilterRumRule=${runtimeConfig.localDataFilterRumRule}`,
-      `appId=${runtimeConfig.appId}`
-    ];
+  private formatRuntimeConfigLog(runtimeConfig: Record<string, string>): string {
+    const resolvedValues: string[] = [];
+    for (const key of ENTRY_RUNTIME_KEYS) {
+      const value = key === KEY_CLIENT_TOKEN ? this.maskClientToken(runtimeConfig[key]) : runtimeConfig[key];
+      resolvedValues.push(`${key}=${value}`);
+    }
     return `Runtime config loaded resolved={${resolvedValues.join(', ')}}`;
   }
 
   private maskClientToken(token: string): string {
     return token.length === 0 ? '<empty>' : `<masked:length=${token.length}>`;
-  }
-
-  private async resolveRuntimeValue(
-    preferencesStore: preferences.Preferences,
-    key: string,
-    incomingValue: string | null | undefined,
-    defaultValue: string
-  ): Promise<string> {
-    if (incomingValue != null && incomingValue.length > 0) {
-      return incomingValue;
-    }
-    const storedValue = await preferencesStore.get(key, defaultValue) as string;
-    return storedValue ?? defaultValue;
-  }
-
-  private hasMissingRuntimeConfig(runtimeConfig: RuntimeConfig): boolean {
-    return runtimeConfig.datakitUrl.length === 0 ||
-      runtimeConfig.datawayUrl.length === 0 ||
-      runtimeConfig.webViewUrl.length === 0 ||
-      runtimeConfig.traceUrl.length === 0 ||
-      runtimeConfig.clientToken.length === 0 ||
-      runtimeConfig.appId.length === 0;
-  }
-
-  private updateRuntimeConfigStorage(runtimeConfig: RuntimeConfig): void {
-    AppStorage.setOrCreate(KEY_DATAKIT_URL, runtimeConfig.datakitUrl);
-    AppStorage.setOrCreate(KEY_DATAWAY_URL, runtimeConfig.datawayUrl);
-    AppStorage.setOrCreate(KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl);
-    AppStorage.setOrCreate(KEY_TRACE_URL, runtimeConfig.traceUrl);
-    AppStorage.setOrCreate(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
-    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
-    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
-    AppStorage.setOrCreate(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
-    AppStorage.setOrCreate(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
-    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
-    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
-    AppStorage.setOrCreate(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
-    AppStorage.setOrCreate(KEY_APP_ID, runtimeConfig.appId);
-  }
-
-  private async persistRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
-    const preferencesStore = await preferences.getPreferences(this.context, PREFERENCES_NAME);
-    await this.persistResolvedRuntimeConfig(preferencesStore, runtimeConfig);
-  }
-
-  private async persistResolvedRuntimeConfig(
-    preferencesStore: preferences.Preferences,
-    runtimeConfig: RuntimeConfig
-  ): Promise<void> {
-    await preferencesStore.put(KEY_DATAKIT_URL, runtimeConfig.datakitUrl);
-    await preferencesStore.put(KEY_DATAWAY_URL, runtimeConfig.datawayUrl);
-    await preferencesStore.put(KEY_WEB_VIEW_URL, runtimeConfig.webViewUrl);
-    await preferencesStore.put(KEY_TRACE_URL, runtimeConfig.traceUrl);
-    await preferencesStore.put(KEY_CLIENT_TOKEN, runtimeConfig.clientToken);
-    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_ENABLED, runtimeConfig.networkRouteTestEnabled);
-    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_MODE, runtimeConfig.networkRouteTestMode);
-    await preferencesStore.put(KEY_NETWORK_ROUTE_TEST_HOST, runtimeConfig.networkRouteTestHost);
-    await preferencesStore.put(KEY_REMOTE_CONFIG_TEST_ENABLED, runtimeConfig.remoteConfigTestEnabled);
-    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_ENABLED, runtimeConfig.localDataFilterEnabled);
-    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_LOG_RULE, runtimeConfig.localDataFilterLogRule);
-    await preferencesStore.put(KEY_LOCAL_DATA_FILTER_RUM_RULE, runtimeConfig.localDataFilterRumRule);
-    await preferencesStore.put(KEY_APP_ID, runtimeConfig.appId);
-    await preferencesStore.flush();
-  }
-
-  private resolveAutoSyncEnabled(): boolean {
-    const value = this.runtimeConfig.autoSync.trim().toLowerCase();
-    return value !== 'false' && value !== '0' && value !== 'off';
-  }
-
-  private isNetworkRouteTestEnabled(): boolean {
-    const value = this.runtimeConfig.networkRouteTestEnabled.trim().toLowerCase();
-    if (value.length === 0) {
-      return DEFAULT_NETWORK_ROUTE_TEST_ENABLED;
-    }
-    return value === 'true' || value === '1' || value === 'on';
-  }
-
-  private resolveNetworkRouteTestMode(): 'proxy' | 'dns' {
-    const value = this.runtimeConfig.networkRouteTestMode.trim().toLowerCase();
-    return value === 'dns' || value === 'proxy' ? value : DEFAULT_NETWORK_ROUTE_TEST_MODE;
-  }
-
-  private isRemoteConfigTestEnabled(): boolean {
-    const value = this.runtimeConfig.remoteConfigTestEnabled.trim().toLowerCase();
-    if (value.length === 0) {
-      return DEFAULT_REMOTE_CONFIG_TEST_ENABLED;
-    }
-    return value === 'true' || value === '1' || value === 'on';
-  }
-
-  private isLocalDataFilterEnabled(): boolean {
-    const value = this.runtimeConfig.localDataFilterEnabled.trim().toLowerCase();
-    return value !== 'false' && value !== '0' && value !== 'off';
   }
 
   private applyLocalDataFilterConfig(sdkConfig: FTSDKConfig): FTSDKConfig {
@@ -613,12 +331,12 @@ export default class EntryAbility extends UIAbility {
     if (rumRule.length > 0) {
       filters.set('rum', [rumRule]);
     }
-    const enabled = this.isLocalDataFilterEnabled();
+    const enabled = this.runtimeConfig.localDataFilterEnabled === 'true';
 
     return sdkConfig.setEnableDataFilter(enabled).setDataFilters(filters);
   }
 
-  private initFTSDK(testSession: boolean = false):void{
+  private initFTSDK():void{
     try {
       // Get the Context - use this.context instead of getContext(this)
       const context = this.context;
@@ -626,10 +344,10 @@ export default class EntryAbility extends UIAbility {
       const datawayUrl = this.runtimeConfig.datawayUrl.trim();
       const clientToken = this.runtimeConfig.clientToken.trim();
       const appId = this.runtimeConfig.appId.trim();
-      let networkRouteTestEnabled = this.isNetworkRouteTestEnabled();
-      const networkRouteTestMode = this.resolveNetworkRouteTestMode();
+      let networkRouteTestEnabled = this.runtimeConfig.networkRouteTestEnabled === 'true';
+      const networkRouteTestMode = this.runtimeConfig.networkRouteTestMode;
       const networkRouteTestHost = this.runtimeConfig.networkRouteTestHost.trim();
-      const remoteConfigTestEnabled = this.isRemoteConfigTestEnabled();
+      const remoteConfigTestEnabled = this.runtimeConfig.remoteConfigTestEnabled === 'true';
       const remoteConfigFetchResult: FTRemoteConfigFetchResult | null = remoteConfigTestEnabled
         ? new RemoteConfigTestFetchResult()
         : null;
@@ -675,7 +393,7 @@ export default class EntryAbility extends UIAbility {
         .setServiceName('HarmonyOS-Test-App')
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
-        .setAutoSync(networkRouteTestEnabled ? false : this.resolveAutoSyncEnabled())
+        .setAutoSync(networkRouteTestEnabled ? false : this.runtimeConfig.autoSync === 'true')
         // .setSyncPageSize(SyncPageSize.MEDIUM) // Default: 10 records per upload request
         .setCustomSyncPageSize(20)
         .setDataSyncRetryCount(2) // Default: retry failed uploads up to 5 times
@@ -702,11 +420,10 @@ export default class EntryAbility extends UIAbility {
       }
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
-      this.installedSDKConfig = sdkConfig;
 
       // Initialize log configuration
       const logConfig = new FTLoggerConfig()
-        .setSamplingRate(1.0)  // 100% sampling rate
+        .setSamplingRate(Number(this.runtimeConfig.logSamplingRate))  // Shared persisted sampling configuration
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true)
         // .setLogCacheLimitCount(20000)
@@ -727,8 +444,8 @@ export default class EntryAbility extends UIAbility {
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
         .setEnableTrackAppCrash(true)  // JS and native crash monitoring
-        .setSamplingRate(1.0)          // Set the sampling rate to 100%
-        .setSessionErrorSampleRate(1.0) // Set the error sampling rate to 100%
+        .setSamplingRate(Number(this.runtimeConfig.rumSamplingRate))
+        .setSessionErrorSampleRate(Number(this.runtimeConfig.errorSamplingRate))
         .setEnableTraceUserAction(true)
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
@@ -751,13 +468,11 @@ export default class EntryAbility extends UIAbility {
       userData.setEmail("harmonyos@guance.com");
       userData.addExt("ft_key", "ft_value");
 
-      if (!testSession) {
-        FTSDK.bindRumUserData(userData);
-      }
+      FTSDK.bindRumUserData(userData);
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()
-        .setSamplingRate(1.0)
+        .setSamplingRate(Number(this.runtimeConfig.traceSamplingRate))
         .setEnableAutoTrace(true)
         .setEnableLinkRUMData(true)
         .setTraceType(TraceType.DDTRACE);

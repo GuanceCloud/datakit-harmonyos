@@ -149,6 +149,22 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
 
   async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
     try {
+      // NetworkKit also invokes FINAL_RESPONSE for transport failures, with
+      // responseCode=0. The normal response path has no error stack and would
+      // produce a Resource without the corresponding network Error.
+      if (!rspContext.responseCode) {
+        const error = new Error('NetworkKit request failed without an HTTP response');
+        FTSDKExtensionBridge.completeHttpError({
+          url: reqContext.url,
+          requestHeaders: reqContext.header,
+          responseHeaders: rspContext.header,
+          statusCode: 0,
+          body: rspContext.result,
+          errorMessage: error.message,
+          errorStack: error.stack
+        });
+        return true;
+      }
       FTSDKExtensionBridge.completeHttpResponse({
         url: reqContext.url,
         requestHeaders: reqContext.header,

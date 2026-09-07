@@ -29,11 +29,6 @@ export default function rumUploadE2EUITest() {
 
     beforeEach(async () => {
       driver = await UiTestUtils.createDriver();
-      if (!UiTestUtils.hasConfiguredUploadEndpoint()) {
-        throw new Error(
-          'Real upload verification requires entryDatakitUrl, or entryDatawayUrl together with entryClientToken.'
-        );
-      }
       await UiTestUtils.launchEntryAbility(driver);
       await EntryDBAssert.resetAll();
 
@@ -42,7 +37,6 @@ export default function rumUploadE2EUITest() {
     });
 
     afterEach(async () => {
-      // The root afterAll owns SDK restoration, also when this suite is skipped.
       await EntryDBAssert.cleanupAll();
     });
 
@@ -112,7 +106,6 @@ export default function rumUploadE2EUITest() {
       // This is intentionally the real endpoint configured by entryDatakitUrl
       // or entryDatawayUrl/clientToken in the test launch parameters.
       const uploadSequenceBeforeFlush = SyncTaskManager.getInstance().getStatus().lastUploadResult.sequence;
-      UiTestUtils.assertTestConfigurationApplied();
       FTSDK.flushSyncData();
       const uploadCompleted = await EntryWaitUtils.waitUntil(async () => {
         const status = SyncTaskManager.getInstance().getStatus();

@@ -12,6 +12,11 @@ Guance HarmonyOS extension SDK for newer HarmonyOS compiler and platform capabil
 - NetworkKit and interceptor-based HTTP auto tracking helpers
 - Compatibility layer for newer HarmonyOS capabilities
 
+NetworkKit HTTP and Axios Chain transport failures (`responseCode=0`) produce
+both a Resource and its linked network Error. When the interceptor has no native
+failure details, the Error includes a diagnostic message and the interceptor's
+call stack. The request still fails normally for the caller.
+
 ## Package
 
 - Name: `@guancecloud/ft_sdk_ext`
