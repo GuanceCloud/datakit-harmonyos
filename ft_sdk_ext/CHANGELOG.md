@@ -5,11 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-- Fixed missing linked RUM Errors when NetworkKit HTTP or Axios Chain requests fail before receiving an HTTP response (`responseCode=0`).
-
 ## [0.1.17-alpha01] - 2026-09-05
-- No extension API changes; released with `ft_sdk` 0.1.17-alpha01.
+- Fixed missing linked RUM Errors for NetworkKit HTTP and Axios Chain failures without an HTTP response.
+- Released with `ft_sdk` 0.1.17-alpha01; no public API changes.
 
 ## [0.1.16] - 2026-08-31
 - Added `observeFTAppFirstFrame(...)` for one-shot cold-launch first-frame timing on HarmonyOS API 22 and later.

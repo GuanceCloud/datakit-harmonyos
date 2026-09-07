@@ -24,3 +24,6 @@
 /cer
 .cursorrules
 ft_sdk/LICENSE
+
+# Local Hvigor plugin package archives
+/ft_hvigor_plugin/*.tgz

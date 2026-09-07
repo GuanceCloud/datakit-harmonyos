@@ -5,23 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [Unreleased]
-- Fixed stale View counters when a Resource completes after its initiating Action has closed. Both Resource completion and explicit completion-counter updates now schedule a refreshed View summary after counter persistence.
-- Fixed implicit request retries in the RCP Trace interceptor. Each request is dispatched once: transport failures propagate to the caller, trace preparation failures do not prevent dispatch, and trace-response processing failures preserve the original response.
-- Fixed missing `resource_status=0` in final Resource records for timeouts and connection failures without an HTTP response, in both Host and Worker processing. Status zero has no HTTP status group; real HTTP statuses and Resource/Error correlation remain unchanged.
-- Fixed a race where persistence of an earlier open View could delete its closed state before the final `is_active=false` event was generated.
-- Restored bounded WebView Action-ID deduplication in the event Worker before database insertion; repeated View events remain collectable.
-- Fixed missing bound-user and network attributes in Worker-generated Actions, Resources and Errors, including resource-derived Network Errors.
-- Fixed SDK state reset and endpoint checks accessing an uninitialized SDK instance before installation.
-- Fixed missing SDK public attributes on Actions, Errors, Resources and their generated Network Errors when a custom `LineDataModifier` is configured. These events now run Host-side data and line modification callbacks before serialization and local filtering.
-
 ## [0.1.17-alpha01] - 2026-09-05
-- Added automatic application `console.*` and `hilog.*` collection through `FTLoggerConfig.setEnableConsoleLog(...)`. Install the Guance Hvigor compiler plugin to enable collection; manual `FTLogger` reporting remains independent, and output before SDK installation is ignored.
-- Changed cold-launch tracking to automatic Hvigor compiler-plugin instrumentation; manual lifecycle timing calls are no longer required.
-- Optimized diagnostics by moving routine initialization and success logs to Debug.
-- Added Debug logs for Hvigor compiler-plugin detection and Trace handler/context changes.
-- Fixed Axios auto-tracked Resources not being uploaded: completion now reports the required network state and a non-zero request duration, including extension-bridge requests.
-- Fixed cold-launch first-frame tracking to retry after `WindowStage.loadContent(...)` and ignore duplicate WindowStage observation.
+- Added automatic `console.*` and `hilog.*` collection via `setEnableConsoleLog(...)` and the Guance Hvigor compiler plugin.
+- Added compiler-plugin instrumentation for cold-launch tracking, removing manual lifecycle timing calls.
+- Moved routine diagnostics to Debug and added plugin-detection and Trace-context logs.
+- Fixed missing Axios Resource uploads by reporting network state and request duration.
+- Fixed cold-launch first-frame observation retries and duplicate registration.
+- Fixed stale View counters after requests complete beyond the initiating Action's lifetime.
+- Prevented RCP Trace instrumentation errors from resending requests or replacing successful responses.
+- Preserved `resource_status=0` without an HTTP status group for network failures.
+- Fixed a persistence race that could lose closed View events.
+- Restored WebView Action deduplication while allowing repeated View events.
+- Fixed missing user and network attributes in Worker-generated RUM events.
+- Fixed SDK reset and endpoint checks before initialization.
+- Preserved SDK public attributes when using a custom `LineDataModifier`.
+- Expanded network-failure, RCP single-dispatch, Worker, and RUM upload regression coverage.
 
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
