@@ -10,6 +10,40 @@ import {
 import { MemoryRemoteConfigStorage } from '../../main/ets/components/remote/RemoteConfigStorage';
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { Status as LogLevel } from '../../main/ets/components/bean/Status';
+
+interface RemoteConfigTestContent {
+  env?: string;
+  serviceName?: string;
+  autoSync?: boolean;
+  compressIntakeRequests?: boolean;
+  syncPageSize?: number;
+  syncSleepTime?: number;
+  rumSampleRate?: number;
+  rumSessionOnErrorSampleRate?: number;
+  rumEnableTraceUserAction?: boolean;
+  rumEnableResourceHostIP?: boolean;
+  rumEnableTrackAppUIBlock?: boolean;
+  rumBlockDurationMs?: number;
+  rumAllowWebViewHost?: string[];
+  logSampleRate?: number;
+  logLevelFilters?: string[];
+  logEnableCustomLog?: boolean;
+  logEnableConsoleLog?: boolean;
+  traceSampleRate?: number;
+  traceEnableAutoTrace?: boolean;
+  traceType?: string;
+  unsupportedServerKey?: string;
+}
+
+interface RemoteConfigTestPayload {
+  md5?: string;
+  content: RemoteConfigTestContent;
+}
+
+function stringifyRemoteConfig(payload: RemoteConfigTestPayload): string {
+  return JSON.stringify(payload);
+}
 
 class FakeRemoteConfigHttpClient implements RemoteConfigHttpClient {
   public calls: number = 0;
@@ -56,7 +90,7 @@ export default function remoteConfigUnitTest() {
     });
 
     it('beanShouldParseAndRetainUnknownContent', 0, () => {
-      const bean = RemoteConfigBean.buildFromConfigJson(JSON.stringify({
+      const bean = RemoteConfigBean.buildFromConfigJson(stringifyRemoteConfig({
         md5: 'cached-md5',
         content: {
           env: 'gray',
@@ -77,8 +111,8 @@ export default function remoteConfigUnitTest() {
       expect(serialized.indexOf('unsupportedServerKey') >= 0).assertTrue();
     });
 
-    it('managerShouldFetchOverridePersistAndDeduplicate', 0, async () => {
-      const body = JSON.stringify({
+    it('remoteConfigFetchMergeSaveAndDedup', 0, async () => {
+      const body = stringifyRemoteConfig({
         content: {
           serviceName: 'server-service',
           autoSync: false,
@@ -118,10 +152,10 @@ export default function remoteConfigUnitTest() {
       expect(storage.loadFetchTime()).assertEqual(101);
     });
 
-    it('managerShouldRejectIntervalSkipAndRememberAValidEmptyChange', 0, async () => {
+    it('configTracksIntervalSkipAndEmptyChange', 0, async () => {
       const client = new FakeRemoteConfigHttpClient({
         code: 200,
-        body: JSON.stringify({ content: { env: 'prod' } })
+        body: stringifyRemoteConfig({ content: { env: 'prod' } })
       });
       const storage = new MemoryRemoteConfigStorage();
       const callback = new RecordingFetchResult();
@@ -149,10 +183,10 @@ export default function remoteConfigUnitTest() {
       expect(storage.loadFetchTime()).assertEqual(61);
     });
 
-    it('endpointSwitchShouldBypassIntervalAndUseTheLatestResponse', 0, async () => {
+    it('endpointSwitchFetchesLatestImmediately', 0, async () => {
       const client = new FakeRemoteConfigHttpClient({
         code: 200,
-        body: JSON.stringify({ content: { serviceName: 'first-endpoint' } })
+        body: stringifyRemoteConfig({ content: { serviceName: 'first-endpoint' } })
       });
       const manager = new FTRemoteConfigManager(
         FTSDKConfig.builder('http://datakit.local'),
@@ -160,14 +194,16 @@ export default function remoteConfigUnitTest() {
         new MemoryRemoteConfigStorage(),
         null,
         client,
-        () => 100,
+        () => 10_000,
         (value: string) => value
       );
 
       await manager.initFromRemote('rum-app-id');
+      expect(client.calls).assertEqual(1);
+      expect(manager.getCachedConfig()!.getServiceName()).assertEqual('first-endpoint');
       client.response = {
         code: 200,
-        body: JSON.stringify({ content: { serviceName: 'second-endpoint' } })
+        body: stringifyRemoteConfig({ content: { serviceName: 'second-endpoint' } })
       };
       await manager.refreshForEndpointChange(true);
 
@@ -175,9 +211,9 @@ export default function remoteConfigUnitTest() {
       expect(manager.getCachedConfig()!.getServiceName()).assertEqual('second-endpoint');
     });
 
-    it('managerShouldMergeCachedValuesBeforeComponentInitialization', 0, () => {
+    it('cachedConfigMergesBeforeComponentInit', 0, () => {
       const storage = new MemoryRemoteConfigStorage();
-      storage.save(JSON.stringify({
+      storage.save(stringifyRemoteConfig({
         md5: 'cached-md5',
         content: {
           env: 'gray',
@@ -233,16 +269,16 @@ export default function remoteConfigUnitTest() {
       expect(logConfig.getSamplingRate()).assertEqual(0.2);
       expect(logConfig.isEnableCustomLog()).assertFalse();
       expect(logConfig.isEnableConsoleLog()).assertTrue();
-      expect(logConfig.getLogLevelFilters()[0]).assertEqual('WARN');
+      expect(logConfig.getLogLevelFilters()[0]).assertEqual(LogLevel.WARN.name);
       expect(traceConfig.getSamplingRate()).assertEqual(0.3);
       expect(traceConfig.isEnableAutoTrace()).assertTrue();
       expect(traceConfig.getTraceType()).assertEqual(TraceType.TRACEPARENT);
     });
 
-    it('syncTaskShouldHotUpdateSupportedUploadValues', 0, () => {
+    it('syncTaskHotUpdateSupportedUploadValues', 0, () => {
       const syncTask = SyncTaskManager.getInstance();
       syncTask.init(FTSDKConfig.builder('http://datakit.local').setAutoSync(false));
-      const bean = RemoteConfigBean.buildFromConfigJson(JSON.stringify({
+      const bean = RemoteConfigBean.buildFromConfigJson(stringifyRemoteConfig({
         content: {
           autoSync: true,
           syncPageSize: 22,

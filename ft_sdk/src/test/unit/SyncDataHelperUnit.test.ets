@@ -106,7 +106,7 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('shared=base')).assertFalse();
     });
 
-    it('bodyContentShouldMergeLogContextDictionary', 0, () => {
+    it('bodyContentMergeLogContextDictionary', 0, () => {
       const helper = new SyncDataHelper();
       const staticContext: Map<string, LogGlobalContextValue> = new Map();
       staticContext.set('dict_string', 'value');
@@ -170,6 +170,7 @@ export default function syncDataHelperUnitTest() {
       const rumConfig = new FTRUMConfig()
         .setRumAppId('rum-id')
         .addGlobalContext(Constants.KEY_SERVICE, 'native-service' as Object)
+        .addGlobalContext(Constants.KEY_SDK_VERSION, '1.0.0' as Object)
         .addGlobalContext(Constants.KEY_SDK_PACKAGE_INFO, '{"agent":"1.0.0"}' as Object);
       const tags: Map<string, string> = new Map();
       tags.set(Constants.KEY_SERVICE, 'browser');
@@ -185,6 +186,7 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('service=browser')).assertTrue();
       expect(lineProtocol.includes('service=native-service')).assertFalse();
       expect(lineProtocol.includes('sdk_version=2.0.0')).assertFalse();
+      expect(lineProtocol.includes('sdk_version=1.0.0')).assertTrue();
       expect(lineProtocol.includes('"agent":"1.0.0"')).assertTrue();
       expect(lineProtocol.includes('"web":"2.0.0"')).assertTrue();
     });

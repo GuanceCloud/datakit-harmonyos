@@ -81,6 +81,22 @@ levels omit the first-frame phase.
 
 - https://docs.guance.com/real-user-monitoring/harmonyos/app-access/
 
+## Device Tests
+
+In DevEco Studio, run `src/ohosTest/ets/test/List.test.ets` as an Instrument Test
+with module `ft_sdk_ext` and product `default` (API 22 or later). The device
+command must target `-m ft_sdk_ext_test`. The full suite contains the HTTP chain
+tests and the first-frame listener test. Check the final `Tests run`, `Failure`,
+`Error`, and `Pass` counts; `TestFinished-ResultCode: 0` alone does not mean the
+assertions passed.
+
+The `ohosTest` build target explicitly includes the core SDK Worker entry points.
+The shared device-test collector keeps the real Worker, line-protocol assembly,
+and database commit/deletion path, and injects HTTP results at the upload Worker
+boundary. These cases do not contact a real collector. Use a real-backend smoke
+test separately to verify network transport. The test helper imports from
+`ft_sdk/src/ohosTest` are for this repository's local tests only.
+
 ## License
 
 - Apache-2.0

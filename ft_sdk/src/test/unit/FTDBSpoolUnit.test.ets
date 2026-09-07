@@ -51,7 +51,7 @@ export default function ftDBSpoolUnitTest() {
       DbInternalTestAccess.resetDbManagerInstance();
     });
 
-    it('syncDataWriteFailureShouldUseUnifiedFallback', 0, async () => {
+    it('syncDataWriteFailureUseUnifiedFallback', 0, async () => {
       DbInternalTestAccess.forceNextSyncDataWriteFailure();
       const result = await manager.writeSyncDataAtomically(
         'unit.sync-data-failure',
@@ -66,7 +66,7 @@ export default function ftDBSpoolUnitTest() {
       expect(fallback.records[0].uuid).assertEqual('fallback-sync-data');
     });
 
-    it('syncDraftWriteFailureShouldUseSameFallback', 0, async () => {
+    it('syncDraftWriteFailureUseSameFallback', 0, async () => {
       const draft: FTDBTaskPoolSyncDraftDTO = {
         dataType: DataType.RUM_APP.toString(),
         dataString: 'view,view_id=fallback-draft value=1i 101',
@@ -88,7 +88,7 @@ export default function ftDBSpoolUnitTest() {
       expect(fallback.records[0].dataType).assertEqual(DataType.RUM_APP);
     });
 
-    it('replayFailureShouldNotRecursivelyFallback', 0, async () => {
+    it('replayFailureNotRecursivelyFallback', 0, async () => {
       DbInternalTestAccess.forceNextSyncDataWriteFailure();
       const result = await manager.writeSyncDataAtomically(
         'unit.replay-failure',

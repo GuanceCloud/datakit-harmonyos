@@ -17,8 +17,10 @@ import { FTTraceHandler } from '@guancecloud/ft_sdk/src/main/ets/components/trac
 import { applyFTAxiosChainMethodBridge, applyFTHttpTrack } from '../../../../Index';
 import { resolveAxiosFullUrl } from '../../../main/ets/components/network/FTHttpAutoTrackExt';
 import { ExtDBAssert } from './helpers/ExtDBAssert';
-import { ExtMockCollector } from './helpers/ExtMockCollector';
+import { ExtMockCollector, runTestCleanup } from './helpers/ExtMockCollector';
 import { WaitUtils } from './helpers/WaitUtils';
+import { SdkTestLifecycle } from '@guancecloud/ft_sdk/src/ohosTest/ets/test/helpers/SdkTestLifecycle';
+import { RumAttributeAssert, RumAttributeExpectation } from '@guancecloud/ft_sdk/src/ohosTest/ets/test/helpers/RumAttributeAssert';
 
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
@@ -187,6 +189,7 @@ export default function httpChainModeDeviceTest() {
     let collector: ExtMockCollector;
 
     beforeEach(async () => {
+      await SdkTestLifecycle.resetRuntimeState();
       collector = new ExtMockCollector(200, '');
       collector.start();
       await installExtResourceSdk();
@@ -195,9 +198,11 @@ export default function httpChainModeDeviceTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      FTSDK.shutDown();
-      await ExtDBAssert.cleanupAll();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await ExtDBAssert.cleanupAll(); }
+      ]);
     });
 
     it('httpChainShouldUploadAndDelete', 0, async () => {
@@ -345,7 +350,7 @@ export default function httpChainModeDeviceTest() {
       }
     });
 
-    it('httpErrorStatusShouldWriteUploadAndDelete', 0, async () => {
+    it('httpErrorStatusWriteUploadAndDelete', 0, async () => {
       const viewName = 'http_chain_error_resource_view';
       const resourceUrl = 'http://device.test/http-chain-error-resource';
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -398,7 +403,49 @@ export default function httpChainModeDeviceTest() {
       }
     });
 
-    it('resolveAxiosFullUrlShouldJoinBaseUrlOnDevice', 0, async () => {
+    it('zeroStatusShouldUploadResourceAndLinkedError', 0, async () => {
+      const viewName = 'http_chain_transport_failure_view';
+      const resourceUrl = 'http://device.test/connection-refused';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      const request = http.createHttp();
+      try {
+        const interceptors = applyFTHttpTrack(request).getChain();
+        const headers: Record<string, Object> = {};
+        const context = new ChainRequestContext(resourceUrl, headers);
+        const failedResponse = new ChainResponse(0, headers, '');
+        await interceptors[0].interceptorHandle(context, failedResponse);
+        const traceIds = assertTraceparentHeaders(context.header);
+        expect(await interceptors[1].interceptorHandle(context, failedResponse)).assertTrue();
+
+        const resourceFragments = ['resource,', `resource_url=${resourceUrl}`, `trace_id=${traceIds[0]}`];
+        const resource = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments);
+        const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+          viewName, resourceStatus: 0, requiredTags: ['trace_id', 'span_id'], requiredFields: ['request_header'] };
+        const resourcePoint = RumAttributeAssert.record(resource, resourceAttributes);
+        expect(resourcePoint.tags.has('resource_status')).assertFalse();
+        expect(resourcePoint.tags.get('span_id')).assertEqual(traceIds[1]);
+
+        const errorFragments = ['error,', 'error_source=network', `resource_id=${resource!.getUuid()}`];
+        const error = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments);
+        const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID,
+          viewName, requiredFields: ['error_stack'] };
+        const errorPoint = RumAttributeAssert.record(error, errorAttributes);
+        expect(errorPoint.tags.get('resource_status')).assertEqual('0');
+        expect(errorPoint.tags.get('resource_url')).assertEqual(resourceUrl);
+        expect(String(errorPoint.fields.get('error_message')).includes(
+          'NetworkKit request failed without an HTTP response')).assertTrue();
+
+        const uploadedResource = await flushAndAssertUploaded(collector, resourceFragments, resource!.getUuid());
+        const uploadedError = await collector.waitForPayloadContaining(errorFragments, 5000);
+        RumAttributeAssert.uploaded(uploadedResource, resource, resourceAttributes);
+        RumAttributeAssert.uploaded(uploadedError, error, errorAttributes);
+        expect(await ExtDBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, error!.getUuid(), 5000)).assertTrue();
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('resolveAxiosFullUrlJoinBaseUrlOnDevice', 0, async () => {
       expect(resolveAxiosFullUrl('/users', 'https://device.example.com/api'))
         .assertEqual('https://device.example.com/api/users');
       expect(resolveAxiosFullUrl('users', 'https://device.example.com/api/'))

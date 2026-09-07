@@ -5,7 +5,7 @@ import { FTLogger } from '../../../main/ets/components/log/FTLogger';
 import { Status } from '../../../main/ets/components/bean/Status';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 
 const TEST_FAKE_URL = 'http://www.test.url';
 const STATIC_KEY = 'custom_key';
@@ -31,9 +31,11 @@ export default function logGlobalContextTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      FTSDK.shutDown();
-      await DBAssert.cleanupAll();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        () => { FTSDK.shutDown(); },
+        async () => { await DBAssert.cleanupAll(); }
+      ]);
     });
 
     it('logContextShouldPersistInPayload', 0, async () => {

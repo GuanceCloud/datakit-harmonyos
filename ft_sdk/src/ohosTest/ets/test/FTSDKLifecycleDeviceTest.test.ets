@@ -30,8 +30,9 @@ class DeviceLifecycleAnrManager implements FTSDKAnrManager {
     this.initializeCount++;
   }
 
-  startMonitoring(): void {
+  startMonitoring(): boolean {
     this.startMonitoringCount++;
+    return true;
   }
 
   shutdown(): void {
@@ -199,7 +200,7 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG, DataType.RUM_APP, DataType.RUM_WEBVIEW])).assertEqual(0);
     });
 
-    it('rumWithoutAppIdShouldIgnorePublicRumCalls', 0, async () => {
+    it('rumWithoutAppIdIgnorePublicRumCalls', 0, async () => {
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig());
 
@@ -245,7 +246,7 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(runtime.anrManager.startMonitoringCount).assertEqual(2);
     });
 
-    it('foregroundColdLaunchShouldIgnoreActionHandler', 0, async () => {
+    it('foregroundColdLaunchIgnoreActionHandler', 0, async () => {
       const actionHandler = new RejectAllAutomaticActionsHandler();
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig()
@@ -276,7 +277,7 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(actionHandler.invocationCount).assertEqual(0);
     });
 
-    it('hotStartShouldNotPersistColdLaunchTypeField', 0, async () => {
+    it('hotStartNotPersistColdLaunchTypeField', 0, async () => {
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig()
         .setRumAppId(TEST_FAKE_RUM_ID)

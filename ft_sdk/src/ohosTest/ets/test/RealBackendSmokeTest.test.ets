@@ -1,6 +1,15 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { Context } from '@kit.AbilityKit';
+import { http } from '@kit.NetworkKit';
+import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
+import { DefaultSyncTaskManagerRuntime } from '../../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
+import { SyncInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
+import { SDKUploadExecutePageResultDTO, SDKWorkerCommand, SDKWorkerRequest, SDKWorkerResponse }
+  from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
+import { RumAttributeAssert } from './helpers/RumAttributeAssert';
+import { runTestCleanup } from './helpers/MockCollector';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig, FTLoggerConfig, FTTraceConfig } from '../../../main/ets/components/Configs';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
@@ -25,6 +34,7 @@ interface RealBackendTestParameters {
   realBackendDatawayUrl?: string;
   realBackendClientToken?: string;
   realBackendRumAppId?: string;
+  realBackendRecoveryControlUrl?: string;
 }
 
 interface RealBackendTestArguments extends RealBackendTestParameters {
@@ -36,6 +46,7 @@ interface RealBackendRuntimeConfig {
   datawayUrl: string;
   clientToken: string;
   rumAppId: string;
+  recoveryControlUrl: string;
 }
 
 function getRealBackendTestArguments(): RealBackendTestArguments {
@@ -57,6 +68,9 @@ function readRealBackendParameter(args: RealBackendTestArguments, key: string, f
     case 'realBackendRumAppId':
       value = args.parameters?.realBackendRumAppId ?? args.realBackendRumAppId;
       break;
+    case 'realBackendRecoveryControlUrl':
+      value = args.parameters?.realBackendRecoveryControlUrl ?? args.realBackendRecoveryControlUrl;
+      break;
     default:
       value = undefined;
       break;
@@ -70,26 +84,76 @@ function getRealBackendRuntimeConfig(): RealBackendRuntimeConfig {
     enabled: readRealBackendParameter(args, 'enableRealBackendSmoke', 'false') === 'true',
     datawayUrl: readRealBackendParameter(args, 'realBackendDatawayUrl', DEFAULT_REAL_DATAWAY_URL).trim(),
     clientToken: readRealBackendParameter(args, 'realBackendClientToken', '').trim(),
-    rumAppId: readRealBackendParameter(args, 'realBackendRumAppId', '').trim()
+    rumAppId: readRealBackendParameter(args, 'realBackendRumAppId', '').trim(),
+    recoveryControlUrl: readRealBackendParameter(args, 'realBackendRecoveryControlUrl', '').trim()
   };
 }
 
 function isRealBackendSmokeRunnable(): boolean {
   const config = getRealBackendRuntimeConfig();
-  return config.enabled &&
-    config.datawayUrl.length > 0 &&
-    config.clientToken.length > 0 &&
-    config.rumAppId.length > 0;
+  if (!config.enabled) return false;
+  if (!config.datawayUrl || !config.clientToken || !config.rumAppId) {
+    throw new Error('Real backend smoke enabled: Dataway URL, Client Token and RUM App ID are required');
+  }
+  return true;
 }
 
 function skipIfRealBackendDisabled(): boolean {
-  if (isRealBackendSmokeRunnable()) {
-    return false;
+  return !isRealBackendSmokeRunnable();
+}
+
+/** Observe real HTTP results; do not inject responses or replace DB commits. */
+class RealUploadObserver extends DefaultSyncTaskManagerRuntime {
+  private successes: Map<string, string> = new Map<string, string>();
+  private failures: Set<string> = new Set<string>();
+  readonly statusCodes: number[] = [];
+
+  async executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    const response = await super.executeUploadWorkerCommand(request);
+    if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE && response.ok && response.payload) {
+      const result = response.payload as Object as SDKUploadExecutePageResultDTO;
+      if (result.shouldUpload) {
+        this.statusCodes.push(result.httpResult.code);
+        for (const row of result.rows) {
+          // UUIDs are SDK-generated hex identifiers. Require the actual data-id tag,
+          // not an incidental occurrence in another event's message or URL.
+          const idPattern = new RegExp(`(?:,|^)sdk_data_id=(?:[^, \n]+\\.)?${row.uuid}(?=,| )`);
+          if (!idPattern.test(result.bodyPreview)) continue;
+          if (result.successfulResponse && result.httpResult.code >= 200 && result.httpResult.code < 300) {
+            this.successes.set(row.uuid, result.bodyPreview);
+          } else if (result.httpResult.code === 503) {
+            this.failures.add(row.uuid);
+          }
+        }
+      }
+    }
+    return response;
   }
 
-  console.info('RealBackendSmokeTest', 'Skipped. Set enableRealBackendSmoke=true, realBackendClientToken, and realBackendRumAppId.');
-  expect(true).assertTrue();
-  return true;
+  successfulPayload(uuid: string): string { return this.successes.get(uuid) ?? ''; }
+  failedWith503(uuid: string): boolean { return this.failures.has(uuid); }
+}
+
+// Test-owned proxy protocol: POST {mode:"fail"} returns 503 on upload routes;
+// POST {mode:"recover"} resumes forwarding to the configured real backend.
+async function setRecoveryProxyMode(mode: string): Promise<void> {
+  const url = getRealBackendRuntimeConfig().recoveryControlUrl;
+  if (!url) throw new Error('Recovery case requires realBackendRecoveryControlUrl and a controllable Dataway proxy');
+  const request = http.createHttp();
+  try {
+    const response = await request.request(url, {
+      method: http.RequestMethod.POST,
+      header: { 'Content-Type': 'application/json' },
+      extraData: JSON.stringify({ mode }),
+      connectTimeout: 5000,
+      readTimeout: 5000
+    });
+    if (response.responseCode < 200 || response.responseCode >= 300) {
+      throw new Error(`Recovery control failed: HTTP ${response.responseCode}`);
+    }
+  } finally {
+    request.destroy();
+  }
 }
 
 function installRealBackendSdk(context: Context): void {
@@ -98,6 +162,7 @@ function installRealBackendSdk(context: Context): void {
     FTSDKConfig.builder(config.datawayUrl, config.clientToken)
       .setDebug(true)
       .setAutoSync(false)
+      .setDataSyncRetryCount(0)
       .setEnv(EnvType.GRAY),
     context
   );
@@ -122,21 +187,36 @@ function installRealBackendSdk(context: Context): void {
 }
 
 async function flushAndAssertRealBackendConsumed(
+  observer: RealUploadObserver,
   dataType: DataType,
   fragments: string[],
-  uuid: string,
+  record: SyncData,
   searchHint: string
 ): Promise<void> {
+  const uuid = record.getUuid();
   console.info('RealBackendSmokeTest', `Uploading real backend payload. Search Studio ${searchHint}`);
-
   FTSDK.flushSyncData();
-
-  const consumed = await DBAssert.waitForNoSyncRecordWithUuid(dataType, uuid, 10000);
-  expect(consumed).assertTrue();
-  const matchingGone = await DBAssert.waitForNoSyncRecordContaining(dataType, fragments, 1000);
-  expect(matchingGone).assertTrue();
-
-  console.info('RealBackendSmokeTest', `Real backend upload consumed local DB record. Search Studio ${searchHint}`);
+  const acknowledged = await WaitUtils.waitUntil(async () => observer.successfulPayload(uuid).length > 0, 30000);
+  if (!acknowledged) {
+    throw new Error(`No real HTTP 2xx for ${uuid}; statusCodes=${observer.statusCodes.join(',')}`);
+  }
+  const payload = observer.successfulPayload(uuid);
+  for (const fragment of fragments) expect(payload.includes(fragment)).assertTrue();
+  if (dataType === DataType.RUM_APP) {
+    RumAttributeAssert.uploaded(payload, record, {
+      measurement: record.getDataString().split(',')[0], appId: getRealBackendRuntimeConfig().rumAppId
+    });
+  }
+  if (dataType === DataType.LOG) {
+    // These smoke messages are single-line. Compare the complete original log,
+    // allowing only the SDK's upload-package prefix to change.
+    const original = record.getDataString().replace(/sdk_data_id=[^, ]+/, 'sdk_data_id=<id>');
+    expect(payload.split('\n').some((line: string) =>
+      line.replace(/sdk_data_id=[^, ]+/, 'sdk_data_id=<id>') === original)).assertTrue();
+  }
+  expect(await DBAssert.waitForNoSyncRecordWithUuid(dataType, uuid, 10000)).assertTrue();
+  expect(await DBAssert.waitForNoSyncRecordContaining(dataType, fragments, 1000)).assertTrue();
+  console.info('RealBackendSmokeTest', `HTTP 2xx and DB commit verified for ${uuid}. Search Studio ${searchHint}`);
 }
 
 function assertDDTraceHeaders(headers: Record<string, string>): string[] {
@@ -154,8 +234,11 @@ function assertDDTraceHeaders(headers: Record<string, string>): string[] {
 }
 
 export default function realBackendSmokeTest() {
+  // Disabled suites register no passing placeholder cases.
+  if (!getRealBackendRuntimeConfig().enabled) return;
   describe('RealBackendSmokeTest', () => {
     let context: Context;
+    let observer: RealUploadObserver;
 
     const shouldRunRealBackend = (): boolean => {
       return isRealBackendSmokeRunnable();
@@ -168,9 +251,11 @@ export default function realBackendSmokeTest() {
 
       context = await DBAssert.getAppContext();
       HttpBuilder.disableTestMode();
-      FTSDK.shutDown();
+      await SdkTestLifecycle.resetRuntimeState();
       await DBAssert.resetAll();
       installRealBackendSdk(context);
+      observer = new RealUploadObserver();
+      SyncInternalTestAccess.setRuntime(observer);
       await WaitUtils.delay(120);
     });
 
@@ -179,9 +264,11 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      FTSDK.shutDown();
-      HttpBuilder.disableTestMode();
-      await DBAssert.cleanupAll();
+      await runTestCleanup([
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        () => { HttpBuilder.disableTestMode(); },
+        async () => { await DBAssert.cleanupAll(); }
+      ]);
     });
 
     it('realBackendShouldUploadRumView', 0, async () => {
@@ -204,7 +291,7 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `view_name=${viewName}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.RUM_APP, fragments, record, `view_name=${viewName}`);
     });
 
     it('realBackendShouldUploadLog', 0, async () => {
@@ -226,7 +313,54 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.LOG, fragments, record.getUuid(), `message=${logContent}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.LOG, fragments, record, `message=${logContent}`);
+    });
+
+    it('realBackendShouldRecoverUploadAfter503', 0, async () => {
+      if (skipIfRealBackendDisabled()) return;
+      const message = `real_backend_recovery_${Date.now()}`;
+      const fragments = [message, 'status=info'];
+      await runTestCleanup([async () => {
+        await setRecoveryProxyMode('fail');
+        FTLogger.logBackground(message, Status.INFO);
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.LOG, fragments, 5000);
+        expect(record !== null).assertTrue();
+        FTSDK.flushSyncData();
+        expect(await WaitUtils.waitUntil(async () => observer.failedWith503(record!.getUuid()), 30000)).assertTrue();
+        expect(await SdkTestLifecycle.waitForUploadIdle(10000)).assertTrue();
+        const retained = await DBAssert.waitForSyncRecordContaining(DataType.LOG, fragments, 5000);
+        expect(retained!.getUuid()).assertEqual(record!.getUuid());
+        // Upload persists a package prefix in sdk_data_id even on HTTP failure.
+        expect(retained!.getTime()).assertEqual(record!.getTime());
+        expect(retained!.getDataString().replace(/sdk_data_id=[^, ]+/, 'sdk_data_id=<id>'))
+          .assertEqual(record!.getDataString().replace(/sdk_data_id=[^, ]+/, 'sdk_data_id=<id>'));
+        expect(observer.successfulPayload(record!.getUuid())).assertEqual('');
+        await setRecoveryProxyMode('recover');
+        await flushAndAssertRealBackendConsumed(observer, DataType.LOG, fragments, record!, `message=${message}`);
+      }, async () => {
+        // Restore the proxy without hiding the original assertion failure.
+        await setRecoveryProxyMode('recover');
+      }]);
+    });
+
+    it('realBackendShouldUploadHistoricalLogAfterSdkReinstall', 0, async () => {
+      if (skipIfRealBackendDisabled()) return;
+      const message = `real_backend_historical_${Date.now()}`;
+      const fragments = [message, 'status=info'];
+      FTLogger.logBackground(message, Status.INFO);
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.LOG, fragments, 5000);
+      expect(record !== null).assertTrue();
+      expect(observer.statusCodes.length).assertEqual(0);
+      // Recreate SDK and Worker state, but deliberately preserve database rows.
+      await SdkTestLifecycle.resetRuntimeState();
+      installRealBackendSdk(context);
+      observer = new RealUploadObserver();
+      SyncInternalTestAccess.setRuntime(observer);
+      const historical = await DBAssert.waitForSyncRecordContaining(DataType.LOG, fragments, 5000);
+      expect(historical!.getUuid()).assertEqual(record!.getUuid());
+      expect(historical!.getTime()).assertEqual(record!.getTime());
+      expect(historical!.getDataString()).assertEqual(record!.getDataString());
+      await flushAndAssertRealBackendConsumed(observer, DataType.LOG, fragments, record!, `message=${message}`);
     });
 
     it('realBackendShouldUploadAction', 0, async () => {
@@ -252,7 +386,7 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `action_name=${actionName}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.RUM_APP, fragments, record, `action_name=${actionName}`);
     });
 
     it('realBackendShouldUploadError', 0, async () => {
@@ -281,7 +415,7 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `error_message=${errorMessage}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.RUM_APP, fragments, record, `error_message=${errorMessage}`);
     });
 
     it('realBackendShouldUploadResource', 0, async () => {
@@ -323,7 +457,7 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `resource_url=${resourceUrl}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.RUM_APP, fragments, record, `resource_url=${resourceUrl}`);
     });
 
     it('realBackendShouldUploadTraceResource', 0, async () => {
@@ -378,7 +512,7 @@ export default function realBackendSmokeTest() {
         return;
       }
 
-      await flushAndAssertRealBackendConsumed(DataType.RUM_APP, fragments, record.getUuid(), `trace_id=${traceIds[0]}`);
+      await flushAndAssertRealBackendConsumed(observer, DataType.RUM_APP, fragments, record, `trace_id=${traceIds[0]}`);
     });
   });
 }

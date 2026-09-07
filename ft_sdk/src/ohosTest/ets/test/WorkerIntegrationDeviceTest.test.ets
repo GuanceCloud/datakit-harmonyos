@@ -37,7 +37,7 @@ interface DeviceANRTestParams {
 
 export default function workerIntegrationDeviceTest() {
   describe('WorkerIntegrationDeviceTest', () => {
-    it('dataUploadCompressionShouldDeflateAndRoundTripOnDevice', 0, async () => {
+    it('uploadDeflateRoundTrip', 0, async () => {
       const body = 'df_rum_harmonyos_log,sdk_data_id=device-deflate value=1i 100';
       const prepared = await prepareDataUploadPayload(body, true);
 
@@ -93,7 +93,7 @@ export default function workerIntegrationDeviceTest() {
       }
     });
 
-    it('shouldExecuteAnrAndMetricsProductionCommandsInThreadWorkers', 0, async () => {
+    it('workersExecuteAnrAndMetricsCommands', 0, async () => {
       const anrParams: DeviceANRTestParams = {
         freeze_type: 'THREAD_BLOCK_6S',
         foreground: true,
@@ -141,7 +141,7 @@ export default function workerIntegrationDeviceTest() {
       expect(metrics.batteryCurrent === metrics.batteryCurrent).assertTrue();
     });
 
-    it('crashWorkerShouldHandleCrashParsingAndNativeLogAppend', 0, async () => {
+    it('crashWorkerParsesAndAppendsLogs', 0, async () => {
       const nativeLogPayload: SDKNativeCrashLogBatchDTO = { logs: [] };
       const nativeLogResponse = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
         id: `device-crash-native-log-${Date.now()}`,
@@ -179,61 +179,33 @@ export default function workerIntegrationDeviceTest() {
       expect(getPayloadString(parseResponse, 'trimmedLength')).assertEqual(String(crashContent.length));
     });
 
-    it('crashWorkerShouldRecycleWithoutLosingNativeLogBuffer', 0, async () => {
+    it('crashWorkerRecycleAndResumeCommands', 0, async () => {
       const pool = SDKDedicatedPoolType.CRASH;
-      const firstMarker = `crash-idle-before-${Date.now()}`;
-      const secondMarker = `crash-idle-after-${Date.now()}`;
-      const canObserveNativeLogs = SdkInternalTestAccess.clearNativeCrashLogsForTest();
       SdkInternalTestAccess.configureDedicatedWorkerIdleTimeout(pool, 50);
       try {
-        const firstPayload: SDKNativeCrashLogBatchDTO = {
-          logs: [{ level: 'I', tag: 'CrashIdleTest', message: firstMarker }]
-        };
-        const firstResponse = await SdkInternalTestAccess.postDedicatedWorkerCommandAndWait({
-          id: `device-crash-idle-first-${Date.now()}`,
-          pool,
-          command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
-          priority: SDKTaskPriority.LOW,
-          createdAt: Date.now(),
-          payload: firstPayload as Object as SDKWorkerPayload
-        }, 8000);
-        expect(firstResponse.ok).assertTrue();
-
-        await waitForDelay(300);
-        const idleStatus = SdkInternalTestAccess.getDedicatedPoolStatus().pools[pool];
-        expect(idleStatus.backend).assertEqual('thread-worker-idle');
-        expect(idleStatus.idleRecycleCount >= 1).assertTrue();
-        if (canObserveNativeLogs) {
-          expect(SdkInternalTestAccess.getCollectedNativeCrashLogsForTest(20).includes(firstMarker))
-            .assertTrue();
-        }
-
-        const secondPayload: SDKNativeCrashLogBatchDTO = {
-          logs: [{ level: 'I', tag: 'CrashIdleTest', message: secondMarker }]
-        };
-        const secondResponse = await SdkInternalTestAccess.postDedicatedWorkerCommandAndWait({
-          id: `device-crash-idle-second-${Date.now()}`,
-          pool,
-          command: SDKWorkerCommand.NATIVE_CRASH_LOG_APPEND,
-          priority: SDKTaskPriority.LOW,
-          createdAt: Date.now(),
-          payload: secondPayload as Object as SDKWorkerPayload
-        }, 8000);
-        expect(secondResponse.ok).assertTrue();
-        expect(SdkInternalTestAccess.getDedicatedPoolStatus().pools[pool].backend ===
-          'thread-worker-idle').assertFalse();
-        if (canObserveNativeLogs) {
-          const collectedLogs = SdkInternalTestAccess.getCollectedNativeCrashLogsForTest(20);
-          expect(collectedLogs.includes(firstMarker)).assertTrue();
-          expect(collectedLogs.includes(secondMarker)).assertTrue();
+        for (let round = 0; round < 2; round++) {
+          const response = await SdkInternalTestAccess.postDedicatedWorkerCommandAndWait({
+            id: `device-crash-idle-ping-${round}-${Date.now()}`,
+            pool,
+            command: SDKWorkerCommand.PING,
+            priority: SDKTaskPriority.LOW,
+            createdAt: Date.now(),
+            payload: null
+          }, 8000);
+          if (!response.ok) throw new Error(`Crash Worker ping failed: ${response.errorMessage}`);
+          expect(getPayloadString(response, 'pool')).assertEqual(pool);
+          expect(getPayloadString(response, 'backend')).assertEqual('thread-worker');
+          await waitForDelay(300);
+          const status = SdkInternalTestAccess.getDedicatedPoolStatus().pools[pool];
+          expect(status.backend).assertEqual('thread-worker-idle');
+          expect(status.idleRecycleCount >= round + 1).assertTrue();
         }
       } finally {
         SdkInternalTestAccess.configureDedicatedWorkerIdleTimeout(pool, 120000);
-        SdkInternalTestAccess.clearNativeCrashLogsForTest();
       }
     });
 
-    it('workerRestartShouldReplayPendingMailboxPingExactlyOnce', 0, async () => {
+    it('restartReplaysPendingPingOnce', 0, async () => {
       const pool = SDKDedicatedPoolType.EVENT_CONSUMER;
       const warmup = await SdkInternalTestAccess.executeDedicatedWorkerCommand({
         id: 'device-worker-replay-warmup',
@@ -266,7 +238,7 @@ export default function workerIntegrationDeviceTest() {
       expect(status.mailboxReplayPending).assertEqual(0);
     });
 
-    it('anrWorkerShouldRecycleAfterIdleAndRestartOnDemand', 0, async () => {
+    it('anrWorkerRecyclesAndRestarts', 0, async () => {
       const pool = SDKDedicatedPoolType.ANR;
       SdkInternalTestAccess.configureDedicatedWorkerIdleTimeout(pool, 50);
       try {

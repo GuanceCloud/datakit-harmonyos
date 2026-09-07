@@ -4,6 +4,8 @@ import { SdkInternalTestAccess } from '../../../../main/ets/components/internal/
 import { SyncInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { TelemetryInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/TelemetryInternalTestAccess';
 import { SyncTaskManager } from '../../../../main/ets/components/SyncTaskManager';
+import { FTRUMInnerManager } from '../../../../main/ets/components/rum/FTRUMInnerManager';
+import { SDKDedicatedPoolManager } from '../../../../main/ets/components/thread/SDKDedicatedPoolManager';
 import { WaitUtils } from './WaitUtils';
 
 export class SdkTestLifecycle {
@@ -26,6 +28,8 @@ export class SdkTestLifecycle {
     await SdkTestLifecycle.waitForUploadIdle(timeoutMs);
 
     try {
+      // shutdown() closes views asynchronously; finish it before replacing singletons.
+      await FTRUMInnerManager.getInstance().shutdown();
       FTSDK.shutDown();
     } catch (_error) {
     }
@@ -36,6 +40,8 @@ export class SdkTestLifecycle {
     }
 
     SyncInternalTestAccess.resetState();
+    // Host context versions restart with the singletons; discard Worker snapshots too.
+    SDKDedicatedPoolManager.resetInternal();
     TelemetryInternalTestAccess.resetState();
     DbInternalTestAccess.resetDbManagerInstance();
     SdkInternalTestAccess.resetState();

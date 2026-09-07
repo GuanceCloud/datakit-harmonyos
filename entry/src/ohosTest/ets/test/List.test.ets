@@ -1,3 +1,5 @@
+import entryTestConfigTest from './EntryTestConfig.test';
+import nativeWorkerIntegrationUITest from './NativeWorkerIntegrationUITest.test';
 import abilityTest from './Ability.test';
 import dbTest from './DBTest.test';
 import rumAutoViewUITest from './RumAutoViewUITest.test';
@@ -11,6 +13,7 @@ import rumUploadE2EUITest from './RumUploadE2EUITest.test';
 import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
 
 export default function testsuite() {
+  entryTestConfigTest();
   abilityTest();
   dbTest();
   rumAutoViewUITest();
@@ -22,4 +25,5 @@ export default function testsuite() {
   traceAutoTrackUITest();
   rumUploadE2EUITest();
   stressLogTimestampSequencerTest();
+  nativeWorkerIntegrationUITest();
 }

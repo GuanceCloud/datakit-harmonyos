@@ -55,6 +55,29 @@ The native module contributes `libftnativecrash.so`; `ft_sdk` detects and initia
 - HarmonyOS project with native library support
 - Use together with the Guance HarmonyOS core SDK for reporting and unified monitoring
 
+## Testing
+
+Run the local ArkTS tests from the repository root:
+
+```bash
+node /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw.js \
+  --mode module -p product=default -p module=ft_native@default \
+  -p ohos-test-coverage=false test --no-daemon
+```
+
+`src/test/List.test.ets` is the local test entry. It checks that the public
+`HAR_VERSION` export is usable as SDK package-version metadata. This suite runs
+in the local previewer and does not validate native crash collection.
+Use `product=default` for local tests so the compiled output matches the
+previewer's `.test/default` load path.
+The command disables ArkTS coverage reporting because this module's native
+implementation is exercised by the device suite.
+
+`src/ohosTest/ets/test/List.test.ets` contains the device tests for native crash
+handler lifecycle, log-buffer limits and clearing, and consistency between the
+C++ version and the public HAR version. Run these on a HarmonyOS device with
+`libftnativecrash.so` packaged in the test application.
+
 ## Documentation
 
 - https://docs.guance.com/real-user-monitoring/harmonyos/app-access/

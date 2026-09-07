@@ -164,7 +164,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
     });
 
-    it('httpPrepareShouldApplyTraceHeaderHandlerToDefaultHeaders', 0, () => {
+    it('httpPrepareAppliesTraceHeaderHandler', 0, () => {
       const headerHandler = new RecordingTraceHeaderHandler();
       const traceConfig = new FTTraceConfig()
         .setEnableAutoTrace(true)
@@ -188,7 +188,7 @@ export default function ftSDKExtensionBridgeUnitTest() {
       expect(preparedRequest.headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY]).assertEqual(headerHandler.requestSpanId);
     });
 
-    it('httpPrepareShouldAllowHandlerToOverrideTraceContextFromFormBody', 0, () => {
+    it('formHandlerOverridesTraceContext', 0, () => {
       const traceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
       const spanId = 'bbbbbbbbbbbbbbbb';
       const headerHandler = new FormBodyTraceHeaderHandler();

@@ -14,8 +14,11 @@ import {
   RCPTraceInterceptor
 } from '../../../main/ets/components/network/FTHttpAutoTrack';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
+import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { WaitUtils } from './helpers/WaitUtils';
+import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
@@ -198,11 +201,15 @@ async function runRcpErrorChain(
 async function flushAndAssertUploaded(
   collector: MockCollector,
   fragments: string[],
-  recordUuid: string
+  record: SyncData | null
 ): Promise<void> {
+  const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID };
+  RumAttributeAssert.record(record, attributes);
+  const recordUuid = record!.getUuid();
   FTSDK.flushSyncData();
 
   const uploaded = await collector.waitForPayloadContaining(fragments, 5000);
+  RumAttributeAssert.uploaded(uploaded, record, attributes);
   const consumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, recordUuid, 5000);
 
   expect(uploaded.length > 0).assertTrue();
@@ -277,6 +284,7 @@ export default function rcpAutoTrackDeviceTest() {
     let collector: MockCollector;
 
     beforeEach(async () => {
+      await SdkTestLifecycle.resetRuntimeState();
       collector = new MockCollector(200, '');
       collector.start();
       await installRcpSdk();
@@ -285,9 +293,11 @@ export default function rcpAutoTrackDeviceTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      FTSDK.shutDown();
-      await DBAssert.cleanupAll();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await DBAssert.cleanupAll(); }
+      ]);
     });
 
     it('rcpConfigShouldUploadResource', 0, async () => {
@@ -321,7 +331,7 @@ export default function rcpAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
-      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      await flushAndAssertUploaded(collector, fragments, record);
     });
 
     it('rcpResourceShouldWritePerfFields', 0, async () => {
@@ -362,7 +372,7 @@ export default function rcpAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
-      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      await flushAndAssertUploaded(collector, fragments, record);
     });
 
     it('rcpNoTimeInfoShouldFallback', 0, async () => {
@@ -392,7 +402,7 @@ export default function rcpAutoTrackDeviceTest() {
       expect(record!.getDataString().includes('resource_dns=')).assertFalse();
       expect(record!.getDataString().includes('resource_tcp=')).assertFalse();
       expect(record!.getDataString().includes('resource_ttfb=')).assertFalse();
-      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      await flushAndAssertUploaded(collector, fragments, record);
     });
 
     it('rcpErrorShouldWriteResourceError', 0, async () => {
@@ -434,6 +444,10 @@ export default function rcpAutoTrackDeviceTest() {
 
       expect(resourceRecord !== null).assertTrue();
       expect(errorRecord !== null).assertTrue();
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID, viewName };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID, viewName, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
       await flushAndAssertResourceAndErrorUploaded(
         collector,
         resourceFragments,
@@ -441,6 +455,10 @@ export default function rcpAutoTrackDeviceTest() {
         errorFragments,
         errorRecord?.getUuid() ?? ''
       );
+      const resourcePayload = await collector.waitForPayloadContaining([resourceRecord!.getUuid()], 5000);
+      const errorPayload = await collector.waitForPayloadContaining([errorRecord!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(resourcePayload, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorPayload, errorRecord, errorAttributes);
     });
 
     it('manualRcpShouldInjectTrace', 0, async () => {
@@ -469,7 +487,7 @@ export default function rcpAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
-      await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      await flushAndAssertUploaded(collector, fragments, record);
     });
   });
 }

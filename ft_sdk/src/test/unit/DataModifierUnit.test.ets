@@ -77,7 +77,7 @@ export default function dataModifierUnitTest() {
       expect(lineProtocol.includes('env=prod')).assertTrue();
     });
 
-    it('localDataFilterShouldReadValuesAfterLineModifier', 0, () => {
+    it('filterReadsModifiedValues', 0, () => {
       const helper = new SyncDataHelper();
       const rules = new Map<string, Array<string>>();
       rules.set('logging', ["{ message in ['xxx'] }"]);
@@ -116,7 +116,7 @@ export default function dataModifierUnitTest() {
       expect(lineProtocol.includes('message="original-message"')).assertTrue();
     });
 
-    it('lineModifierShouldKeepFinalValuesForRumAndWebView', 0, () => {
+    it('lineModifierKeepsNativeAndWebValues', 0, () => {
       const helper = new SyncDataHelper();
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setLineDataModifier(new FinalValueLineDataModifier());
       helper.initBaseConfig(config);
@@ -153,7 +153,7 @@ export default function dataModifierUnitTest() {
       expect(webLineProtocol.includes('new_field')).assertFalse();
     });
 
-    it('dataModifierShouldMaskRawDataInDirectAndWorkerPaths', 0, () => {
+    it('modifierMasksDirectAndWorkerData', 0, () => {
       const helper = new SyncDataHelper();
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setDataModifier(new MaskingDataModifier());
       const tags: Map<string, string> = new Map();
@@ -190,7 +190,7 @@ export default function dataModifierUnitTest() {
       expect(fields.get('secret_field')).assertEqual('original-field');
     });
 
-    it('dataModifierShouldCoverNativeRumAndWebViewRawData', 0, () => {
+    it('modifierHandlesNativeAndWebRum', 0, () => {
       const helper = new SyncDataHelper();
       const config = FTSDKConfig.builder(TEST_FAKE_URL).setDataModifier(new MaskingDataModifier());
       helper.initBaseConfig(config);

@@ -10,6 +10,7 @@ import {
   SDKPropertyRecord,
   SDKRumCompletedActionBatchDTO,
   SDKRumCompletedActionDTO,
+  SDKRumCounterDeltaDTO,
   SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
   SDKRumErrorCommandBatchDTO,
@@ -241,14 +242,14 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       resetDataUploadPayloadCompressorInternal();
     });
 
-    it('dataProcessCommandShouldUseConfiguredWorkerCount', 0, async () => {
+    it('dataProcessUseConfiguredWorkerCount', 0, async () => {
       const workerCount = manager.getDataProcessWorkerCount();
       expect(workerCount).assertEqual(1);
       const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_PROCESS];
       expect(status.workerCount).assertEqual(workerCount);
     });
 
-    it('dataUploadCommandShouldUseOneStateOwnerWorker', 0, async () => {
+    it('uploadUseOneStateOwnerWorker', 0, async () => {
       const status = manager.getStatus().pools[SDKDedicatedPoolType.DATA_UPLOAD];
       expect(status.workerCount).assertEqual(1);
       expect(status.maxConcurrency).assertEqual(1);
@@ -258,7 +259,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(status.mailboxReplayDropped).assertEqual(0);
     });
 
-    it('workerReplayPolicyShouldExcludeUploadSideEffects', 0, () => {
+    it('replayExcludesUploadSideEffects', 0, () => {
       expect(isSDKWorkerInFlightReplaySafe(SDKWorkerCommand.EVENT_RUM_COMMAND)).assertTrue();
       expect(isSDKWorkerMailboxReplaySafe(SDKWorkerCommand.EVENT_RUM_COMMAND_BATCH)).assertTrue();
       expect(isSDKWorkerInFlightReplaySafe(SDKWorkerCommand.UPLOAD_EXECUTE_PAGE)).assertFalse();
@@ -268,7 +269,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(isSDKWorkerExternalSideEffectCommand(SDKWorkerCommand.EVENT_RUM_COMMAND)).assertFalse();
     });
 
-    it('workerProtocolShouldRejectNonSerializablePayload', 0, async () => {
+    it('workerRejectsNonSerializablePayload', 0, async () => {
       let rejected = false;
       const request: SDKWorkerRequest = {
         id: 'bad-payload',
@@ -305,7 +306,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(response.payload, 'backend').length > 0).assertTrue();
     });
 
-    it('specializedWorkerPoolsShouldReturnIndependentPingPayloads', 0, async () => {
+    it('workerPoolsReturnIndependentPings', 0, async () => {
       const pools: SDKDedicatedPoolType[] = [
         SDKDedicatedPoolType.CRASH,
         SDKDedicatedPoolType.ANR
@@ -335,7 +336,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(status[SDKDedicatedPoolType.DATA_PROCESS].idleTimeoutMs).assertEqual(0);
     });
 
-    it('anrWorkerShouldFormatSerializableFreezePayloadWithoutHostFileIo', 0, () => {
+    it('anrWorkerFormatsFreezeWithoutHostIo', 0, () => {
       const frame: SDKANRTestFrame = {
         file: 'Index.ets',
         line: 12,
@@ -369,7 +370,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(result.filesRead).assertEqual(0);
     });
 
-    it('anrHostEnvelopeShouldWhitelistAndBoundMergedParams', 0, () => {
+    it('anrEnvelopeBoundsAllowedParams', 0, () => {
       const sources: Array<Record<string, Object>> = [];
       for (let sourceIndex = 0; sourceIndex < 12; sourceIndex++) {
         const frames: Object[] = [];
@@ -421,7 +422,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(normalized['unknown_payload'] === undefined).assertTrue();
     });
 
-    it('backgroundWorkerShouldParseProcMetricsDeterministically', 0, () => {
+    it('workerParsesProcMetrics', 0, () => {
       const stat = '123 (demo process) S 1 2 3 4 5 6 7 8 9 10 120 30 0 0';
       expect(parseProcStatCpuTicks(stat)).assertEqual(120);
       expect(parseProcStatusMemoryBytes('Name:\tdemo\nVmRSS:\t20480 kB\n')).assertEqual(20480000);
@@ -429,7 +430,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(parseProcStatusMemoryBytes('VmSize: 10 kB')).assertEqual(-1);
     });
 
-    it('errorMonitorMetricUnitsShouldMatchAndroid', 0, () => {
+    it('errorMonitorMetricUnitsMatchAndroid', 0, () => {
       // Android reports device memory occupancy (not app PSS) as a percentage.
       expect(calculateSystemMemoryUsagePercent(8 * 1024 * 1024, 2 * 1024 * 1024)).assertEqual(75);
       // HiDebug reports a 0–1 process ratio; Android normalizes its top value by cores.
@@ -448,7 +449,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(battery.avgValue).assertEqual(-200);
     });
 
-    it('dataProcessCommandShouldCreateLineProtocolDraftsFromDto', 0, async () => {
+    it('dataProcessBuildsDraftsFromDto', 0, async () => {
       const tags: SDKStringRecord = {};
       tags['sdk_data_id'] = 'uuid-1';
       tags['status'] = 'info';
@@ -486,7 +487,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['uuid'])).assertEqual('uuid-1');
     });
 
-    it('eventRumCommandShouldCreateSyncDraftFromSerializableDto', 0, async () => {
+    it('rumBuildsDraftFromDto', 0, async () => {
       const tags: SDKStringRecord = {};
       tags['sdk_data_id'] = 'rum-uuid-1';
       tags['session_id'] = 'session-1';
@@ -530,7 +531,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
     });
 
-    it('eventRumBatchShouldDeriveAndSortRawEventsInWorker', 0, async () => {
+    it('rumWorkerDerivesAndSortsEvents', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-raw-context',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -598,7 +599,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadArray(duplicateResponse.payload, 'syncDrafts').length).assertEqual(1);
     });
 
-    it('eventRumWorkerShouldFullyFormatRawWebViewData', 0, async () => {
+    it('rumWorkerFullyFormatRawWebViewData', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-webview-context',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -671,10 +672,11 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: actionBatch as Object as SDKWorkerPayload
       });
       expect(getPayloadString(actionResponse.payload, 'activeActionId')).assertEqual('web-action');
-      expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(2);
+      // Browser action IDs identify one event; repeated view updates above remain valid.
+      expect(getPayloadArray(actionResponse.payload, 'syncDrafts').length).assertEqual(1);
     });
 
-    it('eventRumWorkerShouldDiscardExpiredWebViewResourceErrorLinks', 0, async () => {
+    it('webResourceErrorLinksExpire', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-webview-expired-link-context',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -684,18 +686,17 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         payload: createRumWorkerLineContext() as Object as SDKWorkerPayload
       });
       const resourceUuid = 'stale-webview-resource-uuid';
-      const resourceEvent: SDKRumEventDTO = {
-        time: 1000,
-        dataType: 'rum_webview',
-        measurement: 'resource',
-        uuid: resourceUuid,
-        tags: {
-          view_id: 'stale-link-view',
-          resource_method: 'GET',
-          resource_url: 'https://webview.test/api/stale-link'
-        },
-        fields: { duration: '1' }
-      };
+      const resourceEvent = new Object() as SDKRumEventDTO;
+      resourceEvent.time = 1000;
+      resourceEvent.dataType = 'rum_webview';
+      resourceEvent.measurement = 'resource';
+      resourceEvent.uuid = resourceUuid;
+      resourceEvent.tags = new Object() as SDKStringRecord;
+      resourceEvent.tags['view_id'] = 'stale-link-view';
+      resourceEvent.tags['resource_method'] = 'GET';
+      resourceEvent.tags['resource_url'] = 'https://webview.test/api/stale-link';
+      resourceEvent.fields = new Object() as SDKStringRecord;
+      resourceEvent.fields['duration'] = '1';
       const resourceResponse = await executeWorkerCommandForUnit({
         id: 'rum-webview-expired-link-resource',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -706,18 +707,17 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(resourceResponse.ok).assertTrue();
 
-      const errorEvent: SDKRumEventDTO = {
-        time: 32001,
-        dataType: 'rum_webview',
-        measurement: 'error',
-        tags: {
-          view_id: 'stale-link-view',
-          resource_method: 'GET',
-          resource_url: 'https://webview.test/api/stale-link',
-          error_source: 'network'
-        },
-        fields: { error_message: 'network error without a matching resource' }
-      };
+      const errorEvent = new Object() as SDKRumEventDTO;
+      errorEvent.time = 32001;
+      errorEvent.dataType = 'rum_webview';
+      errorEvent.measurement = 'error';
+      errorEvent.tags = new Object() as SDKStringRecord;
+      errorEvent.tags['view_id'] = 'stale-link-view';
+      errorEvent.tags['resource_method'] = 'GET';
+      errorEvent.tags['resource_url'] = 'https://webview.test/api/stale-link';
+      errorEvent.tags['error_source'] = 'network';
+      errorEvent.fields = new Object() as SDKStringRecord;
+      errorEvent.fields['error_message'] = 'network error without a matching resource';
       const errorResponse = await executeWorkerCommandForUnit({
         id: 'rum-webview-expired-link-error',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
@@ -734,7 +734,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(unitWorkerStates[SDKDedicatedPoolType.EVENT_CONSUMER].webViewResourceErrorLinks.size).assertEqual(0);
     });
 
-    it('eventRumCounterShouldBatchSerializableCounterUpdates', 0, async () => {
+    it('rumCountersSerializableCounterUpdates', 0, async () => {
       const updates: SDKRumCounterUpdateDTO[] = [
         {
           updateType: 'resource.pending.increase',
@@ -792,7 +792,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(snapshot.payload, 'rumCounterStateKeyCount')).assertEqual('0');
     });
 
-    it('eventRumCounterBatchShouldCompactAndFinalizeByViewAndAction', 0, async () => {
+    it('rumCountersCompactByViewAndAction', 0, async () => {
       const updates: SDKRumCounterUpdateDTO[] = [];
       for (let i = 0; i < 2; i++) {
         updates.push({ updateType: 'resource.pending.increase', viewId: 'view-final', actionId: 'action-final' });
@@ -833,7 +833,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(action['actionPendingDelta'])).assertEqual('0');
     });
 
-    it('eventRumCounterBatchShouldPreserveCoalescedLongTaskCounts', 0, async () => {
+    it('rumCountersKeepMergedLongTasks', 0, async () => {
       const batch: SDKRumCounterUpdateBatchDTO = {
         updates: [
           { updateType: 'long_task.view', viewId: 'view-long-task', count: 50 },
@@ -871,7 +871,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(action['actionLongTaskDelta'])).assertEqual('50');
     });
 
-    it('eventRumLifecycleShouldTrackActionAndResourceStateFromDto', 0, async () => {
+    it('rumDtoTracksActionAndResourceState', 0, async () => {
       const actionPayload: SDKRumEventDTO = {
         eventType: 'action.complete',
         name: 'tap',
@@ -936,7 +936,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(getPayloadString(snapshot.payload, 'activeResourceStateKeyCount')).assertEqual('0');
     });
 
-    it('eventRumWorkerShouldNormalizeRawErrorProperties', 0, async () => {
+    it('rumWorkerNormalizeRawErrorProperties', 0, async () => {
       const context: SDKRumResourceContextDTO = {
         sessionId: 'error-session',
         viewId: 'error-view',
@@ -961,12 +961,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       errorCommand.errorSource = 'logger';
       errorCommand.appState = 'run';
       errorCommand.property = errorProperty;
-      errorCommand.deviceTags = {
-        memory_total: '8GB',
-        locale: 'zh-Hans-CN'
-      };
+      errorCommand.deviceTags = new Object() as SDKStringRecord;
+      errorCommand.deviceTags['memory_total'] = '8GB';
+      errorCommand.deviceTags['locale'] = 'zh-Hans-CN';
       errorCommand.time = 500;
       const batch: SDKRumErrorCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
         commands: [errorCommand, errorCommand]
       };
       const response = await executeWorkerCommandForUnit({
@@ -991,9 +991,53 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('custom_error="normalized"')).assertTrue();
       expect(line.includes('custom_nested=')).assertTrue();
       expect(line.includes('stack-line')).assertTrue();
+      expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
+
+      // Without shared context, preserve the error timeline and counters while
+      // leaving both context enrichment and callbacks to the Host.
+      errorCommand.uuid = 'raw-error-uuid';
+      errorCommand.customDataType = 'rum_app_error_sampled';
+      errorCommand.counterFlushMaxEvents = 1;
+      const laterError: SDKRumErrorCommandDTO = {
+        uuid: 'later-raw-error-uuid', context, log: 'later-stack', message: 'later-error',
+        errorType: 'ANR', errorSource: 'logger', appState: 'run',
+        property: errorProperty, time: 700, counterFlushMaxEvents: 1
+      };
+      const rawBatch: SDKRumErrorCommandBatchDTO = { commands: [laterError, errorCommand] };
+      for (let replay = 0; replay < 2; replay++) {
+        const rawResponse = handleSDKWorkerRequest({
+          id: `raw-error-replay-${replay}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH,
+          priority: 7, createdAt: 1,
+          payload: rawBatch as Object as SDKWorkerPayload
+        }, createSDKWorkerRuntimeStateWithBackend(
+          SDKDedicatedPoolType.EVENT_CONSUMER, 'RawErrorWorker', 'unit-worker'));
+        expect(rawResponse.ok).assertTrue();
+        expect(getPayloadArray(rawResponse.payload, 'syncDrafts').length).assertEqual(0);
+        expect(getPayloadString(rawResponse.payload, 'errorTimeLine')).assertEqual('700');
+        const events = getPayloadArray(rawResponse.payload, 'rawEvents') as Object as SDKRumEventDTO[];
+        expect(events.length).assertEqual(2);
+        expect(events[0].uuid).assertEqual('raw-error-uuid');
+        expect(events[0].time).assertEqual(500);
+        expect(events[0].customDataType).assertEqual('rum_app_error_sampled');
+        expect(events[0].tags?.['memory_total']).assertEqual('8GB');
+        expect(events[0].fields?.['custom_error']).assertEqual('normalized');
+        expect(events[1].uuid).assertEqual('later-raw-error-uuid');
+        expect(events[1].time).assertEqual(700);
+        const deltas = getPayloadArray(rawResponse.payload, 'deltas') as Object as SDKRumCounterDeltaDTO[];
+        let viewErrors = 0;
+        let actionErrors = 0;
+        for (const delta of deltas) {
+          if (delta.viewId === context.viewId) viewErrors += delta.viewErrorDelta;
+          if (delta.actionId === context.actionId) actionErrors += delta.actionErrorDelta;
+        }
+        expect(viewErrors).assertEqual(2);
+        expect(actionErrors).assertEqual(2);
+      }
     });
 
-    it('eventRumWorkerShouldSortMergeAndNormalizeResourceCommands', 0, async () => {
+    it('rumWorkerNormalizesResourceCommands', 0, async () => {
       const context: SDKRumResourceContextDTO = {
         sessionId: 'resource-session',
         viewId: 'resource-view',
@@ -1055,6 +1099,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         commandType: 'stop', resourceId: 'resource-worker', context, endTime: 40
       };
       const batch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
         commands: [stop, network, content, content, start, start]
       };
       const response = await executeWorkerCommandForUnit({
@@ -1101,7 +1146,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(actionResourceDelta).assertEqual(1);
     });
 
-    it('eventRumResourceAndNetworkErrorShouldKeepStartActionContext', 0, async () => {
+    it('resourceAndErrorKeepStartActionContext', 0, async () => {
       const startContext: SDKRumResourceContextDTO = {
         sessionId: 'session-first-action',
         viewId: 'view-first-action',
@@ -1153,6 +1198,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         resourceHostIP: ''
       };
       const batch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
         commands: [{
           commandType: 'start',
           resourceId: 'late-resource',
@@ -1207,9 +1253,57 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(errorLine.includes('battery_use="80"')).assertFalse();
       expect(resourceLine.includes('memory_total=8GB')).assertFalse();
       expect(resourceLine.includes('locale=zh-Hans-CN')).assertFalse();
+      expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
+
+      // A custom LineDataModifier disables the line context. Both events must
+      // reach the Host unformatted, with stable IDs even after Worker replay.
+      const rawBatch: SDKRumResourceCommandBatchDTO = { commands: batch.commands };
+      rawBatch.commands[1].customDataType = 'rum_app_error_sampled';
+      for (let replay = 0; replay < 2; replay++) {
+        const state = createSDKWorkerRuntimeStateWithBackend(
+          SDKDedicatedPoolType.EVENT_CONSUMER, 'ResourceFallbackWorker', 'unit-worker');
+        const rawResponse = handleSDKWorkerRequest({
+          id: `resource-host-preparation-${replay}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+          priority: 7,
+          createdAt: 1,
+          payload: rawBatch as Object as SDKWorkerPayload
+        }, state);
+        expect(rawResponse.ok).assertTrue();
+        expect(getPayloadArray(rawResponse.payload, 'syncDrafts').length).assertEqual(0);
+        const events = getPayloadArray(rawResponse.payload, 'rawEvents') as Object as SDKRumEventDTO[];
+        expect(events.length).assertEqual(2);
+        expect(events[0].measurement).assertEqual('resource');
+        expect(events[1].measurement).assertEqual('error');
+        expect(events[0].uuid).assertEqual('late-resource-draft');
+        expect(events[1].uuid).assertEqual('late-resource-error-draft');
+        for (const event of events) {
+          expect(event.tags?.['resource_id']).assertEqual('late-resource-draft');
+          expect(event.tags?.['action_id']).assertEqual('action-first');
+          expect(event.customDataType).assertEqual('rum_app_error_sampled');
+          expect(event.time).assertEqual(20);
+        }
+        expect(getPayloadArray(rawResponse.payload, 'completedResourceIds')[0]).assertEqual('late-resource');
+        expect(state.rumResources.size).assertEqual(0);
+      }
+
+      rawBatch.commands[1].shouldCollect = false;
+      const droppedResponse = handleSDKWorkerRequest({
+        id: 'resource-host-preparation-dropped',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: 1,
+        payload: rawBatch as Object as SDKWorkerPayload
+      }, createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'DroppedResourceWorker', 'unit-worker'));
+      expect(droppedResponse.ok).assertTrue();
+      expect(getPayloadArray(droppedResponse.payload, 'syncDrafts').length).assertEqual(0);
+      expect(getPayloadArray(droppedResponse.payload, 'rawEvents').length).assertEqual(0);
     });
 
-    it('eventRumResourceAndCounterReplayShouldSurviveFreshWorkerState', 0, () => {
+    it('workerRestartReplaysResourceCounters', 0, () => {
       const context: SDKRumResourceContextDTO = {
         sessionId: 'restart-session',
         viewId: 'restart-view',
@@ -1404,14 +1498,15 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(checkpointRestoredState.rumResources.size).assertEqual(0);
     });
 
-    it('eventRumCompletedActionShouldBuildLineProtocolInputFromDto', 0, async () => {
+    it('completedActionBuildLineInputFromDto', 0, async () => {
       const customText: SDKCompletedActionPropertyTestValue = { value: 'fast' };
       const customJson: SDKCompletedActionPropertyTestValue = { nested: 'yes' };
       const properties = new Object() as Record<string, object>;
       properties['custom_text'] = customText;
       properties['custom_json'] = customJson;
       properties['duration'] = new String('must-not-override-sdk-duration');
-      properties['app_launch_type'] = new String('foreground');
+      const launchType: SDKCompletedActionPropertyTestValue = { value: 'foreground' };
+      properties['app_launch_type'] = launchType;
       const launchPhase: SDKCompletedActionLaunchPhaseTestValue = { start: 0, duration: 20 };
       properties['app_pre_application_init_time'] = launchPhase;
       const dynamicTags = new Object() as SDKStringRecord;
@@ -1474,9 +1569,40 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const syncDrafts = getPayloadArray(response.payload, 'syncDrafts');
       const lineProtocol = String((syncDrafts[0] as Record<string, object>)['dataString']);
       expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
+      expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
+
+      completedAction.customDataType = 'rum_app_error_sampled';
+      completedAction.countViewAction = true;
+      completedAction.counterFlushMaxEvents = 1;
+      const rawBatch: SDKRumCompletedActionBatchDTO = { actions: [completedAction] };
+      for (let replay = 0; replay < 2; replay++) {
+        const rawResponse = handleSDKWorkerRequest({
+          id: `raw-action-replay-${replay}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH,
+          priority: 7, createdAt: 1,
+          payload: rawBatch as Object as SDKWorkerPayload
+        }, createSDKWorkerRuntimeStateWithBackend(
+          SDKDedicatedPoolType.EVENT_CONSUMER, 'RawActionWorker', 'unit-worker'));
+        expect(rawResponse.ok).assertTrue();
+        expect(getPayloadArray(rawResponse.payload, 'syncDrafts').length).assertEqual(0);
+        const events = getPayloadArray(rawResponse.payload, 'rawEvents') as Object as SDKRumEventDTO[];
+        expect(events.length).assertEqual(1);
+        expect(events[0].uuid).assertEqual('action-sync-uuid');
+        expect(events[0].time).assertEqual(12345);
+        expect(events[0].customDataType).assertEqual('rum_app_error_sampled');
+        expect(events[0].tags?.['action_id']).assertEqual('action-1');
+        expect(events[0].tags?.['env']).assertEqual('test');
+        expect(events[0].fields?.['duration']).assertEqual('42');
+        expect(events[0].fields?.['app_launch_type']).assertEqual('foreground');
+        expect(events[0].fields?.['app_pre_application_init_time']).assertEqual('{"start":0,"duration":20}');
+        const deltas = getPayloadArray(rawResponse.payload, 'deltas') as Object as SDKRumCounterDeltaDTO[];
+        expect(deltas.length).assertEqual(1);
+        expect(deltas[0].viewActionDelta).assertEqual(1);
+      }
     });
 
-    it('dataUploadCommandShouldKeepSdkDataIdStableInsideUploadPool', 0, async () => {
+    it('uploadKeepDataIdStableInsideUploadPool', 0, async () => {
       const row: SDKUploadRowDTO = {
         id: 1,
         dataType: 'log',
@@ -1505,7 +1631,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(body.includes('message=\"hello\"')).assertTrue();
     });
 
-    it('dataUploadCommandShouldOnlyPrefixSdkDataIdWhenResourceIdMatchesRowUuid', 0, async () => {
+    it('uploadPrefixesMatchingResourceIds', 0, async () => {
       const resourceUuid = '64697047c13d4ac8ae1a64aa1d364d39';
       const row: SDKUploadRowDTO = {
         id: 2,
@@ -1535,7 +1661,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(body.includes(`resource_id=pkg-2.${resourceUuid}`)).assertFalse();
     });
 
-    it('dataUploadSoftTimeoutShouldDestroyStalledWorkerRequest', 0, async () => {
+    it('softTimeoutDestroysStalledRequest', 0, async () => {
       let destroyCount = 0;
       const stalledRequest = new Promise<SDKUploadHttpResultDTO>((_resolve: (value: SDKUploadHttpResultDTO) => void) => {
       });
@@ -1561,7 +1687,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(result.softTimedOut).assertTrue();
     });
 
-    it('dataUploadWorkerSoftTimeoutShouldRetryWithoutAcknowledgingFailedDbCommit', 0, async () => {
+    it('softTimeoutRetriesWithoutAckOnDbFailure', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'SoftTimeoutWorker', 'unit-worker');
       const startPayload: SDKUploadRoundStartDTO = {
@@ -1639,7 +1765,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(committed.delayMs >= 500).assertTrue();
     });
 
-    it('dataUploadWorkerShouldDeflatePayloadBeforeExecutingHttpRequest', 0, async () => {
+    it('uploadDeflatesBeforeHttp', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'DeflateUploadWorker', 'unit-worker');
       const startResponse = handleSDKWorkerRequest({
@@ -1707,7 +1833,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(new Uint8Array(compressedBody)[1]).assertEqual(0x9c);
     });
 
-    it('dataUploadWorkerShouldApplyProxyAndDnsOptionsToNetworkKitRequest', 0, () => {
+    it('uploadAppliesProxyAndDns', 0, () => {
       const request: SDKUploadHttpRequestDTO = {
         datakitUrl: 'https://localhost',
         datawayUrl: '',
@@ -1743,7 +1869,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(options.dnsOverHttps).assertEqual('https://dns.example.com/dns-query');
     });
 
-    it('dataUploadWorkerShouldFallbackToPlaintextWhenDeflateFails', 0, async () => {
+    it('deflateFailureUsesPlaintext', 0, async () => {
       class FailingPayloadCompressor implements DataUploadPayloadCompressor {
         async compress(_body: string): Promise<ArrayBuffer> {
           throw new Error('deflate unavailable');
@@ -1801,12 +1927,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
 
       expect(sentRequest.compressedBody === undefined).assertTrue();
       expect(sentRequest.contentEncoding === undefined).assertTrue();
-      expect(sentRequest.body.includes('sdk_data_id=fallback')).assertTrue();
+      expect(sentRequest.body.includes(`sdk_data_id=${sentRequest.packageId}.fallback`)).assertTrue();
       expect(createDataUploadHeaders(sentRequest)['Content-Encoding'] === undefined).assertTrue();
       expect(getDataUploadRequestBody(sentRequest)).assertEqual(sentRequest.body);
     });
 
-    it('dataUploadWorkerShouldOwnDedupPackagingPaginationAndRetryState', 0, async () => {
+    it('uploadOwnsBatchAndRetryState', 0, async () => {
       const startPayload: SDKUploadRoundStartDTO = {
         ownerId: 'unit-upload-owner',
         taskName: 'unit-upload-round',
@@ -1926,7 +2052,27 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(retryExecuteResponse.ok).assertTrue();
       const retried = retryExecuteResponse.payload as Object as SDKUploadExecutePageResultDTO;
       expect(retried.bodyPreview.includes(`sdk_data_id=${executed.packageId}.retry-uuid`)).assertTrue();
-      expect(retried.bodyPreview.includes(`sdk_data_id=${retried.packageId}.retry-uuid`)).assertFalse();
+      expect(retried.packageId).assertEqual(executed.packageId);
+      expect(retried.bodyPreview).assertEqual(executed.bodyPreview);
+
+      const retryCommitPayload: SDKUploadCommitPageDTO = {
+        roundId: start.roundId,
+        attemptId: retried.attemptId,
+        dbSucceeded: true
+      };
+      const retryCommitResponse = await executeWorkerCommandForUnit({
+        id: 'upload-retry-commit-page',
+        pool: SDKDedicatedPoolType.DATA_UPLOAD,
+        command: SDKWorkerCommand.UPLOAD_COMMIT_PAGE,
+        priority: 5,
+        createdAt: Date.now(),
+        payload: retryCommitPayload as Object as SDKWorkerPayload
+      });
+      expect(retryCommitResponse.ok).assertTrue();
+      const retryCommitted = retryCommitResponse.payload as Object as SDKUploadCommitPageResultDTO;
+      expect(retryCommitted.checkpoint.version).assertEqual(2);
+      expect(retryCommitted.errorCount).assertEqual(2);
+      expect(retryCommitted.delayMs).assertEqual(1000);
 
       const finishPayload: SDKUploadRoundFinishDTO = { roundId: start.roundId };
       const finishResponse = await executeWorkerCommandForUnit({
@@ -1939,12 +2085,14 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(finishResponse.ok).assertTrue();
       const finished = finishResponse.payload as Object as SDKUploadRoundResultDTO;
-      expect(finished.consumedRows).assertEqual(1);
+      // Both attempts failed and retained the record. Only committed deletes
+      // count as consumed rows; retries must not report cached data as consumed.
+      expect(finished.consumedRows).assertEqual(0);
       expect(finished.hasMoreData).assertTrue();
-      expect(finished.errorCount).assertEqual(1);
+      expect(finished.errorCount).assertEqual(2);
     });
 
-    it('dataUploadWorkerShouldReusePersistedPackageAfterHttpRestart', 0, async () => {
+    it('httpRestartReusesPersistedPackage', 0, async () => {
       const ownerId = 'persisted-package-restart-owner';
       const rawRow: SDKUploadRowDTO = {
         id: 91,
@@ -2083,7 +2231,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(restartedRequest.body.includes(`sdk_data_id=${firstPrepared.packageId}.restart-uuid`)).assertTrue();
     });
 
-    it('dataUploadWorkerShouldUseSdkDataIdWhenLegacyRowUuidDiffers', 0, async () => {
+    it('uploadUseDataIdWhenLegacyRowUuidDiffers', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'LegacySdkDataIdWorker', 'unit-worker');
       const httpConfig: SDKUploadHttpConfigDTO = {
@@ -2171,7 +2319,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(commitResponse.ok).assertTrue();
     });
 
-    it('dataUploadWorkerShouldWrapNonStandardSdkDataIdOnlyOnce', 0, async () => {
+    it('uploadWrapNonStandardSdkDataIdOnlyOnce', 0, async () => {
       const ownerId = 'non-standard-sdk-data-id-owner';
       const legacyRow: SDKUploadRowDTO = {
         id: 93,
@@ -2311,7 +2459,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(restartedRequest.body.includes(`sdk_data_id=${expectedSdkDataId}`)).assertTrue();
     });
 
-    it('dataUploadWorkerShouldKeepHistoricalPackagesAndRawRowsSeparate', 0, () => {
+    it('uploadSeparatesPackagesAndRawRows', 0, () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'UploadPackageGroupingWorker', 'unit-worker');
       const startResponse = handleSDKWorkerRequest({
@@ -2402,7 +2550,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(rawPrepared.bodyPreview.includes(`sdk_data_id=${rawPrepared.packageId}.raw-three`)).assertTrue();
     });
 
-    it('dataUploadWorkerShouldStopAutomaticRetryAfterConfiguredLimit', 0, async () => {
+    it('uploadStopAutoRetryAfterConfiguredLimit', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'RetryLimitWorker', 'unit-worker');
       const startPayload: SDKUploadRoundStartDTO = {
@@ -2509,7 +2657,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(terminal.dbAction).assertEqual(SDKUploadDbActionDTO.REINSERT);
     });
 
-    it('dataUploadWorkerShouldClampPageAndSplitBodyAtUtf8ByteLimit', 0, async () => {
+    it('uploadBoundsPageAndUtf8Body', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'BodyLimitWorker', 'unit-worker');
       const startPayload: SDKUploadRoundStartDTO = {
@@ -2594,7 +2742,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(committed.roundHasMoreData).assertTrue();
     });
 
-    it('dataUploadWorkerShouldDeferOversizedRowWithoutDbDelete', 0, async () => {
+    it('uploadDeferOversizedRowWithoutDbDelete', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'OversizedRowWorker', 'unit-worker');
       const startPayload: SDKUploadRoundStartDTO = {
@@ -2660,7 +2808,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(httpExecutor.lastRequest === null).assertTrue();
     });
 
-    it('dataUploadWorkerShouldRestoreHostCheckpointAfterAckWindowRestart', 0, async () => {
+    it('ackWindowRestartRestoresCheckpoint', 0, async () => {
       const firstState = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'DataUploadFirstWorker', 'unit-worker');
       const ownerId = 'checkpoint-owner';

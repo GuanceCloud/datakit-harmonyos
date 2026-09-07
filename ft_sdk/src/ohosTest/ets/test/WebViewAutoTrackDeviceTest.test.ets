@@ -8,7 +8,7 @@ import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTWebViewHandler } from '../../../main/ets/components/web/FTWebViewHandler';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
@@ -265,9 +265,11 @@ export default function webViewAutoTrackDeviceTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      await SdkTestLifecycle.resetRuntimeState();
-      await DBAssert.cleanupAll();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await DBAssert.cleanupAll(); }
+      ]);
     });
 
     it('webViewHandlerShouldGateBridge', 0, () => {
@@ -373,7 +375,7 @@ export default function webViewAutoTrackDeviceTest() {
       expect(actionConsumed).assertTrue();
     });
 
-    it('webViewResourceErrorShouldLinkToResourceSdkDataId', 0, async () => {
+    it('webViewResourceErrorLinkToResourceDataId', 0, async () => {
       const webViewId = 'webview_resource_error_view_id';
       const webViewName = 'webview_resource_error_view';
       const resourceUrl = 'https://webview.test/api/failed-request';
@@ -512,6 +514,12 @@ export default function webViewAutoTrackDeviceTest() {
 
       expect(record !== null).assertTrue();
       expect(await countWebViewSyncRecordsContaining(fragments)).assertEqual(1);
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+      const consumed = await DBAssert.waitForSyncCount([DataType.RUM_WEBVIEW], 0, 5000);
+      expect(consumed).assertTrue();
+      const lines = collector.getRequests().map(request => request.bodyString).join('\n').split('\n');
+      expect(lines.filter(line => containsAll(line, fragments)).length).assertEqual(1);
     });
 
     it('invalidWebViewShouldWriteNothing', 0, async () => {

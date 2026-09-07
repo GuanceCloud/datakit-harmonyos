@@ -90,6 +90,7 @@ async function waitUntil(condition: () => boolean): Promise<void> {
       return;
     }
   }
+  throw new Error('Timed out waiting for the expected test state');
 }
 
 class FakePreferences implements SyncTaskPreferences {
@@ -558,17 +559,23 @@ class FakeRuntime implements SyncTaskManagerRuntime, SDKUploadWorkerHttpExecutor
 }
 
 async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
-  const initialUploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
-  if (initialUploadStatus.isScheduled && initialUploadStatus.scheduledDelay > 0) {
-    const delayedUpload = runtime.timerCallbacks.get(runtime.timerId);
-    if (delayedUpload) {
-      delayedUpload();
-    }
-  }
-
-  for (let i = 0; i < 200; i++) {
-    await Promise.resolve();
+  for (let i = 0; i < 100; i++) {
+    // Let the complete Worker/DB Promise chain settle before observing the
+    // lane. A fixed number of microtasks can return halfway through a commit.
+    await new Promise<void>((resolve: () => void) => {
+      setTimeout(resolve, 0);
+    });
     const uploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
+    if (uploadStatus.isScheduled && uploadStatus.scheduledDelay > 0) {
+      // A running upload can schedule a delayed follow-up after this helper
+      // starts. Advance that fake timer as well as the initial upload timer.
+      const delayedUpload = runtime.timerCallbacks.get(runtime.timerId);
+      if (!delayedUpload) {
+        throw new Error('Scheduled upload has no fake timer callback');
+      }
+      delayedUpload();
+      continue;
+    }
     if (!uploadStatus.isScheduled && !uploadStatus.isRunning && !uploadStatus.needReschedule) {
       await flushPromises();
       const latestUploadStatus = SyncTaskManager.getInstance().getStatus().uploadLaneStatus;
@@ -577,6 +584,7 @@ async function runScheduledUpload(runtime: FakeRuntime): Promise<void> {
       }
     }
   }
+  throw new Error('Timed out waiting for the upload lane to become idle');
 }
 
 async function runCleanupTimer(runtime: FakeRuntime): Promise<void> {
@@ -592,9 +600,9 @@ function createLineProtocolForType(dataType: DataType, uuid: string, time: numbe
     return `df_rum_harmonyos_log,sdk_data_id=${uuid} message="${uuid}",value=1i ${time}`;
   }
   if (dataType === DataType.RUM_WEBVIEW) {
-    return `view,view_id=${uuid},view_update_time=${time},is_webview=true value=1i ${time}`;
+    return `view,sdk_data_id=${uuid},view_id=${uuid},view_update_time=${time},is_webview=true value=1i ${time}`;
   }
-  return `view,view_id=${uuid},view_update_time=${time} value=1i ${time}`;
+  return `view,sdk_data_id=${uuid},view_id=${uuid},view_update_time=${time} value=1i ${time}`;
 }
 
 function createBatchSyncData(dataType: DataType, prefix: string, count: number, startTime: number = 100): SyncData[] {
@@ -678,7 +686,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('executeSyncPollShouldScheduleTenSecondAggregationWhenDbIsEmpty', 0, async () => {
+    it('emptyDbDelaysSyncPollTenSeconds', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
       const db = runtime.dbTaskPool as FakeDbTaskPool;
@@ -692,7 +700,7 @@ export default function syncTaskManagerUnitTest() {
       expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
     });
 
-    it('executeSyncPollShouldRunUploadLaneWhenDbHasData', 0, async () => {
+    it('syncPollRunUploadLaneWhenDbHasData', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -714,7 +722,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('executeSyncPollShouldSkipInvalidEndpointAndResumeAfterDatawayUpdate', 0, async () => {
+    it('syncPollResumesAfterEndpointFix', 0, async () => {
       const db = new FakeDbTaskPool();
       const config = FTSDKConfig.builder();
       runtime.dbTaskPool = db;
@@ -752,7 +760,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
     });
 
-    it('uploadShouldUseLatestRuntimeEndpointConfig', 0, async () => {
+    it('uploadUseLatestRuntimeEndpointConfig', 0, async () => {
       const db = new FakeDbTaskPool();
       const config = createConfig();
       runtime.dbTaskPool = db;
@@ -775,7 +783,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpClientToken).assertEqual('runtime-token');
     });
 
-    it('executeSyncPollShouldAggregateRepeatedTriggersWithinOneTenSecondWindow', 0, async () => {
+    it('syncPollCoalescesTriggersForTenSeconds', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -802,7 +810,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('executeSyncPollShouldCoalesceWhileUploadLaneIsRunning', 0, async () => {
+    it('syncPollCoalesceWhileUploadLaneIsRunning', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -843,7 +851,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('uploadLaneShouldStopWhenMoreDataMakesNoProgress', 0, async () => {
+    it('uploadStopWhenMoreDataMakesNoProgress', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -862,7 +870,7 @@ export default function syncTaskManagerUnitTest() {
       expect(uploadStatus.isScheduled).assertFalse();
     });
 
-    it('uploadLaneShouldSkipOversizedRowsAndUploadLaterCachedData', 0, async () => {
+    it('uploadSkipsOversizedRowsAndContinues', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -884,7 +892,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.lastHttpBody.includes('transport-limit-row')).assertFalse();
     });
 
-    it('executeSyncPollShouldUploadWhenCachedDataExistsAfterInit', 0, async () => {
+    it('syncPollUploadsCacheAfterInit', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       db.hasDataResult = true;
@@ -923,7 +931,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('errorTimelineShouldUseRdbMetadataAndOnlyReadLegacyPreferences', 0, async () => {
+    it('errorTimelineReadsRdbOrLegacyPrefs', 0, async () => {
       manager.init(createConfig(), createContext());
       await flushPromises();
       const view = new ViewBean('view-id', 'view', 100);
@@ -997,7 +1005,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-1);
     });
 
-    it('uploadLaneShouldSendPersistedRumPackageWithoutReSelectingIt', 0, async () => {
+    it('uploadReusesPersistedRumPackage', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1016,7 +1024,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.rumDelta).assertEqual(-1);
     });
 
-    it('uploadLaneShouldNotLetLegacyRumRowsWithoutSdkDataIdBlockColdLaunch', 0, async () => {
+    it('legacyRowsWithoutDataIdDoNotBlockLaunch', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1043,7 +1051,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.rumDelta).assertEqual(-3);
     });
 
-    it('uploadLaneShouldRespectPerRoundPageBudget', 0, async () => {
+    it('uploadRespectPerRoundPageBudget', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1075,7 +1083,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-pageSize);
     });
 
-    it('uploadLaneShouldFormatBodyThroughUploadExecutor', 0, async () => {
+    it('uploadFormatBodyThroughUploadExecutor', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1101,7 +1109,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('uploadLaneShouldRemoveCachedRemoteFilteredRowsBeforeSending', 0, async () => {
+    it('remoteFilterRemovesRowsBeforeUpload', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig().setEnableDataFilter(true), createContext());
@@ -1130,7 +1138,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(-2);
     });
 
-    it('uploadLaneShouldDeleteCachedRemoteFilteredRowsWithoutSending', 0, async () => {
+    it('remoteFilterDropsRowsWithoutUpload', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig().setEnableDataFilter(true), createContext());
@@ -1153,7 +1161,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('uploadLaneShouldNotCommitWorkerCheckpointWhenDbCommitFails', 0, async () => {
+    it('dbFailurePreservesWorkerCheckpoint', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1176,7 +1184,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.sleepDurations.includes(500)).assertTrue();
     });
 
-    it('uploadLaneShouldNotAckWhenDbCommitAffectsFewerAcceptedRows', 0, async () => {
+    it('partialDbCommitDoesNotAck', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1197,7 +1205,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.sleepDurations.includes(500)).assertTrue();
     });
 
-    it('uploadLaneShouldDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {
+    it('uploadDelete2xxTo4xxWithoutRetryBackoff', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1214,7 +1222,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().errorCount).assertEqual(0);
     });
 
-    it('uploadLaneShouldDeleteAndBackoffForIgnoredClientErrors', 0, async () => {
+    it('ignoredClientErrorsDeleteAndBackoff', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1246,7 +1254,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.sleepDurations.includes(1000)).assertTrue();
     });
 
-    it('uploadLaneShouldIsolateIgnoredClientBackoffByDataTypeAndCapDelay', 0, async () => {
+    it('clientBackoffIsBoundedAndIsolatedByType', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1271,7 +1279,7 @@ export default function syncTaskManagerUnitTest() {
       expect(db.insertCount).assertEqual(7);
     });
 
-    it('uploadLaneShouldIsolateRetryBackoffByDataType', 0, async () => {
+    it('uploadIsolateRetryBackoffByDataType', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1296,7 +1304,7 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().errorCount).assertEqual(2);
     });
 
-    it('uploadLaneShouldReinsert5xxAndNetworkErrorsWithRetryBackoff', 0, async () => {
+    it('uploadFailuresKeepRowsAndBackoff', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1321,7 +1329,7 @@ export default function syncTaskManagerUnitTest() {
       expect(runtime.cachePolicy.logDelta).assertEqual(0);
     });
 
-    it('uploadLaneShouldStopSchedulingAfterOfflineRetryLimit', 0, async () => {
+    it('offlineRetryLimitStopsScheduling', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
@@ -1386,7 +1394,8 @@ export default function syncTaskManagerUnitTest() {
 
       const deleteCountAfterSuccess = db.deleteCount;
       const insertCountAfterSuccess = db.insertCount;
-      const rumError = createSyncData(DataType.RUM_APP, 'rum-1', 'error,error_type=js,error_message="boom" value=1i 100');
+      const rumError = createSyncData(DataType.RUM_APP, 'rum-1',
+        'error,sdk_data_id=rum-1,error_type=js,error_message="boom" value=1i 100');
       queueUploadRowsForOnly(db, DataType.RUM_APP, [rumError]);
       runtime.httpResults.push(new FakeHttpResult(500, 'fail', 'server'));
       manager.executePoll(false);
@@ -1396,11 +1405,17 @@ export default function syncTaskManagerUnitTest() {
       expect(db.insertCount).assertEqual(insertCountAfterSuccess + 1);
       expect(runtime.sleepDurations.includes(500)).assertTrue();
 
+      // A retry reads the package-prefixed record persisted before the first
+      // request. It must reuse that record without another delete/reinsert.
+      const persistedRumError = db.lastInserted[0];
+      const firstRumBody = runtime.lastHttpBody;
       runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network', 'net'));
-      queueUploadRowsForOnly(db, DataType.RUM_APP, [rumError]);
+      queueUploadRowsForOnly(db, DataType.RUM_APP, [persistedRumError]);
       manager.executePoll(false);
       await runScheduledUpload(runtime);
-      expect(db.insertCount).assertEqual(insertCountAfterSuccess + 2);
+      expect(db.insertCount).assertEqual(insertCountAfterSuccess + 1);
+      expect(db.deleteCount).assertEqual(deleteCountAfterSuccess + 1);
+      expect(runtime.lastHttpBody).assertEqual(firstRumBody);
       expect(db.insertReInsertFlags[0]).assertTrue();
       expect(db.insertReInsertFlags[1]).assertTrue();
     });

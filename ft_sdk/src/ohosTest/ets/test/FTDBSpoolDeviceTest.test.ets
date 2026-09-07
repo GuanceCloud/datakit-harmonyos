@@ -63,7 +63,7 @@ export default function ftDBSpoolDeviceTest() {
       await dbManager.delete();
     });
 
-    it('activeAndInflightShouldRemainIsolatedUntilAck', 0, async () => {
+    it('activeAndInflightRemainIsolatedUntilAck', 0, async () => {
       const first = createLogSyncData('active-first', TEST_NOW_NS + 1);
       const second = createLogSyncData('active-second', TEST_NOW_NS + 2);
       const paths = createPaths(spoolManager);
@@ -88,7 +88,7 @@ export default function ftDBSpoolDeviceTest() {
       expect(await pathExists(paths.activePath)).assertTrue();
     });
 
-    it('replayShouldBeIdempotentAfterDbCommitBeforeAck', 0, async () => {
+    it('replayBeIdempotentAfterDbCommitBeforeAck', 0, async () => {
       const row = createLogSyncData('commit-before-ack', TEST_NOW_NS + 10);
       const paths = createPaths(spoolManager);
       await spoolManager.appendSyncData('device.idempotent', [row]);
@@ -107,17 +107,17 @@ export default function ftDBSpoolDeviceTest() {
       });
 
       expect(firstWrite.success).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
       expect(await pathExists(paths.inflightPath)).assertTrue();
 
       const replayed = await spoolManager.replay(context, 'device.idempotent-retry');
       expect(replayed).assertEqual(1);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
       expect(spoolManager.getStatus().pendingRecords).assertEqual(0);
       expect(await pathExists(paths.inflightPath)).assertFalse();
     });
 
-    it('ackTokenFaultShouldRetainInflightForIdempotentReplay', 0, async () => {
+    it('ackFaultPreservesReplay', 0, async () => {
       const row = createLogSyncData('ack-token-fault', TEST_NOW_NS + 15);
       const paths = createPaths(spoolManager);
       await spoolManager.appendSyncData('device.ack-token-fault', [row]);
@@ -148,16 +148,16 @@ export default function ftDBSpoolDeviceTest() {
       }
       expect(ackRejected).assertTrue();
       expect(await pathExists(paths.inflightPath)).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
 
       const replayed = await spoolManager.replay(context, 'device.ack-token-fault-retry');
       expect(replayed).assertEqual(1);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
       expect(spoolManager.getStatus().pendingRecords).assertEqual(0);
       expect(await pathExists(paths.inflightPath)).assertFalse();
     });
 
-    it('replayShouldAdvanceByUtf8ByteCursorWithoutDuplicates', 0, async () => {
+    it('utf8ReplayAvoidsDuplicates', 0, async () => {
       const rows: SyncData[] = [
         createLogSyncData('字节游标-一', TEST_NOW_NS + 21),
         createLogSyncData('字节游标-二', TEST_NOW_NS + 22),
@@ -200,7 +200,7 @@ export default function ftDBSpoolDeviceTest() {
       await FTDBSpoolTaskPoolExecutor.ackReplay(paths, first.batchToken);
     });
 
-    it('capacityShouldIncludeInflightAndReleaseAfterAck', 0, async () => {
+    it('ackReleasesInflightCapacity', 0, async () => {
       const first = createLogSyncData('capacity-row', TEST_NOW_NS + 31);
       const second = createLogSyncData('capacity-row', TEST_NOW_NS + 32);
       const paths = createPaths(spoolManager);

@@ -9,7 +9,7 @@ import {
 
 export default function sdkWorkerRetryPolicyUnitTest() {
   describe('SDKWorkerRetryPolicyUnit', () => {
-    it('shouldBackOffExponentiallyAndOpenCircuitAtFailureThreshold', 0, () => {
+    it('retryBackoffOpensCircuitAtFailureLimit', 0, () => {
       const circuit = new SDKWorkerRetryCircuit();
       let nowMs = 1000;
 
@@ -35,7 +35,7 @@ export default function sdkWorkerRetryPolicyUnitTest() {
       expect(circuit.beginAttempt(nowMs + SDK_WORKER_RETRY_CIRCUIT_COOLDOWN_MS - 1)).assertFalse();
     });
 
-    it('shouldAllowOneHalfOpenProbeAndCloseAfterSuccess', 0, () => {
+    it('singleProbeSuccessClosesCircuit', 0, () => {
       const circuit = new SDKWorkerRetryCircuit();
       let nowMs = 2000;
       for (let attempt = 0; attempt < SDK_WORKER_RETRY_CIRCUIT_FAILURE_THRESHOLD; attempt++) {

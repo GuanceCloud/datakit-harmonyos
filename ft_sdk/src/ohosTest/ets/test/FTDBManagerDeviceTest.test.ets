@@ -1,6 +1,9 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
+import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
+import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType } from '../../../main/ets/components/enum/Enums';
@@ -25,25 +28,6 @@ function createRumSyncData(label: string, time: number = TEST_NOW_NS): SyncData 
     `action,action_id=${label},sdk_data_id=${syncData.getUuid()} action_name="${label}" ${time}`
   );
   return syncData;
-}
-
-class CountTypeCallback implements DataBaseCallBack {
-  public count: number = 0;
-  private readonly typeValue: string;
-
-  constructor(typeValue: string) {
-    this.typeValue = typeValue;
-  }
-
-  async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-    predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.typeValue);
-    const resultSet = await rdbStore.query(predicates, ['count(*) as count']);
-    if (resultSet.goToFirstRow()) {
-      this.count = resultSet.getLong(0);
-    }
-    resultSet.close();
-  }
 }
 
 class SchemaProbeCallback implements DataBaseCallBack {
@@ -80,14 +64,70 @@ export default function ftDBManagerDeviceTest() {
       await dbManager.delete();
     });
 
+    it('staleOpenAckKeepsClosedView', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const open = new ViewBean('delayed-open-view', 'delayed-open-view', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.upsertRumView(context, open);
+      const closed = ViewBean.fromJSON(open.toJSON());
+      // Deliberately share the millisecond timestamp and counter: the state
+      // check must still reject the earlier open snapshot's completion.
+      closed.setIsClose(true);
+      await FTDBTaskPoolExecutor.updateRumView(context, closed);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, open)).assertFalse();
+      const retained = await FTDBTaskPoolExecutor.queryRumViewById(context, open.getId());
+      expect(retained !== null).assertTrue();
+      expect(retained!.getIsClose()).assertTrue();
+      expect(retained!.getDataUploadTime()).assertEqual(0);
+      expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
+        .some(view => view.getId() === open.getId())).assertTrue();
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, retained!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, open.getId())).assertNull();
+    });
+
+    it('viewAckKeepsNewerAndUnrelatedData', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const old = new ViewBean('delayed-counter-view', 'delayed-counter-view', TEST_NOW_NS);
+      old.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, old);
+      const newer = ViewBean.fromJSON(old.toJSON());
+      newer.setResourceCount(1);
+      // Counter-only DB updates need not bump the timestamp or version.
+      await FTDBTaskPoolExecutor.updateRumView(context, newer);
+      const other = new ViewBean('unserialized-closed-view', 'unserialized-closed-view', TEST_NOW_NS);
+      other.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, other);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, old)).assertFalse();
+      const retained = await FTDBTaskPoolExecutor.queryRumViewById(context, old.getId());
+      expect(retained!.getResourceCount()).assertEqual(1);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, retained!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, old.getId())).assertNull();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, other.getId()) !== null).assertTrue();
+    });
+
+    it('pendingClosedViewSurvivesUntilPersisted', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('pending-closed-view', 'pending-closed-view', TEST_NOW_NS);
+      view.setIsClose(true);
+      view.setPendingResource(1);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, view)).assertTrue();
+      await FTDBTaskPoolExecutor.forceClearRumPendingResource(context, 'view', view.getId());
+      const finalViews = await FTDBTaskPoolExecutor.querySumView(context, 20);
+      const finalView = finalViews.find(item => item.getId() === view.getId());
+      expect(finalView !== undefined).assertTrue();
+      expect(finalView!.getPendingResource()).assertEqual(0);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, finalView!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
     it('dbShouldCrudSingleRecord', 0, async () => {
       const syncData = createLogSyncData('single-insert');
 
       const inserted = await dbManager.insertFtOperation(syncData);
-      const countAfterInsert = await dbManager.queryTotalCount([DataType.LOG]);
-      const queried = await dbManager.queryFtOperation([DataType.LOG], 10);
-      await dbManager.deleteFtOperation(queried);
-      const countAfterDelete = await dbManager.queryTotalCount([DataType.LOG]);
+      const countAfterInsert = await DBAssert.querySyncCount([DataType.LOG]);
+      const queried = await DBAssert.querySyncData([DataType.LOG], 10);
+      await DBAssert.deleteSyncData(queried);
+      const countAfterDelete = await DBAssert.querySyncCount([DataType.LOG]);
 
       expect(inserted).assertTrue();
       expect(countAfterInsert).assertEqual(1);
@@ -101,25 +141,25 @@ export default function ftDBManagerDeviceTest() {
       const second = createLogSyncData('batch-2', TEST_NOW_NS + 2);
       const third = createLogSyncData('batch-3', TEST_NOW_NS + 3);
 
-      const inserted = await dbManager.insertFtOptList([first, second, third]);
-      const queried = await dbManager.queryFtOperation([DataType.LOG], 10);
-      await dbManager.deleteFtOperation(queried);
-      const countAfterDelete = await dbManager.queryTotalCount([DataType.LOG]);
+      const inserted = await DBAssert.insertSyncData([first, second, third]);
+      const queried = await DBAssert.querySyncData([DataType.LOG], 10);
+      await DBAssert.deleteSyncData(queried);
+      const countAfterDelete = await DBAssert.querySyncCount([DataType.LOG]);
 
       expect(inserted).assertTrue();
       expect(queried.length).assertEqual(3);
       expect(countAfterDelete).assertEqual(0);
     });
 
-    it('deleteOldestDataShouldRemoveOldestRowsOnly', 0, async () => {
-      await dbManager.insertFtOptList([
+    it('deleteOldestDataRemoveOldestRowsOnly', 0, async () => {
+      await DBAssert.insertSyncData([
         createLogSyncData('oldest', TEST_NOW_NS + 1),
         createLogSyncData('middle', TEST_NOW_NS + 2),
         createLogSyncData('newest', TEST_NOW_NS + 3)
       ]);
 
-      await dbManager.deleteOldestData(DataType.LOG, 2);
-      const remaining = await dbManager.queryFtOperation([DataType.LOG], 10);
+      await DBAssert.deleteOldestSyncData([DataType.LOG], 2);
+      const remaining = await DBAssert.querySyncData([DataType.LOG], 10);
 
       expect(remaining.length).assertEqual(1);
       expect(remaining[0].getDataString().includes('newest')).assertTrue();
@@ -128,7 +168,8 @@ export default function ftDBManagerDeviceTest() {
     it('migrationSchemaShouldExist', 0, async () => {
       const callback = new SchemaProbeCallback();
 
-      await dbManager.executeWithDB(false, callback);
+      const store = await DatabaseHelper.getInstance(await DBAssert.getAppContext()).initDatabase();
+      await callback.run(store);
 
       expect(callback.hasViewMigrationColumns).assertTrue();
       expect(callback.hasSyncDataFlatTable).assertTrue();
@@ -142,30 +183,29 @@ export default function ftDBManagerDeviceTest() {
       const freshSampled = createRumSyncData('fresh-sampled', TEST_NOW_NS);
       freshSampled.setCustomDataTypeString('rum_app_error_sampled');
 
-      await dbManager.insertFtOptList([oldSampled, expiredSampled, freshSampled], true);
+      await DBAssert.insertSyncData([oldSampled, expiredSampled, freshSampled], true);
       const updatedCount = await dbManager.updateDataType('rum_app_error_sampled', TEST_NOW_NS - 100000000000);
-      const migratedRumCount = await dbManager.queryTotalCount([DataType.RUM_APP]);
+      const migratedRumCount = await DBAssert.querySyncCount([DataType.RUM_APP]);
       const deletedCount = await dbManager.deleteExpireCache('rum_app_error_sampled', TEST_NOW_NS, 60000000000);
-      const callback = new CountTypeCallback('rum_app_error_sampled');
-      await dbManager.executeWithDB(false, callback);
+      const remainingSampledCount = await DBAssert.queryRawSyncCount(['rum_app_error_sampled']);
 
       expect(updatedCount).assertEqual(1);
       expect(migratedRumCount).assertEqual(1);
       expect(deletedCount).assertEqual(1);
-      expect(callback.count).assertEqual(1);
+      expect(remainingSampledCount).assertEqual(1);
     });
 
     it('resetDbShouldKeepTablesUsable', 0, async () => {
-      await dbManager.insertFtOptList([
+      await DBAssert.insertSyncData([
         createLogSyncData('cleanup-log', TEST_NOW_NS + 1),
         createRumSyncData('cleanup-rum', TEST_NOW_NS + 2)
       ]);
 
       await dbManager.delete();
-      const countAfterDelete = await dbManager.queryTotalCount([]);
+      const countAfterDelete = await DBAssert.querySyncCount([]);
       await dbManager.resetDatabase();
       const insertedAfterReset = await dbManager.insertFtOperation(createLogSyncData('after-reset', TEST_NOW_NS + 3));
-      const countAfterResetInsert = await dbManager.queryTotalCount([DataType.LOG]);
+      const countAfterResetInsert = await DBAssert.querySyncCount([DataType.LOG]);
 
       expect(countAfterDelete).assertEqual(0);
       expect(insertedAfterReset).assertTrue();

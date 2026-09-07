@@ -94,6 +94,18 @@ class RecordingConfigHeaderHandler implements FTTraceHeaderHandler {
   }
 }
 
+class TestViewRouterTrackingHandler implements FTViewRouterTrackingHandler {
+  resolveHandlerView(routeName: string): HandlerView | null {
+    return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
+  }
+}
+
+class TestViewNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
+  resolveHandlerView(destinationName: string): HandlerView | null {
+    return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
+  }
+}
+
 class FakeAnrManager implements FTSDKAnrManager {
   initializeCount: number = 0;
   startMonitoringCount: number = 0;
@@ -255,7 +267,7 @@ export default function configUnitTest() {
       expect(deferredEndpointConfig.getClientToken()).assertEqual('');
     });
 
-    it('runtimeEndpointUpdatesShouldSwitchUploadModes', 0, () => {
+    it('runtimeEndpointUpdatesSwitchUploadModes', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       const config = FTSDKConfig.builder();
       SdkInternalTestAccess.setRuntime(runtime);
@@ -277,7 +289,7 @@ export default function configUnitTest() {
       expect(config.getClientToken()).assertEqual('');
     });
 
-    it('runtimeEndpointOverrideShouldBeClearedWhenSdkResets', 0, () => {
+    it('sdkResetClearsEndpointOverride', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       const config = FTSDKConfig.builder('https://startup-datakit.example.com');
       SdkInternalTestAccess.setRuntime(runtime);
@@ -313,7 +325,7 @@ export default function configUnitTest() {
       expect(config.getDataFilters().size).assertEqual(0);
     });
 
-    it('sdkConfigShouldStoreUploadProxyAndDnsOptions', 0, () => {
+    it('sdkConfigStoreUploadProxyAndDnsOptions', 0, () => {
       const configuredProxyExclusionList: string[] = ['localhost'];
       const configuredProxy: FTProxyConfig = {
         host: 'proxy.example.com',
@@ -425,17 +437,9 @@ export default function configUnitTest() {
       expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);
     });
 
-    it('rumConfigShouldStoreAutomaticViewTrackingHandlers', 0, () => {
-      const routerHandler: FTViewRouterTrackingHandler = {
-        resolveHandlerView: (routeName: string): HandlerView | null => {
-          return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
-        }
-      };
-      const navigationHandler: FTViewNavigationTrackingHandler = {
-        resolveHandlerView: (destinationName: string): HandlerView | null => {
-          return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
-        }
-      };
+    it('rumConfigStoreAutoViewTrackingHandlers', 0, () => {
+      const routerHandler = new TestViewRouterTrackingHandler();
+      const navigationHandler = new TestViewNavigationTrackingHandler();
       const rumConfig = new FTRUMConfig()
         .setViewRouterTrackingHandler(routerHandler)
         .setViewNavigationTrackingHandler(navigationHandler);
@@ -574,7 +578,7 @@ export default function configUnitTest() {
       expect(SdkInternalTestAccess.requiresUIFeatures(new FTRUMConfig().setEnableTrackAppANR(true))).assertTrue();
     });
 
-    it('rumCrashSwitchShouldControlNativeDiagnosticLogCollection', 0, () => {
+    it('rumCrashSwitchControlsNativeLogs', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       runtime.uiContext = new FakeUIContext() as Object as UIContext;
       SdkInternalTestAccess.setRuntime(runtime);
@@ -659,7 +663,7 @@ export default function configUnitTest() {
       expect(FTDBCachePolicy.getInstance().getRumLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
     });
 
-    it('rumCacheFastDiscardCheckShouldPreserveDiscardOldestWrites', 0, () => {
+    it('rumFastDiscardPreservesDiscardOldest', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       cachePolicy.setTestLimits(0, 2);
       cachePolicy.optRumCount(2);
@@ -771,7 +775,7 @@ export default function configUnitTest() {
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
     });
 
-    it('consoleCaptureShouldBeIndependentFromCustomLogs', 0, () => {
+    it('consoleCaptureIsIndependent', 0, () => {
       const logManager = TrackLogManager.getInstance();
       const config = new FTLoggerConfig().setEnableConsoleLog(true, 'capture:');
       logManager.setLogConfig(config);
@@ -793,7 +797,7 @@ export default function configUnitTest() {
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
     });
 
-    it('consoleCaptureShouldSkipSilentlyBeforeLogConfigIsInstalled', 0, () => {
+    it('consoleCaptureSkipsBeforeLogConfig', 0, () => {
       const logManager = TrackLogManager.getInstance();
       const delegate = new RecordingConsoleDelegate();
 
@@ -807,7 +811,7 @@ export default function configUnitTest() {
       expect(logManager.getQueueStatus().filteredCount).assertEqual(0);
     });
 
-    it('remoteConfigShouldKeepAndroidCompatibleDefaults', 0, () => {
+    it('remoteDefaultsMatchAndroid', 0, () => {
       const config = FTSDKConfig.builder(TEST_FAKE_URL);
 
       expect(config.isRemoteConfiguration()).assertFalse();
@@ -817,7 +821,7 @@ export default function configUnitTest() {
       expect(config.setRemoteConfigMiniUpdateInterval(12.9).getRemoteConfigMiniUpdateInterval()).assertEqual(12);
     });
 
-    it('runtimeEndpointAndDeviceIdUpdatesShouldMutateInstalledConfig', 0, () => {
+    it('runtimeUpdatesEndpointAndDeviceId', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);
       const config = FTSDKConfig.builder();

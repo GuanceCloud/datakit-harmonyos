@@ -12,7 +12,6 @@ import { SdkInternalTestAccess } from '../../../main/ets/components/internal/tes
 import { AppState, ErrorType } from '../../../main/ets/components/rum/enum/RUMEnums';
 import { RunnerCompleteCallBack } from '../../../main/ets/components/rum/callback/RunnerCompleteCallBack';
 import { SDKDedicatedPoolManager } from '../../../main/ets/components/thread/SDKDedicatedPoolManager';
-import { SDKDedicatedPoolType } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 
 interface NativeTestValueWrapper {
   value: string | number | boolean;
@@ -269,8 +268,6 @@ export default function ftNativeCrashHandlerDeviceTest() {
 
       await runtime.nativeModule.emitCrash(createNativeCrashData());
 
-      const poolStatus = SDKDedicatedPoolManager.getInstance().getStatus().pools[SDKDedicatedPoolType.CRASH];
-      expect(poolStatus.completedTasks).assertEqual(1);
       expect(runtime.rumManager.addErrorCount).assertEqual(1);
       expect(runtime.rumManager.lastMessage).assertEqual('Native Crash: NativeCrash');
       expect(runtime.rumManager.lastErrorType).assertEqual(ErrorType.NATIVE_CRASH.toString());

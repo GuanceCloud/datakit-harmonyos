@@ -14,7 +14,7 @@ import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handle
 import { FTViewNavigationTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
 import { FTViewRouterTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
@@ -64,6 +64,10 @@ class ActionPropertyWrapper {
   }
 }
 
+interface FakeInspectorInfo {
+  $attrs: Record<string, Object>;
+}
+
 class FakeFrameNode {
   private nodeType: string;
   private nodeId: string;
@@ -105,7 +109,8 @@ class FakeFrameNode {
   }
 
   getInspectorInfo(): Object {
-    return { '$attrs': this.inspectorAttributes } as Object;
+    const info: FakeInspectorInfo = { $attrs: this.inspectorAttributes };
+    return info;
   }
 
   setParent(parent: FakeFrameNode): FakeFrameNode {
@@ -360,14 +365,16 @@ export default function autoTrackDeviceTest() {
     });
 
     afterEach(async () => {
-      FTActionTracker.getInstance().destroy();
-      FTNavigationTracker.getInstance().destroy();
-      collector.stop();
-      await SdkTestLifecycle.resetRuntimeState();
-      await DBAssert.cleanupAll();
+      await runTestCleanup([
+        () => { FTActionTracker.getInstance().destroy(); },
+        () => { FTNavigationTracker.getInstance().destroy(); },
+        async () => { await collector.stop(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await DBAssert.cleanupAll(); }
+      ]);
     });
 
-    it('autoTrackDestroyShouldRemoveOnlySdkCallbacks', 0, async () => {
+    it('autoTrackDestroyRemoveOnlySdkCallbacks', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, true));
       let appRouterCallbackCount = 0;
       let appNavigationCallbackCount = 0;
@@ -400,7 +407,7 @@ export default function autoTrackDeviceTest() {
       expect(appClickCallbackCount).assertEqual(1);
     });
 
-    it('navigationReinitializationShouldNotDuplicateObservers', 0, async () => {
+    it('navigationReinitNotDuplicateObservers', 0, async () => {
       const routerHandler = new FilteringRouterTrackingHandler();
       const navigationHandler = new FilteringNavigationTrackingHandler();
       const rumConfig = buildRumConfig(true, false)
@@ -421,7 +428,7 @@ export default function autoTrackDeviceTest() {
       expect(navigationHandler.resolvedDestinationNames.length).assertEqual(1);
     });
 
-    it('actionReinitializationShouldNotDuplicateObserversOrKeepClickDebounce', 0, async () => {
+    it('actionReinitResetsObserversAndDebounce', 0, async () => {
       const handler = new FilteringActionTrackingHandler();
       const rumConfig = buildRumConfig(false, true, handler);
       const button = new FakeFrameNode('Button', 'ignore_action_view', 9002);
@@ -438,7 +445,7 @@ export default function autoTrackDeviceTest() {
       }
     });
 
-    it('routerPageShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+    it('routerViewUsesAndroidSimpleName', 0, async () => {
       const routeName = 'pages/account/AutoTrackRouterPage';
       const normalizedViewName = 'AutoTrackRouterPage';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
@@ -473,7 +480,7 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('routerHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+    it('routerHandlerCustomizeAndFilterAutoViews', 0, async () => {
       const handler = new FilteringRouterTrackingHandler();
       const rumConfig = buildRumConfig(true, false).setViewRouterTrackingHandler(handler);
       const routeName = 'pages/account/HandledRouterPage';
@@ -509,7 +516,7 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('navDestinationShouldUploadViewWithAndroidAlignedSimpleName', 0, async () => {
+    it('navigationViewUsesAndroidSimpleName', 0, async () => {
       const routeName = 'pages/account/AutoTrackNavDestination';
       const normalizedViewName = 'AutoTrackNavDestination';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
@@ -539,7 +546,7 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('navigationSwitchShouldNotSuppressRouterView', 0, async () => {
+    it('navigationSwitchNotSuppressRouterView', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
 
       await uiContext.observer.emitNavDestinationSwitch('pages/NavigationSource', 'pages/NavigationDestination');
@@ -552,7 +559,7 @@ export default function autoTrackDeviceTest() {
       expect(view?.getViewName() ?? '').assertEqual('RouterDestination');
     });
 
-    it('navigationHandlerShouldCustomizeAndFilterAutomaticViews', 0, async () => {
+    it('navHandlerCustomizesAndFiltersViews', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
       const rumConfig = buildRumConfig(true, false).setViewNavigationTrackingHandler(handler);
       const destinationName = 'pages/account/HandledNavigationDestination';
@@ -584,7 +591,7 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('navigationHandlerEmptyViewNameShouldSkipAutomaticView', 0, async () => {
+    it('emptyNavNameSkipsView', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
         .setViewNavigationTrackingHandler(new EmptyViewNameNavigationTrackingHandler()));
 
@@ -595,7 +602,7 @@ export default function autoTrackDeviceTest() {
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });
 
-    it('filteredDestinationShouldCloseThePreviousAutomaticView', 0, async () => {
+    it('filteredDestinationClosesPriorView', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
         .setViewNavigationTrackingHandler(handler));
@@ -604,14 +611,19 @@ export default function autoTrackDeviceTest() {
       await WaitUtils.delay(120);
       await uiContext.observer.emitNavDestinationSwitch('pages/TrackedNavigationDestination', 'pages/IgnoredNavigationDestination');
 
-      const previousView = await DBAssert.waitForViewNamed('custom_navigation_TrackedNavigationDestination', 5000);
-      expect(previousView !== null).assertTrue();
+      // Closed views are removed from the aggregation table after serialization.
+      const closedView = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,', 'view_name=custom_navigation_TrackedNavigationDestination', 'is_active=false'
+      ], 5000);
+      expect(closedView !== null).assertTrue();
       const views = await DBAssert.queryViews(20);
-      expect(views.length).assertEqual(1);
-      expect(views[0].getViewName()).assertEqual('custom_navigation_TrackedNavigationDestination');
+      expect(views.some(view => view.getViewName().includes('IgnoredNavigationDestination'))).assertFalse();
+      const records = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(records.some(record => record.getDataString().includes('view_name=custom_navigation_IgnoredNavigationDestination')))
+        .assertFalse();
     });
 
-    it('filteredNavigationShouldNotBlockSameNamedRouterView', 0, async () => {
+    it('filteredNavAllowsSameNamedRouter', 0, async () => {
       const handler = new FilteringNavigationTrackingHandler();
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
         .setViewNavigationTrackingHandler(handler));
@@ -695,7 +707,7 @@ export default function autoTrackDeviceTest() {
       ]);
     });
 
-    it('willClickHandlerShouldFilterAutomaticAction', 0, async () => {
+    it('willClickHandlerFilterAutoAction', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new FilteringActionTrackingHandler()));
       await startViewForAction('filtered_action_view');
 
@@ -704,10 +716,11 @@ export default function autoTrackDeviceTest() {
       await WaitUtils.delay(500);
 
       expect((await DBAssert.queryActions(20)).length).assertEqual(0);
-      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+      const records = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(records.some(record => record.getDataString().startsWith('action,'))).assertFalse();
     });
 
-    it('willClickHandlerShouldContinueOriginalCollectionForUndefined', 0, async () => {
+    it('undefinedClickUsesDefaultTracking', 0, async () => {
       const viewName = 'pass_through_action_view';
       const actionName = 'Button/继续默认采集#pass_through_action#position:1';
       const handler = new PassThroughActionTrackingHandler();

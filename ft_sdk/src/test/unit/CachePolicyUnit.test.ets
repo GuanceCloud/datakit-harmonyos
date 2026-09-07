@@ -157,7 +157,7 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.getDiscardStrategy(DataType.RUM_WEBVIEW)).assertEqual(RUMCacheDiscard.DISCARD_OLDEST);
     });
 
-    it('fastDiscardAdmissionShouldSkipOnlyDiscardAndKeepDiscardOldestWritable', 0, () => {
+    it('fastDiscardPreservesDiscardOldestWrites', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       cachePolicy.setTestLimits(2, 2);
       cachePolicy.optLogCount(2);
@@ -172,7 +172,7 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.isCacheDiscardingAtLimit(DataType.RUM_WEBVIEW)).assertFalse();
     });
 
-    it('dbCachePolicyShouldKeepLegacyDiscardSeparate', 0, () => {
+    it('dbCachePolicyKeepLegacyDiscardSeparate', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .enableLimitWithDbSize(Constants.DB_OLD_CACHE_REMOVE_COUNT)
@@ -228,7 +228,7 @@ export default function cachePolicyUnitTest() {
       expect(cachePolicy.shouldDiscardData(DataType.RUM_APP)).assertFalse();
     });
 
-    it('countPolicyShouldRecoverExistingDbCountsBeforeFirstWrite', 0, async () => {
+    it('countPolicyRestoresCountsBeforeWrite', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
       runtime.dbTaskPool.logTotalCount = 5;
       runtime.dbTaskPool.rumTotalCount = 4;
@@ -249,7 +249,7 @@ export default function cachePolicyUnitTest() {
       expect(runtime.dbTaskPool.queryTotalCountCallCount).assertEqual(2);
     });
 
-    it('dbSizePolicyShouldSkipCountInitialization', 0, async () => {
+    it('dbSizePolicySkipCountInitialization', 0, async () => {
       const runtime = new FakeCachePolicyRuntime();
       runtime.dbTaskPool.logTotalCount = 100;
       runtime.dbTaskPool.rumTotalCount = 100;

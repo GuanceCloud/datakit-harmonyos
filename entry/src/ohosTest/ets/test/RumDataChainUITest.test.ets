@@ -27,7 +27,7 @@ export default function rumDataChainUITest() {
       await UiTestUtils.pressBack(driver);
     });
 
-    it('manualLongTaskShouldCreateRumLongTaskRecord', 0, async () => {
+    it('manualLongTaskCreateRumLongTaskRecord', 0, async () => {
       await UiTestUtils.clickId(driver, 'rum-basic-add-long-task');
 
       const record = await EntryDBAssert.waitForRecentSyncRecordContainingAny(

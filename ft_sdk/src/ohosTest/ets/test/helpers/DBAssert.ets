@@ -1,13 +1,11 @@
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { Context } from '@kit.AbilityKit';
-import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '../../../../main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '../../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncData } from '../../../../main/ets/components/db/bean/SyncData';
 import { ViewBean } from '../../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../../main/ets/components/db/bean/ActionBean';
 import { DataType } from '../../../../main/ets/components/enum/Enums';
-import { DataBaseCallBack } from '../../../../main/ets/components/db/base/DataBaseCallBack';
-import * as FTSQL from '../../../../main/ets/components/db/FTSQL';
 import { WaitUtils } from './WaitUtils';
 
 export class DBAssert {
@@ -96,62 +94,42 @@ export class DBAssert {
   }
 
   static async querySyncData(types: DataType[], limit: number = 100): Promise<SyncData[]> {
-    const dbManager = await DBAssert.getManager();
-    return await dbManager.queryFtOperation(types, limit);
+    return await FTDBTaskPoolExecutor.querySyncData(
+      await DBAssert.getAppContext(), types.map((type: DataType) => type.toString()), limit);
   }
 
   static async queryRawSyncData(typeValue: string, limit: number = 100): Promise<SyncData[]> {
-    const dbManager = await DBAssert.getManager();
-
-    class RawTypeQueryCallback implements DataBaseCallBack {
-      public records: SyncData[] = [];
-      private readonly rawType: string;
-      private readonly maxLimit: number;
-
-      constructor(rawType: string, maxLimit: number) {
-        this.rawType = rawType;
-        this.maxLimit = maxLimit;
-      }
-
-      async run(rdbStore: relationalStore.RdbStore): Promise<void> {
-        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
-        predicates.equalTo(FTSQL.RECORD_COLUMN_DATA_TYPE, this.rawType);
-        predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
-        if (this.maxLimit > 0) {
-          predicates.limitAs(this.maxLimit);
-        }
-
-        const resultSet = await rdbStore.query(predicates);
-        try {
-          while (resultSet.goToNextRow()) {
-            const id = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_ID));
-            const uuid = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA_UUID));
-            const data = resultSet.getString(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_DATA));
-            const timestamp = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RECORD_COLUMN_TM));
-            if (uuid && data) {
-              const syncData = new SyncData(DataType.RUM_APP);
-              syncData.setId(id);
-              syncData.setUuid(uuid);
-              syncData.setDataString(data);
-              syncData.setTime(timestamp);
-              syncData.setCustomDataTypeString(this.rawType);
-              this.records.push(syncData);
-            }
-          }
-        } finally {
-          resultSet.close();
-        }
-      }
-    }
-
-    const callback = new RawTypeQueryCallback(typeValue, limit);
-    await dbManager.executeWithDB(false, callback);
-    return callback.records;
+    return await FTDBTaskPoolExecutor.querySyncData(await DBAssert.getAppContext(), [typeValue], limit);
   }
 
   static async querySyncCount(types: DataType[]): Promise<number> {
+    return await DBAssert.queryRawSyncCount(types.map((type: DataType) => type.toString()));
+  }
+
+  static async queryRawSyncCount(types: string[]): Promise<number> {
+    return await FTDBTaskPoolExecutor.queryTotalCount(await DBAssert.getAppContext(), types);
+  }
+
+  static async insertSyncData(records: SyncData[], reInsert: boolean = false): Promise<boolean> {
     const dbManager = await DBAssert.getManager();
-    return await dbManager.queryTotalCount(types);
+    const result = await dbManager.writeSyncDataAtomically('device-test-fixture', records, {
+      applyCachePolicy: false,
+      reInsert,
+      forceTransaction: true
+    });
+    if (!result.success) {
+      throw new Error(`Device test fixture write failed: ${result.errorMessage}`);
+    }
+    return result.success;
+  }
+
+  static async deleteSyncData(records: SyncData[]): Promise<number> {
+    return await FTDBTaskPoolExecutor.deleteSyncRows(await DBAssert.getAppContext(), records);
+  }
+
+  static async deleteOldestSyncData(types: DataType[], limit: number): Promise<number> {
+    return await FTDBTaskPoolExecutor.deleteOldestSyncData(
+      await DBAssert.getAppContext(), types.map((type: DataType) => type.toString()), limit);
   }
 
   static async queryViews(limit: number = 50): Promise<ViewBean[]> {
@@ -182,7 +160,23 @@ export class DBAssert {
       }
       return false;
     }, timeoutMs);
-    return found ? matched : null;
+    if (!found) {
+      const records = await DBAssert.querySyncData([type], 100);
+      let closestLine = '';
+      let matchedCount = -1;
+      for (const record of records) {
+        const line = record.getDataString();
+        const count = fragments.filter(fragment => line.includes(fragment)).length;
+        if (count > matchedCount) {
+          closestLine = line;
+          matchedCount = count;
+        }
+      }
+      const missing = fragments.filter(fragment => !closestLine.includes(fragment));
+      throw new Error(`Missing line fragments: ${JSON.stringify(missing)}; expected: ${JSON.stringify(fragments)}; ` +
+        `queried rows: ${records.length}; closest line (first 12000 characters): ${closestLine.substring(0, 12000)}`);
+    }
+    return matched;
   }
 
   static async waitForRawSyncRecordContaining(typeValue: string, fragments: string[], timeoutMs: number = 5000): Promise<SyncData | null> {

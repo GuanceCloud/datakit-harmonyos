@@ -6,10 +6,9 @@ import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType, SyncPageSize } from '../../../main/ets/components/enum/Enums';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
 import { NetCodeStatus } from '../../../main/ets/components/http/HttpEngine';
-import { DefaultSyncTaskManagerRuntime } from '../../../main/ets/components/internal/runtime/SyncTaskManagerRuntime';
 import { SyncInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SyncInternalTestAccess';
 import { WaitUtils } from './helpers/WaitUtils';
-import { MockCollector } from './helpers/MockCollector';
+import { MockCollector, MockUploadRuntime, runTestCleanup } from './helpers/MockCollector';
 import { DBAssert } from './helpers/DBAssert';
 import {
   SDKUploadExecutePageDTO,
@@ -27,7 +26,7 @@ const TEST_HOST = 'http://127.0.0.1:1';
 const TEST_NOW_NS = 1700000000000;
 const BACKOFF_SLEEP_TEST_DELAY_MS = 300;
 
-class DeviceUploadRuntime extends DefaultSyncTaskManagerRuntime {
+class DeviceUploadRuntime extends MockUploadRuntime {
   public backoffSleeps: number[] = [];
   public injectedDbFailures: number = 0;
   public injectedWorkerFailureCommand: string = '';
@@ -88,7 +87,7 @@ class DeviceUploadRuntime extends DefaultSyncTaskManagerRuntime {
   }
 
   takeInjectedUploadHttpResult(): SDKUploadHttpResultDTO | undefined {
-    return this.injectedHttpResults.length > 0 ? this.injectedHttpResults.shift() : undefined;
+    return this.injectedHttpResults.length > 0 ? this.injectedHttpResults.shift() : super.takeInjectedUploadHttpResult();
   }
 
   consumeUploadDbCommitFailure(): string {
@@ -265,11 +264,11 @@ async function uploadSingleAndMeasureBackoff(
   await WaitUtils.delay(BACKOFF_SLEEP_TEST_DELAY_MS + 50);
   const payload = await collector.waitForPayloadContaining([label], 500);
   if (code >= 500) {
-    const reinserted = await WaitUtils.waitUntil(async () => {
-      const records = await dbManager.queryFtOperation([dataType], 10);
-      return records.length > 0 && records[0].getUuid() !== originalUuid;
-    }, 3000, 20);
-    expect(reinserted).assertTrue();
+    // A failed upload retains the persisted package and row identity for retry.
+    const records = await DBAssert.querySyncData([dataType], 10);
+    expect(records.length).assertEqual(1);
+    expect(records[0].getUuid()).assertEqual(originalUuid);
+    expect(records[0].getDataString()).assertEqual(payload);
   }
   await dbManager.resetDatabase();
   const idle = await waitForUploadIdle(syncTaskManager, idleTimeoutMs);
@@ -306,16 +305,18 @@ export default function syncUploadChainDeviceTest() {
       syncTaskManager.init(config, context);
       syncTaskManager.resume();
       collector = new MockCollector(200, '');
-      collector.start();
+      collector.start(runtime);
       await WaitUtils.delay(120);
     });
 
     afterEach(async () => {
-      collector.stop();
-      syncTaskManager.stop();
-      await dbManager.delete();
-      SyncInternalTestAccess.resetRuntime();
-      SyncTaskManager.resetStateInternal();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        () => { syncTaskManager.stop(); },
+        async () => { await dbManager.delete(); },
+        () => { SyncInternalTestAccess.resetRuntime(); },
+        () => { SyncTaskManager.resetStateInternal(); }
+      ]);
     });
 
     it('successfulUploadShouldDeleteRows', 0, async () => {
@@ -324,13 +325,13 @@ export default function syncUploadChainDeviceTest() {
 
       syncTaskManager.executePoll(false);
       const consumed = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 4000);
       const payload = await collector.waitForPayloadContaining(['success-delete'], 1000);
 
       expect(consumed).assertTrue();
       expect(payload.length > 0).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
     it('batchUploadShouldDeleteAllPages', 0, async () => {
@@ -338,19 +339,19 @@ export default function syncUploadChainDeviceTest() {
       for (let i = 0; i < 7; i++) {
         records.push(createLogSyncData(`batch-${i}`, TEST_NOW_NS + i));
       }
-      await dbManager.insertFtOptList(records);
+      await DBAssert.insertSyncData(records);
       collector.setResponse(200, '');
 
       syncTaskManager.executePoll(false);
       const consumed = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 5000);
       const payloads = collector.getRequests().map(request => request.bodyString).join('\n');
 
       expect(consumed).assertTrue();
       expect(payloads.includes('batch-0')).assertTrue();
       expect(payloads.includes('batch-6')).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
     it('failedUploadShouldRecover', 0, async () => {
@@ -366,7 +367,7 @@ export default function syncUploadChainDeviceTest() {
       syncTaskManager.stop();
       await WaitUtils.delay(BACKOFF_SLEEP_TEST_DELAY_MS + 50);
       const preservedAfterFailure = await WaitUtils.waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 1;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 1;
       }, 3000, 20);
 
       collector.setResponse(200, '');
@@ -374,7 +375,7 @@ export default function syncUploadChainDeviceTest() {
       syncTaskManager.resume();
       syncTaskManager.executePoll(false);
       const recovered = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 4000);
       const recoveredPayload = await collector.waitForPayloadContaining(['retry-preserve'], 1000);
 
@@ -383,10 +384,10 @@ export default function syncUploadChainDeviceTest() {
       expect(preservedAfterFailure).assertTrue();
       expect(recoveredPayload.length > 0).assertTrue();
       expect(recovered).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('softTimeoutShouldKeepRowsUntilRetrySucceeds', 0, async () => {
+    it('softTimeoutKeepRowsUntilRetrySucceeds', 0, async () => {
       syncTaskManager.init(
         FTSDKConfig.builder(TEST_HOST)
           .setAutoSync(false)
@@ -401,25 +402,27 @@ export default function syncUploadChainDeviceTest() {
 
       syncTaskManager.executePoll(false);
       const timeoutHandled = await waitForUploadIdle(syncTaskManager, 5000);
-      const retainedRows = await dbManager.queryFtOperation([DataType.LOG], 10);
+      const retainedRows = await DBAssert.querySyncData([DataType.LOG], 10);
 
       expect(timeoutHandled).assertTrue();
       expect(retainedRows.length).assertEqual(1);
       expect(retainedRows[0].getDataString().includes('soft-timeout-preserve')).assertTrue();
-      expect(retainedRows[0].getUuid() !== originalUuid).assertTrue();
+      expect(retainedRows[0].getUuid()).assertEqual(originalUuid);
+      expect(collector.getRequests().length).assertEqual(1);
+      expect(collector.getRequests()[0].bodyString).assertEqual(retainedRows[0].getDataString());
       expect(syncTaskManager.getStatus().errorCount).assertEqual(1);
 
       collector.setResponse(200, '');
       syncTaskManager.executePoll(false);
       const recovered = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 5000);
 
       expect(recovered).assertTrue();
       expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
     });
 
-    it('ignoredClientBackoffShouldCapAtEightSecondsAndStayIsolatedByDataType', 0, async () => {
+    it('clientBackoffCapsAtEightSecondsPerType', 0, async () => {
       const backoffs: number[] = [];
 
       for (let i = 0; i < 6; i++) {
@@ -436,7 +439,7 @@ export default function syncUploadChainDeviceTest() {
           4000
         );
         backoffs.push(backoff);
-        expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(0);
+        expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
       }
 
       expect(backoffs[0]).assertEqual(500);
@@ -459,7 +462,7 @@ export default function syncUploadChainDeviceTest() {
       );
 
       expect(webViewBackoff).assertEqual(500);
-      expect(await dbManager.queryTotalCount([DataType.RUM_WEBVIEW])).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_WEBVIEW])).assertEqual(0);
     });
 
     it('retryBackoffShouldStayIsolatedByDataType', 0, async () => {
@@ -516,20 +519,20 @@ export default function syncUploadChainDeviceTest() {
       expect(webViewBackoff).assertEqual(500);
     });
 
-    it('uploadPollShouldRespectTypeOrderAndPageBudget', 0, async () => {
+    it('uploadPollRespectTypeOrderAndPageBudget', 0, async () => {
       const records: SyncData[] = [];
       const pageSize = SyncPageSize.MINI;
       appendSyncDataBatch(records, DataType.RUM_APP, 'rum-app-budget', pageSize * 3, TEST_NOW_NS + 1000);
       appendSyncDataBatch(records, DataType.RUM_WEBVIEW, 'rum-web-budget', pageSize * 2, TEST_NOW_NS + 2000);
       appendSyncDataBatch(records, DataType.LOG, 'log-budget', pageSize * 2, TEST_NOW_NS + 3000);
-      await dbManager.insertFtOptList(records);
+      await DBAssert.insertSyncData(records);
       collector.setResponse(200, '');
       collector.clearRequests();
 
       syncTaskManager.executePoll(false);
-      expect(await dbManager.queryTotalCount([DataType.RUM_APP])).assertEqual(pageSize * 3);
-      expect(await dbManager.queryTotalCount([DataType.RUM_WEBVIEW])).assertEqual(pageSize * 2);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(pageSize * 2);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(pageSize * 3);
+      expect(await DBAssert.querySyncCount([DataType.RUM_WEBVIEW])).assertEqual(pageSize * 2);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(pageSize * 2);
 
       const capturedFirstPoll = await waitForRequestCountAndStop(collector, syncTaskManager, 4, 8000);
       expect(capturedFirstPoll).assertTrue();
@@ -546,12 +549,12 @@ export default function syncUploadChainDeviceTest() {
       expect(countBodyLines(requests[2].bodyString)).assertEqual(pageSize);
       expect(countBodyLines(requests[3].bodyString)).assertEqual(pageSize);
 
-      expect(await dbManager.queryTotalCount([DataType.RUM_APP])).assertEqual(pageSize);
-      expect(await dbManager.queryTotalCount([DataType.RUM_WEBVIEW])).assertEqual(pageSize);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(pageSize);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(pageSize);
+      expect(await DBAssert.querySyncCount([DataType.RUM_WEBVIEW])).assertEqual(pageSize);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(pageSize);
     });
 
-    it('injectedHttpAndDbFailuresShouldPreserveRowsForManualRecovery', 0, async () => {
+    it('httpAndDbFailuresKeepRowsForRecovery', 0, async () => {
       syncTaskManager.init(
         FTSDKConfig.builder(TEST_HOST)
           .setAutoSync(false)
@@ -566,14 +569,15 @@ export default function syncUploadChainDeviceTest() {
       syncTaskManager.executePoll(false);
       const httpFailureIdle = await waitForUploadIdle(syncTaskManager, 5000);
       expect(httpFailureIdle).assertTrue();
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
-      expect(collector.getRequests().length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
+      expect(collector.getRequests().length).assertEqual(1);
+      expect(collector.getRequests()[0].bodyString.includes('injected-http-row')).assertTrue();
       expect(syncTaskManager.getStatus().errorCount).assertEqual(1);
 
       collector.setResponse(200, '');
       syncTaskManager.executePoll(false);
       const httpRecovered = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 5000);
       expect(httpRecovered).assertTrue();
       expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
@@ -588,13 +592,13 @@ export default function syncUploadChainDeviceTest() {
       expect(dbFaultConsumed).assertTrue();
       syncTaskManager.stop();
       await WaitUtils.delay(BACKOFF_SLEEP_TEST_DELAY_MS + 50);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
 
       syncTaskManager.resume();
       collector.clearRequests();
       syncTaskManager.executePoll(false);
       const dbRecovered = await waitUntil(async () => {
-        return await dbManager.queryTotalCount([DataType.LOG]) === 0;
+        return await DBAssert.querySyncCount([DataType.LOG]) === 0;
       }, 5000);
       expect(dbRecovered).assertTrue();
       expect(await waitForUploadIdle(syncTaskManager, 5000)).assertTrue();
@@ -609,11 +613,11 @@ export default function syncUploadChainDeviceTest() {
       expect(workerFaultConsumed).assertTrue();
       syncTaskManager.stop();
       await WaitUtils.delay(100);
-      expect(await dbManager.queryTotalCount([DataType.LOG])).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
       expect(collector.getRequests().length).assertEqual(0);
     });
 
-    it('largeUploadPageShouldKeepMainLoopDelayBoundedAndBodyCapped', 0, async () => {
+    it('largeUploadBoundsBodyAndMainLoopDelay', 0, async () => {
       syncTaskManager.init(
         FTSDKConfig.builder(TEST_HOST)
           .setAutoSync(false)
@@ -626,7 +630,7 @@ export default function syncUploadChainDeviceTest() {
       for (let i = 0; i < DATA_UPLOAD_MAX_PAGE_SIZE + 100; i++) {
         records.push(createLogSyncData(`main-loop-${i}-${largeMessage}`, TEST_NOW_NS + 5000 + i));
       }
-      await dbManager.insertFtOptList(records);
+      await DBAssert.insertSyncData(records);
       collector.setResponse(200, '');
       collector.clearRequests();
 

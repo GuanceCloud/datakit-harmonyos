@@ -1,4 +1,5 @@
-import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
+import { UiTestUtils } from './helpers/UiTestUtils';
+import { describe, beforeAll, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
@@ -51,7 +52,18 @@ class SchemaProbeCallback implements DataBaseCallBack {
 }
 
 export default function dbTest() {
+  // CRUD cases reset the schema and delete arbitrary rows: never run them when
+  // the caller is retaining a previous process's upload evidence.
+  if (!UiTestUtils.shouldClearData(true) || !UiTestUtils.shouldClearData(false)) {
+    console.info('EntrySDKDBTest skipped: database CRUD requires both cleanup switches and entryKeepData=false');
+    return;
+  }
   describe('EntrySDKDBTest', () => {
+    beforeAll(async () => {
+      const driver = await UiTestUtils.createDriver();
+      await UiTestUtils.launchEntryAbility(driver);
+    });
+
     let context: Context;
     let dbManager: FTDBManager;
 

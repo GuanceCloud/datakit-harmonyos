@@ -32,7 +32,8 @@ import {
 import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandler';
 import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManager';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
+import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 import {
@@ -501,10 +502,12 @@ export default function resourceAutoTrackDeviceTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      FTSDK.shutDown();
-      await DBAssert.cleanupAll();
-      await SdkTestLifecycle.resetRuntimeState();
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        () => { FTSDK.shutDown(); },
+        async () => { await DBAssert.cleanupAll(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); }
+      ]);
     });
 
     it('httpBridgeShouldUploadAndDelete', 0, async () => {
@@ -530,7 +533,7 @@ export default function resourceAutoTrackDeviceTest() {
       expect(FTSDKExtensionBridge.completeHttpResponse(response)).assertTrue();
 
       const fragments = [
-        'resource',
+        'resource,',
         `resource_url=${resourceUrl}`,
         'resource_method=GET',
         'resource_status=200',
@@ -541,10 +544,15 @@ export default function resourceAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 200 };
+      RumAttributeAssert.record(record, attributes);
       await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
     });
 
-    it('rumMailboxFailureAndWorkerRestartShouldKeepResourceAndCounterState', 0, async () => {
+    it('mailboxRestartKeepsResourceCounters', 0, async () => {
       const viewName = 'resource_mailbox_restart_view';
       const resourceUrl = 'http://device.test/resource-mailbox-restart';
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -676,7 +684,7 @@ export default function resourceAutoTrackDeviceTest() {
       expect(FTSDKExtensionBridge.completeHttpError(response)).assertTrue();
 
       const resourceFragments = [
-        'resource',
+        'resource,',
         `resource_url=${resourceUrl}`,
         'resource_method=GET',
         `view_name=${viewName}`,
@@ -684,7 +692,7 @@ export default function resourceAutoTrackDeviceTest() {
         `span_id=${traceIds[1]}`
       ];
       const errorFragments = [
-        'error',
+        'error,',
         'error_type=network',
         'error_source=network',
         `resource_url=${resourceUrl}`,
@@ -699,6 +707,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
       expect(errorRecord !== null).assertTrue();
 
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 0 };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID,
+        viewName, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
+
       collector.clearRequests();
       FTSDK.flushSyncData();
 
@@ -706,6 +721,8 @@ export default function resourceAutoTrackDeviceTest() {
         await collector.waitForPayloadContaining(resourceFragments, 5000);
       const errorUploaded =
         await collector.waitForPayloadContaining(errorFragments, 5000);
+      RumAttributeAssert.uploaded(resourceUploaded, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorUploaded, errorRecord, errorAttributes);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =
@@ -744,7 +761,7 @@ export default function resourceAutoTrackDeviceTest() {
       expect(FTSDKExtensionBridge.completeHttpError(response)).assertTrue();
 
       const resourceFragments = [
-        'resource',
+        'resource,',
         `resource_url=${resourceUrl}`,
         'resource_method=GET',
         `view_name=${viewName}`,
@@ -752,7 +769,7 @@ export default function resourceAutoTrackDeviceTest() {
         `span_id=${traceIds[1]}`
       ];
       const errorFragments = [
-        'error',
+        'error,',
         'error_type=network',
         'error_source=network',
         `resource_url=${resourceUrl}`,
@@ -766,6 +783,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect(resourceRecord !== null).assertTrue();
       expect(errorRecord !== null).assertTrue();
 
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 0 };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID,
+        viewName, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
+
       collector.clearRequests();
       FTSDK.flushSyncData();
 
@@ -773,6 +797,8 @@ export default function resourceAutoTrackDeviceTest() {
         await collector.waitForPayloadContaining(resourceFragments, 5000);
       const errorUploaded =
         await collector.waitForPayloadContaining(errorFragments, 5000);
+      RumAttributeAssert.uploaded(resourceUploaded, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorUploaded, errorRecord, errorAttributes);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =
@@ -1037,7 +1063,7 @@ export default function resourceAutoTrackDeviceTest() {
       target.responseManager.fulfilled!(response);
 
       const fragments = [
-        'resource',
+        'resource,',
         `resource_url=${resourceUrl}`,
         'resource_method=POST',
         'resource_status=201',
@@ -1048,7 +1074,12 @@ export default function resourceAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 201 };
+      RumAttributeAssert.record(record, attributes);
       await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
+      const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
     });
 
     it('axiosRejectShouldWriteResourceError', 0, async () => {
@@ -1079,7 +1110,7 @@ export default function resourceAutoTrackDeviceTest() {
       expect(rejected).assertTrue();
 
       const resourceFragments = [
-        'resource',
+        'resource,',
         `resource_url=${resourceUrl}`,
         'resource_method=GET',
         `view_name=${viewName}`,
@@ -1087,7 +1118,7 @@ export default function resourceAutoTrackDeviceTest() {
         `span_id=${traceIds[1]}`
       ];
       const errorFragments = [
-        'error',
+        'error,',
         'error_type=network',
         'error_source=network',
         `resource_url=${resourceUrl}`,
@@ -1101,6 +1132,13 @@ export default function resourceAutoTrackDeviceTest() {
       expect(resourceRecord !== null).assertTrue();
       expect(errorRecord !== null).assertTrue();
 
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 0 };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID,
+        viewName, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
+
       collector.clearRequests();
       FTSDK.flushSyncData();
 
@@ -1108,6 +1146,8 @@ export default function resourceAutoTrackDeviceTest() {
         await collector.waitForPayloadContaining(resourceFragments, 5000);
       const errorUploaded =
         await collector.waitForPayloadContaining(errorFragments, 5000);
+      RumAttributeAssert.uploaded(resourceUploaded, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorUploaded, errorRecord, errorAttributes);
       const resourceConsumed =
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
       const errorConsumed =

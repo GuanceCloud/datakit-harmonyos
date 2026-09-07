@@ -1,161 +1,239 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Driver } from '@ohos.UiTest';
-import { AppState, ErrorType, FTRUMGlobalManager, FTSDK } from '@guancecloud/ft_sdk/Index';
-import {
-  FTSDKExtensionBridge,
-  FTSDKExtensionPreparedRequest
-} from '@guancecloud/ft_sdk/src/main/ets/components/integration/FTSDKExtensionBridge';
+import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
+import { SyncDataHelper } from '@guancecloud/ft_sdk/src/main/ets/components/SyncDataHelper';
+import { DefaultSyncTaskManagerRuntime } from '@guancecloud/ft_sdk/src/main/ets/components/internal/runtime/SyncTaskManagerRuntime';
+import { SyncInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/SyncInternalTestAccess';
+import {
+  SDKUploadExecutePageResultDTO, SDKWorkerCommand, SDKWorkerRequest, SDKWorkerResponse
+} from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
+import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { RumAttributeExpectation } from '@guancecloud/ft_sdk/src/ohosTest/ets/test/helpers/RumAttributeAssert';
+import { KEY_RESOURCE_TEST_URL } from '../../../main/ets/entryability/EntryAbility';
 import { EntryDBAssert } from './helpers/EntryDBAssert';
+import { EntryRumUploadAssert, RumUploadRecord } from './helpers/EntryRumUploadAssert';
 import { EntryWaitUtils } from './helpers/EntryWaitUtils';
 import { UiTestUtils } from './helpers/UiTestUtils';
 
-/**
- * This suite is intentionally opt-in. It runs on a real device and verifies
- * the complete client path: RUM API/HTTP bridge -> worker -> DB -> upload
- * worker -> the actual DataKit/Dataway URL supplied in the launch parameters.
- * It deliberately does not inspect server-side ingestion, request headers, or
- * post-upload DB deletion; those are deployment-level checks rather than RUM
- * line-protocol regression coverage.
- */
-export default function rumUploadE2EUITest() {
-  if (!UiTestUtils.isUploadE2EEnabled()) {
-    return;
+interface ResourceUploadCase {
+  source: string;
+  buttonId: string;
+  method: string;
+}
+
+const RESOURCE_CASES: ResourceUploadCase[] = [
+  { source: 'rcp', buttonId: 'test-get-btn', method: 'GET' },
+  // API 22 HttpRequestContext exposes url/header/body, but no method.
+  { source: 'network-http', buttonId: 'test-http-get-btn', method: 'UNKNOWN' },
+  { source: 'axios-compat', buttonId: 'test-axios-compat-get-btn', method: 'GET' },
+  { source: 'axios-chain', buttonId: 'test-axios-chain-get-btn', method: 'GET' }
+];
+
+/** Observe complete bodies of real successful requests; never inject HTTP results. */
+class UploadObserver extends DefaultSyncTaskManagerRuntime {
+  readonly statusCodes: number[] = [];
+  private readonly bodies: string[] = [];
+
+  async executeUploadWorkerCommand(request: SDKWorkerRequest): Promise<SDKWorkerResponse> {
+    const response = await super.executeUploadWorkerCommand(request);
+    if (request.command === SDKWorkerCommand.UPLOAD_EXECUTE_PAGE && response.ok && response.payload) {
+      const result = response.payload as Object as SDKUploadExecutePageResultDTO;
+      if (result.shouldUpload) {
+        this.statusCodes.push(result.httpResult.code);
+        if (result.successfulResponse && result.httpResult.code >= 200 && result.httpResult.code < 300) {
+          this.bodies.push(result.bodyPreview);
+        }
+      }
+    }
+    return response;
   }
+
+  getPayload(): string {
+    return this.bodies.join('\n');
+  }
+}
+
+/** Real UI -> SDK -> Worker/DB -> launch endpoint, with complete uploaded event contracts. */
+export default function rumUploadE2EUITest() {
+  if (!UiTestUtils.isUploadE2EEnabled()) return;
 
   describe('RumUploadE2EUITest', () => {
     let driver: Driver;
+    let originalResourceUrl: string = '';
 
     beforeEach(async () => {
       driver = await UiTestUtils.createDriver();
       await UiTestUtils.launchEntryAbility(driver);
+      originalResourceUrl = AppStorage.get<string>(KEY_RESOURCE_TEST_URL) ?? '';
       await EntryDBAssert.resetAll();
-
-      const syncTaskManager = SyncTaskManager.getInstance();
-      syncTaskManager.setAutoSync(false);
     });
 
-    afterEach(async () => {
-      await EntryDBAssert.cleanupAll();
+    afterEach(() => {
+      SyncInternalTestAccess.resetRuntime();
+      FTSDK.appendRUMGlobalContextKeyValue('ft_e2e_run', '');
+      AppStorage.set(KEY_RESOURCE_TEST_URL, originalResourceUrl);
+      // Do not clear pending records on failure.
     });
 
-    it('shouldUploadViewActionAxiosBridgeResourceLongTaskAndError', 0, async () => {
-      const runId = `rum_upload_e2e_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-      const viewName = `e2e_upload_view_${runId}`;
-      const actionName = `e2e_upload_action_${runId}`;
-      const resourceUrl = `https://resource.e2e.invalid/${runId}`;
-      const longTaskMarker = `e2e_upload_long_task_${runId}`;
-      const errorMarker = `e2e_upload_error_${runId}`;
-      const rum = FTRUMGlobalManager.getInstance();
+    // Use a 150-second case timeout for UI navigation, four requests and the 60-second upload wait.
+    it('uploadsAllRumEventTypes', 0, async () => {
+      const runId = beginRun('success');
+      const batch: RumUploadRecord[] = [];
 
-      await rum.startView(viewName);
-      rum.addAction(actionName, 'click');
+      await UiTestUtils.clickText(driver, 'RUM Unified Test');
+      await UiTestUtils.clickId(driver, 'rum-basic-add-long-task');
+      await UiTestUtils.clickId(driver, 'rum-basic-add-error');
+      await UiTestUtils.ensureHome(driver);
+      batch.push(await capture(runId, 'long_task', ['Basic long task test'], 'RUMDataTestPage'));
+      batch.push(await capture(runId, 'error', ['error_type=custom', 'Basic error message'], 'RUMDataTestPage',
+        ['error_stack']));
+      expect(batch[0].point.fields.get('duration')).assertEqual(2000000000);
+      expect(batch[0].point.fields.get('long_task_stack')).assertEqual('Basic long task test');
+      expect(batch[1].point.fields.get('error_message')).assertEqual('Basic error message');
+      expect(batch[1].point.tags.get('error_source')).assertEqual('logger');
+      expect(batch[1].point.tags.get('error_situation')).assertEqual('run');
 
-      // The extension bridge is the completion path used by Axios Compat.
-      // It must set both the content and NetState before stopResource; if the
-      // old setNetState regression returns, the following resource never
-      // reaches sync_data_flat and therefore cannot enter the upload worker.
-      const requestHeaders: Record<string, Object> = {};
-      const prepared: FTSDKExtensionPreparedRequest = FTSDKExtensionBridge.prepareHttpRequest(
-        {
-          url: resourceUrl,
-          method: 'GET',
-          headers: requestHeaders
-        },
-        {
-          enableTraceInterceptor: false,
-          enableResourceInterceptor: true
-        }
-      );
-      await EntryWaitUtils.delay(20);
-      const responseHeaders: Record<string, Object> = {};
-      responseHeaders['content-type'] = 'application/json' as Object;
-      responseHeaders['content-length'] = '11' as Object;
-      const completed = FTSDKExtensionBridge.completeHttpResponse({
-        url: resourceUrl,
-        method: 'GET',
-        uniqueId: prepared.uniqueId,
-        requestHeaders: prepared.headers,
-        responseHeaders: responseHeaders,
-        statusCode: 200,
-        body: '{"ok":true}'
-      });
-      expect(completed).assertTrue();
+      await UiTestUtils.clickText(driver, 'Button Click Auto-Tracking Test');
+      await UiTestUtils.clickText(driver, 'Test Button 1 - Basic Click');
+      batch.push(await capture(runId, 'action', ['test-button-1'], 'ButtonClickTestPage'));
+      await UiTestUtils.ensureHome(driver);
 
-      rum.addLongTask(longTaskMarker, 1_000_000_000);
-      rum.addError(`stack: ${errorMarker}`, errorMarker, ErrorType.CUSTOM, AppState.RUN);
-      await rum.stopView();
+      await collectResources(driver, runId, batch, 200);
+      await includeParents(runId, batch);
+      expect(batch.length).assertEqual(16);
+      await uploadAndAssert(runId, batch, 0);
+    });
 
-      const queued = await EntryWaitUtils.waitUntil(async () => {
-        const records = await EntryDBAssert.querySyncRecords([DataType.RUM_APP], 100, true);
-        return RumUploadE2EUITest.hasEveryLineWithFragments(records.map((record) => record.getDataString()), [
-          ['view,', `view_name=${viewName}`, 'session_id='],
-          ['action,', `action_name=${actionName}`, 'action_type=click', `view_name=${viewName}`],
-          ['resource,', `resource_url=${resourceUrl}`, 'resource_method=GET', 'resource_status=200', 'duration='],
-          ['long_task,', longTaskMarker, 'duration='],
-          ['error,', 'error_type=custom', 'error_stack=', errorMarker]
-        ]);
-      }, 12000, 200);
-      if (!queued) {
-        throw new Error(
-          `Expected every RUM chain to reach sync_data_flat before upload.\n${await EntryDBAssert.dumpSyncRecords(100)}`
-        );
-      }
+    it('uploadsHttpFailureResourcesAndLinkedErrors', 0, async () => {
+      const runId = beginRun('http_failure');
+      const batch: RumUploadRecord[] = [];
+      // The override only changes the real GET target used by existing Demo buttons.
+      AppStorage.set(KEY_RESOURCE_TEST_URL, UiTestUtils.getResourceErrorUrl());
+      await collectResources(driver, runId, batch, 500);
+      await includeParents(runId, batch);
+      expect(batch.length).assertEqual(13);
+      await uploadAndAssert(runId, batch, 4);
+    });
 
-      // This is intentionally the real endpoint configured by entryDatakitUrl
-      // or entryDatawayUrl/clientToken in the test launch parameters.
-      const uploadSequenceBeforeFlush = SyncTaskManager.getInstance().getStatus().lastUploadResult.sequence;
-      FTSDK.flushSyncData();
-      const uploadCompleted = await EntryWaitUtils.waitUntil(async () => {
-        const status = SyncTaskManager.getInstance().getStatus();
-        const lane = status.uploadLaneStatus;
-        const active = status.running || lane.isRunning || lane.isScheduled;
-        const result = status.lastUploadResult;
-        return result.sequence > uploadSequenceBeforeFlush && !active && !lane.needReschedule &&
-          result.httpAttemptCount > 0 && result.failedHttpResponseCount === 0 &&
-          result.successfulHttpResponseCount === result.httpAttemptCount &&
-          result.lastHttpStatusCode >= 200 && result.lastHttpStatusCode < 300;
-      }, 30000, 50);
-      if (!uploadCompleted) {
-        const status = SyncTaskManager.getInstance().getStatus();
-        throw new Error(
-          `Upload did not complete successfully against the launch endpoint: ` +
-          `errorCount=${status.errorCount}, httpAttempts=${status.lastUploadResult.httpAttemptCount}, ` +
-          `httpSuccess=${status.lastUploadResult.successfulHttpResponseCount}, ` +
-          `httpFailure=${status.lastUploadResult.failedHttpResponseCount}, ` +
-          `lastHttpCode=${status.lastUploadResult.lastHttpStatusCode}, ` +
-          `running=${status.running}, scheduled=${status.uploadLaneStatus.isScheduled}, ` +
-          `retry=${status.uploadLaneStatus.needReschedule}`
-        );
-      }
+    it('uploadsConnectionFailureResourcesAndLinkedErrors', 0, async () => {
+      const runId = beginRun('connection_failure');
+      const batch: RumUploadRecord[] = [];
+      // No listener: exercise actual transport rejection, independently of DNS or Internet access.
+      AppStorage.set(KEY_RESOURCE_TEST_URL, 'http://127.0.0.1:1/resource');
+      await collectResources(driver, runId, batch, 0);
+      await includeParents(runId, batch);
+      expect(batch.length).assertEqual(13);
+      await uploadAndAssert(runId, batch, 4);
     });
   });
 }
 
-class RumUploadE2EUITest {
-  static hasEveryLineWithFragments(lines: string[], expectedLines: string[][]): boolean {
-    for (let expectedIndex = 0; expectedIndex < expectedLines.length; expectedIndex++) {
-      const expectedFragments = expectedLines[expectedIndex];
-      let found = false;
-      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-        let includesEveryFragment = true;
-        for (let fragmentIndex = 0; fragmentIndex < expectedFragments.length; fragmentIndex++) {
-          if (!lines[lineIndex].includes(expectedFragments[fragmentIndex])) {
-            includesEveryFragment = false;
-            break;
-          }
-        }
-        if (includesEveryFragment) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        return false;
+function beginRun(scenario: string): string {
+  const runId = `rum_upload_e2e_${scenario}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+  FTSDK.appendRUMGlobalContextKeyValue('ft_e2e_run', runId);
+  return runId;
+}
+
+async function collectResources(driver: Driver, runId: string, batch: RumUploadRecord[], status: number): Promise<void> {
+  await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
+  for (const transport of RESOURCE_CASES) {
+    await UiTestUtils.clickId(driver, transport.buttonId);
+    const source = SyncDataHelper.translateTagKeyValue(`ft_source=${transport.source}`);
+    const fields = status > 0 ? ['request_header', 'response_header'] : ['request_header'];
+    const resource = await capture(runId, 'resource', [source], 'HttpAutoTrackTestPage', fields, status);
+    expect(resource.point.tags.get('resource_method')).assertEqual(transport.method);
+    expect(resource.point.tags.get('resource_type')).assertEqual('network');
+    expect(resource.point.tags.has('trace_id')).assertTrue();
+    expect(resource.point.tags.has('span_id')).assertTrue();
+    if (status === 0) {
+      expect(resource.point.tags.has('resource_status')).assertFalse();
+      expect(resource.point.tags.has('resource_status_group')).assertFalse();
+    }
+    batch.push(resource);
+    if (status !== 200) {
+      const resourceId = EntryRumUploadAssert.tag(resource.point, 'resource_id');
+      const error = await capture(runId, 'error', [source, `resource_id=${resourceId}`, 'error_source=network'],
+        'HttpAutoTrackTestPage', status === 0 ? ['error_stack'] : []);
+      expect(error.point.tags.get('resource_status')).assertEqual(String(status));
+      batch.push(error);
+    }
+  }
+  await UiTestUtils.ensureHome(driver);
+}
+
+async function capture(runId: string, measurement: string, fragments: string[], viewName: string,
+  fields: string[] = [], resourceStatus?: number): Promise<RumUploadRecord> {
+  const record = await waitForRunRecord(runId, measurement, fragments);
+  const tags = ['ft_e2e_run', 'custom_key'];
+  if (measurement !== 'view') tags.push('action_id', 'action_name');
+  if (measurement === 'resource') tags.push('trace_id', 'span_id');
+  const expected: RumAttributeExpectation = { measurement, viewName, resourceStatus,
+    appId: FTSDK.getRumConfig()!.getRumAppId(), requiredTags: tags, requiredFields: fields };
+  return EntryRumUploadAssert.capture(record, expected);
+}
+
+async function includeParents(runId: string, batch: RumUploadRecord[]): Promise<void> {
+  const children = batch.slice();
+  for (const child of children) {
+    const viewId = EntryRumUploadAssert.tag(child.point, 'view_id');
+    const viewName = EntryRumUploadAssert.tag(child.point, 'view_name');
+    if (!batch.some((entry) => entry.point.measurement === 'view' && entry.point.tags.get('view_id') === viewId)) {
+      batch.push(await capture(runId, 'view', [`view_id=${viewId}`, 'is_active=false'], viewName));
+    }
+    const actionId = EntryRumUploadAssert.tag(child.point, 'action_id');
+    if (!batch.some((entry) => entry.point.measurement === 'action' && entry.point.tags.get('action_id') === actionId)) {
+      batch.push(await capture(runId, 'action', [`action_id=${actionId}`], viewName));
+    }
+  }
+}
+
+async function uploadAndAssert(runId: string, batch: RumUploadRecord[], networkErrors: number): Promise<void> {
+  EntryRumUploadAssert.relationships(batch.map((entry) => entry.point), runId, networkErrors);
+  const uuids = batch.map((entry) => entry.record.getUuid());
+  expect(new Set<string>(uuids).size).assertEqual(batch.length);
+  expect(await EntryDBAssert.countSyncRecordsWithUuids(uuids)).assertEqual(batch.length);
+  const manager = SyncTaskManager.getInstance();
+  expect(manager.getStatus().autoSync).assertFalse();
+  const observer = new UploadObserver();
+  SyncInternalTestAccess.setRuntime(observer);
+  FTSDK.flushSyncData();
+  const uploaded = await EntryWaitUtils.waitUntil(async () => {
+    const status = manager.getStatus();
+    const lane = status.uploadLaneStatus;
+    return observer.getPayload().length > 0 && !status.running && !lane.isRunning && !lane.isScheduled &&
+      !lane.needReschedule && await EntryDBAssert.countSyncRecordsWithUuids(uuids) === 0;
+  }, 60000, 250);
+  if (!uploaded) {
+    const remaining = await EntryDBAssert.countSyncRecordsWithUuids(uuids);
+    throw new Error(`RUM upload completion not confirmed within 60s: runId=${runId}, pending=${remaining}/${batch.length}, ` +
+      `httpStatusCodes=${observer.statusCodes.join(',') || 'awaiting worker result'}, ` +
+      `uploadLane=${JSON.stringify(manager.getStatus().uploadLaneStatus)}. ` +
+      'An in-flight request may still finish after this test times out.');
+  }
+  // Every selected event must occur exactly once in successful HTTP bodies, with
+  // all original tags/fields/timestamp intact (apart from the allowed UUID package prefix).
+  EntryRumUploadAssert.uploaded(observer.getPayload(), batch, runId, networkErrors);
+  console.info(`RUM upload attributes/associations passed: runId=${runId}, events=${batch.length}, networkErrors=${networkErrors}`);
+}
+
+async function waitForRunRecord(runId: string, measurement: string, fragments: string[]): Promise<SyncData> {
+  let matched: SyncData | null = null;
+  const found = await EntryWaitUtils.waitUntil(async () => {
+    const records = await EntryDBAssert.querySyncRecords([DataType.RUM_APP], 1000, true);
+    for (const record of records) {
+      const line = record.getDataString();
+      if (line.startsWith(`${measurement},`) && line.includes(`ft_e2e_run=${runId}`) &&
+        fragments.every((fragment) => line.includes(fragment))) {
+        matched = record;
+        return true;
       }
     }
-    return true;
+    return false;
+  }, 12000, 150);
+  if (!found || matched === null) {
+    throw new Error(`Missing ${measurement} for runId=${runId}, expected=${fragments.join(', ')}`);
   }
-
+  return matched;
 }

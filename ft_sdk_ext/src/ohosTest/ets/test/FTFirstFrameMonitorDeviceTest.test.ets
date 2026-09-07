@@ -44,7 +44,7 @@ class FirstFrameTestWindowStage {
 
 export default function ftFirstFrameMonitorDeviceTest() {
   describe('FTFirstFrameMonitorDeviceTest', () => {
-    it('shouldObserveOnlyFirstDrawFrameAndRemoveListener', 0, () => {
+    it('firstFrameRemovesListener', 0, () => {
       const windowStage = new FirstFrameTestWindowStage();
 
       const registered = observeFTAppFirstFrame(windowStage as Object as window.WindowStage);

@@ -9,7 +9,8 @@ import { UserData } from '../../../main/ets/components/rum/bean/UserData';
 import { FTRUMConfigManager } from '../../../main/ets/components/rum/FTRUMConfigManager';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
@@ -65,11 +66,13 @@ export default function userDataManagerPersistenceTest() {
     });
 
     afterEach(async () => {
-      collector.stop();
-      FTSDK.unbindRumUserData();
-      await SdkTestLifecycle.resetRuntimeState();
-      await DBAssert.cleanupAll();
-      await clearUserDataPreferences(context);
+      await runTestCleanup([
+        async () => { await collector.stop(); },
+        () => { FTSDK.unbindRumUserData(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await DBAssert.cleanupAll(); },
+        async () => { await clearUserDataPreferences(context); }
+      ]);
     });
 
     it('bindUserShouldPersistFields', 0, async () => {
@@ -108,6 +111,8 @@ export default function userDataManagerPersistenceTest() {
       ], 8000);
 
       expect(record !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'action', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(record, attributes);
 
       FTSDK.flushSyncData();
 
@@ -121,6 +126,7 @@ export default function userDataManagerPersistenceTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
       expect(consumed).assertTrue();
     });
 
@@ -149,6 +155,7 @@ export default function userDataManagerPersistenceTest() {
 
       collector.clearRequests();
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
       const restored = await WaitUtils.waitUntil(async () => {
@@ -222,6 +229,8 @@ export default function userDataManagerPersistenceTest() {
       const line = record?.getDataString() ?? '';
 
       expect(record !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'action', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(record, attributes);
       expect(line.includes('unbind-user-id')).assertFalse();
       expect(line.includes('unbind-user-name')).assertFalse();
       expect(line.includes('unbind@example.com')).assertFalse();
@@ -238,6 +247,7 @@ export default function userDataManagerPersistenceTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
       expect(uploaded.includes('unbind-user-id')).assertFalse();
       expect(uploaded.includes('unbind-user-name')).assertFalse();
       expect(uploaded.includes('unbind@example.com')).assertFalse();

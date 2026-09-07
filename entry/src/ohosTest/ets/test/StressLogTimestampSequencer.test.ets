@@ -3,7 +3,7 @@ import { StressLogTimestampSequencer } from '../../../main/ets/utils/StressLogTi
 
 export default function stressLogTimestampSequencerTest() {
   describe('StressLogTimestampSequencerTest', () => {
-    it('shouldKeepLargeSameTickBatchStrictlyOrdered', 0, () => {
+    it('keepLargeSameTickBatchStrictlyOrdered', 0, () => {
       const sequencer = new StressLogTimestampSequencer();
       const fixedNowMs = 1700000000000;
       const firstTimestampMs = sequencer.next(fixedNowMs);
@@ -18,7 +18,7 @@ export default function stressLogTimestampSequencerTest() {
       expect(previousTimestampMs - firstTimestampMs < 3).assertTrue();
     });
 
-    it('shouldRemainOrderedWhenClockDoesNotAdvanceAndResetBetweenRuns', 0, () => {
+    it('frozenClockKeepsOrderAcrossResets', 0, () => {
       const sequencer = new StressLogTimestampSequencer();
       const firstTimestampMs = sequencer.next(1700000001000);
       const secondTimestampMs = sequencer.next(1700000000000);

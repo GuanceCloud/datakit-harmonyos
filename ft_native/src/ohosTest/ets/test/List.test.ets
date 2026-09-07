@@ -31,7 +31,7 @@ export default function testsuite() {
       nativeModule().setMaxLogSize(500);
     });
 
-    it('nativeCrashHandlerShouldInitializeRegisterCallbackAndStopSafely', 0, () => {
+    it('nativeCrashHandlerInitCallbackAndStop', 0, () => {
       let callbackObserved = false;
       const module = nativeModule();
 
@@ -49,7 +49,7 @@ export default function testsuite() {
       expect(callbackObserved).assertFalse();
     });
 
-    it('nativeCrashLogBufferShouldCollectLimitAndClearLogs', 0, () => {
+    it('nativeLogBufferCollectLimitAndClear', 0, () => {
       const module = nativeModule();
 
       expect(module.setMaxLogSize(2)).assertTrue();
@@ -69,7 +69,7 @@ export default function testsuite() {
       expect(module.getCollectedLogs()).assertEqual('');
     });
 
-    it('nativeCrashVersionShouldMatchPublicHarVersion', 0, () => {
+    it('nativeCrashVersionMatchPublicHarVersion', 0, () => {
       const version = nativeModule().getVersion();
 
       expect(version).assertEqual(HAR_VERSION);

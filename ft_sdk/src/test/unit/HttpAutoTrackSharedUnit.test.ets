@@ -73,7 +73,7 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(methodStore.get(`resource-${Constants.MAX_MAP_SIZE_RESOURCE + 1}`)).assertEqual('GET');
     });
 
-    it('testResetShouldClearSharedStoresAndTraceState', 0, () => {
+    it('testResetClearSharedStoresAndTraceState', 0, () => {
       const stateStore = HttpAutoTrackStateStore.getInstance();
       const methodStore = AxiosChainMethodStore.getInstance();
       const resourceId = 'reset-resource';

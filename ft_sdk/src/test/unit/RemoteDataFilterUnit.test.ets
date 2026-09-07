@@ -8,6 +8,20 @@ import {
   RemoteDataFilterScheduler
 } from '../../main/ets/components/remote/RemoteDataFilterTypes';
 
+interface RemoteDataFilterTestRules {
+  logging?: string[];
+  rum?: string[];
+}
+
+interface RemoteDataFilterTestPayload {
+  filters: RemoteDataFilterTestRules;
+  pull_interval: string | number;
+}
+
+function stringifyRemoteDataFilter(payload: RemoteDataFilterTestPayload): string {
+  return JSON.stringify(payload);
+}
+
 class FakeRemoteDataFilterHttpClient implements RemoteDataFilterHttpClient {
   public calls: number = 0;
   public response: RemoteDataFilterHttpResponse;
@@ -39,10 +53,10 @@ class FakeRemoteDataFilterScheduler implements RemoteDataFilterScheduler {
 
 export default function remoteDataFilterUnitTest() {
   describe('RemoteDataFilterUnit', () => {
-    it('shouldApplyLoggingAndRumRulesAtTheServerInterval', 0, async () => {
+    it('serverIntervalAppliesLogAndRumRules', 0, async () => {
       const client = new FakeRemoteDataFilterHttpClient({
         code: 200,
-        body: JSON.stringify({
+        body: stringifyRemoteDataFilter({
           filters: {
             logging: ["{ message match ['password'] }"],
             rum: ["{ source = 'resource' }"]
@@ -72,10 +86,10 @@ export default function remoteDataFilterUnitTest() {
       expect(scheduler.cancelled.length).assertEqual(1);
     });
 
-    it('shouldFallbackToTenSecondsForInvalidPayloadOrInterval', 0, async () => {
+    it('invalidFilterConfigUsesTenSeconds', 0, async () => {
       const client = new FakeRemoteDataFilterHttpClient({
         code: 200,
-        body: JSON.stringify({ filters: { logging: [] }, pull_interval: 'bad-value' })
+        body: stringifyRemoteDataFilter({ filters: { logging: [] }, pull_interval: 'bad-value' })
       });
       const scheduler = new FakeRemoteDataFilterScheduler();
       const manager = new FTRemoteDataFilterManager(
@@ -95,10 +109,10 @@ export default function remoteDataFilterUnitTest() {
       manager.close();
     });
 
-    it('shouldKeepPullingAtTheServerIntervalAndSkipUnchangedPayloads', 0, async () => {
+    it('filterPollsOnScheduleAndSkipsUnchanged', 0, async () => {
       const client = new FakeRemoteDataFilterHttpClient({
         code: 200,
-        body: JSON.stringify({
+        body: stringifyRemoteDataFilter({
           filters: { logging: ["{ message = 'blocked' }"] },
           pull_interval: '45s'
         })
@@ -131,10 +145,10 @@ export default function remoteDataFilterUnitTest() {
       manager.close();
     });
 
-    it('shouldClearOldRulesBeforeRefreshingAfterEndpointSwitch', 0, async () => {
+    it('endpointSwitchClearsOldRules', 0, async () => {
       const client = new FakeRemoteDataFilterHttpClient({
         code: 200,
-        body: JSON.stringify({
+        body: stringifyRemoteDataFilter({
           filters: { logging: ["{ message in ['old'] }"] },
           pull_interval: 30
         })
@@ -152,7 +166,7 @@ export default function remoteDataFilterUnitTest() {
 
       client.response = {
         code: 200,
-        body: JSON.stringify({
+        body: stringifyRemoteDataFilter({
           filters: { rum: ["{ source in ['resource'] }"] },
           pull_interval: '2m'
         })

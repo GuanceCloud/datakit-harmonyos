@@ -24,7 +24,8 @@ import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandle
 import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManager';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
 import { DBAssert } from './helpers/DBAssert';
-import { MockCollector } from './helpers/MockCollector';
+import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
+import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
 
@@ -90,6 +91,10 @@ function buildActionProperty(key: string, value: string): Record<string, object>
   return property;
 }
 
+function wrapActionProperty(value: string): ActionPropertyValue {
+  return { value };
+}
+
 function assertContainsAll(value: string, fragments: string[]): void {
   for (const fragment of fragments) {
     expect(value.includes(fragment)).assertTrue();
@@ -131,11 +136,14 @@ async function assertActionRecordUploaded(
   const actionRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, actionIdentityFragments, 5000);
   expect(actionRecord !== null).assertTrue();
   assertContainsAll(actionRecord?.getDataString() ?? '', actionIdentityFragments.concat(fragments));
+  const expected: RumAttributeExpectation = { measurement: 'action', appId: TEST_FAKE_RUM_ID };
+  RumAttributeAssert.record(actionRecord, expected);
 
   collector.clearRequests();
   const uploadIdentityFragments = ['action,', actionRecord?.getUuid() ?? ''];
 
   const uploaded = await flushAndWaitForPayload(collector, uploadIdentityFragments);
+  RumAttributeAssert.uploaded(uploaded, actionRecord, expected);
   const consumed =
     await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, actionRecord?.getUuid() ?? '', 5000);
 
@@ -149,11 +157,14 @@ async function assertRumRecordUploaded(
 ): Promise<void> {
   const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 8000);
   expect(record !== null).assertTrue();
+  const expected: RumAttributeExpectation = { measurement: fragments[0].replace(',', ''), appId: TEST_FAKE_RUM_ID };
+  RumAttributeAssert.record(record, expected);
 
   collector.clearRequests();
   const identityFragments = [fragments[0], record?.getUuid() ?? ''];
 
   const uploaded = await flushAndWaitForPayload(collector, identityFragments);
+  RumAttributeAssert.uploaded(uploaded, record, expected);
   const consumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
 
   expect(uploaded.length > 0).assertTrue();
@@ -227,11 +238,13 @@ export default function dataSyncTest() {
     });
 
     afterEach(async () => {
-      console.info('DataSyncTest', 'afterEach called');
-      collector.stop();
-      await SdkTestLifecycle.resetRuntimeState();
-      await DBAssert.cleanupAll();
-      await clearSyncErrorTimeline(context);
+      await runTestCleanup([
+        () => { console.info('DataSyncTest', 'afterEach called'); },
+        async () => { await collector.stop(); },
+        async () => { await SdkTestLifecycle.resetRuntimeState(); },
+        async () => { await DBAssert.cleanupAll(); },
+        async () => { await clearSyncErrorTimeline(context); }
+      ]);
     });
 
     afterAll(() => {
@@ -287,6 +300,8 @@ export default function dataSyncTest() {
         `view_name=${viewName}`
       ], 5000);
       expect(viewRecord !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'view', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(viewRecord, attributes);
 
       FTSDK.flushSyncData();
 
@@ -298,10 +313,11 @@ export default function dataSyncTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, viewRecord?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, viewRecord, attributes);
       expect(consumed).assertTrue();
     });
 
-    it('rumViewPropertiesShouldKeepOriginalFieldNames', 0, async () => {
+    it('rumViewPropertiesKeepOriginalFieldNames', 0, async () => {
       const viewName = 'view_property_field_name';
       const property = buildActionProperty('custom_view_property', 'from-start-view');
 
@@ -365,7 +381,7 @@ export default function dataSyncTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('ignoredClientErrorUploadShouldDropRowsAndAllowLaterSuccess', 0, async () => {
+    it('clientErrorDropsRowsAndAllowsRecovery', 0, async () => {
       collector.setResponse(403, 'forbidden');
       await assertLogRecordDroppedAfterUpload(collector, 'real_ignored_403_drop_log');
 
@@ -378,7 +394,7 @@ export default function dataSyncTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('uploadShouldSendRumBeforeLogWhenBothExist', 0, async () => {
+    it('uploadSendRumBeforeLogWhenBothExist', 0, async () => {
       const viewName = 'real_order_rum_first_view';
       const logContent = 'real_order_log_after_rum';
 
@@ -401,13 +417,12 @@ export default function dataSyncTest() {
       const rumUploaded = await collector.waitForPayloadContaining([`view_name=${viewName}`], 5000);
       const logUploaded = await collector.waitForPayloadContaining([logContent], 5000);
       const requests = collector.getRequests()
-        .filter(request => request.url.includes('/v1/write/rum') || request.url.includes('/v1/write/logging'));
+        .filter(request => request.httpConfig.model === 'v1/write/rum' || request.httpConfig.model === 'v1/write/logging');
 
       expect(rumUploaded.length > 0).assertTrue();
       expect(logUploaded.length > 0).assertTrue();
       expect(requests.length >= 2).assertTrue();
-      expect(requests[0].url.includes('/v1/write/rum')).assertTrue();
-      expect(requests[0].url.includes('/v1/write/logging')).assertFalse();
+      expect(requests[0].httpConfig.model).assertEqual('v1/write/rum');
       expect(await DBAssert.waitForSyncCount([DataType.RUM_APP, DataType.LOG], 0, 5000)).assertTrue();
     });
 
@@ -417,6 +432,8 @@ export default function dataSyncTest() {
 
       const actionRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, ['action', 'sync_action'], 5000);
       expect(actionRecord !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'action', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(actionRecord, attributes);
 
       FTSDK.flushSyncData();
 
@@ -426,6 +443,7 @@ export default function dataSyncTest() {
       await WaitUtils.delay(200);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, actionRecord, attributes);
       expect(consumed).assertTrue();
     });
 
@@ -567,6 +585,8 @@ export default function dataSyncTest() {
         'DataSyncTest'
       ], 5000);
       expect(errorRecord !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(errorRecord, attributes);
 
       FTSDK.flushSyncData();
 
@@ -580,6 +600,7 @@ export default function dataSyncTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, errorRecord?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, errorRecord, attributes);
       expect(consumed).assertTrue();
     });
 
@@ -609,6 +630,8 @@ export default function dataSyncTest() {
       ];
       const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
       expect(errorRecord !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(errorRecord, attributes);
 
       FTSDK.flushSyncData();
 
@@ -617,6 +640,7 @@ export default function dataSyncTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, errorRecord?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, errorRecord, attributes);
       expect(consumed).assertTrue();
     });
 
@@ -716,23 +740,23 @@ export default function dataSyncTest() {
       await assertRumRecordUploaded(collector, fragments);
     });
 
-    it('resourceLifecyclePropertiesShouldMergeInCallOrder', 0, async () => {
+    it('resourcePropertiesMergeInOrder', 0, async () => {
       const viewName = 'resource_lifecycle_property_view';
       const resourceId = 'resource_lifecycle_property';
       const resourceUrl = 'https://example.com/resource-lifecycle-property';
 
       const startProperty = buildActionProperty('resource_start_property', 'from-start');
-      startProperty['resource_shared_property'] = { value: 'from-start' } as object;
+      startProperty['resource_shared_property'] = wrapActionProperty('from-start');
       const stopProperty = buildActionProperty('resource_stop_property', 'from-stop');
-      stopProperty['resource_shared_property'] = { value: 'from-stop' } as object;
+      stopProperty['resource_shared_property'] = wrapActionProperty('from-stop');
 
       const params = new ResourceParams();
       params.setUrl(resourceUrl);
       params.setResourceMethod('GET');
       params.setResourceStatus(200);
       const addProperty = new Map<string, object>();
-      addProperty.set('resource_add_property', { value: 'from-add' } as object);
-      addProperty.set('resource_shared_property', { value: 'from-add' } as object);
+      addProperty.set('resource_add_property', wrapActionProperty('from-add'));
+      addProperty.set('resource_shared_property', wrapActionProperty('from-add'));
       params.setProperty(addProperty);
 
       const netStatus = new NetStatusBean();
@@ -748,10 +772,10 @@ export default function dataSyncTest() {
         'resource',
         `resource_url=${resourceUrl}`,
         `view_name=${viewName}`,
-        'resource_start_property=from-start',
-        'resource_stop_property=from-stop',
-        'resource_add_property=from-add',
-        'resource_shared_property=from-add'
+        'resource_start_property="from-start"',
+        'resource_stop_property="from-stop"',
+        'resource_add_property="from-add"',
+        'resource_shared_property="from-add"'
       ]);
     });
 
@@ -799,6 +823,10 @@ export default function dataSyncTest() {
       expect(resourceRecord !== null).assertTrue();
       expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
       expect(errorRecord !== null).assertTrue();
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID, viewName };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID, viewName, requiredFields: ['error_stack'] };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
       const resourceRumId = getLineProtocolTag(resourceRecord?.getDataString() ?? '', 'resource_id');
       const resourceDataId = getLineProtocolTag(resourceRecord?.getDataString() ?? '', 'sdk_data_id');
       const errorRumId = getLineProtocolTag(errorRecord?.getDataString() ?? '', 'resource_id');
@@ -820,6 +848,8 @@ export default function dataSyncTest() {
 
       expect(resourceUploaded.length > 0).assertTrue();
       expect(errorUploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(resourceUploaded, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorUploaded, errorRecord, errorAttributes);
       expect(resourceConsumed).assertTrue();
       expect(errorConsumed).assertTrue();
     });
@@ -854,6 +884,8 @@ export default function dataSyncTest() {
       const line = record?.getDataString() ?? '';
 
       expect(record !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(record, attributes);
       expect(line.includes('request_header=')).assertFalse();
       expect(line.includes('response_header=')).assertFalse();
       expect(line.includes('resource_size=')).assertFalse();
@@ -865,10 +897,11 @@ export default function dataSyncTest() {
       const consumed = await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
       expect(consumed).assertTrue();
     });
 
-    it('rumLongTaskShouldKeepCallerDescriptionWithoutCapturingSdkStack', 0, async () => {
+    it('longTaskKeepsCallerStackOnly', 0, async () => {
       const longTaskLog = 'real_collected_long_task';
 
       await FTRUMGlobalManager.getInstance().startView('long_task_sync_view');
@@ -880,6 +913,8 @@ export default function dataSyncTest() {
         'duration'
       ], 5000);
       expect(longTaskRecord !== null).assertTrue();
+      const attributes: RumAttributeExpectation = { measurement: 'long_task', appId: TEST_FAKE_RUM_ID };
+      RumAttributeAssert.record(longTaskRecord, attributes);
       const line = longTaskRecord?.getDataString() ?? '';
       expect(line.includes(longTaskLog)).assertTrue();
       expect(line.includes('Stack Trace:')).assertFalse();
@@ -895,12 +930,14 @@ export default function dataSyncTest() {
         await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, longTaskRecord?.getUuid() ?? '', 5000);
 
       expect(uploaded.length > 0).assertTrue();
+      RumAttributeAssert.uploaded(uploaded, longTaskRecord, attributes);
       expect(consumed).assertTrue();
     });
 
     it('configShouldAffectUpload', 0, async () => {
       const logPrefix = 'config_payload_log';
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       await DBAssert.resetAll();
       collector.clearRequests();
 
@@ -909,9 +946,9 @@ export default function dataSyncTest() {
         .setAutoSync(false)
         .setEnv(EnvType.PRE)
         .setSyncPageSize(SyncPageSize.MINI)
+        .setServiceName('config_payload_service')
         .addGlobalContext('config_payload_tag', new String('config_payload_value'));
       const logConfig = buildDefaultLogConfig();
-      logConfig.setServiceName('config_payload_service');
       logConfig.addGlobalContext('log_payload_tag', 'log_payload_value');
       installTestSdk(context, sdkConfig, buildDefaultRumConfig(), logConfig, buildDefaultTraceConfig());
 
@@ -941,14 +978,14 @@ export default function dataSyncTest() {
         'log_payload_tag=log_payload_value'
       ], 5000);
       const consumed = await DBAssert.waitForSyncCount([DataType.LOG], 0, 5000);
-      const logRequests = collector.getRequests().filter(request => request.url.includes('/v1/write/logging'));
+      const logRequests = collector.getRequests().filter(request => request.httpConfig.model === 'v1/write/logging');
 
       expect(uploaded.length > 0).assertTrue();
       expect(consumed).assertTrue();
       expect(logRequests.length >= 2).assertTrue();
-      expect(logRequests[0].url.includes(`token=${TEST_DATAWAY_TOKEN}`)).assertTrue();
-      expect(logRequests[0].url.includes('to_headless=true')).assertTrue();
-      expect(logRequests[0].url.includes('precision=ns')).assertTrue();
+      expect(logRequests[0].httpConfig.clientToken).assertEqual(TEST_DATAWAY_TOKEN);
+      expect(logRequests[0].httpConfig.datawayUrl).assertEqual(TEST_HOST);
+      expect(logRequests[0].httpConfig.datakitUrl).assertEqual('');
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
@@ -957,17 +994,18 @@ export default function dataSyncTest() {
       const appId = 'config_rum_app_id';
       const viewName = 'config_rum_payload_view';
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       await DBAssert.resetAll();
       collector.clearRequests();
 
       const sdkConfig = FTSDKConfig.builder(TEST_HOST)
         .setDebug(true)
         .setAutoSync(false)
-        .setEnv(EnvType.PRE);
+        .setEnv(EnvType.PRE)
+        .setServiceName(serviceName);
       const rumConfig = buildDefaultRumConfig()
         .setRumAppId(appId)
         .addGlobalContext('rum_payload_tag', new String('rum_payload_value'));
-      rumConfig.setServiceName(serviceName);
       installTestSdk(context, sdkConfig, rumConfig, buildDefaultLogConfig(), buildDefaultTraceConfig());
 
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -997,6 +1035,7 @@ export default function dataSyncTest() {
       const viewName = 'rum_global_context_view';
       const actionName = 'rum_global_context_action';
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       await DBAssert.resetAll();
       collector.clearRequests();
 
@@ -1046,9 +1085,10 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
-    it('datakitUploadTargetShouldUseDatakitWriteUrl', 0, async () => {
+    it('datakitUploadTargetUseDatakitWriteUrl', 0, async () => {
       const logContent = 'datakit_target_log';
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       await DBAssert.resetAll();
       collector.clearRequests();
 
@@ -1069,8 +1109,9 @@ export default function dataSyncTest() {
 
       expect(uploaded.length > 0).assertTrue();
       expect(logRequests.length > 0).assertTrue();
-      expect(logRequests[0].url.includes('/v1/write/logging?precision=ns')).assertTrue();
-      expect(logRequests[0].url.includes('token=')).assertFalse();
+      expect(logRequests[0].httpConfig.model).assertEqual('v1/write/logging');
+      expect(logRequests[0].httpConfig.datakitUrl).assertEqual(TEST_HOST);
+      expect(logRequests[0].httpConfig.clientToken).assertEqual('');
       expect(consumed).assertTrue();
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
@@ -1078,6 +1119,7 @@ export default function dataSyncTest() {
     it('autoSyncShouldUploadMiniBatches', 0, async () => {
       const logPrefix = 'auto_page_log';
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       await DBAssert.resetAll();
       collector.clearRequests();
 
@@ -1093,17 +1135,68 @@ export default function dataSyncTest() {
 
       const uploadedAll = await WaitUtils.waitUntil(async () => {
         const logRequests = collector.getRequests()
-          .filter(request => request.url.includes('/v1/write/logging') && request.bodyString.includes(logPrefix));
+          .filter(request => request.httpConfig.model === 'v1/write/logging' && request.bodyString.includes(logPrefix));
         const payloads = logRequests.map(request => request.bodyString).join('\n');
         return logRequests.length >= 2 &&
           payloads.includes(`${logPrefix}_0`) &&
           payloads.includes(`${logPrefix}_5`);
-      }, 7000);
+      }, SyncTaskManager.AUTO_SYNC_DELAY_MS + 5000);
       const consumed = await DBAssert.waitForSyncCount([DataType.LOG], 0, 5000);
 
+      if (!uploadedAll || !consumed) {
+        throw new Error(`Auto upload incomplete: uploaded=${uploadedAll}, consumed=${consumed}, status=${
+          JSON.stringify(SyncTaskManager.getInstance().getStatus())}, requests=${JSON.stringify(collector.getRequests())}`);
+      }
       expect(uploadedAll).assertTrue();
       expect(consumed).assertTrue();
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+    });
+
+    it('resourceUploadKeepAttributesAcrossRetry', 0, async () => {
+      await collector.stop();
+      await SdkTestLifecycle.resetRuntimeState();
+      await DBAssert.resetAll();
+      collector.start();
+      // This case controls the failed attempt and its later retry separately.
+      installTestSdk(context, buildDefaultSdkConfig().setDataSyncRetryCount(0));
+      const resourceId = 'attribute-retry-resource';
+      const params = new ResourceParams();
+      params.setUrl('https://example.com/attribute-retry');
+      params.setResourceMethod('GET');
+      params.setResourceStatus(200);
+      params.setResponseContentLength(128);
+      const net = new NetStatusBean();
+      net.setHoleRequestTime(1000000);
+      await FTRUMGlobalManager.getInstance().startView('attribute_retry_view');
+      FTRUMGlobalManager.getInstance().startResource(resourceId);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
+      FTRUMGlobalManager.getInstance().addResource(resourceId, params, net);
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource,', 'resource_url_path=/attribute-retry'], 5000);
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName: 'attribute_retry_view', resourceStatus: 200, requiredFields: ['resource_size'] };
+      RumAttributeAssert.record(record, attributes);
+
+      collector.setResponse(500, 'planned retry');
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+      const first = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(first, record, attributes);
+      // A failed attempt can schedule a retry. Wait for its DB commit, while
+      // allowing that delayed retry to remain scheduled for the recovery step.
+      expect(await WaitUtils.waitUntil(async () => {
+        return !SyncTaskManager.getInstance().getStatus().uploadLaneStatus.isRunning;
+      }, 5000)).assertTrue();
+      const retained = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource,', record!.getUuid()], 5000);
+      expect(retained !== null).assertTrue();
+
+      collector.setResponse(200, '');
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+      const retried = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(retried, record, attributes);
+      expect(await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, record!.getUuid(), 5000)).assertTrue();
     });
 
     it('failedLogUploadShouldRecover', 0, async () => {
@@ -1138,7 +1231,7 @@ export default function dataSyncTest() {
     it('networkFailureShouldRecoverRows', 0, async () => {
       const logContent = 'real_network_failure_retry_log';
 
-      collector.stop();
+      await collector.stop();
       await SdkTestLifecycle.resetRuntimeState();
       await DBAssert.resetAll();
       installTestSdk(
@@ -1176,7 +1269,7 @@ export default function dataSyncTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('historicalRowsShouldFlushAfterSdkReinstall', 0, async () => {
+    it('historicalRowsFlushAfterSdkReinstall', 0, async () => {
       const logContent = 'restart_flush_log';
 
       FTLogger.logBackground(logContent, Status.ERROR);
@@ -1186,6 +1279,7 @@ export default function dataSyncTest() {
       FTSDK.shutDown();
       collector.clearRequests();
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       installTestSdk(context);
 
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(1);
@@ -1200,7 +1294,7 @@ export default function dataSyncTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('historicalRumRowsShouldFlushAfterSdkReinstall', 0, async () => {
+    it('historicalRumRowsFlushAfterSdkReinstall', 0, async () => {
       const viewName = 'restart_flush_view';
 
       await FTRUMGlobalManager.getInstance().startView(viewName);
@@ -1216,6 +1310,7 @@ export default function dataSyncTest() {
       FTSDK.shutDown();
       collector.clearRequests();
       await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
       installTestSdk(context);
 
       const historical = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [

@@ -28,7 +28,22 @@
       "name": "default"
     },
     {
-      "name": "ohosTest"
+      "name": "ohosTest",
+      "config": {
+        "buildOption": {
+          "sourceOption": {
+            // The standalone test HAP must include ft_sdk's Worker entry points.
+            "workers": [
+              "../ft_sdk/src/main/ets/components/thread/workers/EventConsumerWorker.ets",
+              "../ft_sdk/src/main/ets/components/thread/workers/LogConsumerWorker.ets",
+              "../ft_sdk/src/main/ets/components/thread/workers/DataProcessWorker.ets",
+              "../ft_sdk/src/main/ets/components/thread/workers/CrashWorker.ets",
+              "../ft_sdk/src/main/ets/components/thread/workers/ANRWorker.ets",
+              "../ft_sdk/src/main/ets/components/thread/workers/DataUploadWorker.ets"
+            ]
+          }
+        }
+      }
     }
   ]
 }

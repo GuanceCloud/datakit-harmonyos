@@ -137,7 +137,7 @@ export default function logTest() {
       expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
     });
 
-    it('logLevelFilterShouldDropInfoAndUploadError', 0, async () => {
+    it('logLevelFilterDropInfoAndUploadError', 0, async () => {
       const collector = new MockCollector(200, '');
       collector.start();
       try {
@@ -173,7 +173,7 @@ export default function logTest() {
         expect(payloads.includes('filter_drop_info_log')).assertFalse();
         expect(consumed).assertTrue();
       } finally {
-        collector.stop();
+        await collector.stop();
       }
     });
 
@@ -205,7 +205,7 @@ export default function logTest() {
       expect(records.some(record => record.getDataString().includes('custom_status_type'))).assertTrue();
     });
 
-    it('publicLoggerApisShouldWriteSingleAndBatchLogs', 0, async () => {
+    it('publicLoggerApisWriteSingleAndBatchLogs', 0, async () => {
       FTSDK.installLogConfig(new FTLoggerConfig().setEnableCustomLog(true));
 
       FTLogger.d('public_debug_tag', 'public_debug_message');
@@ -245,7 +245,7 @@ export default function logTest() {
       expect(lines.includes('batch_default_message')).assertTrue();
     });
 
-    it('batchLogTenThousandShouldYieldToMainLoopInBoundedSlices', 0, async () => {
+    it('tenThousandLogsYieldToMainLoop', 0, async () => {
       FTSDK.installLogConfig(new FTLoggerConfig()
         .setEnableCustomLog(true)
         .setSamplingRate(0));

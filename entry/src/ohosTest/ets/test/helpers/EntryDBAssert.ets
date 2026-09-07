@@ -1,3 +1,4 @@
+import { UiTestUtils } from './UiTestUtils';
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { Context } from '@kit.AbilityKit';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
@@ -6,6 +7,8 @@ import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/Sy
 import { ViewBean } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/ActionBean';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { DatabaseHelper } from '@guancecloud/ft_sdk/src/main/ets/components/db/base/DatabaseHelper';
+import { FT_SYNC_DATA_FLAT_TABLE_NAME, RECORD_COLUMN_DATA_UUID } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTSQL';
 import { EntryWaitUtils } from './EntryWaitUtils';
 
 export class EntryDBAssert {
@@ -25,13 +28,34 @@ export class EntryDBAssert {
   }
 
   static async resetAll(): Promise<void> {
-    const dbManager = await EntryDBAssert.getManager();
-    await dbManager.resetDatabase();
+    if (!UiTestUtils.shouldClearData(true)) return;
+    await FTDBTaskPoolExecutor.deleteAll(await EntryDBAssert.getAppContext());
   }
 
   static async cleanupAll(): Promise<void> {
-    const dbManager = await EntryDBAssert.getManager();
-    await dbManager.delete();
+    if (!UiTestUtils.shouldClearData(false)) return;
+    await FTDBTaskPoolExecutor.deleteAll(await EntryDBAssert.getAppContext());
+  }
+
+  /** Query the exact batch even if later events move it outside a paged query. */
+  static async countSyncRecordsWithUuids(uuids: string[]): Promise<number> {
+    if (uuids.length === 0) {
+      throw new Error('Upload verification requires a non-empty batch of UUIDs');
+    }
+    const store = await DatabaseHelper.getInstance(await EntryDBAssert.getAppContext()).initDatabase();
+    const placeholders = uuids.map(() => '?').join(',');
+    const result = await store.querySql(
+      `SELECT COUNT(*) AS count FROM ${FT_SYNC_DATA_FLAT_TABLE_NAME} ` +
+        `WHERE ${RECORD_COLUMN_DATA_UUID} IN (${placeholders})`, uuids
+    );
+    try {
+      if (!result.goToFirstRow()) {
+        throw new Error('Cannot count the pending upload batch');
+      }
+      return result.getLong(result.getColumnIndex('count'));
+    } finally {
+      result.close();
+    }
   }
 
   static async querySyncRecords(types: DataType[], limit: number = 100, newestFirst: boolean = false): Promise<SyncData[]> {
@@ -110,10 +134,7 @@ export class EntryDBAssert {
     let matched: SyncData | null = null;
     const found = await EntryWaitUtils.waitUntil(async () => {
       const records = await EntryDBAssert.querySyncRecords([type], 1000, true);
-      const fallbackRecords = await EntryDBAssert.querySyncRecords([], 1000, true);
-      const candidates = records.concat(fallbackRecords);
-
-      for (const record of candidates) {
+      for (const record of records) {
         const data = record.getDataString();
         const lowerData = data.toLowerCase();
         let containsRequired = true;
@@ -154,10 +175,7 @@ export class EntryDBAssert {
     let matched: SyncData | null = null;
     const found = await EntryWaitUtils.waitUntil(async () => {
       const records = await EntryDBAssert.querySyncRecords([type], 1000, true);
-      const fallbackRecords = await EntryDBAssert.querySyncRecords([], 1000, true);
-      const candidates = records.concat(fallbackRecords);
-
-      for (const record of candidates) {
+      for (const record of records) {
         if (record.getTime() < sinceTime) {
           continue;
         }

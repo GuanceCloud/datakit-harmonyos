@@ -2,6 +2,8 @@ import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry
 import { Context } from '@kit.AbilityKit';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBTaskPoolExecutor';
+import { SDKDedicatedPoolManager } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKDedicatedPoolManager';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { WaitUtils } from './WaitUtils';
 
@@ -44,13 +46,13 @@ export class ExtDBAssert {
   }
 
   static async querySyncData(types: DataType[], limit: number = 100): Promise<SyncData[]> {
-    const dbManager = await ExtDBAssert.getManager();
-    return await dbManager.queryFtOperation(types, limit);
+    return await FTDBTaskPoolExecutor.querySyncData(
+      await ExtDBAssert.getAppContext(), types.map((type: DataType) => type.toString()), limit);
   }
 
   static async querySyncCount(types: DataType[]): Promise<number> {
-    const dbManager = await ExtDBAssert.getManager();
-    return await dbManager.queryTotalCount(types);
+    return await FTDBTaskPoolExecutor.queryTotalCount(
+      await ExtDBAssert.getAppContext(), types.map((type: DataType) => type.toString()));
   }
 
   static async waitForSyncCount(
@@ -108,7 +110,7 @@ export class ExtDBAssert {
     for (const record of records) {
       lines.push(`${record.getUuid()} ${record.getDataString()}`);
     }
-    return lines.join('\n');
+    return `${lines.join('\n')}\nWorker status: ${JSON.stringify(SDKDedicatedPoolManager.getInstance().getStatus())}`;
   }
 
   static containsAll(value: string, fragments: string[]): boolean {

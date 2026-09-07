@@ -38,7 +38,7 @@ function phaseProperty(action: FTAppLaunchAction, key: string): Record<string, n
 
 export default function ftAppLaunchTrackerUnitTest() {
   describe('FTAppLaunchTrackerUnit', () => {
-    it('shouldReportForegroundLaunchWithPhaseFields', 0, () => {
+    it('reportForegroundLaunchWithPhaseFields', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 1_000_000);
@@ -61,7 +61,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(phaseProperty(action, 'app_first_frame_init_time')['duration']).assertEqual(50);
     });
 
-    it('shouldCacheBoundariesUntilRumBecomesReadyAndReportOnlyOnce', 0, () => {
+    it('launchCachesBoundariesAndReportsOnce', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 10, 500);
@@ -80,7 +80,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(tracker.getSnapshot().reported).assertTrue();
     });
 
-    it('shouldNotifyColdLaunchCompletionListenersOnce', 0, () => {
+    it('notifyColdLaunchCompletionListenersOnce', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -102,7 +102,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(completionCount).assertEqual(2);
     });
 
-    it('shouldWaitForFirstUiFrameBeforeReportingBackgroundLaunch', 0, () => {
+    it('backgroundLaunchWaitsForFirstFrame', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -130,7 +130,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(phaseProperty(action, 'app_first_frame_init_time')['duration']).assertEqual(40);
     });
 
-    it('shouldNotifyBackgroundLaunchDetectionWithoutSubmittingAnAction', 0, () => {
+    it('backgroundLaunchNotifiesWithoutAction', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -153,7 +153,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(detectionCount).assertEqual(2);
     });
 
-    it('shouldOmitInvalidPhaseButKeepValidForegroundTotal', 0, () => {
+    it('invalidPhaseKeepsForegroundTotal', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -171,7 +171,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(phaseProperty(action, 'app_first_frame_init_time')['duration']).assertEqual(50);
     });
 
-    it('shouldNotClassifyDelayedForegroundUiAsBackground', 0, () => {
+    it('delayedUiRemainsForeground', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -189,7 +189,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(propertyText(reporter.actions[0], 'app_launch_type')).assertEqual('foreground');
     });
 
-    it('shouldUseOnlyTheFirstUiAbilityAcrossMultipleAbilities', 0, () => {
+    it('launchUsesFirstUiAbilityOnly', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -208,7 +208,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(phaseProperty(reporter.actions[0], 'app_first_frame_init_time')['duration']).assertEqual(60);
     });
 
-    it('shouldPreferForegroundStateDuringFirstRoundRace', 0, () => {
+    it('launchRacePrefersForeground', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -227,7 +227,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(propertyText(reporter.actions[0], 'app_launch_type')).assertEqual('foreground');
     });
 
-    it('shouldWaitForConcreteInitialVisibilityWhenProcessIsStillCreating', 0, () => {
+    it('launchWaitsForInitialVisibility', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);
@@ -251,7 +251,7 @@ export default function ftAppLaunchTrackerUnitTest() {
       expect(propertyText(reporter.actions[0], 'app_launch_type')).assertEqual('background');
     });
 
-    it('shouldNotFabricateForegroundFirstFrameWhenProcessExitsEarly', 0, () => {
+    it('earlyExitOmitsForegroundFirstFrame', 0, () => {
       const clock = new FixedLaunchClock();
       const reporter = new RecordingLaunchReporter();
       const tracker = new FTAppLaunchTracker(clock, reporter, 100, 900);

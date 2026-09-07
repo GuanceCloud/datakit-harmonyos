@@ -10,7 +10,7 @@ function filtersFor(category: string, rules: Array<string>): FTDataFilter {
 
 export default function ftDataFilterUnitTest() {
   describe('FTDataFilterUnit', () => {
-    it('shouldSupportDataKitEqualitySyntaxUsedByRemoteRules', 0, () => {
+    it('filterSupportsDataKitEquality', 0, () => {
       const filter = filtersFor('rum', ["{ source = 'resource' and resource_status = 404 }"]);
       expect(filter.isFilteredLine(
         DataType.RUM_APP,
@@ -21,7 +21,7 @@ export default function ftDataFilterUnitTest() {
         'resource resource_status=200i 1234567890'
       )).assertFalse();
     });
-    it('shouldFilterLoggingAndRumWithSupportedOperators', 0, () => {
+    it('operatorsFilterLogAndRum', 0, () => {
       const loggingFilter = filtersFor('logging', [
         "{ source in ['df_rum_harmonyos_log'] and message match ['.*password.*'] }",
         "{ status not in [200, 201] and enabled not match ['false'] }"
@@ -39,7 +39,7 @@ export default function ftDataFilterUnitTest() {
       expect(rumFilter.isFiltered(DataType.RUM_WEBVIEW, 'resource', rumTags, new Map())).assertTrue();
     });
 
-    it('shouldUseLineProtocolValuesAfterEscapingAndIgnoreInvalidRules', 0, () => {
+    it('filterHandlesEscapesAndInvalidRules', 0, () => {
       const filter = filtersFor('logging', [
         "{ message match ['secret, value'] }",
         '{ message match ["["] }',
@@ -55,7 +55,7 @@ export default function ftDataFilterUnitTest() {
       )).assertFalse();
     });
 
-    it('shouldNotMatchMissingValuesForNegativeOperators', 0, () => {
+    it('negativeOperatorsRejectMissingValues', 0, () => {
       const filter = filtersFor('logging', ["{ missing not in ['value'] }", "{ missing not match ['.*'] }"]);
       expect(filter.isFiltered(DataType.LOG, 'df_rum_harmonyos_log', new Map(), new Map())).assertFalse();
     });

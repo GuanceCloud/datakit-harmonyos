@@ -103,7 +103,7 @@ export default function traceHeaderUnitTest() {
       TestReset.resetP0State();
     });
 
-    it('ddTraceShouldUseNumericIdsAndSamplingPriority', 0, () => {
+    it('ddTraceUseNumericIdsAndSamplingPriority', 0, () => {
       const headers = buildHeaders(TraceType.DDTRACE);
 
       expect(isDecimal(headers[FTTraceHandler.DD_TRACE_TRACE_ID_KEY])).assertTrue();
@@ -275,7 +275,7 @@ export default function traceHeaderUnitTest() {
       expect(manager.hasHandler('resource-1000')).assertTrue();
     });
 
-    it('directTraceContextShouldBypassConfiguredHeaderHandler', 0, () => {
+    it('directTraceContextBypassHeaderHandler', 0, () => {
       const traceHeaderHandler = new FakeTraceHeaderHandler('custom-trace', 'custom-span');
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
         .setTraceType(TraceType.DDTRACE)
@@ -293,7 +293,7 @@ export default function traceHeaderUnitTest() {
       expect(headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY].length > 0).assertTrue();
     });
 
-    it('traceHeaderHandlerShouldProcessDefaultHeaders', 0, () => {
+    it('traceHeaderHandlerProcessDefaultHeaders', 0, () => {
       const traceHeaderHandler = new CustomHeaderHandler();
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
         .setTraceType(TraceType.DDTRACE)
@@ -311,7 +311,7 @@ export default function traceHeaderUnitTest() {
       expect(traceContext!.spanId).assertEqual(headers[FTTraceHandler.DD_TRACE_PARENT_SPAN_ID_KEY]);
     });
 
-    it('traceHeaderHandlerShouldUpdateContextFromProcessedHeaders', 0, () => {
+    it('processedHeadersUpdateTraceContext', 0, () => {
       const traceHeaderHandler = new OverrideW3CHeaderHandler();
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig()
         .setTraceType(TraceType.TRACEPARENT)

@@ -29,6 +29,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { KEY_RESOURCE_TEST_URL, KEY_TRACE_URL } from '../entryability/EntryAbility';
+import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
   preInitChainClient,
@@ -81,6 +82,7 @@ export struct HttpAutoTrackTestPage {
   @State errorCount: number = 0;
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
+  @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
 
   aboutToAppear() {
     this.checkAutoTrackStatus();
@@ -212,7 +214,12 @@ export struct HttpAutoTrackTestPage {
   }
 
   private getResourceTestUrl(source: string, fallback: string): string {
-    return this.resourceTestUrl.trim() || fallback;
+    const url = this.resourceTestUrl.trim() || fallback;
+    if (!this.isUITest) {
+      return url;
+    }
+    const baseUrl = url.split('#')[0];
+    return `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}ft_source=${source}`;
   }
 
   private getAxiosRequestUrl(method: AxiosHttpMethod, mode: AxiosAutoTrackMode): string {
@@ -1039,6 +1046,7 @@ export struct HttpAutoTrackTestPage {
             .customProperty('test-trace-headers-btn', 'Test Trace Headers')
 
           Button('Test HTTP GET Request (API 22+)')
+            .id('test-http-get-btn')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#1976D2')
@@ -1099,6 +1107,7 @@ export struct HttpAutoTrackTestPage {
             .customProperty('test-shared-preinit-chain-btn', 'Use Shared Pre-init Axios (Chain)')
 
           Button('Test Axios GET (Compat)')
+            .id('test-axios-compat-get-btn')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FF9800')
@@ -1113,6 +1122,7 @@ export struct HttpAutoTrackTestPage {
             .customProperty('test-axios-compat-post-btn', 'Test Axios POST (Compat)')
 
           Button('Test Axios GET (Chain)')
+            .id('test-axios-chain-get-btn')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#FB8C00')
