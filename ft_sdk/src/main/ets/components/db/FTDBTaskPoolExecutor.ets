@@ -31,6 +31,7 @@ enum FTDBTaskPoolCommand {
   UPDATE_RUM_VIEW = 'updateRumView',
   CLOSE_RUM_VIEW = 'closeRumView',
   UPDATE_VIEW_UPLOAD_TIME = 'updateViewUploadTime',
+  ACKNOWLEDGE_VIEW = 'acknowledgeView',
   INCREASE_VIEW_ACTION = 'increaseViewAction',
   GET_RUM_PENDING_RESOURCE = 'getRumPendingResource',
   FORCE_CLEAR_RUM_PENDING_RESOURCE = 'forceClearRumPendingResource',
@@ -592,6 +593,14 @@ export class FTDBTaskPoolExecutor {
       command: FTDBTaskPoolCommand.UPDATE_VIEW_UPLOAD_TIME,
       viewId,
       dateTime
+    });
+    return response.value === true;
+  }
+
+  public static async acknowledgeView(context: Context, view: ViewBean): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW,
+      view: view.toJSON()
     });
     return response.value === true;
   }

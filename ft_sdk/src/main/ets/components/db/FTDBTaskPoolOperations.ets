@@ -38,6 +38,7 @@ enum FTDBTaskPoolCommand {
   UPDATE_RUM_VIEW = 'updateRumView',
   CLOSE_RUM_VIEW = 'closeRumView',
   UPDATE_VIEW_UPLOAD_TIME = 'updateViewUploadTime',
+  ACKNOWLEDGE_VIEW = 'acknowledgeView',
   INCREASE_VIEW_ACTION = 'increaseViewAction',
   GET_RUM_PENDING_RESOURCE = 'getRumPendingResource',
   FORCE_CLEAR_RUM_PENDING_RESOURCE = 'forceClearRumPendingResource',
@@ -395,6 +396,8 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
           request.viewId || '',
           request.dateTime || 0
         ));
+      case FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW:
+        return okResponse(undefined, await acknowledgeViewInTaskPool(rdbStore, request.view));
       case FTDBTaskPoolCommand.INCREASE_VIEW_ACTION:
         return okCountResponse(await increaseViewActionInTaskPool(rdbStore, request.viewId || ''));
       case FTDBTaskPoolCommand.GET_RUM_PENDING_RESOURCE:
@@ -1840,6 +1843,45 @@ async function updateViewUploadTimeInTaskPool(
   values[FTSQL.RUM_VIEW_UPDATE_TIME] = currentUpdateTime + 1;
   const updated = await rdbStore.update(values, updatePredicates);
   return updated > 0;
+}
+
+// A delayed completion may describe an open View that has since closed, or a
+// closed View whose resource counters have changed. Only acknowledge its exact
+// snapshot, and delete it in the same transaction after successful persistence.
+async function acknowledgeViewInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  view: ViewBeanJSON | undefined
+): Promise<boolean> {
+  if (!view || view.id.length === 0) return false;
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
+  predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, view.isClose ? 1 : 0);
+  predicates.equalTo(FTSQL.RUM_DATA_UPDATE_TIME, view.dataUpdateTime);
+  predicates.equalTo(FTSQL.RUM_VIEW_UPDATE_TIME, view.viewUpdateTime);
+  predicates.equalTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, view.pendingResource);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ACTION_COUNT, view.actionCount);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ERROR_COUNT, view.errorCount);
+  predicates.equalTo(FTSQL.RUM_COLUMN_RESOURCE_COUNT, view.resourceCount);
+  predicates.equalTo(FTSQL.RUM_COLUMN_LONG_TASK_COUNT, view.longTaskCount);
+  const values = {} as relationalStore.ValuesBucket;
+  // Keep a closed View queryable while unfinished resources can still update
+  // it, including the watchdog's pending-resource clear without a timestamp bump.
+  values[FTSQL.RUM_DATA_UPLOAD_TIME] = view.isClose && view.pendingResource > 0 ? 0 : view.dataUpdateTime;
+  values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
+  rdbStore.beginTransaction();
+  try {
+    const updated = await rdbStore.update(values, predicates);
+    if (updated > 0 && view.isClose && view.pendingResource <= 0) {
+      const closed = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+      closed.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
+      await rdbStore.delete(closed);
+    }
+    rdbStore.commit();
+    return updated > 0;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function increaseViewActionInTaskPool(

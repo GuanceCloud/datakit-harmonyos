@@ -69,7 +69,7 @@ const PROCESS_STATE_ACTIVE = 2;
 const PROCESS_STATE_BACKGROUND = 3;
 
 export class FTSDK {
-  private static ftSdk: FTSDK | null;
+  private static ftSdk: FTSDK | null = null;
   // Native module version is immutable for the process. Cache only successful
   // reads so a transient load failure can still be retried later.
   private static nativeCrashVersion: string | null = null;

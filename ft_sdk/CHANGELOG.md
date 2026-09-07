@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [Unreleased]
+- Fixed a race where persistence of an earlier open View could delete its closed state before the final `is_active=false` event was generated.
+- Restored bounded WebView Action-ID deduplication in the event Worker before database insertion; repeated View events remain collectable.
+- Fixed missing bound-user and network attributes in Worker-generated Actions, Resources and Errors, including resource-derived Network Errors.
+- Fixed SDK state reset and endpoint checks accessing an uninitialized SDK instance before installation.
+- Fixed missing SDK public attributes on Actions, Errors, Resources and their generated Network Errors when a custom `LineDataModifier` is configured. These events now run Host-side data and line modification callbacks before serialization and local filtering.
+
 ## [0.1.17-alpha01] - 2026-09-05
 - Added automatic application `console.*` and `hilog.*` collection through `FTLoggerConfig.setEnableConsoleLog(...)`. Install the Guance Hvigor compiler plugin to enable collection; manual `FTLogger` reporting remains independent, and output before SDK installation is ignored.
 - Changed cold-launch tracking to automatic Hvigor compiler-plugin instrumentation; manual lifecycle timing calls are no longer required.

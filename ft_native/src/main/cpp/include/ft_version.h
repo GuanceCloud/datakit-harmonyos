@@ -1,2 +1,2 @@
 #pragma once
-#define FT_VERSION "0.1.1"
+#define FT_VERSION "0.1.2"

@@ -187,6 +187,8 @@ export interface SDKWorkerResponseCreditDTO {
 }
 
 export interface SDKRumResourceContextDTO {
+  /** User and network attributes captured with the initiating event. */
+  dynamicTags?: SDKStringRecord;
   sessionId: string;
   viewId: string;
   viewName: string;

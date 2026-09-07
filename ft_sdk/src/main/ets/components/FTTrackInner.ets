@@ -77,6 +77,8 @@ interface SDKLineProtocolDraftsResponsePayload {
 
 interface SDKRumCommandResponsePayload {
   syncDrafts?: SDKSyncDataDraftDTO[];
+  /** Semantic RUM events that require Host-only modification callbacks before persistence. */
+  rawEvents?: SDKRumEventDTO[];
   errorTimeLine?: number;
   completedResourceIds?: string[];
   deltas?: SDKRumCounterDeltaDTO[];
@@ -851,7 +853,7 @@ class FTTrackInner {
         needsRumDataGenerate: payload.needsRumDataGenerate
       });
     }
-    const drafts = payload.syncDrafts || [];
+    const drafts = this.prepareRumWorkerResponseDrafts(payload);
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
       if (countersApplied) {
@@ -915,6 +917,38 @@ class FTTrackInner {
         rumManager.acknowledgeRumSemanticThrough(response.id);
       }
     }
+  }
+
+  private prepareRumWorkerResponseDrafts(payload: SDKRumCommandResponsePayload): SDKSyncDataDraftDTO[] {
+    const drafts = (payload.syncDrafts || []).slice();
+    for (const event of payload.rawEvents || []) {
+      const dataType = this.dataTypeFromWorkerString(event.dataType || '', DataType.RUM_APP);
+      const uuid = event.uuid || '';
+      const prepared = this.dataHelper.prepareLineProtocolContent(
+        event.measurement || '',
+        this.stringRecordToMap(event.tags || {}),
+        this.stringRecordToMap(event.fields || {}),
+        event.time,
+        dataType,
+        uuid
+      );
+      // Stay in the original response lane: re-enqueuing a RUM event would
+      // apply counters twice and acknowledge the event before its DB write.
+      drafts.push({
+        dataType: dataType.toString(),
+        customDataType: event.customDataType,
+        uuid,
+        time: prepared.time,
+        dataString: SyncDataHelper.convertToLineProtocolLine(
+          prepared.measurement,
+          this.stringRecordToMap(prepared.tags),
+          this.stringRecordToMap(prepared.fields),
+          prepared.time,
+          prepared.integerCompatible
+        )
+      });
+    }
+    return drafts;
   }
 
   private logEventMailboxFailure(errorMessage: string): void {

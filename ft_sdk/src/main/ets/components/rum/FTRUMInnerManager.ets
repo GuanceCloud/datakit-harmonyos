@@ -1408,15 +1408,14 @@ export class FTRUMInnerManager {
       resourceCount: actionBean.getResourceCount(),
       properties: actionBean.getProperty()
     };
-    this.attachCompletedActionDynamicTagsIfNeeded(payload);
+    this.attachCompletedActionDynamicTags(payload);
     return payload;
   }
 
-  private attachCompletedActionDynamicTagsIfNeeded(payload: SDKRumCompletedActionDTO): void {
+  private attachCompletedActionDynamicTags(payload: SDKRumCompletedActionDTO): void {
     payload.rumAppId = this.getSemanticRumAppId();
-    if (FTTrackInner.getInstance().getWorkerLineProtocolContextSnapshot() === null) {
-      payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
-    }
+    // User and network state are event attributes, absent from the shared static context.
+    payload.dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
   }
 
   /**
@@ -1591,10 +1590,8 @@ export class FTRUMInnerManager {
         }
       } while (beans.length >= LIMIT_SIZE);
       
-      // Clean up all closed views from database (aligned with Android: cleanCloseViewData() at the end)
-      // This ensures all closed views are deleted, not just the ones we processed
-      // This is important because the same view might have multiple closed versions in the database
-      await FTDBTaskPoolExecutor.cleanCloseViewData(this.context!);
+      // The persistence callback acknowledges and cleans only its own snapshot.
+      // A View may close after this query while its open snapshot is in flight.
       
       
     } catch (error) {
@@ -1760,21 +1757,21 @@ export class FTRUMInnerManager {
       // Aligned with Android: use callback to update upload_time after successful upload
       const self = this;
       class ViewUploadCallback implements RunnerCompleteCallBack {
-        private viewId: string;
+        private view: ViewBean;
         
-        constructor(viewId: string) {
-          this.viewId = viewId;
+        constructor(view: ViewBean) {
+          this.view = view;
         }
         
         onComplete(): void {
           // Update upload_time after successful upload (aligned with Android)
           if (self.context) {
-            self.updateUploadedViewAfterComplete(self.context, this.viewId);
+            self.updateUploadedViewAfterComplete(self.context, this.view);
           }
         }
       }
       
-      const callback = new ViewUploadCallback(viewBean.getId());
+      const callback = new ViewUploadCallback(viewBean);
       // Aligned with Android SDK: pass nanoseconds directly (19 digits) without conversion
       // Android SDK: FTTrackInner.getInstance().rum(bean.getStartTime(), ...)
       FTTrackInner.getInstance().rum(
@@ -1812,14 +1809,14 @@ export class FTRUMInnerManager {
     }
   }
 
-  private async updateUploadedViewAfterComplete(context: Context, viewId: string): Promise<void> {
+  private async updateUploadedViewAfterComplete(context: Context, view: ViewBean): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.updateViewUploadTime(context, viewId, Date.now());
+      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, view);
       if (!success) {
-        return;
+        // The database contains a newer state. Ensure it is serialized even if
+        // its earlier generation request overlapped the previous summary pass.
+        this.generateRumData();
       }
-      // After upload_time is updated, try to clean up this specific view if it's closed.
-      await FTDBTaskPoolExecutor.cleanCloseViewData(context, [viewId]);
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to update uploaded view state: ${error}`);
     }
@@ -2510,7 +2507,7 @@ export class FTRUMInnerManager {
         countViewAction: true,
         counterFlushMaxEvents: FTRUMInnerManager.ACTION_COUNTER_FLUSH_MAX_EVENTS
       };
-      this.attachCompletedActionDynamicTagsIfNeeded(payload);
+      this.attachCompletedActionDynamicTags(payload);
       this.submitCompletedActionDTO(
         actionId,
         actionName,
@@ -2554,7 +2551,8 @@ export class FTRUMInnerManager {
       viewReferrer: this.activeView?.getViewReferrer() || '',
       actionId,
       actionName,
-      rumAppId: this.getSemanticRumAppId()
+      rumAppId: this.getSemanticRumAppId(),
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
     };
   }
 
@@ -3688,7 +3686,7 @@ export class FTRUMInnerManager {
           // Schedule a delayed task to force clear pending_resource if it's still > 0 after 30 seconds
           // This handles cases where resources never complete (e.g., network failures, timeouts)
           // After view is closed, wait 30 seconds for resources to complete, then force clear pending_resource
-          // This allows cleanCloseViewData to delete the view data
+          // This allows the final persisted snapshot to delete the view data.
           if (this.context) {
             setTimeout(() => {
               (async () => {
@@ -3701,8 +3699,9 @@ export class FTRUMInnerManager {
                   );
                   if (viewPendingResource > 0) {
                     FTInnerLogger.w(TAG, `View ${viewId} still has pending_resource=${viewPendingResource} after 30 seconds, forcing clear to allow cleanup`);
-                    // Force clear pending_resource to allow cleanCloseViewData to delete the view
+                    // Persist the final state before its completion removes the View.
                     await FTDBTaskPoolExecutor.forceClearRumPendingResource(this.context!, 'view', viewId);
+                    this.generateRumData();
                   }
                 } catch (error) {
                   FTInnerLogger.e(TAG, `Error checking/clearing pending_resource for view ${viewId}: ${error}`);

@@ -61,6 +61,7 @@ import { prepareDataUploadPayload } from './workers/DataUploadCompression';
 const DEFAULT_BATCH_SIZE = 20;
 const LOG_PROCESS_COALESCE_DELAY_MS = 100;
 const WEBVIEW_RESOURCE_ERROR_LINK_MAX_KEYS = 256;
+const WEBVIEW_ACTION_DEDUP_MAX_IDS = 1024;
 const WEBVIEW_RESOURCE_ERROR_LINK_MAX_PER_KEY = 8;
 const WEBVIEW_RESOURCE_ERROR_LINK_MAX_AGE_MS = 30 * 1000;
 
@@ -85,6 +86,7 @@ export interface SDKWorkerRuntimeState {
   rumCounterNeedsRumDataGenerate: boolean;
   rumResources: Map<string, SDKRumWorkerResourceState>;
   webViewResourceErrorLinks: Map<string, SDKWebViewResourceErrorLink[]>;
+  webViewActionIds: Set<string>;
   logQueue: SDKLogDTO[];
   logBatchBuffer: SDKLogDTO[];
   uploadIsScheduled: boolean;
@@ -155,6 +157,8 @@ interface SDKRumCommandResultPayload {
   activeActionName: string;
   activeResourceCount: number;
   syncDrafts: SDKSyncDataDraftDTO[];
+  /** Semantic RUM events awaiting Host context merge and modification callbacks. */
+  rawEvents?: SDKRumEventDTO[];
   /** Latest error timestamp represented by this RUM draft batch. */
   errorTimeLine?: number;
   completedResourceIds?: string[];
@@ -189,6 +193,7 @@ interface SDKLineProtocolRecordsPayload {
 
 interface SDKLineProtocolRecordsWithDraftsPayload extends SDKLineProtocolRecordsPayload {
   syncDrafts: SDKSyncDataDraftDTO[];
+  rawEvents?: SDKRumEventDTO[];
   deltas?: SDKRumCounterDeltaDTO[];
   needsActionCloseCheck?: boolean;
   needsRumDataGenerate?: boolean;
@@ -321,6 +326,7 @@ export function createSDKWorkerRuntimeStateWithBackend(
     rumCounterNeedsRumDataGenerate: false,
     rumResources: new Map<string, SDKRumWorkerResourceState>(),
     webViewResourceErrorLinks: new Map<string, SDKWebViewResourceErrorLink[]>(),
+    webViewActionIds: new Set<string>(),
     logQueue: [],
     logBatchBuffer: [],
     uploadIsScheduled: false,
@@ -479,6 +485,7 @@ function resetState(state: SDKWorkerRuntimeState): void {
   state.rumCounterNeedsRumDataGenerate = false;
   state.rumResources.clear();
   state.webViewResourceErrorLinks.clear();
+  state.webViewActionIds.clear();
   state.logQueue = [];
   state.logBatchBuffer = [];
   state.uploadIsScheduled = false;
@@ -582,6 +589,9 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
   const eventType = finalizedEvent.eventType || '';
 
   state.eventSequence++;
+  if (isDuplicateWebViewAction(finalizedEvent, state)) {
+    return createRumCommandResultPayload(eventType, [], state);
+  }
   if (eventType === 'view.start' || eventType === 'view.init') {
     state.activeViewId = finalizedEvent.viewId || '';
     state.activeViewName = finalizedEvent.viewName || finalizedEvent.name || '';
@@ -612,6 +622,24 @@ function processRumEvent(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): S
     payload.errorTimeLine = finalizedEvent.time;
   }
   return payload;
+}
+
+/** Suppress repeated Browser actions before they create separate database rows. */
+function isDuplicateWebViewAction(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): boolean {
+  if (event.dataType !== 'rum_webview' || event.measurement !== Constants.FT_MEASUREMENT_RUM_ACTION ||
+    !event.actionId) {
+    return false;
+  }
+  if (state.webViewActionIds.has(event.actionId)) {
+    return true;
+  }
+  // Bound memory for long-running WebViews; keep the most recently accepted IDs.
+  if (state.webViewActionIds.size >= WEBVIEW_ACTION_DEDUP_MAX_IDS) {
+    const oldest = Array.from(state.webViewActionIds)[0];
+    state.webViewActionIds.delete(oldest);
+  }
+  state.webViewActionIds.add(event.actionId);
+  return false;
 }
 
 function createRumCommandResultPayload(
@@ -1030,6 +1058,7 @@ function handleRumErrorCommandBatch(
   const commands = sortRumErrorCommands(batch && batch.commands ? batch.commands : []);
   const lineContext = batch && batch.lineContext ? batch.lineContext : state.lineContext;
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
+  const rawEvents: SDKRumEventDTO[] = [];
   let flushMaxEvents = 256;
   let lastErrorTimeLine = -1;
   for (let i = 0; i < commands.length; i++) {
@@ -1040,9 +1069,9 @@ function handleRumErrorCommandBatch(
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
       flushMaxEvents = command.counterFlushMaxEvents;
     }
-    const draftCountBefore = syncDrafts.length;
-    processRumErrorCommand(command, state, syncDrafts, lineContext);
-    if (syncDrafts.length > draftCountBefore) {
+    const eventCountBefore = syncDrafts.length + rawEvents.length;
+    processRumErrorCommand(command, state, syncDrafts, rawEvents, lineContext);
+    if (syncDrafts.length + rawEvents.length > eventCountBefore) {
       lastErrorTimeLine = Math.max(lastErrorTimeLine, command.time || Date.now());
     }
   }
@@ -1057,6 +1086,9 @@ function handleRumErrorCommandBatch(
     activeResourceCount: getActiveResourceCount(state),
     syncDrafts
   };
+  if (rawEvents.length > 0) {
+    payload.rawEvents = rawEvents;
+  }
   if (lastErrorTimeLine > 0) {
     payload.errorTimeLine = lastErrorTimeLine;
   }
@@ -1073,6 +1105,7 @@ function processRumErrorCommand(
   command: SDKRumErrorCommandDTO,
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[],
+  rawEvents: SDKRumEventDTO[],
   lineContext: SDKLineProtocolContextDTO | null
 ): void {
   if (!command || !command.context) {
@@ -1081,6 +1114,7 @@ function processRumErrorCommand(
   state.eventSequence++;
   const tags: SDKStringRecord = {};
   const context = command.context;
+  mergeStringRecords(tags, context.dynamicTags || {});
   // DataKit runs source-map processing for RUM errors and requires sdk_name on
   // every error point, including points assembled without a line context.
   tags[Constants.KEY_SDK_NAME] = Constants.SDK_NAME.toString();
@@ -1125,8 +1159,10 @@ function processRumErrorCommand(
   };
   if (lineContext) {
     event.lineContext = lineContext;
+    syncDrafts.push(createRumDraft(event, state));
+  } else {
+    rawEvents.push(event);
   }
-  syncDrafts.push(createRumDraft(event, state));
   applyRumErrorDelta(state, context.viewId, context.actionId);
 }
 
@@ -1153,6 +1189,7 @@ function handleRumResourceCommandBatch(
   const commands = sortRumResourceCommands(batch && batch.commands ? batch.commands : []);
   const lineContext = batch && batch.lineContext ? batch.lineContext : state.lineContext;
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
+  const rawEvents: SDKRumEventDTO[] = [];
   const completedResourceIds: string[] = [];
   const stateRecoveryOnly = batch && batch.stateRecoveryOnly === true;
   let flushMaxEvents = 256;
@@ -1164,7 +1201,7 @@ function handleRumResourceCommandBatch(
     if (command.counterFlushMaxEvents && command.counterFlushMaxEvents > 0) {
       flushMaxEvents = command.counterFlushMaxEvents;
     }
-    if (processRumResourceCommand(command, state, syncDrafts, stateRecoveryOnly, lineContext)) {
+    if (processRumResourceCommand(command, state, syncDrafts, rawEvents, stateRecoveryOnly, lineContext)) {
       completedResourceIds.push(command.resourceId);
     }
   }
@@ -1180,6 +1217,9 @@ function handleRumResourceCommandBatch(
     syncDrafts,
     completedResourceIds
   };
+  if (rawEvents.length > 0) {
+    payload.rawEvents = rawEvents;
+  }
   if (state.rumCounterPendingEventCount >= flushMaxEvents) {
     const flushPayload = createRumCounterFlushPayload(state);
     payload.deltas = flushPayload.deltas;
@@ -1222,6 +1262,7 @@ function processRumResourceCommand(
   command: SDKRumResourceCommandDTO,
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[],
+  rawEvents: SDKRumEventDTO[],
   stateRecoveryOnly: boolean = false,
   lineContext: SDKLineProtocolContextDTO | null = null
 ): boolean {
@@ -1273,7 +1314,7 @@ function processRumResourceCommand(
     if (!stateRecoveryOnly) {
       applyResourceCompleteDelta(state, resource.context.viewId, resource.context.actionId);
     }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
   }
 
   if (commandType === 'setContent' || commandType === 'add') {
@@ -1286,14 +1327,14 @@ function processRumResourceCommand(
     if (commandType === 'add' && resource.endTime <= 0) {
       resource.endTime = resource.eventTime > 0 ? resource.eventTime : Date.now() * 1000000;
     }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
   }
 
   if (commandType === 'setNetState') {
     if (command.netStatus) {
       applyResourceNetStatus(resource, command.netStatus);
     }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
   }
   return false;
 }
@@ -1376,6 +1417,7 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   // supply a context only when the resource did not have one (for example,
   // addResource without a preceding startResource), preventing a late
   // completion from being rebound to a newer action.
+  resource.context.dynamicTags = resource.context.dynamicTags || context.dynamicTags;
   resource.context.sessionId = resource.context.sessionId || context.sessionId;
   resource.context.viewId = resource.context.viewId || context.viewId;
   resource.context.viewName = resource.context.viewName || context.viewName;
@@ -1513,6 +1555,7 @@ function tryCreateRumResourceDraft(
   resource: SDKRumWorkerResourceState,
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[],
+  rawEvents: SDKRumEventDTO[],
   lineContext: SDKLineProtocolContextDTO | null
 ): boolean {
   if (!resource.contentSet || !resource.netStateSet || resource.endTime <= 0 || resource.isProcessing) {
@@ -1525,15 +1568,21 @@ function tryCreateRumResourceDraft(
     const resourceEvent = createResourceRumEvent(resource);
     if (lineContext) {
       resourceEvent.lineContext = lineContext;
+      syncDrafts.push(createRumDraft(resourceEvent, state));
+    } else {
+      // Custom LineDataModifier callbacks live on the Host. Keep the event
+      // structured until the Host has merged public tags and run callbacks.
+      rawEvents.push(resourceEvent);
     }
-    syncDrafts.push(createRumDraft(resourceEvent, state));
   }
   if (isWorkerResourceError(resource) && resource.shouldCollect !== false) {
     const errorEvent = createResourceErrorRumEvent(resource);
     if (lineContext) {
       errorEvent.lineContext = lineContext;
+      syncDrafts.push(createRumDraft(errorEvent, state));
+    } else {
+      rawEvents.push(errorEvent);
     }
-    syncDrafts.push(createRumDraft(errorEvent, state));
     applyRumErrorDelta(state, resource.context.viewId, resource.context.actionId);
   }
   state.rumResources.delete(resource.resourceId);
@@ -1564,6 +1613,7 @@ function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEven
 
 function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRumEventDTO {
   const tags: SDKStringRecord = {};
+  mergeStringRecords(tags, resource.context.dynamicTags || {});
   tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
   tags[Constants.KEY_RUM_ERROR_TYPE] = 'network';
   tags[Constants.KEY_RUM_ERROR_SOURCE] = 'network';
@@ -1613,6 +1663,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
 
 function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const tags: SDKStringRecord = {};
+  mergeStringRecords(tags, resource.context.dynamicTags || {});
   tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
   tags[Constants.KEY_RUM_SESSION_ID] = resource.context.sessionId;
   tags[Constants.KEY_RUM_VIEW_ID] = resource.context.viewId;
@@ -1840,6 +1891,7 @@ function createCompletedActionPayload(
 ): SDKLineProtocolRecordsWithDraftsPayload {
   const records: SDKLineProtocolInputDTO[] = [];
   const syncDrafts: SDKSyncDataDraftDTO[] = [];
+  const rawEvents: SDKRumEventDTO[] = [];
   let flushMaxEvents = 256;
   const sortedActions = sortCompletedActionsByTime(actions);
   for (let i = 0; i < sortedActions.length; i++) {
@@ -1850,13 +1902,16 @@ function createCompletedActionPayload(
     if (action.counterFlushMaxEvents && action.counterFlushMaxEvents > 0) {
       flushMaxEvents = action.counterFlushMaxEvents;
     }
-    appendCompletedActionDraft(action, state, records, syncDrafts, batchLineContext);
+    appendCompletedActionDraft(action, state, records, syncDrafts, rawEvents, batchLineContext);
   }
 
   const payload: SDKLineProtocolRecordsWithDraftsPayload = {
     records,
     syncDrafts
   };
+  if (rawEvents.length > 0) {
+    payload.rawEvents = rawEvents;
+  }
   if (state.rumCounterPendingEventCount >= flushMaxEvents) {
     const flushPayload = createRumCounterFlushPayload(state);
     payload.deltas = flushPayload.deltas;
@@ -1871,6 +1926,7 @@ function appendCompletedActionDraft(
   state: SDKWorkerRuntimeState,
   records: SDKLineProtocolInputDTO[],
   syncDrafts: SDKSyncDataDraftDTO[],
+  rawEvents: SDKRumEventDTO[],
   batchLineContext: SDKLineProtocolContextDTO | null
 ): void {
   if (!action) {
@@ -1885,9 +1941,8 @@ function appendCompletedActionDraft(
     mergeStringRecords(tags, lineContext.dynamicBaseTags);
     mergeStringRecords(tags, lineContext.rumTags);
     mergeStringRecords(tags, lineContext.dynamicRumTags);
-  } else {
-    mergeStringRecords(tags, action.dynamicTags || {});
   }
+  mergeStringRecords(tags, action.dynamicTags || {});
   if (action.rumAppId && action.rumAppId.length > 0) {
     tags[Constants.KEY_RUM_APP_ID] = action.rumAppId;
   }
@@ -1928,13 +1983,25 @@ function appendCompletedActionDraft(
     uuid
   };
   records.push(record);
-  syncDrafts.push({
-    dataType: record.dataType,
-    customDataType: record.customDataType,
-    dataString: buildLineProtocol(record.measurement, record.tags, record.fields, record.time, record.integerCompatible === true),
-    uuid: record.uuid,
-    time: record.time
-  });
+  if (lineContext) {
+    syncDrafts.push({
+      dataType: record.dataType,
+      customDataType: record.customDataType,
+      dataString: buildLineProtocol(record.measurement, record.tags, record.fields, record.time, record.integerCompatible === true),
+      uuid: record.uuid,
+      time: record.time
+    });
+  } else {
+    rawEvents.push({
+      dataType: record.dataType,
+      customDataType: record.customDataType,
+      measurement: record.measurement,
+      tags: record.tags,
+      fields: record.fields,
+      uuid: record.uuid,
+      time: record.time
+    });
+  }
   if (action.countViewAction === true && action.viewId && action.viewId.length > 0) {
     appendViewActionCounterDelta(state, action.viewId);
   }
