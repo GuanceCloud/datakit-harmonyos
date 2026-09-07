@@ -1,5 +1,7 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { rcp } from '@kit.RemoteCommunicationKit';
+import json from '@ohos.util.json';
+import { FTTraceInterceptor, HttpRequestData, HttpResponseData } from '../../main/ets/components/trace/FTTraceInterceptor';
 import {
   createFTRCPTrackConfig,
   RCPResourceInterceptor,
@@ -10,6 +12,54 @@ import { TestReset } from '../helpers/TestReset';
 class CustomRcpInterceptor implements rcp.Interceptor {
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
     return await next.handle(context);
+  }
+}
+
+interface RcpTraceTestAccess {
+  isEnabled: boolean;
+  traceInterceptor: FTTraceInterceptor;
+}
+
+class ThrowingTraceInterceptor implements FTTraceInterceptor {
+  requestCalls: number = 0;
+  responseCalls: number = 0;
+  private phase: string;
+  constructor(phase: string) { this.phase = phase; }
+  interceptRequest(request: HttpRequestData): HttpRequestData {
+    this.requestCalls++;
+    if (this.phase === 'request') throw new Error('trace request failed');
+    return request;
+  }
+  interceptResponse(response: HttpResponseData): HttpResponseData {
+    this.responseCalls++;
+    if (this.phase === 'response') throw new Error('trace response failed');
+    return response;
+  }
+}
+
+class SingleDispatchResponse implements rcp.Response {
+  readonly statusCode: number = 201;
+  readonly headers: rcp.ResponseHeaders = {};
+  readonly request: rcp.Request;
+  constructor(request: rcp.Request) { this.request = request; }
+  toString(): string | null { return '{}'; }
+  toJSON(): object | null;
+  toJSON(options: json.ParseOptions): object | null;
+  toJSON(_options?: json.ParseOptions): object | null { return null; }
+}
+
+class SingleDispatchHandler implements rcp.RequestHandler {
+  calls: number = 0;
+  readonly response: rcp.Response;
+  readonly failure: Error | null;
+  constructor(response: rcp.Response, failure: Error | null) {
+    this.response = response;
+    this.failure = failure;
+  }
+  async handle(_context: rcp.RequestContext): Promise<rcp.Response> {
+    this.calls++;
+    if (this.failure) throw this.failure;
+    return this.response;
   }
 }
 
@@ -33,6 +83,38 @@ export default function httpAutoTrackRcpConfigUnitTest() {
 
     afterEach(() => {
       TestReset.resetP0State();
+    });
+
+    it('rcpTraceShouldDispatchExactlyOnce', 0, async () => {
+      for (const phase of ['success', 'transport', 'request', 'response']) {
+        const trace = new ThrowingTraceInterceptor(phase);
+        const interceptor = new RCPTraceInterceptor();
+        const access = interceptor as Object as RcpTraceTestAccess;
+        access.isEnabled = true;
+        access.traceInterceptor = trace;
+        const request = new rcp.Request('https://example.com/orders', 'POST', {
+          'X-FT-Resource-ID': `dispatch-${phase}`,
+          'x-datadog-trace-id': '123', 'x-datadog-parent-id': '456'
+        });
+        const session = rcp.createSession();
+        const context: rcp.RequestContext = { request, session };
+        const response = new SingleDispatchResponse(request);
+        const failure = phase === 'transport' ? new Error('Timeout was reached') : null;
+        const next = new SingleDispatchHandler(response, failure);
+        let caught: Object | null = null;
+        try {
+          const actual = await interceptor.intercept(context, next);
+          expect(actual === response).assertTrue();
+        } catch (error) {
+          caught = error as Object;
+        } finally {
+          session.close();
+        }
+        expect(next.calls).assertEqual(1);
+        expect(caught === failure).assertTrue();
+        expect(trace.requestCalls).assertEqual(1);
+        expect(trace.responseCalls).assertEqual(phase === 'transport' ? 0 : 1);
+      }
     });
 
     it('rcpConfigShouldCreateInterceptors', 0, () => {

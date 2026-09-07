@@ -120,11 +120,16 @@ export class RumAttributeAssert {
         RumAttributeAssert.requireValues(point, ['resource_id', 'resource_url', 'resource_url_host',
           'resource_url_path', 'resource_url_path_group', 'resource_method', 'resource_type'], true);
         RumAttributeAssert.numericFields(point, ['duration']);
-        // A failed transport (status 0) intentionally omits Resource status tags.
-        // Size and detailed timings are required only when supplied by the case.
-        if (expected.resourceStatus !== undefined && expected.resourceStatus > 0) {
-          RumAttributeAssert.requireValues(point, ['resource_status', 'resource_status_group'], true);
+        // Status 0 explicitly represents no HTTP response and has no HTTP group.
+        RumAttributeAssert.requireValues(point, ['resource_status'], true);
+        if (expected.resourceStatus !== undefined) {
           RumAttributeAssert.check(point.tags.get('resource_status') === String(expected.resourceStatus), point, 'incorrect resource_status');
+          if (expected.resourceStatus > 0) {
+            RumAttributeAssert.check(point.tags.get('resource_status_group') === `${Math.floor(expected.resourceStatus / 100)}xx`,
+              point, 'incorrect resource_status_group');
+          } else {
+            RumAttributeAssert.check(!point.tags.has('resource_status_group'), point, 'no response must not have an HTTP status group');
+          }
         }
         break;
       case 'long_task':

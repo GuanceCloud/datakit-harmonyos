@@ -86,7 +86,7 @@ export class EntryRumUploadAssert {
       EntryRumUploadAssert.check(requestHeaders['x-datadog-parent-id'] === resource.tags.get('span_id'),
         'resource span_id differs from the outgoing request header');
       const matches = errors.filter((error) => error.tags.get('resource_id') === id);
-      const status = Number(resource.tags.get('resource_status') ?? '0');
+      const status = Number(EntryRumUploadAssert.tag(resource, 'resource_status'));
       const failed = status === 0 || status >= 400;
       EntryRumUploadAssert.check(matches.length === (failed ? 1 : 0),
         `resource ${id}: expected ${failed ? 1 : 0} linked errors, got ${matches.length}`);
@@ -96,7 +96,12 @@ export class EntryRumUploadAssert {
         EntryRumUploadAssert.check(error.tags.get('error_type') === 'network' &&
           error.tags.get('error_situation') === 'run', 'incorrect network error attributes');
         EntryRumUploadAssert.check(error.tags.get('resource_status') === String(status), 'error/resource status mismatch');
-        if (status > 0) EntryRumUploadAssert.sameTags(error, resource, ['resource_status_group']);
+        if (status > 0) {
+          EntryRumUploadAssert.sameTags(error, resource, ['resource_status_group']);
+        } else {
+          EntryRumUploadAssert.check(!resource.tags.has('resource_status_group') && !error.tags.has('resource_status_group'),
+            'no response must not have an HTTP status group');
+        }
         EntryRumUploadAssert.check(error.time === resource.time, 'error/resource timestamp mismatch');
         EntryRumUploadAssert.check(String(error.fields.get('error_message')).includes(
           EntryRumUploadAssert.tag(resource, 'resource_url')), 'error message does not identify its resource URL');
@@ -128,10 +133,14 @@ export class EntryRumUploadAssert {
   }
 
   private static counters(parent: RumAttributePoint, points: RumAttributePoint[], key: string, prefix: string): void {
+    // Actions force-close after five seconds. A later Resource/Error keeps its
+    // start Action ID, but cannot change the already emitted counter snapshot.
+    const actionEnd = Number(parent.time) + Number(parent.fields.get('duration'));
     for (const measurement of ['action', 'resource', 'error', 'long_task']) {
       if (prefix === 'action' && measurement === 'action') continue;
       const count = points.filter((point) => point.measurement === measurement &&
-        point.tags.get(key) === parent.tags.get(key)).length;
+        point.tags.get(key) === parent.tags.get(key) &&
+        (prefix !== 'action' || Number(point.time) <= actionEnd)).length;
       EntryRumUploadAssert.check(Number(parent.fields.get(`${prefix}_${measurement}_count`)) >= count,
         `${prefix}: ${measurement} counter is smaller than its uploaded children (${count})`);
     }

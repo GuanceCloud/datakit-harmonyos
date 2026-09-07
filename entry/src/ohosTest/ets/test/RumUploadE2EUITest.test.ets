@@ -1,5 +1,7 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Driver } from '@ohos.UiTest';
+import fs from '@ohos.file.fs';
+import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { SyncDataHelper } from '@guancecloud/ft_sdk/src/main/ets/components/SyncDataHelper';
@@ -77,7 +79,7 @@ export default function rumUploadE2EUITest() {
       // Do not clear pending records on failure.
     });
 
-    // Use a 150-second case timeout for UI navigation, four requests and the 60-second upload wait.
+    // Use a 300-second case timeout for UI navigation, four transport timeouts and the 60-second upload wait.
     it('uploadsAllRumEventTypes', 0, async () => {
       const runId = beginRun('success');
       const batch: RumUploadRecord[] = [];
@@ -123,6 +125,32 @@ export default function rumUploadE2EUITest() {
       // No listener: exercise actual transport rejection, independently of DNS or Internet access.
       AppStorage.set(KEY_RESOURCE_TEST_URL, 'http://127.0.0.1:1/resource');
       await collectResources(driver, runId, batch, 0);
+      await includeParents(runId, batch);
+      expect(batch.length).assertEqual(13);
+      await uploadAndAssert(runId, batch, 4);
+    });
+
+    it('uploadsClientErrorResourcesAndLinkedErrors', 0, async () => {
+      const runId = beginRun('http_client_error');
+      const batch: RumUploadRecord[] = [];
+      AppStorage.set(KEY_RESOURCE_TEST_URL, UiTestUtils.getResourceErrorUrl(404));
+      await collectResources(driver, runId, batch, 404);
+      await includeParents(runId, batch);
+      expect(batch.length).assertEqual(13);
+      await uploadAndAssert(runId, batch, 4);
+    });
+
+    it('uploadsTimeoutResourcesAndLinkedErrors', 0, async () => {
+      const runId = beginRun('timeout');
+      const batch: RumUploadRecord[] = [];
+      // The endpoint must accept the connection and delay beyond the Demo request timeout.
+      AppStorage.set(KEY_RESOURCE_TEST_URL, UiTestUtils.getResourceTimeoutUrl());
+      await collectResources(driver, runId, batch, 0);
+      for (const item of batch) {
+        if (item.point.measurement === 'resource') {
+          expect(Number(item.point.fields.get('duration')) >= 9000000000).assertTrue();
+        }
+      }
       await includeParents(runId, batch);
       expect(batch.length).assertEqual(13);
       await uploadAndAssert(runId, batch, 4);
@@ -180,7 +208,21 @@ async function includeParents(runId: string, batch: RumUploadRecord[]): Promise<
     const viewId = EntryRumUploadAssert.tag(child.point, 'view_id');
     const viewName = EntryRumUploadAssert.tag(child.point, 'view_name');
     if (!batch.some((entry) => entry.point.measurement === 'view' && entry.point.tags.get('view_id') === viewId)) {
-      batch.push(await capture(runId, 'view', [`view_id=${viewId}`, 'is_active=false'], viewName));
+      let view: RumUploadRecord | null = null;
+      // The first closed View may precede the final asynchronous Resource
+      // counter flush. Wait for the corresponding uploaded snapshot contract.
+      const ready = await EntryWaitUtils.waitUntil(async () => {
+        const current = await capture(runId, 'view', [`view_id=${viewId}`, 'is_active=false'], viewName);
+        for (const measurement of ['resource', 'error', 'long_task', 'action']) {
+          const count = children.filter((item) => item.point.measurement === measurement &&
+            item.point.tags.get('view_id') === viewId).length;
+          if (Number(current.point.fields.get(`view_${measurement}_count`)) < count) return false;
+        }
+        view = current;
+        return true;
+      }, 10000, 150);
+      if (!ready || view === null) throw new Error(`Closed View counters did not settle: runId=${runId}, viewId=${viewId}`);
+      batch.push(view);
     }
     const actionId = EntryRumUploadAssert.tag(child.point, 'action_id');
     if (!batch.some((entry) => entry.point.measurement === 'action' && entry.point.tags.get('action_id') === actionId)) {
@@ -214,6 +256,14 @@ async function uploadAndAssert(runId: string, batch: RumUploadRecord[], networkE
   }
   // Every selected event must occur exactly once in successful HTTP bodies, with
   // all original tags/fields/timestamp intact (apart from the allowed UUID package prefix).
+  // Retain the actual successful HTTP body for backend JSON/UI acceptance.
+  const path = `${AbilityDelegatorRegistry.getAbilityDelegator().getAppContext().filesDir}/${runId}.lp`;
+  const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+  try {
+    fs.writeSync(file.fd, observer.getPayload());
+  } finally {
+    fs.closeSync(file);
+  }
   EntryRumUploadAssert.uploaded(observer.getPayload(), batch, runId, networkErrors);
   console.info(`RUM upload attributes/associations passed: runId=${runId}, events=${batch.length}, networkErrors=${networkErrors}`);
 }
@@ -231,7 +281,7 @@ async function waitForRunRecord(runId: string, measurement: string, fragments: s
       }
     }
     return false;
-  }, 12000, 150);
+  }, 25000, 150);
   if (!found || matched === null) {
     throw new Error(`Missing ${measurement} for runId=${runId}, expected=${fragments.join(', ')}`);
   }

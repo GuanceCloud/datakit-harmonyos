@@ -1146,6 +1146,85 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(actionResourceDelta).assertEqual(1);
     });
 
+    it('resourceFinalProtocolPreservesZeroAndHttpStatuses', 0, async () => {
+      const statuses = [0, 200, 204, 302, 404, 500, 0, 0];
+      for (let index = 0; index < statuses.length; index++) {
+        const status = statuses[index];
+        const id = `status-contract-${index}`;
+        const context: SDKRumResourceContextDTO = {
+          sessionId: 'status-session', viewId: 'status-view', viewName: 'StatusView', viewReferrer: 'root',
+          actionId: 'status-action', actionName: 'request', rumAppId: 'gc_app_harmonyos_demo',
+          dynamicTags: { resource_status: '599', resource_status_group: '5xx' }
+        };
+        const params: SDKRumResourceParamsDTO = {
+          url: 'https://example.com/api/users/123/profile?from=status-test',
+          requestHeader: '', responseHeader: '', responseConnection: '', responseContentType: '',
+          responseContentEncoding: '', responseContentLength: 0, resourceMethod: 'GET', responseBody: '',
+          resourceStatus: status, resourceType: 'network', requestErrorStack: index === 0 ? 'timeout stack' : '',
+          requestErrorMsg: index === 0 || index === 7 ? 'Timeout was reached' : '',
+          property: new Object() as SDKPropertyRecord
+        };
+        const netStatus: SDKRumResourceNetStatusDTO = {
+          dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0, sslTime: 0, sslStartTime: 0,
+          ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
+          downloadStartTime: 0, holeRequestTime: 100, resourceHostIP: ''
+        };
+        const start: SDKRumResourceCommandDTO = {
+          commandType: 'start', resourceId: id, draftUuid: id, errorDraftUuid: `${id}-error`, context, startTime: 10
+        };
+        const content: SDKRumResourceCommandDTO = {
+          commandType: 'setContent', resourceId: id, context, params, eventTime: 20
+        };
+        const network: SDKRumResourceCommandDTO = {
+          commandType: 'setNetState', resourceId: id, context, netStatus, eventTime: 30
+        };
+        const stop: SDKRumResourceCommandDTO = {
+          commandType: 'stop', resourceId: id, context, endTime: 110
+        };
+        const batch: SDKRumResourceCommandBatchDTO = {
+          lineContext: createRumWorkerLineContext(), commands: [stop, network, content, content, start, start]
+        };
+        const response = await executeWorkerCommandForUnit({
+          id, pool: SDKDedicatedPoolType.EVENT_CONSUMER, command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+          priority: 7, createdAt: Date.now(), payload: batch as Object as SDKWorkerPayload
+        });
+        expect(response.ok).assertTrue();
+        const drafts = getPayloadArray(response.payload, 'syncDrafts');
+        const hasError = status >= 400 || index === 0;
+        expect(drafts.length).assertEqual(hasError ? 2 : 1);
+        for (const draft of drafts) {
+          const line = String((draft as Record<string, object>)['dataString']);
+          expect(line.includes(`resource_status=${status},`)).assertTrue();
+          expect(line.includes('resource_url_path=/api/users/123/profile,')).assertTrue();
+          expect(/resource_url_path_group=\/api\/users\/\?\/profile[, ]/.test(line)).assertTrue();
+          expect(line.includes(`resource_id=${id},`)).assertTrue();
+          if (status === 0) {
+            expect(line.includes('resource_status_group=')).assertFalse();
+          } else {
+            expect(line.includes(`resource_status_group=${Math.floor(status / 100)}xx,`)).assertTrue();
+          }
+          if (index === 0 && line.startsWith('error,')) {
+            expect(line.includes('Timeout was reached')).assertTrue();
+            expect(line.includes('error_stack="timeout stack"')).assertTrue();
+          }
+        }
+        const snapshot = await getRumWorkerSnapshotForUnit(`${id}-snapshot`);
+        expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
+        const flush = await executeWorkerCommandForUnit({
+          id: `${id}-flush`, pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH, priority: 7, createdAt: Date.now()
+        });
+        expect(getPayloadString(flush.payload, 'needsRumDataGenerate')).assertEqual('true');
+        const deltas = getPayloadArray(flush.payload, 'deltas');
+        expect(deltas.length).assertEqual(2);
+        const delta = deltas[0] as Record<string, object>;
+        expect(String(delta['viewId'])).assertEqual('status-view');
+        expect(Number(delta['viewResourceDelta'])).assertEqual(1);
+        expect(Number(delta['viewErrorDelta'])).assertEqual(hasError ? 1 : 0);
+        expect(Number(delta['viewPendingDelta'])).assertEqual(0);
+      }
+    });
+
     it('resourceAndErrorKeepStartActionContext', 0, async () => {
       const startContext: SDKRumResourceContextDTO = {
         sessionId: 'session-first-action',

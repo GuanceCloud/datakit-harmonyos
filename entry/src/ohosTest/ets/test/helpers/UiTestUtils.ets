@@ -34,9 +34,15 @@ export class UiTestUtils {
     return testBoolean(getEntryLaunchArguments().parameters ?? {}, 'entryUploadE2EEnabled', false);
   }
 
-  static getResourceErrorUrl(): string {
-    return (testArgument(getEntryLaunchArguments().parameters ?? {}, 'entryResourceErrorUrl') ??
-      'https://httpbin.org/status/500').trim();
+  static getResourceErrorUrl(status: number = 500): string {
+    const key = status === 404 ? 'entryResourceClientErrorUrl' : 'entryResourceErrorUrl';
+    return (testArgument(getEntryLaunchArguments().parameters ?? {}, key) ??
+      `https://httpbin.org/status/${status}`).trim();
+  }
+
+  static getResourceTimeoutUrl(): string {
+    return (testArgument(getEntryLaunchArguments().parameters ?? {}, 'entryResourceTimeoutUrl') ??
+      'https://httpbin.org/delay/30').trim();
   }
 
   static getWebViewExpectedMarker(): string {
