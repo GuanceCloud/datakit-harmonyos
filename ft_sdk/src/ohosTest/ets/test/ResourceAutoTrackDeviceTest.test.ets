@@ -704,7 +704,7 @@ export default function resourceAutoTrackDeviceTest() {
       const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments, 5000);
 
       expect(resourceRecord !== null).assertTrue();
-      expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
+      expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertTrue();
       expect(errorRecord !== null).assertTrue();
 
       const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,

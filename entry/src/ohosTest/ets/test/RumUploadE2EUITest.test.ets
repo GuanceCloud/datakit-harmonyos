@@ -148,7 +148,7 @@ async function collectResources(driver: Driver, runId: string, batch: RumUploadR
     expect(resource.point.tags.has('trace_id')).assertTrue();
     expect(resource.point.tags.has('span_id')).assertTrue();
     if (status === 0) {
-      expect(resource.point.tags.has('resource_status')).assertFalse();
+      expect(resource.point.tags.get('resource_status')).assertEqual('0');
       expect(resource.point.tags.has('resource_status_group')).assertFalse();
     }
     batch.push(resource);

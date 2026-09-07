@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- Fixed stale View counters when a Resource completes after its initiating Action has closed. Both Resource completion and explicit completion-counter updates now schedule a refreshed View summary after counter persistence.
+- Fixed implicit request retries in the RCP Trace interceptor. Each request is dispatched once: transport failures propagate to the caller, trace preparation failures do not prevent dispatch, and trace-response processing failures preserve the original response.
+- Fixed missing `resource_status=0` in final Resource records for timeouts and connection failures without an HTTP response, in both Host and Worker processing. Status zero has no HTTP status group; real HTTP statuses and Resource/Error correlation remain unchanged.
 - Fixed a race where persistence of an earlier open View could delete its closed state before the final `is_active=false` event was generated.
 - Restored bounded WebView Action-ID deduplication in the event Worker before database insertion; repeated View events remain collectable.
 - Fixed missing bound-user and network attributes in Worker-generated Actions, Resources and Errors, including resource-derived Network Errors.

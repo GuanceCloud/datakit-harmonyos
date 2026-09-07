@@ -1694,10 +1694,9 @@ function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecor
   if (resource.resourceType.length > 0) {
     tags[Constants.KEY_RUM_RESOURCE_TYPE] = resource.resourceType;
   }
-  if (resource.resourceStatus > 0) {
-    tags[Constants.KEY_RUM_RESOURCE_STATUS] = String(resource.resourceStatus);
-    tags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resource.resourceStatusGroup;
-  }
+  // Zero means no HTTP response; it is still a meaningful Resource status.
+  tags[Constants.KEY_RUM_RESOURCE_STATUS] = String(resource.resourceStatus);
+  tags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resource.resourceStatusGroup;
   if (resource.resourceHostIP.length > 0) {
     tags[Constants.KEY_RUM_RESOURCE_HOST_IP] = resource.resourceHostIP;
   }
@@ -1781,6 +1780,9 @@ function applyResourceCompleteDelta(state: SDKWorkerRuntimeState, viewId: string
     delta.viewResourceDelta += 1;
     delta.viewPendingDelta -= 1;
     delta.viewUpdateTimeDelta += 1;
+    // The initiating Action may already be closed when a slow request ends.
+    // Its completion must still publish the updated View counter snapshot.
+    state.rumCounterNeedsRumDataGenerate = true;
   }
   if (actionId && actionId.length > 0) {
     delta.actionResourceDelta += 1;
@@ -2109,6 +2111,7 @@ function applyRumCounterUpdate(
       delta.viewResourceDelta += count;
       delta.viewPendingDelta -= count;
       delta.viewUpdateTimeDelta += count;
+      state.rumCounterNeedsRumDataGenerate = true;
     }
     if (actionId.length > 0) {
       delta.actionResourceDelta += count;

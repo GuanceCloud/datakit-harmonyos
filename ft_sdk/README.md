@@ -98,6 +98,12 @@ export default class EntryAbility extends UIAbility {
 }
 ```
 
+### Network Resource status
+
+Native network auto-tracking reports `resource_status=0` when no HTTP response is received (for example, timeout or connection failure). The final Resource and its associated Network Error retain this value. Zero has no `resource_status_group`; real HTTP responses retain their status and existing `2xx`/`4xx`/`5xx` grouping. The full URL path remains in `resource_url_path`; only `resource_url_path_group` normalizes numeric segments.
+
+Following the existing SDK contract, a collected Resource generates one linked Network Error for HTTP status >=400, or for status 0 with a non-empty error stack. A manually supplied status 0 without an error stack does not alone create an Error. Auto-tracking supplies the failure message and stack (or the available platform failure description), and links both records through `resource_id`.
+
 ## Hvigor Compiler Plugin
 
 The Guance Hvigor compiler plugin provides automatic console/HiLog collection and cold-launch lifecycle tracking. `FTLoggerConfig.setEnableConsoleLog(...)` controls automatic application-console collection; `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.

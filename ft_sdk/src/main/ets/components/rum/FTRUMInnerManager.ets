@@ -4011,9 +4011,7 @@ export class FTRUMInnerManager {
       // Set resource error information (aligned with Android)
       const resourceStatus = resourceBean.resourceStatus;
       errorTags[Constants.KEY_RUM_RESOURCE_STATUS] = String(resourceStatus);
-      if (resourceStatus > 0) {
-        errorTags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resourceBean.getResourceStatusGroup();
-      }
+      errorTags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resourceBean.getResourceStatusGroup();
       errorTags[Constants.KEY_RUM_RESOURCE_URL] = resourceBean.url || "";
       errorTags[Constants.KEY_RUM_RESOURCE_URL_HOST] = resourceBean.urlHost || "";
       errorTags[Constants.KEY_RUM_RESOURCE_METHOD] = resourceBean.resourceMethod || "";
@@ -4133,7 +4131,7 @@ export class FTRUMInnerManager {
       if (resourceTags.resource_method) allTags[Constants.KEY_RUM_RESOURCE_METHOD] = resourceTags.resource_method;
       if (resourceTags.resource_type) allTags[Constants.KEY_RUM_RESOURCE_TYPE] = resourceTags.resource_type;
       if (resourceTags.resource_status) allTags[Constants.KEY_RUM_RESOURCE_STATUS] = resourceTags.resource_status;
-      if (resourceTags.resource_status_group) allTags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resourceTags.resource_status_group;
+      allTags[Constants.KEY_RUM_RESOURCE_STATUS_GROUP] = resourceTags.resource_status_group || '';
       // Optional extended tags
       if (resourceTags.resource_host_ip) allTags[Constants.KEY_RUM_RESOURCE_HOST_IP] = resourceTags.resource_host_ip;
       if (resourceTags.response_connection) allTags[Constants.KEY_RUM_RESPONSE_CONNECTION] = resourceTags.response_connection;
@@ -4762,10 +4760,9 @@ export class FTRUMInnerManager {
     }
     if (resourceBean.resourceMethod) tags.resource_method = resourceBean.resourceMethod;
     if (resourceBean.resourceType) tags.resource_type = resourceBean.resourceType;
-    if (resourceBean.resourceStatus > 0) {
-      tags.resource_status = String(resourceBean.resourceStatus);
-      tags.resource_status_group = resourceBean.getResourceStatusGroup();
-    }
+    // Preserve the no-response sentinel in final line protocol, just like Network Errors.
+    tags.resource_status = String(resourceBean.resourceStatus);
+    tags.resource_status_group = resourceBean.getResourceStatusGroup();
     
     // Extended info (optional, matching Android)
     if (resourceBean.resourceHostIP) tags.resource_host_ip = resourceBean.resourceHostIP;

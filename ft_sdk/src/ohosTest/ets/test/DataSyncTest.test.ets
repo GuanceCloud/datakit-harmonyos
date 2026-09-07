@@ -821,9 +821,10 @@ export default function dataSyncTest() {
       const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments, 5000);
 
       expect(resourceRecord !== null).assertTrue();
-      expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertFalse();
+      expect((resourceRecord?.getDataString() ?? '').includes('resource_status=0')).assertTrue();
       expect(errorRecord !== null).assertTrue();
-      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID, viewName };
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID, viewName,
+        resourceStatus: 0 };
       const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID, viewName, requiredFields: ['error_stack'] };
       RumAttributeAssert.record(resourceRecord, resourceAttributes);
       RumAttributeAssert.record(errorRecord, errorAttributes);

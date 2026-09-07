@@ -519,10 +519,11 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       return await next.handle(context);
     }
 
+    const url = context.request.url.href;
+    const method = context.request.method || 'GET';
+    let finalTraceId: string | undefined = undefined;
+    let finalSpanId: string | undefined = undefined;
     try {
-      const url = context.request.url.href;
-      const method = context.request.method || 'GET';
-
       let uniqueId: string | undefined = undefined;
       if (context.request.headers && context.request.headers['X-FT-Resource-ID']) {
         const headerValue = context.request.headers['X-FT-Resource-ID'];
@@ -557,8 +558,6 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       let traceHeaders: Record<string, string> = {};
       let traceId: string | undefined = undefined;
       let spanId: string | undefined = undefined;
-      let finalTraceId: string | undefined = undefined;
-      let finalSpanId: string | undefined = undefined;
       let traceHeadersInjected = false;
       if (!hasKnownTraceHeaderMap(headersMap)) {
         const requestContextHeaders: Record<string, string> = {};
@@ -618,8 +617,14 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       finalSpanId = finalTraceContext.spanId || spanId;
 
       FTInnerLogger.d(TAG, `[RCP-Trace] Added trace headers for ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(traceHeaders)}`);
+    } catch (error) {
+      FTInnerLogger.e(TAG, `[RCP-Trace] Failed to prepare trace request: ${error}`);
+    }
 
-      const response = await next.handle(context);
+    // A transport failure belongs to the caller. Never retry the request from
+    // an instrumentation catch block (especially for non-idempotent requests).
+    const response = await next.handle(context);
+    try {
       if (response) {
         const responseHeadersMap = new Map<string, string>();
         if (response.headers) {
@@ -651,11 +656,10 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         );
       }
 
-      return response;
     } catch (error) {
-      FTInnerLogger.e(TAG, `[RCP-Trace] Error in trace interceptor: ${error}`);
-      return await next.handle(context);
+      FTInnerLogger.e(TAG, `[RCP-Trace] Failed to process trace response: ${error}`);
     }
+    return response;
   }
 }
 
