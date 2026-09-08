@@ -369,6 +369,12 @@ export class SyncTaskManager {
    * uploaded in a single batch. Kept aligned with Android's SLEEP_TIME.
    */
   public static readonly AUTO_SYNC_DELAY_MS = 10_000;
+  /**
+   * Let HarmonyOS finish applying routes/capabilities after netAvailable
+   * before a pending request is created. This is intentionally much shorter
+   * than the normal aggregation window.
+   */
+  public static readonly NETWORK_RECOVERY_UPLOAD_DELAY_MS = 750;
   private static instance: SyncTaskManager | null = null;
   private static readonly PREFERENCES_NAME = 'ft_sdk_sync_task';
   private static readonly KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
@@ -382,6 +388,12 @@ export class SyncTaskManager {
   private uploadRescheduleDelay = 0;
   private uploadTimer = -1;
   private uploadTaskSequence = 0;
+  /** Updated by FTNetworkListener's netLost/netAvailable callbacks. */
+  private networkAvailable = true;
+  /** A trigger received while offline is retained until the next recovery. */
+  private uploadPendingForNetwork = false;
+  /** Prevent an in-flight failure from shortening the recovery stabilization delay. */
+  private networkRecoveryDelayPending = false;
   private isStop = false;
   private autoSync = false;
   private syncSleepTime = 0;
@@ -489,7 +501,18 @@ export class SyncTaskManager {
       return;
     }
 
-    const normalizedDelay = Math.max(0, delay);
+    if (!this.networkAvailable) {
+      // Do not create an upload Worker round while HarmonyOS has reported the
+      // network as lost. In particular, this preserves the retry budget for
+      // when netAvailable arrives instead of spending it on immediate errors.
+      this.uploadPendingForNetwork = true;
+      return;
+    }
+
+    let normalizedDelay = Math.max(0, delay);
+    if (this.networkRecoveryDelayPending) {
+      normalizedDelay = Math.max(normalizedDelay, SyncTaskManager.NETWORK_RECOVERY_UPLOAD_DELAY_MS);
+    }
     const taskName = this.nextUploadTaskName();
     if (this.uploadScheduled || this.uploadRunning) {
       // A repeated auto-sync trigger is already covered by the outstanding
@@ -538,6 +561,8 @@ export class SyncTaskManager {
     this.uploadScheduledDelay = 0;
     this.uploadScheduledAt = 0;
     this.uploadRescheduleDelay = 0;
+    this.uploadPendingForNetwork = false;
+    this.networkRecoveryDelayPending = false;
   }
 
   private async executeScheduledUpload(taskName: string): Promise<void> {
@@ -548,6 +573,17 @@ export class SyncTaskManager {
     if (this.isStop) {
       return;
     }
+
+    // netLost can race a timer callback. Check again immediately before the
+    // Worker is started so a timer scheduled while online cannot consume a
+    // retry after the platform has declared the network unavailable.
+    if (!this.networkAvailable) {
+      this.uploadPendingForNetwork = true;
+      FTInnerLogger.d(TAG, 'Upload deferred: waiting for network recovery');
+      return;
+    }
+    this.uploadPendingForNetwork = false;
+    this.networkRecoveryDelayPending = false;
 
     FTLogSeparator.data(TAG, "数据上传开始");
     this.uploadRunning = true;
@@ -652,16 +688,61 @@ export class SyncTaskManager {
       return;
     }
 
-    if (this.sdkConfig === null || !isUploadEndpointAvailable(
-      this.sdkConfig.getDatakitUrl(),
-      this.sdkConfig.getDatawayUrl(),
-      this.sdkConfig.getClientToken()
-    )) {
+    if (!this.isUploadEndpointConfigured()) {
       FTInnerLogger.w(TAG, 'Upload URL not configured, skipping sync');
       return;
     }
 
     this.executePoll(true);
+  }
+
+  /**
+   * Receives the lifecycle state reported by FTNetworkListener. A running HTTP
+   * request is left to complete, but no queued or follow-up upload is started
+   * while the network is unavailable.
+   *
+   * @param available current network lifecycle state from HarmonyOS
+   * @param scheduleRecovery true for netAvailable (including the initial
+   * listener callback), which resumes auto-sync after a short stabilization
+   * delay instead of the normal 10-second aggregation delay
+   */
+  public updateNetworkAvailability(available: boolean, scheduleRecovery: boolean = false): void {
+    const wasAvailable = this.networkAvailable;
+    this.networkAvailable = available;
+
+    if (!available) {
+      this.networkRecoveryDelayPending = false;
+      const hadScheduledUpload = this.uploadScheduled;
+      if (hadScheduledUpload) {
+        this.clearUploadTimer();
+        this.uploadScheduled = false;
+        this.uploadScheduledDelay = 0;
+        this.uploadScheduledAt = 0;
+      }
+      this.uploadPendingForNetwork = this.uploadPendingForNetwork || hadScheduledUpload ||
+        this.uploadRunning || this.uploadNeedReschedule;
+      FTInnerLogger.d(TAG, 'Upload scheduling paused: network unavailable');
+      return;
+    }
+
+    const shouldResume = scheduleRecovery || !wasAvailable;
+    if (!shouldResume || this.isStop || !this.isUploadEndpointConfigured() ||
+      (!this.autoSync && !this.uploadPendingForNetwork)) {
+      return;
+    }
+
+    FTInnerLogger.i(TAG,
+      `Network available; scheduling pending upload after ${SyncTaskManager.NETWORK_RECOVERY_UPLOAD_DELAY_MS}ms`);
+    this.networkRecoveryDelayPending = true;
+    this.scheduleUpload(SyncTaskManager.NETWORK_RECOVERY_UPLOAD_DELAY_MS);
+  }
+
+  private isUploadEndpointConfigured(): boolean {
+    return this.sdkConfig !== null && isUploadEndpointAvailable(
+      this.sdkConfig.getDatakitUrl(),
+      this.sdkConfig.getDatawayUrl(),
+      this.sdkConfig.getClientToken()
+    );
   }
 
   /**

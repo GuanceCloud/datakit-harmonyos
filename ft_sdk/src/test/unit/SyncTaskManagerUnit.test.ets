@@ -700,6 +700,65 @@ export default function syncTaskManagerUnitTest() {
       expect(uploadStatus.scheduledDelay).assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
     });
 
+    it('networkLossDefersScheduledUploadUntilRecovery', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.hasDataResult = true;
+      queueUploadRowsForOnly(db, DataType.LOG, [
+        createSyncData(DataType.LOG, 'network-recovery-log',
+          'df_rum_harmonyos_log,sdk_data_id=network-recovery-log value=1i 100')
+      ]);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
+
+      manager.executeSyncPoll();
+      expect(manager.getStatus().uploadLaneStatus.scheduledDelay)
+        .assertEqual(SyncTaskManager.AUTO_SYNC_DELAY_MS);
+
+      manager.updateNetworkAvailability(false);
+      await flushPromises();
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+      expect(runtime.executeHttpCount).assertEqual(0);
+
+      manager.updateNetworkAvailability(true, true);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertTrue();
+      expect(manager.getStatus().uploadLaneStatus.scheduledDelay)
+        .assertEqual(SyncTaskManager.NETWORK_RECOVERY_UPLOAD_DELAY_MS);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(1);
+    });
+
+    it('networkLossPreventsInFlightFailureFromStartingRetry', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      db.hasDataResult = true;
+      const row = createSyncData(DataType.RUM_APP, 'network-lost-in-flight',
+        'action,sdk_data_id=network-lost-in-flight,action_id=network-lost value=1i 100');
+      db.queryQueue.push([row], [], []);
+      runtime.httpResults.push(new FakeHttpResult(NetCodeStatus.NETWORK_EXCEPTION_CODE, 'network lost', '2300007'));
+
+      let releaseHttp: () => void = () => {
+        // Resolver is assigned by the Promise executor below.
+      };
+      runtime.httpBarrier = new Promise<void>((resolve: () => void) => {
+        releaseHttp = resolve;
+      });
+
+      manager.executePoll(false);
+      await waitUntil(() => runtime.executeHttpCount === 1);
+      manager.updateNetworkAvailability(false);
+      releaseHttp();
+      runtime.httpBarrier = null;
+      await runScheduledUpload(runtime);
+
+      // The request already in flight may fail, but netLost must prevent its
+      // retry chain from starting another HTTP request.
+      expect(runtime.executeHttpCount).assertEqual(1);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
     it('syncPollRunUploadLaneWhenDbHasData', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;

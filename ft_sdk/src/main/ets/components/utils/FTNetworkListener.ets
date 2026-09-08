@@ -176,6 +176,7 @@ export class FTNetworkListener {
     try {
       FTInnerLogger.i(TAG, `Network lost, netId=${data.netId}`);
       this.hasInternetCapability = false;
+      SyncTaskManager.getInstance().updateNetworkAvailability(false);
 
       // Update network type cache to "unknown"
       DeviceUtils.setCachedNetworkType("unknown");
@@ -192,6 +193,7 @@ export class FTNetworkListener {
     try {
       FTInnerLogger.i(TAG, "Network unavailable");
       this.hasInternetCapability = false;
+      SyncTaskManager.getInstance().updateNetworkAvailability(false);
 
       // Update network type cache to "unknown"
       DeviceUtils.setCachedNetworkType("unknown");
@@ -215,11 +217,10 @@ export class FTNetworkListener {
   }
 
   private resumePendingUploadAfterNetworkRecovery(reason: string): void {
-    // SyncTaskManager coalesces this delayed automatic trigger with any
-    // existing upload task, so duplicate platform callbacks cannot create a
-    // tight polling loop.
+    // SyncTaskManager coalesces duplicate platform callbacks and delays the
+    // recovery request briefly, allowing HarmonyOS to finish route setup.
     FTInnerLogger.i(TAG, `Network recovery (${reason}); scheduling pending upload`);
-    SyncTaskManager.getInstance().executeSyncPoll();
+    SyncTaskManager.getInstance().updateNetworkAvailability(true, true);
   }
 
   /**
