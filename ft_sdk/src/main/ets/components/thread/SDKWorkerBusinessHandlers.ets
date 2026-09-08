@@ -1300,9 +1300,6 @@ function processRumResourceCommand(
     }
     resource.startRegistered = true;
     resource.startTime = command.startTime && command.startTime > 0 ? command.startTime : resource.startTime;
-    if (!stateRecoveryOnly) {
-      appendResourcePendingIncreaseDelta(state, resource.context.viewId, resource.context.actionId);
-    }
     return false;
   }
 
@@ -1311,10 +1308,7 @@ function processRumResourceCommand(
     if (resource.context.actionId.length === 0 && command.fallbackActionId && command.fallbackActionId.length > 0) {
       resource.context.actionId = command.fallbackActionId;
     }
-    if (!stateRecoveryOnly) {
-      applyResourceCompleteDelta(state, resource.context.viewId, resource.context.actionId);
-    }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext, stateRecoveryOnly);
   }
 
   if (commandType === 'setContent' || commandType === 'add') {
@@ -1327,14 +1321,14 @@ function processRumResourceCommand(
     if (commandType === 'add' && resource.endTime <= 0) {
       resource.endTime = resource.eventTime > 0 ? resource.eventTime : Date.now() * 1000000;
     }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext, stateRecoveryOnly);
   }
 
   if (commandType === 'setNetState') {
     if (command.netStatus) {
       applyResourceNetStatus(resource, command.netStatus);
     }
-    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext);
+    return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext, stateRecoveryOnly);
   }
   return false;
 }
@@ -1556,7 +1550,8 @@ function tryCreateRumResourceDraft(
   state: SDKWorkerRuntimeState,
   syncDrafts: SDKSyncDataDraftDTO[],
   rawEvents: SDKRumEventDTO[],
-  lineContext: SDKLineProtocolContextDTO | null
+  lineContext: SDKLineProtocolContextDTO | null,
+  stateRecoveryOnly: boolean = false
 ): boolean {
   if (!resource.contentSet || !resource.netStateSet || resource.endTime <= 0 || resource.isProcessing) {
     return false;
@@ -1583,7 +1578,15 @@ function tryCreateRumResourceDraft(
     } else {
       rawEvents.push(errorEvent);
     }
-    applyRumErrorDelta(state, resource.context.viewId, resource.context.actionId);
+    if (!stateRecoveryOnly) {
+      applyRumErrorDelta(state, resource.context.viewId, resource.context.actionId);
+    }
+  }
+  if (!stateRecoveryOnly) {
+    // Resource/Error counters are emitted together only after the lifecycle
+    // is complete. The Host subsequently releases the durable pending
+    // Resource reference after the corresponding drafts are persisted.
+    applyResourceCompleteDelta(state, resource.context.viewId, resource.context.actionId);
   }
   state.rumResources.delete(resource.resourceId);
   return true;
@@ -1767,18 +1770,13 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   return fields;
 }
 
-function appendResourcePendingIncreaseDelta(state: SDKWorkerRuntimeState, viewId: string, actionId: string): void {
-  const delta = getOrCreateRumCounterDelta(state, viewId || '', actionId || '');
-  delta.viewPendingDelta += viewId && viewId.length > 0 ? 1 : 0;
-  delta.actionPendingDelta += actionId && actionId.length > 0 ? 1 : 0;
-  state.rumCounterPendingEventCount++;
-}
-
 function applyResourceCompleteDelta(state: SDKWorkerRuntimeState, viewId: string, actionId: string): void {
   const delta = getOrCreateRumCounterDelta(state, viewId || '', actionId || '');
   if (viewId && viewId.length > 0) {
     delta.viewResourceDelta += 1;
-    delta.viewPendingDelta -= 1;
+    // The durable Resource lifecycle table owns pending_resource. Its
+    // reference is released by the Host only after this Resource/Error draft
+    // and these counter deltas have both committed to RDB.
     delta.viewUpdateTimeDelta += 1;
     // The initiating Action may already be closed when a slow request ends.
     // Its completion must still publish the updated View counter snapshot.
@@ -1786,7 +1784,6 @@ function applyResourceCompleteDelta(state: SDKWorkerRuntimeState, viewId: string
   }
   if (actionId && actionId.length > 0) {
     delta.actionResourceDelta += 1;
-    delta.actionPendingDelta -= 1;
   }
   state.rumCounterNeedsActionCloseCheck = true;
   state.rumCounterPendingEventCount++;

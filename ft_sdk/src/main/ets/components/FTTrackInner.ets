@@ -856,11 +856,11 @@ class FTTrackInner {
     const drafts = this.prepareRumWorkerResponseDrafts(payload);
     if (drafts.length === 0) {
       this.completeRumWorkerCallback(callback, true);
-      if (countersApplied) {
-        rumManager.markRumResourcesCompleted(
+      const resourcesCompleted = countersApplied && await rumManager.markRumResourcesCompleted(
           payload.completedResourceIds || [],
           !!(payload.deltas && payload.deltas.length > 0)
         );
+      if (resourcesCompleted) {
         rumManager.markRumSemanticHostApplied(response.id);
         if (payload.deltas && payload.deltas.length > 0) {
           rumManager.acknowledgeRumSemanticThrough(response.id);
@@ -872,11 +872,11 @@ class FTTrackInner {
     if (await this.shouldSkipRumDraftDbWriteForCacheDiscard()) {
       this.logRumCacheDiscard(drafts.length);
       this.completeRumWorkerCallback(callback, true);
-      if (countersApplied) {
-        rumManager.markRumResourcesCompleted(
+      const resourcesCompleted = countersApplied && await rumManager.markRumResourcesCompleted(
           payload.completedResourceIds || [],
           !!(payload.deltas && payload.deltas.length > 0)
         );
+      if (resourcesCompleted) {
         rumManager.markRumSemanticHostApplied(response.id);
         // DISCARD is terminal for these drafts. Advance the barrier here so
         // resource draft/context state is still converged without a DB task.
@@ -907,11 +907,11 @@ class FTTrackInner {
     } finally {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
-    if (draftsCommitted && countersApplied) {
-      rumManager.markRumResourcesCompleted(
+    const resourcesCompleted = draftsCommitted && countersApplied && await rumManager.markRumResourcesCompleted(
         payload.completedResourceIds || [],
         !!(payload.deltas && payload.deltas.length > 0)
       );
+    if (resourcesCompleted) {
       rumManager.markRumSemanticHostApplied(response.id);
       if (payload.deltas && payload.deltas.length > 0) {
         rumManager.acknowledgeRumSemanticThrough(response.id);

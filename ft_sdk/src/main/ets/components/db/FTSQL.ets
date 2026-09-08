@@ -18,6 +18,13 @@ export const FT_TABLE_VIEW: string = "rum_view";
 export const FT_TABLE_ACTION: string = "rum_action";
 
 /**
+ * Resource lifecycles that have started but have not yet produced their final
+ * Resource/Error records.  Keeping this relation in RDB makes the Action
+ * counter and action_id association recoverable after a process restart.
+ */
+export const FT_TABLE_PENDING_RUM_RESOURCE: string = "rum_pending_resource";
+
+/**
  * SDK internal metadata table name.
  * This table only stores a bounded set of SDK state values, not telemetry.
  */
@@ -61,6 +68,21 @@ export const RUM_COLUMN_EXTRA_ATTR: string = "extra_attr";
 export const RUM_DATA_UPDATE_TIME: string = "data_update_time";
 export const RUM_DATA_UPLOAD_TIME: string = "data_upload_time";
 export const RUM_VIEW_UPDATE_TIME: string = "view_update_time";
+
+/** Pending Resource lifecycle column definitions. */
+export const PENDING_RESOURCE_COLUMN_ID: string = "resource_id";
+export const PENDING_RESOURCE_COLUMN_VIEW_ID: string = "view_id";
+export const PENDING_RESOURCE_COLUMN_ACTION_ID: string = "action_id";
+export const PENDING_RESOURCE_COLUMN_SESSION_ID: string = "session_id";
+export const PENDING_RESOURCE_COLUMN_VIEW_NAME: string = "view_name";
+export const PENDING_RESOURCE_COLUMN_VIEW_REFERRER: string = "view_referrer";
+export const PENDING_RESOURCE_COLUMN_ACTION_NAME: string = "action_name";
+export const PENDING_RESOURCE_COLUMN_RUM_APP_ID: string = "rum_app_id";
+export const PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS: string = "dynamic_tags";
+export const PENDING_RESOURCE_COLUMN_DRAFT_UUID: string = "draft_uuid";
+export const PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID: string = "error_draft_uuid";
+export const PENDING_RESOURCE_COLUMN_START_TIME: string = "start_time";
+export const PENDING_RESOURCE_COLUMN_PENDING: string = "pending_resource";
 
 /**
  * Sync data table creation SQL
@@ -121,6 +143,28 @@ export const FT_TABLE_ACTION_CREATE: string =
   )`;
 
 /**
+ * A row represents one outstanding Resource. `pending_resource` is retained
+ * explicitly so recovery can distinguish an incomplete lifecycle from any
+ * future non-pending Resource bookkeeping rows.
+ */
+export const FT_TABLE_PENDING_RUM_RESOURCE_CREATE: string =
+  `CREATE TABLE IF NOT EXISTS ${FT_TABLE_PENDING_RUM_RESOURCE} (
+    ${PENDING_RESOURCE_COLUMN_ID} TEXT PRIMARY KEY,
+    ${PENDING_RESOURCE_COLUMN_VIEW_ID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_ACTION_ID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_SESSION_ID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_VIEW_NAME} TEXT,
+    ${PENDING_RESOURCE_COLUMN_VIEW_REFERRER} TEXT,
+    ${PENDING_RESOURCE_COLUMN_ACTION_NAME} TEXT,
+    ${PENDING_RESOURCE_COLUMN_RUM_APP_ID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS} TEXT,
+    ${PENDING_RESOURCE_COLUMN_DRAFT_UUID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID} TEXT,
+    ${PENDING_RESOURCE_COLUMN_START_TIME} BIGINT,
+    ${PENDING_RESOURCE_COLUMN_PENDING} INTEGER
+  )`;
+
+/**
  * SDK internal metadata table creation SQL.
  * Keys are primary keys so this table remains bounded regardless of runtime.
  */
@@ -141,7 +185,9 @@ export const CREATE_INDEXES: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_rum_view_session ON ${FT_TABLE_VIEW} (${RUM_COLUMN_SESSION_ID})`,
   `CREATE INDEX IF NOT EXISTS idx_rum_view_time ON ${FT_TABLE_VIEW} (${RUM_COLUMN_START_TIME})`,
   `CREATE INDEX IF NOT EXISTS idx_rum_action_session ON ${FT_TABLE_ACTION} (${RUM_COLUMN_SESSION_ID})`,
-  `CREATE INDEX IF NOT EXISTS idx_rum_action_time ON ${FT_TABLE_ACTION} (${RUM_COLUMN_START_TIME})`
+  `CREATE INDEX IF NOT EXISTS idx_rum_action_time ON ${FT_TABLE_ACTION} (${RUM_COLUMN_START_TIME})`,
+  `CREATE INDEX IF NOT EXISTS idx_pending_resource_action ON ${FT_TABLE_PENDING_RUM_RESOURCE} (${PENDING_RESOURCE_COLUMN_ACTION_ID})`,
+  `CREATE INDEX IF NOT EXISTS idx_pending_resource_start ON ${FT_TABLE_PENDING_RUM_RESOURCE} (${PENDING_RESOURCE_COLUMN_START_TIME})`
 ];
 
 /**

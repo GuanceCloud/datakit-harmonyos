@@ -1689,41 +1689,17 @@ export class FTDBManager extends DBManager {
    * Aligned with Android implementation
    * @param actionId Action ID
    * @param duration Action duration
-   * @param force Force close (ignore pending resources)
    * @returns Promise<boolean>
    */
-  public async closeAction(actionId: string, duration: number, force: boolean): Promise<boolean> {
+  public async closeAction(actionId: string, duration: number): Promise<boolean> {
     if (!actionId) {
       return false;
     }
 
     try {
-      const closeResult = await FTDBTaskPoolExecutor.closeRumAction(this.context, actionId, duration, force);
+      const closeResult = await FTDBTaskPoolExecutor.closeRumAction(this.context, actionId, duration);
       if (closeResult.wasClosed) {
         FTInnerLogger.d(TAG, `Action closed: ${actionId}`);
-      }
-
-      // If action was closed and had pending_resource, schedule delayed cleanup
-      if (closeResult.wasClosed && closeResult.hadPendingResource) {
-        // Schedule a delayed task to force clear pending_resource if it's still > 0 after 30 seconds
-        // This handles cases where resources never complete (e.g., network failures, timeouts)
-        // After action is closed, wait 30 seconds for resources to complete, then force clear pending_resource
-        // This allows cleanCloseActionData to delete the action data
-        setTimeout(() => {
-          (async () => {
-            try {
-              // Check if action still has pending_resource > 0
-              const actionPendingResource = await this.getActionPendingResource(actionId);
-              if (actionPendingResource > 0) {
-                FTInnerLogger.w(TAG, `Action pending resource timeout, forcing clear: ${actionId}`);
-                // Force clear pending_resource to allow cleanCloseActionData to delete the action
-                await this.forceClearActionPendingResource(actionId);
-              }
-            } catch (error) {
-              FTInnerLogger.e(TAG, `Delayed action pending resource cleanup failed: ${error}`);
-            }
-          })();
-        }, 30 * 1000);
       }
 
       return closeResult.wasClosed;

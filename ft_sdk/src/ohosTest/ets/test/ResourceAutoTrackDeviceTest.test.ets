@@ -282,6 +282,19 @@ class ResourceFakeRcpTerminalHandler implements rcp.RequestHandler {
   }
 }
 
+class ResourceDelayedFailingRcpTerminalHandler implements rcp.RequestHandler {
+  private readonly delayMs: number;
+
+  constructor(delayMs: number) {
+    this.delayMs = delayMs;
+  }
+
+  async handle(_context: rcp.RequestContext): Promise<rcp.Response> {
+    await WaitUtils.delay(this.delayMs);
+    throw new Error('Delayed RCP request failure');
+  }
+}
+
 class ResourceFakeRcpChainHandler implements rcp.RequestHandler {
   private interceptors: rcp.Interceptor[];
   private index: number;
@@ -447,6 +460,16 @@ async function runResourceRcpChain(
   const terminal = new ResourceFakeRcpTerminalHandler();
   const handler = new ResourceFakeRcpChainHandler(interceptors, 0, terminal);
   return await handler.handle(context);
+}
+
+async function runResourceRcpFailureChain(
+  interceptors: rcp.Interceptor[],
+  context: ResourceFakeRcpRequestContext,
+  delayMs: number
+): Promise<void> {
+  const terminal = new ResourceDelayedFailingRcpTerminalHandler(delayMs);
+  const handler = new ResourceFakeRcpChainHandler(interceptors, 0, terminal);
+  await handler.handle(context);
 }
 
 async function assertRcpTraceTypeResource(
@@ -950,6 +973,52 @@ export default function resourceAutoTrackDeviceTest() {
       expect(uploaded.includes('trace_id=')).assertFalse();
       expect(uploaded.includes('span_id=')).assertFalse();
       expect(consumed).assertTrue();
+    });
+
+    it('rcpFailureAfterActionTimeoutShouldKeepActionCounters', 0, async () => {
+      const viewName = 'rcp_late_failure_action_counter_view';
+      const actionName = 'rcp_late_failure_action_counter';
+      const resourceUrl = 'http://device.test/rcp-late-action-failure';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().startAction(actionName, 'click');
+
+      const config = createFTRCPTrackConfig({
+        enableTraceInterceptor: true,
+        enableResourceInterceptor: true
+      });
+      const interceptors = config.interceptors ?? [];
+      const context = new ResourceFakeRcpRequestContext(resourceUrl, 'GET');
+      let rejected = false;
+      try {
+        // This crosses the legacy five-second Action force-close threshold.
+        await runResourceRcpFailureChain(interceptors, context, 5200);
+      } catch (_error) {
+        rejected = true;
+      }
+      expect(rejected).assertTrue();
+
+      const actionRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action,',
+        `action_name=${actionName}`,
+        'action_resource_count=1i',
+        'action_error_count=1i'
+      ], 5000);
+      const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'resource,',
+        `resource_url=${resourceUrl}`,
+        `action_name=${actionName}`,
+        'resource_status=0'
+      ], 5000);
+      const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'error,',
+        `resource_url=${resourceUrl}`,
+        `action_name=${actionName}`,
+        'error_type=network'
+      ], 5000);
+
+      expect(actionRecord !== null).assertTrue();
+      expect(resourceRecord !== null).assertTrue();
+      expect(errorRecord !== null).assertTrue();
     });
 
     it('rcpNoRumLinkShouldOmitTraceIds', 0, async () => {

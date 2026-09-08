@@ -3,8 +3,13 @@ import taskpool from '@ohos.taskpool';
 import { SyncData, SyncDataJSON } from './bean/SyncData';
 import { ActionBean, ActionBeanJSON } from './bean/ActionBean';
 import { ViewBean, ViewBeanJSON } from './bean/ViewBean';
-import { runFTDBTaskPoolExecute } from './FTDBTaskPoolOperations';
+import {
+  runFTDBTaskPoolExecute,
+  FTDBTaskPoolPendingRumResourceDTO
+} from './FTDBTaskPoolOperations';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+
+export { FTDBTaskPoolPendingRumResourceDTO } from './FTDBTaskPoolOperations';
 
 enum FTDBTaskPoolCommand {
   INIT = 'init',
@@ -36,6 +41,11 @@ enum FTDBTaskPoolCommand {
   GET_RUM_PENDING_RESOURCE = 'getRumPendingResource',
   FORCE_CLEAR_RUM_PENDING_RESOURCE = 'forceClearRumPendingResource',
   GET_ACTION_INFO = 'getActionInfo',
+  REGISTER_PENDING_RUM_RESOURCE = 'registerPendingRumResource',
+  COMPLETE_PENDING_RUM_RESOURCES = 'completePendingRumResources',
+  GET_PENDING_RUM_RESOURCE = 'getPendingRumResource',
+  QUERY_PENDING_RUM_ACTIONS = 'queryPendingRumActions',
+  MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
   INSERT_RUM_ACTION = 'insertRumAction',
@@ -191,6 +201,8 @@ interface FTDBTaskPoolRequest {
   target?: string;
   ids?: string[];
   counterDeltas?: FTDBTaskPoolRumCounterDeltaDTO[];
+  pendingResource?: FTDBTaskPoolPendingRumResourceDTO;
+  resourceIds?: string[];
   measurementType?: string;
 }
 
@@ -218,6 +230,7 @@ interface FTDBTaskPoolResponse {
   actionInfo?: FTDBTaskPoolActionInfoDTO | null;
   actionCounts?: FTDBTaskPoolActionCountsDTO | null;
   closeAction?: FTDBTaskPoolCloseActionResponse;
+  pendingResource?: FTDBTaskPoolPendingRumResourceDTO | null;
   strings?: string[];
   dbLaneWaitMs?: number;
   errorMessage?: string;
@@ -638,6 +651,74 @@ export class FTDBTaskPoolExecutor {
     return response.actionInfo || null;
   }
 
+  /**
+   * Atomically persists an outstanding Resource together with the Action/View
+   * pending-resource reference counts. Repeating the same resourceId is a
+   * no-op, so interceptor retries cannot double-count it.
+   */
+  public static async registerPendingRumResource(
+    context: Context,
+    resource: FTDBTaskPoolPendingRumResourceDTO
+  ): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.REGISTER_PENDING_RUM_RESOURCE,
+      pendingResource: resource
+    });
+    return response.value === true;
+  }
+
+  /**
+   * Removes completed Resource lifecycle rows and decrements their persisted
+   * Action/View references. Counter values are written before this operation.
+   */
+  public static async completePendingRumResources(context: Context, resourceIds: string[]): Promise<number> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.COMPLETE_PENDING_RUM_RESOURCES,
+      resourceIds
+    });
+    return response.count || 0;
+  }
+
+  /** Retrieves the original Resource association after the in-memory SDK state is restarted. */
+  public static async getPendingRumResource(
+    context: Context,
+    resourceId: string
+  ): Promise<FTDBTaskPoolPendingRumResourceDTO | null> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.GET_PENDING_RUM_RESOURCE,
+      resourceIds: [resourceId]
+    });
+    return response.pendingResource || null;
+  }
+
+  /** Returns open Actions that still have durable Resource references. */
+  public static async queryPendingRumActions(context: Context, limit: number): Promise<ActionBean[]> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.QUERY_PENDING_RUM_ACTIONS,
+      limit
+    });
+    const rows = response.actions || [];
+    const result: ActionBean[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      result.push(ActionBean.fromJSON(rows[i]));
+    }
+    return result;
+  }
+
+  /** Persists the Action duration once close has been requested, before waiting for Resources. */
+  public static async markRumActionCloseRequested(
+    context: Context,
+    actionId: string,
+    duration: number
+  ): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.MARK_RUM_ACTION_CLOSE_REQUESTED,
+      actionId,
+      duration
+    });
+    return response.value === true;
+  }
+
   public static async applyRumCounterDeltas(
     context: Context,
     deltas: FTDBTaskPoolRumCounterDeltaDTO[]
@@ -670,14 +751,12 @@ export class FTDBTaskPoolExecutor {
   public static async closeRumAction(
     context: Context,
     actionId: string,
-    duration: number,
-    force: boolean
+    duration: number
   ): Promise<FTDBTaskPoolCloseActionResponse> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.CLOSE_RUM_ACTION,
       actionId,
-      duration,
-      force
+      duration
     });
     return response.closeAction || {
       wasClosed: false,

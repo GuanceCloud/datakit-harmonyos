@@ -111,10 +111,11 @@ export class DatabaseHelper {
     // Check if all SDK tables exist
     const hasViewTable = await this.hasTable(FTSQL.FT_TABLE_VIEW);
     const hasActionTable = await this.hasTable(FTSQL.FT_TABLE_ACTION);
+    const hasPendingResourceTable = await this.hasTable(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE);
     const hasSyncTable = await this.hasTable(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
     const hasSdkMetaTable = await this.hasTable(FTSQL.FT_TABLE_SDK_META);
 
-    return hasViewTable && hasActionTable && hasSyncTable && hasSdkMetaTable;
+    return hasViewTable && hasActionTable && hasPendingResourceTable && hasSyncTable && hasSdkMetaTable;
   }
 
   /**
@@ -204,6 +205,10 @@ export class DatabaseHelper {
       // Create RUM action table
       await this.rdbStore.executeSql(FTSQL.FT_TABLE_ACTION_CREATE);
       FTInnerLogger.d(TAG, "Created rum_action table");
+
+      // Persist incomplete Resource-to-Action associations across restarts.
+      await this.rdbStore.executeSql(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE_CREATE);
+      FTInnerLogger.d(TAG, "Created rum_pending_resource table");
 
       // Create bounded SDK metadata table
       await this.rdbStore.executeSql(FTSQL.FT_TABLE_SDK_META_CREATE);
@@ -472,6 +477,7 @@ export class DatabaseHelper {
     try {
       // Drop all tables
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_ACTION}`);
+      await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE}`);
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_VIEW}`);
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}`);
       await this.rdbStore.executeSql(`DROP TABLE IF EXISTS ${FTSQL.FT_TABLE_SDK_META}`);

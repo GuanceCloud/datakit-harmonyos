@@ -7,7 +7,7 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
-import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+import { SDKRumResourceContextDTO, SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -43,6 +43,11 @@ enum FTDBTaskPoolCommand {
   GET_RUM_PENDING_RESOURCE = 'getRumPendingResource',
   FORCE_CLEAR_RUM_PENDING_RESOURCE = 'forceClearRumPendingResource',
   GET_ACTION_INFO = 'getActionInfo',
+  REGISTER_PENDING_RUM_RESOURCE = 'registerPendingRumResource',
+  COMPLETE_PENDING_RUM_RESOURCES = 'completePendingRumResources',
+  GET_PENDING_RUM_RESOURCE = 'getPendingRumResource',
+  QUERY_PENDING_RUM_ACTIONS = 'queryPendingRumActions',
+  MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
   INSERT_RUM_ACTION = 'insertRumAction',
@@ -157,6 +162,15 @@ export interface FTDBTaskPoolCloseActionResponse {
   hadPendingResource: boolean;
 }
 
+/** Durable Resource-to-Action association retained until Resource finalization. */
+export interface FTDBTaskPoolPendingRumResourceDTO {
+  resourceId: string;
+  startTime: number;
+  context: SDKRumResourceContextDTO;
+  draftUuid: string;
+  errorDraftUuid: string;
+}
+
 interface FTDBTaskPoolRequest {
   command: string;
   source?: string;
@@ -191,6 +205,8 @@ interface FTDBTaskPoolRequest {
   target?: string;
   ids?: string[];
   counterDeltas?: FTDBTaskPoolRumCounterDeltaDTO[];
+  pendingResource?: FTDBTaskPoolPendingRumResourceDTO;
+  resourceIds?: string[];
   measurementType?: string;
 }
 
@@ -214,6 +230,7 @@ interface FTDBTaskPoolResponse {
   actionInfo?: FTDBTaskPoolActionInfoDTO | null;
   actionCounts?: FTDBTaskPoolActionCountsDTO | null;
   closeAction?: FTDBTaskPoolCloseActionResponse;
+  pendingResource?: FTDBTaskPoolPendingRumResourceDTO | null;
   strings?: string[];
   dbLaneWaitMs?: number;
   errorMessage?: string;
@@ -417,6 +434,30 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
           ok: true,
           actionInfo: await getActionInfoInTaskPool(rdbStore, request.actionId || '')
         } as FTDBTaskPoolResponse as Object;
+      case FTDBTaskPoolCommand.REGISTER_PENDING_RUM_RESOURCE:
+        return okResponse(undefined, request.pendingResource ?
+          await registerPendingRumResourceInTaskPool(rdbStore, request.pendingResource) : false);
+      case FTDBTaskPoolCommand.COMPLETE_PENDING_RUM_RESOURCES:
+        return okCountResponse(await completePendingRumResourcesInTaskPool(
+          rdbStore,
+          request.resourceIds || []
+        ));
+      case FTDBTaskPoolCommand.GET_PENDING_RUM_RESOURCE:
+        return {
+          ok: true,
+          pendingResource: await getPendingRumResourceInTaskPool(rdbStore, firstString(request.resourceIds || []))
+        } as FTDBTaskPoolResponse as Object;
+      case FTDBTaskPoolCommand.QUERY_PENDING_RUM_ACTIONS:
+        return {
+          ok: true,
+          actions: await queryPendingRumActionsInTaskPool(rdbStore, normalizeLimit(request.limit))
+        } as FTDBTaskPoolResponse as Object;
+      case FTDBTaskPoolCommand.MARK_RUM_ACTION_CLOSE_REQUESTED:
+        return okResponse(undefined, await markRumActionCloseRequestedInTaskPool(
+          rdbStore,
+          request.actionId || '',
+          request.duration || 0
+        ));
       case FTDBTaskPoolCommand.APPLY_RUM_COUNTER_DELTAS:
         return okCountResponse(await applyRumCounterDeltasInTaskPool(
           rdbStore,
@@ -437,8 +478,7 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
           closeAction: await closeRumActionInTaskPool(
             rdbStore,
             request.actionId || '',
-            request.duration || 0,
-            request.force === true
+            request.duration || 0
           )
         } as FTDBTaskPoolResponse as Object;
       case FTDBTaskPoolCommand.QUERY_SUM_ACTION:
@@ -498,6 +538,7 @@ async function openTaskPoolRdbStore(context: Context): Promise<relationalStore.R
   await rdbStore.executeSql(FTSQL.FT_TABLE_SYNC_CREATE);
   await rdbStore.executeSql(FTSQL.FT_TABLE_VIEW_CREATE);
   await rdbStore.executeSql(FTSQL.FT_TABLE_ACTION_CREATE);
+  await rdbStore.executeSql(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE_CREATE);
   await rdbStore.executeSql(FTSQL.FT_TABLE_SDK_META_CREATE);
   for (let i = 0; i < FTSQL.CREATE_INDEXES.length; i++) {
     await rdbStore.executeSql(FTSQL.CREATE_INDEXES[i]);
@@ -1560,6 +1601,7 @@ async function deleteAllInTaskPool(rdbStore: relationalStore.RdbStore): Promise<
     result.sync = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME));
     result.view = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW));
     result.action = await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+    await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE));
     await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_SDK_META));
     rdbStore.commit();
   } catch (error) {
@@ -1582,6 +1624,14 @@ async function cleanupExpiredRumTableInTaskPool(
   }
   const deletePredicates = new relationalStore.RdbPredicates(tableName);
   deletePredicates.lessThan(FTSQL.RUM_COLUMN_START_TIME, cutoffTime);
+  if (tableName === FTSQL.FT_TABLE_ACTION) {
+    await rdbStore.executeSql(
+      `DELETE FROM ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE} WHERE ` +
+        `${FTSQL.PENDING_RESOURCE_COLUMN_ACTION_ID} IN (` +
+        `SELECT ${FTSQL.RUM_COLUMN_ID} FROM ${FTSQL.FT_TABLE_ACTION} ` +
+        `WHERE ${FTSQL.RUM_COLUMN_START_TIME} < ${Math.floor(cutoffTime)})`
+    );
+  }
   await rdbStore.delete(deletePredicates);
   return count;
 }
@@ -1865,7 +1915,7 @@ async function acknowledgeViewInTaskPool(
   predicates.equalTo(FTSQL.RUM_COLUMN_LONG_TASK_COUNT, view.longTaskCount);
   const values = {} as relationalStore.ValuesBucket;
   // Keep a closed View queryable while unfinished resources can still update
-  // it, including the watchdog's pending-resource clear without a timestamp bump.
+  // its counters before the final snapshot is acknowledged.
   values[FTSQL.RUM_DATA_UPLOAD_TIME] = view.isClose && view.pendingResource > 0 ? 0 : view.dataUpdateTime;
   values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
   rdbStore.beginTransaction();
@@ -1965,6 +2015,234 @@ async function getActionInfoInTaskPool(
   } finally {
     resultSet.close();
   }
+}
+
+function pendingResourceValues(resource: FTDBTaskPoolPendingRumResourceDTO): relationalStore.ValuesBucket {
+  const context = resource.context;
+  const values = {} as relationalStore.ValuesBucket;
+  values[FTSQL.PENDING_RESOURCE_COLUMN_ID] = resource.resourceId;
+  values[FTSQL.PENDING_RESOURCE_COLUMN_VIEW_ID] = context.viewId || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_ACTION_ID] = context.actionId || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_SESSION_ID] = context.sessionId || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_VIEW_NAME] = context.viewName || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_VIEW_REFERRER] = context.viewReferrer || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_ACTION_NAME] = context.actionName || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID] = context.rumAppId || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS] = JSON.stringify(context.dynamicTags || {});
+  values[FTSQL.PENDING_RESOURCE_COLUMN_DRAFT_UUID] = resource.draftUuid || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID] = resource.errorDraftUuid || '';
+  values[FTSQL.PENDING_RESOURCE_COLUMN_START_TIME] = resource.startTime;
+  values[FTSQL.PENDING_RESOURCE_COLUMN_PENDING] = 1;
+  return values;
+}
+
+function parsePendingResourceDynamicTags(value: string): Record<string, string> {
+  const parsed = parseJsonRecord(value);
+  const tags: Record<string, string> = {};
+  const keys = Object.keys(parsed);
+  for (let i = 0; i < keys.length; i++) {
+    tags[keys[i]] = String(parsed[keys[i]]);
+  }
+  return tags;
+}
+
+function readPendingRumResourceFromResultSet(
+  resultSet: relationalStore.ResultSet
+): FTDBTaskPoolPendingRumResourceDTO {
+  const startTime = resultSet.getString(
+    resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_START_TIME)
+  );
+  return {
+    resourceId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_ID)),
+    startTime: startTime ? Number.parseInt(startTime, 10) : 0,
+    draftUuid: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_DRAFT_UUID)),
+    errorDraftUuid: resultSet.getString(
+      resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID)
+    ),
+    context: {
+      viewId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_VIEW_ID)),
+      actionId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_ACTION_ID)),
+      sessionId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_SESSION_ID)),
+      viewName: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_VIEW_NAME)),
+      viewReferrer: resultSet.getString(
+        resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_VIEW_REFERRER)
+      ),
+      actionName: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_ACTION_NAME)),
+      rumAppId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID)),
+      dynamicTags: parsePendingResourceDynamicTags(
+        resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS))
+      )
+    }
+  };
+}
+
+async function getPendingRumResourceInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  resourceId: string
+): Promise<FTDBTaskPoolPendingRumResourceDTO | null> {
+  if (!resourceId || resourceId.length === 0) {
+    return null;
+  }
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE);
+  predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_ID, resourceId);
+  predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_PENDING, 1);
+  const resultSet = await rdbStore.query(predicates);
+  try {
+    if (!resultSet.goToFirstRow()) {
+      return null;
+    }
+    return readPendingRumResourceFromResultSet(resultSet);
+  } finally {
+    resultSet.close();
+  }
+}
+
+async function countPendingRumResourcesForActionInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  actionId: string
+): Promise<number> {
+  if (!actionId || actionId.length === 0) {
+    return 0;
+  }
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE);
+  predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_ACTION_ID, actionId);
+  predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_PENDING, 1);
+  const resultSet = await rdbStore.query(predicates, [FTSQL.PENDING_RESOURCE_COLUMN_ID]);
+  let count = 0;
+  try {
+    if (resultSet.goToFirstRow()) {
+      do {
+        count++;
+      } while (resultSet.goToNextRow());
+    }
+  } finally {
+    resultSet.close();
+  }
+  return count;
+}
+
+async function registerPendingRumResourceInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  resource: FTDBTaskPoolPendingRumResourceDTO
+): Promise<boolean> {
+  if (!resource || !resource.resourceId || resource.resourceId.length === 0) {
+    return false;
+  }
+  const existing = await getPendingRumResourceInTaskPool(rdbStore, resource.resourceId);
+  if (existing) {
+    return true;
+  }
+
+  const context = resource.context;
+  rdbStore.beginTransaction();
+  try {
+    await rdbStore.insert(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE, pendingResourceValues(resource));
+    if (context.viewId && context.viewId.length > 0) {
+      await rdbStore.executeSql(
+        `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ` +
+          `COALESCE(${FTSQL.RUM_COLUMN_PENDING_RESOURCE}, 0) + 1 ` +
+          `WHERE ${FTSQL.RUM_COLUMN_ID} = '${escapeSqlString(context.viewId)}'`
+      );
+    }
+    if (context.actionId && context.actionId.length > 0) {
+      await rdbStore.executeSql(
+        `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ` +
+          `COALESCE(${FTSQL.RUM_COLUMN_PENDING_RESOURCE}, 0) + 1 ` +
+          `WHERE ${FTSQL.RUM_COLUMN_ID} = '${escapeSqlString(context.actionId)}'`
+      );
+    }
+    rdbStore.commit();
+    return true;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
+}
+
+async function completePendingRumResourcesInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  resourceIds: string[]
+): Promise<number> {
+  if (resourceIds.length === 0) {
+    return 0;
+  }
+  let completed = 0;
+  rdbStore.beginTransaction();
+  try {
+    for (let i = 0; i < resourceIds.length; i++) {
+      const resourceId = resourceIds[i];
+      const resource = await getPendingRumResourceInTaskPool(rdbStore, resourceId);
+      if (!resource) {
+        continue;
+      }
+      const context = resource.context;
+      if (context.viewId && context.viewId.length > 0) {
+        await rdbStore.executeSql(
+          `UPDATE ${FTSQL.FT_TABLE_VIEW} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ` +
+            `CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 THEN ` +
+            `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END ` +
+            `WHERE ${FTSQL.RUM_COLUMN_ID} = '${escapeSqlString(context.viewId)}'`
+        );
+      }
+      if (context.actionId && context.actionId.length > 0) {
+        await rdbStore.executeSql(
+          `UPDATE ${FTSQL.FT_TABLE_ACTION} SET ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} = ` +
+            `CASE WHEN ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0 THEN ` +
+            `${FTSQL.RUM_COLUMN_PENDING_RESOURCE} - 1 ELSE 0 END ` +
+            `WHERE ${FTSQL.RUM_COLUMN_ID} = '${escapeSqlString(context.actionId)}'`
+        );
+      }
+      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE);
+      predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_ID, resourceId);
+      predicates.equalTo(FTSQL.PENDING_RESOURCE_COLUMN_PENDING, 1);
+      await rdbStore.delete(predicates);
+      completed++;
+    }
+    rdbStore.commit();
+    return completed;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
+}
+
+async function queryPendingRumActionsInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  limit: number
+): Promise<ActionBeanJSON[]> {
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+  predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
+  predicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
+  predicates.orderByAsc(FTSQL.RUM_COLUMN_START_TIME);
+  predicates.limitAs(limit);
+  const resultSet = await rdbStore.query(predicates);
+  const result: ActionBeanJSON[] = [];
+  try {
+    if (resultSet.goToFirstRow()) {
+      do {
+        result.push(readActionFromResultSet(resultSet));
+      } while (resultSet.goToNextRow());
+    }
+  } finally {
+    resultSet.close();
+  }
+  return result;
+}
+
+async function markRumActionCloseRequestedInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  actionId: string,
+  duration: number
+): Promise<boolean> {
+  if (!actionId || actionId.length === 0) {
+    return false;
+  }
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ID, actionId);
+  predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
+  const values = {} as relationalStore.ValuesBucket;
+  values[FTSQL.RUM_COLUMN_ACTION_DURATION] = Math.max(0, Math.floor(duration));
+  return await rdbStore.update(values, predicates) > 0;
 }
 
 function appendPositiveCounterAssignment(assignments: string[], column: string, delta: number): void {
@@ -2071,15 +2349,20 @@ async function insertRumActionInTaskPool(
   if (!actionBean.id || actionBean.id.length === 0) {
     return false;
   }
-  const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, toActionValues(actionBean));
+  // A Resource start can race the Action insert on a fresh process. Include
+  // already-persisted Resource rows in the initial reference count so Action
+  // close never observes a false zero.
+  const values = toActionValues(actionBean);
+  const pending = await countPendingRumResourcesForActionInTaskPool(rdbStore, actionBean.id);
+  values[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = Math.max(actionBean.pendingResource, pending);
+  const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
   return Number(rowId) > 0;
 }
 
 async function closeRumActionInTaskPool(
   rdbStore: relationalStore.RdbStore,
   actionId: string,
-  duration: number,
-  force: boolean
+  duration: number
 ): Promise<FTDBTaskPoolCloseActionResponse> {
   const response: FTDBTaskPoolCloseActionResponse = {
     wasClosed: false,
@@ -2100,19 +2383,26 @@ async function closeRumActionInTaskPool(
   } finally {
     resultSet.close();
   }
-  if (!force && pendingResource > 0) {
+  if (pendingResource > 0) {
     response.hadPendingResource = true;
     return response;
   }
-  const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-  updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, actionId);
-  const values = {} as relationalStore.ValuesBucket;
-  values[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
-  values[FTSQL.RUM_COLUMN_ACTION_DURATION] = duration;
-  const updated = await rdbStore.update(values, updatePredicates);
-  response.wasClosed = updated > 0;
-  response.hadPendingResource = pendingResource > 0;
-  return response;
+  rdbStore.beginTransaction();
+  try {
+    const updatePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+    updatePredicates.equalTo(FTSQL.RUM_COLUMN_ID, actionId);
+    const values = {} as relationalStore.ValuesBucket;
+    values[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
+    values[FTSQL.RUM_COLUMN_ACTION_DURATION] = duration;
+    const updated = await rdbStore.update(values, updatePredicates);
+    response.wasClosed = updated > 0;
+    response.hadPendingResource = pendingResource > 0;
+    rdbStore.commit();
+    return response;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function querySumActionInTaskPool(
@@ -2224,9 +2514,20 @@ async function cleanCloseActionDataInTaskPool(
   if (ids.length === 0) {
     return 0;
   }
-  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
-  predicates.in(FTSQL.RUM_COLUMN_ID, ids);
-  return await rdbStore.delete(predicates);
+  rdbStore.beginTransaction();
+  try {
+    const pendingPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE);
+    pendingPredicates.in(FTSQL.PENDING_RESOURCE_COLUMN_ACTION_ID, ids);
+    await rdbStore.delete(pendingPredicates);
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+    predicates.in(FTSQL.RUM_COLUMN_ID, ids);
+    const deleted = await rdbStore.delete(predicates);
+    rdbStore.commit();
+    return deleted;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function cleanCloseViewDataInTaskPool(
@@ -2283,6 +2584,7 @@ async function closeAllActionAndViewInTaskPool(
     actionValues[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
     actionValues[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = 0;
     updated += await rdbStore.update(actionValues, new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+    await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE));
     rdbStore.commit();
   } catch (error) {
     rdbStore.rollBack();

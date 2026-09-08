@@ -3,6 +3,7 @@ import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import { FTDBTaskPoolExecutor } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
+import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
 import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
@@ -118,6 +119,62 @@ export default function ftDBManagerDeviceTest() {
       expect(finalView!.getPendingResource()).assertEqual(0);
       expect(await FTDBTaskPoolExecutor.acknowledgeView(context, finalView!)).assertTrue();
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
+    it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const actionId = 'pending-resource-action';
+      const action = new ActionBean(actionId, 'pending resource action', 'click', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.insertRumAction(context, action);
+
+      const createPendingResource = (resourceId: string) => ({
+        resourceId,
+        startTime: TEST_NOW_NS,
+        draftUuid: `${resourceId}-draft`,
+        errorDraftUuid: `${resourceId}-error-draft`,
+        context: {
+          sessionId: 'pending-resource-session',
+          viewId: '',
+          viewName: '',
+          viewReferrer: '',
+          actionId,
+          actionName: 'pending resource action',
+          rumAppId: 'pending-resource-rum',
+          dynamicTags: { network_type: 'wifi' }
+        }
+      });
+
+      expect(await FTDBTaskPoolExecutor.registerPendingRumResource(
+        context, createPendingResource('pending-resource-one')
+      )).assertTrue();
+      expect(await FTDBTaskPoolExecutor.registerPendingRumResource(
+        context, createPendingResource('pending-resource-two')
+      )).assertTrue();
+
+      // The relation is read from RDB, not a Resource object retained in memory.
+      const restored = await FTDBTaskPoolExecutor.getPendingRumResource(context, 'pending-resource-one');
+      expect(restored !== null).assertTrue();
+      expect(restored!.context.actionId).assertEqual(actionId);
+      expect(restored!.draftUuid).assertEqual('pending-resource-one-draft');
+
+      const waitingClose = await FTDBTaskPoolExecutor.closeRumAction(context, actionId, 100);
+      expect(waitingClose.wasClosed).assertFalse();
+      expect(waitingClose.hadPendingResource).assertTrue();
+
+      expect(await FTDBTaskPoolExecutor.completePendingRumResources(
+        context, ['pending-resource-one']
+      )).assertEqual(1);
+      const stillPending = await FTDBTaskPoolExecutor.queryPendingRumActions(context, 10);
+      expect(stillPending.length).assertEqual(1);
+      expect(stillPending[0].getPendingResource()).assertEqual(1);
+
+      expect(await FTDBTaskPoolExecutor.completePendingRumResources(
+        context, ['pending-resource-two']
+      )).assertEqual(1);
+      const finalClose = await FTDBTaskPoolExecutor.closeRumAction(context, actionId, 100);
+      expect(finalClose.wasClosed).assertTrue();
+      expect(finalClose.hadPendingResource).assertFalse();
+      expect(await FTDBTaskPoolExecutor.getPendingRumResource(context, 'pending-resource-two')).assertNull();
     });
 
     it('dbShouldCrudSingleRecord', 0, async () => {

@@ -15,6 +15,7 @@ import {
 import FTTrackInner from '../FTTrackInner';
 import {
   FTDBTaskPoolExecutor,
+  FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
 import { FTInnerLogger } from "../log/FTLogger";
@@ -218,7 +219,6 @@ interface PendingRumErrorWorkerCommand {
 /** A closed-in-memory Action waiting for its resource counters to settle in RDB. */
 interface PendingActionCloseState {
   actionBean: ActionBean;
-  forceClose: boolean;
   closeInFlight: boolean;
   waitingForResource: boolean;
 }
@@ -333,6 +333,10 @@ export class FTRUMInnerManager {
   private pendingCompletedActions: PendingCompletedActionWorkerCommand[] = [];
   private pendingResourceCommands: PendingRumResourceWorkerCommand[] = [];
   private pendingErrorCommands: PendingRumErrorWorkerCommand[] = [];
+  /** Resource start persistence barriers; later lifecycle commands wait behind them. */
+  private pendingResourceRegistrations: Map<string, Promise<boolean>> = new Map();
+  /** Shared DB reads restore an original Resource context after process restart. */
+  private pendingResourceContextRestores: Map<string, Promise<FTDBTaskPoolPendingRumResourceDTO | null>> = new Map();
   private resourceContextById: Map<string, SDKRumResourceContextDTO> = new Map();
   /** Resource IDs with an accepted start command; guards duplicate interceptors. */
   private startedResourceIds: Set<string> = new Set();
@@ -342,7 +346,9 @@ export class FTRUMInnerManager {
   private resourceStoppedIds: Set<string> = new Set();
   /** Actions that are closed to new events but not yet durably closed in RDB. */
   private pendingActionCloseStates: Map<string, PendingActionCloseState> = new Map();
+  /** Retries only transient database close failures; it never overrides Resource references. */
   private pendingActionCloseRetryTimer: number | null = null;
+  private pendingActionRecoveryStarted: boolean = false;
   /** Allows an early close request to await the initial Action insert. */
   private pendingActionInsertions: Map<string, Promise<boolean>> = new Map();
   /**
@@ -499,8 +505,10 @@ export class FTRUMInnerManager {
     }
   }
 
-  public markRumResourcesCompleted(resourceIds: string[], counterDeltasApplied: boolean = false): void {
-    let releasedResourceLifecycle = false;
+  public async markRumResourcesCompleted(
+    resourceIds: string[],
+    counterDeltasApplied: boolean = false
+  ): Promise<boolean> {
     for (let i = 0; i < resourceIds.length; i++) {
       const resourceId = resourceIds[i];
       if (resourceId && resourceId.length > 0) {
@@ -508,19 +516,42 @@ export class FTRUMInnerManager {
         // Only the resources explicitly completed by this worker response are
         // considered for cleanup. Do not scan every outstanding draft here.
         this.cleanupCompletedResourceDraftId(resourceId);
-        if (counterDeltasApplied) {
-          // This response carried the matching counter barrier, which was
-          // committed before this callback. It is now safe to release the
-          // Host-side guard for this Resource.
-          this.clearResourceLifecycleRegistration(resourceId);
-          releasedResourceLifecycle = true;
-        }
       }
     }
-    if (releasedResourceLifecycle) {
-      this.retryPendingActionClosures(true);
+    if (!counterDeltasApplied || resourceIds.length === 0) {
+      return true;
     }
-    this.pruneCommittedRumSemanticPrefix();
+    return await this.completePersistedResourceLifecycles(resourceIds);
+  }
+
+  /**
+   * The final Resource/Error drafts and their counter deltas have committed.
+   * Only now release the durable reference that keeps the Action available.
+   */
+  private async completePersistedResourceLifecycles(resourceIds: string[]): Promise<boolean> {
+    if (resourceIds.length === 0) {
+      return true;
+    }
+    if (!this.context) {
+      return false;
+    }
+    try {
+      await FTDBTaskPoolExecutor.completePendingRumResources(this.context, resourceIds);
+      for (let i = 0; i < resourceIds.length; i++) {
+        const resourceId = resourceIds[i];
+        if (resourceId && resourceId.length > 0) {
+          this.clearResourceLifecycleRegistration(resourceId);
+          this.cleanupCompletedResourceDraftId(resourceId);
+        }
+      }
+      this.retryPendingActionClosures();
+      this.pruneCommittedRumSemanticPrefix();
+      return true;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      FTInnerLogger.e(TAG, `Failed to complete persisted Resource lifecycle: ${errorMessage}`);
+      return false;
+    }
   }
 
   /**
@@ -722,9 +753,9 @@ export class FTRUMInnerManager {
   }
 
   /** Releases completed Resources once a later counter-flush reaches RDB. */
-  private releaseCompletedResourceLifecycleRegistrations(
+  private async releaseCompletedResourceLifecycleRegistrations(
     deltas: SDKRumCounterDeltaDTO[]
-  ): boolean {
+  ): Promise<boolean> {
     const actionIds = new Set<string>();
     for (let i = 0; i < deltas.length; i++) {
       const actionId = deltas[i].actionId;
@@ -735,17 +766,16 @@ export class FTRUMInnerManager {
     if (actionIds.size === 0) {
       return false;
     }
-    let released = false;
+    const readyResourceIds: string[] = [];
     const completedResourceIds = Array.from(this.completedRumResourceIds.values());
     for (let i = 0; i < completedResourceIds.length; i++) {
       const resourceId = completedResourceIds[i];
       const actionId = this.startedResourceActionIds.get(resourceId);
       if (actionId && actionIds.has(actionId)) {
-        this.clearResourceLifecycleRegistration(resourceId);
-        released = true;
+        readyResourceIds.push(resourceId);
       }
     }
-    return released;
+    return await this.completePersistedResourceLifecycles(readyResourceIds);
   }
 
   private hasPendingOrJournaledResource(resourceId: string): boolean {
@@ -1202,14 +1232,14 @@ export class FTRUMInnerManager {
       // EVENT_CONSUMER returns finalized, zero-filtered View/Action deltas.
       const taskPoolDeltas = deltas as Object as FTDBTaskPoolRumCounterDeltaDTO[];
       await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, taskPoolDeltas);
-      const releasedResourceLifecycle = this.releaseCompletedResourceLifecycleRegistrations(deltas);
+      const releasedResourceLifecycle = await this.releaseCompletedResourceLifecycleRegistrations(deltas);
       if (payload.needsActionCloseCheck === true) {
         this.checkActionClose();
       }
       if (payload.needsActionCloseCheck === true || releasedResourceLifecycle) {
         // A closed Action may no longer be active after the next click. Retry
         // its own close transition once the resource decrement is durable.
-        this.retryPendingActionClosures(true);
+        this.retryPendingActionClosures();
       }
       if (payload.needsRumDataGenerate === true) {
         this.generateRumData();
@@ -1899,6 +1929,8 @@ export class FTRUMInnerManager {
     this.pendingCompletedActions = [];
     this.pendingResourceCommands = [];
     this.pendingErrorCommands = [];
+    this.pendingResourceRegistrations.clear();
+    this.pendingResourceContextRestores.clear();
     this.resourceContextById.clear();
     this.startedResourceIds.clear();
     this.startedResourceActionIds.clear();
@@ -1906,6 +1938,7 @@ export class FTRUMInnerManager {
     this.resourceNetStateSubmittedIds.clear();
     this.resourceStoppedIds.clear();
     this.pendingActionCloseStates.clear();
+    this.pendingActionRecoveryStarted = false;
     this.pendingActionInsertions.clear();
     this.rumSemanticJournal = [];
     this.rumSemanticJournalHead = 0;
@@ -1962,6 +1995,11 @@ export class FTRUMInnerManager {
       this.initRumContextPreferences();
       this.preferencesInitialized = true;
     }
+
+    // Actions that were waiting for Resources before a process restart have
+    // no active in-memory owner. Rebuild their close state from RDB so a
+    // later Resource callback can still finalize the original Action.
+    this.recoverPendingActionClosures();
 
     FTInnerLogger.i(TAG, `initContext initialized`);
   }
@@ -2237,12 +2275,12 @@ export class FTRUMInnerManager {
           return;
         }
         
-        // Force close action when view changes (aligned with Android: checkActionClose checks viewChanged)
-        // This ensures action is closed before new view starts, even if 100ms timeout hasn't elapsed
-        // When view changes, force close action regardless of pending resources (aligned with Android behavior)
+        // A View change closes the Action to new events, but an already-started
+        // Resource still owns its durable Action reference and must be allowed
+        // to write its final counters before this Action is generated.
         if (this.activeAction && !this.activeAction.isActionClose()) {
           this.activeAction.close();
-          this.closeAction(this.activeAction, true); // true = force close when view changes (aligned with Android)
+          this.closeAction(this.activeAction);
         }
         
         const closedViewName = this.activeView.getViewName();
@@ -2529,7 +2567,7 @@ export class FTRUMInnerManager {
     try {
       if (this.activeAction && this.activeAction.isNeedWaitAction()) {
         this.activeAction.close();
-        this.closeAction(this.activeAction, false);
+        this.closeAction(this.activeAction);
       } else {
       }
     } catch (error) {
@@ -2557,6 +2595,86 @@ export class FTRUMInnerManager {
   }
 
   private submitResourceWorkerCommand(command: SDKRumResourceCommandDTO, traceBaseName: string): boolean {
+    if (!this.context || !command || !command.resourceId) {
+      return false;
+    }
+    const registration = this.pendingResourceRegistrations.get(command.resourceId);
+    if (registration) {
+      registration.then((registered: boolean): void => {
+        this.pendingResourceRegistrations.delete(command.resourceId);
+        if (!registered) {
+          FTInnerLogger.e(TAG, `Skipping Resource command because its pending state was not persisted: ${command.resourceId}`);
+          this.clearResourceLifecycleRegistration(command.resourceId);
+          this.retryPendingActionClosures();
+          return;
+        }
+        this.enqueueResourceWorkerCommand(command, traceBaseName);
+      }).catch((error: Error): void => {
+        FTInnerLogger.e(TAG, `Pending Resource registration failed: ${command.resourceId}, ${error.message}`);
+        this.clearResourceLifecycleRegistration(command.resourceId);
+        this.retryPendingActionClosures();
+      });
+      return true;
+    }
+
+    // After a process restart the original action is no longer active in
+    // memory. Restore the context and stable draft IDs before processing the
+    // callback so Resource/Error retain the original action_id.
+    // Callers may create a temporary context before they submit an add/content
+    // or network callback. That context is not evidence that this process saw
+    // the original start. After a restart, use the durable row unless this
+    // process owns a start marker, so the callback cannot overwrite the
+    // original Action association.
+    if (command.commandType !== 'start' && !this.startedResourceIds.has(command.resourceId)) {
+      this.restorePendingResourceContext(command.resourceId).then(
+        (pending: FTDBTaskPoolPendingRumResourceDTO | null): void => {
+          if (pending) {
+            command.context = pending.context;
+            command.draftUuid = pending.draftUuid;
+            command.errorDraftUuid = pending.errorDraftUuid;
+          }
+          this.enqueueResourceWorkerCommand(command, traceBaseName);
+        }
+      ).catch((error: Error): void => {
+        FTInnerLogger.e(TAG, `Failed to restore pending Resource context: ${command.resourceId}, ${error.message}`);
+      });
+      return true;
+    }
+    return this.enqueueResourceWorkerCommand(command, traceBaseName);
+  }
+
+  private restorePendingResourceContext(
+    resourceId: string
+  ): Promise<FTDBTaskPoolPendingRumResourceDTO | null> {
+    const existing = this.pendingResourceContextRestores.get(resourceId);
+    if (existing) {
+      return existing;
+    }
+    const context = this.context;
+    if (!context) {
+      return Promise.resolve(null);
+    }
+    const restore = FTDBTaskPoolExecutor.getPendingRumResource(context, resourceId).then(
+      (pending: FTDBTaskPoolPendingRumResourceDTO | null): FTDBTaskPoolPendingRumResourceDTO | null => {
+        if (pending) {
+          this.resourceContextById.set(resourceId, pending.context);
+          this.startedResourceIds.add(resourceId);
+          this.startedResourceActionIds.set(resourceId, pending.context.actionId);
+          this.resourceDraftIdsById.set(resourceId, {
+            resourceUuid: pending.draftUuid,
+            errorUuid: pending.errorDraftUuid
+          });
+        }
+        return pending;
+      }
+    ).finally((): void => {
+      this.pendingResourceContextRestores.delete(resourceId);
+    });
+    this.pendingResourceContextRestores.set(resourceId, restore);
+    return restore;
+  }
+
+  private enqueueResourceWorkerCommand(command: SDKRumResourceCommandDTO, traceBaseName: string): boolean {
     if (!this.context || !command || !command.resourceId) {
       return false;
     }
@@ -2998,6 +3116,7 @@ export class FTRUMInnerManager {
       this.checkSessionRefresh(true);
 
       const context = this.createCurrentResourceContext();
+      const startTime = Utils.getCurrentNanoTime();
       this.startedResourceIds.add(resourceId);
       this.startedResourceActionIds.set(resourceId, context.actionId);
       this.resourceContentSubmittedIds.delete(resourceId);
@@ -3005,14 +3124,30 @@ export class FTRUMInnerManager {
       this.resourceStoppedIds.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
       this.resourceDraftIdsById.delete(resourceId);
+      const draftIds = this.getOrCreateResourceDraftIds(resourceId);
       this.resourceContextById.set(resourceId, context);
       this.updateResourceContextMemoryOnStart(context);
+      const pendingResource: FTDBTaskPoolPendingRumResourceDTO = {
+        resourceId,
+        startTime,
+        context,
+        draftUuid: draftIds.resourceUuid,
+        errorDraftUuid: draftIds.errorUuid
+      };
+      const registration = FTDBTaskPoolExecutor.registerPendingRumResource(this.context!, pendingResource)
+        .catch((error: Error): boolean => {
+          FTInnerLogger.e(TAG, `Failed to persist pending Resource ${resourceId}: ${error.message}`);
+          return false;
+        });
+      this.pendingResourceRegistrations.set(resourceId, registration);
       this.submitResourceWorkerCommand({
         commandType: 'start',
         resourceId,
         context,
         property: this.propertyToRecord(property),
-        startTime: Utils.getCurrentNanoTime(),
+        startTime,
+        draftUuid: draftIds.resourceUuid,
+        errorDraftUuid: draftIds.errorUuid,
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.start');
       this.scheduleRumCounterFlush();
@@ -3549,7 +3684,9 @@ export class FTRUMInnerManager {
     const waiting = this.activeAction.isNeedWaitAction() && 
                    (this.activeView && !this.activeView.isClose());
     
-    // Check timeout: 5 seconds timeout (ACTION_NEED_WAIT_TIME_OUT) - aligned with Android
+    // The normal timeout ends the active Action in memory. Its database row
+    // remains available until every Resource started by that Action has
+    // settled its Resource/Error counter deltas.
     const timeOut = now - lastActionTime > ActiveActionBean.ACTION_NEED_WAIT_TIME_OUT;
 
     const viewChanged = this.activeView && 
@@ -3558,7 +3695,7 @@ export class FTRUMInnerManager {
 
     // Aligned with Android SDK logic (see FTRUMInnerManager.java:277-292):
     // - If waiting (needWaitAction && view not closed), action waits
-    // - If has pending resource and not timeout, action waits (checked in closeAction via database)
+    // - If it has pending Resources, its database row waits for their durable completion
     // - Otherwise, check normal timeout (100ms), timeout (5s), or view changed
     const needClose = (!waiting && 
                       (now - lastActionTime >= ActiveActionBean.ACTION_NORMAL_TIME_OUT)) ||
@@ -3566,8 +3703,9 @@ export class FTRUMInnerManager {
     
     if (needClose && !this.activeAction.isActionClose()) {
       this.activeAction.close();
-      // Pass timeout flag to closeAction: if timeout, force=true; otherwise, force=false (will check pending_resource in database)
-      this.closeAction(this.activeAction, timeOut);
+      // A closed Action remains in RDB until every persisted Resource reference
+      // finishes and its Resource/Error counters are durably recorded.
+      this.closeAction(this.activeAction);
     }
   }
   
@@ -3683,32 +3821,6 @@ export class FTRUMInnerManager {
             `closeView persisted: ${activeViewBean.getViewName()}, viewId=${viewId}, sessionId=${viewSessionId}, timeSpent=${timeSpent}, loadTime=${loadTime}, updateTime=${viewBean.getViewUpdateTime()}`
           );
           
-          // Schedule a delayed task to force clear pending_resource if it's still > 0 after 30 seconds
-          // This handles cases where resources never complete (e.g., network failures, timeouts)
-          // After view is closed, wait 30 seconds for resources to complete, then force clear pending_resource
-          // This allows the final persisted snapshot to delete the view data.
-          if (this.context) {
-            setTimeout(() => {
-              (async () => {
-                try {
-                  // Check if view still has pending_resource > 0
-                  const viewPendingResource = await FTDBTaskPoolExecutor.getRumPendingResource(
-                    this.context!,
-                    'view',
-                    viewId
-                  );
-                  if (viewPendingResource > 0) {
-                    FTInnerLogger.w(TAG, `View ${viewId} still has pending_resource=${viewPendingResource} after 30 seconds, forcing clear to allow cleanup`);
-                    // Persist the final state before its completion removes the View.
-                    await FTDBTaskPoolExecutor.forceClearRumPendingResource(this.context!, 'view', viewId);
-                    this.generateRumData();
-                  }
-                } catch (error) {
-                  FTInnerLogger.e(TAG, `Error checking/clearing pending_resource for view ${viewId}: ${error}`);
-                }
-              })();
-            }, 30 * 1000); // 30 seconds delay
-          }
         } catch (error) {
           FTInnerLogger.e(TAG, `Error closing view in database: ${error}`);
         }
@@ -3776,25 +3888,66 @@ export class FTRUMInnerManager {
   /**
    * Close action
    */
-  private closeAction(activeActionBean: ActiveActionBean, isTimeout: boolean): void {
+  private closeAction(activeActionBean: ActiveActionBean): void {
     try {
       const actionBean = activeActionBean.convertToActionBean();
-      const actionId = actionBean.getId();
-      const pending = this.pendingActionCloseStates.get(actionId);
-      if (pending) {
-        pending.forceClose = pending.forceClose || isTimeout;
-      } else {
-        this.pendingActionCloseStates.set(actionId, {
-          actionBean,
-          forceClose: isTimeout,
-          closeInFlight: false,
-          waitingForResource: false
-        });
-      }
-      this.tryClosePendingAction(actionId);
+      this.requestActionClose(actionBean);
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action: ${error}`);
     }
+  }
+
+  /** Registers an Action close intent without discarding its persisted Resource references. */
+  private requestActionClose(actionBean: ActionBean): void {
+    const actionId = actionBean.getId();
+    if (!actionId || actionId.length === 0) {
+      return;
+    }
+    const pending = this.pendingActionCloseStates.get(actionId);
+    if (!pending) {
+      this.pendingActionCloseStates.set(actionId, {
+        actionBean,
+        closeInFlight: false,
+        waitingForResource: false
+      });
+    }
+    if (this.context) {
+      // Persist the close duration before waiting. Recovery can then generate
+      // the original Action with the correct duration after a process restart.
+      void FTDBTaskPoolExecutor.markRumActionCloseRequested(
+        this.context,
+        actionId,
+        actionBean.getActionDuration()
+      ).catch((error: Error): void => {
+        FTInnerLogger.w(TAG, `Failed to persist Action close request ${actionId}: ${error.message}`);
+      });
+    }
+    this.tryClosePendingAction(actionId);
+  }
+
+  /** Rebuilds close state for Actions left behind by a process restart. */
+  private recoverPendingActionClosures(): void {
+    if (this.pendingActionRecoveryStarted || !this.context) {
+      return;
+    }
+    this.pendingActionRecoveryStarted = true;
+    const context = this.context;
+    void FTDBTaskPoolExecutor.queryPendingRumActions(context, 100).then((actions: ActionBean[]): void => {
+      const now = Utils.getCurrentNanoTime();
+      for (let i = 0; i < actions.length; i++) {
+        const action = actions[i];
+        if (this.pendingActionCloseStates.has(action.getId())) {
+          continue;
+        }
+        if (action.getActionDuration() <= 0) {
+          action.setActionDuration(Math.max(0, now - action.getStartTime()));
+        }
+        this.requestActionClose(action);
+      }
+    }).catch((error: Error): void => {
+      this.pendingActionRecoveryStarted = false;
+      FTInnerLogger.e(TAG, `Failed to recover pending Action closures: ${error.message}`);
+    });
   }
 
   private async tryClosePendingAction(actionId: string): Promise<void> {
@@ -3810,9 +3963,8 @@ export class FTRUMInnerManager {
 
     // A resource is registered synchronously on the Host, before its worker
     // counter delta reaches RDB. Do not close the Action in that gap.
-    if (!pending.forceClose && this.hasStartedResourceForAction(actionId)) {
+    if (this.hasStartedResourceForAction(actionId)) {
       pending.waitingForResource = true;
-      this.schedulePendingActionCloseRetry();
       return;
     }
 
@@ -3831,8 +3983,7 @@ export class FTRUMInnerManager {
       const closeResult = await FTDBTaskPoolExecutor.closeRumAction(
         this.context,
         actionId,
-        pending.actionBean.getDuration(),
-        pending.forceClose
+        pending.actionBean.getDuration()
       );
       if (closeResult.wasClosed) {
         this.pendingActionCloseStates.delete(actionId);
@@ -3842,7 +3993,6 @@ export class FTRUMInnerManager {
       }
 
       pending.waitingForResource = closeResult.hadPendingResource;
-      this.schedulePendingActionCloseRetry();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action in database: ${errorMessage}`);
@@ -3855,25 +4005,16 @@ export class FTRUMInnerManager {
     }
   }
 
-  private retryPendingActionClosures(afterResourceCounterCommit: boolean = false): void {
-    const now = Utils.getCurrentNanoTime();
+  private retryPendingActionClosures(): void {
     const pendingStates = Array.from(this.pendingActionCloseStates.entries());
     for (let i = 0; i < pendingStates.length; i++) {
       const actionId = pendingStates[i][0];
       const pending = pendingStates[i][1];
-      if (!pending.forceClose &&
-        now - pending.actionBean.getStartTime() >= ActiveActionBean.ACTION_NEED_WAIT_TIME_OUT) {
-        pending.forceClose = true;
-        pending.waitingForResource = false;
-      }
-      if (pending.waitingForResource && !pending.forceClose && !afterResourceCounterCommit) {
+      if (pending.waitingForResource && this.hasStartedResourceForAction(actionId)) {
         continue;
       }
       pending.waitingForResource = false;
       this.tryClosePendingAction(actionId);
-    }
-    if (this.pendingActionCloseStates.size > 0) {
-      this.schedulePendingActionCloseRetry();
     }
   }
 
@@ -3881,33 +4022,12 @@ export class FTRUMInnerManager {
     if (this.pendingActionCloseStates.size === 0 || this.pendingActionCloseRetryTimer !== null) {
       return;
     }
-    const now = Utils.getCurrentNanoTime();
-    const pendingStates = Array.from(this.pendingActionCloseStates.values());
-    let delayMs = FTRUMInnerManager.PENDING_ACTION_CLOSE_RETRY_MS;
-    let allWaitingForResource = pendingStates.length > 0;
-    for (let i = 0; i < pendingStates.length; i++) {
-      const pending = pendingStates[i];
-      if (!pending.waitingForResource || pending.forceClose) {
-        allWaitingForResource = false;
-        break;
-      }
-      const remainingNs = pending.actionBean.getStartTime() +
-        ActiveActionBean.ACTION_NEED_WAIT_TIME_OUT - now;
-      const remainingMs = Math.max(1, Math.ceil(remainingNs / 1000000));
-      if (i === 0 || remainingMs < delayMs) {
-        delayMs = remainingMs;
-      }
-    }
-    // Resource completion wakes the state machine through the counter-flush
-    // callback. When every Action is only waiting for a resource, sleep until
-    // its force-close deadline instead of polling the database.
-    if (!allWaitingForResource) {
-      delayMs = FTRUMInnerManager.PENDING_ACTION_CLOSE_RETRY_MS;
-    }
+    // Resource completion explicitly re-enters the state machine. This timer
+    // is reserved for an RDB close failure, not for timing out Resources.
     this.pendingActionCloseRetryTimer = setTimeout(() => {
       this.pendingActionCloseRetryTimer = null;
       this.retryPendingActionClosures();
-    }, delayMs) as number;
+    }, FTRUMInnerManager.PENDING_ACTION_CLOSE_RETRY_MS) as number;
   }
   
   /**
@@ -4439,7 +4559,7 @@ export class FTRUMInnerManager {
       // Close current activities
       if (this.activeAction && !this.activeAction.isActionClose()) {
         this.activeAction.close();
-        this.closeAction(this.activeAction, false);
+        this.closeAction(this.activeAction);
       }
       
       if (this.activeView && !this.activeView.isClose()) {
@@ -4498,6 +4618,8 @@ export class FTRUMInnerManager {
       this.submitRumCounterFlushTask();
       this.pendingResourceCommands = [];
       this.pendingErrorCommands = [];
+      this.pendingResourceRegistrations.clear();
+      this.pendingResourceContextRestores.clear();
       this.resourceContextById.clear();
       this.startedResourceIds.clear();
       this.startedResourceActionIds.clear();
@@ -4505,6 +4627,7 @@ export class FTRUMInnerManager {
       this.resourceNetStateSubmittedIds.clear();
       this.resourceStoppedIds.clear();
       this.pendingActionCloseStates.clear();
+      this.pendingActionRecoveryStarted = false;
       this.pendingActionInsertions.clear();
       this.rumSemanticJournal = [];
       this.rumSemanticJournalHead = 0;
