@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.17-alpha02] - 2026-09-08
+- Fixed RCP Resource waterfall timing to retain the original `preTransfer` and
+  `startTransfer` positions. First-byte and download spans no longer discard
+  transport-to-ready gaps, fabricate zero-length phases, or use inconsistent
+  fallback origins for `resource_trans`.
 - Fixed Action resource/error counters being lost when an auto-tracked request
   completes after the Action's normal five-second timeout. Pending Resource
   associations and reference counts now survive process restart; Actions are

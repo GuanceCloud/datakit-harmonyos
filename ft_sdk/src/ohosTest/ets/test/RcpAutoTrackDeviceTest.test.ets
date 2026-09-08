@@ -50,13 +50,58 @@ class FakeRcpRawTimeInfo implements rcp.TimeInfo {
   preTransferTimeMs: number = 100;
   startTransferTimeMs: number = 150;
   totalTimeMs: number = 180;
+  redirectTimeMs: number = 40;
+}
+
+class FakeRcpHttpTimeInfo implements rcp.TimeInfo {
+  nameLookupTimeMs: number = 10;
+  connectTimeMs: number = 30;
+  tlsHandshakeTimeMs: number = 0;
+  preTransferTimeMs: number = 60;
+  startTransferTimeMs: number = 80;
+  totalTimeMs: number = 100;
   redirectTimeMs: number = 0;
-  dnsTime: number = 10000000;
-  tcpTime: number = 20000000;
-  ttfbTime: number = 50000000;
-  responseTime: number = 100000000;
-  downloadTime: number = 30000000;
-  totalTime: number = 180000000;
+}
+
+class FakeRcpReusedConnectionTimeInfo implements rcp.TimeInfo {
+  nameLookupTimeMs: number = 0;
+  connectTimeMs: number = 0;
+  tlsHandshakeTimeMs: number = 0;
+  preTransferTimeMs: number = 40;
+  startTransferTimeMs: number = 70;
+  totalTimeMs: number = 100;
+  redirectTimeMs: number = 0;
+}
+
+class FakeRcpEqualTimeInfo implements rcp.TimeInfo {
+  nameLookupTimeMs: number = 10;
+  connectTimeMs: number = 30;
+  tlsHandshakeTimeMs: number = 30;
+  preTransferTimeMs: number = 60;
+  startTransferTimeMs: number = 60;
+  totalTimeMs: number = 100;
+  redirectTimeMs: number = 0;
+}
+
+class FakeRcpReversedTimeInfo implements rcp.TimeInfo {
+  nameLookupTimeMs: number = 10;
+  connectTimeMs: number = 30;
+  tlsHandshakeTimeMs: number = 30;
+  preTransferTimeMs: number = 80;
+  startTransferTimeMs: number = 60;
+  totalTimeMs: number = 100;
+  redirectTimeMs: number = 0;
+}
+
+// The public RCP type requires this field, but a runtime value can still be
+// absent when timing collection is partial or comes from an older platform.
+class FakeRcpMissingPreTransferTimeInfo {
+  nameLookupTimeMs: number = 10;
+  connectTimeMs: number = 30;
+  tlsHandshakeTimeMs: number = 80;
+  startTransferTimeMs: number = 150;
+  totalTimeMs: number = 180;
+  redirectTimeMs: number = 0;
 }
 
 class FakeRcpResponse implements rcp.Response {
@@ -198,6 +243,29 @@ async function runRcpErrorChain(
   await handler.handle(context);
 }
 
+function assertResourceTimingField(
+  record: SyncData | null,
+  key: string,
+  startTime: number,
+  duration: number
+): void {
+  const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID };
+  const point = RumAttributeAssert.record(record, attributes);
+  const rawTiming = point.fields.get(key);
+  if (typeof rawTiming !== 'string') {
+    throw new Error(`Expected ${key} to be a JSON timing field`);
+  }
+  const timing = JSON.parse(rawTiming) as Record<string, number>;
+  expect(timing['start']).assertEqual(startTime);
+  expect(timing['duration']).assertEqual(duration);
+}
+
+function assertResourceFieldAbsent(record: SyncData | null, key: string): void {
+  const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID };
+  const point = RumAttributeAssert.record(record, attributes);
+  expect(point.fields.has(key)).assertFalse();
+}
+
 async function flushAndAssertUploaded(
   collector: MockCollector,
   fragments: string[],
@@ -336,7 +404,7 @@ export default function rcpAutoTrackDeviceTest() {
 
     it('rcpResourceShouldWritePerfFields', 0, async () => {
       const viewName = 'rcp_performance_resource_view';
-      const resourceUrl = 'http://device.test/rcp-performance-resource';
+      const resourceUrl = 'https://device.test/rcp-performance-resource';
       await FTRUMGlobalManager.getInstance().startView(viewName);
 
       const config = createFTRCPTrackConfig({
@@ -372,7 +440,117 @@ export default function rcpAutoTrackDeviceTest() {
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
 
       expect(record !== null).assertTrue();
+      assertResourceTimingField(record, 'resource_dns_time', 0, 10000000);
+      assertResourceTimingField(record, 'resource_connect_time', 10000000, 20000000);
+      assertResourceTimingField(record, 'resource_ssl_time', 30000000, 50000000);
+      // The redirect span is not a RUM phase. The TLS-to-preTransfer gap must
+      // remain visible instead of shifting the following phases left.
+      assertResourceTimingField(record, 'resource_first_byte_time', 100000000, 50000000);
+      assertResourceTimingField(record, 'resource_download_time', 150000000, 30000000);
       await flushAndAssertUploaded(collector, fragments, record);
+    });
+
+    it('rcpHttpWithoutTlsShouldKeepTransferStartsAndOmitTlsBasedTrans', 0, async () => {
+      const viewName = 'rcp_http_timing_resource_view';
+      const resourceUrl = 'http://device.test/rcp-http-timing-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({ enableResourceInterceptor: true });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      await runRcpChain(config.interceptors ?? [], context, 200, 'ok', 'text/plain', new FakeRcpHttpTimeInfo());
+      await WaitUtils.delay(5);
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_ttfb=20000000',
+        'resource_first_byte=20000000',
+        'duration=100000000',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      assertResourceTimingField(record, 'resource_first_byte_time', 60000000, 20000000);
+      assertResourceTimingField(record, 'resource_download_time', 80000000, 20000000);
+      assertResourceFieldAbsent(record, 'resource_ssl');
+      assertResourceFieldAbsent(record, 'resource_trans');
+      await flushAndAssertUploaded(collector, fragments, record);
+    });
+
+    it('rcpReusedConnectionShouldNotInventZeroLengthConnectionPhases', 0, async () => {
+      const viewName = 'rcp_reused_connection_resource_view';
+      const resourceUrl = 'https://device.test/rcp-reused-connection-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({ enableResourceInterceptor: true });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      await runRcpChain(config.interceptors ?? [], context, 200, 'ok', 'text/plain', new FakeRcpReusedConnectionTimeInfo());
+      await WaitUtils.delay(5);
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_ttfb=30000000',
+        'resource_first_byte=30000000',
+        'duration=100000000',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      assertResourceTimingField(record, 'resource_first_byte_time', 40000000, 30000000);
+      assertResourceTimingField(record, 'resource_download_time', 70000000, 30000000);
+      assertResourceFieldAbsent(record, 'resource_dns');
+      assertResourceFieldAbsent(record, 'resource_tcp');
+      assertResourceFieldAbsent(record, 'resource_ssl');
+      assertResourceFieldAbsent(record, 'resource_trans');
+      await flushAndAssertUploaded(collector, fragments, record);
+    });
+
+    it('rcpEqualAndMissingPointsShouldNotFallbackToCumulativeEndpoints', 0, async () => {
+      const viewName = 'rcp_partial_timing_resource_view';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      const config = createFTRCPTrackConfig({ enableResourceInterceptor: true });
+
+      const equalUrl = 'https://device.test/rcp-equal-timing-resource';
+      await runRcpChain(config.interceptors ?? [], new FakeRcpRequestContext(equalUrl, 'GET'), 200, 'ok', 'text/plain',
+        new FakeRcpEqualTimeInfo());
+      const reversedUrl = 'https://device.test/rcp-reversed-timing-resource';
+      await runRcpChain(config.interceptors ?? [], new FakeRcpRequestContext(reversedUrl, 'GET'), 200, 'ok', 'text/plain',
+        new FakeRcpReversedTimeInfo());
+      const missingUrl = 'https://device.test/rcp-missing-timing-resource';
+      await runRcpChain(config.interceptors ?? [], new FakeRcpRequestContext(missingUrl, 'GET'), 200, 'ok', 'text/plain',
+        new FakeRcpMissingPreTransferTimeInfo() as object as rcp.TimeInfo);
+      await WaitUtils.delay(5);
+
+      const equalRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource', `resource_url=${equalUrl}`, 'duration=100000000'], 5000);
+      expect(equalRecord !== null).assertTrue();
+      assertResourceTimingField(equalRecord, 'resource_download_time', 60000000, 40000000);
+      assertResourceFieldAbsent(equalRecord, 'resource_ssl');
+      assertResourceFieldAbsent(equalRecord, 'resource_ttfb');
+      assertResourceFieldAbsent(equalRecord, 'resource_first_byte');
+      assertResourceFieldAbsent(equalRecord, 'resource_first_byte_time');
+      const equalAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID };
+      const equalPoint = RumAttributeAssert.record(equalRecord, equalAttributes);
+      expect(equalPoint.fields.get('resource_trans')).assertEqual(70000000);
+
+      const reversedRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource', `resource_url=${reversedUrl}`, 'duration=100000000'], 5000);
+      expect(reversedRecord !== null).assertTrue();
+      assertResourceFieldAbsent(reversedRecord, 'resource_ttfb');
+      assertResourceFieldAbsent(reversedRecord, 'resource_first_byte');
+      assertResourceFieldAbsent(reversedRecord, 'resource_first_byte_time');
+      assertResourceFieldAbsent(reversedRecord, 'resource_download_time');
+
+      const missingRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource', `resource_url=${missingUrl}`, 'resource_trans=100000000', 'duration=180000000'], 5000);
+      expect(missingRecord !== null).assertTrue();
+      assertResourceFieldAbsent(missingRecord, 'resource_ttfb');
+      assertResourceFieldAbsent(missingRecord, 'resource_first_byte');
+      assertResourceFieldAbsent(missingRecord, 'resource_first_byte_time');
+      assertResourceTimingField(missingRecord, 'resource_download_time', 150000000, 30000000);
     });
 
     it('rcpNoTimeInfoShouldFallback', 0, async () => {

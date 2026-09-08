@@ -90,71 +90,187 @@ interface TimeInfoStructure {
   startTransferTimeMs?: number;
   totalTimeMs?: number;
   redirectTimeMs?: number;
-  dnsTime?: number;
-  dnsStartTime?: number;
-  dnsEndTime?: number;
-  tcpTime?: number;
-  tcpStartTime?: number;
-  tcpEndTime?: number;
-  sslTime?: number;
-  sslStartTime?: number;
-  sslEndTime?: number;
+}
+
+interface RCPResourceTimingPhase {
+  startTime: number;
+  duration: number;
+}
+
+interface RCPResourceTiming {
+  performanceMetrics: Map<string, number>;
+  dnsPhase?: RCPResourceTimingPhase;
+  tcpPhase?: RCPResourceTimingPhase;
+  sslPhase?: RCPResourceTimingPhase;
   ttfbTime?: number;
-  firstByteTime?: number;
-  headerStartTime?: number;
-  headerEndTime?: number;
   transTime?: number;
-  responseTime?: number;
-  downloadTime?: number;
-  bodyStartTime?: number;
-  bodyEndTime?: number;
-  totalTime?: number;
+  firstBytePhase?: RCPResourceTimingPhase;
+  downloadPhase?: RCPResourceTimingPhase;
+  loadTime: number;
 }
 
-function readPositiveMetric(metrics: Map<string, number>, key: string): number {
-  const value = metrics.get(key);
-  return value !== undefined && value > 0 ? value : 0;
+function readTimePointNs(value: number | undefined): number | undefined {
+  if (value === undefined || typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return value * MS_TO_NS;
 }
 
-function createRCPNetStatusBean(metrics: Map<string, number>, fallbackLoadNs: number): NetStatusBean {
+function createTimingPhase(startTime: number | undefined, endTime: number | undefined): RCPResourceTimingPhase | undefined {
+  if (startTime === undefined || endTime === undefined || endTime < startTime) {
+    return undefined;
+  }
+  return {
+    startTime,
+    duration: endTime - startTime
+  };
+}
+
+function appendPositiveTimingMetric(metrics: Map<string, number>, key: string, value: number | undefined): void {
+  if (value !== undefined && value > 0) {
+    metrics.set(key, value);
+  }
+}
+
+function appendPhaseMetric(
+  metrics: Map<string, number>,
+  key: string,
+  phase: RCPResourceTimingPhase | undefined
+): void {
+  if (phase !== undefined) {
+    appendPositiveTimingMetric(metrics, key, phase.duration);
+  }
+}
+
+function getLastKnownTimePoint(
+  first: number | undefined,
+  second: number | undefined,
+  third: number | undefined
+): number | undefined {
+  if (third !== undefined) {
+    return third;
+  }
+  if (second !== undefined) {
+    return second;
+  }
+  return first;
+}
+
+function createFallbackRCPResourceTiming(fallbackLoadNs: number): RCPResourceTiming {
+  const performanceMetrics: Map<string, number> = new Map();
+  appendPositiveTimingMetric(performanceMetrics, 'resourceLoad', fallbackLoadNs);
+  return {
+    performanceMetrics,
+    loadTime: fallbackLoadNs
+  };
+}
+
+/**
+ * Converts RCP's cumulative TimeInfo points into RUM phases without rebuilding
+ * starts from phase durations. A missing or reversed endpoint means the phase
+ * is unavailable; it must not be replaced with a cumulative endpoint.
+ */
+function createRCPResourceTiming(timeInfo: TimeInfoStructure, fallbackLoadNs: number): RCPResourceTiming {
+  const timing = createFallbackRCPResourceTiming(fallbackLoadNs);
+  const dnsEndTime = readTimePointNs(timeInfo.nameLookupTimeMs);
+  const rawConnectEndTime = readTimePointNs(timeInfo.connectTimeMs);
+  const connectEndTime = rawConnectEndTime !== undefined &&
+    (dnsEndTime === undefined || rawConnectEndTime >= dnsEndTime)
+    ? rawConnectEndTime
+    : undefined;
+  const rawTlsHandshakeEndTime = readTimePointNs(timeInfo.tlsHandshakeTimeMs);
+  const tlsHandshakeEndTime = rawTlsHandshakeEndTime !== undefined && connectEndTime !== undefined &&
+    rawTlsHandshakeEndTime >= connectEndTime
+    ? rawTlsHandshakeEndTime
+    : undefined;
+
+  timing.dnsPhase = createTimingPhase(0, dnsEndTime);
+  timing.tcpPhase = createTimingPhase(dnsEndTime, connectEndTime);
+  timing.sslPhase = createTimingPhase(connectEndTime, tlsHandshakeEndTime);
+  appendPhaseMetric(timing.performanceMetrics, 'resourceDNS', timing.dnsPhase);
+  appendPhaseMetric(timing.performanceMetrics, 'resourceTCP', timing.tcpPhase);
+  appendPhaseMetric(timing.performanceMetrics, 'resourceSSL', timing.sslPhase);
+
+  const lastTransportEndTime = getLastKnownTimePoint(dnsEndTime, connectEndTime, tlsHandshakeEndTime);
+  const rawPreTransferTime = readTimePointNs(timeInfo.preTransferTimeMs);
+  const preTransferTime = rawPreTransferTime !== undefined &&
+    (lastTransportEndTime === undefined || rawPreTransferTime >= lastTransportEndTime)
+    ? rawPreTransferTime
+    : undefined;
+  const rawStartTransferTime = readTimePointNs(timeInfo.startTransferTimeMs);
+  const startTransferPreviousTime = preTransferTime !== undefined ? preTransferTime : lastTransportEndTime;
+  const startTransferTime = rawStartTransferTime !== undefined &&
+    (startTransferPreviousTime === undefined || rawStartTransferTime >= startTransferPreviousTime)
+    ? rawStartTransferTime
+    : undefined;
+  const rawTotalTime = readTimePointNs(timeInfo.totalTimeMs);
+  const totalPreviousTime = startTransferTime !== undefined
+    ? startTransferTime
+    : (preTransferTime !== undefined ? preTransferTime : lastTransportEndTime);
+  const totalTime = rawTotalTime !== undefined &&
+    (totalPreviousTime === undefined || rawTotalTime >= totalPreviousTime)
+    ? rawTotalTime
+    : undefined;
+
+  // RCP defines preTransfer as transfer-ready and startTransfer as first byte
+  // received. This is not request-body completion or response-header completion.
+  timing.firstBytePhase = createTimingPhase(preTransferTime, startTransferTime);
+  timing.downloadPhase = createTimingPhase(startTransferTime, totalTime);
+  if (timing.firstBytePhase !== undefined) {
+    timing.ttfbTime = timing.firstBytePhase.duration;
+  }
+  // Keep resource_trans consistently defined as TLS completion to request end.
+  // A zero TLS time is an inapplicable/reused TLS phase, not a request-local
+  // completion point, so it cannot provide the start for this metric.
+  if (tlsHandshakeEndTime !== undefined && tlsHandshakeEndTime > 0 && totalTime !== undefined) {
+    const transPhase = createTimingPhase(tlsHandshakeEndTime, totalTime);
+    if (transPhase !== undefined) {
+      timing.transTime = transPhase.duration;
+    }
+  }
+
+  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceTTFB', timing.ttfbTime);
+  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceFirstByte', timing.ttfbTime);
+  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceTrans', timing.transTime);
+  appendPhaseMetric(timing.performanceMetrics, 'resourceDownloadTime', timing.downloadPhase);
+  // totalTimeMs remains the request duration when it is independently valid,
+  // even if an intermediate endpoint made a derived phase unavailable.
+  if (rawTotalTime !== undefined) {
+    timing.loadTime = rawTotalTime;
+    appendPositiveTimingMetric(timing.performanceMetrics, 'resourceLoad', rawTotalTime);
+  }
+  return timing;
+}
+
+function createRCPNetStatusBean(timing: RCPResourceTiming): NetStatusBean {
   const netStatusBean = new NetStatusBean();
-  const dnsTime = readPositiveMetric(metrics, 'resourceDNS');
-  const tcpTime = readPositiveMetric(metrics, 'resourceTCP');
-  const sslTime = readPositiveMetric(metrics, 'resourceSSL');
-  const ttfbTime = readPositiveMetric(metrics, 'resourceTTFB');
-  const responseTime = readPositiveMetric(metrics, 'resourceTrans');
-  const firstByteTime = readPositiveMetric(metrics, 'resourceFirstByte');
-  const downloadTime = readPositiveMetric(metrics, 'resourceDownloadTime');
-  const loadTime = readPositiveMetric(metrics, 'resourceLoad');
-
-  if (dnsTime > 0) {
-    netStatusBean.setDNSStartTime(0);
-    netStatusBean.setDNSTime(dnsTime);
+  if (timing.dnsPhase !== undefined && timing.dnsPhase.duration > 0) {
+    netStatusBean.setDNSStartTime(timing.dnsPhase.startTime);
+    netStatusBean.setDNSTime(timing.dnsPhase.duration);
   }
-  if (tcpTime > 0) {
-    netStatusBean.setConnectStartTime(dnsTime);
-    netStatusBean.setTcpTime(tcpTime);
+  if (timing.tcpPhase !== undefined && timing.tcpPhase.duration > 0) {
+    netStatusBean.setConnectStartTime(timing.tcpPhase.startTime);
+    netStatusBean.setTcpTime(timing.tcpPhase.duration);
   }
-  if (sslTime > 0) {
-    netStatusBean.setSslStartTime(dnsTime + tcpTime);
-    netStatusBean.setSSLTime(sslTime);
+  if (timing.sslPhase !== undefined && timing.sslPhase.duration > 0) {
+    netStatusBean.setSslStartTime(timing.sslPhase.startTime);
+    netStatusBean.setSSLTime(timing.sslPhase.duration);
   }
-  if (ttfbTime > 0) {
-    netStatusBean.setTTFB(ttfbTime);
+  if (timing.ttfbTime !== undefined && timing.ttfbTime > 0) {
+    netStatusBean.setTTFB(timing.ttfbTime);
   }
-  if (responseTime > 0) {
-    netStatusBean.setResponseTime(responseTime);
+  if (timing.transTime !== undefined && timing.transTime > 0) {
+    netStatusBean.setResponseTime(timing.transTime);
   }
-  if (firstByteTime > 0) {
-    netStatusBean.setFirstByteStartTime(dnsTime + tcpTime + sslTime);
-    netStatusBean.setFirstByteTime(firstByteTime);
+  if (timing.firstBytePhase !== undefined && timing.firstBytePhase.duration > 0) {
+    netStatusBean.setFirstByteStartTime(timing.firstBytePhase.startTime);
+    netStatusBean.setFirstByteTime(timing.firstBytePhase.duration);
   }
-  if (downloadTime > 0) {
-    const downloadStartTime = dnsTime + tcpTime + sslTime + (ttfbTime > 0 ? ttfbTime : firstByteTime);
-    netStatusBean.setDownloadTimeStart(downloadStartTime);
-    netStatusBean.setDownloadTime(downloadTime);
+  if (timing.downloadPhase !== undefined && timing.downloadPhase.duration > 0) {
+    netStatusBean.setDownloadTimeStart(timing.downloadPhase.startTime);
+    netStatusBean.setDownloadTime(timing.downloadPhase.duration);
   }
-  netStatusBean.setHoleRequestTime(loadTime > 0 ? loadTime : fallbackLoadNs);
+  netStatusBean.setHoleRequestTime(timing.loadTime);
   return netStatusBean;
 }
 
@@ -256,7 +372,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const response = await next.handle(context);
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      let netStatusBean = createRCPNetStatusBean(new Map<string, number>(), fallbackLoadNs);
+      let resourceTiming = createFallbackRCPResourceTiming(fallbackLoadNs);
+      let netStatusBean = createRCPNetStatusBean(resourceTiming);
 
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
@@ -294,134 +411,9 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
       if (response.timeInfo) {
         const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
-        const performanceMetrics: Map<string, number> = new Map();
-
-        if (timeInfoObj.nameLookupTimeMs !== undefined && typeof timeInfoObj.nameLookupTimeMs === 'number') {
-          performanceMetrics.set('resourceDNS', timeInfoObj.nameLookupTimeMs * MS_TO_NS);
-        } else if (timeInfoObj.dnsTime !== undefined && typeof timeInfoObj.dnsTime === 'number') {
-          performanceMetrics.set('resourceDNS', timeInfoObj.dnsTime);
-        } else if (timeInfoObj.dnsEndTime !== undefined && timeInfoObj.dnsStartTime !== undefined) {
-          const dnsStart = typeof timeInfoObj.dnsStartTime === 'number' ? timeInfoObj.dnsStartTime : 0;
-          const dnsEnd = typeof timeInfoObj.dnsEndTime === 'number' ? timeInfoObj.dnsEndTime : 0;
-          if (dnsEnd > dnsStart) {
-            performanceMetrics.set('resourceDNS', dnsEnd - dnsStart);
-          }
-        }
-
-        if (timeInfoObj.connectTimeMs !== undefined && typeof timeInfoObj.connectTimeMs === 'number') {
-          const connectTime = timeInfoObj.connectTimeMs * MS_TO_NS;
-          const dnsTime = timeInfoObj.nameLookupTimeMs !== undefined && typeof timeInfoObj.nameLookupTimeMs === 'number'
-            ? timeInfoObj.nameLookupTimeMs * MS_TO_NS
-            : 0;
-          const tcpTime = connectTime > dnsTime ? connectTime - dnsTime : connectTime;
-          if (tcpTime > 0) {
-            performanceMetrics.set('resourceTCP', tcpTime);
-          }
-        } else if (timeInfoObj.tcpTime !== undefined && typeof timeInfoObj.tcpTime === 'number') {
-          performanceMetrics.set('resourceTCP', timeInfoObj.tcpTime);
-        } else if (timeInfoObj.tcpEndTime !== undefined && timeInfoObj.tcpStartTime !== undefined) {
-          const tcpStart = typeof timeInfoObj.tcpStartTime === 'number' ? timeInfoObj.tcpStartTime : 0;
-          const tcpEnd = typeof timeInfoObj.tcpEndTime === 'number' ? timeInfoObj.tcpEndTime : 0;
-          if (tcpEnd > tcpStart) {
-            performanceMetrics.set('resourceTCP', tcpEnd - tcpStart);
-          }
-        }
-
-        if (timeInfoObj.tlsHandshakeTimeMs !== undefined && typeof timeInfoObj.tlsHandshakeTimeMs === 'number') {
-          const tlsHandshakeTime = timeInfoObj.tlsHandshakeTimeMs * MS_TO_NS;
-          const connectTime = timeInfoObj.connectTimeMs !== undefined && typeof timeInfoObj.connectTimeMs === 'number'
-            ? timeInfoObj.connectTimeMs * MS_TO_NS
-            : 0;
-          const sslTime = tlsHandshakeTime > connectTime ? tlsHandshakeTime - connectTime : tlsHandshakeTime;
-          if (sslTime > 0) {
-            performanceMetrics.set('resourceSSL', sslTime);
-          }
-        } else if (timeInfoObj.sslTime !== undefined && typeof timeInfoObj.sslTime === 'number') {
-          performanceMetrics.set('resourceSSL', timeInfoObj.sslTime);
-        } else if (timeInfoObj.sslEndTime !== undefined && timeInfoObj.sslStartTime !== undefined) {
-          const sslStart = typeof timeInfoObj.sslStartTime === 'number' ? timeInfoObj.sslStartTime : 0;
-          const sslEnd = typeof timeInfoObj.sslEndTime === 'number' ? timeInfoObj.sslEndTime : 0;
-          if (sslEnd > sslStart) {
-            performanceMetrics.set('resourceSSL', sslEnd - sslStart);
-          }
-        }
-
-        let ttfbValue: number | undefined = undefined;
-        if (timeInfoObj.startTransferTimeMs !== undefined && timeInfoObj.preTransferTimeMs !== undefined) {
-          const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
-          const preTransfer = (typeof timeInfoObj.preTransferTimeMs === 'number' ? timeInfoObj.preTransferTimeMs : 0) * MS_TO_NS;
-          ttfbValue = startTransfer > preTransfer ? startTransfer - preTransfer : startTransfer;
-        } else if (timeInfoObj.startTransferTimeMs !== undefined && timeInfoObj.tlsHandshakeTimeMs !== undefined) {
-          const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
-          const tlsHandshake = (typeof timeInfoObj.tlsHandshakeTimeMs === 'number' ? timeInfoObj.tlsHandshakeTimeMs : 0) * MS_TO_NS;
-          ttfbValue = startTransfer > tlsHandshake ? startTransfer - tlsHandshake : startTransfer;
-        } else if (timeInfoObj.ttfbTime !== undefined && typeof timeInfoObj.ttfbTime === 'number') {
-          ttfbValue = timeInfoObj.ttfbTime;
-        } else if (timeInfoObj.firstByteTime !== undefined && typeof timeInfoObj.firstByteTime === 'number') {
-          ttfbValue = timeInfoObj.firstByteTime;
-        }
-
-        if (ttfbValue !== undefined && ttfbValue > 0) {
-          performanceMetrics.set('resourceTTFB', ttfbValue);
-          performanceMetrics.set('resourceFirstByte', ttfbValue);
-        }
-
-        if (timeInfoObj.totalTimeMs !== undefined && timeInfoObj.tlsHandshakeTimeMs !== undefined) {
-          const totalTime = (typeof timeInfoObj.totalTimeMs === 'number' ? timeInfoObj.totalTimeMs : 0) * MS_TO_NS;
-          const tlsHandshake = (typeof timeInfoObj.tlsHandshakeTimeMs === 'number' ? timeInfoObj.tlsHandshakeTimeMs : 0) * MS_TO_NS;
-          if (totalTime > tlsHandshake) {
-            performanceMetrics.set('resourceTrans', totalTime - tlsHandshake);
-          }
-        } else if (timeInfoObj.totalTimeMs !== undefined && timeInfoObj.startTransferTimeMs !== undefined) {
-          const totalTime = (typeof timeInfoObj.totalTimeMs === 'number' ? timeInfoObj.totalTimeMs : 0) * MS_TO_NS;
-          const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
-          if (totalTime > startTransfer) {
-            performanceMetrics.set('resourceTrans', totalTime - startTransfer + (ttfbValue !== undefined ? ttfbValue : 0));
-          }
-        } else if (timeInfoObj.transTime !== undefined && typeof timeInfoObj.transTime === 'number') {
-          performanceMetrics.set('resourceTrans', timeInfoObj.transTime);
-        } else if (timeInfoObj.responseTime !== undefined && typeof timeInfoObj.responseTime === 'number') {
-          performanceMetrics.set('resourceTrans', timeInfoObj.responseTime);
-        }
-
-        if (timeInfoObj.totalTimeMs !== undefined && timeInfoObj.startTransferTimeMs !== undefined) {
-          const totalTime = (typeof timeInfoObj.totalTimeMs === 'number' ? timeInfoObj.totalTimeMs : 0) * MS_TO_NS;
-          const startTransfer = (typeof timeInfoObj.startTransferTimeMs === 'number' ? timeInfoObj.startTransferTimeMs : 0) * MS_TO_NS;
-          if (totalTime > startTransfer) {
-            performanceMetrics.set('resourceDownloadTime', totalTime - startTransfer);
-          }
-        } else if (timeInfoObj.downloadTime !== undefined && typeof timeInfoObj.downloadTime === 'number') {
-          performanceMetrics.set('resourceDownloadTime', timeInfoObj.downloadTime);
-        } else if (timeInfoObj.bodyEndTime !== undefined && timeInfoObj.bodyStartTime !== undefined) {
-          const bodyStart = typeof timeInfoObj.bodyStartTime === 'number' ? timeInfoObj.bodyStartTime : 0;
-          const bodyEnd = typeof timeInfoObj.bodyEndTime === 'number' ? timeInfoObj.bodyEndTime : 0;
-          if (bodyEnd > bodyStart) {
-            performanceMetrics.set('resourceDownloadTime', bodyEnd - bodyStart);
-          }
-        }
-
-        if (timeInfoObj.totalTimeMs !== undefined && typeof timeInfoObj.totalTimeMs === 'number') {
-          performanceMetrics.set('resourceLoad', timeInfoObj.totalTimeMs * MS_TO_NS);
-        } else if (timeInfoObj.totalTime !== undefined && typeof timeInfoObj.totalTime === 'number') {
-          performanceMetrics.set('resourceLoad', timeInfoObj.totalTime);
-        } else {
-          performanceMetrics.set('resourceLoad', responseTime * MS_TO_NS);
-        }
-
-        const perfKeys = Array.from(performanceMetrics.keys());
-        for (let i = 0; i < perfKeys.length; i++) {
-          const key = perfKeys[i];
-          const value = performanceMetrics.get(key);
-          if (value !== undefined) {
-            const metricValue: PerformanceMetricValue = { value: value };
-            resourceParams.addProperty(key, metricValue);
-          }
-        }
-        netStatusBean = createRCPNetStatusBean(performanceMetrics, fallbackLoadNs);
-        FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(performanceMetrics)}`);
-      } else {
-        const metricValue: PerformanceMetricValue = { value: fallbackLoadNs };
-        resourceParams.addProperty('resourceLoad', metricValue);
+        resourceTiming = createRCPResourceTiming(timeInfoObj, fallbackLoadNs);
+        netStatusBean = createRCPNetStatusBean(resourceTiming);
+        FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
       }
 
       FTInnerLogger.d(
@@ -442,7 +434,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const error = err instanceof Error ? err : new Error(String(err));
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      const netStatusBean = createRCPNetStatusBean(new Map<string, number>(), fallbackLoadNs);
+      const resourceTiming = createFallbackRCPResourceTiming(fallbackLoadNs);
+      const netStatusBean = createRCPNetStatusBean(resourceTiming);
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
       resourceParams.setResourceMethod(method);
@@ -451,8 +444,6 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       resourceParams.setRequestErrorMsg(error.message || 'Unknown error');
       resourceParams.setRequestErrorStack((error.stack && error.stack.length > 0) ? error.stack : String(error));
       resourceParams.setResourceStatus(0);
-      const metricValue: PerformanceMetricValue = { value: fallbackLoadNs };
-      resourceParams.addProperty('resourceLoad', metricValue);
 
       FTInnerLogger.e(
         TAG,
