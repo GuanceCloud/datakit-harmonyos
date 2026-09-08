@@ -13,6 +13,7 @@ import {
   SDKWorkerRequest
 } from '../SDKWorkerProtocol';
 import { NetCodeStatus } from '../../http/HttpEngine';
+import { describeHttpError, formatHttpError } from '../../http/HttpError';
 import { awaitDataUploadHttpResult } from './DataUploadSoftTimeout';
 import { createDataUploadHeaders, getDataUploadRequestBody } from './DataUploadHttpRequest';
 import { createDataUploadNetworkOptions } from './DataUploadNetworkOptions';
@@ -114,8 +115,9 @@ function createUploadHttpErrorResult(
   startedAt: number,
   softTimedOut: boolean
 ): SDKUploadHttpResultDTO {
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
+  const errorDetails = describeHttpError(error);
+  const message = formatHttpError(errorDetails);
+  const normalized = `${errorDetails.code} ${errorDetails.message}`.toLowerCase();
   let code = NetCodeStatus.UNKNOWN_EXCEPTION_CODE;
   if (normalized.includes('timeout') || normalized.includes('2300028')) {
     code = NetCodeStatus.FILE_TIMEOUT_CODE;
@@ -125,7 +127,9 @@ function createUploadHttpErrorResult(
   return {
     code,
     message: abbreviateHttpResponse(message, 4096),
-    errorCode: String(code),
+    // Keep HarmonyOS's original code in the upload diagnostic. The logical
+    // SDK status remains in `code` for retry classification.
+    errorCode: errorDetails.code.length > 0 ? errorDetails.code : String(code),
     elapsedMs: Math.max(0, Date.now() - startedAt),
     softTimedOut
   };

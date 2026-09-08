@@ -8,6 +8,7 @@ import BuildProfile from '../../../../../BuildProfile';
 import { StringUtils } from '../utils/StringUtils';
 import { DateUtils } from '../utils/DateUtils';
 import { FTInnerLogger } from '../log/FTLogger';
+import { describeHttpError, formatHttpError } from './HttpError';
 
 export interface HttpBuilderTestRequest {
   url: string;
@@ -338,15 +339,19 @@ export class HttpBuilder {
       return await this.executeRequest(requestOptions, header);
 
     } catch (error) {
-      FTInnerLogger.e("HttpBuilder", `HTTP request failed: ${error}`);
+      const httpError = describeHttpError(error);
+      const errorDescription = formatHttpError(httpError);
+      FTInnerLogger.e("HttpBuilder", `HTTP request failed: ${errorDescription}`);
       
       // Return the corresponding status code based on the error type
-      if (error.message?.includes('timeout')) {
-        return new FTResponseData(NetCodeStatus.FILE_TIMEOUT_CODE, `Request timeout: ${error.message}`);
-      } else if (error.message?.includes('network')) {
-        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, `Network error: ${error.message}`);
+      const normalizedError = `${httpError.code} ${httpError.message}`.toLowerCase();
+      if (normalizedError.includes('timeout') || normalizedError.includes('2300028')) {
+        return new FTResponseData(NetCodeStatus.FILE_TIMEOUT_CODE, `Request timeout: ${errorDescription}`);
+      } else if (normalizedError.includes('network') || normalizedError.includes('2300007') ||
+        normalizedError.includes('2300006')) {
+        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, `Network error: ${errorDescription}`);
       } else {
-        return new FTResponseData(NetCodeStatus.UNKNOWN_EXCEPTION_CODE, `Unknown error: ${error.message}`);
+        return new FTResponseData(NetCodeStatus.UNKNOWN_EXCEPTION_CODE, `Unknown error: ${errorDescription}`);
       }
     }
   }
@@ -416,15 +421,19 @@ export class HttpBuilder {
       return await this.executeRequest(requestOptions, header);
 
     } catch (error) {
-      FTInnerLogger.e("HttpBuilder", `[COMPRESSION] HTTP request failed: ${error}`);
+      const httpError = describeHttpError(error);
+      const errorDescription = formatHttpError(httpError);
+      FTInnerLogger.e("HttpBuilder", `[COMPRESSION] HTTP request failed: ${errorDescription}`);
       
       // Return the corresponding status code based on the error type
-      if (error.message?.includes('timeout')) {
-        return new FTResponseData(NetCodeStatus.FILE_TIMEOUT_CODE, `Request timeout: ${error.message}`);
-      } else if (error.message?.includes('network')) {
-        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, `Network error: ${error.message}`);
+      const normalizedError = `${httpError.code} ${httpError.message}`.toLowerCase();
+      if (normalizedError.includes('timeout') || normalizedError.includes('2300028')) {
+        return new FTResponseData(NetCodeStatus.FILE_TIMEOUT_CODE, `Request timeout: ${errorDescription}`);
+      } else if (normalizedError.includes('network') || normalizedError.includes('2300007') ||
+        normalizedError.includes('2300006')) {
+        return new FTResponseData(NetCodeStatus.NETWORK_EXCEPTION_CODE, `Network error: ${errorDescription}`);
       } else {
-        return new FTResponseData(NetCodeStatus.UNKNOWN_EXCEPTION_CODE, `Unknown error: ${error.message}`);
+        return new FTResponseData(NetCodeStatus.UNKNOWN_EXCEPTION_CODE, `Unknown error: ${errorDescription}`);
       }
     }
   }

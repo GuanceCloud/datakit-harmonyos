@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paused queued and follow-up uploads after HarmonyOS reports network loss;
   pending data now resumes 750ms after network recovery without spending
   offline retry attempts.
+- Preserved HarmonyOS HTTP error codes and messages in control-plane and
+  upload diagnostics.
 
 ## [0.1.17-alpha01] - 2026-09-05
 - Added automatic `console.*` and `hilog.*` collection via `setEnableConsoleLog(...)` and the Guance Hvigor compiler plugin.
@@ -29,7 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed SDK reset and endpoint checks before initialization.
 - Preserved SDK public attributes when using a custom `LineDataModifier`.
 - Expanded network-failure, RCP single-dispatch, Worker, and RUM upload regression coverage.
-- Preserved HarmonyOS HTTP error codes and messages in control-plane and upload diagnostics.
 
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
