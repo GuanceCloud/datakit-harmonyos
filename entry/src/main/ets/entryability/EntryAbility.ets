@@ -12,6 +12,7 @@ import {
   ErrorMonitorType,
   ActionEventWrapper,
   FTActionTrackingHandler,
+  FTInTakeUrlHandler,
   FTLoggerConfig,
   FTRemoteConfigFetchResult,
   FTRUMConfig,
@@ -51,6 +52,13 @@ const FILTERED_AUTOMATIC_ACTION_NAME_PREFIXES: Array<string> = [
   '__Common__/'
 ];
 const FILTERED_AUTOMATIC_ACTION_IDS: Array<string> = [];
+// Automatic Resource URLs with these prefixes are excluded from RUM Resource
+// collection. HttpAutoTrackTestPage uses this reachable test endpoint to
+// verify that a filtered request is still dispatched but is not reported.
+export const RESOURCE_FILTER_TEST_URL_PREFIX = 'https://httpbin.org/anything/ft-resource-filter/';
+const FILTERED_AUTOMATIC_RESOURCE_URL_PREFIXES: Array<string> = [
+  RESOURCE_FILTER_TEST_URL_PREFIX
+];
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -134,6 +142,23 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
     }
     for (let index = 0; index < FILTERED_AUTOMATIC_ACTION_IDS.length; index++) {
       if (nodeId === FILTERED_AUTOMATIC_ACTION_IDS[index]) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * Example of automatic Resource filtering. Returning true skips automatic
+ * Resource collection for the URL; trace propagation and manual Resources are
+ * unaffected.
+ */
+class DemoResourceUrlHandler extends FTInTakeUrlHandler {
+  public isInTakeUrl(url: string): boolean {
+    for (let index = 0; index < FILTERED_AUTOMATIC_RESOURCE_URL_PREFIXES.length; index++) {
+      if (url.startsWith(FILTERED_AUTOMATIC_RESOURCE_URL_PREFIXES[index])) {
+        DemoLogger.i(LOG_TAG, `Automatic Resource filtered: url=${url}`);
         return true;
       }
     }
@@ -454,6 +479,7 @@ export default class EntryAbility extends UIAbility {
         .setViewRouterTrackingHandler(new DemoRouterViewTrackingHandler())
         .setViewNavigationTrackingHandler(new DemoNavigationViewTrackingHandler())
         .setActionTrackingHandler(new DemoActionTrackingHandler())
+        .setResourceUrlHandler(new DemoResourceUrlHandler())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)

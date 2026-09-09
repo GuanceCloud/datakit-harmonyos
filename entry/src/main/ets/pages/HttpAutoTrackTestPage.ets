@@ -21,7 +21,11 @@ import axios, {
 import { BusinessError } from '@kit.BasicServicesKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
-import { KEY_RESOURCE_TEST_URL, KEY_TRACE_URL } from '../entryability/EntryAbility';
+import {
+  KEY_RESOURCE_TEST_URL,
+  KEY_TRACE_URL,
+  RESOURCE_FILTER_TEST_URL_PREFIX
+} from '../entryability/EntryAbility';
 import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
@@ -242,6 +246,10 @@ export struct HttpAutoTrackTestPage {
     return `https://httpbin.org/${method}`;
   }
 
+  private getResourceFilterTestUrl(): string {
+    return `${RESOURCE_FILTER_TEST_URL_PREFIX}${Date.now()}`;
+  }
+
   private createAxiosRequestData(method: AxiosHttpMethod, mode: AxiosAutoTrackMode): AxiosStyleRequestData {
     const methodName = method.toUpperCase();
     return {
@@ -414,6 +422,103 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ GET request failed: ${errorMsg}`);
+    }
+  }
+
+  /**
+   * Sends an RCP request whose URL matches DemoResourceUrlHandler. The request
+   * must still succeed, while the SDK must not create an automatic Resource.
+   */
+  async testResourceUrlFilter() {
+    const testUrl = this.getResourceFilterTestUrl();
+    const resourceUrlHandler = FTSDK.getRumConfig()?.getResourceUrlHandler() ?? null;
+    if (resourceUrlHandler === null || !resourceUrlHandler.isInTakeUrl(testUrl)) {
+      this.addTestResult(`❌ Resource URL filter is not configured for: ${testUrl}`);
+      return;
+    }
+
+    try {
+      const session = this.createRCPSession();
+      let response: rcp.Response;
+      try {
+        response = await session.fetch(new rcp.Request(testUrl, 'GET'));
+      } finally {
+        session.close();
+      }
+
+      this.requestCount++;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        this.successCount++;
+        this.addTestResult(`✅ Filtered Resource request succeeded: status=${response.statusCode}. ` +
+          'Verify no matching RUM Resource is uploaded.');
+      } else {
+        this.errorCount++;
+        this.addTestResult(`⚠️ Filtered Resource request returned status=${response.statusCode}`);
+      }
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Filtered Resource request failed: ${err.message || String(error)}`);
+    }
+  }
+
+  /**
+   * Verifies filtering through the Native HTTP interceptor chain.
+   */
+  async testHttpResourceUrlFilter() {
+    const testUrl = this.getResourceFilterTestUrl();
+    const resourceUrlHandler = FTSDK.getRumConfig()?.getResourceUrlHandler() ?? null;
+    if (resourceUrlHandler === null || !resourceUrlHandler.isInTakeUrl(testUrl)) {
+      this.addTestResult(`❌ HTTP Resource URL filter is not configured for: ${testUrl}`);
+      return;
+    }
+
+    try {
+      const response = await this.executeHttpRequest(testUrl, {
+        method: http.RequestMethod.GET,
+        header: { 'Accept': 'application/json' }
+      });
+      this.requestCount++;
+      if (response.responseCode >= 200 && response.responseCode < 300) {
+        this.successCount++;
+        this.addTestResult(`✅ Filtered HTTP Resource request succeeded: status=${response.responseCode}. ` +
+          'Verify no matching RUM Resource is uploaded.');
+      } else {
+        this.errorCount++;
+        this.addTestResult(`⚠️ Filtered HTTP Resource request returned status=${response.responseCode}`);
+      }
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Filtered HTTP Resource request failed: ${err.message || String(error)}`);
+    }
+  }
+
+  /**
+   * Verifies filtering through the selected Axios auto-track integration.
+   */
+  async testAxiosResourceUrlFilter(mode: AxiosAutoTrackMode) {
+    const testUrl = this.getResourceFilterTestUrl();
+    const resourceUrlHandler = FTSDK.getRumConfig()?.getResourceUrlHandler() ?? null;
+    if (resourceUrlHandler === null || !resourceUrlHandler.isInTakeUrl(testUrl)) {
+      this.addTestResult(`❌ Axios Resource URL filter is not configured for: ${testUrl}`);
+      return;
+    }
+
+    const modeName = mode === 'chain' ? 'Chain' : 'Compat';
+    try {
+      const responseText = await this.executeAxiosRequest(testUrl, 'get', undefined, mode);
+      this.requestCount++;
+      this.successCount++;
+      this.addTestResult(`✅ Filtered Axios ${modeName} Resource request succeeded: bodyLength=${responseText.length}. ` +
+        'Verify no matching RUM Resource is uploaded.');
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Filtered Axios ${modeName} Resource request failed: ${err.message || String(error)}`);
     }
   }
 
@@ -876,6 +981,14 @@ export struct HttpAutoTrackTestPage {
             .customProperty('test-get-btn', 'Test GET Request (RCP)')
             .onClick(() => this.testRCPGetRequest())
 
+          Button('Test Resource URL Filter (RCP)')
+            .id('test-resource-filter-btn')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#607D8B')
+            .onClick(() => this.testResourceUrlFilter())
+            .customProperty('test-resource-filter-btn', 'Test Resource URL Filter (RCP)')
+
           Button('Test POST Request (RCP)')
             .width('100%')
             .margin({ bottom: 10 })
@@ -926,6 +1039,14 @@ export struct HttpAutoTrackTestPage {
             .backgroundColor('#1976D2')
             .onClick(() => this.testHttpGetRequestWithInterceptorChain())
             .customProperty('test-http-get-btn', 'Test HTTP GET Request (API 22+)')
+
+          Button('Test HTTP Resource URL Filter (API 22+)')
+            .id('test-http-resource-filter-btn')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#607D8B')
+            .onClick(() => this.testHttpResourceUrlFilter())
+            .customProperty('test-http-resource-filter-btn', 'Test HTTP Resource URL Filter (API 22+)')
 
           Button('Test HTTP POST Request (API 22+)')
             .width('100%')
@@ -1003,6 +1124,14 @@ export struct HttpAutoTrackTestPage {
             .backgroundColor('#FF9800')
             .onClick(() => this.testAxiosMethodRequest(this.axiosMode, 'get'))
             .customProperty('test-axios-get-btn', 'Test Axios GET')
+
+          Button(`Test Axios Resource URL Filter (${this.getAxiosModeName()})`)
+            .id('test-axios-resource-filter-btn')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#607D8B')
+            .onClick(() => this.testAxiosResourceUrlFilter(this.axiosMode))
+            .customProperty('test-axios-resource-filter-btn', 'Test Axios Resource URL Filter')
 
           Button(`Test Axios POST (${this.getAxiosModeName()})`)
             .width('100%')
