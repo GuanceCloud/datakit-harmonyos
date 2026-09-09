@@ -138,6 +138,11 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     const url = context.request.url.href;
     const method = context.request.method || 'GET';
 
+    if (FTRUMConfigManager.getInstance().shouldFilterResourceUrl(url)) {
+      FTInnerLogger.d(TAG, `[RCP-Resource] Filtered ${method} ${url}`);
+      return await next.handle(context);
+    }
+
     let uniqueId: string | undefined = undefined;
     if (context.request.headers && context.request.headers['X-FT-Resource-ID']) {
       const headerValue = context.request.headers['X-FT-Resource-ID'];
@@ -905,7 +910,12 @@ export function applyFTAxiosTrack(
     const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled);
     config.headers = state.requestHeaders as Object;
 
-    if (resourceEnabled) {
+    if (state.resourceEnabled && FTRUMConfigManager.getInstance().shouldFilterResourceUrl(state.url)) {
+      state.resourceEnabled = false;
+      FTInnerLogger.d(TAG, `[Axios-Resource] Filtered ${state.method} ${state.url}`);
+    }
+
+    if (state.resourceEnabled) {
       FTRUMInnerManager.getInstance().startResource(state.resourceId);
       const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
       if (activeAction && !activeAction.isActionClose()) {
@@ -916,7 +926,7 @@ export function applyFTAxiosTrack(
     setAxiosAutoTrackState(config, state);
     FTInnerLogger.d(
       TAG,
-      `[Axios-Request] Prepared ${state.method} ${state.url}, resourceId=${state.resourceId}, trace=${traceEnabled}, resource=${resourceEnabled}, ${summarizeHeaderKeys(state.requestHeaders)}`
+      `[Axios-Request] Prepared ${state.method} ${state.url}, resourceId=${state.resourceId}, trace=${traceEnabled}, resource=${state.resourceEnabled}, ${summarizeHeaderKeys(state.requestHeaders)}`
     );
     return config;
   });

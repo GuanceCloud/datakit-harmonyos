@@ -26,8 +26,8 @@ const TAG = "FTInTakeUrlHandler";
 /**
  * URL collection handler
  *
- * //TODO to implement
- * Determines which URLs should be monitored
+ * Determines whether an automatically tracked Resource URL should be ignored.
+ * `true` skips Resource collection; `false` keeps it.
  */
 export class FTInTakeUrlHandler {
   // Default ignored URL patterns

@@ -48,6 +48,7 @@ import {
 } from '../../main/ets/components/trace/FTTraceHeaderHandler';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
 import { FTViewNavigationTrackingHandler } from '../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
 import { FTViewRouterTrackingHandler } from '../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
@@ -103,6 +104,15 @@ class TestViewRouterTrackingHandler implements FTViewRouterTrackingHandler {
 class TestViewNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
   resolveHandlerView(destinationName: string): HandlerView | null {
     return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
+  }
+}
+
+class TestResourceUrlHandler extends FTInTakeUrlHandler {
+  public calls: number = 0;
+
+  public isInTakeUrl(url: string): boolean {
+    this.calls++;
+    return url.startsWith('https://ignored.example.com/');
   }
 }
 
@@ -265,6 +275,18 @@ export default function configUnitTest() {
       expect(deferredEndpointConfig.getDatakitUrl()).assertEqual('');
       expect(deferredEndpointConfig.getDatawayUrl()).assertEqual('');
       expect(deferredEndpointConfig.getClientToken()).assertEqual('');
+    });
+
+    it('resourceUrlHandlerShouldUseAndroidFilterSemantics', 0, () => {
+      const handler = new TestResourceUrlHandler();
+      const config = new FTRUMConfig().setResourceUrlHandler(handler);
+      const manager = FTRUMConfigManager.getInstance();
+      manager.initWithConfig(config);
+
+      expect(config.getResourceUrlHandler() === handler).assertTrue();
+      expect(manager.shouldFilterResourceUrl('https://ignored.example.com/metrics')).assertTrue();
+      expect(manager.shouldFilterResourceUrl('https://api.example.com/orders')).assertFalse();
+      expect(handler.calls).assertEqual(2);
     });
 
     it('runtimeEndpointUpdatesSwitchUploadModes', 0, () => {

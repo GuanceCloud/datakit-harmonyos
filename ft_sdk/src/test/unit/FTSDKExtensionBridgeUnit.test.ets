@@ -1,5 +1,6 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
-import { FTTraceConfig } from '../../main/ets/components/Configs';
+import { FTRUMConfig, FTTraceConfig } from '../../main/ets/components/Configs';
+import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import {
   FTSDKExtensionAutoTrackOptions,
   FTSDKExtensionBridge,
@@ -15,7 +16,14 @@ import {
 } from '../../main/ets/components/trace/FTTraceHeaderHandler';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { TestReset } from '../helpers/TestReset';
+
+class IgnoredResourceUrlHandler extends FTInTakeUrlHandler {
+  public isInTakeUrl(url: string): boolean {
+    return url.includes('/ignored-resource');
+  }
+}
 
 class RecordingTraceHeaderHandler implements FTTraceHeaderHandler {
   public requestCount: number = 0;
@@ -70,10 +78,12 @@ export default function ftSDKExtensionBridgeUnitTest() {
   describe('FTSDKExtensionBridgeUnit', () => {
     beforeEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     afterEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     it('axiosPrepareShouldStoreMethod', 0, () => {
@@ -121,6 +131,32 @@ export default function ftSDKExtensionBridgeUnitTest() {
       };
       const completed = FTSDKExtensionBridge.completeHttpResponse(response);
       expect(completed).assertTrue();
+    });
+
+    it('httpPrepareShouldSkipFilteredResourceAndKeepTracePathAvailable', 0, () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setResourceUrlHandler(new IgnoredResourceUrlHandler()));
+
+      const request: FTSDKExtensionRequestInput = {
+        url: 'https://example.com/ignored-resource',
+        method: 'GET',
+        headers: {}
+      };
+      const prepared = FTSDKExtensionBridge.prepareHttpRequest(request, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      expect(prepared.resourceEnabled).assertFalse();
+      expect(prepared.traceEnabled).assertFalse();
+      expect(FTSDKExtensionBridge.completeHttpResponse({
+        url: request.url,
+        method: prepared.method,
+        requestHeaders: prepared.headers,
+        responseHeaders: {},
+        statusCode: 200
+      })).assertTrue();
     });
 
     it('httpPrepareShouldPassTraceIds', 0, () => {

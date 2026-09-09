@@ -104,6 +104,22 @@ Native network auto-tracking reports `resource_status=0` when no HTTP response i
 
 Following the existing SDK contract, a collected Resource generates one linked Network Error for HTTP status >=400, or for status 0 with a non-empty error stack. A manually supplied status 0 without an error stack does not alone create an Error. Auto-tracking supplies the failure message and stack (or the available platform failure description), and links both records through `resource_id`.
 
+### Filter automatically tracked Resources
+
+Use `FTRUMConfig.setResourceUrlHandler(...)` to exclude URLs from automatically tracked RCP, Axios, and NetworkKit HTTP Resources. The handler follows the Android contract: return `true` to skip Resource collection and `false` to collect. It does not affect Trace header injection or manually reported Resources.
+
+```ts
+class ResourceUrlFilter extends FTInTakeUrlHandler {
+  public isInTakeUrl(url: string): boolean {
+    return url.startsWith('https://telemetry.example.com/');
+  }
+}
+
+const rumConfig = new FTRUMConfig()
+  .setEnableTraceUserResource(true)
+  .setResourceUrlHandler(new ResourceUrlFilter());
+```
+
 ## Hvigor Compiler Plugin
 
 The Guance Hvigor compiler plugin provides automatic console/HiLog collection and cold-launch lifecycle tracking. `FTLoggerConfig.setEnableConsoleLog(...)` controls automatic application-console collection; `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.

@@ -128,6 +128,7 @@ export { Status } from './src/main/ets/components/bean/Status';
 export { UserData } from './src/main/ets/components/rum/bean/UserData';
 export { ResourceParams } from './src/main/ets/components/rum/bean/ResourceParams';
 export { NetStatusBean } from './src/main/ets/components/rum/bean/NetStatusBean';
+export { FTInTakeUrlHandler } from './src/main/ets/components/http/FTInTakeUrlHandler';
 
 // ============================================================================
 // Data Modifiers (Optional)

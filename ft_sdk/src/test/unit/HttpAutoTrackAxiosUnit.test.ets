@@ -5,9 +5,22 @@ import {
   FTAxiosRequestConfigTarget,
   FTAxiosResponseTarget
 } from '../../main/ets/components/network/FTHttpAutoTrack';
+import { FTRUMConfig } from '../../main/ets/components/Configs';
+import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
+import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { TestReset } from '../helpers/TestReset';
 
 const FT_AXIOS_AUTOTRACK_CONTEXT_KEY = '__ftAxiosAutoTrackState';
+
+class IgnoredAxiosResourceUrlHandler extends FTInTakeUrlHandler {
+  public isInTakeUrl(url: string): boolean {
+    return url.includes('/api');
+  }
+}
+
+interface StoredAxiosAutoTrackState {
+  resourceEnabled: boolean;
+}
 
 type AxiosRequestFulfilled = (value: FTAxiosRequestConfigTarget) => FTAxiosRequestConfigTarget | Promise<FTAxiosRequestConfigTarget>;
 type AxiosResponseFulfilled = (value: FTAxiosResponseTarget) => FTAxiosResponseTarget | Promise<FTAxiosResponseTarget>;
@@ -94,10 +107,12 @@ export default function httpAutoTrackAxiosUnitTest() {
   describe('HttpAutoTrackAxiosUnit', () => {
     beforeEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     afterEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     it('axiosSuccessShouldClearState', 0, () => {
@@ -144,6 +159,25 @@ export default function httpAutoTrackAxiosUnitTest() {
       const contextAfterResponse = getContext(preparedConfig);
       expect(contextAfterResponse[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
       expect(contextAfterResponse['existing']).assertEqual('keep-me');
+    });
+
+    it('axiosShouldSkipFilteredResource', 0, () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setResourceUrlHandler(new IgnoredAxiosResourceUrlHandler()));
+
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      const preparedConfig = createPreparedConfig(target);
+      const state = getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
+      expect(state.resourceEnabled).assertFalse();
+
+      target.responseManager.fulfilled!(new FakeAxiosResponse(preparedConfig));
+      expect(getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
     });
   });
 }

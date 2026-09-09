@@ -20,6 +20,7 @@ ErrorType
 FTDataFilters
 FTDnsConfig
 FTInnerLogFileConfig
+FTInTakeUrlHandler
 FTLogger
 FTLoggerConfig
 FTProxyAuthenticator
@@ -361,6 +362,7 @@ isAccessODIDEnabled
 isAutoSyncEnabled
 isAutoTraceEnabled
 isCompressIntakeRequests
+isInTakeUrl
 isDataIntegerCompatible
 isDebugMode
 isEnableAutoTrace

@@ -7,7 +7,16 @@ import {
   RCPResourceInterceptor,
   RCPTraceInterceptor
 } from '../../main/ets/components/network/FTHttpAutoTrack';
+import { FTRUMConfig } from '../../main/ets/components/Configs';
+import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
+import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { TestReset } from '../helpers/TestReset';
+
+class IgnoredRcpResourceUrlHandler extends FTInTakeUrlHandler {
+  public isInTakeUrl(url: string): boolean {
+    return url.includes('/ignored-resource');
+  }
+}
 
 class CustomRcpInterceptor implements rcp.Interceptor {
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
@@ -79,10 +88,12 @@ export default function httpAutoTrackRcpConfigUnitTest() {
   describe('HttpAutoTrackRcpConfigUnit', () => {
     beforeEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     afterEach(() => {
       TestReset.resetP0State();
+      FTRUMConfigManager.getInstance().release();
     });
 
     it('rcpTraceShouldDispatchExactlyOnce', 0, async () => {
@@ -114,6 +125,26 @@ export default function httpAutoTrackRcpConfigUnitTest() {
         expect(caught === failure).assertTrue();
         expect(trace.requestCalls).assertEqual(1);
         expect(trace.responseCalls).assertEqual(phase === 'transport' ? 0 : 1);
+      }
+    });
+
+    it('rcpResourceShouldBypassFilteredUrl', 0, async () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setResourceUrlHandler(new IgnoredRcpResourceUrlHandler()));
+
+      const interceptor = new RCPResourceInterceptor();
+      const request = new rcp.Request('https://example.com/ignored-resource', 'GET');
+      const session = rcp.createSession();
+      const context: rcp.RequestContext = { request, session };
+      const response = new SingleDispatchResponse(request);
+      const next = new SingleDispatchHandler(response, null);
+      try {
+        const actual = await interceptor.intercept(context, next);
+        expect(actual === response).assertTrue();
+        expect(next.calls).assertEqual(1);
+      } finally {
+        session.close();
       }
     });
 

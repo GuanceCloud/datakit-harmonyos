@@ -76,6 +76,29 @@ export class FTRUMConfigManager {
   }
 
   /**
+   * Determines whether an automatically collected Resource should be ignored.
+   *
+   * `FTInTakeUrlHandler` follows the Android SDK contract: `true` means the
+   * URL is filtered and no Resource lifecycle should be created. Manual
+   * Resource reporting deliberately bypasses this method.
+   */
+  public shouldFilterResourceUrl(url: string): boolean {
+    const handler = this.config?.getResourceUrlHandler() ?? null;
+    if (handler === null) {
+      return false;
+    }
+
+    try {
+      return handler.isInTakeUrl(url);
+    } catch (error) {
+      // A user callback must not break the application's request path.
+      // Keep collecting when a custom handler itself fails.
+      FTInnerLogger.e(TAG, `Resource URL handler failed for ${url}: ${error}`);
+      return false;
+    }
+  }
+
+  /**
    * Get RUM public dynamic tags
    * Reference HarmonyOS: FTRUMConfigManager.getRUMPublicDynamicTags()
    */

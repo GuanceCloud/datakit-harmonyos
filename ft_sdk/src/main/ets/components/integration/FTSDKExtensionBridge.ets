@@ -111,13 +111,19 @@ export class FTSDKExtensionBridge {
     AxiosChainMethodStore.getInstance().put(uniqueId, method);
 
     let finalHeaders = headers;
+    const resourceFiltered = resolvedOptions.enableResourceInterceptor &&
+      FTRUMConfigManager.getInstance().shouldFilterResourceUrl(request.url);
+    const resourceEnabled = resolvedOptions.enableResourceInterceptor && !resourceFiltered;
+    if (resourceFiltered) {
+      FTInnerLogger.d(TAG, `[HTTP-Resource] Filtered ${method} ${request.url}`);
+    }
     try {
       if (resolvedOptions.enableTraceInterceptor) {
         finalHeaders = FTSDKExtensionBridge.applyTraceHeaders(resourceId, request, method, headers, uniqueId);
       }
 
       let actionId: string | undefined = undefined;
-      if (resolvedOptions.enableResourceInterceptor) {
+      if (resourceEnabled) {
         FTRUMInnerManager.getInstance().startResource(resourceId);
         const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
         if (activeAction && !activeAction.isActionClose()) {
@@ -133,13 +139,13 @@ export class FTSDKExtensionBridge {
         requestHeaders: finalHeaders,
         actionId: actionId,
         traceEnabled: resolvedOptions.enableTraceInterceptor,
-        resourceEnabled: resolvedOptions.enableResourceInterceptor
+        resourceEnabled: resourceEnabled
       };
       HttpAutoTrackStateStore.getInstance().put(state);
 
       FTInnerLogger.d(
         TAG,
-        `[HTTP-Initial] Prepared ${request.url}, resourceId=${resourceId}, trace=${resolvedOptions.enableTraceInterceptor}, resource=${resolvedOptions.enableResourceInterceptor}, ${summarizeHeaderKeys(finalHeaders)}`
+        `[HTTP-Initial] Prepared ${request.url}, resourceId=${resourceId}, trace=${resolvedOptions.enableTraceInterceptor}, resource=${resourceEnabled}, ${summarizeHeaderKeys(finalHeaders)}`
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Initial] Failed to prepare request: ${error}`);
@@ -152,7 +158,7 @@ export class FTSDKExtensionBridge {
       uniqueId: uniqueId,
       headers: finalHeaders,
       traceEnabled: resolvedOptions.enableTraceInterceptor,
-      resourceEnabled: resolvedOptions.enableResourceInterceptor
+      resourceEnabled: resourceEnabled
     };
   }
 
