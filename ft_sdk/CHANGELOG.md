@@ -6,26 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.17-alpha02] - 2026-09-08
-- Fixed RCP Resource waterfall timing to retain the original `preTransfer` and
-  `startTransfer` positions. First-byte and download spans no longer discard
-  transport-to-ready gaps, fabricate zero-length phases, or use inconsistent
-  fallback origins for `resource_trans`.
-- Added NetworkKit and `@ohos/axios` performance-timing Resource phases when
-  the underlying response exposes them. Both paths now use the same validated
-  cumulative-point mapping as RCP and retain wall-clock total-duration fallback
-  when platform timing data is unavailable or its final endpoint is reversed.
-- Fixed Resource lifecycle finalization when asynchronous `add` and `stop`
-  commands arrive out of order. Resource properties and matching View/Action
-  counter updates now complete together with the final Resource draft.
-- Fixed Action resource/error counters being lost when an auto-tracked request
-  completes after the Action's normal five-second timeout. Pending Resource
-  associations and reference counts now survive process restart; Actions are
-  generated only after every Resource/Error counter has settled.
-- Paused queued and follow-up uploads after HarmonyOS reports network loss;
-  pending data now resumes 750ms after network recovery without spending
-  offline retry attempts.
-- Preserved HarmonyOS HTTP error codes and messages in control-plane and
-  upload diagnostics.
+- Fixed RCP Resource waterfall phases to preserve `preTransfer` and `startTransfer` positions.
+- Added Resource timing phases from NetworkKit and Axios responses with a safe duration fallback.
+- Fixed Resource `add`/`stop` races so final drafts retain properties and matching counter updates.
+- Fixed missing Action Resource/Error counters after slow requests and process restarts.
+- Paused queued and retry uploads while offline, then resumed them after network recovery.
+- Preserved HarmonyOS HTTP error codes and messages in control-plane and upload diagnostics.
 
 ## [0.1.17-alpha01] - 2026-09-05
 - Added automatic `console.*` and `hilog.*` collection via `setEnableConsoleLog(...)` and the Guance Hvigor compiler plugin.

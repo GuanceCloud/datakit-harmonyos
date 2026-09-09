@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17-alpha02] - 2026-09-08
+- Added NetworkKit response performance timing to Resource collection; no public API changes.
+
 ## [0.1.17-alpha01] - 2026-09-05
 - Fixed missing linked RUM Errors for NetworkKit HTTP and Axios Chain failures without an HTTP response.
 - Released with `ft_sdk` 0.1.17-alpha01; no public API changes.
