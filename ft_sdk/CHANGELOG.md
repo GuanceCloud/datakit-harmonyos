@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added FTRUMConfig.setResourceUrlHandler(...) to exclude auto-tracked RCP, Axios, and NetworkKit HTTP Resources without affecting Trace propagation or manual Resources.
 - Added file-backed telemetry cache governance, with capacity eviction, durable recovery, direct file upload, and resumable migration from legacy cache storage.
 - Optimized remote data-filter refreshes to check `pull_interval` when uploads start, parse numeric intervals as nanoseconds, and skip unchanged payload processing.
-- Replaced separate Router and Navigation View tracking handlers with `FTRUMConfig.setViewTrackingHandler(handler, type)`, supporting `ROUTER`, `NAVIGATION`, and `ALL` targets.
+- Added `FTRUMConfig.setViewTrackingHandler(handler, type)` to customize or filter automatically tracked Router and Navigation Views. It supports `ROUTER`, `NAVIGATION`, and `ALL` targets; handlers can set a View name and properties, or return `null` to skip collection.
 
 ## [0.1.17-alpha02] - 2026-09-08
 - Fixed RCP Resource waterfall timings that positioned first-byte and download phases from reconstructed duration sums rather than original `preTransfer` and `startTransfer` points, causing transport-to-ready gaps to disappear, zero-length spans, and inconsistent `resource_trans` origins.
@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.17-alpha01] - 2026-09-05
 - Added `setEnableConsoleLog(...)` and the Guance Hvigor plugin to automatically collect `console.*` and `hilog.*` calls.
-- Added compiler-plugin cold-launch instrumentation, so launch timing no longer requires manual lifecycle reporting calls.
+- Added compiler-plugin cold-launch collection that automatically reports process startup, AbilityStage initialization, first UIAbility creation, and first-frame timing without manual lifecycle reporting calls.
 - Moved routine SDK diagnostics to Debug level and added logs for compiler-plugin detection and Trace-context injection.
 - Fixed Axios and NetworkKit HTTP Resource events being dropped when completion did not report network state and a valid request duration.
 - Fixed cold-launch first-frame timing being missed when the main Window is unavailable during `onWindowStageCreate`; observation now retries after a successful `loadContent` callback and registers each WindowStage once.
@@ -38,10 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
 - Aligned Error and View device metrics with Android: Error memory, CPU, and battery values are percentage-based and use Android-compatible calculations; Error `locale` now uses Android `Locale.toString()` format; View memory remains bytes, battery current remains mA (including Android-compatible negative-current maxima), CPU fields remain process clock ticks/ticks per second, and FPS uses one-second frame windows.
-- Added `FTRUMConfig.setViewRouterTrackingHandler(...)` and `setViewNavigationTrackingHandler(...)` to customize or filter automatically tracked Router page and Navigation destination Views. Handlers can set the View name and properties, or return `null` to skip collection.
 - Added RUM device-metric collection. `setDeviceMetricsMonitorType(...)` configures View CPU, memory, battery-current, and FPS metrics, while `setExtraMonitorTypeWithError(...)` adds CPU, memory, and battery metrics to Errors. The existing `setDeviceMetricsDetectFrequency(...)` and one-argument `setDeviceMetricsMonitorType(...)` calls remain supported.
 - Added `FTRUMConfig.setActionTrackingHandler(...)` to filter automatic Click Actions. Return `null` to skip collection or `undefined` to retain default collection.
-- Added cold-launch collection APIs: `FTSDK.setAppLaunchStartTime(...)`, `recordAppApplicationInit(...)`, `recordAppFirstUIAbilityCreate(...)`, and `recordAppFirstFrame(...)` record process startup, `AbilityStage` initialization, first `UIAbility` creation, and first-frame timing. First-frame observation requires HarmonyOS API 22 or later and `ft_sdk_ext.observeFTAppFirstFrame(...)`. A background entry reports `app_launch_type=background` only after a later UI first frame.
 - Fixed UI-block LongTask duration calculation to use the system `MAIN_THREAD_JANK` event's `begin_time` and `end_time`, without timer or heartbeat fallback data.
 - Fixed occasional missing `app_id` tags on RUM Action, Resource, and Error data after an EventConsumer Worker restart.
 - Fixed native and WebView Resource data and their generated Network Errors to use a stable Resource UUID as `resource_id` for correlation.
