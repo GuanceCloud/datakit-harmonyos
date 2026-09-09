@@ -411,8 +411,8 @@ export default function autoTrackDeviceTest() {
       const routerHandler = new FilteringRouterTrackingHandler();
       const navigationHandler = new FilteringNavigationTrackingHandler();
       const rumConfig = buildRumConfig(true, false)
-        .setViewRouterTrackingHandler(routerHandler)
-        .setViewNavigationTrackingHandler(navigationHandler);
+        .setViewTrackingHandler(routerHandler, FTViewTrackingType.ROUTER)
+        .setViewTrackingHandler(navigationHandler, FTViewTrackingType.NAVIGATION);
       initializeAutoTrack(context, uiContext, rumConfig);
       for (let i = 0; i < 2; i++) {
         FTNavigationTracker.getInstance().destroy();
