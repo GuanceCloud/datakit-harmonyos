@@ -5,15 +5,8 @@
 import {
   applyFTAxiosTrack,
   createFTRCPTrackConfig,
-  FTRUMGlobalManager,
   FTSDK,
-  FTTraceConfig,
   FTTraceConfigManager,
-  FTTraceContext,
-  FTTraceHeaderHandler,
-  FTTraceManager,
-  FTTraceRequestContext,
-  TraceType
 } from '@guancecloud/ft_sdk/Index';
 import {
   applyFTAxiosChainMethodBridge,
@@ -32,9 +25,7 @@ import { KEY_RESOURCE_TEST_URL, KEY_TRACE_URL } from '../entryability/EntryAbili
 import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
-  preInitChainClient,
   preInitChainClientInfo,
-  preInitCompatClient,
   preInitCompatClientInfo,
   preInitControlChainClientInfo,
   PreInitAxiosSmokeExecutionMode,
@@ -66,7 +57,16 @@ interface AxiosPageRequestConfig {
 }
 
 type AxiosAutoTrackMode = 'chain' | 'compat';
-type AxiosHttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
+type AxiosHttpMethod = 'get' | 'post';
+
+interface AxiosErrorResponse {
+  status?: number;
+}
+
+interface AxiosErrorTarget {
+  message?: string;
+  response?: AxiosErrorResponse;
+}
 
 /**
  * HTTP Interceptor Test Page Component
@@ -80,6 +80,7 @@ export struct HttpAutoTrackTestPage {
   @State requestCount: number = 0;
   @State successCount: number = 0;
   @State errorCount: number = 0;
+  @State axiosMode: AxiosAutoTrackMode = 'compat';
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
   @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
@@ -114,24 +115,20 @@ export struct HttpAutoTrackTestPage {
     data?: Object,
     mode: AxiosAutoTrackMode = 'compat'
   ): Promise<string> {
-    const client = this.createAxiosInstance(mode);
-    const requestHeaders = new AxiosHeaders();
-    requestHeaders.setAccept('application/json');
-    requestHeaders.setContentType('application/json');
-    const requestConfig: AxiosPageRequestConfig = {
-      url: url,
-      method: method,
-      data: data,
-      responseType: 'string',
-      headers: requestHeaders
-    };
-    const response: AxiosResponse<string | Object, Object> = await client.request<string | Object,
-    AxiosResponse<string | Object, Object>,
-    Object>(requestConfig as AxiosRequestConfig<Object>);
-
+    const response = await this.executeAxiosRequestResponse(url, method, data, mode);
     return typeof response.data === 'string'
       ? response.data
       : JSON.stringify(response.data);
+  }
+
+  private async executeAxiosRequestResponse(
+    url: string,
+    method: AxiosHttpMethod,
+    data?: Object,
+    mode: AxiosAutoTrackMode = 'compat'
+  ): Promise<AxiosResponse<string | Object, Object>> {
+    const client = this.createAxiosInstance(mode);
+    return await this.executeAxiosRequestWithClientResponse(client, url, method, data);
   }
 
   private async executeAxiosRequestWithClient(
@@ -140,6 +137,18 @@ export struct HttpAutoTrackTestPage {
     method: AxiosHttpMethod,
     data?: Object
   ): Promise<string> {
+    const response = await this.executeAxiosRequestWithClientResponse(client, url, method, data);
+    return typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(response.data);
+  }
+
+  private async executeAxiosRequestWithClientResponse(
+    client: AxiosInstance,
+    url: string,
+    method: AxiosHttpMethod,
+    data?: Object
+  ): Promise<AxiosResponse<string | Object, Object>> {
     const requestHeaders = new AxiosHeaders();
     requestHeaders.setAccept('application/json');
     requestHeaders.setContentType('application/json');
@@ -153,10 +162,7 @@ export struct HttpAutoTrackTestPage {
     const response: AxiosResponse<string | Object, Object> = await client.request<string | Object,
     AxiosResponse<string | Object, Object>,
     Object>(requestConfig as AxiosRequestConfig<Object>);
-
-    return typeof response.data === 'string'
-      ? response.data
-      : JSON.stringify(response.data);
+    return response;
   }
 
   private createAxiosInstance(mode: AxiosAutoTrackMode = 'compat'): AxiosInstance {
@@ -214,7 +220,13 @@ export struct HttpAutoTrackTestPage {
   }
 
   private getResourceTestUrl(source: string, fallback: string): string {
-    const url = this.resourceTestUrl.trim() || fallback;
+    // UI instrumentation always configures traceUrl for the Trace case. Reuse
+    // that known device-reachable endpoint when no separate resource endpoint
+    // was supplied, instead of silently depending on the public httpbin
+    // fallback. Production/demo calls retain their existing fallback.
+    const configuredResourceUrl = this.resourceTestUrl.trim();
+    const uiTestTraceUrl = this.isUITest ? this.getTraceTestUrl() : '';
+    const url = configuredResourceUrl || uiTestTraceUrl || fallback;
     if (!this.isUITest) {
       return url;
     }
@@ -226,9 +238,6 @@ export struct HttpAutoTrackTestPage {
     const from = mode === 'chain' ? 'axios-chain' : 'axios-adapter';
     if (method === 'get') {
       return this.getResourceTestUrl(`axios-${mode}`, `https://httpbin.org/get?from=${from}`);
-    }
-    if (method === 'delete') {
-      return `https://httpbin.org/delete?from=${from}`;
     }
     return `https://httpbin.org/${method}`;
   }
@@ -252,7 +261,7 @@ export struct HttpAutoTrackTestPage {
         return;
       }
 
-      const requestData = method === 'get' || method === 'delete'
+      const requestData = method === 'get'
         ? undefined
         : this.createAxiosRequestData(method, mode);
       const responseText = await this.executeAxiosRequest(
@@ -273,6 +282,101 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
+  private getAxiosModeName(): string {
+    return this.axiosMode === 'chain' ? 'Chain' : 'Compat';
+  }
+
+  private async testAxiosErrorRequest(mode: AxiosAutoTrackMode) {
+    const modeName = mode === 'chain' ? 'Chain' : 'Compat';
+    try {
+      if (!this.isAutoTrackEnabled) {
+        this.addTestResult(`⚠️ Auto Track not enabled, skipping Axios ${modeName} error test`);
+        return;
+      }
+
+      const response = await this.executeAxiosRequestResponse(
+        'https://httpbin.org/status/404',
+        'get',
+        undefined,
+        mode
+      );
+      this.requestCount++;
+      if (response.status === 404) {
+        this.successCount++;
+        this.addTestResult(`✅ Axios ${modeName} error request returned expected status=404`);
+      } else {
+        this.errorCount++;
+        this.addTestResult(`⚠️ Axios ${modeName} error request returned unexpected status=${response.status}`);
+      }
+    } catch (error) {
+      this.requestCount++;
+      const axiosError = error as AxiosErrorTarget;
+      const status = axiosError.response ? axiosError.response.status || 0 : 0;
+      if (status === 404) {
+        this.successCount++;
+        this.addTestResult(`✅ Axios ${modeName} error request returned expected status=404`);
+      } else {
+        this.errorCount++;
+        this.addTestResult(`❌ Axios ${modeName} error request failed: ${axiosError.message || String(error)}`);
+      }
+    }
+  }
+
+  private async testAxiosTraceRequest(mode: AxiosAutoTrackMode) {
+    const modeName = mode === 'chain' ? 'Chain' : 'Compat';
+    try {
+      const testUrl = this.getTraceTestUrl();
+      if (testUrl.length === 0) {
+        this.addTestResult(`⚠️ traceUrl not configured, skipping Axios ${modeName} Trace request`);
+        return;
+      }
+      if (!this.isAutoTrackEnabled || !FTTraceConfigManager.getInstance().isAutoTraceEnabled()) {
+        this.addTestResult(`⚠️ Trace is not enabled, skipping Axios ${modeName} Trace request`);
+        return;
+      }
+
+      const responseText = await this.executeAxiosRequest(testUrl, 'get', undefined, mode);
+      this.requestCount++;
+      this.successCount++;
+      this.addTestResult(`✅ Axios ${modeName} Trace request succeeded: bodyLength=${responseText.length}`);
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Axios ${modeName} Trace request failed: ${err.message || String(error)}`);
+    }
+  }
+
+  private async testAxiosConcurrentRequests(mode: AxiosAutoTrackMode) {
+    const modeName = mode === 'chain' ? 'Chain' : 'Compat';
+    try {
+      if (!this.isAutoTrackEnabled) {
+        this.addTestResult(`⚠️ Auto Track not enabled, skipping 5 concurrent Axios ${modeName} GET requests`);
+        return;
+      }
+
+      const client = this.createAxiosInstance(mode);
+      const baseUrl = this.getAxiosRequestUrl('get', mode);
+      const requests: Promise<string>[] = [];
+      for (let index = 0; index < 5; index++) {
+        const separator = baseUrl.includes('?') ? '&' : '?';
+        requests.push(this.executeAxiosRequestWithClient(client, `${baseUrl}${separator}request=${index}`, 'get'));
+      }
+
+      const responses = await Promise.all(requests);
+      for (let index = 0; index < responses.length; index++) {
+        this.requestCount++;
+        this.successCount++;
+      }
+      this.addTestResult(`✅ 5 concurrent Axios ${modeName} GET requests completed`);
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ Concurrent Axios ${modeName} GET requests failed: ${err.message || String(error)}`);
+    }
+  }
+
   /**
    * Test GET request with RCP
    */
@@ -285,7 +389,8 @@ export struct HttpAutoTrackTestPage {
 
       const session = this.createRCPSession();
 
-      // Send GET request (should be automatically intercepted)
+      // createFTRCPTrackConfig() attaches the FT interceptors. A Session using
+      // baseAddress with a relative URL follows this same interceptor path.
       const request = new rcp.Request(this.getResourceTestUrl('rcp', 'https://httpbin.org/get'), 'GET');
       let response: rcp.Response;
       try {
@@ -363,40 +468,6 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test creating custom session with interceptors
-   */
-  async testRCPWithInterceptors() {
-    try {
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping test");
-        return;
-      }
-
-      const session = this.createRCPSession('https://httpbin.org');
-
-      // Send GET request (should be automatically intercepted)
-      const request = new rcp.Request('/get', 'GET');
-      const response = await session.fetch(request);
-
-      this.requestCount++;
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        this.successCount++;
-        this.addTestResult(`✅ Custom session request succeeded: status=${response.statusCode}`);
-      } else {
-        this.errorCount++;
-        this.addTestResult(`⚠️ Custom session request returned status=${response.statusCode}`);
-      }
-
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Custom session test failed: ${errorMsg}`);
-    }
-  }
-
-  /**
    * Test error request (404)
    */
   async testRCPErrorRequest() {
@@ -432,13 +503,13 @@ export struct HttpAutoTrackTestPage {
   }
 
   /**
-   * Test trace headers (if trace is enabled)
+   * Test an RCP request through the Trace interceptor path.
    */
-  async testRCPTraceHeaders() {
+  async testRCPTraceRequest() {
     try {
       const testUrl = this.getTraceTestUrl();
       if (testUrl.length === 0) {
-        this.addTestResult("⚠️ traceUrl not configured, skipping trace header test");
+        this.addTestResult("⚠️ traceUrl not configured, skipping RCP Trace request");
         return;
       }
 
@@ -451,23 +522,23 @@ export struct HttpAutoTrackTestPage {
       const isTraceEnabled = traceConfigManager.isAutoTraceEnabled();
 
       if (!isTraceEnabled) {
-        this.addTestResult("⚠️ Trace is not enabled, skipping trace header test");
+        this.addTestResult("⚠️ Trace is not enabled, skipping RCP Trace request");
         return;
       }
 
       const session = this.createRCPSession();
 
-      // Send GET request (trace headers should be added automatically)
+      // The RCP interceptor injects Trace headers before dispatching this request.
       const request = new rcp.Request(testUrl, 'GET');
       const response = await session.fetch(request);
 
       this.requestCount++;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ Trace headers request succeeded: status=${response.statusCode}`);
+        this.addTestResult(`✅ RCP Trace request succeeded: status=${response.statusCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ Trace headers request returned status=${response.statusCode}`);
+        this.addTestResult(`⚠️ RCP Trace request returned status=${response.statusCode}`);
       }
 
     } catch (error) {
@@ -475,62 +546,14 @@ export struct HttpAutoTrackTestPage {
       this.errorCount++;
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Trace headers test failed: ${errorMsg}`);
+      this.addTestResult(`❌ RCP Trace request failed: ${errorMsg}`);
     }
   }
 
   /**
-   * Test trace id in resource request to the configured traceUrl
+   * Test five concurrent RCP GET requests.
    */
-  async testRCPTraceWithRequest() {
-    try {
-      const testUrl = this.getTraceTestUrl();
-      if (testUrl.length === 0) {
-        this.addTestResult("⚠️ traceUrl not configured, skipping trace id test");
-        return;
-      }
-
-      if (!this.isAutoTrackEnabled) {
-        this.addTestResult("⚠️ Auto Track not enabled, skipping test");
-        return;
-      }
-
-      const traceConfigManager = FTTraceConfigManager.getInstance();
-      const isTraceEnabled = traceConfigManager.isAutoTraceEnabled();
-
-      if (!isTraceEnabled) {
-        this.addTestResult("⚠️ Trace is not enabled, skipping trace id test");
-        return;
-      }
-
-      const session = this.createRCPSession();
-
-      // Send GET request (trace headers should be added automatically)
-      const request = new rcp.Request(testUrl, 'GET');
-      const response = await session.fetch(request);
-
-      this.requestCount++;
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        this.successCount++;
-        this.addTestResult(`✅ Trace-id request succeeded: status=${response.statusCode}`);
-      } else {
-        this.errorCount++;
-        this.addTestResult(`⚠️ Trace-id request returned status=${response.statusCode}`);
-      }
-
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Trace id test failed: ${errorMsg}`);
-    }
-  }
-
-  /**
-   * Test multiple requests
-   */
-  async testMultipleRequests() {
+  async testRCPConcurrentRequests() {
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping test");
@@ -558,14 +581,14 @@ export struct HttpAutoTrackTestPage {
         }
       }
 
-      this.addTestResult(`✅ Multiple requests completed: ${success}/${responses.length} successful`);
+      this.addTestResult(`✅ 5 concurrent RCP GET requests completed: ${success}/${responses.length} successful`);
 
     } catch (error) {
       this.requestCount++;
       this.errorCount++;
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Multiple requests test failed: ${errorMsg}`);
+      this.addTestResult(`❌ Concurrent RCP GET requests failed: ${errorMsg}`);
     }
   }
 
@@ -609,94 +632,11 @@ export struct HttpAutoTrackTestPage {
    * Test POST request with NetworkKit http interceptor chain
    */
   async testHttpPostRequestWithInterceptorChain() {
-    const previousTraceConfig = FTTraceConfigManager.getInstance().getConfig();
-    let temporaryTraceConfigInstalled = false;
-    const headerTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-    const headerSpanId = 'bbbbbbbbbbbbbbbb';
-
-    class PostHeaderTraceHeaderHandler implements FTTraceHeaderHandler {
-      public called: boolean = false;
-      public requestMethod: string = "";
-      public requestContentType: string = "";
-      public parsedTraceId: string = "";
-      public parsedSpanId: string = "";
-      public finalTraceId: string = "";
-      public finalSpanId: string = "";
-
-      getTraceContext(request: FTTraceRequestContext): FTTraceContext {
-        this.called = true;
-        this.requestMethod = request.method;
-        this.requestContentType = request.headers['Content-Type'] || request.headers['content-type'] || '';
-
-        const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
-        this.parsedTraceId = this.getHeaderValue(request.headers, 'x-existing-trace-id');
-        this.parsedSpanId = this.getHeaderValue(request.headers, 'x-existing-span-id');
-        if (this.isValidTraceId(this.parsedTraceId) && this.isValidSpanId(this.parsedSpanId)) {
-          traceContext.traceId = this.parsedTraceId;
-          traceContext.spanId = this.parsedSpanId;
-          traceContext.headers['traceparent'] = `00-${this.parsedTraceId}-${this.parsedSpanId}-01`;
-          traceContext.headers['x-header-trace-source'] = 'http-post-header';
-        }
-
-        this.finalTraceId = traceContext.traceId;
-        this.finalSpanId = traceContext.spanId;
-        return traceContext;
-      }
-
-      private getHeaderValue(headers: Record<string, string>, key: string): string {
-        const directValue = headers[key];
-        if (directValue !== undefined) {
-          return directValue;
-        }
-
-        const normalizedKey = key.toLowerCase();
-        const headerKeys = Object.keys(headers);
-        for (let i = 0; i < headerKeys.length; i++) {
-          const headerKey = headerKeys[i];
-          if (headerKey.toLowerCase() === normalizedKey) {
-            return headers[headerKey];
-          }
-        }
-        return '';
-      }
-
-      private isValidTraceId(traceId: string): boolean {
-        return traceId.length === 32 && this.isLowercaseHex(traceId);
-      }
-
-      private isValidSpanId(spanId: string): boolean {
-        return spanId.length === 16 && this.isLowercaseHex(spanId);
-      }
-
-      private isLowercaseHex(value: string): boolean {
-        for (let i = 0; i < value.length; i++) {
-          const code = value.charCodeAt(i);
-          const isDigit = code >= 48 && code <= 57;
-          const isLowercaseHexLetter = code >= 97 && code <= 102;
-          if (!isDigit && !isLowercaseHexLetter) {
-            return false;
-          }
-        }
-        return true;
-      }
-    }
-
-    const traceHeaderHandler = new PostHeaderTraceHeaderHandler();
     try {
       if (!this.isAutoTrackEnabled) {
         this.addTestResult("⚠️ Auto Track not enabled, skipping http POST test");
         return;
       }
-
-      const traceConfig = new FTTraceConfig()
-        .setSamplingRate(1.0)
-        .setEnableAutoTrace(true)
-        .setEnableLinkRUMData(true)
-        .setTraceType(TraceType.TRACEPARENT)
-        .setTraceHeaderHandler(traceHeaderHandler);
-      FTSDK.installTraceConfig(traceConfig);
-      temporaryTraceConfigInstalled = true;
-      this.addTestResult("✅ Installed TraceConfig with POST header Trace Header handler");
 
       const postBody = JSON.stringify({
         name: 'HarmonyOS HTTP Interceptor Test',
@@ -706,26 +646,10 @@ export struct HttpAutoTrackTestPage {
       const response = await this.executeHttpRequest('https://httpbin.org/post', {
         method: http.RequestMethod.POST,
         header: {
-          'Content-Type': 'application/json',
-          'x-existing-trace-id': headerTraceId,
-          'x-existing-span-id': headerSpanId
+          'Content-Type': 'application/json'
         },
         extraData: postBody
       });
-
-      if (traceHeaderHandler.called &&
-        traceHeaderHandler.parsedTraceId === headerTraceId &&
-        traceHeaderHandler.parsedSpanId === headerSpanId &&
-        traceHeaderHandler.finalTraceId === headerTraceId &&
-        traceHeaderHandler.finalSpanId === headerSpanId) {
-        this.addTestResult(`✅ Handler parsed trace_id/span_id from request.headers: traceId=${traceHeaderHandler.finalTraceId}, spanId=${traceHeaderHandler.finalSpanId}`);
-        this.addTestResult("✅ Request header uses existing header trace context: traceparent + x-header-trace-source");
-      } else if (traceHeaderHandler.called &&
-        (traceHeaderHandler.parsedTraceId.length === 0 || traceHeaderHandler.parsedSpanId.length === 0)) {
-        this.addTestResult("⚠️ Handler called, but x-existing-trace-id/x-existing-span-id headers are missing.");
-      } else {
-        this.addTestResult(`❌ Handler did not parse header trace context: parsedTraceId=${traceHeaderHandler.parsedTraceId}, parsedSpanId=${traceHeaderHandler.parsedSpanId}`);
-      }
 
       this.requestCount++;
       if (response.responseCode >= 200 && response.responseCode < 300) {
@@ -741,208 +665,109 @@ export struct HttpAutoTrackTestPage {
       const err = error as BusinessError;
       const errorMsg = err.message || String(error);
       this.addTestResult(`❌ HTTP POST request failed: ${errorMsg}`);
-      if (traceHeaderHandler.called) {
-        this.addTestResult(`⚠️ Handler already ran before POST failed: parsedTraceId=${traceHeaderHandler.parsedTraceId}, parsedSpanId=${traceHeaderHandler.parsedSpanId}`);
-      }
-    } finally {
-      if (temporaryTraceConfigInstalled) {
-        if (previousTraceConfig) {
-          FTSDK.installTraceConfig(previousTraceConfig);
-          this.addTestResult("✅ Restored previous TraceConfig after HTTP POST test");
-        } else {
-          FTTraceConfigManager.getInstance().reset();
-          this.addTestResult("✅ Cleared temporary TraceConfig after HTTP POST test");
-        }
-      }
     }
   }
 
   /**
-   * Test trace headers with NetworkKit http interceptor chain
+   * Test a 404 response through the NetworkKit interceptor chain.
    */
-  async testHttpTraceHeaders() {
-    const previousTraceConfig = FTTraceConfigManager.getInstance().getConfig();
-    let temporaryTraceConfigInstalled = false;
+  async testHttpErrorRequestWithInterceptorChain() {
     try {
-      const testUrl = this.getTraceTestUrl();
-      if (testUrl.length === 0) {
-        this.addTestResult("⚠️ traceUrl not configured, skipping http trace header test");
+      if (!this.isAutoTrackEnabled) {
+        this.addTestResult("⚠️ Auto Track not enabled, skipping HTTP error test");
         return;
       }
 
-      class HttpTraceHeaderHandler implements FTTraceHeaderHandler {
-        public called: boolean = false;
-        public traceUrl: string = "";
-        public traceId: string = "";
-        public spanId: string = "";
-        public requestMethod: string = "";
-        public requestAccept: string = "";
-
-        getTraceContext(request: FTTraceRequestContext): FTTraceContext {
-          this.called = true;
-          this.traceUrl = request.url;
-          this.requestMethod = request.method;
-          this.requestAccept = request.headers['Accept'] || '';
-          const traceContext = FTTraceManager.getInstance().getTraceContextDirect(request.url);
-          this.traceId = traceContext.traceId;
-          this.spanId = traceContext.spanId;
-          traceContext.headers['x-handler-trace-id'] = traceContext.traceId;
-          traceContext.headers['x-handler-span-id'] = traceContext.spanId;
-          traceContext.headers['x-handler-source'] = 'http-api22';
-          return traceContext;
-        }
+      const response = await this.executeHttpRequest('https://httpbin.org/status/404', {
+        method: http.RequestMethod.GET,
+        header: { 'Accept': 'application/json' }
+      });
+      this.requestCount++;
+      if (response.responseCode === 404) {
+        this.successCount++;
+        this.addTestResult("✅ HTTP error request returned expected status=404");
+      } else {
+        this.errorCount++;
+        this.addTestResult(`⚠️ HTTP error request returned unexpected status=${response.responseCode}`);
       }
+    } catch (error) {
+      this.requestCount++;
+      this.errorCount++;
+      const err = error as BusinessError;
+      this.addTestResult(`❌ HTTP error request failed: ${err.message || String(error)}`);
+    }
+  }
 
-      const traceHeaderHandler = new HttpTraceHeaderHandler();
-      const traceConfig = new FTTraceConfig()
-        .setSamplingRate(1.0)
-        .setEnableAutoTrace(true)
-        .setEnableLinkRUMData(true)
-        .setTraceType(TraceType.TRACEPARENT)
-        .setTraceHeaderHandler(traceHeaderHandler);
-      FTSDK.installTraceConfig(traceConfig);
-      temporaryTraceConfigInstalled = true;
-      this.addTestResult("✅ Installed TraceConfig with custom setTraceHeaderHandler for HTTP trace test");
-
-      const traceConfigManager = FTTraceConfigManager.getInstance();
-      if (!traceConfigManager.isAutoTraceEnabled()) {
-        this.addTestResult("⚠️ Trace is not enabled, skipping http trace header test");
+  /**
+   * Test a native HTTP request through the Trace interceptor path.
+   */
+  async testHttpTraceRequest() {
+    try {
+      const testUrl = this.getTraceTestUrl();
+      if (testUrl.length === 0) {
+        this.addTestResult("⚠️ traceUrl not configured, skipping HTTP Trace request");
+        return;
+      }
+      if (!this.isAutoTrackEnabled || !FTTraceConfigManager.getInstance().isAutoTraceEnabled()) {
+        this.addTestResult("⚠️ Trace is not enabled, skipping HTTP Trace request");
         return;
       }
 
       const response = await this.executeHttpRequest(testUrl, {
         method: http.RequestMethod.GET,
-        header: {
-          'Accept': 'application/json'
-        }
+        header: { 'Accept': 'application/json' }
       });
-
-      if (traceHeaderHandler.called &&
-        traceHeaderHandler.traceId.length > 0 &&
-        traceHeaderHandler.spanId.length > 0 &&
-        traceHeaderHandler.traceUrl === testUrl) {
-        this.addTestResult(`✅ setTraceHeaderHandler called: traceId=${traceHeaderHandler.traceId}, spanId=${traceHeaderHandler.spanId}`);
-        this.addTestResult(`✅ Request context received: method=${traceHeaderHandler.requestMethod}, accept=${traceHeaderHandler.requestAccept}`);
-        this.addTestResult("✅ Custom headers appended: x-handler-trace-id, x-handler-span-id, x-handler-source");
-      } else {
-        this.addTestResult("❌ setTraceHeaderHandler was not called by HTTP interceptor chain");
-      }
-
       this.requestCount++;
       if (response.responseCode >= 200 && response.responseCode < 300) {
         this.successCount++;
-        this.addTestResult(`✅ HTTP trace headers request succeeded: status=${response.responseCode}`);
+        this.addTestResult(`✅ HTTP Trace request succeeded: status=${response.responseCode}`);
       } else {
         this.errorCount++;
-        this.addTestResult(`⚠️ HTTP trace headers request returned status=${response.responseCode}`);
+        this.addTestResult(`⚠️ HTTP Trace request returned status=${response.responseCode}`);
       }
     } catch (error) {
       this.requestCount++;
       this.errorCount++;
       const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ HTTP trace headers test failed: ${errorMsg}`);
-    } finally {
-      if (temporaryTraceConfigInstalled) {
-        if (previousTraceConfig) {
-          FTSDK.installTraceConfig(previousTraceConfig);
-          this.addTestResult("✅ Restored previous TraceConfig after HTTP trace test");
+      this.addTestResult(`❌ HTTP Trace request failed: ${err.message || String(error)}`);
+    }
+  }
+
+  /**
+   * Test five concurrent native HTTP GET requests.
+   */
+  async testHttpConcurrentRequestsWithInterceptorChain() {
+    try {
+      if (!this.isAutoTrackEnabled) {
+        this.addTestResult("⚠️ Auto Track not enabled, skipping 5 concurrent HTTP GET requests");
+        return;
+      }
+
+      const requests: Promise<http.HttpResponse>[] = [];
+      for (let index = 0; index < 5; index++) {
+        requests.push(this.executeHttpRequest(`https://httpbin.org/get?request=${index}`, {
+          method: http.RequestMethod.GET,
+          header: { 'Accept': 'application/json' }
+        }));
+      }
+
+      const responses = await Promise.all(requests);
+      let success = 0;
+      for (let index = 0; index < responses.length; index++) {
+        this.requestCount++;
+        if (responses[index].responseCode >= 200 && responses[index].responseCode < 300) {
+          success++;
+          this.successCount++;
         } else {
-          FTTraceConfigManager.getInstance().reset();
-          this.addTestResult("✅ Cleared temporary TraceConfig after HTTP trace test");
+          this.errorCount++;
         }
       }
-    }
-  }
-
-  /**
-   * Test real axios GET request with FT auto track compat interceptors.
-   */
-  async testAxiosGetCompatRequest() {
-    await this.testAxiosMethodRequest('compat', 'get');
-  }
-
-  /**
-   * Test real axios POST request with FT auto track compat interceptors.
-   */
-  async testAxiosPostCompatRequest() {
-    await this.testAxiosMethodRequest('compat', 'post');
-  }
-
-  /**
-   * Test real axios GET request with interceptorChain.
-   */
-  async testAxiosGetChainRequest() {
-    await this.testAxiosMethodRequest('chain', 'get');
-  }
-
-  /**
-   * Test real axios POST request with interceptorChain.
-   */
-  async testAxiosPostChainRequest() {
-    await this.testAxiosMethodRequest('chain', 'post');
-  }
-
-  /**
-   * Test real axios PUT request with interceptorChain.
-   */
-  async testAxiosPutChainRequest() {
-    await this.testAxiosMethodRequest('chain', 'put');
-  }
-
-  /**
-   * Test real axios PATCH request with interceptorChain.
-   */
-  async testAxiosPatchChainRequest() {
-    await this.testAxiosMethodRequest('chain', 'patch');
-  }
-
-  /**
-   * Test real axios DELETE request with interceptorChain.
-   */
-  async testAxiosDeleteChainRequest() {
-    await this.testAxiosMethodRequest('chain', 'delete');
-  }
-
-  async testSharedPreInitAxiosCompatRequest() {
-    try {
-      const responseText = await this.executeAxiosRequestWithClient(
-        preInitCompatClient,
-        'https://httpbin.org/get?from=shared-preinit-compat',
-        'get'
-      );
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(
-        `✅ Shared pre-init Axios compat request succeeded: createdAt=${preInitCompatClientInfo.createdAt}, bodyLength=${responseText.length}`
-      );
+      this.addTestResult(`✅ 5 concurrent HTTP GET requests completed: ${success}/5 successful`);
     } catch (error) {
       this.requestCount++;
       this.errorCount++;
       const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Shared pre-init Axios compat request failed: ${errorMsg}`);
-    }
-  }
-
-  async testSharedPreInitAxiosChainRequest() {
-    try {
-      const responseText = await this.executeAxiosRequestWithClient(
-        preInitChainClient,
-        'https://httpbin.org/get?from=shared-preinit-chain',
-        'get'
-      );
-      this.requestCount++;
-      this.successCount++;
-      this.addTestResult(
-        `✅ Shared pre-init Axios chain request succeeded: createdAt=${preInitChainClientInfo.createdAt}, bodyLength=${responseText.length}`
-      );
-    } catch (error) {
-      this.requestCount++;
-      this.errorCount++;
-      const err = error as BusinessError;
-      const errorMsg = err.message || String(error);
-      this.addTestResult(`❌ Shared pre-init Axios chain request failed: ${errorMsg}`);
+      this.addTestResult(`❌ Concurrent HTTP GET requests failed: ${err.message || String(error)}`);
     }
   }
 
@@ -955,14 +780,14 @@ export struct HttpAutoTrackTestPage {
     return `https://httpbin.org/get?from=${source}`;
   }
 
-  async testSharedPreInitAxiosSmokeSuite() {
+  async testNetworkAutoTrackSmokeSuite() {
     const executionMode: PreInitAxiosSmokeExecutionMode = 'parallel';
     const urls: PreInitAxiosSmokeUrls = {
       compatUrl: this.buildPreInitSmokeTestUrl('compat'),
       chainUrl: this.buildPreInitSmokeTestUrl('chain')
     };
     this.addTestResult(
-      `▶ Running pre-init Axios smoke suite: mode=${executionMode}, compatAt=${preInitCompatClientInfo.createdAt}, ` +
+      `▶ Running network auto-track smoke suite: mode=${executionMode}, compatAt=${preInitCompatClientInfo.createdAt}, ` +
       `chainAt=${preInitChainClientInfo.createdAt}, controlAt=${preInitControlChainClientInfo.createdAt}`
     );
 
@@ -973,16 +798,16 @@ export struct HttpAutoTrackTestPage {
         this.requestCount++;
         if (result.success) {
           this.successCount++;
-          this.addTestResult(`✅ Pre-init ${result.mode}: status=${result.statusCode}, bodyLength=${result.bodyLength}`);
+          this.addTestResult(`✅ Network smoke ${result.mode}: status=${result.statusCode}, bodyLength=${result.bodyLength}`);
         } else {
           this.errorCount++;
-          this.addTestResult(`❌ Pre-init ${result.mode}: ${result.errorMessage || 'unknown error'}`);
+          this.addTestResult(`❌ Network smoke ${result.mode}: ${result.errorMessage || 'unknown error'}`);
         }
       }
     } catch (error) {
       this.errorCount++;
       const err = error as BusinessError;
-      this.addTestResult(`❌ Pre-init Axios smoke suite failed: ${err.message || String(error)}`);
+      this.addTestResult(`❌ Network auto-track smoke suite failed: ${err.message || String(error)}`);
     }
   }
 
@@ -1014,6 +839,36 @@ export struct HttpAutoTrackTestPage {
 
       Scroll() {
         Column() {
+          Text('Trace configuration: switch, not a global network hook')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text('setEnableAutoTrace(true) only enables Trace injection for FT SDK interceptors that have already been attached. It does not intercept every network request in the process.')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 4 })
+
+          Text('Configure Trace before creating a Session, HttpRequest, Axios client, or interceptor chain. Existing recognized Trace headers are retained. setEnableLinkRUMData(true) links Trace IDs to RUM Resource data; it does not install an interceptor.')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 16 })
+
+          Text('RCP: session-level interception')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .width('100%')
+            .margin({ bottom: 4 })
+
+          Text('These tests create an RCP Session with createFTRCPTrackConfig(). Only requests sent through that Session receive the RCP Trace/Resource interceptors.')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 10 })
+
           Button('Test GET Request (RCP)')
             .id('test-get-btn')
             .width('100%')
@@ -1027,23 +882,42 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testRCPPostRequest())
             .customProperty('test-post-btn', 'Test POST Request (RCP)')
 
-          Button('Test Custom Session (With Interceptors)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .onClick(() => this.testRCPWithInterceptors())
-            .customProperty('test-custom-session-btn', 'Test Custom Session (With Interceptors)')
-
           Button('Test Error Request (404)')
             .width('100%')
             .margin({ bottom: 10 })
             .onClick(() => this.testRCPErrorRequest())
             .customProperty('test-error-btn', 'Test Error Request (404)')
 
-          Button('Test Trace Headers')
+          Button('Test RCP Trace Request')
             .width('100%')
             .margin({ bottom: 10 })
-            .onClick(() => this.testRCPTraceHeaders())
-            .customProperty('test-trace-headers-btn', 'Test Trace Headers')
+            .backgroundColor('#4CAF50')
+            .onClick(() => this.testRCPTraceRequest())
+            .customProperty('test-rcp-trace-request-btn', 'Test RCP Trace Request')
+
+          Button('Test 5 Concurrent RCP GET Requests')
+            .width('100%')
+            .margin({ bottom: 16 })
+            .onClick(() => this.testRCPConcurrentRequests())
+            .customProperty('test-multiple-requests-btn', 'Test 5 Concurrent RCP GET Requests')
+
+          Text('The RCP Trace request verifies the request path. Inspect SDK logs or uploaded Resource data to verify the injected headers and trace_id/span_id values.')
+            .fontSize(12)
+            .fontColor('#8B5D00')
+            .width('100%')
+            .margin({ bottom: 16 })
+
+          Text('Native HTTP (API 22+): request-level interception')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .width('100%')
+            .margin({ bottom: 4 })
+
+          Text('Each native HTTP test creates http.createHttp() and explicitly calls applyFTHttpTrack(request). A native HttpRequest without this call is outside auto-track coverage.')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 10 })
 
           Button('Test HTTP GET Request (API 22+)')
             .id('test-http-get-btn')
@@ -1060,117 +934,116 @@ export struct HttpAutoTrackTestPage {
             .onClick(() => this.testHttpPostRequestWithInterceptorChain())
             .customProperty('test-http-post-btn', 'Test HTTP POST Request (API 22+)')
 
-          Button('Test HTTP Trace Headers (API 22+)')
+          Button('Test HTTP Error Request (404, API 22+)')
             .width('100%')
             .margin({ bottom: 10 })
             .backgroundColor('#1976D2')
-            .onClick(() => this.testHttpTraceHeaders())
-            .customProperty('test-http-trace-btn', 'Test HTTP Trace Headers (API 22+)')
+            .onClick(() => this.testHttpErrorRequestWithInterceptorChain())
+            .customProperty('test-http-error-btn', 'Test HTTP Error Request (404, API 22+)')
 
-          Text('Axios Auto Track Modes')
-            .fontSize(14)
+          Button('Test HTTP Trace Request (API 22+)')
+            .id('test-http-trace-btn')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#1976D2')
+            .onClick(() => this.testHttpTraceRequest())
+            .customProperty('test-http-trace-btn', 'Test HTTP Trace Request (API 22+)')
+
+          Button('Test 5 Concurrent HTTP GET Requests (API 22+)')
+            .width('100%')
+            .margin({ bottom: 16 })
+            .backgroundColor('#1976D2')
+            .onClick(() => this.testHttpConcurrentRequestsWithInterceptorChain())
+            .customProperty('test-http-concurrent-btn', 'Test 5 Concurrent HTTP GET Requests (API 22+)')
+
+          Text('The five HTTP tests all use applyFTHttpTrack(request). The Trace request validates the request path; inspect SDK logs or uploaded Resource data for Trace fields.')
+            .fontSize(12)
+            .fontColor('#8B5D00')
+            .width('100%')
+            .margin({ bottom: 16 })
+
+          Text('Axios: client-level interception')
+            .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .margin({ top: 6, bottom: 8 })
+            .margin({ bottom: 4 })
             .width('100%')
 
-          Text('Compat: applyFTAxiosTrack(client). Chain: createFTHttpInterceptorChain() + applyFTAxiosChainMethodBridge(client).')
+          Text('Compat attaches applyFTAxiosTrack(client). Chain uses createFTHttpInterceptorChain() + applyFTAxiosChainMethodBridge(client). Only the registered Axios client is covered.')
             .fontSize(12)
+            .fontColor('#4E5969')
             .margin({ bottom: 10 })
             .width('100%')
 
-          Text(`Shared Axios clients are created when this test page is loaded. CompatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`)
+          Row() {
+            Button('Compat')
+              .layoutWeight(1)
+              .margin({ right: 4 })
+              .backgroundColor(this.axiosMode === 'compat' ? '#FF9800' : '#DDE3EA')
+              .onClick(() => this.axiosMode = 'compat')
+
+            Button('Chain')
+              .layoutWeight(1)
+              .margin({ left: 4 })
+              .backgroundColor(this.axiosMode === 'chain' ? '#FB8C00' : '#DDE3EA')
+              .onClick(() => this.axiosMode = 'chain')
+          }
+          .width('100%')
+          .margin({ bottom: 8 })
+
+          Text(`Selected mode: ${this.getAxiosModeName()}. The five buttons below use only the selected Axios client integration.`)
             .fontSize(12)
+            .fontColor('#8B5D00')
             .margin({ bottom: 10 })
             .width('100%')
 
-          Button('Run Shared Pre-init Axios Smoke Suite (5)')
+          Button(`Test Axios GET (${this.getAxiosModeName()})`)
+            .id('test-axios-get-btn')
             .width('100%')
             .margin({ bottom: 10 })
+            .backgroundColor('#FF9800')
+            .onClick(() => this.testAxiosMethodRequest(this.axiosMode, 'get'))
+            .customProperty('test-axios-get-btn', 'Test Axios GET')
+
+          Button(`Test Axios POST (${this.getAxiosModeName()})`)
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FF9800')
+            .onClick(() => this.testAxiosMethodRequest(this.axiosMode, 'post'))
+            .customProperty('test-axios-post-btn', 'Test Axios POST')
+
+          Button(`Test Axios Error Request (404, ${this.getAxiosModeName()})`)
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FF9800')
+            .onClick(() => this.testAxiosErrorRequest(this.axiosMode))
+            .customProperty('test-axios-error-btn', 'Test Axios Error Request (404)')
+
+          Button(`Test Axios Trace Request (${this.getAxiosModeName()})`)
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#FF9800')
+            .onClick(() => this.testAxiosTraceRequest(this.axiosMode))
+            .customProperty('test-axios-trace-btn', 'Test Axios Trace Request')
+
+          Button(`Test 5 Concurrent Axios GET Requests (${this.getAxiosModeName()})`)
+            .width('100%')
+            .margin({ bottom: 16 })
+            .backgroundColor('#FF9800')
+            .onClick(() => this.testAxiosConcurrentRequests(this.axiosMode))
+            .customProperty('test-axios-concurrent-btn', 'Test 5 Concurrent Axios GET Requests')
+
+          Text(`Network smoke suite: reuses module-created Axios clients and creates one Native HTTP plus one RCP request. CompatAt=${preInitCompatClientInfo.createdAt}, chainAt=${preInitChainClientInfo.createdAt}`)
+            .fontSize(12)
+            .fontColor('#8B5D00')
+            .margin({ bottom: 8 })
+            .width('100%')
+
+          Button('Run Network Auto-track Smoke Suite (5)')
+            .width('100%')
+            .margin({ bottom: 16 })
             .backgroundColor('#4A148C')
-            .onClick(() => this.testSharedPreInitAxiosSmokeSuite())
-            .customProperty('test-shared-preinit-smoke-suite-btn', 'Run Shared Pre-init Axios Smoke Suite (5)')
-
-          Button('Use Shared Pre-init Axios (Compat)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#7B1FA2')
-            .onClick(() => {
-              this.testSharedPreInitAxiosCompatRequest()
-            })
-            .customProperty('test-shared-preinit-compat-btn', 'Use Shared Pre-init Axios (Compat)')
-
-          Button('Use Shared Pre-init Axios (Chain)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#6A1B9A')
-            .onClick(() => this.testSharedPreInitAxiosChainRequest())
-            .customProperty('test-shared-preinit-chain-btn', 'Use Shared Pre-init Axios (Chain)')
-
-          Button('Test Axios GET (Compat)')
-            .id('test-axios-compat-get-btn')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FF9800')
-            .onClick(() => this.testAxiosGetCompatRequest())
-            .customProperty('test-axios-compat-get-btn', 'Test Axios GET (Compat)')
-
-          Button('Test Axios POST (Compat)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FF9800')
-            .onClick(() => this.testAxiosPostCompatRequest())
-            .customProperty('test-axios-compat-post-btn', 'Test Axios POST (Compat)')
-
-          Button('Test Axios GET (Chain)')
-            .id('test-axios-chain-get-btn')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FB8C00')
-            .onClick(() => this.testAxiosGetChainRequest())
-            .customProperty('test-axios-chain-get-btn', 'Test Axios GET (Chain)')
-
-          Button('Test Axios POST (Chain)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FB8C00')
-            .onClick(() => {
-              this.testAxiosPostChainRequest()
-            })
-            .customProperty('test-axios-chain-post-btn', 'Test Axios POST (Chain)')
-
-          Button('Test Axios PUT (Chain)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FB8C00')
-            .onClick(() => this.testAxiosPutChainRequest())
-            .customProperty('test-axios-chain-put-btn', 'Test Axios PUT (Chain)')
-
-          Button('Test Axios PATCH (Chain)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FB8C00')
-            .onClick(() => this.testAxiosPatchChainRequest())
-            .customProperty('test-axios-chain-patch-btn', 'Test Axios PATCH (Chain)')
-
-          Button('Test Axios DELETE (Chain)')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#FB8C00')
-            .onClick(() => this.testAxiosDeleteChainRequest())
-            .customProperty('test-axios-chain-delete-btn', 'Test Axios DELETE (Chain)')
-
-          Button('Test Trace ID in /api/user')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .backgroundColor('#4CAF50')
-            .onClick(() => this.testRCPTraceWithRequest())
-            .customProperty('test-trace-id-btn', 'Test Trace ID in /api/user')
-
-          Button('Test Multiple Requests')
-            .width('100%')
-            .margin({ bottom: 10 })
-            .onClick(() => this.testMultipleRequests())
-            .customProperty('test-multiple-requests-btn', 'Test Multiple Requests')
+            .onClick(() => this.testNetworkAutoTrackSmokeSuite())
+            .customProperty('test-network-auto-track-smoke-suite-btn', 'Run Network Auto-track Smoke Suite (5)')
 
           Column() {
             Row() {

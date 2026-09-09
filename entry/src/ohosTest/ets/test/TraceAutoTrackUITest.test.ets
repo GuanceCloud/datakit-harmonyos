@@ -29,7 +29,9 @@ export default function traceAutoTrackUITest() {
       await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
       const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
       expect(interceptorReady).assertTrue();
-      await UiTestUtils.clickText(driver, 'Test Trace ID in /api/user');
+      // The page label is intentionally generic because traceUrl is supplied
+      // at launch. Use its stable ID instead of the removed sample endpoint.
+      await UiTestUtils.clickId(driver, 'test-http-trace-btn');
 
       const record = await capture.waitForRecord(
         DataType.RUM_APP,
@@ -39,7 +41,9 @@ export default function traceAutoTrackUITest() {
           'trace_id=',
           'span_id='
         ],
-        12000
+        // Native HTTP has no page-level timeout here. Leave enough room for a
+        // slow first DNS/TLS connection and the SDK worker to persist it.
+        30000
       );
 
       if (record === null) {
@@ -58,7 +62,8 @@ export default function traceAutoTrackUITest() {
       await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
       const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
       expect(interceptorReady).assertTrue();
-      await UiTestUtils.clickText(driver, 'Test Axios GET (Compat)');
+      await UiTestUtils.clickText(driver, 'Compat');
+      await UiTestUtils.clickId(driver, 'test-axios-get-btn');
 
       const record = await capture.waitForRecord(
         DataType.RUM_APP,
@@ -85,7 +90,8 @@ export default function traceAutoTrackUITest() {
       await UiTestUtils.clickText(driver, 'HTTP Interceptor Test');
       const interceptorReady = await UiTestUtils.waitForText(driver, 'Interceptor Helper: ✅ Available', 5000);
       expect(interceptorReady).assertTrue();
-      await UiTestUtils.clickText(driver, 'Test Axios GET (Chain)');
+      await UiTestUtils.clickText(driver, 'Chain');
+      await UiTestUtils.clickId(driver, 'test-axios-get-btn');
 
       const record = await capture.waitForRecord(
         DataType.RUM_APP,

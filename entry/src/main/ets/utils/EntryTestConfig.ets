@@ -30,6 +30,9 @@ export function validateEntryTestConfig(args: Record<string, string>, config: Re
     throw new Error('Dataway requires clientToken in the shared configuration');
   }
   const e2e = testBoolean(args, 'entryUploadE2EEnabled', false);
+  // Real Axios timing tests are opt-in because they require caller-provided
+  // HTTP/HTTPS endpoints reachable from the device.
+  testBoolean(args, 'entryAxiosTimingE2EEnabled', false);
   if ((e2e || config.autoSync === 'true') &&
     !isUploadEndpointAvailable(config.datakitUrl, config.datawayUrl, config.clientToken)) {
     throw new Error('Uploading requires a valid saved endpoint or explicit datakitUrl / datawayUrl + clientToken');

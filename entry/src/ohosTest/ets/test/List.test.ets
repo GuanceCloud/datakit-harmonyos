@@ -9,6 +9,7 @@ import uiBlockLongTaskUITest from './UIBlockLongTaskUITest.test';
 import webViewTrackUITest from './WebViewTrackUITest.test';
 import logChainUITest from './LogChainUITest.test';
 import traceAutoTrackUITest from './TraceAutoTrackUITest.test';
+import axiosPerformanceTimingE2ETest from './AxiosPerformanceTimingE2ETest.test';
 import rumUploadE2EUITest from './RumUploadE2EUITest.test';
 import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
 
@@ -23,6 +24,7 @@ export default function testsuite() {
   webViewTrackUITest();
   logChainUITest();
   traceAutoTrackUITest();
+  axiosPerformanceTimingE2ETest();
   rumUploadE2EUITest();
   stressLogTimestampSequencerTest();
   nativeWorkerIntegrationUITest();

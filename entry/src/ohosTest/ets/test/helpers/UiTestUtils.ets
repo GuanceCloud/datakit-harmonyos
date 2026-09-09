@@ -34,6 +34,19 @@ export class UiTestUtils {
     return testBoolean(getEntryLaunchArguments().parameters ?? {}, 'entryUploadE2EEnabled', false);
   }
 
+  /** Real Axios adapter timing tests require explicit device-reachable endpoints. */
+  static isAxiosTimingE2EEnabled(): boolean {
+    return testBoolean(getEntryLaunchArguments().parameters ?? {}, 'entryAxiosTimingE2EEnabled', false);
+  }
+
+  static requireTestUrl(key: string): string {
+    const value = (testArgument(getEntryLaunchArguments().parameters ?? {}, key) ?? '').trim();
+    if (value.length === 0) {
+      throw new Error(`Configure ${key} as a device-reachable URL before running this E2E case`);
+    }
+    return value;
+  }
+
   static getResourceErrorUrl(status: number = 500): string {
     const key = status === 404 ? 'entryResourceClientErrorUrl' : 'entryResourceErrorUrl';
     return (testArgument(getEntryLaunchArguments().parameters ?? {}, key) ??

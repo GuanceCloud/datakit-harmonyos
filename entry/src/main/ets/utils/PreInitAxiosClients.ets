@@ -215,24 +215,21 @@ async function executeHttpChainSmokeRequest(url: string): Promise<PreInitAxiosSm
       enableTraceInterceptor: true,
       enableResourceInterceptor: true
     });
-    const requestOptions: http.HttpRequestOptions = {
+    const response = await request.request(url, {
       method: http.RequestMethod.GET,
       header: {
         'Accept': 'application/json',
         'Content-Type': 'application/json'
       }
-    };
-    const response = await request.request(url, requestOptions);
+    });
     const result: PreInitAxiosSmokeTestResult = {
       mode: 'http-chain',
       success: true,
       statusCode: response.responseCode,
       bodyLength: response.result ? String(response.result).length : 0
     };
-    DemoLogger.i(
-      TAG,
-      `Pre-init smoke request succeeded: mode=http-chain, status=${response.responseCode}, bodyLength=${result.bodyLength}, url=${url}`
-    );
+    DemoLogger.i(TAG,
+      `Network smoke request succeeded: mode=http-chain, status=${response.responseCode}, bodyLength=${result.bodyLength}, url=${url}`);
     return result;
   } catch (error) {
     const errorMessage = formatSmokeTestError(error as Object);
@@ -241,10 +238,7 @@ async function executeHttpChainSmokeRequest(url: string): Promise<PreInitAxiosSm
       success: false,
       errorMessage: errorMessage
     };
-    DemoLogger.w(
-      TAG,
-      `Pre-init smoke request failed: mode=http-chain, error=${errorMessage}, url=${url}`
-    );
+    DemoLogger.w(TAG, `Network smoke request failed: mode=http-chain, error=${errorMessage}, url=${url}`);
     return result;
   } finally {
     request.destroy();
@@ -254,22 +248,20 @@ async function executeHttpChainSmokeRequest(url: string): Promise<PreInitAxiosSm
 async function executeRcpChainSmokeRequest(url: string): Promise<PreInitAxiosSmokeTestResult> {
   let session: rcp.Session | null = null;
   try {
-    session =
-      rcp.createSession(createFTRCPTrackConfig({ enableTraceInterceptor: true, enableResourceInterceptor: true }));
-    const request = new rcp.Request(url, 'GET');
-    const response = await session.fetch(request);
+    session = rcp.createSession(createFTRCPTrackConfig({
+      enableTraceInterceptor: true,
+      enableResourceInterceptor: true
+    }));
+    const response = await session.fetch(new rcp.Request(url, 'GET'));
     const responseBody = response.body;
-    const bodyLength = responseBody ? String(responseBody).length : 0;
     const result: PreInitAxiosSmokeTestResult = {
       mode: 'rcp-chain',
       success: true,
       statusCode: response.statusCode,
-      bodyLength: bodyLength
+      bodyLength: responseBody ? String(responseBody).length : 0
     };
-    DemoLogger.i(
-      TAG,
-      `Pre-init smoke request succeeded: mode=rcp-chain, status=${response.statusCode}, bodyLength=${bodyLength}, url=${url}`
-    );
+    DemoLogger.i(TAG,
+      `Network smoke request succeeded: mode=rcp-chain, status=${response.statusCode}, bodyLength=${result.bodyLength}, url=${url}`);
     return result;
   } catch (error) {
     const errorMessage = formatSmokeTestError(error as Object);
@@ -278,10 +270,7 @@ async function executeRcpChainSmokeRequest(url: string): Promise<PreInitAxiosSmo
       success: false,
       errorMessage: errorMessage
     };
-    DemoLogger.w(
-      TAG,
-      `Pre-init smoke request failed: mode=rcp-chain, error=${errorMessage}, url=${url}`
-    );
+    DemoLogger.w(TAG, `Network smoke request failed: mode=rcp-chain, error=${errorMessage}, url=${url}`);
     return result;
   } finally {
     if (session) {
