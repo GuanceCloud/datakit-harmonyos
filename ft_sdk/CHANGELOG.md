@@ -9,28 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added FTRUMConfig.setResourceUrlHandler(...) to exclude auto-tracked RCP, Axios, and NetworkKit HTTP Resources without affecting Trace propagation or manual Resources.
 
 ## [0.1.17-alpha02] - 2026-09-08
-- Fixed RCP Resource waterfall phases to preserve `preTransfer` and `startTransfer` positions.
-- Added Resource timing phases from NetworkKit and Axios responses with a safe duration fallback.
-- Fixed Resource `add`/`stop` races so final drafts retain properties and matching counter updates.
-- Fixed missing Action Resource/Error counters after slow requests and process restarts.
-- Paused queued and retry uploads while offline, then resumed them after network recovery.
-- Preserved HarmonyOS HTTP error codes and messages in control-plane and upload diagnostics.
+- Fixed RCP Resource waterfall timings that positioned first-byte and download phases from reconstructed duration sums rather than original `preTransfer` and `startTransfer` points, causing transport-to-ready gaps to disappear, zero-length spans, and inconsistent `resource_trans` origins.
+- Added Resource waterfall phase mapping for NetworkKit and `@ohos/axios` responses exposing platform performance timings; missing timings or a final point preceding an earlier one now fall back to the measured total duration rather than producing invalid phases.
+- Fixed asynchronous Resource delivery where `add` could finalize a lifecycle before an already-queued `stop`, dropping stop properties and leaving View/Action counter updates in a later commit; final drafts and counters now commit together.
+- Fixed auto-tracked Resources finishing after their initiating Action's five-second close timeout: Resource/Error counters and the Resource-to-Action association could be lost, including after process restart, allowing incomplete Actions to be emitted.
+- Fixed scheduled and follow-up uploads starting while HarmonyOS reported no network, which consumed offline retry attempts; queued work now resumes 750 ms after network recovery.
+- Fixed HarmonyOS `BusinessError` diagnostics being logged as `[object Object]` in control-plane and upload failures, losing the platform code and message needed to diagnose DNS, routing, TLS, and timeout errors.
 
 ## [0.1.17-alpha01] - 2026-09-05
-- Added automatic `console.*` and `hilog.*` collection via `setEnableConsoleLog(...)` and the Guance Hvigor compiler plugin.
-- Added compiler-plugin instrumentation for cold-launch tracking, removing manual lifecycle timing calls.
-- Moved routine diagnostics to Debug and added plugin-detection and Trace-context logs.
-- Fixed missing Axios Resource uploads by reporting network state and request duration.
-- Fixed cold-launch first-frame observation retries and duplicate registration.
-- Fixed stale View counters after requests complete beyond the initiating Action's lifetime.
-- Prevented RCP Trace instrumentation errors from resending requests or replacing successful responses.
-- Preserved `resource_status=0` without an HTTP status group for network failures.
-- Fixed a persistence race that could lose closed View events.
-- Restored WebView Action deduplication while allowing repeated View events.
-- Fixed missing user and network attributes in Worker-generated RUM events.
-- Fixed SDK reset and endpoint checks before initialization.
-- Preserved SDK public attributes when using a custom `LineDataModifier`.
-- Expanded network-failure, RCP single-dispatch, Worker, and RUM upload regression coverage.
+- Added `setEnableConsoleLog(...)` and the Guance Hvigor plugin to automatically collect `console.*` and `hilog.*` calls.
+- Added compiler-plugin cold-launch instrumentation, so launch timing no longer requires manual lifecycle reporting calls.
+- Moved routine SDK diagnostics to Debug level and added logs for compiler-plugin detection and Trace-context injection.
+- Fixed Axios and NetworkKit HTTP Resource events being dropped when completion did not report network state and a valid request duration.
+- Fixed cold-launch first-frame timing being missed when the main Window is unavailable during `onWindowStageCreate`; observation now retries after a successful `loadContent` callback and registers each WindowStage once.
+- Fixed View Resource and pending counters staying out of date when an Action has already closed before its Resource completes; completion now schedules a refreshed View summary after counter persistence.
+- Fixed RCP Trace instrumentation retrying requests after trace preparation or response-processing failures, which could resend non-idempotent requests or replace a successful response; each request now dispatches once and preserves its original response.
+- Fixed Resource records and their linked Network Errors omitting `resource_status=0` for timeouts and connection failures without an HTTP response; status zero leaves `resource_status_group` empty.
+- Fixed a persistence race where an earlier open-View snapshot could delete a later closed View state before its final `is_active=false` event was generated.
+- Fixed duplicate WebView RUM Action records by restoring Action-ID deduplication in the event Worker before database insertion; repeated View events remain collectable.
+- Fixed Worker-generated Actions, Resources, Errors, and resource-generated Network Errors missing bound-user and network attributes.
+- Fixed SDK state reset and DataKit/Dataway endpoint updates before installation accessing an uninitialized SDK instance.
+- Fixed custom `LineDataModifier` causing Actions, Resources, Errors, and resource-generated Network Errors to lose SDK public attributes before serialization.
+- Expanded regression coverage for network failures, RCP single dispatch, Worker attributes, and RUM uploads.
 
 ## [0.1.16] - 2026-08-31
 - Added device tags `memory_total` (physical memory capacity in GB) and `locale` (current system locale) to standard RUM Errors. Resource-generated Network Errors follow Android behavior and do not carry Error device metrics; `memory_total` follows the memory Error-monitor setting.
