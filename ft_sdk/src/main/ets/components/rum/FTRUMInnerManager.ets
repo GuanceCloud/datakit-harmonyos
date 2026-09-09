@@ -3410,6 +3410,10 @@ export class FTRUMInnerManager {
         params: resourceParams,
         netStatus: this.createResourceNetStatusDTO(netStatusBean),
         eventTime: Utils.getCurrentNanoTime(),
+        // stopResource may be queued behind an asynchronous persistence or
+        // recovery barrier. Keep addResource from finalizing first if this
+        // lifecycle has already been stopped on the Host.
+        awaitStopCommand: this.resourceStoppedIds.has(resourceId),
         shouldCollect: collectType !== CollectType.DROP,
         customDataType: this.getResourceCustomDataType(collectType),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS

@@ -1,7 +1,10 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
-import { FTDBTaskPoolExecutor } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
+import {
+  FTDBTaskPoolExecutor,
+  FTDBTaskPoolPendingRumResourceDTO
+} from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
 import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
@@ -9,6 +12,7 @@ import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseC
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import * as FTSQL from '../../../main/ets/components/db/FTSQL';
+import { SDKRumResourceContextDTO, SDKStringRecord } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import { DBAssert } from './helpers/DBAssert';
 
 const TEST_NOW_NS = 1700000000000;
@@ -48,6 +52,39 @@ class SchemaProbeCallback implements DataBaseCallBack {
     );
     this.hasSyncDataFlatTable = syncResult.goToFirstRow();
     syncResult.close();
+  }
+}
+
+class PendingResourceContextFixture implements SDKRumResourceContextDTO {
+  dynamicTags?: SDKStringRecord;
+  sessionId: string = 'pending-resource-session';
+  viewId: string = '';
+  viewName: string = '';
+  viewReferrer: string = '';
+  actionId: string;
+  actionName: string = 'pending resource action';
+  rumAppId?: string = 'pending-resource-rum';
+
+  constructor(actionId: string) {
+    this.actionId = actionId;
+    const tags: SDKStringRecord = {};
+    tags['network_type'] = 'wifi';
+    this.dynamicTags = tags;
+  }
+}
+
+class PendingRumResourceFixture implements FTDBTaskPoolPendingRumResourceDTO {
+  resourceId: string;
+  startTime: number = TEST_NOW_NS;
+  context: SDKRumResourceContextDTO;
+  draftUuid: string;
+  errorDraftUuid: string;
+
+  constructor(resourceId: string, actionId: string) {
+    this.resourceId = resourceId;
+    this.context = new PendingResourceContextFixture(actionId);
+    this.draftUuid = `${resourceId}-draft`;
+    this.errorDraftUuid = `${resourceId}-error-draft`;
   }
 }
 
@@ -127,22 +164,8 @@ export default function ftDBManagerDeviceTest() {
       const action = new ActionBean(actionId, 'pending resource action', 'click', TEST_NOW_NS);
       await FTDBTaskPoolExecutor.insertRumAction(context, action);
 
-      const createPendingResource = (resourceId: string) => ({
-        resourceId,
-        startTime: TEST_NOW_NS,
-        draftUuid: `${resourceId}-draft`,
-        errorDraftUuid: `${resourceId}-error-draft`,
-        context: {
-          sessionId: 'pending-resource-session',
-          viewId: '',
-          viewName: '',
-          viewReferrer: '',
-          actionId,
-          actionName: 'pending resource action',
-          rumAppId: 'pending-resource-rum',
-          dynamicTags: { network_type: 'wifi' }
-        }
-      });
+      const createPendingResource = (resourceId: string): FTDBTaskPoolPendingRumResourceDTO =>
+        new PendingRumResourceFixture(resourceId, actionId);
 
       expect(await FTDBTaskPoolExecutor.registerPendingRumResource(
         context, createPendingResource('pending-resource-one')

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the underlying response exposes them. Both paths now use the same validated
   cumulative-point mapping as RCP and retain wall-clock total-duration fallback
   when platform timing data is unavailable or its final endpoint is reversed.
+- Fixed Resource lifecycle finalization when asynchronous `add` and `stop`
+  commands arrive out of order. Resource properties and matching View/Action
+  counter updates now complete together with the final Resource draft.
 - Fixed Action resource/error counters being lost when an auto-tracked request
   completes after the Action's normal five-second timeout. Pending Resource
   associations and reference counts now survive process restart; Actions are

@@ -250,6 +250,8 @@ export interface SDKRumResourceCommandDTO {
   endTime?: number;
   eventTime?: number;
   fallbackActionId?: string;
+  /** The Host has already accepted stopResource; do not let addResource finalize ahead of that command. */
+  awaitStopCommand?: boolean;
   shouldCollect?: boolean;
   customDataType?: string;
   counterFlushMaxEvents?: number;

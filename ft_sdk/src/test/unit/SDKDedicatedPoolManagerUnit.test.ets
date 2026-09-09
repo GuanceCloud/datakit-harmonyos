@@ -1146,6 +1146,86 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(actionResourceDelta).assertEqual(1);
     });
 
+    it('resourceCompletionKeepsStopPropertiesWhenAddArrivesFirst', 0, () => {
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'lifecycle-session', viewId: 'lifecycle-view', viewName: 'LifecycleView', viewReferrer: 'root',
+        actionId: 'lifecycle-action', actionName: 'load', rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const startProperty = new Object() as SDKPropertyRecord;
+      const startValue = new Object() as SDKCompletedActionPropertyTestValue;
+      startValue.value = 'start';
+      startProperty['lifecycle_start'] = startValue;
+      const sharedStartValue = new Object() as SDKCompletedActionPropertyTestValue;
+      sharedStartValue.value = 'start';
+      startProperty['lifecycle_shared'] = sharedStartValue;
+
+      const stopProperty = new Object() as SDKPropertyRecord;
+      const stopValue = new Object() as SDKCompletedActionPropertyTestValue;
+      stopValue.value = 'stop';
+      stopProperty['lifecycle_stop'] = stopValue;
+      const sharedStopValue = new Object() as SDKCompletedActionPropertyTestValue;
+      sharedStopValue.value = 'stop';
+      stopProperty['lifecycle_shared'] = sharedStopValue;
+
+      const addProperty = new Object() as SDKPropertyRecord;
+      const addValue = new Object() as SDKCompletedActionPropertyTestValue;
+      addValue.value = 'add';
+      addProperty['lifecycle_add'] = addValue;
+      const sharedAddValue = new Object() as SDKCompletedActionPropertyTestValue;
+      sharedAddValue.value = 'add';
+      addProperty['lifecycle_shared'] = sharedAddValue;
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/lifecycle-order', requestHeader: '', responseHeader: '', responseConnection: '',
+        responseContentType: '', responseContentEncoding: '', responseContentLength: 0, resourceMethod: 'GET',
+        responseBody: '', resourceStatus: 200, resourceType: 'network', requestErrorStack: '', requestErrorMsg: '',
+        property: addProperty
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0, sslTime: 0, sslStartTime: 0,
+        ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
+        downloadStartTime: 0, holeRequestTime: 30, resourceHostIP: ''
+      };
+      const workerState = createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'LifecycleOrderWorker', 'unit-worker');
+      const partial: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'start', resourceId: 'lifecycle-order', context, property: startProperty, startTime: 10
+        }, {
+          // The Host accepted stopResource first, but addResource reached the
+          // Worker first after a transport boundary.
+          commandType: 'add', resourceId: 'lifecycle-order', context, params, netStatus, eventTime: 30,
+          awaitStopCommand: true
+        }]
+      };
+      const partialResponse = handleSDKWorkerRequest({
+        id: 'lifecycle-order-partial', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: 1,
+        payload: partial as Object as SDKWorkerPayload
+      }, workerState);
+      expect(getPayloadArray(partialResponse.payload, 'syncDrafts').length).assertEqual(0);
+
+      const completion: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'stop', resourceId: 'lifecycle-order', context, property: stopProperty, endTime: 20
+        }]
+      };
+      const completionResponse = handleSDKWorkerRequest({
+        id: 'lifecycle-order-completion', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: 2,
+        payload: completion as Object as SDKWorkerPayload
+      }, workerState);
+      const drafts = getPayloadArray(completionResponse.payload, 'syncDrafts');
+
+      expect(drafts.length).assertEqual(1);
+      const line = String((drafts[0] as Record<string, object>)['dataString']);
+      expect(line.includes('lifecycle_start="start"')).assertTrue();
+      expect(line.includes('lifecycle_stop="stop"')).assertTrue();
+      expect(line.includes('lifecycle_add="add"')).assertTrue();
+      expect(line.includes('lifecycle_shared="add"')).assertTrue();
+    });
+
     it('resourceFinalProtocolPreservesZeroAndHttpStatuses', 0, async () => {
       const statuses = [0, 200, 204, 302, 404, 500, 0, 0];
       for (let index = 0; index < statuses.length; index++) {
@@ -1503,8 +1583,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const restarted = runLifecycle(restartedState, 'restarted');
       const originalDrafts = getPayloadArray(original[0].payload, 'syncDrafts');
       const restartedDrafts = getPayloadArray(restarted[0].payload, 'syncDrafts');
-      const originalDeltas = getPayloadArray(original[1].payload, 'deltas');
-      const restartedDeltas = getPayloadArray(restarted[1].payload, 'deltas');
+      const originalDeltas = getPayloadArray(original[0].payload, 'deltas');
+      const restartedDeltas = getPayloadArray(restarted[0].payload, 'deltas');
 
       expect(originalDrafts.length).assertEqual(1);
       expect(restartedDrafts.length).assertEqual(1);
@@ -1512,7 +1592,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String((restartedDrafts[0] as Record<string, Object>)['uuid'])).assertEqual('restart-resource-draft');
       expect(String((originalDrafts[0] as Record<string, Object>)['dataString'])).assertEqual(
         String((restartedDrafts[0] as Record<string, Object>)['dataString']));
+      expect(originalDeltas.length).assertEqual(1);
+      expect(restartedDeltas.length).assertEqual(1);
       expect(JSON.stringify(originalDeltas)).assertEqual(JSON.stringify(restartedDeltas));
+      // Resource completion must carry its counter mutation in the same
+      // response. A subsequent periodic flush therefore has nothing left.
+      expect(getPayloadArray(original[1].payload, 'deltas').length).assertEqual(0);
+      expect(getPayloadArray(restarted[1].payload, 'deltas').length).assertEqual(0);
       expect(originalState.rumResources.size).assertEqual(0);
       expect(restartedState.rumResources.size).assertEqual(0);
 
@@ -1566,14 +1652,16 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const stateOnlyDeltas = getPayloadArray(stateOnlyFlush.payload, 'deltas');
       const checkpointDrafts = getPayloadArray(checkpointCompletion.payload, 'syncDrafts');
       const checkpointCompletedIds = getPayloadArray(checkpointCompletion.payload, 'completedResourceIds');
-      const checkpointDeltas = getPayloadArray(checkpointFlush.payload, 'deltas');
+      const checkpointDeltas = getPayloadArray(checkpointCompletion.payload, 'deltas');
       const checkpointViewDelta = checkpointDeltas[0] as Record<string, Object>;
 
       expect(stateOnlyDeltas.length).assertEqual(0);
       expect(checkpointDrafts.length).assertEqual(1);
       expect(String(checkpointCompletedIds[0])).assertEqual('restart-resource');
+      expect(checkpointDeltas.length).assertEqual(1);
       expect(Number(checkpointViewDelta['viewResourceDelta'])).assertEqual(1);
       expect(Number(checkpointViewDelta['viewPendingDelta'])).assertEqual(-1);
+      expect(getPayloadArray(checkpointFlush.payload, 'deltas').length).assertEqual(0);
       expect(checkpointRestoredState.rumResources.size).assertEqual(0);
     });
 

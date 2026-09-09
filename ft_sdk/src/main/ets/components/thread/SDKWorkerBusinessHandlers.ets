@@ -291,6 +291,11 @@ interface SDKRumWorkerResourceState {
   resourceDownloadTimeStart: number;
   resourceLoad: number;
   properties: SDKStringRecord;
+  /** Keep public Resource properties in lifecycle order, independent of mailbox delivery order. */
+  startProperties: SDKStringRecord;
+  stopProperties: SDKStringRecord;
+  contentProperties: SDKStringRecord;
+  additionalProperties: SDKStringRecord;
   startRegistered: boolean;
   contentSet: boolean;
   netStateSet: boolean;
@@ -1220,7 +1225,13 @@ function handleRumResourceCommandBatch(
   if (rawEvents.length > 0) {
     payload.rawEvents = rawEvents;
   }
-  if (state.rumCounterPendingEventCount >= flushMaxEvents) {
+  // A completed Resource owns both its final RUM draft and the matching
+  // View/Action counter transition. Do not leave that transition behind a
+  // timer-only counter flush: the Worker may restart after the Resource draft
+  // is durable but before the next periodic flush. Returning the delta with
+  // the completed lifecycle lets the Host commit the draft, counters and
+  // pending-resource release in one response path.
+  if (completedResourceIds.length > 0 || state.rumCounterPendingEventCount >= flushMaxEvents) {
     const flushPayload = createRumCounterFlushPayload(state);
     payload.deltas = flushPayload.deltas;
     payload.needsActionCloseCheck = flushPayload.needsActionCloseCheck;
@@ -1292,6 +1303,7 @@ function processRumResourceCommand(
     resource.eventTime = command.eventTime;
   }
   if (command.property) {
+    recordResourceLifecycleProperties(resource, commandType, command.property);
     applyResourcePropertyMetrics(resource, command.property);
   }
   if (commandType === 'start') {
@@ -1318,7 +1330,7 @@ function processRumResourceCommand(
     if (command.netStatus) {
       applyResourceNetStatus(resource, command.netStatus);
     }
-    if (commandType === 'add' && resource.endTime <= 0) {
+    if (commandType === 'add' && resource.endTime <= 0 && command.awaitStopCommand !== true) {
       resource.endTime = resource.eventTime > 0 ? resource.eventTime : Date.now() * 1000000;
     }
     return tryCreateRumResourceDraft(resource, state, syncDrafts, rawEvents, lineContext, stateRecoveryOnly);
@@ -1392,6 +1404,10 @@ function getOrCreateRumResourceState(
     resourceDownloadTimeStart: -1,
     resourceLoad: -1,
     properties: {},
+    startProperties: {},
+    stopProperties: {},
+    contentProperties: {},
+    additionalProperties: {},
     startRegistered: false,
     contentSet: false,
     netStateSet: false,
@@ -1452,8 +1468,35 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
     resource.requestErrorStack = resource.responseBody || '';
     resource.requestErrorMsg = '';
   }
-  applyResourcePropertyMetrics(resource, params.property || {});
+  const property = params.property || {};
+  mergeStringRecords(resource.contentProperties, normalizeRumPropertyRecord(property));
+  applyResourcePropertyMetrics(resource, property);
   resource.contentSet = true;
+}
+
+function recordResourceLifecycleProperties(
+  resource: SDKRumWorkerResourceState,
+  commandType: string,
+  property: SDKPropertyRecord
+): void {
+  const normalized = normalizeRumPropertyRecord(property || {});
+  if (commandType === 'start') {
+    mergeStringRecords(resource.startProperties, normalized);
+    return;
+  }
+  if (commandType === 'stop') {
+    mergeStringRecords(resource.stopProperties, normalized);
+    return;
+  }
+  mergeStringRecords(resource.additionalProperties, normalized);
+}
+
+function rebuildResourceCustomProperties(resource: SDKRumWorkerResourceState): void {
+  resource.properties = {};
+  mergeStringRecords(resource.properties, resource.startProperties);
+  mergeStringRecords(resource.properties, resource.stopProperties);
+  mergeStringRecords(resource.properties, resource.contentProperties);
+  mergeStringRecords(resource.properties, resource.additionalProperties);
 }
 
 function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, property: SDKPropertyRecord): void {
@@ -1557,6 +1600,7 @@ function tryCreateRumResourceDraft(
     return false;
   }
   resource.isProcessing = true;
+  rebuildResourceCustomProperties(resource);
   state.eventSequence++;
 
   if (resource.shouldCollect !== false) {
