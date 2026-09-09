@@ -8,6 +8,7 @@
  */
 
 import cachePolicyUnitTest from './unit/CachePolicyUnit.test';
+import cacheGovernanceUnitTest from './unit/CacheGovernanceUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
@@ -57,6 +58,7 @@ export default function testsuite() {
   ftExceptionHandlerUnitTest();
   ftDBSpoolUnitTest();
   cachePolicyUnitTest();
+  cacheGovernanceUnitTest();
   syncTaskManagerUnitTest();
   userDataUnitTest();
 }

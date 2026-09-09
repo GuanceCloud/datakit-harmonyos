@@ -2,7 +2,7 @@ import { FTSDKConfig } from './Configs';
 import { RemoteConfigBean } from './remote/RemoteConfigBean';
 import { DataType } from './enum/Enums';
 import { isUploadEndpointAvailable } from './http/UploadEndpoint';
-import { SyncData } from './db/bean/SyncData';
+import { SyncData, SyncDataJSON } from './db/bean/SyncData';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
 import { ViewBean } from './db/bean/ViewBean';
@@ -55,6 +55,18 @@ class ConfigRecordImpl implements ConfigRecord {
 
   constructor(config: FTSDKConfig) {
     this.config = config;
+  }
+
+  isLimitWithCacheSize(): boolean {
+    return this.config.isLimitWithCacheSize();
+  }
+
+  getCacheLimit(): number {
+    return this.config.getCacheLimit();
+  }
+
+  getCacheDiscard(): string {
+    return this.config.getCacheDiscard();
   }
 
   isLimitWithDbSize(): boolean {
@@ -406,6 +418,7 @@ export class SyncTaskManager {
   private preferencesInitPromise: Promise<void> | null = null;
   private uploadWorkerExecutor = new DataUploadWorkerExecutor();
   private remoteDataFilters: Map<string, Array<string>> = new Map<string, Array<string>>();
+  private remoteDataFilterSyncHandler: (() => void) | null = null;
   private constructor() {
   }
 
@@ -585,6 +598,9 @@ export class SyncTaskManager {
     this.uploadPendingForNetwork = false;
     this.networkRecoveryDelayPending = false;
 
+    // Match Android: an upload task checks whether the remote filter pull is
+    // due, but does not wait for the control-plane request to finish.
+    this.remoteDataFilterSyncHandler?.();
     FTLogSeparator.data(TAG, "数据上传开始");
     this.uploadRunning = true;
     this.running = true;
@@ -664,6 +680,14 @@ export class SyncTaskManager {
     filters.forEach((rules: Array<string>, category: string) => {
       this.remoteDataFilters.set(category, rules.slice());
     });
+  }
+
+  /**
+   * Set the lightweight remote-filter pull check run when an upload starts.
+   * The handler must start work asynchronously and must not delay the upload.
+   */
+  public setRemoteDataFilterSyncHandler(handler: (() => void) | null): void {
+    this.remoteDataFilterSyncHandler = handler;
   }
 
   /**

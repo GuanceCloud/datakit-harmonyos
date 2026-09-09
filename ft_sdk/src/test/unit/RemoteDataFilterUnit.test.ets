@@ -5,7 +5,7 @@ import {
   RemoteDataFilterHttpClient,
   RemoteDataFilterHttpResponse,
   RemoteDataFilterHash,
-  RemoteDataFilterScheduler
+  RemoteDataFilterClock
 } from '../../main/ets/components/remote/RemoteDataFilterTypes';
 
 interface RemoteDataFilterTestRules {
@@ -36,21 +36,6 @@ class FakeRemoteDataFilterHttpClient implements RemoteDataFilterHttpClient {
   }
 }
 
-class FakeRemoteDataFilterScheduler implements RemoteDataFilterScheduler {
-  public delays: Array<number> = [];
-  public cancelled: Array<number> = [];
-  private nextTimerId: number = 1;
-
-  schedule(delayMs: number, _callback: () => void): number {
-    this.delays.push(delayMs);
-    return this.nextTimerId++;
-  }
-
-  cancel(timerId: number): void {
-    this.cancelled.push(timerId);
-  }
-}
-
 export default function remoteDataFilterUnitTest() {
   describe('RemoteDataFilterUnit', () => {
     it('serverIntervalAppliesLogAndRumRules', 0, async () => {
@@ -64,14 +49,16 @@ export default function remoteDataFilterUnitTest() {
           pull_interval: '1m20s'
         })
       });
-      const scheduler = new FakeRemoteDataFilterScheduler();
+      let currentTimeMs = 1_000;
+      const clock: RemoteDataFilterClock = (): number => currentTimeMs;
       const applied: Array<Map<string, Array<string>>> = [];
       const manager = new FTRemoteDataFilterManager(
         FTSDKConfig.builder('http://datakit.local'),
         () => true,
         (filters: Map<string, Array<string>>) => applied.push(filters),
         client,
-        scheduler
+        undefined,
+        clock
       );
 
       await manager.start();
@@ -80,10 +67,12 @@ export default function remoteDataFilterUnitTest() {
       expect(applied.length).assertEqual(1);
       expect(applied[0].get('logging')![0]).assertEqual("{ message match ['password'] }");
       expect(applied[0].get('rum')![0]).assertEqual("{ source = 'resource' }");
-      expect(scheduler.delays.length).assertEqual(1);
-      expect(scheduler.delays[0]).assertEqual(80_000);
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(1);
+      currentTimeMs += 80_000;
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(2);
       manager.close();
-      expect(scheduler.cancelled.length).assertEqual(1);
     });
 
     it('invalidFilterConfigUsesTenSeconds', 0, async () => {
@@ -91,21 +80,27 @@ export default function remoteDataFilterUnitTest() {
         code: 200,
         body: stringifyRemoteDataFilter({ filters: { logging: [] }, pull_interval: 'bad-value' })
       });
-      const scheduler = new FakeRemoteDataFilterScheduler();
+      let currentTimeMs = 1_000;
+      const clock: RemoteDataFilterClock = (): number => currentTimeMs;
       const manager = new FTRemoteDataFilterManager(
         FTSDKConfig.builder('http://datakit.local'),
         () => true,
         (_filters: Map<string, Array<string>>) => {},
         client,
-        scheduler
+        undefined,
+        clock
       );
 
       await manager.start();
-      expect(scheduler.delays[0]).assertEqual(10_000);
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(1);
+      currentTimeMs += 10_000;
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(2);
 
       client.response = { code: 200, body: '{}' };
       await manager.refreshForEndpointChange();
-      expect(scheduler.delays[1]).assertEqual(10_000);
+      expect(client.calls).assertEqual(3);
       manager.close();
     });
 
@@ -117,7 +112,8 @@ export default function remoteDataFilterUnitTest() {
           pull_interval: '45s'
         })
       });
-      const scheduler = new FakeRemoteDataFilterScheduler();
+      let currentTimeMs = 1_000;
+      const clock: RemoteDataFilterClock = (): number => currentTimeMs;
       const applied: Array<Map<string, Array<string>>> = [];
       let hashCalls = 0;
       const hash: RemoteDataFilterHash = (_value: string): string => {
@@ -129,19 +125,17 @@ export default function remoteDataFilterUnitTest() {
         () => true,
         (filters: Map<string, Array<string>>) => applied.push(filters),
         client,
-        scheduler,
-        hash
+        hash,
+        clock
       );
 
       await manager.start();
-      await manager.start();
+      currentTimeMs += 45_000;
+      await manager.syncRemoteIfNeeded();
 
       expect(client.calls).assertEqual(2);
       expect(hashCalls).assertEqual(2);
       expect(applied.length).assertEqual(1);
-      expect(scheduler.delays.length).assertEqual(2);
-      expect(scheduler.delays[0]).assertEqual(45_000);
-      expect(scheduler.delays[1]).assertEqual(45_000);
       manager.close();
     });
 
@@ -150,17 +144,15 @@ export default function remoteDataFilterUnitTest() {
         code: 200,
         body: stringifyRemoteDataFilter({
           filters: { logging: ["{ message in ['old'] }"] },
-          pull_interval: 30
+          pull_interval: 30_000_000_000
         })
       });
-      const scheduler = new FakeRemoteDataFilterScheduler();
       const applied: Array<Map<string, Array<string>>> = [];
       const manager = new FTRemoteDataFilterManager(
         FTSDKConfig.builder('http://datakit.local'),
         () => true,
         (filters: Map<string, Array<string>>) => applied.push(filters),
-        client,
-        scheduler
+        client
       );
       await manager.start();
 
@@ -177,7 +169,36 @@ export default function remoteDataFilterUnitTest() {
       expect(applied[1].size).assertEqual(0);
       expect(applied[2].get('logging') === undefined).assertTrue();
       expect(applied[2].get('rum')![0]).assertEqual("{ source in ['resource'] }");
-      expect(scheduler.delays[1]).assertEqual(120_000);
+      manager.close();
+    });
+
+    it('shouldTreatNumericPullIntervalAsNanoseconds', 0, async () => {
+      const client = new FakeRemoteDataFilterHttpClient({
+        code: 200,
+        body: JSON.stringify({
+          filters: { logging: [] },
+          pull_interval: 10_000_000_000
+        })
+      });
+      let currentTimeMs = 1_000;
+      const clock: RemoteDataFilterClock = (): number => currentTimeMs;
+      const manager = new FTRemoteDataFilterManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        () => true,
+        (_filters: Map<string, Array<string>>) => {},
+        client,
+        undefined,
+        clock
+      );
+
+      await manager.start();
+
+      currentTimeMs += 9_999;
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(1);
+      currentTimeMs += 1;
+      await manager.syncRemoteIfNeeded();
+      expect(client.calls).assertEqual(2);
       manager.close();
     });
   });

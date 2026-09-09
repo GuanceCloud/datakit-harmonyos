@@ -7,6 +7,7 @@ import {
   runFTDBTaskPoolExecute,
   FTDBTaskPoolPendingRumResourceDTO
 } from './FTDBTaskPoolOperations';
+import { FTCacheContext, FTCacheSettings } from './FTCacheContext';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 
 export { FTDBTaskPoolPendingRumResourceDTO } from './FTDBTaskPoolOperations';
@@ -61,9 +62,9 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithDbSize: boolean;
-  dbLimitSize: number;
-  dbCacheDiscard: string;
+  enableLimitWithCacheSize: boolean;
+  cacheLimitSize: number;
+  cacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */
@@ -91,6 +92,7 @@ export interface FTDBTaskPoolWriteResult {
   dropped: number;
   duplicateSkipped: number;
   deletedOld: number;
+  acceptedUuids: string[];
   errorMessage: string;
 }
 
@@ -167,13 +169,15 @@ export interface FTDBTaskPoolCloseActionResponse {
   hadPendingResource: boolean;
 }
 
-interface FTDBTaskPoolRequest {
+export interface FTDBTaskPoolRequest {
+  cache?: FTCacheSettings;
   command: string;
   source?: string;
   dataTypes?: string[];
   limit?: number;
   maxBytes?: number;
   newestFirst?: boolean;
+  afterId?: number;
   records?: SyncDataJSON[];
   drafts?: FTDBTaskPoolSyncDraftDTO[];
   fallbackDataType?: string;
@@ -210,7 +214,7 @@ type FTDBTaskPoolRequestFactory = () => FTDBTaskPoolRequest;
 type FTDBTaskPoolWritePolicyProvider = () => FTDBTaskPoolCachePolicySnapshot;
 type FTDBTaskPoolWriteCompletion = (response: FTDBTaskPoolWriteResponse) => void;
 
-interface FTDBTaskPoolResponse {
+export interface FTDBTaskPoolResponse {
   ok: boolean;
   value?: boolean;
   count?: number;
@@ -236,7 +240,7 @@ interface FTDBTaskPoolResponse {
   errorMessage?: string;
 }
 
-interface FTDBTaskPoolDeleteAllResult {
+export interface FTDBTaskPoolDeleteAllResult {
   sync: number;
   view: number;
   action: number;
@@ -244,6 +248,12 @@ interface FTDBTaskPoolDeleteAllResult {
 
 export class FTDBTaskPoolExecutor {
   private static dbLaneTail: Promise<void> = Promise.resolve();
+
+  /** Internal diagnostics; intentionally not exported by the package Index. */
+  public static async getCacheStatus(context: Context): Promise<string> {
+    const response = await FTDBTaskPoolExecutor.execute(context, { command: 'getCacheStatus' });
+    return (response.strings || ['{}'])[0];
+  }
 
   public static async init(context: Context): Promise<void> {
     await FTDBTaskPoolExecutor.execute(context, {
@@ -270,6 +280,27 @@ export class FTDBTaskPoolExecutor {
       dataTypes,
       limit,
       newestFirst
+    });
+    const rows = response.rows || [];
+    const result: SyncData[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      result.push(SyncData.fromJSON(rows[i]));
+    }
+    return result;
+  }
+
+  /** Read a stable ascending page for FileStore migration. */
+  public static async querySyncDataAfterId(
+    context: Context,
+    afterId: number,
+    limit: number
+  ): Promise<SyncData[]> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.QUERY_SYNC_DATA,
+      dataTypes: [],
+      limit,
+      newestFirst: false,
+      afterId: Math.max(0, Math.floor(afterId))
     });
     const rows = response.rows || [];
     const result: SyncData[] = [];
@@ -378,6 +409,7 @@ export class FTDBTaskPoolExecutor {
     const enqueueTime = Date.now();
     const run = async (): Promise<FTDBTaskPoolResponse> => {
       const request = requestFactory();
+      request.cache = FTCacheContext.settings;
       const dbLaneWaitMs = Math.max(0, Date.now() - enqueueTime);
       const response = await taskpool.execute(ftDBTaskPoolExecute, context as Object, request as Object);
       const typed = response as Object as FTDBTaskPoolResponse;
@@ -390,8 +422,8 @@ export class FTDBTaskPoolExecutor {
       }
       return typed;
     };
-    const current = FTDBTaskPoolExecutor.dbLaneTail.then(run, run);
-    FTDBTaskPoolExecutor.dbLaneTail = current.then(() => undefined, () => undefined);
+    const current = FTCacheContext.lane.then(run, run);
+    FTCacheContext.lane = current.then(() => undefined, () => undefined);
     return await current;
   }
 
@@ -849,6 +881,7 @@ export class FTDBTaskPoolExecutor {
   private static async execute(context: Context, request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
     const enqueueTime = Date.now();
     const run = async (): Promise<FTDBTaskPoolResponse> => {
+      request.cache = FTCacheContext.settings;
       const dbLaneWaitMs = Math.max(0, Date.now() - enqueueTime);
       const response = await taskpool.execute(ftDBTaskPoolExecute, context as Object, request as Object);
       const typed = response as Object as FTDBTaskPoolResponse;
@@ -859,8 +892,8 @@ export class FTDBTaskPoolExecutor {
       return typed;
     };
 
-    const current = FTDBTaskPoolExecutor.dbLaneTail.then(run, run);
-    FTDBTaskPoolExecutor.dbLaneTail = current.then(() => undefined, () => undefined);
+    const current = FTCacheContext.lane.then(run, run);
+    FTCacheContext.lane = current.then(() => undefined, () => undefined);
     return await current;
   }
 }

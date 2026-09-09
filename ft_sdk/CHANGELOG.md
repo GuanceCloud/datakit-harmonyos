@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.17-alpha03] - 2026-09-10
 - Added FTRUMConfig.setResourceUrlHandler(...) to exclude auto-tracked RCP, Axios, and NetworkKit HTTP Resources without affecting Trace propagation or manual Resources.
+- Added file-backed telemetry cache governance, with capacity eviction, durable recovery, direct file upload, and resumable migration from legacy cache storage.
+- Optimized remote data-filter refreshes to check `pull_interval` when uploads start, parse numeric intervals as nanoseconds, and skip unchanged payload processing.
+- Replaced separate Router and Navigation View tracking handlers with `FTRUMConfig.setViewTrackingHandler(handler, type)`, supporting `ROUTER`, `NAVIGATION`, and `ALL` targets.
 
 ## [0.1.17-alpha02] - 2026-09-08
 - Fixed RCP Resource waterfall timings that positioned first-byte and download phases from reconstructed duration sums rather than original `preTransfer` and `startTransfer` points, causing transport-to-ready gaps to disappear, zero-length spans, and inconsistent `resource_trans` origins.

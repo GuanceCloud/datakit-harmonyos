@@ -1,9 +1,11 @@
 import { fileIo } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { SyncDataJSON } from './bean/SyncData';
+import { FTCacheFiles } from './FTCacheFiles';
 import {
   FT_DB_SPOOL_MAX_BYTES,
   FT_DB_SPOOL_MAX_RECORD_BYTES,
+  FT_DB_SPOOL_REPLAY_PAGE_RECORDS,
   FT_DB_SPOOL_REPLAY_PAGE_BYTES
 } from './FTDBSpoolLimits';
 
@@ -12,7 +14,11 @@ enum FTDBSpoolTaskPoolCommand {
   APPEND = 'append',
   PREPARE_REPLAY = 'prepareReplay',
   ACK_REPLAY = 'ackReplay',
-  CLEAR = 'clear'
+  CLEAR = 'clear',
+  REMOVE_BY_UUIDS = 'removeByUuids',
+  READ_PAGE = 'readPage',
+  HAS_MARKER = 'hasMarker',
+  WRITE_MARKER = 'writeMarker'
 }
 
 interface FTDBSpoolTaskPoolRequest {
@@ -28,6 +34,9 @@ interface FTDBSpoolTaskPoolRequest {
   byteOffset?: number;
   recordLimit?: number;
   maxCapacityBytes?: number;
+  uuids?: string[];
+  readPath?: string;
+  markerPath?: string;
 }
 
 interface FTDBSpoolRecordDTO {
@@ -53,10 +62,13 @@ interface FTDBSpoolTaskPoolResponse {
   nextByteOffset: number;
   inflightBytes: number;
   hasMoreRecords: boolean;
+  removedRecords: number;
+  markerExists: boolean;
   errorMessage: string;
 }
 
 interface FTDBSpoolParseResult {
+  corruptLines: string[];
   records: FTDBSpoolRecordDTO[];
   fileRecords: number;
   skippedRecords: number;
@@ -65,10 +77,37 @@ interface FTDBSpoolParseResult {
 }
 
 const SPOOL_READ_CHUNK_SIZE = 64 * 1024;
+interface FTSpoolAppendJournal { path: string; offset: number; content: string; }
+
+function recoverSpoolAppend(dir: string): void {
+  const journalPath = `${dir}/append.json`;
+  const body = FTCacheFiles.read(journalPath);
+  if (!body) { return; }
+  const journal = JSON.parse(body) as FTSpoolAppendJournal;
+  if (!journal.path.startsWith(`${dir}/`) || journal.path.includes('/../') || journal.offset < 0) {
+    throw new Error('SPOOL_JOURNAL_INVALID');
+  }
+  const file = fileIo.openSync(journal.path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE);
+  try {
+    fileIo.truncateSync(file.fd, journal.offset);
+    fileIo.lseek(file.fd, journal.offset, fileIo.WhenceType.SEEK_SET);
+    const data = util.TextEncoder.create('utf-8').encodeInto(journal.content);
+    let written = 0;
+    while (written < data.length) {
+      const count = fileIo.writeSync(file.fd, data.slice(written).buffer as ArrayBuffer);
+      if (count <= 0) { throw new Error('SPOOL_SHORT_WRITE'); }
+      written += count;
+    }
+    fileIo.fsyncSync(file.fd);
+  } finally { fileIo.closeSync(file); }
+  FTCacheFiles.syncDirectory(dir);
+  FTCacheFiles.remove(journalPath);
+}
 
 export async function runFTDBSpoolTaskPoolExecute(requestObject: Object): Promise<Object> {
   const request = requestObject as FTDBSpoolTaskPoolRequest;
   try {
+    recoverSpoolAppend(request.spoolDir);
     switch (request.command) {
       case FTDBSpoolTaskPoolCommand.INIT:
         await ensureSpoolDirectory(request.spoolDir);
@@ -81,11 +120,21 @@ export async function runFTDBSpoolTaskPoolExecute(requestObject: Object): Promis
         return await ackSpoolReplay(request);
       case FTDBSpoolTaskPoolCommand.CLEAR:
         return await clearSpoolFiles(request);
+      case FTDBSpoolTaskPoolCommand.REMOVE_BY_UUIDS:
+        return await removeSpoolRecordsByUuids(request);
+      case FTDBSpoolTaskPoolCommand.READ_PAGE:
+        return await readSpoolPage(request);
+      case FTDBSpoolTaskPoolCommand.HAS_MARKER:
+        return await hasMarker(request);
+      case FTDBSpoolTaskPoolCommand.WRITE_MARKER:
+        return await writeMarker(request);
       default:
         return createErrorResponse(`Unsupported Spool TaskPool command: ${request.command}`) as Object;
     }
   } catch (error) {
     return createErrorResponse(error instanceof Error ? error.message : String(error)) as Object;
+  } finally {
+    if (FTCacheFiles.exists(request.spoolDir)) { FTCacheFiles.syncDirectory(request.spoolDir); }
   }
 }
 
@@ -126,15 +175,10 @@ async function appendSpoolRecords(request: FTDBSpoolTaskPoolRequest): Promise<Ob
     appendedRecords++;
   }
   if (appendedRecords > 0) {
-    const file = await fileIo.open(
-      request.activePath,
-      fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.APPEND
-    );
-    try {
-      await fileIo.write(file.fd, acceptedLines.join(''));
-    } finally {
-      await fileIo.close(file);
-    }
+    const journal: FTSpoolAppendJournal = { path: request.activePath,
+      offset: FTCacheFiles.size(request.activePath), content: acceptedLines.join('') };
+    FTCacheFiles.atomicWrite(`${request.spoolDir}/append.json`, JSON.stringify(journal));
+    recoverSpoolAppend(request.spoolDir);
   }
   const response = createSuccessResponse();
   response.appendedRecords = appendedRecords;
@@ -149,6 +193,8 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   await ensureSpoolDirectory(request.spoolDir);
   await removeEmptyFile(request.inflightPath);
   if (!(await pathExists(request.inflightPath))) {
+    // A fresh batch must never reuse the token of an already-acknowledged batch.
+    FTCacheFiles.remove(`${request.spoolDir}/inflight-token.json`);
     if (await pathExists(request.legacyPath)) {
       await fileIo.rename(request.legacyPath, request.inflightPath);
     } else if (await pathExists(request.activePath)) {
@@ -162,6 +208,10 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   const byteOffset = Math.max(0, request.byteOffset || 0);
   const recordLimit = Math.max(1, request.recordLimit || 256);
   const parseResult = readSpoolRecordsPage(request.inflightPath, byteOffset, recordLimit);
+  if (parseResult.skippedRecords > 0) {
+    // Bounded forensic sample; bad rows cannot block the valid rows following them.
+    FTCacheFiles.atomicWrite(`${request.spoolDir}/corrupt.json`, JSON.stringify(parseResult.corruptLines));
+  }
   const response = createSuccessResponse();
   response.records = parseResult.records;
   response.batchFileRecords = parseResult.fileRecords;
@@ -170,7 +220,7 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   response.nextByteOffset = parseResult.nextByteOffset;
   response.inflightBytes = parseResult.fileSize;
   response.hasMoreRecords = response.nextByteOffset < parseResult.fileSize;
-  response.batchToken = await getFileToken(request.inflightPath);
+  response.batchToken = await getFileToken(request.inflightPath, true);
   response.pendingRecordsKnown = false;
   response.pendingBytes = await countAllPendingBytes(request);
   response.capacityBytes = FT_DB_SPOOL_MAX_BYTES;
@@ -200,7 +250,81 @@ async function clearSpoolFiles(request: FTDBSpoolTaskPoolRequest): Promise<Objec
   await deleteFileIfExists(request.activePath);
   await deleteFileIfExists(request.inflightPath);
   await deleteFileIfExists(request.legacyPath);
+  FTCacheFiles.remove(`${request.spoolDir}/corrupt.json`);
+  FTCacheFiles.remove(`${request.spoolDir}/inflight-token.json`);
   return createSuccessResponse() as Object;
+}
+
+/**
+ * Remove committed records from a durable NDJSON queue. This command is used
+ * by FileStore; the DB-failure spool only uses append/replay/ack operations.
+ */
+async function removeSpoolRecordsByUuids(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  const uuidSet: Set<string> = new Set<string>();
+  const uuids = request.uuids || [];
+  for (let i = 0; i < uuids.length; i++) {
+    if (uuids[i] && uuids[i].length > 0) {
+      uuidSet.add(uuids[i]);
+    }
+  }
+  if (uuidSet.size === 0) {
+    return await createPendingResponse(request) as Object;
+  }
+
+  const response = createSuccessResponse();
+  response.removedRecords += await removeFileRecordsByUuids(request.activePath, uuidSet);
+  response.removedRecords += await removeFileRecordsByUuids(request.inflightPath, uuidSet);
+  response.removedRecords += await removeFileRecordsByUuids(request.legacyPath, uuidSet);
+  response.pendingRecords = await countAllPendingRecords(request);
+  response.pendingBytes = await countAllPendingBytes(request);
+  response.capacityBytes = normalizeCapacityBytes(request.maxCapacityBytes);
+  return response as Object;
+}
+
+async function readSpoolPage(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  const path = request.readPath || '';
+  if (!path || !(await pathExists(path))) {
+    return createSuccessResponse() as Object;
+  }
+  const page = readSpoolRecordsPage(
+    path,
+    Math.max(0, request.byteOffset || 0),
+    Math.max(1, request.recordLimit || 256)
+  );
+  const response = createSuccessResponse();
+  response.records = page.records;
+  response.batchFileRecords = page.fileRecords;
+  response.skippedRecords = page.skippedRecords;
+  response.pageStartByteOffset = Math.max(0, request.byteOffset || 0);
+  response.nextByteOffset = page.nextByteOffset;
+  response.inflightBytes = page.fileSize;
+  response.hasMoreRecords = page.nextByteOffset < page.fileSize;
+  return response as Object;
+}
+
+async function hasMarker(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  const response = createSuccessResponse();
+  response.markerExists = !!request.markerPath && await pathExists(request.markerPath);
+  return response as Object;
+}
+
+async function writeMarker(request: FTDBSpoolTaskPoolRequest): Promise<Object> {
+  if (!request.markerPath) {
+    return createErrorResponse('Marker path is required') as Object;
+  }
+  await ensureSpoolDirectory(request.spoolDir);
+  const file = await fileIo.open(
+    request.markerPath,
+    fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE
+  );
+  try {
+    await fileIo.write(file.fd, 'complete');
+  } finally {
+    await fileIo.close(file);
+  }
+  const response = createSuccessResponse();
+  response.markerExists = true;
+  return response as Object;
 }
 
 async function createPendingResponse(request: FTDBSpoolTaskPoolRequest): Promise<FTDBSpoolTaskPoolResponse> {
@@ -228,8 +352,60 @@ function createSuccessResponse(): FTDBSpoolTaskPoolResponse {
     nextByteOffset: 0,
     inflightBytes: 0,
     hasMoreRecords: false,
+    removedRecords: 0,
+    markerExists: false,
     errorMessage: ''
   };
+}
+
+async function removeFileRecordsByUuids(path: string, uuids: Set<string>): Promise<number> {
+  if (!(await pathExists(path))) {
+    return 0;
+  }
+
+  let offset = 0;
+  let removed = 0;
+  const retainedLines: string[] = [];
+  while (true) {
+    const page = readSpoolRecordsPage(path, offset, FT_DB_SPOOL_REPLAY_PAGE_RECORDS);
+    for (let i = 0; i < page.records.length; i++) {
+      const record = page.records[i];
+      if (uuids.has(record.data.uuid)) {
+        removed++;
+      } else {
+        retainedLines.push(`${JSON.stringify(record)}\n`);
+      }
+    }
+    if (page.nextByteOffset >= page.fileSize) {
+      break;
+    }
+    if (page.nextByteOffset <= offset) {
+      throw new Error(`FileStore remove cursor did not advance: path=${path}, offset=${offset}`);
+    }
+    offset = page.nextByteOffset;
+  }
+
+  if (removed <= 0) {
+    return 0;
+  }
+  if (retainedLines.length === 0) {
+    await fileIo.unlink(path);
+    return removed;
+  }
+
+  const tempPath = `${path}.rewrite`;
+  await deleteFileIfExists(tempPath);
+  const file = await fileIo.open(
+    tempPath,
+    fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE
+  );
+  try {
+    await fileIo.write(file.fd, retainedLines.join(''));
+  } finally {
+    await fileIo.close(file);
+  }
+  await fileIo.rename(tempPath, path);
+  return removed;
 }
 
 function createErrorResponse(message: string): FTDBSpoolTaskPoolResponse {
@@ -245,6 +421,7 @@ function readSpoolRecordsPage(
   recordLimit: number
 ): FTDBSpoolParseResult {
   const result: FTDBSpoolParseResult = {
+    corruptLines: [],
     records: [],
     fileRecords: 0,
     skippedRecords: 0,
@@ -343,6 +520,7 @@ function parseSpoolLineBytes(
   result.fileRecords++;
   if (oversizedLine || lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES) {
     result.skippedRecords++;
+    if (result.corruptLines.length < 8) { result.corruptLines.push(`oversized line: ${lineBytes} bytes`); }
     return;
   }
   const joined = new Uint8Array(lineBytes);
@@ -362,9 +540,11 @@ function parseSpoolLineBytes(
       result.records.push(record);
     } else {
       result.skippedRecords++;
+      if (result.corruptLines.length < 8) { result.corruptLines.push(trimmed.slice(0, 2048)); }
     }
   } catch (_) {
     result.skippedRecords++;
+    if (result.corruptLines.length < 8) { result.corruptLines.push(trimmed.slice(0, 2048)); }
   }
 }
 
@@ -448,9 +628,14 @@ function countFileRecords(path: string): number {
   }
 }
 
-async function getFileToken(path: string): Promise<string> {
-  const stat = await fileIo.stat(path);
-  return `${stat.size}:${stat.mtime}`;
+async function getFileToken(path: string, create: boolean = false): Promise<string> {
+  const tokenPath = `${path.substring(0, path.lastIndexOf('/'))}/inflight-token.json`;
+  let token = FTCacheFiles.read(tokenPath);
+  if (token === null && create) {
+    token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    FTCacheFiles.atomicWrite(tokenPath, token);
+  }
+  return token || '';
 }
 
 async function ensureSpoolDirectory(path: string): Promise<void> {
@@ -494,7 +679,7 @@ function normalizeCapacityBytes(value: number | undefined): number {
   if (value === undefined || value !== value || value <= 0) {
     return FT_DB_SPOOL_MAX_BYTES;
   }
-  return Math.min(FT_DB_SPOOL_MAX_BYTES, Math.max(1, Math.floor(value)));
+  return Math.max(1, Math.floor(value));
 }
 
 function isValidSyncDataJSON(data: SyncDataJSON | undefined): boolean {

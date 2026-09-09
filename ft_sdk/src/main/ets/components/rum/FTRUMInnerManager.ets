@@ -18,6 +18,7 @@ import {
   FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
+import { FTCacheContext } from '../db/FTCacheContext';
 import { FTInnerLogger } from "../log/FTLogger";
 import {
   SDKDedicatedPoolManager,
@@ -497,6 +498,14 @@ export class FTRUMInnerManager {
     const entry = this.rumSemanticJournalByRequestId.get(requestId);
     if (entry) {
       entry.hostApplied = true;
+      if (entry.request.command === SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH && this.context) {
+        const payload = entry.request.payload as Object as SDKRumCompletedActionBatchDTO;
+        const ids = payload.actions.map((a: SDKRumCompletedActionDTO) => a.actionId);
+        FTDBTaskPoolExecutor.cleanCloseActionData(this.context, ids).catch((error: Error) => {
+          for (const id of ids) { this.forgetInsertedActionId(id); this.forgetProcessedActionId(id); }
+          FTInnerLogger.e(TAG, `Completed action cleanup failed: ${error.message}`);
+        });
+      }
     } else {
       // The replay state may have been evicted to preserve newer entries. The
       // response was still applied by the Host, so retain only its bounded
@@ -505,10 +514,26 @@ export class FTRUMInnerManager {
     }
   }
 
+  /** A failed/lost transport attempt must not permanently pin a retained aggregate. */
+  public markRumSemanticHostFailed(requestId: string): void {
+    const entry = this.rumSemanticJournalByRequestId.get(requestId);
+    if (entry) { this.releaseCompletedActionAttempt(entry); }
+  }
+
+  private releaseCompletedActionAttempt(entry: RumSemanticJournalEntry): void {
+    if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH) { return; }
+    const payload = entry.request.payload as Object as SDKRumCompletedActionBatchDTO;
+    for (const action of payload.actions || []) {
+      this.forgetInsertedActionId(action.actionId);
+      this.forgetProcessedActionId(action.actionId);
+    }
+  }
+
   public async markRumResourcesCompleted(
     resourceIds: string[],
     counterDeltasApplied: boolean = false
   ): Promise<boolean> {
+    let releasedResourceLifecycle = false;
     for (let i = 0; i < resourceIds.length; i++) {
       const resourceId = resourceIds[i];
       if (resourceId && resourceId.length > 0) {
@@ -516,18 +541,29 @@ export class FTRUMInnerManager {
         // Only the resources explicitly completed by this worker response are
         // considered for cleanup. Do not scan every outstanding draft here.
         this.cleanupCompletedResourceDraftId(resourceId);
+        if (counterDeltasApplied) {
+          // This response carried the matching counter barrier, which was
+          // committed before this callback. It is now safe to release the
+          // Host-side guard for this Resource.
+          this.clearResourceLifecycleRegistration(resourceId);
+          releasedResourceLifecycle = true;
+        }
       }
     }
     if (!counterDeltasApplied || resourceIds.length === 0) {
       return true;
     }
-    return await this.completePersistedResourceLifecycles(resourceIds);
+    if (FTCacheContext.settings.mode === 'sqlite') {
+      return await this.completePersistedResourceLifecycles(resourceIds);
+    }
+    if (releasedResourceLifecycle) {
+      this.retryPendingActionClosures();
+    }
+    this.pruneCommittedRumSemanticPrefix();
+    return true;
   }
 
-  /**
-   * The final Resource/Error drafts and their counter deltas have committed.
-   * Only now release the durable reference that keeps the Action available.
-   */
+  /** SQLite retains the cross-restart Resource-to-Action association separately. */
   private async completePersistedResourceLifecycles(resourceIds: string[]): Promise<boolean> {
     if (resourceIds.length === 0) {
       return true;
@@ -775,6 +811,12 @@ export class FTRUMInnerManager {
         readyResourceIds.push(resourceId);
       }
     }
+    if (FTCacheContext.settings.mode !== 'sqlite') {
+      for (let i = 0; i < readyResourceIds.length; i++) {
+        this.clearResourceLifecycleRegistration(readyResourceIds[i]);
+      }
+      return readyResourceIds.length > 0;
+    }
     return await this.completePersistedResourceLifecycles(readyResourceIds);
   }
 
@@ -857,6 +899,7 @@ export class FTRUMInnerManager {
     while (this.rumSemanticJournal.length - this.rumSemanticJournalHead >=
       FTRUMInnerManager.RUM_SEMANTIC_JOURNAL_HIGH_WATERMARK) {
       const entry = this.rumSemanticJournal[this.rumSemanticJournalHead];
+      this.releaseCompletedActionAttempt(entry);
       this.rumSemanticJournalByRequestId.delete(entry.request.id);
       this.releaseResourceTransportReferences(entry.resourceIds);
       this.rumSemanticJournalHead++;
@@ -955,6 +998,7 @@ export class FTRUMInnerManager {
         retained.push(entry);
         continue;
       }
+      this.releaseCompletedActionAttempt(entry);
       this.rumSemanticJournalByRequestId.delete(entry.request.id);
       this.rememberCommittedRumSemanticResponse(entry.request.id);
       this.releaseResourceTransportReferences(entry.resourceIds);
@@ -1423,7 +1467,7 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-      uuid: Utils.generateUUID(),
+      uuid: `action-${actionBean.getId()}`,
       time: actionBean.getStartTime(),
       actionId: actionBean.getId(),
       actionName: actionBean.getActionName(),
@@ -1519,19 +1563,16 @@ export class FTRUMInnerManager {
           // Filter out already processed actions to prevent duplicate inserts
           // Check both processedActionIds and insertedActionIds to ensure no duplicates
           const unprocessedBeans: ActionBean[] = [];
-          const deleteIds: string[] = [];
           
           for (const bean of beans) {
             const actionId = bean.getId();
             // Skip if already processed OR already inserted (double check for safety)
             if (this.processedActionIds.has(actionId) || this.insertedActionIds.has(actionId)) {
-              // Still delete from database even if already processed/inserted
-              deleteIds.push(actionId);
+              // The worker result has not necessarily reached durable storage yet.
             } else {
               // Mark as processed immediately to prevent duplicate processing
               this.rememberProcessedActionId(actionId);
               unprocessedBeans.push(bean);
-              deleteIds.push(actionId);
             }
           }
           
@@ -1552,11 +1593,7 @@ export class FTRUMInnerManager {
             }
           }
           
-          // Delete actions from database AFTER updating counts
-          // This ensures that even if generateActionSum is called again, the same actions won't be queried
-          if (deleteIds.length > 0) {
-            await FTDBTaskPoolExecutor.cleanCloseActionData(this.context!, deleteIds);
-          }
+          // Deletion is deferred to the durable worker-result acknowledgement.
           
           // Then insert actions to sync table (only unprocessed ones)
           // Note: We delete after updating counts to ensure we can query the latest counts
@@ -1574,7 +1611,7 @@ export class FTRUMInnerManager {
           FTInnerLogger.e(TAG, `Error querying actions from database: ${error}`);
           break;
         }
-      } while (beans.length >= LIMIT_SIZE);
+      } while (false); // One bounded page per tick; in-flight aggregates remain queryable until committed.
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in generateActionSum: ${error}`);
@@ -1618,7 +1655,7 @@ export class FTRUMInnerManager {
           FTInnerLogger.e(TAG, `Error querying views from database: ${error}`);
           break;
         }
-      } while (beans.length >= LIMIT_SIZE);
+      } while (false); // Callbacks are asynchronous; do not loop on the same uncommitted page.
       
       // The persistence callback acknowledges and cleans only its own snapshot.
       // A View may close after this query while its open snapshot is in flight.
@@ -1787,21 +1824,22 @@ export class FTRUMInnerManager {
       // Aligned with Android: use callback to update upload_time after successful upload
       const self = this;
       class ViewUploadCallback implements RunnerCompleteCallBack {
-        private view: ViewBean;
-        
-        constructor(view: ViewBean) {
-          this.view = view;
+        private viewId: string;
+        private versionTime: number;
+        constructor(viewId: string, versionTime: number) {
+          this.viewId = viewId;
+          this.versionTime = versionTime;
         }
         
         onComplete(): void {
           // Update upload_time after successful upload (aligned with Android)
           if (self.context) {
-            self.updateUploadedViewAfterComplete(self.context, this.view);
+            self.updateUploadedViewAfterComplete(self.context, this.viewId, this.versionTime);
           }
         }
       }
       
-      const callback = new ViewUploadCallback(viewBean);
+      const callback = new ViewUploadCallback(viewBean.getId(), viewBean.getDataUpdateTime());
       // Aligned with Android SDK: pass nanoseconds directly (19 digits) without conversion
       // Android SDK: FTTrackInner.getInstance().rum(bean.getStartTime(), ...)
       FTTrackInner.getInstance().rum(
@@ -1809,7 +1847,9 @@ export class FTRUMInnerManager {
         Constants.FT_MEASUREMENT_RUM_VIEW,
         tagsMap,
         fieldsMap,
-        callback
+        callback,
+        null,
+        `view-${viewBean.getId()}-${viewBean.getDataUpdateTime()}-${viewBean.getViewUpdateTime()}`
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
@@ -1839,9 +1879,9 @@ export class FTRUMInnerManager {
     }
   }
 
-  private async updateUploadedViewAfterComplete(context: Context, view: ViewBean): Promise<void> {
+  private async updateUploadedViewAfterComplete(context: Context, viewId: string, versionTime: number): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, view);
+      const success = await FTDBTaskPoolExecutor.updateViewUploadTime(context, viewId, versionTime);
       if (!success) {
         // The database contains a newer state. Ensure it is serialized even if
         // its earlier generation request overlapped the previous summary pass.
@@ -1999,7 +2039,9 @@ export class FTRUMInnerManager {
     // Actions that were waiting for Resources before a process restart have
     // no active in-memory owner. Rebuild their close state from RDB so a
     // later Resource callback can still finalize the original Action.
-    this.recoverPendingActionClosures();
+    if (FTCacheContext.settings.mode === 'sqlite') {
+      this.recoverPendingActionClosures();
+    }
 
     FTInnerLogger.i(TAG, `initContext initialized`);
   }
@@ -2598,7 +2640,9 @@ export class FTRUMInnerManager {
     if (!this.context || !command || !command.resourceId) {
       return false;
     }
-    const registration = this.pendingResourceRegistrations.get(command.resourceId);
+    const supportsPendingResourcePersistence = FTCacheContext.settings.mode === 'sqlite';
+    const registration = supportsPendingResourcePersistence ?
+      this.pendingResourceRegistrations.get(command.resourceId) : undefined;
     if (registration) {
       registration.then((registered: boolean): void => {
         this.pendingResourceRegistrations.delete(command.resourceId);
@@ -2625,7 +2669,8 @@ export class FTRUMInnerManager {
     // the original start. After a restart, use the durable row unless this
     // process owns a start marker, so the callback cannot overwrite the
     // original Action association.
-    if (command.commandType !== 'start' && !this.startedResourceIds.has(command.resourceId)) {
+    if (supportsPendingResourcePersistence && command.commandType !== 'start' &&
+      !this.startedResourceIds.has(command.resourceId)) {
       this.restorePendingResourceContext(command.resourceId).then(
         (pending: FTDBTaskPoolPendingRumResourceDTO | null): void => {
           if (pending) {
@@ -3127,19 +3172,21 @@ export class FTRUMInnerManager {
       const draftIds = this.getOrCreateResourceDraftIds(resourceId);
       this.resourceContextById.set(resourceId, context);
       this.updateResourceContextMemoryOnStart(context);
-      const pendingResource: FTDBTaskPoolPendingRumResourceDTO = {
-        resourceId,
-        startTime,
-        context,
-        draftUuid: draftIds.resourceUuid,
-        errorDraftUuid: draftIds.errorUuid
-      };
-      const registration = FTDBTaskPoolExecutor.registerPendingRumResource(this.context!, pendingResource)
-        .catch((error: Error): boolean => {
-          FTInnerLogger.e(TAG, `Failed to persist pending Resource ${resourceId}: ${error.message}`);
-          return false;
-        });
-      this.pendingResourceRegistrations.set(resourceId, registration);
+      if (FTCacheContext.settings.mode === 'sqlite') {
+        const pendingResource: FTDBTaskPoolPendingRumResourceDTO = {
+          resourceId,
+          startTime,
+          context,
+          draftUuid: draftIds.resourceUuid,
+          errorDraftUuid: draftIds.errorUuid
+        };
+        const registration = FTDBTaskPoolExecutor.registerPendingRumResource(this.context!, pendingResource)
+          .catch((error: Error): boolean => {
+            FTInnerLogger.e(TAG, `Failed to persist pending Resource ${resourceId}: ${error.message}`);
+            return false;
+          });
+        this.pendingResourceRegistrations.set(resourceId, registration);
+      }
       this.submitResourceWorkerCommand({
         commandType: 'start',
         resourceId,
@@ -3915,7 +3962,7 @@ export class FTRUMInnerManager {
         waitingForResource: false
       });
     }
-    if (this.context) {
+    if (this.context && FTCacheContext.settings.mode === 'sqlite') {
       // Persist the close duration before waiting. Recovery can then generate
       // the original Action with the correct duration after a process restart.
       void FTDBTaskPoolExecutor.markRumActionCloseRequested(
@@ -3931,7 +3978,7 @@ export class FTRUMInnerManager {
 
   /** Rebuilds close state for Actions left behind by a process restart. */
   private recoverPendingActionClosures(): void {
-    if (this.pendingActionRecoveryStarted || !this.context) {
+    if (FTCacheContext.settings.mode !== 'sqlite' || this.pendingActionRecoveryStarted || !this.context) {
       return;
     }
     this.pendingActionRecoveryStarted = true;

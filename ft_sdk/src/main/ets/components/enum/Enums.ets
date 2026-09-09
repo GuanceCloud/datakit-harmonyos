@@ -70,6 +70,18 @@ export enum DBCacheDiscard {
   DISCARD_OLDEST = "discard_oldest"
 }
 
+/**
+ * Strategy used when the SDK-wide telemetry cache reaches its byte budget.
+ *
+ * This is the public cache-governance enum aligned with Android's
+ * `CacheDiscard`. `DBCacheDiscard` remains available for source compatibility
+ * with earlier HarmonyOS SDK versions.
+ */
+export enum CacheDiscard {
+  DISCARD = "discard",
+  DISCARD_OLDEST = "discard_oldest"
+}
+
 export enum RUMCacheDiscard {
   DISCARD = "discard",
   DISCARD_OLDEST = "discard_oldest"

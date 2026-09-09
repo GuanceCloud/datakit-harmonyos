@@ -836,10 +836,12 @@ class FTTrackInner {
 
     if (!response.ok) {
       this.logEventMailboxFailure(response.errorMessage || 'unknown');
+      rumManager.markRumSemanticHostFailed(response.id);
       this.completeRumWorkerCallback(callback, false);
       return;
     }
     if (!response.payload) {
+      rumManager.markRumSemanticHostFailed(response.id);
       this.completeRumWorkerCallback(callback, false);
       return;
     }
@@ -907,6 +909,7 @@ class FTTrackInner {
     } finally {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
+    if (!draftsCommitted) { rumManager.markRumSemanticHostFailed(response.id); }
     const resourcesCompleted = draftsCommitted && countersApplied && await rumManager.markRumResourcesCompleted(
         payload.completedResourceIds || [],
         !!(payload.deltas && payload.deltas.length > 0)
@@ -1546,7 +1549,8 @@ class FTTrackInner {
     tags: Map<string, string>,
     fields: Map<string, string>,
     callBack: RunnerCompleteCallBack | null = null,
-    collectTypeParam: CollectType | null = null
+    collectTypeParam: CollectType | null = null,
+    draftUuid?: string
   ): void {
 
     // Debug log - use more obvious tags
@@ -1585,7 +1589,7 @@ class FTTrackInner {
 
     if (!sessionId && (collectTypeParam === null || collectTypeParam === undefined)) {
       // If no session ID, collect by default
-      this.syncDataBackground(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+      this.syncDataBackground(DataType.RUM_APP, time, measurement, tags, fields, callBack, draftUuid);
       return;
     }
 
@@ -1599,7 +1603,7 @@ class FTTrackInner {
       // if (measurement === 'rum_action') {
       //   FTInnerLogger.d(TAG, `[FT-ACTION-DEBUG] ========== STAGE 4: syncDataBackground START ==========`);
       // }
-      this.syncDataBackground(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+      this.syncDataBackground(DataType.RUM_APP, time, measurement, tags, fields, callBack, draftUuid);
     } else if (collectType === CollectType.SAMPLING) {
       // Error sampling collection - store as rum_app_error_sampled
       // if (measurement === 'rum_action') {
@@ -1608,7 +1612,7 @@ class FTTrackInner {
       // Store as error_sampled type by using string concatenation (aligned with database implementation)
       // Use DataType.RUM_APP for getBodyContent, but store as "rum_app_error_sampled" in database
       this.syncDataBackgroundWithErrorSampled(DataType.RUM_APP, "rum_app_error_sampled", time, measurement, tags,
-        fields, callBack);
+        fields, callBack, draftUuid);
     } else {
       // CollectType.DROP - do not collect
       FTInnerLogger.w(TAG,
@@ -2088,7 +2092,8 @@ class FTTrackInner {
     measurement: string,
     tags: Map<string, string>,
     fields: Map<string, string>,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     this.submitRumWorkerDraftTask(
       'data.prepare.errorSampled',
@@ -2099,7 +2104,8 @@ class FTTrackInner {
       tags,
       fields,
       callBack,
-      true
+      true,
+      draftUuid
     );
   }
 

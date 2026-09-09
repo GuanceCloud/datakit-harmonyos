@@ -1,13 +1,15 @@
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { Constants } from '../Constants';
-import { DBCacheDiscard, DataType } from '../enum/Enums';
+import { CacheDiscard, DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTDBConfig } from './FTDBConfig';
 import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
 import { SDKRumResourceContextDTO, SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+import { FTCacheCoordinator } from './FTCacheCoordinator';
+import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse } from './FTDBTaskPoolExecutor';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -63,9 +65,9 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithDbSize: boolean;
-  dbLimitSize: number;
-  dbCacheDiscard: string;
+  enableLimitWithCacheSize: boolean;
+  cacheLimitSize: number;
+  cacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */
@@ -93,6 +95,8 @@ export interface FTDBTaskPoolWriteResult {
   dropped: number;
   duplicateSkipped: number;
   deletedOld: number;
+  /** UUIDs accepted by the DB transaction, used to keep FileStore in sync. */
+  acceptedUuids: string[];
   errorMessage: string;
 }
 
@@ -178,6 +182,7 @@ interface FTDBTaskPoolRequest {
   limit?: number;
   maxBytes?: number;
   newestFirst?: boolean;
+  afterId?: number;
   records?: SyncDataJSON[];
   options?: FTDBTaskPoolWriteOptions;
   policy?: FTDBTaskPoolCachePolicySnapshot;
@@ -274,11 +279,48 @@ enum FTDBTaskPoolCacheCategory {
   NONE = 'none'
 }
 export async function runFTDBTaskPoolExecute(contextObject: Object, requestObject: Object): Promise<Object> {
+  try {
+    return await FTCacheCoordinator.run(contextObject as Context, requestObject as CacheRequest,
+      async (request: CacheRequest): Promise<CacheResponse> => {
+        return await runFTSqliteTaskPoolExecute(contextObject, request as Object) as CacheResponse;
+      }) as Object;
+  } catch (error) {
+    return { ok: false, errorMessage: String(error) } as CacheResponse as Object;
+  }
+}
+
+export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestObject: Object): Promise<Object> {
   const context = contextObject as Context;
   const request = requestObject as FTDBTaskPoolRequest;
   try {
     const rdbStore = await openTaskPoolRdbStore(context);
     switch (request.command) {
+      case 'queryMigrationPage':
+        return { ok: true, rows: await querySyncDataInTaskPool(rdbStore, [], normalizeLimit(request.limit),
+          false, request.afterId || 0, true) } as FTDBTaskPoolResponse as Object;
+      case 'compactCacheIndex':
+        await rdbStore.executeSql('PRAGMA wal_checkpoint(TRUNCATE)');
+        await rdbStore.executeSql('VACUUM');
+        await rdbStore.executeSql('PRAGMA wal_checkpoint(TRUNCATE)');
+        return okResponse();
+      case 'deleteSyncUuids': {
+        const ids = request.ids || [];
+        if (ids.length === 0) { return okCountResponse(0); }
+        const predicate = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+        predicate.in(FTSQL.RECORD_COLUMN_DATA_UUID, ids);
+        return okCountResponse(await rdbStore.delete(predicate));
+      }
+      case 'exportRumState': {
+        const views: ViewBeanJSON[] = [];
+        const actions: ActionBeanJSON[] = [];
+        const vr = await rdbStore.query(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW));
+        try { if (vr.goToFirstRow()) { do { views.push(readViewFromResultSet(vr)); } while (vr.goToNextRow()); } }
+        finally { vr.close(); }
+        const ar = await rdbStore.query(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+        try { if (ar.goToFirstRow()) { do { actions.push(readActionFromResultSet(ar)); } while (ar.goToNextRow()); } }
+        finally { ar.close(); }
+        return { ok: true, views, actions } as FTDBTaskPoolResponse as Object;
+      }
       case FTDBTaskPoolCommand.INIT:
         return okResponse();
       case FTDBTaskPoolCommand.HAS_SYNC_DATA:
@@ -290,7 +332,8 @@ export async function runFTDBTaskPoolExecute(contextObject: Object, requestObjec
             rdbStore,
             request.dataTypes || [],
             normalizeLimit(request.limit),
-            request.newestFirst === true
+            request.newestFirst === true,
+            request.afterId === undefined ? -1 : Math.max(0, request.afterId)
           )
         } as FTDBTaskPoolResponse as Object;
       case FTDBTaskPoolCommand.QUERY_UPLOAD_DATA: {
@@ -589,9 +632,9 @@ function defaultWriteOptions(): FTDBTaskPoolWriteOptions {
 
 function defaultCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
   return {
-    enableLimitWithDbSize: false,
-    dbLimitSize: 0,
-    dbCacheDiscard: DBCacheDiscard.DISCARD,
+    enableLimitWithCacheSize: false,
+    cacheLimitSize: 0,
+    cacheDiscard: CacheDiscard.DISCARD,
     logLimitCount: 0,
     rumLimitCount: 0,
     logCount: 0,
@@ -633,6 +676,7 @@ function createWriteResult(source: string, requested: number): FTDBTaskPoolWrite
     dropped: 0,
     duplicateSkipped: 0,
     deletedOld: 0,
+    acceptedUuids: [],
     errorMessage: ''
   };
 }
@@ -766,10 +810,17 @@ async function querySyncDataInTaskPool(
   rdbStore: relationalStore.RdbStore,
   dataTypes: string[],
   limit: number,
-  newestFirst: boolean
+  newestFirst: boolean,
+  afterId: number = -1,
+  latestUuidOnly: boolean = false
 ): Promise<SyncDataJSON[]> {
   const predicates = buildTypePredicates(dataTypes);
-  if (newestFirst) {
+  if (afterId >= 0) {
+    if (afterId > 0) {
+      predicates.greaterThan(FTSQL.RECORD_COLUMN_ID, afterId);
+    }
+    predicates.orderByAsc(FTSQL.RECORD_COLUMN_ID);
+  } else if (newestFirst) {
     predicates.orderByDesc(FTSQL.RECORD_COLUMN_TM);
   } else {
     predicates.orderByAsc(FTSQL.RECORD_COLUMN_TM);
@@ -777,7 +828,11 @@ async function querySyncDataInTaskPool(
   predicates.limitAs(limit);
 
   const rows: SyncDataJSON[] = [];
-  const resultSet = await rdbStore.query(predicates, [
+  const resultSet = latestUuidOnly ? await rdbStore.querySql(
+    `SELECT * FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} WHERE ${FTSQL.RECORD_COLUMN_ID} > ?
+     AND ${FTSQL.RECORD_COLUMN_ID} IN (SELECT MAX(${FTSQL.RECORD_COLUMN_ID}) FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}
+     GROUP BY ${FTSQL.RECORD_COLUMN_DATA_UUID}) ORDER BY ${FTSQL.RECORD_COLUMN_ID} ASC LIMIT ?`, [afterId, limit]) :
+    await rdbStore.query(predicates, [
     FTSQL.RECORD_COLUMN_ID,
     FTSQL.RECORD_COLUMN_DATA_UUID,
     FTSQL.RECORD_COLUMN_DATA_TYPE,
@@ -919,14 +974,24 @@ async function getCurrentDbSizeInTaskPool(
 ): Promise<number> {
   const startTime = Date.now();
   const resultSet = await rdbStore.querySql("PRAGMA page_count");
+  let pageCount = 0;
   try {
     if (resultSet && resultSet.goToFirstRow()) {
-      const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
-      return pageCount * 4096;
+      pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
+    }
+  } finally {
+    resultSet?.close();
+  }
+
+  const pageSizeResultSet = await rdbStore.querySql("PRAGMA page_size");
+  try {
+    if (pageSizeResultSet && pageSizeResultSet.goToFirstRow()) {
+      const pageSize = pageSizeResultSet.getLong(pageSizeResultSet.getColumnIndex("page_size"));
+      return Math.max(0, pageCount) * Math.max(0, pageSize);
     }
     return 0;
   } finally {
-    resultSet?.close();
+    pageSizeResultSet?.close();
     timing.sizeCheckMs += Math.max(0, Date.now() - startTime);
   }
 }
@@ -1051,16 +1116,16 @@ async function resolveAllowedInsertCount(
   const dataTypes = category === FTDBTaskPoolCacheCategory.LOG ?
     [DataType.LOG.toString()] : [DataType.RUM_APP.toString(), DataType.RUM_WEBVIEW.toString()];
 
-  if (policy.enableLimitWithDbSize) {
+  if (policy.enableLimitWithCacheSize) {
     const currentSize = await getCurrentDbSizeInTaskPool(rdbStore, timing);
-    if (currentSize < Math.max(0, policy.dbLimitSize)) {
+    if (currentSize < Math.max(0, policy.cacheLimitSize)) {
       return requested;
     }
-    if (policy.dbCacheDiscard === DBCacheDiscard.DISCARD_OLDEST) {
+    if (policy.cacheDiscard === CacheDiscard.DISCARD_OLDEST) {
       const cleanupStart = Date.now();
       const deleted = await deleteOldestSyncDataInTaskPool(
         rdbStore,
-        dataTypes,
+        [],
         Constants.DB_OLD_CACHE_REMOVE_COUNT,
         timing
       );
@@ -1179,6 +1244,7 @@ async function insertPreparedSyncData(
     addInsertTime(timing, executeStart);
     if (Number(rowId) > 0) {
       result.inserted++;
+      addAcceptedRows(result, records, 1);
       if (countInserted) {
         addInsertedCountDelta(delta, records, 1);
       }
@@ -1199,6 +1265,7 @@ async function insertPreparedSyncData(
   addInsertTime(timing, executeStart);
   const insertedRows = Math.max(0, inserted);
   result.inserted += insertedRows;
+  addAcceptedRows(result, records, insertedRows);
   if (countInserted) {
     addInsertedCountDelta(delta, records, insertedRows);
   }
@@ -1236,6 +1303,7 @@ async function writeSyncDataBody(
       const updated = await updatePreparedSyncDataByUuid(rdbStore, upsertRows[i], timing);
       if (updated > 0) {
         result.updated += updated;
+        addAcceptedRows(result, [upsertRows[i]], 1);
       } else {
         rowsToInsert.push(upsertRows[i]);
       }
@@ -1280,6 +1348,16 @@ function deduplicateRowsForUpsert(
   return rows;
 }
 
+function addAcceptedRows(result: FTDBTaskPoolWriteResult, rows: SyncDataJSON[], count: number): void {
+  const accepted = Math.min(rows.length, Math.max(0, count));
+  for (let i = 0; i < accepted; i++) {
+    const uuid = rows[i].uuid;
+    if (uuid && uuid.length > 0) {
+      result.acceptedUuids.push(uuid);
+    }
+  }
+}
+
 async function writeSyncDataInTaskPool(
   rdbStore: relationalStore.RdbStore,
   source: string,
@@ -1320,6 +1398,7 @@ async function writeSyncDataInTaskPool(
     result.dropped = 0;
     result.duplicateSkipped = 0;
     result.deletedOld = 0;
+    result.acceptedUuids = [];
     // Cache deltas were computed inside the transaction and must not escape a rollback.
     delta.log = 0;
     delta.rum = 0;
@@ -2531,38 +2610,26 @@ async function cleanCloseActionDataInTaskPool(
 }
 
 async function cleanCloseViewDataInTaskPool(
-  rdbStore: relationalStore.RdbStore,
-  ids: string[],
-  now: number
+  rdbStore: relationalStore.RdbStore, ids: string[], now: number
 ): Promise<number> {
-  const staleViewThresholdMs = 5 * 60 * 1000;
-  let deleted = 0;
-  rdbStore.beginTransaction();
+  const candidates: string[] = [];
+  const result = await rdbStore.querySql(
+    `SELECT ${FTSQL.RUM_COLUMN_ID} FROM ${FTSQL.FT_TABLE_VIEW}
+     WHERE ${FTSQL.RUM_COLUMN_IS_CLOSE} = 1 AND ${FTSQL.RUM_DATA_UPLOAD_TIME} > 0
+     AND ${FTSQL.RUM_DATA_UPLOAD_TIME} >= ${FTSQL.RUM_DATA_UPDATE_TIME}
+     AND (${FTSQL.RUM_COLUMN_PENDING_RESOURCE} <= 0 OR ${FTSQL.RUM_DATA_UPDATE_TIME} <= ?)`,
+    [now - 5 * 60 * 1000]);
   try {
-    if (ids.length > 0) {
-      for (let i = 0; i < ids.length; i++) {
-        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-        predicates.equalTo(FTSQL.RUM_COLUMN_ID, ids[i]);
-        predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-        predicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-        deleted += await rdbStore.delete(predicates);
-      }
-    } else {
-      const normalPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-      normalPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-      normalPredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-      deleted += await rdbStore.delete(normalPredicates);
-
-      const stalePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-      stalePredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-      stalePredicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-      stalePredicates.lessThanOrEqualTo(FTSQL.RUM_DATA_UPDATE_TIME, now - staleViewThresholdMs);
-      deleted += await rdbStore.delete(stalePredicates);
+    if (result.goToFirstRow()) {
+      do { const id = result.getString(0); if (ids.length === 0 || ids.includes(id)) { candidates.push(id); } }
+      while (result.goToNextRow());
     }
-    rdbStore.commit();
-  } catch (error) {
-    rdbStore.rollBack();
-    throw new Error(String(error));
+  } finally { result.close(); }
+  let deleted = 0;
+  for (const id of candidates) {
+    const predicate = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+    predicate.equalTo(FTSQL.RUM_COLUMN_ID, id);
+    deleted += await rdbStore.delete(predicate);
   }
   return deleted;
 }

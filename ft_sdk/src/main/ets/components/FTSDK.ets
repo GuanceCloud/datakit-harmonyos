@@ -30,6 +30,9 @@ import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
+import { FTCacheContext } from "./db/FTCacheContext";
+import { FTDBTaskPoolExecutor } from "./db/FTDBTaskPoolExecutor";
+import { SyncData } from "./db/bean/SyncData";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
@@ -477,6 +480,20 @@ export class FTSDK {
 
     // Initialize sync task manager
     if (context) {
+      FTCacheContext.filesDir = context.filesDir;
+      FTCacheContext.context = context;
+      FTCacheContext.databaseDir = context.databaseDir;
+      FTCacheContext.settings = {
+        mode: config.isUseFileDataStore() ? 'file' : config.isFileDataStoreShadow() ? 'shadow' : 'sqlite',
+        limitEnabled: config.isLimitWithCacheSize(), capacity: config.getCacheLimit(),
+        discard: config.getCacheDiscard(), migrate: config.isNeedTransformOldCache(), directUpload: true
+      };
+      if (FTCacheContext.settings.mode !== 'sqlite') {
+        // Every subsequent storage command uses this same lane and recovery gate.
+        FTDBTaskPoolExecutor.init(context).catch((error: Error) => {
+          FTInnerLogger.e(TAG, `Cache startup recovery failed: ${error.message}`);
+        });
+      }
       FTInnerLogger.d(TAG, "Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
       const spoolManager = FTDBSpoolManager.getInstance();
@@ -1106,8 +1123,8 @@ export class FTSDK {
         return;
       }
 
-      await FTDBManager.getInstance(context).delete();
       await FTDBSpoolManager.getInstance().clear();
+      await FTDBManager.getInstance(context).delete();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {
@@ -1286,6 +1303,9 @@ export class FTSDK {
       }
     );
     FTSDK.remoteDataFilterManager = manager;
+    SyncTaskManager.getInstance().setRemoteDataFilterSyncHandler((): void => {
+      void manager.syncRemoteIfNeeded();
+    });
     const launchTracker = FTAppLaunchTracker.getInstance();
     const launchSnapshot = launchTracker.getSnapshot();
     if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
@@ -1335,6 +1355,7 @@ export class FTSDK {
       FTSDK.remoteDataFilterManager.close();
       FTSDK.remoteDataFilterManager = null;
     }
+    SyncTaskManager.getInstance().setRemoteDataFilterSyncHandler(null);
   }
 
   private static startRemoteConfigIfPossible(appId: string): void {

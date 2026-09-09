@@ -20,6 +20,7 @@ import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
 import { Constants } from '../Constants';
+import { FTCacheContext } from './FTCacheContext';
 import { Utils } from '../utils/Utils';
 
 const TAG = "FTDBManager";
@@ -54,6 +55,8 @@ export interface SyncDataWriteOptions {
   lastErrorTimeLine?: number;
   /** Replay must not recursively spool the same inflight batch on DB failure. */
   skipFailureFallback?: boolean;
+  /** FileStore recovery projects rows into SQLite without mirroring them back. */
+  skipFileDataStore?: boolean;
 }
 
 export interface SyncDataWriteFailureFallback {
@@ -165,6 +168,10 @@ export class FTDBManager extends DBManager {
    * Uses a promise-based lock to prevent concurrent initialization
    */
   public async init(): Promise<void> {
+    if (FTCacheContext.settings.mode === 'file') {
+      await FTDBTaskPoolExecutor.init(this.context);
+      return;
+    }
     // If already initializing, wait for the existing init to complete
     if (this.initPromise) {
       return await this.initPromise;
@@ -548,9 +555,9 @@ export class FTDBManager extends DBManager {
   private createTaskPoolCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
     const cachePolicy = FTDBCachePolicy.getInstance();
     return {
-      enableLimitWithDbSize: cachePolicy.isEnableLimitWithDbSize(),
-      dbLimitSize: cachePolicy.getDbLimitSize(),
-      dbCacheDiscard: cachePolicy.getDBCacheDiscard(),
+      enableLimitWithCacheSize: cachePolicy.isEnableLimitWithCacheSize(),
+      cacheLimitSize: cachePolicy.getCacheLimitSize(),
+      cacheDiscard: cachePolicy.getCacheDiscard(),
       logLimitCount: cachePolicy.getLogLimitCount(),
       rumLimitCount: cachePolicy.getRumLimitCount(),
       logCount: cachePolicy.getLogCount(),
@@ -649,15 +656,24 @@ export class FTDBManager extends DBManager {
   ): Promise<number> {
     const executeStartTime = Date.now();
     const resultSet = await rdbStore.querySql("PRAGMA page_count");
+    let pageCount = 0;
     try {
       if (resultSet && resultSet.goToFirstRow()) {
-        const pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
-        const pageSize = 4096;
-        return pageCount * pageSize;
+        pageCount = resultSet.getLong(resultSet.getColumnIndex("page_count"));
+      }
+    } finally {
+      resultSet?.close();
+    }
+
+    const pageSizeResultSet = await rdbStore.querySql("PRAGMA page_size");
+    try {
+      if (pageSizeResultSet && pageSizeResultSet.goToFirstRow()) {
+        const pageSize = pageSizeResultSet.getLong(pageSizeResultSet.getColumnIndex("page_size"));
+        return Math.max(0, pageCount) * Math.max(0, pageSize);
       }
       return 0;
     } finally {
-      resultSet?.close();
+      pageSizeResultSet?.close();
       this.addWriteExecuteTime(timing, executeStartTime);
     }
   }
@@ -760,7 +776,7 @@ export class FTDBManager extends DBManager {
 
       if (String(cachePolicy.getDBCacheDiscard()) === DBCacheDiscard.DISCARD_OLDEST) {
         this.addWriteComputeTime(timing, sizePolicyStartTime);
-        const deleted = await this.deleteOldestDataLocked(rdbStore, types, Constants.DB_OLD_CACHE_REMOVE_COUNT, timing);
+        const deleted = await this.deleteOldestDataLocked(rdbStore, [], Constants.DB_OLD_CACHE_REMOVE_COUNT, timing);
         const deletedPolicyStartTime = Date.now();
         result.deletedOld += deleted;
         this.addCacheCountDelta(countDelta, category, -deleted);
@@ -1075,10 +1091,11 @@ export class FTDBManager extends DBManager {
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const dataToWrite = this.filterTaskPoolDuplicates(dataList, reInsert, updateOrInsertByUuid, result);
+    const fileStoreRecords = this.toSyncDataJSONList(dataToWrite);
     if (FTDBManager.consumeForcedSyncDataWriteFailure()) {
       result.success = false;
       result.errorMessage = 'Forced sync-data DB write failure';
-      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+      await this.persistFailedSyncData(source, fileStoreRecords, options, result);
       return result;
     }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
@@ -1156,7 +1173,7 @@ export class FTDBManager extends DBManager {
     }
 
     if (!result.success) {
-      await this.persistFailedSyncData(source, this.toSyncDataJSONList(dataToWrite), options, result);
+      await this.persistFailedSyncData(source, fileStoreRecords, options, result);
     }
 
     return result;
@@ -1189,6 +1206,7 @@ export class FTDBManager extends DBManager {
     let dbLaneWaitTime = Math.max(0, options.dbLaneWaitMs || 0);
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
+    const fileStoreRecords = this.syncDraftsToSyncDataJSON(drafts, fallbackDataType);
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
 
     try {
@@ -1298,6 +1316,37 @@ export class FTDBManager extends DBManager {
       }
     }
     return rows;
+  }
+
+  private filterFileStoreRowsByUuids(records: SyncDataJSON[], acceptedUuids: string[]): SyncDataJSON[] {
+    const accepted: Set<string> = new Set<string>();
+    for (let i = 0; i < acceptedUuids.length; i++) {
+      if (acceptedUuids[i] && acceptedUuids[i].length > 0) {
+        accepted.add(acceptedUuids[i]);
+      }
+    }
+    const filtered: SyncDataJSON[] = [];
+    for (let i = 0; i < records.length; i++) {
+      if (accepted.has(records[i].uuid)) {
+        filtered.push(records[i]);
+      }
+    }
+    return filtered;
+  }
+
+  private collectUnacceptedFileStoreUuids(records: SyncDataJSON[], acceptedRows: SyncDataJSON[]): string[] {
+    const accepted: Set<string> = new Set<string>();
+    for (let i = 0; i < acceptedRows.length; i++) {
+      accepted.add(acceptedRows[i].uuid);
+    }
+    const rejected: string[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const uuid = records[i].uuid;
+      if (uuid && !accepted.has(uuid)) {
+        rejected.push(uuid);
+      }
+    }
+    return rejected;
   }
 
   private syncDraftsToSyncDataJSON(

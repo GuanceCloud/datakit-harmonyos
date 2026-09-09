@@ -15,6 +15,7 @@ import {
 import { Constants } from '../../main/ets/components/Constants';
 import {
   DataType,
+  CacheDiscard,
   DBCacheDiscard,
   DetectFrequency,
   EnvType,
@@ -50,8 +51,8 @@ import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
-import { FTViewNavigationTrackingHandler } from '../../main/ets/components/rum/handler/FTViewNavigationTrackingHandler';
-import { FTViewRouterTrackingHandler } from '../../main/ets/components/rum/handler/FTViewRouterTrackingHandler';
+import { FTViewTrackingHandler } from '../../main/ets/components/rum/handler/FTViewTrackingHandler';
+import { FTViewTrackingType } from '../../main/ets/components/rum/enum/FTViewTrackingType';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
@@ -63,6 +64,18 @@ class TestConfigRecord implements ConfigRecord {
 
   constructor(config: FTSDKConfig) {
     this.config = config;
+  }
+
+  isLimitWithCacheSize(): boolean {
+    return this.config.isLimitWithCacheSize();
+  }
+
+  getCacheLimit(): number {
+    return this.config.getCacheLimit();
+  }
+
+  getCacheDiscard(): string {
+    return this.config.getCacheDiscard();
   }
 
   isLimitWithDbSize(): boolean {
@@ -459,21 +472,39 @@ export default function configUnitTest() {
       expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);
     });
 
-    it('rumConfigStoreAutoViewTrackingHandlers', 0, () => {
-      const routerHandler = new TestViewRouterTrackingHandler();
-      const navigationHandler = new TestViewNavigationTrackingHandler();
+    it('rumConfigShouldStoreAutomaticViewTrackingHandlersByType', 0, () => {
+      const routerHandler: FTViewTrackingHandler = {
+        resolveHandlerView: (routeName: string): HandlerView | null => {
+          return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
+        }
+      };
+      const navigationHandler: FTViewTrackingHandler = {
+        resolveHandlerView: (destinationName: string): HandlerView | null => {
+          return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
+        }
+      };
       const rumConfig = new FTRUMConfig()
-        .setViewRouterTrackingHandler(routerHandler)
-        .setViewNavigationTrackingHandler(navigationHandler);
+        .setViewTrackingHandler(routerHandler, FTViewTrackingType.ROUTER)
+        .setViewTrackingHandler(navigationHandler, FTViewTrackingType.NAVIGATION);
 
-      expect(rumConfig.getViewRouterTrackingHandler() === routerHandler).assertTrue();
-      expect(rumConfig.getViewNavigationTrackingHandler() === navigationHandler).assertTrue();
-      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('Home')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER) === routerHandler).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION) === navigationHandler).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === null).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('Home')?.getViewName() ?? '')
         .assertEqual('router_Home');
-      expect(rumConfig.getViewRouterTrackingHandler()?.resolveHandlerView('IgnoredRoute') === null).assertTrue();
-      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('Detail')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('IgnoredRoute') === null)
+        .assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('Detail')?.getViewName() ?? '')
         .assertEqual('navigation_Detail');
-      expect(rumConfig.getViewNavigationTrackingHandler()?.resolveHandlerView('IgnoredDestination') === null).assertTrue();
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('IgnoredDestination') === null)
+        .assertTrue();
+
+      const allHandler: FTViewTrackingHandler = {
+        resolveHandlerView: (viewName: string): HandlerView | null => new HandlerView(`all_${viewName}`)
+      };
+      const allConfig = new FTRUMConfig()
+        .setViewTrackingHandler(allHandler, FTViewTrackingType.ALL);
+      expect(allConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === allHandler).assertTrue();
     });
 
     it('sdkConfigShouldStoreCacheOptions', 0, () => {
@@ -495,6 +526,34 @@ export default function configUnitTest() {
         .setDbCacheLimit(1);
       expect(legacyLimitConfig.isLimitWithDbSize()).assertTrue();
       expect(legacyLimitConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+
+      const cacheConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableLimitWithCacheSize(1)
+        .setCacheDiscard(CacheDiscard.DISCARD_OLDEST);
+      expect(cacheConfig.isLimitWithCacheSize()).assertTrue();
+      expect(cacheConfig.getCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cacheConfig.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
+      // Legacy readers expose exactly the same configured state.
+      expect(cacheConfig.isLimitWithDbSize()).assertTrue();
+      expect(cacheConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cacheConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
+
+      const filePrimaryConfig = FTSDKConfig.builder(TEST_FAKE_URL).enableFileDataStore();
+      expect(filePrimaryConfig.isFileDataStoreEnabled()).assertTrue();
+      expect(filePrimaryConfig.isUseFileDataStore()).assertTrue();
+      expect(filePrimaryConfig.isFileDataStoreShadow()).assertFalse();
+
+      const fileShadowConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .setUseFileDataStore(false)
+        .setFileDataStoreShadow(true);
+      expect(fileShadowConfig.isFileDataStoreEnabled()).assertTrue();
+      expect(fileShadowConfig.isUseFileDataStore()).assertFalse();
+      expect(fileShadowConfig.isFileDataStoreShadow()).assertTrue();
+
+      const migrationConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableFileDataStore()
+        .setNeedTransformOldCache(true);
+      expect(migrationConfig.isNeedTransformOldCache()).assertTrue();
     });
 
     it('sdkOptionsShouldApplyToManagers', 0, () => {

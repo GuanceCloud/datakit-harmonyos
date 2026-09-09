@@ -1,5 +1,5 @@
 import { Constants } from "./Constants";
-import { DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
+import { CacheDiscard, DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
 import { Status } from "./bean/Status";
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
@@ -7,8 +7,8 @@ import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
 import { FTTraceHeaderHandler } from "./trace/FTTraceHeaderHandler";
 import { DataModifier, LineDataModifier } from "./DataModifier";
 import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
-import { FTViewRouterTrackingHandler } from "./rum/handler/FTViewRouterTrackingHandler";
-import { FTViewNavigationTrackingHandler } from "./rum/handler/FTViewNavigationTrackingHandler";
+import { FTViewTrackingHandler } from "./rum/handler/FTViewTrackingHandler";
+import { FTViewTrackingType } from "./rum/enum/FTViewTrackingType";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
@@ -92,8 +92,8 @@ export class FTRUMConfig {
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
-  private viewRouterTrackingHandler: FTViewRouterTrackingHandler | null = null;
-  private viewNavigationTrackingHandler: FTViewNavigationTrackingHandler | null = null;
+  private viewRouterTrackingHandler: FTViewTrackingHandler | null = null;
+  private viewNavigationTrackingHandler: FTViewTrackingHandler | null = null;
   private rumCacheLimitCount: number = Constants.DEFAULT_DB_RUM_CACHE_NUM;
   private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
@@ -308,45 +308,55 @@ export class FTRUMConfig {
   }
 
   /**
-   * Get the Router page View tracking handler.
+   * Customize automatic Router page and Navigation destination View collection.
    *
-   * A configured handler can rename an automatic Router View and attach custom
-   * properties. Returning null from the handler skips the route entirely.
-   */
-  public getViewRouterTrackingHandler(): FTViewRouterTrackingHandler | null {
-    return this.viewRouterTrackingHandler;
-  }
-
-  /**
-   * Customize automatic Router page View collection.
+   * Requires setEnableTraceUserView(true). The target controls whether the
+   * handler applies to Router pages, Navigation destinations, or both. When
+   * the handler is null, the selected target keeps the default final-route-
+   * segment View name.
    *
-   * Requires setEnableTraceUserView(true). When the handler is null, Router
-   * pages keep the default final-route-segment View name.
+   * @param handler Handler used to rename, enrich, or filter automatic Views.
+   * @param type Automatic View source to configure. Defaults to ALL.
+   * @returns FTRUMConfig instance for method chaining.
    */
-  public setViewRouterTrackingHandler(handler: FTViewRouterTrackingHandler | null): FTRUMConfig {
-    this.viewRouterTrackingHandler = handler;
+  public setViewTrackingHandler(
+    handler: FTViewTrackingHandler | null,
+    type: FTViewTrackingType = FTViewTrackingType.ALL
+  ): FTRUMConfig {
+    switch (type) {
+      case FTViewTrackingType.ROUTER:
+        this.viewRouterTrackingHandler = handler;
+        break;
+      case FTViewTrackingType.NAVIGATION:
+        this.viewNavigationTrackingHandler = handler;
+        break;
+      case FTViewTrackingType.ALL:
+        this.viewRouterTrackingHandler = handler;
+        this.viewNavigationTrackingHandler = handler;
+        break;
+    }
     return this;
   }
 
   /**
-   * Get the Navigation destination View tracking handler.
+   * Get the handler configured for an automatic View source.
    *
-   * A configured handler can rename an automatic Navigation View and attach
-   * custom properties. Returning null from the handler skips the destination.
+   * For ALL, returns the common handler only when Router and Navigation use
+   * the same instance. It returns null when the two targets are configured
+   * independently.
    */
-  public getViewNavigationTrackingHandler(): FTViewNavigationTrackingHandler | null {
-    return this.viewNavigationTrackingHandler;
-  }
-
-  /**
-   * Customize automatic Navigation destination View collection.
-   *
-   * Requires setEnableTraceUserView(true). When the handler is null,
-   * destinations keep the default final-route-segment View name.
-   */
-  public setViewNavigationTrackingHandler(handler: FTViewNavigationTrackingHandler | null): FTRUMConfig {
-    this.viewNavigationTrackingHandler = handler;
-    return this;
+  public getViewTrackingHandler(type: FTViewTrackingType): FTViewTrackingHandler | null {
+    switch (type) {
+      case FTViewTrackingType.ROUTER:
+        return this.viewRouterTrackingHandler;
+      case FTViewTrackingType.NAVIGATION:
+        return this.viewNavigationTrackingHandler;
+      case FTViewTrackingType.ALL:
+        return this.viewRouterTrackingHandler === this.viewNavigationTrackingHandler
+          ? this.viewRouterTrackingHandler
+          : null;
+    }
+    return null;
   }
 
   /**
@@ -764,10 +774,16 @@ export class FTSDKConfig {
   private mEnableDataIntegerCompatible: boolean = false;
 
 
-  // Cache limit configurations
-  private dbCacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
-  private limitWithDbSize: boolean = false;
-  private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
+  // SDK-wide telemetry cache limit configurations. The legacy `db*` API is
+  // retained below as aliases so existing integrations keep their behavior.
+  private cacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
+  private limitWithCacheSize: boolean = false;
+  private cacheDiscard: string = CacheDiscard.DISCARD;
+  // FileStore is opt-in. Shadow mode keeps SQLite as the read/upload index
+  // while mirroring accepted telemetry to FileStore for migration validation.
+  private fileDataStoreEnabled: boolean = false;
+  private useFileDataStore: boolean = false;
+  private fileDataStoreShadow: boolean = false;
   private logCacheDiscard: string = LogCacheDiscard.DISCARD;
   private enableInnerLogFile: boolean = false;
   private innerLogFileConfig: FTInnerLogFileConfig = {};
@@ -1269,24 +1285,102 @@ export class FTSDKConfig {
   }
 
   /**
-   * Enable database size limit.
-   * Default limit is 100MB. When dbSize is provided, the minimum is 30MB.
-   * When enabled, the database size policy takes priority over the log/RUM count limits
-   * configured by FTLoggerConfig.setLogCacheLimitCount(...) and FTRUMConfig.setRumCacheLimitCount(...).
+   * Enable the SDK-wide telemetry cache byte limit.
+   *
+   * The default is 100MB and a custom value is clamped to 30MB. When this is
+   * enabled, log and RUM record-count limits are not used for admission.
+   */
+  enableLimitWithCacheSize(cacheSize?: number): FTSDKConfig {
+    if (cacheSize !== undefined) {
+      this.cacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, cacheSize);
+    }
+    this.limitWithCacheSize = true;
+    return this;
+  }
+
+  /** Whether the SDK-wide telemetry cache byte limit is enabled. */
+  isLimitWithCacheSize(): boolean {
+    return this.limitWithCacheSize;
+  }
+
+  /** Get the SDK-wide telemetry cache byte limit. */
+  getCacheLimit(): number {
+    return this.cacheLimit;
+  }
+
+  /** Get the strategy applied when the SDK-wide cache limit is reached. */
+  getCacheDiscard(): string {
+    return this.cacheDiscard;
+  }
+
+  /**
+   * Set the strategy applied when the SDK-wide cache limit is reached.
+   * `DISCARD` rejects new telemetry and `DISCARD_OLDEST` makes room by
+   * evicting the oldest pending telemetry first.
+   */
+  setCacheDiscard(strategy: string | CacheDiscard): FTSDKConfig {
+    this.cacheDiscard = String(strategy) === CacheDiscard.DISCARD_OLDEST ?
+      CacheDiscard.DISCARD_OLDEST : CacheDiscard.DISCARD;
+    return this;
+  }
+
+  /**
+   * Enable FileStore as the primary durable telemetry cache.
+   * SQLite remains an upload index during the staged migration so existing
+   * upload and filtering behavior remains compatible.
+   */
+  enableFileDataStore(): FTSDKConfig {
+    this.fileDataStoreEnabled = true;
+    this.useFileDataStore = true;
+    return this;
+  }
+
+  /** Select FileStore (`true`) or SQLite (`false`) as the durable cache mode. */
+  setUseFileDataStore(useFileDataStore: boolean): FTSDKConfig {
+    this.fileDataStoreEnabled = this.fileDataStoreEnabled || useFileDataStore;
+    this.useFileDataStore = useFileDataStore;
+    return this;
+  }
+
+  /** Whether FileStore is enabled for primary or shadow persistence. */
+  isFileDataStoreEnabled(): boolean {
+    return this.fileDataStoreEnabled || this.fileDataStoreShadow;
+  }
+
+  /** Whether FileStore is the primary durable cache. */
+  isUseFileDataStore(): boolean {
+    return this.useFileDataStore;
+  }
+
+  /**
+   * Mirror SQLite-accepted telemetry to FileStore without changing the
+   * read/upload path. This is intended for a safe staged migration.
+   */
+  setFileDataStoreShadow(enabled: boolean): FTSDKConfig {
+    this.fileDataStoreShadow = enabled;
+    if (enabled) {
+      this.fileDataStoreEnabled = true;
+    }
+    return this;
+  }
+
+  /** Whether SQLite writes are mirrored to FileStore. */
+  isFileDataStoreShadow(): boolean {
+    return this.fileDataStoreShadow;
+  }
+
+  /**
+   * @deprecated Use enableLimitWithCacheSize(cacheSize).
    */
   enableLimitWithDbSize(dbSize?: number): FTSDKConfig {
-    if (dbSize !== undefined) {
-      this.dbCacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, dbSize);
-    }
-    this.limitWithDbSize = true;
-    return this;
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
    * Set database cache limit with custom size.
    */
   setDbCacheLimit(dbSize: number): FTSDKConfig {
-    return this.enableLimitWithDbSize(dbSize);
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
@@ -1294,7 +1388,7 @@ export class FTSDKConfig {
    * @deprecated Kept for old DB cache compatibility.
    */
   isLimitWithDbSize(): boolean {
-    return this.limitWithDbSize;
+    return this.isLimitWithCacheSize();
   }
 
   /**
@@ -1302,22 +1396,21 @@ export class FTSDKConfig {
    * @deprecated Kept for old DB cache compatibility.
    */
   getDbCacheLimit(): number {
-    return this.dbCacheLimit;
+    return this.getCacheLimit();
   }
 
   /**
    * Get database cache discard strategy
    */
   getDBCacheDiscard(): string {
-    return this.dbCacheDiscard;
+    return this.getCacheDiscard();
   }
 
   /**
    * Set database cache discard strategy
    */
   setDbCacheDiscard(strategy: string | DBCacheDiscard): FTSDKConfig {
-    this.dbCacheDiscard = String(strategy);
-    return this;
+    return this.setCacheDiscard(String(strategy));
   }
 }
 

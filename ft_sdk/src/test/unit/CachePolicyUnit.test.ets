@@ -2,7 +2,7 @@ import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context } from '@kit.AbilityKit';
 import { FTSDKConfig } from '../../main/ets/components/Configs';
 import { FTDBCachePolicy } from '../../main/ets/components/db/FTDBCachePolicy';
-import { DataType, DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../../main/ets/components/enum/Enums';
+import { CacheDiscard, DataType, DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../../main/ets/components/enum/Enums';
 import { Constants } from '../../main/ets/components/Constants';
 import { ConfigRecord } from '../../main/ets/components/SyncTaskManager';
 import { DbInternalTestAccess } from '../../main/ets/components/internal/testaccess/DbInternalTestAccess';
@@ -15,6 +15,18 @@ class TestConfigRecord implements ConfigRecord {
 
   constructor(config: FTSDKConfig) {
     this.config = config;
+  }
+
+  isLimitWithCacheSize(): boolean {
+    return this.config.isLimitWithCacheSize();
+  }
+
+  getCacheLimit(): number {
+    return this.config.getCacheLimit();
+  }
+
+  getCacheDiscard(): string {
+    return this.config.getCacheDiscard();
   }
 
   isLimitWithDbSize(): boolean {
@@ -202,7 +214,20 @@ export default function cachePolicyUnitTest() {
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(5);
       expect(runtime.dbTaskPool.deleteCount).assertEqual(1);
       expect(runtime.dbTaskPool.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
-      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual(DataType.LOG.toString());
+      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual('');
+    });
+
+    it('cacheSizePolicyShouldUseUnifiedCacheConfiguration', 0, () => {
+      const cachePolicy = FTDBCachePolicy.getInstance();
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .enableLimitWithCacheSize(Constants.MINI_CACHE_LIMIT_SIZE)
+        .setCacheDiscard(CacheDiscard.DISCARD_OLDEST);
+
+      cachePolicy.initSDKParams(new TestConfigRecord(config));
+
+      expect(cachePolicy.isEnableLimitWithCacheSize()).assertTrue();
+      expect(cachePolicy.getCacheLimitSize()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cachePolicy.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
     });
 
     it('cachePolicyShouldIgnoreCountUpdates', 0, () => {
@@ -314,7 +339,7 @@ export default function cachePolicyUnitTest() {
 
       expect(await cachePolicy.optLogCachePolicy(context, 5)).assertEqual(5);
       expect(runtime.dbTaskPool.lastDeleteLimit).assertEqual(Constants.DB_OLD_CACHE_REMOVE_COUNT);
-      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual(DataType.LOG.toString());
+      expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual('');
 
       const discardConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .setDbCacheLimit(4096)
