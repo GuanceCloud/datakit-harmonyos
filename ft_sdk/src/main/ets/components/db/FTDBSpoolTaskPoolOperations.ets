@@ -193,6 +193,8 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   await ensureSpoolDirectory(request.spoolDir);
   await removeEmptyFile(request.inflightPath);
   if (!(await pathExists(request.inflightPath))) {
+    // A fresh batch must never reuse the token of an already-acknowledged batch.
+    FTCacheFiles.remove(`${request.spoolDir}/inflight-token.json`);
     if (await pathExists(request.legacyPath)) {
       await fileIo.rename(request.legacyPath, request.inflightPath);
     } else if (await pathExists(request.activePath)) {
@@ -218,7 +220,7 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   response.nextByteOffset = parseResult.nextByteOffset;
   response.inflightBytes = parseResult.fileSize;
   response.hasMoreRecords = response.nextByteOffset < parseResult.fileSize;
-  response.batchToken = await getFileToken(request.inflightPath);
+  response.batchToken = await getFileToken(request.inflightPath, true);
   response.pendingRecordsKnown = false;
   response.pendingBytes = await countAllPendingBytes(request);
   response.capacityBytes = FT_DB_SPOOL_MAX_BYTES;
@@ -249,6 +251,7 @@ async function clearSpoolFiles(request: FTDBSpoolTaskPoolRequest): Promise<Objec
   await deleteFileIfExists(request.inflightPath);
   await deleteFileIfExists(request.legacyPath);
   FTCacheFiles.remove(`${request.spoolDir}/corrupt.json`);
+  FTCacheFiles.remove(`${request.spoolDir}/inflight-token.json`);
   return createSuccessResponse() as Object;
 }
 
@@ -625,9 +628,14 @@ function countFileRecords(path: string): number {
   }
 }
 
-async function getFileToken(path: string): Promise<string> {
-  const stat = await fileIo.stat(path);
-  return `${stat.size}:${stat.mtime}`;
+async function getFileToken(path: string, create: boolean = false): Promise<string> {
+  const tokenPath = `${path.substring(0, path.lastIndexOf('/'))}/inflight-token.json`;
+  let token = FTCacheFiles.read(tokenPath);
+  if (token === null && create) {
+    token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    FTCacheFiles.atomicWrite(tokenPath, token);
+  }
+  return token || '';
 }
 
 async function ensureSpoolDirectory(path: string): Promise<void> {

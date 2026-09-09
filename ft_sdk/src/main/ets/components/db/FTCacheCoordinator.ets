@@ -25,14 +25,20 @@ export class FTCacheCoordinator {
       if (request.command === 'getCacheStatus') { return { ok: true, strings: [JSON.stringify(store.status())] }; }
       if (settings.mode === 'shadow') { return await FTCacheCoordinator.shadow(store, request, sqlite); }
       await FTCacheCoordinator.migrate(store, context, sqlite);
-      if (store.read('meta', 'clearing') !== null) {
+      if (settings.directUpload && store.read('meta', 'sqliteReleased') === null) {
+        // Reclaim the old payload pages before opening the file-only lane; interruption safely retries.
         await FTCacheCoordinator.checked(sqlite, { command: 'deleteAll' });
+        await FTCacheCoordinator.checked(sqlite, { command: 'compactCacheIndex' });
+        FTCacheFiles.atomicWrite(store.path('meta', 'sqliteReleased'), 'true');
+      }
+      if (store.read('meta', 'clearing') !== null) {
+        if (!settings.directUpload) { await FTCacheCoordinator.checked(sqlite, { command: 'deleteAll' }); }
         FTCacheCoordinator.clearSpool(context);
         store.finishClear();
       }
       if (request.command === 'deleteAll') {
         FTCacheFiles.atomicWrite(store.path('meta', 'clearing'), 'true');
-        await FTCacheCoordinator.checked(sqlite, request);
+        if (!settings.directUpload) { await FTCacheCoordinator.checked(sqlite, request); }
         FTCacheCoordinator.clearSpool(context);
       }
       // Compatibility mode retains SQLite's query index; file payloads and commits are authoritative.
@@ -91,6 +97,14 @@ export class FTCacheCoordinator {
     const target = new FTCacheFileStore(context, copySettings, sqlite);
     if (state.state === 'copying') {
       if (!state.legacyDone) {
+        // A shadow is never a migration source: SQLite may already have ACKed its stale records.
+        if (store.read('meta', 'shadowSource') !== null || store.read('meta', 'shadowDirty') !== null) {
+          for (const kind of ['sync', 'view', 'action', 'lease']) {
+            for (const id of store.list(kind)) { FTCacheFiles.remove(store.path(kind, id)); }
+          }
+          FTCacheFiles.remove(store.path('meta', 'shadowSource'));
+          FTCacheFiles.remove(store.path('meta', 'shadowDirty'));
+        }
         await FTCacheCoordinator.copyLegacy(target, context);
         state.legacyDone = true; FTCacheFiles.atomicWrite(path, JSON.stringify(state));
       }
@@ -202,6 +216,14 @@ export class FTCacheCoordinator {
 
   private static async shadow(store: FTCacheFileStore, request: FTDBTaskPoolRequest,
     sqlite: FTSqliteRunner): Promise<FTDBTaskPoolResponse> {
+    if (store.read('meta', 'migration') !== null) {
+      if (store.list('sync').length + store.list('view').length + store.list('action').length > 0) {
+        throw new Error('CACHE_MODE_SWITCH_REQUIRES_DRAIN: file cache must be empty before shadow mode');
+      }
+      FTCacheFiles.remove(store.path('meta', 'migration'));
+      FTCacheFiles.remove(store.path('meta', 'sqliteReleased'));
+    }
+    FTCacheFiles.atomicWrite(store.path('meta', 'shadowSource'), 'true');
     const dirty = store.path('meta', 'shadowDirty');
     FTCacheFiles.atomicWrite(dirty, 'true');
     const response = await FTCacheCoordinator.checked(sqlite, request);

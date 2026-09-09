@@ -257,7 +257,7 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 ## Cache Governance and FileStore Migration
 
-The default cache remains SQLite with the existing per-type record-count limits. Enable a byte limit when one shared cache budget is preferred. `DISCARD` preserves existing pending data and rejects new data at the limit; `DISCARD_OLDEST` removes the oldest pending records first.
+The default cache remains SQLite with the existing per-type record-count limits and legacy database-size-limit behavior. In primary FileStore mode, enabling a byte limit applies the shared physical-byte account described below. `DISCARD` preserves existing pending data and rejects new data at the limit; `DISCARD_OLDEST` evicts eligible old records.
 
 ```ts
 import { CacheDiscard, FTSDKConfig } from '@guancecloud/ft_sdk/Index'
@@ -277,7 +277,7 @@ const shadowConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
   .setFileDataStoreShadow(true)
 ```
 
-After validating shadow data, enable FileStore as the primary durable store. SQLite remains a compatible upload index and is rebuilt from FileStore at startup when necessary. To copy an existing SQLite pending queue on the first FileStore launch, explicitly opt in to the one-time migration.
+After validating shadow data, enable FileStore as the primary durable store. Queries, upload pages and ACK/retry commits then operate directly on files; SQLite is not required after source reclamation completes. Existing SQLite payloads are cleared and their pages reclaimed once after the verified switch, including upgrades from the compatibility upload-index implementation. To copy an existing SQLite pending queue on the first FileStore launch, explicitly opt in to migration.
 
 ```ts
 const fileStoreConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
@@ -290,6 +290,8 @@ Migration uses durable `copying → verified → switched → completed` checkpo
 In primary file mode, one physical-byte account covers payload/aggregate files, SQLite and its WAL/SHM files, legacy files, the failure spool, transaction/temp files and bounded quarantine. A 1 MiB recovery reserve and temporary-write headroom reduce usable payload capacity. `DISCARD_OLDEST` evicts unleased logs first (oldest timestamp, then ID), followed by other sync records; live View/Action state and in-flight upload versions are not silently evicted. If only protected data remains, new data is rejected. Lowering a limit below existing protected/control data reports pressure and rejects growth; it cannot make those bytes disappear.
 
 Writes and upload commits use checksummed envelopes, fsync, rename and a forward-recovery journal. Stale ACKs do not delete a newer version of the same UUID. Network delivery remains at-least-once: if the server accepted a request before the client committed its ACK, that UUID can be sent again. `FTSDK.clearAllData()` clears persisted aggregates, sync payloads and the failure spool; stop producers before a manual empty-cache check.
+
+Upload selection retains only page-sized candidate metadata plus the selected payloads; it does not load or rewrite the entire queue for an ACK. A record exceeding the configured upload-page byte limit is moved to the bounded quarantine and counted as rejected so it cannot block later valid records. Expired/orphaned upload leases are reclaimed. Directory enumeration and checksummed record scanning are still linear in the number of cached files; benchmark device latency separately from payload-memory bounds.
 
 The demo's **Inspect Unified Cache** button exposes the physical account and recovery status; these diagnostics are internal, not supported package APIs. Device acceptance must separately verify real power-loss recovery, cross-process locking and server-side delivery.
 

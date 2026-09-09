@@ -17,6 +17,8 @@ export interface FTCacheUsage {
 
 export interface FTCacheStatus {
   mode: string;
+  directUpload: boolean;
+  sqliteReleased: boolean;
   usage: FTCacheUsage;
   migration: string;
   syncCount: number;

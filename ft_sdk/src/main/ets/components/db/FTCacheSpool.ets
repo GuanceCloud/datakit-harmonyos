@@ -3,11 +3,9 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { FTCacheFiles } from './FTCacheFiles';
 import { FTCacheFileStore } from './FTCacheFileStore';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecutor';
-import { FTDBSpoolTaskPoolRequest, FTDBSpoolTaskPoolResponse } from './FTDBSpoolTaskPoolExecutor';
+import { FTDBSpoolTaskPoolRequest } from './FTDBSpoolTaskPoolExecutor';
 import { runFTDBSpoolTaskPoolExecute } from './FTDBSpoolTaskPoolOperations';
 import { runFTSqliteTaskPoolExecute } from './FTDBTaskPoolOperations';
-
-interface FTCacheLocation { filesDir: string; databaseDir: string; }
 
 /** Spool shares both the process lane and the cross-process directory lock. */
 export async function runFTCacheSpool(object: Object, contextObject: Object): Promise<Object> {

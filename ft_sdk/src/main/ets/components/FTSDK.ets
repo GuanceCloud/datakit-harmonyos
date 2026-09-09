@@ -31,6 +31,7 @@ import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
 import { FTCacheContext } from "./db/FTCacheContext";
+import { FTDBTaskPoolExecutor } from "./db/FTDBTaskPoolExecutor";
 import { SyncData } from "./db/bean/SyncData";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
@@ -482,8 +483,14 @@ export class FTSDK {
       FTCacheContext.settings = {
         mode: config.isUseFileDataStore() ? 'file' : config.isFileDataStoreShadow() ? 'shadow' : 'sqlite',
         limitEnabled: config.isLimitWithCacheSize(), capacity: config.getCacheLimit(),
-        discard: config.getCacheDiscard(), migrate: config.isNeedTransformOldCache(), directUpload: false
+        discard: config.getCacheDiscard(), migrate: config.isNeedTransformOldCache(), directUpload: true
       };
+      if (FTCacheContext.settings.mode !== 'sqlite') {
+        // Every subsequent storage command uses this same lane and recovery gate.
+        FTDBTaskPoolExecutor.init(context).catch((error: Error) => {
+          FTInnerLogger.e(TAG, `Cache startup recovery failed: ${error.message}`);
+        });
+      }
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
       const spoolManager = FTDBSpoolManager.getInstance();

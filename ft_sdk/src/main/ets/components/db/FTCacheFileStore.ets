@@ -14,6 +14,7 @@ export type FTSqliteRunner = (request: FTDBTaskPoolRequest) => Promise<FTDBTaskP
 interface FTCacheLease { digest: string; expires: number; }
 interface FTCacheProjection { requests: FTDBTaskPoolRequest[]; }
 interface FTCacheCounters { evicted: number; rejected: number; corrupt: number; }
+interface FTUploadCandidate { uuid: string; id: number; time: number; bytes: number; }
 
 /** Authoritative file payloads and aggregates. Caller owns the directory lock. */
 export class FTCacheFileStore implements FTRumStoreAccess {
@@ -66,13 +67,23 @@ export class FTCacheFileStore implements FTRumStoreAccess {
   async recover(): Promise<void> {
     FTCacheFiles.recover(this.root);
     await this.repairProjection();
+    for (const id of this.list('lease')) {
+      const body = this.read('lease', id);
+      const lease = body ? JSON.parse(body) as FTCacheLease : null;
+      if (!lease || lease.expires <= Date.now() || !FTCacheFiles.exists(this.path('sync', id))) {
+        FTCacheFiles.remove(this.path('lease', id));
+      }
+    }
   }
 
   status(): FTCacheStatus {
+    const oldestUuids = this.query({ command: 'querySyncData', limit: 5 }).map((r: SyncDataJSON) => r.uuid);
     const counters = JSON.parse(this.read('meta', 'counters') || '{"evicted":0,"rejected":0,"corrupt":0}') as FTCacheCounters;
-    return { mode: this.settings.mode, usage: this.ledger.usage(), migration: this.read('meta', 'migration') || 'not-started',
+    return { mode: this.settings.mode, directUpload: this.settings.mode === 'file' && this.settings.directUpload,
+      sqliteReleased: this.read('meta', 'sqliteReleased') === 'true',
+      usage: this.ledger.usage(), migration: this.read('meta', 'migration') || 'not-started',
       syncCount: this.list('sync').length, viewCount: this.list('view').length, actionCount: this.list('action').length,
-      oldestUuids: this.query({ command: 'querySyncData', limit: 5 }).map((r: SyncDataJSON) => r.uuid),
+      oldestUuids,
       evicted: counters.evicted, rejected: counters.rejected, corrupt: counters.corrupt,
       projectionPending: this.read('meta', 'projection') !== null,
       shadowHealthy: this.read('meta', 'shadowDirty') === null };
@@ -105,16 +116,17 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     return true;
   }
 
-  private async evictOne(): Promise<boolean> {
+  private async evictOne(types: string[] = []): Promise<boolean> {
     let oldest: SyncDataJSON | null = null;
     for (const id of this.list('sync')) {
       const row = this.sync(id);
-      if (!row || this.protectedUuids.has(row.uuid) || this.leased(row)) { continue; }
+      if (!row || !this.matches(row, types) || this.protectedUuids.has(row.uuid) || this.leased(row)) { continue; }
       if (oldest === null || (this.type(row) === 'log' && this.type(oldest) !== 'log') ||
         ((this.type(row) === 'log') === (this.type(oldest) === 'log') && this.compare(row, oldest) < 0)) { oldest = row; }
     }
     if (oldest === null) { return false; }
-    const changes: FTCacheMutation[] = [{ path: this.path('sync', oldest.uuid), body: null }];
+    const changes: FTCacheMutation[] = [{ path: this.path('sync', oldest.uuid), body: null },
+      { path: this.path('lease', oldest.uuid), body: null }];
     if (!this.settings.directUpload && this.settings.mode === 'file') {
       this.projection(changes, [{ command: 'deleteSyncUuids', ids: [oldest.uuid] }]);
     }
@@ -257,9 +269,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     if (limit <= 0 || this.countCategory(log) < limit) { return true; }
     const discard = log ? request.policy.logDiscardStrategy : request.policy.rumDiscardStrategy;
     if (discard !== 'discard_oldest') { return false; }
-    const oldest = this.query({ command: 'querySyncData', dataTypes: log ? ['log'] : ['rum_app', 'rum_webview'], limit: 1 });
-    if (oldest.length === 0 || this.leased(oldest[0])) { return false; }
-    await this.deleteRows(oldest); this.evicted++; this.increment('evicted', 1); return true;
+    return await this.evictOne(log ? ['log'] : ['rum_app', 'rum_webview']);
   }
 
   private query(request: FTDBTaskPoolRequest): SyncDataJSON[] {
@@ -278,32 +288,70 @@ export class FTCacheFileStore implements FTRumStoreAccess {
   }
 
   async leaseRows(rows: SyncDataJSON[]): Promise<void> {
+    if (rows.length === 0) { return; }
     const changes: FTCacheMutation[] = [];
     for (const row of rows) {
       const lease: FTCacheLease = { digest: this.digest(row), expires: Date.now() + 15 * 60 * 1000 };
       changes.push({ path: this.path('lease', row.uuid), body: JSON.stringify(lease) });
+    }
+    if (!this.ledger.canReserve(this.ledger.requiredBytes(changes) - FTCacheFiles.CONTROL_RESERVE)) {
+      throw new Error('CACHE_UPLOAD_LEASE_CAPACITY');
     }
     FTCacheFiles.commit(this.root, changes);
   }
 
   private async uploadPage(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
     const limit = Math.max(1, request.limit || 50);
-    const rows = this.query({ command: 'querySyncData', dataTypes: request.dataTypes, limit: limit + 1 });
+    const maxBytes = Math.max(1024, request.maxBytes || 1024 * 1024);
+    const candidates: FTUploadCandidate[] = [];
+    let matching = 0;
+    // Only page-sized metadata is retained. Payload memory is bounded by maxBytes + one record.
+    for (const id of this.list('sync')) {
+      const row = this.sync(id);
+      if (!row || !this.matches(row, request.dataTypes || [])) { continue; }
+      const bytes = this.uploadBytes(row);
+      if (bytes + 1 > maxBytes) {
+        if (!this.leased(row)) { this.quarantineOversized(row); }
+        continue;
+      }
+      matching++;
+      candidates.push({ uuid: row.uuid, id: row.id, time: row.time, bytes });
+      candidates.sort((a: FTUploadCandidate, b: FTUploadCandidate) => a.time - b.time || a.id - b.id);
+      if (candidates.length > limit + 1) { candidates.pop(); }
+    }
     const uploadRows: SDKUploadRowDTO[] = [];
     const selected: SyncDataJSON[] = [];
-    let bytes = 0; let clipped = false;
-    for (const row of rows) {
+    let bytes = 1; let clipped = false;
+    for (const candidate of candidates) {
       if (uploadRows.length >= limit) { break; }
-      const next = FTCacheFiles.bytes(row.dataString) + FTCacheFiles.bytes(row.uuid) +
-        FTCacheFiles.bytes(String(row.dataType)) + FTCacheFiles.bytes(row.customDataTypeString || '') + 64;
-      if (next > (request.maxBytes || 1024 * 1024)) { clipped = true; continue; }
-      if (bytes + next > (request.maxBytes || 1024 * 1024)) { clipped = true; break; }
+      if (bytes + candidate.bytes > maxBytes) { clipped = true; break; }
+      const row = this.sync(candidate.uuid); if (!row) { continue; }
       uploadRows.push({ id: row.id, uuid: row.uuid, dataType: String(row.dataType), dataString: row.dataString,
         time: row.time, customDataType: row.customDataTypeString });
-      selected.push(row); bytes += next;
+      selected.push(row); bytes += candidate.bytes;
     }
     await this.leaseRows(selected);
-    return { ok: true, uploadRows, hasMore: rows.length > uploadRows.length, byteCount: bytes, byteLimitReached: clipped };
+    return { ok: true, uploadRows, hasMore: matching > uploadRows.length,
+      byteCount: uploadRows.length > 0 ? bytes : 0, byteLimitReached: clipped };
+  }
+
+  private uploadBytes(row: SyncDataJSON): number {
+    const dto: SDKUploadRowDTO = { id: row.id, uuid: row.uuid, dataType: String(row.dataType),
+      dataString: row.dataString, time: row.time, customDataType: row.customDataTypeString };
+    // Include JSON escaping and the array separator; the page adds the remaining bracket byte.
+    return FTCacheFiles.bytes(JSON.stringify(dto)) + 1;
+  }
+
+  private quarantineOversized(row: SyncDataJSON): void {
+    const quarantine = `${this.root}/quarantine`;
+    while (FTCacheFiles.size(quarantine) > FTCacheFiles.CONTROL_RESERVE / 2) {
+      const names = FTCacheFiles.fileNames(quarantine).sort();
+      if (names.length === 0) { break; }
+      FTCacheFiles.remove(`${quarantine}/${names[0]}`);
+    }
+    fs.renameSync(this.path('sync', row.uuid), `${quarantine}/oversize-${Date.now()}-${encodeURIComponent(row.uuid)}.json`);
+    FTCacheFiles.syncDirectory(quarantine); FTCacheFiles.syncDirectory(`${this.root}/sync`);
+    this.increment('rejected', 1);
   }
 
   private async uploadCommit(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {

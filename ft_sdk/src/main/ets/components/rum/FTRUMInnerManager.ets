@@ -507,6 +507,21 @@ export class FTRUMInnerManager {
     }
   }
 
+  /** A failed/lost transport attempt must not permanently pin a retained aggregate. */
+  public markRumSemanticHostFailed(requestId: string): void {
+    const entry = this.rumSemanticJournalByRequestId.get(requestId);
+    if (entry) { this.releaseCompletedActionAttempt(entry); }
+  }
+
+  private releaseCompletedActionAttempt(entry: RumSemanticJournalEntry): void {
+    if (entry.request.command !== SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH) { return; }
+    const payload = entry.request.payload as Object as SDKRumCompletedActionBatchDTO;
+    for (const action of payload.actions || []) {
+      this.forgetInsertedActionId(action.actionId);
+      this.forgetProcessedActionId(action.actionId);
+    }
+  }
+
   public markRumResourcesCompleted(resourceIds: string[], counterDeltasApplied: boolean = false): void {
     let releasedResourceLifecycle = false;
     for (let i = 0; i < resourceIds.length; i++) {
@@ -835,6 +850,7 @@ export class FTRUMInnerManager {
     while (this.rumSemanticJournal.length - this.rumSemanticJournalHead >=
       FTRUMInnerManager.RUM_SEMANTIC_JOURNAL_HIGH_WATERMARK) {
       const entry = this.rumSemanticJournal[this.rumSemanticJournalHead];
+      this.releaseCompletedActionAttempt(entry);
       this.rumSemanticJournalByRequestId.delete(entry.request.id);
       this.releaseResourceTransportReferences(entry.resourceIds);
       this.rumSemanticJournalHead++;
@@ -933,6 +949,7 @@ export class FTRUMInnerManager {
         retained.push(entry);
         continue;
       }
+      this.releaseCompletedActionAttempt(entry);
       this.rumSemanticJournalByRequestId.delete(entry.request.id);
       this.rememberCommittedRumSemanticResponse(entry.request.id);
       this.releaseResourceTransportReferences(entry.resourceIds);

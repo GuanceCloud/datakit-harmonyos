@@ -17,6 +17,6 @@ export class FTCacheContext {
   static lane: Promise<void> = Promise.resolve();
   static settings: FTCacheSettings = {
     mode: 'sqlite', limitEnabled: false, capacity: 100 * 1024 * 1024,
-    discard: 'discard', migrate: false, directUpload: false
+    discard: 'discard', migrate: false, directUpload: true
   };
 }

@@ -20,6 +20,7 @@ import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
 import { Constants } from '../Constants';
+import { FTCacheContext } from './FTCacheContext';
 import { Utils } from '../utils/Utils';
 
 const TAG = "FTDBManager";
@@ -167,6 +168,10 @@ export class FTDBManager extends DBManager {
    * Uses a promise-based lock to prevent concurrent initialization
    */
   public async init(): Promise<void> {
+    if (FTCacheContext.settings.mode === 'file') {
+      await FTDBTaskPoolExecutor.init(this.context);
+      return;
+    }
     // If already initializing, wait for the existing init to complete
     if (this.initPromise) {
       return await this.initPromise;
@@ -1094,7 +1099,6 @@ export class FTDBManager extends DBManager {
       return result;
     }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
-    let acceptedFileRows: SyncDataJSON[] = [];
 
     try {
       if (dataToWrite.length > 0) {
@@ -1125,7 +1129,6 @@ export class FTDBManager extends DBManager {
         result.deletedOld += taskPoolResult.deletedOld;
         result.duplicateSkipped += taskPoolResult.duplicateSkipped;
         result.errorMessage = taskPoolResult.errorMessage;
-        acceptedFileRows = this.filterFileStoreRowsByUuids(fileStoreRecords, taskPoolResult.acceptedUuids);
         if (result.success && result.inserted + result.updated > 0) {
           this.markTaskPoolDataAsInserted(dataToWrite, reInsert);
         }
@@ -1205,7 +1208,6 @@ export class FTDBManager extends DBManager {
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const fileStoreRecords = this.syncDraftsToSyncDataJSON(drafts, fallbackDataType);
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
-    let acceptedFileRows: SyncDataJSON[] = [];
 
     try {
       if (options.applyCachePolicy === true) {
@@ -1236,7 +1238,6 @@ export class FTDBManager extends DBManager {
       result.deletedOld += taskPoolResult.deletedOld;
       result.duplicateSkipped += taskPoolResult.duplicateSkipped;
       result.errorMessage = taskPoolResult.errorMessage;
-      acceptedFileRows = this.filterFileStoreRowsByUuids(fileStoreRecords, taskPoolResult.acceptedUuids);
     } catch (error) {
       result.success = false;
       result.errorMessage = String(error);

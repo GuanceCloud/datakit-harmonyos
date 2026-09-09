@@ -835,10 +835,12 @@ class FTTrackInner {
 
     if (!response.ok) {
       this.logEventMailboxFailure(response.errorMessage || 'unknown');
+      rumManager.markRumSemanticHostFailed(response.id);
       this.completeRumWorkerCallback(callback, false);
       return;
     }
     if (!response.payload) {
+      rumManager.markRumSemanticHostFailed(response.id);
       this.completeRumWorkerCallback(callback, false);
       return;
     }
@@ -906,6 +908,7 @@ class FTTrackInner {
     } finally {
       this.pendingWorkerDbWriteCount = Math.max(0, this.pendingWorkerDbWriteCount - 1);
     }
+    if (!draftsCommitted) { rumManager.markRumSemanticHostFailed(response.id); }
     if (draftsCommitted && countersApplied) {
       rumManager.markRumResourcesCompleted(
         payload.completedResourceIds || [],

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.17-alpha01] - 2026-09-02
 - Fixed primary FileStore capacity eviction and unified physical-byte accounting across sync payloads, SQLite, RUM aggregates and failure spool; added complete aggregate mirroring, durable upload commits and resumable migration/recovery.
+- Switched primary FileStore query/upload/ACK to files without SQLite payload duplication; reclaim legacy index pages, bound upload payload selection, isolate oversized records and recover expired upload leases.
 - Optimized remote data-filter refreshes: check `pull_interval` when uploads start, parse numeric intervals as nanoseconds, and skip unchanged payload processing.
 - Replaced the separate Router and Navigation View tracking handlers with `FTRUMConfig.setViewTrackingHandler(handler, type)`, which supports `ROUTER`, `NAVIGATION`, and `ALL` targets.
 
