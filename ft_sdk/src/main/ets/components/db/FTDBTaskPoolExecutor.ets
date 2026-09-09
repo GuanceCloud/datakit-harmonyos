@@ -4,6 +4,7 @@ import { SyncData, SyncDataJSON } from './bean/SyncData';
 import { ActionBean, ActionBeanJSON } from './bean/ActionBean';
 import { ViewBean, ViewBeanJSON } from './bean/ViewBean';
 import { runFTDBTaskPoolExecute } from './FTDBTaskPoolOperations';
+import { FTCacheContext, FTCacheSettings } from './FTCacheContext';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 
 enum FTDBTaskPoolCommand {
@@ -157,7 +158,8 @@ export interface FTDBTaskPoolCloseActionResponse {
   hadPendingResource: boolean;
 }
 
-interface FTDBTaskPoolRequest {
+export interface FTDBTaskPoolRequest {
+  cache?: FTCacheSettings;
   command: string;
   source?: string;
   dataTypes?: string[];
@@ -199,7 +201,7 @@ type FTDBTaskPoolRequestFactory = () => FTDBTaskPoolRequest;
 type FTDBTaskPoolWritePolicyProvider = () => FTDBTaskPoolCachePolicySnapshot;
 type FTDBTaskPoolWriteCompletion = (response: FTDBTaskPoolWriteResponse) => void;
 
-interface FTDBTaskPoolResponse {
+export interface FTDBTaskPoolResponse {
   ok: boolean;
   value?: boolean;
   count?: number;
@@ -224,7 +226,7 @@ interface FTDBTaskPoolResponse {
   errorMessage?: string;
 }
 
-interface FTDBTaskPoolDeleteAllResult {
+export interface FTDBTaskPoolDeleteAllResult {
   sync: number;
   view: number;
   action: number;
@@ -232,6 +234,12 @@ interface FTDBTaskPoolDeleteAllResult {
 
 export class FTDBTaskPoolExecutor {
   private static dbLaneTail: Promise<void> = Promise.resolve();
+
+  /** Internal diagnostics; intentionally not exported by the package Index. */
+  public static async getCacheStatus(context: Context): Promise<string> {
+    const response = await FTDBTaskPoolExecutor.execute(context, { command: 'getCacheStatus' });
+    return (response.strings || ['{}'])[0];
+  }
 
   public static async init(context: Context): Promise<void> {
     await FTDBTaskPoolExecutor.execute(context, {
@@ -387,6 +395,7 @@ export class FTDBTaskPoolExecutor {
     const enqueueTime = Date.now();
     const run = async (): Promise<FTDBTaskPoolResponse> => {
       const request = requestFactory();
+      request.cache = FTCacheContext.settings;
       const dbLaneWaitMs = Math.max(0, Date.now() - enqueueTime);
       const response = await taskpool.execute(ftDBTaskPoolExecute, context as Object, request as Object);
       const typed = response as Object as FTDBTaskPoolResponse;
@@ -399,8 +408,8 @@ export class FTDBTaskPoolExecutor {
       }
       return typed;
     };
-    const current = FTDBTaskPoolExecutor.dbLaneTail.then(run, run);
-    FTDBTaskPoolExecutor.dbLaneTail = current.then(() => undefined, () => undefined);
+    const current = FTCacheContext.lane.then(run, run);
+    FTCacheContext.lane = current.then(() => undefined, () => undefined);
     return await current;
   }
 
@@ -784,6 +793,7 @@ export class FTDBTaskPoolExecutor {
   private static async execute(context: Context, request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
     const enqueueTime = Date.now();
     const run = async (): Promise<FTDBTaskPoolResponse> => {
+      request.cache = FTCacheContext.settings;
       const dbLaneWaitMs = Math.max(0, Date.now() - enqueueTime);
       const response = await taskpool.execute(ftDBTaskPoolExecute, context as Object, request as Object);
       const typed = response as Object as FTDBTaskPoolResponse;
@@ -794,8 +804,8 @@ export class FTDBTaskPoolExecutor {
       return typed;
     };
 
-    const current = FTDBTaskPoolExecutor.dbLaneTail.then(run, run);
-    FTDBTaskPoolExecutor.dbLaneTail = current.then(() => undefined, () => undefined);
+    const current = FTCacheContext.lane.then(run, run);
+    FTCacheContext.lane = current.then(() => undefined, () => undefined);
     return await current;
   }
 }

@@ -19,7 +19,6 @@ import { ActionBean } from './bean/ActionBean';
 import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTDBCachePolicy } from './FTDBCachePolicy';
-import { FTFileDataStore } from './FTFileDataStore';
 import { Constants } from '../Constants';
 import { Utils } from '../utils/Utils';
 
@@ -1088,17 +1087,6 @@ export class FTDBManager extends DBManager {
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
     const dataToWrite = this.filterTaskPoolDuplicates(dataList, reInsert, updateOrInsertByUuid, result);
     const fileStoreRecords = this.toSyncDataJSONList(dataToWrite);
-    const fileDataStore = FTFileDataStore.getInstance();
-    if (options.skipFileDataStore !== true && fileDataStore.isPrimary()) {
-      const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
-      if (persisted !== dataToWrite.length) {
-        result.success = false;
-        result.dropped += Math.max(0, dataToWrite.length - persisted);
-        result.errorMessage = `FileStore persisted ${persisted}/${dataToWrite.length} record(s)`;
-        await this.persistFailedSyncData(source, fileStoreRecords, options, result);
-        return result;
-      }
-    }
     if (FTDBManager.consumeForcedSyncDataWriteFailure()) {
       result.success = false;
       result.errorMessage = 'Forced sync-data DB write failure';
@@ -1183,14 +1171,6 @@ export class FTDBManager extends DBManager {
 
     if (!result.success) {
       await this.persistFailedSyncData(source, fileStoreRecords, options, result);
-    } else if (options.skipFileDataStore !== true && fileDataStore.isPrimary() && result.dropped > 0) {
-      await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
-    } else if (options.skipFileDataStore !== true && !fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
-      try {
-        await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
-      } catch (error) {
-        FTInnerLogger.e(TAG, `FileStore shadow append failed: ${String(error)}`);
-      }
     }
 
     return result;
@@ -1223,18 +1203,7 @@ export class FTDBManager extends DBManager {
     let dbLaneWaitTime = Math.max(0, options.dbLaneWaitMs || 0);
     const reInsert = options.reInsert === true;
     const updateOrInsertByUuid = options.updateOrInsertByUuid === true;
-    const fileDataStore = FTFileDataStore.getInstance();
     const fileStoreRecords = this.syncDraftsToSyncDataJSON(drafts, fallbackDataType);
-    if (options.skipFileDataStore !== true && fileDataStore.isPrimary()) {
-      const persisted = await fileDataStore.appendSyncDataJSON(source, fileStoreRecords);
-      if (persisted !== fileStoreRecords.length) {
-        result.success = false;
-        result.dropped += Math.max(0, fileStoreRecords.length - persisted);
-        result.errorMessage = `FileStore persisted ${persisted}/${fileStoreRecords.length} draft(s)`;
-        await this.persistFailedSyncData(source, fileStoreRecords, options, result);
-        return result;
-      }
-    }
     let taskPoolResponse: FTDBTaskPoolWriteResponse | null = null;
     let acceptedFileRows: SyncDataJSON[] = [];
 
@@ -1302,14 +1271,6 @@ export class FTDBManager extends DBManager {
         options,
         result
       );
-    } else if (options.skipFileDataStore !== true && fileDataStore.isPrimary() && result.dropped > 0) {
-      await fileDataStore.removeByUuids(this.collectUnacceptedFileStoreUuids(fileStoreRecords, acceptedFileRows));
-    } else if (options.skipFileDataStore !== true && !fileDataStore.isPrimary() && fileDataStore.isShadow() && acceptedFileRows.length > 0) {
-      try {
-        await fileDataStore.appendSyncDataJSON(source, acceptedFileRows);
-      } catch (error) {
-        FTInnerLogger.e(TAG, `FileStore shadow draft append failed: ${String(error)}`);
-      }
     }
 
     return result;

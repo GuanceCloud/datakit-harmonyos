@@ -30,7 +30,7 @@ import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
-import { FTFileDataStore } from "./db/FTFileDataStore";
+import { FTCacheContext } from "./db/FTCacheContext";
 import { SyncData } from "./db/bean/SyncData";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
@@ -476,43 +476,16 @@ export class FTSDK {
 
     // Initialize sync task manager
     if (context) {
+      FTCacheContext.filesDir = context.filesDir;
+      FTCacheContext.context = context;
+      FTCacheContext.databaseDir = context.databaseDir;
+      FTCacheContext.settings = {
+        mode: config.isUseFileDataStore() ? 'file' : config.isFileDataStoreShadow() ? 'shadow' : 'sqlite',
+        limitEnabled: config.isLimitWithCacheSize(), capacity: config.getCacheLimit(),
+        discard: config.getCacheDiscard(), migrate: config.isNeedTransformOldCache(), directUpload: false
+      };
       FTInnerLogger.d(TAG, " Initializing SyncTaskManager...");
       getFTSDKRuntime().initSyncTaskManager(config, context);
-      const fileDataStore = FTFileDataStore.getInstance();
-      fileDataStore.init(context, config);
-      if (fileDataStore.isPrimary()) {
-        const projectFileStore = async (): Promise<void> => {
-          if (config.isNeedTransformOldCache()) {
-            await fileDataStore.migrateLegacySqlite(context);
-          }
-          const projected = await fileDataStore.projectToSqlite(async (records) => {
-            const rows: SyncData[] = [];
-            for (let i = 0; i < records.length; i++) {
-              rows.push(SyncData.fromJSON(records[i]));
-            }
-            const result = await FTDBManager.getInstance(context).writeSyncDataAtomically(
-              'fileStore.startup.projection',
-              rows,
-              {
-                applyCachePolicy: false,
-                forceTransaction: rows.length > 1,
-                updateOrInsertByUuid: true,
-                skipFailureFallback: true,
-                skipFileDataStore: true
-              }
-            );
-            if (!result.success) {
-              throw new Error(result.errorMessage || 'FileStore projection DB write failed');
-            }
-          });
-          if (projected > 0) {
-            FTInnerLogger.i(TAG, `FileStore projected ${projected} record(s) into SQLite upload index`);
-          }
-        };
-        projectFileStore().catch((error: Error) => {
-          FTInnerLogger.e(TAG, `FileStore startup recovery failed: ${error.message}`);
-        });
-      }
       const spoolManager = FTDBSpoolManager.getInstance();
       spoolManager.init(context);
       spoolManager.replay(context, "sdk.init").catch((error: Error) => {
@@ -1115,9 +1088,8 @@ export class FTSDK {
         return;
       }
 
-      await FTDBManager.getInstance(context).delete();
       await FTDBSpoolManager.getInstance().clear();
-      await FTFileDataStore.getInstance().clear();
+      await FTDBManager.getInstance(context).delete();
       FTDBCachePolicy.getInstance().resetCounts();
       FTInnerLogger.d(TAG, "clearAllData completed");
     } catch (error) {

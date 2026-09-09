@@ -7,7 +7,6 @@ import { Context } from '@kit.AbilityKit';
 import { Constants } from './Constants';
 import { ViewBean } from './db/bean/ViewBean';
 import { FTInnerLogger } from './log/FTLogger';
-import { FTFileDataStore } from './db/FTFileDataStore';
 import { FTLogSeparator } from './log/FTLogSeparator';
 import {
   DefaultSyncTaskManagerRuntime,
@@ -216,33 +215,6 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       throw new Error(`Upload DB commit affected ${response.affectedRows}/${expectedAffectedRows} expected row operations`);
     }
     this.applyCacheCountDelta(response.logCountDelta, response.rumCountDelta);
-    try {
-      const fileDataStore = FTFileDataStore.getInstance();
-      if (fileDataStore.shouldMirrorSqliteWrites()) {
-        const committedUuids: string[] = [];
-        for (let i = 0; i < rows.length; i++) {
-          if (rows[i].uuid) {
-            committedUuids.push(rows[i].uuid);
-          }
-        }
-        await fileDataStore.removeByUuids(committedUuids);
-        if (action === DataUploadDbCommitAction.REINSERT && reInsertRows && reInsertRows.length > 0) {
-          const reinsertData = this.toSyncDataList(reInsertRows);
-          const reinsertFileRows: SyncDataJSON[] = [];
-          for (let i = 0; i < reinsertData.length; i++) {
-            reinsertFileRows.push(reinsertData[i].toJSON());
-          }
-          await fileDataStore.appendSyncDataJSON(
-            'upload.reinsert',
-            reinsertFileRows
-          );
-        }
-      }
-    } catch (error) {
-      // The SQLite commit is already durable. Keep upload success semantics and
-      // report FileStore divergence for the migration diagnostics instead.
-      FTInnerLogger.e(TAG, `FileStore upload mirror commit failed: ${String(error)}`);
-    }
     return this.createDbWriteResult(response.affectedRows, response.dbLaneWaitMs);
   }
 

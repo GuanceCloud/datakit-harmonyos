@@ -491,6 +491,14 @@ export class FTRUMInnerManager {
     const entry = this.rumSemanticJournalByRequestId.get(requestId);
     if (entry) {
       entry.hostApplied = true;
+      if (entry.request.command === SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH && this.context) {
+        const payload = entry.request.payload as Object as SDKRumCompletedActionBatchDTO;
+        const ids = payload.actions.map((a: SDKRumCompletedActionDTO) => a.actionId);
+        FTDBTaskPoolExecutor.cleanCloseActionData(this.context, ids).catch((error: Error) => {
+          for (const id of ids) { this.forgetInsertedActionId(id); this.forgetProcessedActionId(id); }
+          FTInnerLogger.e(TAG, `Completed action cleanup failed: ${error.message}`);
+        });
+      }
     } else {
       // The replay state may have been evicted to preserve newer entries. The
       // response was still applied by the Host, so retain only its bounded
@@ -1393,7 +1401,7 @@ export class FTRUMInnerManager {
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
-      uuid: Utils.generateUUID(),
+      uuid: `action-${actionBean.getId()}`,
       time: actionBean.getStartTime(),
       actionId: actionBean.getId(),
       actionName: actionBean.getActionName(),
@@ -1490,19 +1498,16 @@ export class FTRUMInnerManager {
           // Filter out already processed actions to prevent duplicate inserts
           // Check both processedActionIds and insertedActionIds to ensure no duplicates
           const unprocessedBeans: ActionBean[] = [];
-          const deleteIds: string[] = [];
           
           for (const bean of beans) {
             const actionId = bean.getId();
             // Skip if already processed OR already inserted (double check for safety)
             if (this.processedActionIds.has(actionId) || this.insertedActionIds.has(actionId)) {
-              // Still delete from database even if already processed/inserted
-              deleteIds.push(actionId);
+              // The worker result has not necessarily reached durable storage yet.
             } else {
               // Mark as processed immediately to prevent duplicate processing
               this.rememberProcessedActionId(actionId);
               unprocessedBeans.push(bean);
-              deleteIds.push(actionId);
             }
           }
           
@@ -1523,11 +1528,7 @@ export class FTRUMInnerManager {
             }
           }
           
-          // Delete actions from database AFTER updating counts
-          // This ensures that even if generateActionSum is called again, the same actions won't be queried
-          if (deleteIds.length > 0) {
-            await FTDBTaskPoolExecutor.cleanCloseActionData(this.context!, deleteIds);
-          }
+          // Deletion is deferred to the durable worker-result acknowledgement.
           
           // Then insert actions to sync table (only unprocessed ones)
           // Note: We delete after updating counts to ensure we can query the latest counts
@@ -1545,7 +1546,7 @@ export class FTRUMInnerManager {
           FTInnerLogger.e(TAG, `Error querying actions from database: ${error}`);
           break;
         }
-      } while (beans.length >= LIMIT_SIZE);
+      } while (false); // One bounded page per tick; in-flight aggregates remain queryable until committed.
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in generateActionSum: ${error}`);
@@ -1589,7 +1590,7 @@ export class FTRUMInnerManager {
           FTInnerLogger.e(TAG, `Error querying views from database: ${error}`);
           break;
         }
-      } while (beans.length >= LIMIT_SIZE);
+      } while (false); // Callbacks are asynchronous; do not loop on the same uncommitted page.
       
       // Clean up all closed views from database (aligned with Android: cleanCloseViewData() at the end)
       // This ensures all closed views are deleted, not just the ones we processed
@@ -1762,19 +1763,21 @@ export class FTRUMInnerManager {
       class ViewUploadCallback implements RunnerCompleteCallBack {
         private viewId: string;
         
-        constructor(viewId: string) {
+        private versionTime: number;
+        constructor(viewId: string, versionTime: number) {
           this.viewId = viewId;
+          this.versionTime = versionTime;
         }
         
         onComplete(): void {
           // Update upload_time after successful upload (aligned with Android)
           if (self.context) {
-            self.updateUploadedViewAfterComplete(self.context, this.viewId);
+            self.updateUploadedViewAfterComplete(self.context, this.viewId, this.versionTime);
           }
         }
       }
       
-      const callback = new ViewUploadCallback(viewBean.getId());
+      const callback = new ViewUploadCallback(viewBean.getId(), viewBean.getDataUpdateTime());
       // Aligned with Android SDK: pass nanoseconds directly (19 digits) without conversion
       // Android SDK: FTTrackInner.getInstance().rum(bean.getStartTime(), ...)
       FTTrackInner.getInstance().rum(
@@ -1782,7 +1785,9 @@ export class FTRUMInnerManager {
         Constants.FT_MEASUREMENT_RUM_VIEW,
         tagsMap,
         fieldsMap,
-        callback
+        callback,
+        null,
+        `view-${viewBean.getId()}-${viewBean.getDataUpdateTime()}-${viewBean.getViewUpdateTime()}`
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
@@ -1812,9 +1817,9 @@ export class FTRUMInnerManager {
     }
   }
 
-  private async updateUploadedViewAfterComplete(context: Context, viewId: string): Promise<void> {
+  private async updateUploadedViewAfterComplete(context: Context, viewId: string, versionTime: number): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.updateViewUploadTime(context, viewId, Date.now());
+      const success = await FTDBTaskPoolExecutor.updateViewUploadTime(context, viewId, versionTime);
       if (!success) {
         return;
       }

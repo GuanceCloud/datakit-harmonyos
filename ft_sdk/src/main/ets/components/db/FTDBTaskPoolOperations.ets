@@ -8,6 +8,8 @@ import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+import { FTCacheCoordinator } from './FTCacheCoordinator';
+import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse } from './FTDBTaskPoolExecutor';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -259,11 +261,48 @@ enum FTDBTaskPoolCacheCategory {
   NONE = 'none'
 }
 export async function runFTDBTaskPoolExecute(contextObject: Object, requestObject: Object): Promise<Object> {
+  try {
+    return await FTCacheCoordinator.run(contextObject as Context, requestObject as CacheRequest,
+      async (request: CacheRequest): Promise<CacheResponse> => {
+        return await runFTSqliteTaskPoolExecute(contextObject, request as Object) as CacheResponse;
+      }) as Object;
+  } catch (error) {
+    return { ok: false, errorMessage: String(error) } as CacheResponse as Object;
+  }
+}
+
+export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestObject: Object): Promise<Object> {
   const context = contextObject as Context;
   const request = requestObject as FTDBTaskPoolRequest;
   try {
     const rdbStore = await openTaskPoolRdbStore(context);
     switch (request.command) {
+      case 'queryMigrationPage':
+        return { ok: true, rows: await querySyncDataInTaskPool(rdbStore, [], normalizeLimit(request.limit),
+          false, request.afterId || 0, true) } as FTDBTaskPoolResponse as Object;
+      case 'compactCacheIndex':
+        await rdbStore.executeSql('PRAGMA wal_checkpoint(TRUNCATE)');
+        await rdbStore.executeSql('VACUUM');
+        await rdbStore.executeSql('PRAGMA wal_checkpoint(TRUNCATE)');
+        return okResponse();
+      case 'deleteSyncUuids': {
+        const ids = request.ids || [];
+        if (ids.length === 0) { return okCountResponse(0); }
+        const predicate = new relationalStore.RdbPredicates(FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME);
+        predicate.in(FTSQL.RECORD_COLUMN_DATA_UUID, ids);
+        return okCountResponse(await rdbStore.delete(predicate));
+      }
+      case 'exportRumState': {
+        const views: ViewBeanJSON[] = [];
+        const actions: ActionBeanJSON[] = [];
+        const vr = await rdbStore.query(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW));
+        try { if (vr.goToFirstRow()) { do { views.push(readViewFromResultSet(vr)); } while (vr.goToNextRow()); } }
+        finally { vr.close(); }
+        const ar = await rdbStore.query(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+        try { if (ar.goToFirstRow()) { do { actions.push(readActionFromResultSet(ar)); } while (ar.goToNextRow()); } }
+        finally { ar.close(); }
+        return { ok: true, views, actions } as FTDBTaskPoolResponse as Object;
+      }
       case FTDBTaskPoolCommand.INIT:
         return okResponse();
       case FTDBTaskPoolCommand.HAS_SYNC_DATA:
@@ -728,7 +767,8 @@ async function querySyncDataInTaskPool(
   dataTypes: string[],
   limit: number,
   newestFirst: boolean,
-  afterId: number = -1
+  afterId: number = -1,
+  latestUuidOnly: boolean = false
 ): Promise<SyncDataJSON[]> {
   const predicates = buildTypePredicates(dataTypes);
   if (afterId >= 0) {
@@ -744,7 +784,11 @@ async function querySyncDataInTaskPool(
   predicates.limitAs(limit);
 
   const rows: SyncDataJSON[] = [];
-  const resultSet = await rdbStore.query(predicates, [
+  const resultSet = latestUuidOnly ? await rdbStore.querySql(
+    `SELECT * FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME} WHERE ${FTSQL.RECORD_COLUMN_ID} > ?
+     AND ${FTSQL.RECORD_COLUMN_ID} IN (SELECT MAX(${FTSQL.RECORD_COLUMN_ID}) FROM ${FTSQL.FT_SYNC_DATA_FLAT_TABLE_NAME}
+     GROUP BY ${FTSQL.RECORD_COLUMN_DATA_UUID}) ORDER BY ${FTSQL.RECORD_COLUMN_ID} ASC LIMIT ?`, [afterId, limit]) :
+    await rdbStore.query(predicates, [
     FTSQL.RECORD_COLUMN_ID,
     FTSQL.RECORD_COLUMN_DATA_UUID,
     FTSQL.RECORD_COLUMN_DATA_TYPE,
@@ -2223,38 +2267,26 @@ async function cleanCloseActionDataInTaskPool(
 }
 
 async function cleanCloseViewDataInTaskPool(
-  rdbStore: relationalStore.RdbStore,
-  ids: string[],
-  now: number
+  rdbStore: relationalStore.RdbStore, ids: string[], now: number
 ): Promise<number> {
-  const staleViewThresholdMs = 5 * 60 * 1000;
-  let deleted = 0;
-  rdbStore.beginTransaction();
+  const candidates: string[] = [];
+  const result = await rdbStore.querySql(
+    `SELECT ${FTSQL.RUM_COLUMN_ID} FROM ${FTSQL.FT_TABLE_VIEW}
+     WHERE ${FTSQL.RUM_COLUMN_IS_CLOSE} = 1 AND ${FTSQL.RUM_DATA_UPLOAD_TIME} > 0
+     AND ${FTSQL.RUM_DATA_UPLOAD_TIME} >= ${FTSQL.RUM_DATA_UPDATE_TIME}
+     AND (${FTSQL.RUM_COLUMN_PENDING_RESOURCE} <= 0 OR ${FTSQL.RUM_DATA_UPDATE_TIME} <= ?)`,
+    [now - 5 * 60 * 1000]);
   try {
-    if (ids.length > 0) {
-      for (let i = 0; i < ids.length; i++) {
-        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-        predicates.equalTo(FTSQL.RUM_COLUMN_ID, ids[i]);
-        predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-        predicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-        deleted += await rdbStore.delete(predicates);
-      }
-    } else {
-      const normalPredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-      normalPredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-      normalPredicates.lessThanOrEqualTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-      deleted += await rdbStore.delete(normalPredicates);
-
-      const stalePredicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-      stalePredicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 1);
-      stalePredicates.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
-      stalePredicates.lessThanOrEqualTo(FTSQL.RUM_DATA_UPDATE_TIME, now - staleViewThresholdMs);
-      deleted += await rdbStore.delete(stalePredicates);
+    if (result.goToFirstRow()) {
+      do { const id = result.getString(0); if (ids.length === 0 || ids.includes(id)) { candidates.push(id); } }
+      while (result.goToNextRow());
     }
-    rdbStore.commit();
-  } catch (error) {
-    rdbStore.rollBack();
-    throw new Error(String(error));
+  } finally { result.close(); }
+  let deleted = 0;
+  for (const id of candidates) {
+    const predicate = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+    predicate.equalTo(FTSQL.RUM_COLUMN_ID, id);
+    deleted += await rdbStore.delete(predicate);
   }
   return deleted;
 }

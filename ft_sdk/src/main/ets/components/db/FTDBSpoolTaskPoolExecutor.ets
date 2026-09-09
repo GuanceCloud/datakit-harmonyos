@@ -2,6 +2,8 @@ import taskpool from '@ohos.taskpool';
 import { SyncDataJSON } from './bean/SyncData';
 import { runFTDBSpoolTaskPoolExecute } from './FTDBSpoolTaskPoolOperations';
 import { FT_DB_SPOOL_MAX_BYTES } from './FTDBSpoolLimits';
+import { FTCacheContext, FTCacheSettings } from './FTCacheContext';
+import { runFTCacheSpool } from './FTCacheSpool';
 
 enum FTDBSpoolTaskPoolCommand {
   INIT = 'init',
@@ -29,8 +31,11 @@ export interface FTDBSpoolRecordDTO {
   data: SyncDataJSON;
 }
 
-interface FTDBSpoolTaskPoolRequest extends FTDBSpoolPaths {
-  command: FTDBSpoolTaskPoolCommand;
+export interface FTDBSpoolTaskPoolRequest extends FTDBSpoolPaths {
+  cache?: FTCacheSettings;
+  filesDir?: string;
+  databaseDir?: string;
+  command: string;
   source?: string;
   seqStart?: number;
   records?: SyncDataJSON[];
@@ -166,20 +171,23 @@ export class FTDBSpoolTaskPoolExecutor {
 
   private static async execute(request: FTDBSpoolTaskPoolRequest): Promise<FTDBSpoolTaskPoolResponse> {
     const run = async (): Promise<FTDBSpoolTaskPoolResponse> => {
-      const response = await taskpool.execute(ftDBSpoolTaskPoolExecute, request as Object);
+      request.cache = FTCacheContext.settings;
+      request.filesDir = FTCacheContext.filesDir;
+      request.databaseDir = FTCacheContext.databaseDir;
+      const response = await taskpool.execute(ftDBSpoolTaskPoolExecute, request as Object, FTCacheContext.context as Object);
       const typed = response as Object as FTDBSpoolTaskPoolResponse;
       if (!typed.ok) {
         throw new Error(typed.errorMessage || `Spool TaskPool command failed: ${request.command}`);
       }
       return typed;
     };
-    const current = FTDBSpoolTaskPoolExecutor.spoolLaneTail.then(run, run);
-    FTDBSpoolTaskPoolExecutor.spoolLaneTail = current.then(() => undefined, () => undefined);
+    const current = FTCacheContext.lane.then(run, run);
+    FTCacheContext.lane = current.then(() => undefined, () => undefined);
     return await current;
   }
 }
 
 @Concurrent
-async function ftDBSpoolTaskPoolExecute(requestObject: Object): Promise<Object> {
-  return await runFTDBSpoolTaskPoolExecute(requestObject);
+async function ftDBSpoolTaskPoolExecute(requestObject: Object, contextObject: Object): Promise<Object> {
+  return await runFTCacheSpool(requestObject, contextObject);
 }

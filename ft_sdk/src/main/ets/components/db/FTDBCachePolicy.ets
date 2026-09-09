@@ -4,6 +4,7 @@ import { ConfigRecord } from '../SyncTaskManager';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from '../Constants';
 import { FTDBTaskPoolExecutor } from './FTDBTaskPoolExecutor';
+import { FTCacheContext } from './FTCacheContext';
 
 // Re-export enum types for external use
 export { CacheDiscard, DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../enum/Enums';
@@ -534,6 +535,8 @@ export class FTDBCachePolicy {
    * transaction that evicts old rows and persists the newest draft.
    */
   public isCacheDiscardingAtLimit(dataType: DataType): boolean {
+    // File/RUM/spool mutations share the on-disk ledger, not this Host's last SQLite-size sample.
+    if (FTCacheContext.settings.mode === 'file' && this.enableLimitWithDbSize) { return false; }
     if (this.enableLimitWithDbSize) {
       return this.currentDbSize >= this.dbLimitSize && this.dbCacheDiscard === DBCacheDiscard.DISCARD;
     }

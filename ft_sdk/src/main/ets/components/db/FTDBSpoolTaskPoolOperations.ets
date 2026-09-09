@@ -1,6 +1,7 @@
 import { fileIo } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { SyncDataJSON } from './bean/SyncData';
+import { FTCacheFiles } from './FTCacheFiles';
 import {
   FT_DB_SPOOL_MAX_BYTES,
   FT_DB_SPOOL_MAX_RECORD_BYTES,
@@ -67,6 +68,7 @@ interface FTDBSpoolTaskPoolResponse {
 }
 
 interface FTDBSpoolParseResult {
+  corruptLines: string[];
   records: FTDBSpoolRecordDTO[];
   fileRecords: number;
   skippedRecords: number;
@@ -75,10 +77,37 @@ interface FTDBSpoolParseResult {
 }
 
 const SPOOL_READ_CHUNK_SIZE = 64 * 1024;
+interface FTSpoolAppendJournal { path: string; offset: number; content: string; }
+
+function recoverSpoolAppend(dir: string): void {
+  const journalPath = `${dir}/append.json`;
+  const body = FTCacheFiles.read(journalPath);
+  if (!body) { return; }
+  const journal = JSON.parse(body) as FTSpoolAppendJournal;
+  if (!journal.path.startsWith(`${dir}/`) || journal.path.includes('/../') || journal.offset < 0) {
+    throw new Error('SPOOL_JOURNAL_INVALID');
+  }
+  const file = fileIo.openSync(journal.path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE);
+  try {
+    fileIo.truncateSync(file.fd, journal.offset);
+    fileIo.lseek(file.fd, journal.offset, fileIo.WhenceType.SEEK_SET);
+    const data = util.TextEncoder.create('utf-8').encodeInto(journal.content);
+    let written = 0;
+    while (written < data.length) {
+      const count = fileIo.writeSync(file.fd, data.slice(written).buffer as ArrayBuffer);
+      if (count <= 0) { throw new Error('SPOOL_SHORT_WRITE'); }
+      written += count;
+    }
+    fileIo.fsyncSync(file.fd);
+  } finally { fileIo.closeSync(file); }
+  FTCacheFiles.syncDirectory(dir);
+  FTCacheFiles.remove(journalPath);
+}
 
 export async function runFTDBSpoolTaskPoolExecute(requestObject: Object): Promise<Object> {
   const request = requestObject as FTDBSpoolTaskPoolRequest;
   try {
+    recoverSpoolAppend(request.spoolDir);
     switch (request.command) {
       case FTDBSpoolTaskPoolCommand.INIT:
         await ensureSpoolDirectory(request.spoolDir);
@@ -104,6 +133,8 @@ export async function runFTDBSpoolTaskPoolExecute(requestObject: Object): Promis
     }
   } catch (error) {
     return createErrorResponse(error instanceof Error ? error.message : String(error)) as Object;
+  } finally {
+    if (FTCacheFiles.exists(request.spoolDir)) { FTCacheFiles.syncDirectory(request.spoolDir); }
   }
 }
 
@@ -144,15 +175,10 @@ async function appendSpoolRecords(request: FTDBSpoolTaskPoolRequest): Promise<Ob
     appendedRecords++;
   }
   if (appendedRecords > 0) {
-    const file = await fileIo.open(
-      request.activePath,
-      fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.APPEND
-    );
-    try {
-      await fileIo.write(file.fd, acceptedLines.join(''));
-    } finally {
-      await fileIo.close(file);
-    }
+    const journal: FTSpoolAppendJournal = { path: request.activePath,
+      offset: FTCacheFiles.size(request.activePath), content: acceptedLines.join('') };
+    FTCacheFiles.atomicWrite(`${request.spoolDir}/append.json`, JSON.stringify(journal));
+    recoverSpoolAppend(request.spoolDir);
   }
   const response = createSuccessResponse();
   response.appendedRecords = appendedRecords;
@@ -180,6 +206,10 @@ async function prepareSpoolReplay(request: FTDBSpoolTaskPoolRequest): Promise<Ob
   const byteOffset = Math.max(0, request.byteOffset || 0);
   const recordLimit = Math.max(1, request.recordLimit || 256);
   const parseResult = readSpoolRecordsPage(request.inflightPath, byteOffset, recordLimit);
+  if (parseResult.skippedRecords > 0) {
+    // Bounded forensic sample; bad rows cannot block the valid rows following them.
+    FTCacheFiles.atomicWrite(`${request.spoolDir}/corrupt.json`, JSON.stringify(parseResult.corruptLines));
+  }
   const response = createSuccessResponse();
   response.records = parseResult.records;
   response.batchFileRecords = parseResult.fileRecords;
@@ -218,6 +248,7 @@ async function clearSpoolFiles(request: FTDBSpoolTaskPoolRequest): Promise<Objec
   await deleteFileIfExists(request.activePath);
   await deleteFileIfExists(request.inflightPath);
   await deleteFileIfExists(request.legacyPath);
+  FTCacheFiles.remove(`${request.spoolDir}/corrupt.json`);
   return createSuccessResponse() as Object;
 }
 
@@ -387,6 +418,7 @@ function readSpoolRecordsPage(
   recordLimit: number
 ): FTDBSpoolParseResult {
   const result: FTDBSpoolParseResult = {
+    corruptLines: [],
     records: [],
     fileRecords: 0,
     skippedRecords: 0,
@@ -485,6 +517,7 @@ function parseSpoolLineBytes(
   result.fileRecords++;
   if (oversizedLine || lineBytes > FT_DB_SPOOL_MAX_RECORD_BYTES) {
     result.skippedRecords++;
+    if (result.corruptLines.length < 8) { result.corruptLines.push(`oversized line: ${lineBytes} bytes`); }
     return;
   }
   const joined = new Uint8Array(lineBytes);
@@ -504,9 +537,11 @@ function parseSpoolLineBytes(
       result.records.push(record);
     } else {
       result.skippedRecords++;
+      if (result.corruptLines.length < 8) { result.corruptLines.push(trimmed.slice(0, 2048)); }
     }
   } catch (_) {
     result.skippedRecords++;
+    if (result.corruptLines.length < 8) { result.corruptLines.push(trimmed.slice(0, 2048)); }
   }
 }
 

@@ -1,7 +1,11 @@
 import { FTDBCachePolicy } from '../../db/FTDBCachePolicy';
 import { FTDBManager } from '../../db/FTDBManager';
+import { FTDBTaskPoolExecutor } from '../../db/FTDBTaskPoolExecutor';
 
 export class DbInternalTestAccess {
+  public static async getCacheStatus(context: Context): Promise<string> {
+    return await FTDBTaskPoolExecutor.getCacheStatus(context);
+  }
   public static setCachePolicyRuntime(runtime: Object): void {
     FTDBCachePolicy.setRuntimeInternal(runtime);
   }

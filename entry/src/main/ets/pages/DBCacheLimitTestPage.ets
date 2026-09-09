@@ -313,6 +313,17 @@ export struct DBCacheLimitTestPage {
               this.refreshPolicyStatus();
             })
 
+          Button('Inspect Unified Cache')
+            .width('100%')
+            .height(44)
+            .onClick(() => {
+              DbInternalTestAccess.getCacheStatus(this.context).then((status: string) => {
+                this.appendResult(`Unified Cache: ${status}\n`);
+              }).catch((error: Error) => {
+                this.appendResult(`Unified Cache ERROR: ${error.message}\n`);
+              });
+            })
+
           Button('Clear Cached DB')
             .width('100%')
             .height(44)

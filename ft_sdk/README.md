@@ -269,7 +269,7 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 `enableLimitWithDbSize`, `setDbCacheLimit`, and `setDbCacheDiscard` are retained as compatibility aliases. When a byte limit is enabled, the Log and RUM record-count limits do not participate in cache admission.
 
-FileStore rollout is opt-in. Start with shadow mode, which retains SQLite as the upload index while mirroring accepted records to `files/ft_sdk_file_store`. Uploaded and cleared records are removed from the mirror as well.
+FileStore rollout is opt-in. Start with shadow mode, which retains SQLite as the authority while mirroring sync payloads and the complete View/Action lifecycle to `files/ft_sdk_cache_v2`. A failed mirror is marked dirty and reconciled on the next operation; it must not be treated as a verified migration source.
 
 ```ts
 const shadowConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
@@ -285,7 +285,13 @@ const fileStoreConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
   .setNeedTransformOldCache(true)
 ```
 
-Do not enable the migration flag until the shadow-mode upload results have been checked in the target app. `FTSDK.clearAllData()` removes SQLite data, the DB-failure spool, and FileStore pending files together.
+Migration uses durable `copying → verified → switched → completed` checkpoints. Commands (including manual/automatic upload) wait behind the same process lane and file lock. Existing SQLite data requires explicit migration opt-in; insufficient capacity leaves the source intact and migration incomplete. Increase the budget and restart to resume. Legacy NDJSON is imported before it is removed; corrupt legacy input blocks switching and retains its source for inspection.
+
+In primary file mode, one physical-byte account covers payload/aggregate files, SQLite and its WAL/SHM files, legacy files, the failure spool, transaction/temp files and bounded quarantine. A 1 MiB recovery reserve and temporary-write headroom reduce usable payload capacity. `DISCARD_OLDEST` evicts unleased logs first (oldest timestamp, then ID), followed by other sync records; live View/Action state and in-flight upload versions are not silently evicted. If only protected data remains, new data is rejected. Lowering a limit below existing protected/control data reports pressure and rejects growth; it cannot make those bytes disappear.
+
+Writes and upload commits use checksummed envelopes, fsync, rename and a forward-recovery journal. Stale ACKs do not delete a newer version of the same UUID. Network delivery remains at-least-once: if the server accepted a request before the client committed its ACK, that UUID can be sent again. `FTSDK.clearAllData()` clears persisted aggregates, sync payloads and the failure spool; stop producers before a manual empty-cache check.
+
+The demo's **Inspect Unified Cache** button exposes the physical account and recovery status; these diagnostics are internal, not supported package APIs. Device acceptance must separately verify real power-loss recovery, cross-process locking and server-side delivery.
 
 ## Remote Configuration and Runtime Endpoint
 
