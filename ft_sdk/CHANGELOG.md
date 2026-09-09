@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `startTransfer` positions. First-byte and download spans no longer discard
   transport-to-ready gaps, fabricate zero-length phases, or use inconsistent
   fallback origins for `resource_trans`.
+- Added NetworkKit and `@ohos/axios` performance-timing Resource phases when
+  the underlying response exposes them. Both paths now use the same validated
+  cumulative-point mapping as RCP and retain wall-clock total-duration fallback
+  when platform timing data is unavailable or its final endpoint is reversed.
 - Fixed Action resource/error counters being lost when an auto-tracked request
   completes after the Action's normal five-second timeout. Pending Resource
   associations and reference counts now survive process restart; Actions are

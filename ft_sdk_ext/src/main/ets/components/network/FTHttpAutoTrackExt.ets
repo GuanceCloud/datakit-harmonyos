@@ -2,7 +2,8 @@ import { http } from '@kit.NetworkKit';
 import {
   FTSDKExtensionBridge,
   FTSDKExtensionAutoTrackOptions,
-  FTSDKExtensionResolvedAutoTrackOptions
+  FTSDKExtensionResolvedAutoTrackOptions,
+  FTSDKExtensionResponseInput
 } from '@guancecloud/ft_sdk/Index';
 
 const TAG = 'FTHttpAutoTrackExt';
@@ -51,6 +52,34 @@ interface FTHttpRequestContextTarget {
 
 interface FTHttpRequestContextOptionsTarget {
   extraData?: string | Object | ArrayBuffer;
+}
+
+class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
+  url: string;
+  requestHeaders?: Object | null;
+  responseHeaders?: Object | null;
+  statusCode: number;
+  body?: string | Object | ArrayBuffer;
+  performanceTiming?: http.PerformanceTiming;
+  errorMessage?: string;
+  errorStack?: string;
+
+  constructor(
+    request: http.HttpRequestContext,
+    response: http.HttpResponse,
+    statusCode: number,
+    errorMessage?: string,
+    errorStack?: string
+  ) {
+    this.url = request.url;
+    this.requestHeaders = request.header;
+    this.responseHeaders = response.header;
+    this.statusCode = statusCode;
+    this.body = response.result;
+    this.performanceTiming = response.performanceTiming;
+    this.errorMessage = errorMessage;
+    this.errorStack = errorStack;
+  }
 }
 
 function applyNormalizedHeadersToHttpContext(context: http.HttpRequestContext, headers: Record<string, string>): void {
@@ -149,38 +178,24 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
 
   async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
     try {
+      // console.info('ft-lizhao-http', JSON.stringify(rspContext.performanceTiming));
       // NetworkKit also invokes FINAL_RESPONSE for transport failures, with
       // responseCode=0. The normal response path has no error stack and would
       // produce a Resource without the corresponding network Error.
       if (!rspContext.responseCode) {
         const error = new Error('NetworkKit request failed without an HTTP response');
-        FTSDKExtensionBridge.completeHttpError({
-          url: reqContext.url,
-          requestHeaders: reqContext.header,
-          responseHeaders: rspContext.header,
-          statusCode: 0,
-          body: rspContext.result,
-          errorMessage: error.message,
-          errorStack: error.stack
-        });
+        FTSDKExtensionBridge.completeHttpError(
+          new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack)
+        );
         return true;
       }
-      FTSDKExtensionBridge.completeHttpResponse({
-        url: reqContext.url,
-        requestHeaders: reqContext.header,
-        responseHeaders: rspContext.header,
-        statusCode: rspContext.responseCode || 0,
-        body: rspContext.result
-      });
+      FTSDKExtensionBridge.completeHttpResponse(
+        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0)
+      );
     } catch (error) {
-      FTSDKExtensionBridge.completeHttpError({
-        url: reqContext.url,
-        requestHeaders: reqContext.header,
-        responseHeaders: rspContext.header,
-        statusCode: rspContext.responseCode || 0,
-        body: rspContext.result,
-        errorMessage: String(error)
-      });
+      FTSDKExtensionBridge.completeHttpError(
+        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0, String(error))
+      );
     }
     return true;
   }

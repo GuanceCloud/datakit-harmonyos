@@ -25,6 +25,11 @@ import {
   RCPTraceInterceptor
 } from '../../../main/ets/components/network/FTHttpAutoTrack';
 import {
+  createFTNetStatusBean,
+  createFTResourceTimingFromNetworkPerformance,
+  FTNetworkPerformanceTiming
+} from '../../../main/ets/components/network/FTHttpAutoTrackShared';
+import {
   FTTraceContext,
   FTTraceHeaderHandler,
   FTTraceRequestContext
@@ -124,8 +129,14 @@ class FakeAxiosResponse implements FTAxiosResponseTarget<string> {
   status: number;
   headers?: Object;
   data?: string;
+  performanceTiming?: FTNetworkPerformanceTiming;
 
-  constructor(config: FTAxiosRequestConfigTarget, status: number, body: string) {
+  constructor(
+    config: FTAxiosRequestConfigTarget,
+    status: number,
+    body: string,
+    performanceTiming?: FTNetworkPerformanceTiming
+  ) {
     const headers: Record<string, Object> = {};
     headers['content-type'] = 'text/plain' as Object;
     headers['content-length'] = String(body.length) as Object;
@@ -133,7 +144,21 @@ class FakeAxiosResponse implements FTAxiosResponseTarget<string> {
     this.status = status;
     this.headers = headers;
     this.data = body;
+    this.performanceTiming = performanceTiming;
   }
+}
+
+class FakeAxiosPerformanceTiming implements FTNetworkPerformanceTiming {
+  dnsTiming: number = 10;
+  tcpTiming: number = 30;
+  tlsTiming: number = 80;
+  firstSendTiming: number = 100;
+  firstReceiveTiming: number = 150;
+  totalFinishTiming: number = 180;
+  redirectTiming: number = 40;
+  responseHeaderTiming: number = 155;
+  responseBodyTiming: number = 180;
+  totalTiming: number = 185;
 }
 
 class FakeAxiosError implements FTAxiosErrorTarget {
@@ -1149,6 +1174,141 @@ export default function resourceAutoTrackDeviceTest() {
       await flushAndAssertUploaded(collector, fragments, record?.getUuid() ?? '');
       const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
       RumAttributeAssert.uploaded(uploaded, record, attributes);
+    });
+
+    it('axiosPerformanceTimingShouldKeepWireLevelPhaseStarts', 0, async () => {
+      const viewName = 'axios_performance_timing_view';
+      const resourceUrl = 'https://device.test/axios-performance-timing';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      const requestConfig = new FakeAxiosRequestConfig(resourceUrl, 'get');
+      const preparedConfig =
+        target.requestManager.fulfilled!(requestConfig) as FTAxiosRequestConfigTarget;
+      const response = new FakeAxiosResponse(preparedConfig, 200, 'ok', new FakeAxiosPerformanceTiming());
+      target.responseManager.fulfilled!(response);
+
+      const fragments = [
+        'resource,',
+        `resource_url=${resourceUrl}`,
+        'resource_status=200',
+        `view_name=${viewName}`,
+        'resource_first_byte_time',
+        'resource_download_time'
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 200 };
+      const point = RumAttributeAssert.record(record, attributes);
+      const dnsTiming = JSON.parse(String(point.fields.get('resource_dns_time'))) as Record<string, number>;
+      const tcpTiming = JSON.parse(String(point.fields.get('resource_connect_time'))) as Record<string, number>;
+      const sslTiming = JSON.parse(String(point.fields.get('resource_ssl_time'))) as Record<string, number>;
+      const firstByteTiming = JSON.parse(String(point.fields.get('resource_first_byte_time'))) as Record<string, number>;
+      const downloadTiming = JSON.parse(String(point.fields.get('resource_download_time'))) as Record<string, number>;
+
+      expect(dnsTiming['start']).assertEqual(0);
+      expect(dnsTiming['duration']).assertEqual(10000000);
+      expect(tcpTiming['start']).assertEqual(10000000);
+      expect(tcpTiming['duration']).assertEqual(20000000);
+      expect(sslTiming['start']).assertEqual(30000000);
+      expect(sslTiming['duration']).assertEqual(50000000);
+      // NetworkKit's firstSend/firstReceive are wire points, so the 20ms
+      // transport-to-send gap remains visible rather than shifting this bar.
+      expect(firstByteTiming['start']).assertEqual(100000000);
+      expect(firstByteTiming['duration']).assertEqual(50000000);
+      expect(downloadTiming['start']).assertEqual(150000000);
+      expect(downloadTiming['duration']).assertEqual(30000000);
+      expect(point.fields.get('resource_ttfb')).assertEqual(50000000);
+      expect(point.fields.get('resource_trans')).assertEqual(100000000);
+      expect(point.fields.get('duration')).assertEqual(180000000);
+
+      await flushAndAssertUploaded(collector, fragments, record!.getUuid());
+    });
+
+    it('networkPerformanceTimingShouldPreserveGapsAndInvalidStates', 0, () => {
+      const httpsTiming = new FakeAxiosPerformanceTiming();
+      const https = createFTResourceTimingFromNetworkPerformance(httpsTiming, 999000000);
+      expect(https.dnsPhase!.startTime).assertEqual(0);
+      expect(https.dnsPhase!.duration).assertEqual(10000000);
+      expect(https.firstBytePhase!.startTime).assertEqual(100000000);
+      expect(https.firstBytePhase!.duration).assertEqual(50000000);
+      expect(https.downloadPhase!.startTime).assertEqual(150000000);
+      expect(https.downloadPhase!.duration).assertEqual(30000000);
+      // redirectTiming is not a phase endpoint, so it cannot move DNS from 0.
+      expect(https.dnsPhase!.startTime).assertEqual(0);
+
+      const http = createFTResourceTimingFromNetworkPerformance({
+        dnsTiming: 10,
+        tcpTiming: 30,
+        tlsTiming: 0,
+        firstSendTiming: 50,
+        firstReceiveTiming: 70,
+        totalFinishTiming: 90
+      }, 999000000);
+      expect(http.sslPhase === undefined).assertTrue();
+      expect(http.transTime === undefined).assertTrue();
+      expect(http.firstBytePhase!.startTime).assertEqual(50000000);
+      expect(http.performanceMetrics.has('resourceSSL')).assertFalse();
+      expect(http.performanceMetrics.has('resourceTrans')).assertFalse();
+
+      const reused = createFTResourceTimingFromNetworkPerformance({
+        dnsTiming: 0,
+        tcpTiming: 0,
+        tlsTiming: 0,
+        firstSendTiming: 30,
+        firstReceiveTiming: 30,
+        totalFinishTiming: 30
+      }, 999000000);
+      // Equal valid points remain zero; reporting must not fabricate a positive phase.
+      expect(reused.firstBytePhase!.duration).assertEqual(0);
+      expect(reused.downloadPhase!.duration).assertEqual(0);
+      expect(reused.performanceMetrics.has('resourceTTFB')).assertFalse();
+      expect(reused.performanceMetrics.has('resourceDownloadTime')).assertFalse();
+      expect(reused.loadTime).assertEqual(30000000);
+      const reusedNetStatus = createFTNetStatusBean(reused);
+      expect(reusedNetStatus.getFirstByteTime()).assertEqual(-1);
+      expect(reusedNetStatus.getDownloadTime()).assertEqual(-1);
+
+      const missing = createFTResourceTimingFromNetworkPerformance({
+        tcpTiming: 30,
+        firstSendTiming: 50,
+        firstReceiveTiming: 70,
+        totalFinishTiming: 90
+      }, 999000000);
+      expect(missing.tcpPhase === undefined).assertTrue();
+      expect(missing.performanceMetrics.has('resourceTCP')).assertFalse();
+      expect(missing.firstBytePhase!.startTime).assertEqual(50000000);
+
+      const reversed = createFTResourceTimingFromNetworkPerformance({
+        dnsTiming: 10,
+        tcpTiming: 30,
+        tlsTiming: 80,
+        firstSendTiming: 60,
+        firstReceiveTiming: 100,
+        totalFinishTiming: 120
+      }, 999000000);
+      expect(reversed.firstBytePhase === undefined).assertTrue();
+      expect(reversed.performanceMetrics.has('resourceTTFB')).assertFalse();
+      expect(reversed.downloadPhase!.startTime).assertEqual(100000000);
+      expect(reversed.downloadPhase!.duration).assertEqual(20000000);
+
+      const invalidTotal = createFTResourceTimingFromNetworkPerformance({
+        dnsTiming: 10,
+        tcpTiming: 30,
+        tlsTiming: 80,
+        firstSendTiming: 100,
+        firstReceiveTiming: 150,
+        totalFinishTiming: 120
+      }, 999000000);
+      expect(invalidTotal.downloadPhase === undefined).assertTrue();
+      expect(invalidTotal.performanceMetrics.has('resourceDownloadTime')).assertFalse();
+      expect(invalidTotal.loadTime).assertEqual(999000000);
+      expect(invalidTotal.performanceMetrics.get('resourceLoad')).assertEqual(999000000);
     });
 
     it('axiosRejectShouldWriteResourceError', 0, async () => {

@@ -59,10 +59,16 @@ class ChainResponse implements http.HttpResponse {
   cookies: string = '';
   performanceTiming: http.PerformanceTiming = new ChainPerformanceTiming();
 
-  constructor(responseCode: number, header: Object, result: string) {
+  constructor(
+    responseCode: number,
+    header: Object,
+    result: string,
+    performanceTiming: http.PerformanceTiming = new ChainPerformanceTiming()
+  ) {
     this.responseCode = responseCode;
     this.header = header;
     this.result = result;
+    this.performanceTiming = performanceTiming;
   }
 }
 
@@ -254,6 +260,69 @@ export default function httpChainModeDeviceTest() {
           );
         }
         await flushAndAssertUploaded(collector, fragments, record.getUuid());
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('httpChainShouldKeepNetworkKitPerformanceTiming', 0, async () => {
+      const viewName = 'http_chain_performance_timing_view';
+      const resourceUrl = 'https://device.test/http-chain-performance-timing';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const request = http.createHttp();
+      try {
+        const interceptors = applyFTHttpTrack(request, {
+          enableTraceInterceptor: false,
+          enableResourceInterceptor: true
+        }).getChain();
+        const requestHeaders: Record<string, Object> = {};
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+
+        const performanceTiming = new ChainPerformanceTiming();
+        performanceTiming.dnsTiming = 10;
+        performanceTiming.tcpTiming = 30;
+        performanceTiming.tlsTiming = 80;
+        performanceTiming.firstSendTiming = 100;
+        performanceTiming.firstReceiveTiming = 150;
+        performanceTiming.totalFinishTiming = 180;
+        performanceTiming.redirectTiming = 40;
+        performanceTiming.responseHeaderTiming = 155;
+        performanceTiming.responseBodyTiming = 180;
+        performanceTiming.totalTiming = 185;
+        const responseHeaders: Record<string, Object> = {};
+        responseHeaders['content-type'] = 'application/json' as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(200, responseHeaders, '{"ok":true}', performanceTiming)
+        );
+
+        const fragments = [
+          'resource,',
+          `resource_url=${resourceUrl}`,
+          'resource_status=200',
+          `view_name=${viewName}`,
+          'resource_first_byte_time',
+          'resource_download_time'
+        ];
+        const record = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+        const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+          viewName, resourceStatus: 200 };
+        const point = RumAttributeAssert.record(record, attributes);
+        const firstByteTiming = JSON.parse(String(point.fields.get('resource_first_byte_time'))) as Record<string, number>;
+        const downloadTiming = JSON.parse(String(point.fields.get('resource_download_time'))) as Record<string, number>;
+
+        expect(firstByteTiming['start']).assertEqual(100000000);
+        expect(firstByteTiming['duration']).assertEqual(50000000);
+        expect(downloadTiming['start']).assertEqual(150000000);
+        expect(downloadTiming['duration']).assertEqual(30000000);
+        expect(point.fields.get('resource_ttfb')).assertEqual(50000000);
+        expect(point.fields.get('resource_trans')).assertEqual(100000000);
+        expect(point.fields.get('duration')).assertEqual(180000000);
+
+        await flushAndAssertUploaded(collector, fragments, record!.getUuid());
       } finally {
         request.destroy();
       }

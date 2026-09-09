@@ -1,7 +1,6 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
-import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { ResourceParams } from '../rum/bean/ResourceParams';
 import { FTTraceConfigManager } from '../trace/FTTraceConfigManager';
 import { DefaultFTTraceInterceptor, FTTraceInterceptor } from '../trace/FTTraceInterceptor';
@@ -13,8 +12,11 @@ import {
   buildAutoTrackResourceId,
   buildRequestHeaderMap,
   buildResponseHeaderMap,
+  createFTNetStatusBean,
+  createFTResourceTimingFromNetworkPerformance,
   ensureHttpResourceId,
   extractContentLength,
+  FTNetworkPerformanceTiming,
   HttpAutoTrackState,
   HttpAutoTrackStateStore,
   normalizeObjectHeaders,
@@ -65,6 +67,8 @@ export interface FTSDKExtensionResponseInput {
   responseHeaders?: Object | null;
   statusCode: number;
   body?: string | Object | ArrayBuffer;
+  /** NetworkKit/axios cumulative wire timing; absent on unsupported adapters. */
+  performanceTiming?: FTNetworkPerformanceTiming;
   errorMessage?: string;
   errorStack?: string;
 }
@@ -188,7 +192,8 @@ export class FTSDKExtensionBridge {
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Final] Failed to complete response for ${resourceId}: ${error}`);
       if (state.resourceEnabled) {
-        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined);
+        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined,
+          response.performanceTiming);
       }
     } finally {
       FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
@@ -231,13 +236,15 @@ export class FTSDKExtensionBridge {
           state,
           response.url,
           response.errorMessage || 'Unknown error',
-          response.errorStack
+          response.errorStack,
+          response.performanceTiming
         );
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Error] Failed to complete error for ${state.resourceId}: ${error}`);
       if (state.resourceEnabled) {
-        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined);
+        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined,
+          response.performanceTiming);
       }
     } finally {
       FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
@@ -422,8 +429,9 @@ export class FTSDKExtensionBridge {
       resourceParams.setResponseContentLength(contentLength);
     }
 
-    const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
-    const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
+    const fallbackLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
+    const resourceTiming = createFTResourceTimingFromNetworkPerformance(response.performanceTiming, fallbackLoadNs);
+    const metricValue: PerformanceMetricValue = { value: resourceTiming.loadTime };
     resourceParams.addProperty('resourceLoad', metricValue);
 
     if (response.errorMessage) {
@@ -435,10 +443,9 @@ export class FTSDKExtensionBridge {
       resourceParams.setRequestErrorStack(response.errorStack);
     }
 
-    const netStatusBean = new NetStatusBean();
-    netStatusBean.setHoleRequestTime(resourceLoadNs);
+    const netStatusBean = createFTNetStatusBean(resourceTiming);
     FTInnerLogger.d(TAG,
-      `[Extension-Resource] Completed resourceId=${state.resourceId}, status=${response.statusCode || 0}, durationNs=${resourceLoadNs}`);
+      `[Extension-Resource] Completed resourceId=${state.resourceId}, status=${response.statusCode || 0}, metrics=${Array.from(resourceTiming.performanceMetrics.keys()).join(',')}`);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
     FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
     FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
@@ -448,7 +455,8 @@ export class FTSDKExtensionBridge {
     state: FTSDKExtensionHttpState,
     url: string,
     errorMessage: string,
-    errorStack?: string
+    errorStack?: string,
+    performanceTiming?: FTNetworkPerformanceTiming
   ): void {
     const resourceParams = new ResourceParams();
     resourceParams.setUrl(url);
@@ -458,13 +466,13 @@ export class FTSDKExtensionBridge {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
-    const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
-    const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
+    const fallbackLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
+    const resourceTiming = createFTResourceTimingFromNetworkPerformance(performanceTiming, fallbackLoadNs);
+    const metricValue: PerformanceMetricValue = { value: resourceTiming.loadTime };
     resourceParams.addProperty('resourceLoad', metricValue);
-    const netStatusBean = new NetStatusBean();
-    netStatusBean.setHoleRequestTime(resourceLoadNs);
+    const netStatusBean = createFTNetStatusBean(resourceTiming);
     FTInnerLogger.d(TAG,
-      `[Extension-Resource] Failed resourceId=${state.resourceId}, durationNs=${resourceLoadNs}`);
+      `[Extension-Resource] Failed resourceId=${state.resourceId}, metrics=${Array.from(resourceTiming.performanceMetrics.keys()).join(',')}`);
     FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
     FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
     FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);

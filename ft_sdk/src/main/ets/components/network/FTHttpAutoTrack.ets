@@ -9,7 +9,6 @@ import { FTTraceContext, FTTraceRequestContext } from '../trace/FTTraceHeaderHan
 import { TraceType } from '../trace/TraceType';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { ResourceParams } from '../rum/bean/ResourceParams';
-import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import { FTTraceHandler } from '../trace/FTTraceHandler';
@@ -22,9 +21,15 @@ import {
   ensureHttpResourceId,
   extractContentLength,
   FTAutoTrackOptions,
+  FTNetworkPerformanceTiming,
+  FTResourceTiming,
   HttpAutoTrackState,
   normalizeObjectHeaders,
   PerformanceMetricValue,
+  createFallbackFTResourceTiming,
+  createFTNetStatusBean,
+  createFTResourceTimingFromCumulative,
+  createFTResourceTimingFromNetworkPerformance,
   resolveAxiosChainMethod,
   summarizeHeaderKeys,
   summarizePerformanceMetrics,
@@ -92,186 +97,19 @@ interface TimeInfoStructure {
   redirectTimeMs?: number;
 }
 
-interface RCPResourceTimingPhase {
-  startTime: number;
-  duration: number;
-}
-
-interface RCPResourceTiming {
-  performanceMetrics: Map<string, number>;
-  dnsPhase?: RCPResourceTimingPhase;
-  tcpPhase?: RCPResourceTimingPhase;
-  sslPhase?: RCPResourceTimingPhase;
-  ttfbTime?: number;
-  transTime?: number;
-  firstBytePhase?: RCPResourceTimingPhase;
-  downloadPhase?: RCPResourceTimingPhase;
-  loadTime: number;
-}
-
-function readTimePointNs(value: number | undefined): number | undefined {
-  if (value === undefined || typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return undefined;
-  }
-  return value * MS_TO_NS;
-}
-
-function createTimingPhase(startTime: number | undefined, endTime: number | undefined): RCPResourceTimingPhase | undefined {
-  if (startTime === undefined || endTime === undefined || endTime < startTime) {
-    return undefined;
-  }
-  return {
-    startTime,
-    duration: endTime - startTime
-  };
-}
-
-function appendPositiveTimingMetric(metrics: Map<string, number>, key: string, value: number | undefined): void {
-  if (value !== undefined && value > 0) {
-    metrics.set(key, value);
-  }
-}
-
-function appendPhaseMetric(
-  metrics: Map<string, number>,
-  key: string,
-  phase: RCPResourceTimingPhase | undefined
-): void {
-  if (phase !== undefined) {
-    appendPositiveTimingMetric(metrics, key, phase.duration);
-  }
-}
-
-function getLastKnownTimePoint(
-  first: number | undefined,
-  second: number | undefined,
-  third: number | undefined
-): number | undefined {
-  if (third !== undefined) {
-    return third;
-  }
-  if (second !== undefined) {
-    return second;
-  }
-  return first;
-}
-
-function createFallbackRCPResourceTiming(fallbackLoadNs: number): RCPResourceTiming {
-  const performanceMetrics: Map<string, number> = new Map();
-  appendPositiveTimingMetric(performanceMetrics, 'resourceLoad', fallbackLoadNs);
-  return {
-    performanceMetrics,
-    loadTime: fallbackLoadNs
-  };
-}
-
 /**
- * Converts RCP's cumulative TimeInfo points into RUM phases without rebuilding
- * starts from phase durations. A missing or reversed endpoint means the phase
- * is unavailable; it must not be replaced with a cumulative endpoint.
+ * RCP preTransfer means transfer-ready, while startTransfer is the received
+ * first byte. The shared mapper retains those exact protocol time points.
  */
-function createRCPResourceTiming(timeInfo: TimeInfoStructure, fallbackLoadNs: number): RCPResourceTiming {
-  const timing = createFallbackRCPResourceTiming(fallbackLoadNs);
-  const dnsEndTime = readTimePointNs(timeInfo.nameLookupTimeMs);
-  const rawConnectEndTime = readTimePointNs(timeInfo.connectTimeMs);
-  const connectEndTime = rawConnectEndTime !== undefined &&
-    (dnsEndTime === undefined || rawConnectEndTime >= dnsEndTime)
-    ? rawConnectEndTime
-    : undefined;
-  const rawTlsHandshakeEndTime = readTimePointNs(timeInfo.tlsHandshakeTimeMs);
-  const tlsHandshakeEndTime = rawTlsHandshakeEndTime !== undefined && connectEndTime !== undefined &&
-    rawTlsHandshakeEndTime >= connectEndTime
-    ? rawTlsHandshakeEndTime
-    : undefined;
-
-  timing.dnsPhase = createTimingPhase(0, dnsEndTime);
-  timing.tcpPhase = createTimingPhase(dnsEndTime, connectEndTime);
-  timing.sslPhase = createTimingPhase(connectEndTime, tlsHandshakeEndTime);
-  appendPhaseMetric(timing.performanceMetrics, 'resourceDNS', timing.dnsPhase);
-  appendPhaseMetric(timing.performanceMetrics, 'resourceTCP', timing.tcpPhase);
-  appendPhaseMetric(timing.performanceMetrics, 'resourceSSL', timing.sslPhase);
-
-  const lastTransportEndTime = getLastKnownTimePoint(dnsEndTime, connectEndTime, tlsHandshakeEndTime);
-  const rawPreTransferTime = readTimePointNs(timeInfo.preTransferTimeMs);
-  const preTransferTime = rawPreTransferTime !== undefined &&
-    (lastTransportEndTime === undefined || rawPreTransferTime >= lastTransportEndTime)
-    ? rawPreTransferTime
-    : undefined;
-  const rawStartTransferTime = readTimePointNs(timeInfo.startTransferTimeMs);
-  const startTransferPreviousTime = preTransferTime !== undefined ? preTransferTime : lastTransportEndTime;
-  const startTransferTime = rawStartTransferTime !== undefined &&
-    (startTransferPreviousTime === undefined || rawStartTransferTime >= startTransferPreviousTime)
-    ? rawStartTransferTime
-    : undefined;
-  const rawTotalTime = readTimePointNs(timeInfo.totalTimeMs);
-  const totalPreviousTime = startTransferTime !== undefined
-    ? startTransferTime
-    : (preTransferTime !== undefined ? preTransferTime : lastTransportEndTime);
-  const totalTime = rawTotalTime !== undefined &&
-    (totalPreviousTime === undefined || rawTotalTime >= totalPreviousTime)
-    ? rawTotalTime
-    : undefined;
-
-  // RCP defines preTransfer as transfer-ready and startTransfer as first byte
-  // received. This is not request-body completion or response-header completion.
-  timing.firstBytePhase = createTimingPhase(preTransferTime, startTransferTime);
-  timing.downloadPhase = createTimingPhase(startTransferTime, totalTime);
-  if (timing.firstBytePhase !== undefined) {
-    timing.ttfbTime = timing.firstBytePhase.duration;
-  }
-  // Keep resource_trans consistently defined as TLS completion to request end.
-  // A zero TLS time is an inapplicable/reused TLS phase, not a request-local
-  // completion point, so it cannot provide the start for this metric.
-  if (tlsHandshakeEndTime !== undefined && tlsHandshakeEndTime > 0 && totalTime !== undefined) {
-    const transPhase = createTimingPhase(tlsHandshakeEndTime, totalTime);
-    if (transPhase !== undefined) {
-      timing.transTime = transPhase.duration;
-    }
-  }
-
-  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceTTFB', timing.ttfbTime);
-  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceFirstByte', timing.ttfbTime);
-  appendPositiveTimingMetric(timing.performanceMetrics, 'resourceTrans', timing.transTime);
-  appendPhaseMetric(timing.performanceMetrics, 'resourceDownloadTime', timing.downloadPhase);
-  // totalTimeMs remains the request duration when it is independently valid,
-  // even if an intermediate endpoint made a derived phase unavailable.
-  if (rawTotalTime !== undefined) {
-    timing.loadTime = rawTotalTime;
-    appendPositiveTimingMetric(timing.performanceMetrics, 'resourceLoad', rawTotalTime);
-  }
-  return timing;
-}
-
-function createRCPNetStatusBean(timing: RCPResourceTiming): NetStatusBean {
-  const netStatusBean = new NetStatusBean();
-  if (timing.dnsPhase !== undefined && timing.dnsPhase.duration > 0) {
-    netStatusBean.setDNSStartTime(timing.dnsPhase.startTime);
-    netStatusBean.setDNSTime(timing.dnsPhase.duration);
-  }
-  if (timing.tcpPhase !== undefined && timing.tcpPhase.duration > 0) {
-    netStatusBean.setConnectStartTime(timing.tcpPhase.startTime);
-    netStatusBean.setTcpTime(timing.tcpPhase.duration);
-  }
-  if (timing.sslPhase !== undefined && timing.sslPhase.duration > 0) {
-    netStatusBean.setSslStartTime(timing.sslPhase.startTime);
-    netStatusBean.setSSLTime(timing.sslPhase.duration);
-  }
-  if (timing.ttfbTime !== undefined && timing.ttfbTime > 0) {
-    netStatusBean.setTTFB(timing.ttfbTime);
-  }
-  if (timing.transTime !== undefined && timing.transTime > 0) {
-    netStatusBean.setResponseTime(timing.transTime);
-  }
-  if (timing.firstBytePhase !== undefined && timing.firstBytePhase.duration > 0) {
-    netStatusBean.setFirstByteStartTime(timing.firstBytePhase.startTime);
-    netStatusBean.setFirstByteTime(timing.firstBytePhase.duration);
-  }
-  if (timing.downloadPhase !== undefined && timing.downloadPhase.duration > 0) {
-    netStatusBean.setDownloadTimeStart(timing.downloadPhase.startTime);
-    netStatusBean.setDownloadTime(timing.downloadPhase.duration);
-  }
-  netStatusBean.setHoleRequestTime(timing.loadTime);
-  return netStatusBean;
+function createRCPResourceTiming(timeInfo: TimeInfoStructure, fallbackLoadNs: number): FTResourceTiming {
+  return createFTResourceTimingFromCumulative({
+    dnsEndTimeMs: timeInfo.nameLookupTimeMs,
+    connectEndTimeMs: timeInfo.connectTimeMs,
+    tlsEndTimeMs: timeInfo.tlsHandshakeTimeMs,
+    firstByteWaitStartTimeMs: timeInfo.preTransferTimeMs,
+    firstByteTimeMs: timeInfo.startTransferTimeMs,
+    totalTimeMs: timeInfo.totalTimeMs
+  }, fallbackLoadNs);
 }
 
 /**
@@ -372,8 +210,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const response = await next.handle(context);
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      let resourceTiming = createFallbackRCPResourceTiming(fallbackLoadNs);
-      let netStatusBean = createRCPNetStatusBean(resourceTiming);
+      let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
+      let netStatusBean = createFTNetStatusBean(resourceTiming);
 
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
@@ -411,8 +249,9 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
       if (response.timeInfo) {
         const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
+        // console.info('ft-lizhao',JSON.stringify(timeInfoObj))
         resourceTiming = createRCPResourceTiming(timeInfoObj, fallbackLoadNs);
-        netStatusBean = createRCPNetStatusBean(resourceTiming);
+        netStatusBean = createFTNetStatusBean(resourceTiming);
         FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
       }
 
@@ -434,8 +273,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       const error = err instanceof Error ? err : new Error(String(err));
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      const resourceTiming = createFallbackRCPResourceTiming(fallbackLoadNs);
-      const netStatusBean = createRCPNetStatusBean(resourceTiming);
+      const resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
+      const netStatusBean = createFTNetStatusBean(resourceTiming);
       const resourceParams = new ResourceParams();
       resourceParams.setUrl(url);
       resourceParams.setResourceMethod(method);
@@ -679,6 +518,8 @@ export interface FTAxiosResponseTarget<T = Object | string | ArrayBuffer> {
   status: number;
   headers?: Object;
   data?: T;
+  /** Optional because streaming and non-NetworkKit Axios adapters omit it. */
+  performanceTiming?: FTNetworkPerformanceTiming;
 }
 
 export interface FTAxiosErrorTarget {
@@ -968,7 +809,8 @@ function completeAxiosResource(
   headers: Record<string, string>,
   _responseBody?: string,
   errorMessage?: string,
-  errorStack?: string
+  errorStack?: string,
+  performanceTiming?: FTNetworkPerformanceTiming
 ): void {
   if (!state.resourceEnabled) {
     return;
@@ -1001,8 +843,9 @@ function completeAxiosResource(
     resourceParams.setResponseContentLength(contentLength);
   }
 
-  const resourceLoadNs = Math.max(Date.now() - state.startTime, 1) * MS_TO_NS;
-  const metricValue: PerformanceMetricValue = { value: resourceLoadNs };
+  const fallbackLoadNs = Math.max(Date.now() - state.startTime, 1) * MS_TO_NS;
+  const resourceTiming = createFTResourceTimingFromNetworkPerformance(performanceTiming, fallbackLoadNs);
+  const metricValue: PerformanceMetricValue = { value: resourceTiming.loadTime };
   resourceParams.addProperty('resourceLoad', metricValue);
 
   if (errorMessage) {
@@ -1012,10 +855,9 @@ function completeAxiosResource(
     resourceParams.setRequestErrorStack(errorStack);
   }
 
-  const netStatusBean = new NetStatusBean();
-  netStatusBean.setHoleRequestTime(resourceLoadNs);
+  const netStatusBean = createFTNetStatusBean(resourceTiming);
   FTInnerLogger.d(TAG,
-    `[Axios-Resource] Completed resourceId=${state.resourceId}, status=${status}, failed=${errorMessage ? 'true' : 'false'}, durationNs=${resourceLoadNs}`);
+    `[Axios-Resource] Completed resourceId=${state.resourceId}, status=${status}, failed=${errorMessage ? 'true' : 'false'}, ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
   FTRUMInnerManager.getInstance().setTransformContent(state.resourceId, resourceParams);
   FTRUMInnerManager.getInstance().setNetState(state.resourceId, netStatusBean);
   FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
@@ -1089,8 +931,10 @@ export function applyFTAxiosTrack(
       const responseHeaders = normalizeAxiosHeaders(response.headers);
       const responseBodyText = tryGetOptionalResponseBodyText(response.data);
 
+      // console.info('ft-lizhao-axios', JSON.stringify(response.performanceTiming));
       completeAxiosTrace(state, response.status || 0, responseHeaders, responseBodyText);
-      completeAxiosResource(state, response.status || 0, responseHeaders, undefined);
+      completeAxiosResource(state, response.status || 0, responseHeaders, undefined, undefined, undefined,
+        response.performanceTiming);
 
       FTInnerLogger.d(
         TAG,
@@ -1115,7 +959,8 @@ export function applyFTAxiosTrack(
           responseHeaders,
           responseBodyText,
           error.message || responseBodyText || 'Unknown error',
-          error.stack
+          error.stack,
+          error.response ? error.response.performanceTiming : undefined
         );
 
         FTInnerLogger.e(
