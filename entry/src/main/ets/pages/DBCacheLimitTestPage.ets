@@ -189,6 +189,8 @@ export struct DBCacheLimitTestPage {
   @State phaseOnePreflightProgress: string = '';
   @State cacheClearProgress: string = '';
   @State phaseOneViewActive: boolean = false;
+  /** Last mode confirmed by a unified-cache snapshot. */
+  @State capacityUsageMode: string = '';
   private context: Context = getContext(this) as Context;
   private writeTimer: number = -1;
   private infoTimer: number = -1;
@@ -747,12 +749,27 @@ export struct DBCacheLimitTestPage {
     for (let i = 0; i < status.oldestUuids.length; i++) {
       oldestSyncFilesPresent.push(this.isFileStoreSyncPresent(status.oldestUuids[i]));
     }
-    return {
+    const snapshot: PhaseOneSnapshot = {
       label,
       capturedAt: Date.now(),
       status,
       oldestSyncFilesPresent
     };
+    this.applyUnifiedCacheHeader(snapshot);
+    return snapshot;
+  }
+
+  /** Keep the top capacity meter and its label on the same snapshot as details. */
+  private applyUnifiedCacheHeader(snapshot: PhaseOneSnapshot): void {
+    const usage = snapshot.status.usage;
+    this.capacityUsageMode = snapshot.status.mode;
+    // `updatePolicyInfo()` runs on a timer. Keep its in-memory policy value
+    // aligned with this freshly queried snapshot so it cannot repaint a stale
+    // size immediately after the user prints cache details.
+    FTDBCachePolicy.getInstance().setCurrentDbSize(usage.governedBytes);
+    this.currentDbSize = this.formatBytes(usage.governedBytes);
+    this.dbCacheLimit = this.formatBytes(usage.capacityBytes);
+    this.dbLimitReached = usage.overLimit;
   }
 
   private async inspectUnifiedCache(label: string): Promise<void> {
@@ -1327,19 +1344,20 @@ export struct DBCacheLimitTestPage {
   }
 
   private getCapacityUsageLabel(): string {
-    const mode = FTCacheContext.settings.mode;
-    if (mode === 'file') { return '容量策略用量（FileStore）'; }
-    if (mode === 'shadow') { return '容量策略用量（SQLite 主库）'; }
-    return '容量策略用量（SQLite）';
+    const mode = this.capacityUsageMode || FTCacheContext.settings.mode;
+    // FileStore primary uses one unified physical-byte ledger. Its value is
+    // not merely the `ft_sdk_cache_v2` directory size.
+    if (mode === 'file') { return '容量策略用量（统一物理缓存）'; }
+    return '容量策略用量（SQLite 主库页分配）';
   }
 
   private getCapacityUsageHint(): string {
-    const mode = FTCacheContext.settings.mode;
+    const mode = this.capacityUsageMode || FTCacheContext.settings.mode;
     if (mode === 'shadow') {
       return '影子 FileStore 是额外的验证副本；完整物理落盘占用请使用“打印统一缓存明细”查看。';
     }
     if (mode === 'file') {
-      return '此值按 FileStore 的本地缓存账本统计；完整物理明细请使用“打印统一缓存明细”。';
+      return '此值包含 FileStore、SQLite/WAL、旧文件缓存与失败 Spool；各项明细请使用“打印统一缓存明细”。';
     }
     return '此值是 SQLite 的页分配容量计量；WAL、旧缓存与失败 Spool 的物理占用请使用“打印统一缓存明细”。';
   }
