@@ -28,6 +28,7 @@ import { Status as LogLevel } from '../../main/ets/components/bean/Status';
 import { DeviceMetricsMonitorType } from '../../main/ets/components/rum/enum/DeviceMetricsMonitorType';
 import { ErrorMonitorType } from '../../main/ets/components/rum/enum/ErrorMonitorType';
 import { FTDBCachePolicy } from '../../main/ets/components/db/FTDBCachePolicy';
+import { isFTCacheSqlitePrimary, resolveFTCacheMode } from '../../main/ets/components/db/FTCacheContext';
 import { FTSDK } from '../../main/ets/components/FTSDK';
 import FTTrackInner from '../../main/ets/components/FTTrackInner';
 import { FTSDKAnrManager, FTSDKRuntime } from '../../main/ets/components/internal/runtime/FTSDKRuntime';
@@ -549,6 +550,16 @@ export default function configUnitTest() {
       expect(fileShadowConfig.isFileDataStoreEnabled()).assertTrue();
       expect(fileShadowConfig.isUseFileDataStore()).assertFalse();
       expect(fileShadowConfig.isFileDataStoreShadow()).assertTrue();
+
+      // Android resolves the ambiguous double-enabled state as shadow. Keep
+      // HarmonyOS aligned without changing the three explicit combinations.
+      expect(resolveFTCacheMode(false, false)).assertEqual('sqlite');
+      expect(resolveFTCacheMode(false, true)).assertEqual('shadow');
+      expect(resolveFTCacheMode(true, false)).assertEqual('file');
+      expect(resolveFTCacheMode(true, true)).assertEqual('shadow');
+      expect(isFTCacheSqlitePrimary('sqlite')).assertTrue();
+      expect(isFTCacheSqlitePrimary('shadow')).assertTrue();
+      expect(isFTCacheSqlitePrimary('file')).assertFalse();
 
       const migrationConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .enableFileDataStore()

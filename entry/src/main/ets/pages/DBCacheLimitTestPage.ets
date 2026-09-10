@@ -1,10 +1,12 @@
 import { FTDBCachePolicy } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBCachePolicy';
 import { FTDBManager } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBManager';
 import { FTDBTaskPoolExecutor } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTDBTaskPoolExecutor';
+import { FTCacheContext } from '@guancecloud/ft_sdk/src/main/ets/components/db/FTCacheContext';
 import { SyncData } from '@guancecloud/ft_sdk/src/main/ets/components/db/bean/SyncData';
 import { Constants } from '@guancecloud/ft_sdk/src/main/ets/components/Constants';
 import { DbInternalTestAccess } from '@guancecloud/ft_sdk/src/main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { FTInnerLogFileManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/FTInnerLogFileManager';
+import { TrackLogManager } from '@guancecloud/ft_sdk/src/main/ets/components/log/TrackLogManager';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import {
   SDKDedicatedPoolManager,
@@ -19,9 +21,21 @@ import {
   SDKWorkerResponse
 } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
 import { DeviceUtils } from '@guancecloud/ft_sdk/src/main/ets/components/utils/DeviceUtils';
-import { AppState, ErrorType, FTRUMGlobalManager, FTLogger, FTSDK, RUMCacheDiscard, Status } from '@guancecloud/ft_sdk/Index';
+import {
+  AppState,
+  ErrorType,
+  FTRUMGlobalManager,
+  FTLogger,
+  FTSDK,
+  NetStatusBean,
+  ResourceParams,
+  RUMCacheDiscard,
+  Status
+} from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { Context } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
@@ -74,6 +88,10 @@ const SINGLE_LANE_BENCH_UPLOAD_TASK_COUNT = 200;
 const DB_WRITE_CAPABILITY_BATCHES_PER_CASE = 100;
 const DB_WRITE_CAPABILITY_BATCH_SIZES: number[] = [1, 10, 20, 50];
 const DB_WRITE_CAPABILITY_SETTLE_MS = 200;
+const PHASE_ONE_LOG_BATCH_COUNT = 64;
+const PHASE_ONE_LOG_PAYLOAD_BYTES = 16 * 1024;
+const PHASE_ONE_LOG_BATCH_BYTES = PHASE_ONE_LOG_BATCH_COUNT * PHASE_ONE_LOG_PAYLOAD_BYTES;
+const PHASE_ONE_SETTLE_MS = 1500;
 
 interface PhysicalProbeDrainResult {
   logMissing: string[];
@@ -91,6 +109,59 @@ interface SingleLaneBenchmarkCase {
 
 interface SyntheticPoolPingPayload {
   syntheticCostMs: number;
+}
+
+interface UnifiedCacheUsageSnapshot {
+  fileBytes: number;
+  sqliteBytes: number;
+  legacyFileBytes: number;
+  spoolBytes: number;
+  totalBytes: number;
+  governedBytes: number;
+  governedScope: string;
+  capacityBytes: number;
+  overLimit: boolean;
+}
+
+interface UnifiedCacheStatusSnapshot {
+  mode: string;
+  directUpload: boolean;
+  sqliteReleased: boolean;
+  usage: UnifiedCacheUsageSnapshot;
+  migration: string;
+  syncCount: number;
+  viewCount: number;
+  actionCount: number;
+  oldestUuids: string[];
+  evicted: number;
+  rejected: number;
+  corrupt: number;
+  projectionPending: boolean;
+  shadowHealthy: boolean;
+}
+
+interface PhaseOneSnapshot {
+  label: string;
+  capturedAt: number;
+  status: UnifiedCacheStatusSnapshot;
+  oldestSyncFilesPresent: boolean[];
+}
+
+/** Historical `ft_sdk_file_store/*.ndjson` payload shape. */
+interface LegacyFileStoreSyncData {
+  id: number;
+  dataType: DataType;
+  dataString: string;
+  uuid: string;
+  time: number;
+  customDataTypeString: string;
+}
+
+interface LegacyFileStoreRecord {
+  source: string;
+  seq: number;
+  createdAt: number;
+  data: LegacyFileStoreSyncData;
 }
 
 @Entry
@@ -114,21 +185,32 @@ export struct DBCacheLimitTestPage {
   @State countLimitNote: string = 'Log/RUM count limits are active.';
   @State writeCount: number = 0;
   @State autoWriteEnabled: boolean = false;
-  @State context: Context = getContext(this) as Context;
+  @State phaseOneSummary: string = 'No Phase 1 baseline saved.';
+  @State phaseOnePreflightProgress: string = '';
+  @State cacheClearProgress: string = '';
+  @State phaseOneViewActive: boolean = false;
+  private context: Context = getContext(this) as Context;
   private writeTimer: number = -1;
   private infoTimer: number = -1;
+  private phaseOnePreflightWaitTimer: number = -1;
+  private cacheClearWaitTimer: number = -1;
   private resultFlushTimer: number = -1;
   private resultLines: string[] = [];
   private dbMetricsRefreshing: boolean = false;
   private lastDbMetricsRefreshTime: number = 0;
   private limitReachedNoticeShown: boolean = false;
   private autoWriteDataType: DataType = DataType.LOG;
+  private phaseOneBaseline: PhaseOneSnapshot | null = null;
+  private phaseOneLastMarker: string = '';
+  private phaseOneActiveViewName: string = '';
 
   aboutToAppear() {
     if (this.infoTimer !== -1) {
       clearInterval(this.infoTimer);
       this.infoTimer = -1;
     }
+    this.stopPhaseOnePreflightProgress();
+    this.stopCacheClearProgress();
     // this.applyPageLoadCacheConfig();
     this.updatePolicyInfo();
     this.refreshActualDbCounts(true);
@@ -147,6 +229,8 @@ export struct DBCacheLimitTestPage {
       clearInterval(this.infoTimer);
       this.infoTimer = -1;
     }
+    this.stopPhaseOnePreflightProgress();
+    this.stopCacheClearProgress();
     if (this.resultFlushTimer !== -1) {
       clearTimeout(this.resultFlushTimer);
       this.resultFlushTimer = -1;
@@ -161,26 +245,31 @@ export struct DBCacheLimitTestPage {
         })
 
         Column({ space: 10 }) {
-          Text('Current Effective Policy')
+          Text('当前生效的缓存策略')
             .fontSize(18)
             .fontWeight(FontWeight.Bold)
             .width('100%')
 
-          Text(`Effective Mode: ${this.effectivePolicy}`)
+          Text(`生效模式：${this.effectivePolicy}`)
             .fontSize(16)
             .fontWeight(FontWeight.Medium)
             .fontColor('#007DFF')
             .width('100%')
 
-          Text(`DB Size: ${this.currentDbSize}`)
+          Text(`${this.getCapacityUsageLabel()}：${this.currentDbSize}`)
             .fontSize(15)
+            .width('100%')
+
+          Text(this.getCapacityUsageHint())
+            .fontSize(12)
+            .fontColor(Color.Gray)
             .width('100%')
 
           Divider()
             .width('100%')
             .margin({ top: 4, bottom: 4 })
 
-          Text(`DB Cache: ${this.dbCacheEnabled ? 'Enabled' : 'Disabled'} | Limit: ${this.dbCacheLimit} | Reached: ${this.dbLimitReached ? 'YES' : 'NO'}`)
+          Text(`统一缓存容量管控：${this.dbCacheEnabled ? '已启用' : '未启用'} | 上限：${this.dbCacheLimit} | 已触达：${this.dbLimitReached ? '是' : '否'}`)
             .fontSize(14)
             .fontColor(this.dbLimitReached ? Color.Red : Color.Green)
             .width('100%')
@@ -195,7 +284,7 @@ export struct DBCacheLimitTestPage {
             .fontColor(this.dbCacheEnabled ? '#888888' : '#222222')
             .width('100%')
 
-          Text(`Actual DB Count: Log=${this.actualLogDbCountText}, RUM=${this.actualRumDbCountText}`)
+          Text(`主库记录数：Log=${this.actualLogDbCountText}, RUM=${this.actualRumDbCountText}`)
             .fontSize(14)
             .fontColor('#555555')
             .width('100%')
@@ -212,6 +301,111 @@ export struct DBCacheLimitTestPage {
         }
         .padding(16)
         .backgroundColor('#F5F5F5')
+        .borderRadius(8)
+        .width('90%')
+        .alignItems(HorizontalAlign.Start)
+
+        Column({ space: 10 }) {
+          Text('容量、聚合与持久化闭环')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .width('100%')
+
+          Text('正式配置为 30 MiB 容量与 discard_oldest。容量测试时请断网或暂停上传；FileStore、影子模式、ACK/强杀属于独立专项场景。')
+            .fontSize(12)
+            .fontColor('#666666')
+            .width('100%')
+
+          Text(this.phaseOneSummary)
+            .fontSize(13)
+            .fontColor('#0A5A2A')
+            .width('100%')
+
+          if (this.phaseOnePreflightProgress.length > 0) {
+            Text(`预检状态：${this.phaseOnePreflightProgress}`)
+              .fontSize(13)
+              .fontColor(this.isRunning ? '#8A5A00' : '#0A5A2A')
+              .width('100%')
+          }
+
+          Button('Preflight and Save Baseline')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#00695C')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.preparePhaseOneBaseline();
+            })
+
+          Button('Write ~1 MiB Tagged Logs')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#007DFF')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.writePhaseOneLogBatch();
+            })
+
+          Button('Compare Eviction / Rejection with Baseline')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#7B1FA2')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.comparePhaseOneBaseline();
+            })
+
+          Button('Force DB Failure and Check Spool')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#C62828')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.verifyPhaseOneSpoolFallback();
+            })
+
+          Button(this.phaseOneViewActive ? 'End Aggregation View' : 'Create View / Action / Resource')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#1565C0')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              if (this.phaseOneViewActive) {
+                this.finishPhaseOneAggregation();
+              } else {
+                this.startPhaseOneAggregation();
+              }
+            })
+
+          Button('Check Shadow Mode Status')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#5D4037')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.inspectPhaseOneShadowMode();
+            })
+
+          Button('Create 3 Legacy File-Cache Records and Verify Migration')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#8D6E63')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.createAndVerifyLegacyFileStoreFixture();
+            })
+
+          Button('Print Unified Cache Details')
+            .width('100%')
+            .height(44)
+            .backgroundColor('#455A64')
+            .enabled(!this.autoWriteEnabled && !this.isRunning)
+            .onClick(() => {
+              this.inspectUnifiedCache('手动检查');
+            })
+        }
+        .padding(16)
+        .backgroundColor('#E8F5E9')
         .borderRadius(8)
         .width('90%')
         .alignItems(HorizontalAlign.Start)
@@ -239,9 +433,9 @@ export struct DBCacheLimitTestPage {
             .height(48)
             .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
             .enabled(!this.isRunning)
-            .onClick(() => {
-              if (this.autoWriteEnabled) {
-                this.stopAutoWrite();
+          .onClick(() => {
+            if (this.autoWriteEnabled) {
+                this.stopAutoWriteAndDrain();
               } else {
                 this.startAutoWriteLogs();
               }
@@ -252,9 +446,9 @@ export struct DBCacheLimitTestPage {
             .height(48)
             .backgroundColor(this.autoWriteEnabled ? Color.Red : '#007DFF')
             .enabled(!this.isRunning)
-            .onClick(() => {
-              if (this.autoWriteEnabled) {
-                this.stopAutoWrite();
+          .onClick(() => {
+            if (this.autoWriteEnabled) {
+                this.stopAutoWriteAndDrain();
               } else {
                 this.startAutoWriteRUM();
               }
@@ -317,20 +511,23 @@ export struct DBCacheLimitTestPage {
             .width('100%')
             .height(44)
             .onClick(() => {
-              DbInternalTestAccess.getCacheStatus(this.context).then((status: string) => {
-                this.appendResult(`Unified Cache: ${status}\n`);
-              }).catch((error: Error) => {
-                this.appendResult(`Unified Cache ERROR: ${error.message}\n`);
-              });
+              this.inspectUnifiedCache('手动检查');
             })
 
-          Button('Clear Cached DB')
+          if (this.cacheClearProgress.length > 0) {
+            Text(`清空状态：${this.cacheClearProgress}`)
+              .fontSize(13)
+              .fontColor(this.isRunning ? '#8A5A00' : '#0A5A2A')
+              .width('100%')
+          }
+
+          Button('Clear All Cached Data')
             .width('100%')
             .height(44)
             .backgroundColor('#DC3545')
             .enabled(!this.isRunning)
             .onClick(() => {
-              this.clearCachedDb();
+              this.clearAllCacheData();
             })
         }
         .padding(16)
@@ -345,7 +542,7 @@ export struct DBCacheLimitTestPage {
             .fontWeight(FontWeight.Bold)
             .width('100%')
 
-          Button('Test DB Cache')
+          Button('Test Unified Cache Capacity')
             .width('100%')
             .height(44)
             .backgroundColor('#007DFF')
@@ -543,6 +740,538 @@ export struct DBCacheLimitTestPage {
     .backgroundColor(TestPageTheme.PAGE_BACKGROUND)
   }
 
+  private async loadUnifiedCacheSnapshot(label: string): Promise<PhaseOneSnapshot> {
+    const rawStatus = await DbInternalTestAccess.getCacheStatus(this.context);
+    const status = JSON.parse(rawStatus) as UnifiedCacheStatusSnapshot;
+    const oldestSyncFilesPresent: boolean[] = [];
+    for (let i = 0; i < status.oldestUuids.length; i++) {
+      oldestSyncFilesPresent.push(this.isFileStoreSyncPresent(status.oldestUuids[i]));
+    }
+    return {
+      label,
+      capturedAt: Date.now(),
+      status,
+      oldestSyncFilesPresent
+    };
+  }
+
+  private async inspectUnifiedCache(label: string): Promise<void> {
+    try {
+      const snapshot = await this.loadUnifiedCacheSnapshot(label);
+      this.appendResult(`\n=== 统一缓存明细：${label} ===\n`);
+      this.appendUnifiedCacheSnapshot(snapshot);
+    } catch (error) {
+      this.appendResult(`统一缓存检查失败：${error}\n`);
+    }
+  }
+
+  /**
+   * Creates data in the historical FileStore layout, rather than writing a
+   * current cache record and merely relabelling it.  The migration reader uses
+   * the same NDJSON envelope as the old DB-failure spool implementation.
+   */
+  private async createAndVerifyLegacyFileStoreFixture(): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.autoWriteEnabled) { this.stopAutoWrite(); }
+      const drained = await this.awaitCachePipelineDrained('旧文件缓存制造前排空');
+      if (!drained) {
+        this.appendResult('旧文件缓存制造已取消：日志邮箱尚未排空，避免与正在写入的数据交叉。\n');
+        return;
+      }
+      const before = await this.loadUnifiedCacheSnapshot('制造旧文件缓存前');
+      const legacyDir = `${this.context.filesDir}/ft_sdk_file_store`;
+      const legacyPath = `${legacyDir}/sync_data.ndjson`;
+      const now = Date.now();
+      const fixtureUuids: string[] = [];
+      const lines: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const uuid = `legacy-migration-fixture-${now}-${i + 1}`;
+        fixtureUuids.push(uuid);
+        const data: LegacyFileStoreSyncData = {
+          id: now + i,
+          dataType: DataType.LOG,
+          dataString: `df_rum_harmonyos_log,source=legacy_migration_fixture message=\"legacy_migration_fixture_${now}_${i + 1}\" ${now + i}`,
+          uuid,
+          time: now + i,
+          customDataTypeString: 'log'
+        };
+        const record: LegacyFileStoreRecord = {
+          source: 'demo.legacy.migration.fixture', seq: i + 1, createdAt: now, data
+        };
+        lines.push(`${JSON.stringify(record)}\n`);
+      }
+      await this.appendLegacyNdjson(legacyDir, legacyPath, lines.join(''));
+      this.appendResult(`\n=== 迁移专项：已制造旧文件缓存 ===\n路径：${legacyPath}\n记录数：3；UUID=${fixtureUuids.join(', ')}\n`);
+
+      if (before.status.mode !== 'file') {
+        this.appendResult('旧缓存已保留。当前不是 FileStore 主模式，不会自动迁移；请配置 enableFileDataStore().setNeedTransformOldCache(true) 并冷启动后验证。\n');
+        return;
+      }
+      if (!FTCacheContext.settings.migrate) {
+        this.appendResult('旧缓存已保留。当前未开启 setNeedTransformOldCache(true)，SDK 应拒绝迁移并保留该来源。\n');
+        return;
+      }
+
+      // A completed migration is intentionally one-shot. Delete only its
+      // checkpoint so this test source is handled exactly like a fresh upgrade.
+      const migrationPath = `${this.context.filesDir}/ft_sdk_cache_v2/meta/migration.json`;
+      try { fs.unlinkSync(migrationPath); } catch (_) { /* First migration has no checkpoint yet. */ }
+      // Status inspection is read-only and deliberately does not start a
+      // migration. Submit the FileStore init command through its normal lane
+      // so this fixture follows the same path as a first FileStore launch.
+      await FTDBTaskPoolExecutor.init(this.context);
+      const after = await this.loadUnifiedCacheSnapshot('旧文件缓存迁移后');
+      const allFixturesImported = fixtureUuids.every((uuid: string) => this.isFileStoreSyncPresent(uuid));
+      const legacyCleared = after.status.usage.legacyFileBytes === 0;
+      this.appendUnifiedCacheSnapshot(after);
+      this.appendResult(`迁移结果：fixture 已导入=${allFixturesImported}，旧目录已清空=${legacyCleared}，migration=${after.status.migration}\n`);
+      this.appendResult(allFixturesImported && legacyCleared && this.isMigrationCompleted(after.status)
+        ? '迁移专项：通过。3 条旧 NDJSON 记录已进入 FileStore，且旧来源已在完成切换后删除。\n'
+        : '迁移专项：未完全通过。旧来源已保留或记录未全部导入，请检查 migration 状态与错误日志。\n');
+    } catch (error) {
+      this.appendResult(`制造或迁移旧文件缓存失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async appendLegacyNdjson(directory: string, path: string, content: string): Promise<void> {
+    let directoryExists = false;
+    try {
+      directoryExists = await fs.access(directory);
+    } catch (_) {
+      directoryExists = false;
+    }
+    if (!directoryExists) {
+      try { await fs.mkdir(directory); }
+      catch (error) {
+        let created = false;
+        try { created = await fs.access(directory); } catch (_) { created = false; }
+        if (!created) {
+          throw new Error(`LEGACY_FIXTURE_MKDIR_FAILED: ${directory}; ${String(error)}`);
+        }
+      }
+    }
+    let file: fs.File | null = null;
+    try {
+      file = await fs.open(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
+      await fs.write(file.fd, content);
+    } catch (error) {
+      throw new Error(`LEGACY_FIXTURE_WRITE_FAILED: ${path}; ${String(error)}`);
+    } finally {
+      if (file !== null) { await fs.close(file); }
+    }
+  }
+
+  private appendUnifiedCacheSnapshot(snapshot: PhaseOneSnapshot): void {
+    const status = snapshot.status;
+    const usage = status.usage;
+    const summedBytes = usage.fileBytes + usage.sqliteBytes + usage.legacyFileBytes + usage.spoolBytes;
+    const filesDir = this.context.filesDir || '(filesDir unavailable)';
+    const databaseDir = this.context.databaseDir || '(databaseDir unavailable)';
+    const modeDescription = status.mode === 'file'
+      ? 'FileStore 主模式'
+      : status.mode === 'shadow' ? 'SQLite 主库 + FileStore 影子模式' : 'SQLite 模式';
+
+    this.appendResult(`快照：${snapshot.label}，时间=${new Date(snapshot.capturedAt).toISOString()}\n`);
+    this.appendResult(`运行模式：${modeDescription}；migration=${status.migration}；projectionPending=${status.projectionPending}\n`);
+    this.appendResult(`【FileStore】${filesDir}/ft_sdk_cache_v2，包含 sync / view / action / 元数据与事务 journal，共 ${this.formatBytes(usage.fileBytes)}\n`);
+    this.appendResult(`【SQLite / WAL】${databaseDir} 下 SDK 数据库及同名前缀的 WAL / SHM，共 ${this.formatBytes(usage.sqliteBytes)}\n`);
+    this.appendResult(`【旧文件缓存】${filesDir}/ft_sdk_file_store，共 ${this.formatBytes(usage.legacyFileBytes)}\n`);
+    this.appendResult(`【失败 Spool】${filesDir}/ft_sdk_spool，DB 写失败后的待回放记录，共 ${this.formatBytes(usage.spoolBytes)}\n`);
+    this.appendResult(`物理落盘总占用：total=${this.formatBytes(usage.totalBytes)}，分项求和=${this.formatBytes(summedBytes)}，${summedBytes === usage.totalBytes ? '一致' : '不一致'}\n`);
+    this.appendResult(`容量策略计量：${usage.governedScope}=${this.formatBytes(usage.governedBytes)}，配置=${this.formatBytes(usage.capacityBytes)}，当前剩余=${this.formatBytes(Math.max(0, usage.capacityBytes - usage.governedBytes))}，overLimit=${usage.overLimit}\n`);
+    if (status.mode === 'shadow') {
+      this.appendResult('说明：影子模式会同时保留 SQLite 主库和 FileStore 镜像；物理落盘总占用包含两份数据，不能直接与 SQLite 的 30 MiB 主库上限比较。\n');
+    }
+    this.appendResult('写入预留：不再保留固定控制空间；每次提交仅按原子替换的最大临时文件、journal 和净增长预估所需空间。剩余容量仍不等于可直接写入的 payload 容量。\n');
+    this.appendResult(`数据：sync=${status.syncCount}，view=${status.viewCount}，action=${status.actionCount}，evicted=${status.evicted}，rejected=${status.rejected}，corrupt=${status.corrupt}\n`);
+    this.appendResult(`状态：directUpload=${status.directUpload}，sqliteReleased=${status.sqliteReleased}，shadowHealthy=${status.shadowHealthy}\n`);
+    if (status.oldestUuids.length === 0) {
+      this.appendResult('最早 sync UUID：无\n');
+    } else {
+      for (let i = 0; i < status.oldestUuids.length; i++) {
+        this.appendResult(`最早 sync[${i}]：uuid=${status.oldestUuids[i]}，文件=${this.getFileStoreSyncPath(status.oldestUuids[i])}，存在=${snapshot.oldestSyncFilesPresent[i]}\n`);
+      }
+    }
+  }
+
+  private getFileStoreSyncPath(uuid: string): string {
+    return `${this.context.filesDir}/ft_sdk_cache_v2/sync/${encodeURIComponent(uuid)}.json`;
+  }
+
+  private isFileStoreSyncPresent(uuid: string): boolean {
+    try {
+      return fs.accessSync(this.getFileStoreSyncPath(uuid));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  private isMigrationCompleted(status: UnifiedCacheStatusSnapshot): boolean {
+    return status.migration.indexOf('"state":"completed"') >= 0;
+  }
+
+  private appendPhaseOnePreflight(snapshot: PhaseOneSnapshot): void {
+    const status = snapshot.status;
+    const policy = FTDBCachePolicy.getInstance();
+    const capacityMatched = status.usage.capacityBytes === PAGE_DB_CACHE_LIMIT_SIZE;
+    const discardOldest = String(policy.getDBCacheDiscard()) === 'discard_oldest';
+    const autoSyncDisabled = !SyncTaskManager.getInstance().isAutoSyncEnabled();
+
+    this.appendResult('\n[预检]\n');
+    this.appendResult(`30 MiB 容量：${capacityMatched ? '通过' : `不通过（当前=${this.formatBytes(status.usage.capacityBytes)}）`}\n`);
+    this.appendResult(`discard_oldest：${discardOldest ? '通过' : `不通过（当前=${policy.getDBCacheDiscard()}）`}\n`);
+    this.appendResult(`当前持久化模式：${status.mode}；自动上传=${autoSyncDisabled ? '已关闭' : '已开启（做容量/Spool 精确验收时请断网或临时关闭）'}\n`);
+    if (status.mode === 'file' || status.mode === 'shadow') {
+      this.appendResult(`FileStore 迁移完成：${this.isMigrationCompleted(status) ? '通过' : `待确认（migration=${status.migration}）`}；Projection 无待修复=${!status.projectionPending}\n`);
+    } else {
+      this.appendResult('当前为 SQLite 正式模式：FileStore 迁移、sync 文件淘汰与影子镜像不作为本次正式配置的预检条件。\n');
+    }
+    this.appendResult('通过正式配置预检后，保存基线并重复写入带标记日志直至接近容量；停止写入后再执行比对。\n');
+  }
+
+  private startPhaseOnePreflightProgress(): void {
+    this.stopPhaseOnePreflightProgress();
+    const startedAt = Date.now();
+    this.phaseOnePreflightProgress = '正在等待 DB 队列…';
+    this.phaseOnePreflightWaitTimer = setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      this.phaseOnePreflightProgress = `正在等待 DB 队列（${elapsedSeconds} 秒）…后台写入、Spool 或影子对账完成后会自动继续`;
+    }, 1000) as number;
+  }
+
+  private stopPhaseOnePreflightProgress(): void {
+    if (this.phaseOnePreflightWaitTimer !== -1) {
+      clearInterval(this.phaseOnePreflightWaitTimer);
+      this.phaseOnePreflightWaitTimer = -1;
+    }
+  }
+
+  private startCacheClearProgress(): void {
+    this.stopCacheClearProgress();
+    const startedAt = Date.now();
+    this.cacheClearProgress = '正在等待 DB 队列，准备清空 Spool、SQLite 与 FileStore 数据…';
+    this.cacheClearWaitTimer = setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      this.cacheClearProgress = `正在等待 DB 队列（${elapsedSeconds} 秒）…清空操作不可并发，请等待后台写入和影子对账结束`;
+    }, 1000) as number;
+  }
+
+  private stopCacheClearProgress(): void {
+    if (this.cacheClearWaitTimer !== -1) {
+      clearInterval(this.cacheClearWaitTimer);
+      this.cacheClearWaitTimer = -1;
+    }
+  }
+
+  private async preparePhaseOneBaseline(): Promise<void> {
+    this.isRunning = true;
+    this.startPhaseOnePreflightProgress();
+    try {
+      this.phaseOnePreflightProgress = '正在等待日志邮箱与 DB 队列排空…';
+      const drained = await this.awaitCachePipelineDrained('预检');
+      if (!drained) {
+        this.appendResult('预检：日志邮箱在 30 秒内未完全排空；已继续执行 DB 栅栏快照，请结合队列状态复查。\n');
+      }
+      const snapshot = await this.loadUnifiedCacheSnapshot('基线');
+      this.stopPhaseOnePreflightProgress();
+      this.phaseOnePreflightProgress = '正在整理统一缓存快照…';
+      this.phaseOneBaseline = snapshot;
+      this.phaseOneSummary = `已保存基线：sync=${snapshot.status.syncCount}，容量策略=${this.formatBytes(snapshot.status.usage.governedBytes)}，物理占用=${this.formatBytes(snapshot.status.usage.totalBytes)}，最早 UUID=${snapshot.status.oldestUuids.length}`;
+      this.appendResult('\n=== 基线已保存 ===\n');
+      this.appendUnifiedCacheSnapshot(snapshot);
+      this.appendPhaseOnePreflight(snapshot);
+      this.phaseOnePreflightProgress = '预检完成，已保存基线。';
+    } catch (error) {
+      this.appendResult(`保存基线失败：${error}\n`);
+      this.phaseOnePreflightProgress = '预检失败，请查看下方测试结果。';
+    } finally {
+      this.stopPhaseOnePreflightProgress();
+      this.isRunning = false;
+    }
+  }
+
+  private createPhaseOneLogPayload(): string {
+    const chunk = '0123456789abcdef';
+    let payload = '';
+    while (payload.length < PHASE_ONE_LOG_PAYLOAD_BYTES) {
+      payload += chunk;
+    }
+    return payload.substring(0, PHASE_ONE_LOG_PAYLOAD_BYTES);
+  }
+
+  private async writePhaseOneLogBatch(): Promise<void> {
+    this.isRunning = true;
+    try {
+      const before = await this.loadUnifiedCacheSnapshot('写入前');
+      const marker = `phase1-capacity-${Date.now()}`;
+      const payload = this.createPhaseOneLogPayload();
+      this.appendResult(`\n=== 容量写入：${marker} ===\n`);
+      this.appendResult(`提交 ${PHASE_ONE_LOG_BATCH_COUNT} 条日志，业务 payload 约 ${this.formatBytes(PHASE_ONE_LOG_BATCH_BYTES)}；请重复点击直到接近 30 MiB。\n`);
+      for (let i = 0; i < PHASE_ONE_LOG_BATCH_COUNT; i++) {
+        FTLogger.logBackground(`${marker}|index=${i}|${payload}`, Status.INFO, undefined, true);
+        if ((i + 1) % 8 === 0) {
+          await this.yieldToUi();
+        }
+      }
+      FTLogger.flush();
+      this.writeCount += PHASE_ONE_LOG_BATCH_COUNT;
+      this.phaseOneLastMarker = marker;
+      await this.waitForWriteSettled(PHASE_ONE_SETTLE_MS);
+      const after = await this.loadUnifiedCacheSnapshot('写入后');
+      const physicalGrowth = after.status.usage.totalBytes - before.status.usage.totalBytes;
+      const governedGrowth = after.status.usage.governedBytes - before.status.usage.governedBytes;
+      const markerData = await this.findPhaseOneMarker(this.phaseOneLastMarker);
+      this.appendResult(`提交后容量策略增量：${this.formatBytes(Math.max(0, governedGrowth))}；物理落盘增量：${this.formatBytes(Math.max(0, physicalGrowth))}；evicted=${after.status.evicted}，rejected=${after.status.rejected}\n`);
+      if (markerData) {
+        this.appendResult(`ACK / 重试证据：marker=${marker}，uuid=${markerData.getUuid()}，sync 文件=${this.getFileStoreSyncPath(markerData.getUuid())}\n`);
+      } else {
+        this.appendResult(`ACK / 重试证据：marker=${marker} 尚未出现在最近 500 条日志中；请等待 worker 清空后重新检查。\n`);
+      }
+      this.appendUnifiedCacheSnapshot(after);
+      this.phaseOneSummary = `最近 marker=${marker}，容量策略增量=${this.formatBytes(Math.max(0, governedGrowth))}，物理占用增量=${this.formatBytes(Math.max(0, physicalGrowth))}`;
+      await this.refreshActualDbCounts(true);
+      this.updatePolicyInfo();
+    } catch (error) {
+      this.appendResult(`容量写入失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async isPhaseOneMarkerPersisted(marker: string): Promise<boolean> {
+    return (await this.findPhaseOneMarker(marker)) !== null;
+  }
+
+  private async findPhaseOneMarker(marker: string): Promise<SyncData | null> {
+    if (marker.length === 0) {
+      return null;
+    }
+    const recentLogs = await this.queryDbSamples([DataType.LOG], 500, true);
+    for (let i = 0; i < recentLogs.length; i++) {
+      if (recentLogs[i].getDataString().indexOf(marker) >= 0) {
+        return recentLogs[i];
+      }
+    }
+    return null;
+  }
+
+  private async comparePhaseOneBaseline(): Promise<void> {
+    this.isRunning = true;
+    try {
+      if (this.phaseOneBaseline === null) {
+        this.appendResult('请先点击“预检并保存基线”。\n');
+        return;
+      }
+      const before = this.phaseOneBaseline;
+      const after = await this.loadUnifiedCacheSnapshot('比对后');
+      const policy = FTDBCachePolicy.getInstance();
+      const status = after.status;
+      const usage = status.usage;
+      const summedBytes = usage.fileBytes + usage.sqliteBytes + usage.legacyFileBytes + usage.spoolBytes;
+      const fileStorePrimary = status.mode === 'file';
+      let removedOldest = 0;
+      if (fileStorePrimary) {
+        for (let i = 0; i < before.status.oldestUuids.length; i++) {
+          if (!this.isFileStoreSyncPresent(before.status.oldestUuids[i])) {
+            removedOldest++;
+          }
+        }
+      }
+      const evictedDelta = status.evicted - before.status.evicted;
+      const rejectedDelta = status.rejected - before.status.rejected;
+      const markerPersisted = await this.isPhaseOneMarkerPersisted(this.phaseOneLastMarker);
+
+      this.appendResult('\n=== 容量策略比对 ===\n');
+      this.appendUnifiedCacheSnapshot(after);
+      this.appendResult(`账本分项求和：${summedBytes === usage.totalBytes ? '通过' : '失败'}（sum=${this.formatBytes(summedBytes)}，total=${this.formatBytes(usage.totalBytes)}）\n`);
+      this.appendResult(`容量健康基线：${!usage.overLimit ? '通过' : '失败'}（${usage.governedScope}=${this.formatBytes(usage.governedBytes)}，capacity=${this.formatBytes(usage.capacityBytes)}）\n`);
+      this.appendResult(fileStorePrimary
+        ? `基线最早 UUID 的已消失 sync 文件数：${removedOldest}/${before.status.oldestUuids.length}\n`
+        : '当前为 SQLite 正式模式：没有 FileStore sync 文件可用于“真实文件淘汰”判断；请以 DB 计数、marker 和容量结果验证当前配置。\n');
+      this.appendResult(`计数增量：evicted=${evictedDelta}，rejected=${rejectedDelta}；最近 marker 持久化=${this.phaseOneLastMarker.length > 0 ? markerPersisted : '未写入'}\n`);
+
+      const strategy = String(policy.getDBCacheDiscard());
+      if (strategy === 'discard_oldest') {
+        if (fileStorePrimary) {
+          const passed = evictedDelta > 0 && removedOldest > 0 && markerPersisted;
+          this.appendResult(passed
+            ? 'FileStore 真实淘汰：通过。发生淘汰、基线旧文件已消失，且新 marker 仍可查询。\n'
+            : 'FileStore 真实淘汰：尚不能下结论。请离线继续写满容量后再比对；只看到 DB 行减少而旧 sync 文件仍存在应判失败。\n');
+        } else {
+          this.appendResult(markerPersisted
+            ? 'SQLite 正式配置：新 marker 已持久化。继续离线写满后，结合 DB 计数与总容量确认旧数据按 discard_oldest 被替换。\n'
+            : 'SQLite 正式配置：最近 marker 尚未持久化；请等待 worker 清空或检查上传状态后重试。\n');
+        }
+      } else if (strategy === 'discard') {
+        if (fileStorePrimary) {
+          const passed = rejectedDelta > 0 && !markerPersisted && removedOldest === 0;
+          this.appendResult(passed
+            ? 'DISCARD：通过。旧文件保留、rejected 增长且新 marker 未持久化。\n'
+            : 'DISCARD：尚不能下结论。写满容量后追加新 marker，再确认不会先删除旧文件。\n');
+        } else {
+          this.appendResult('SQLite 正式配置的 DISCARD 对比需在写满容量后结合 DB 计数和新 marker 进行；FileStore rejected 计数不适用。\n');
+        }
+      } else {
+        this.appendResult(`当前策略=${strategy}，不属于 discard_oldest / discard 验收场景。\n`);
+      }
+      this.phaseOneSummary = `比对完成：模式=${status.mode}，evicted Δ=${evictedDelta}，rejected Δ=${rejectedDelta}`;
+    } catch (error) {
+      this.appendResult(`容量策略比对失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async verifyPhaseOneSpoolFallback(): Promise<void> {
+    this.isRunning = true;
+    try {
+      const before = await this.loadUnifiedCacheSnapshot('Spool 回退前');
+      const marker = `phase1-spool-${Date.now()}`;
+      const data = new SyncData(DataType.LOG);
+      const timeNano = Date.now() * 1000000;
+      data.setUuid(marker);
+      data.setTime(timeNano);
+      data.setDataString(`df_rum_harmonyos_log,source=phase1_spool,sdk_data_id=${marker} message="${marker}" ${timeNano}`);
+
+      const dbManager = FTDBManager.getInstance(this.context);
+      await dbManager.init();
+      DbInternalTestAccess.forceNextSyncDataWriteFailure();
+      const result = await dbManager.writeSyncDataAtomically('phase1.spoolFallback', [data], {
+        applyCachePolicy: true,
+        forceTransaction: true
+      });
+      await this.waitForWriteSettled(PHASE_ONE_SETTLE_MS);
+      const after = await this.loadUnifiedCacheSnapshot('Spool 回退后');
+      const spoolGrowth = after.status.usage.spoolBytes - before.status.usage.spoolBytes;
+      const ledgerConsistent = after.status.usage.totalBytes === after.status.usage.fileBytes + after.status.usage.sqliteBytes +
+        after.status.usage.legacyFileBytes + after.status.usage.spoolBytes;
+
+      this.appendResult('\n=== DB 失败 Spool 回退 ===\n');
+      this.appendResult(`marker=${marker}，强制 DB 失败后 success=${result.success}，fallbackPersisted=${result.fallbackPersisted || 0}\n`);
+      this.appendResult(`Spool 增量=${this.formatBytes(Math.max(0, spoolGrowth))}；统一账本一致=${ledgerConsistent}\n`);
+      this.appendUnifiedCacheSnapshot(after);
+      const passed = !result.success && result.fallbackPersisted === 1 && spoolGrowth > 0 && ledgerConsistent;
+      this.appendResult(passed
+        ? '单一账本 / Spool 回退：通过。失败记录已落入 spool，且其字节数计入总容量。\n'
+        : '单一账本 / Spool 回退：尚不能下结论。确认自动上传关闭，检查 fallbackPersisted、spoolBytes 和总账本后重试。\n');
+    } catch (error) {
+      this.appendResult(`Spool 回退验证失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private createPhaseOneResourceParams(marker: string): ResourceParams {
+    const params = new ResourceParams();
+    params.setUrl(`https://phase-one.invalid/resource/${marker}`);
+    params.setResourceMethod('GET');
+    params.setResourceStatus(200);
+    params.setResponseContentType('application/json');
+    params.setResponseContentLength(128);
+    return params;
+  }
+
+  private createPhaseOneNetStatus(): NetStatusBean {
+    const start = Date.now();
+    const status = new NetStatusBean();
+    status.setDNSStartTime(start);
+    status.setDNSTime(5);
+    status.setConnectStartTime(start + 5);
+    status.setTcpTime(10);
+    status.setFirstByteStartTime(start + 15);
+    status.setFirstByteTime(10);
+    status.setDownloadTimeStart(start + 25);
+    status.setDownloadTime(5);
+    status.setHoleRequestTime(30);
+    return status;
+  }
+
+  private async startPhaseOneAggregation(): Promise<void> {
+    this.isRunning = true;
+    try {
+      const before = await this.loadUnifiedCacheSnapshot('聚合开始前');
+      const marker = `phase1-aggregate-${Date.now()}`;
+      const viewName = `Phase1View_${marker}`;
+      const resourceId = `Phase1Resource_${marker}`;
+      const rumManager = FTRUMGlobalManager.getInstance();
+      await rumManager.startView(viewName);
+      rumManager.addAction(`Phase1Action_${marker}`, 'click');
+      rumManager.addError(`Phase1ErrorStack_${marker}`, `Phase1Error_${marker}`, ErrorType.CUSTOM, AppState.RUN);
+      rumManager.startResource(resourceId);
+      rumManager.stopResource(resourceId);
+      rumManager.addResource(resourceId, this.createPhaseOneResourceParams(marker), this.createPhaseOneNetStatus());
+      this.phaseOneActiveViewName = viewName;
+      this.phaseOneViewActive = true;
+      await this.waitForWriteSettled(PHASE_ONE_SETTLE_MS);
+      const after = await this.loadUnifiedCacheSnapshot('聚合进行中');
+
+      this.appendResult('\n=== 聚合生命周期已开始 ===\n');
+      this.appendResult(`View=${viewName}；已发送 Action、Error 与 Resource。\n`);
+      if (after.status.mode === 'file' || after.status.mode === 'shadow') {
+        this.appendResult(`请先用“打印统一缓存明细”观察 view/ 与 action/，再点击“结束聚合 View”。计数：view ${before.status.viewCount} -> ${after.status.viewCount}，action ${before.status.actionCount} -> ${after.status.actionCount}\n`);
+      } else {
+        this.appendResult('当前为 SQLite 正式模式：聚合数据写入 SQLite，不应以 FileStore 的 view/action 计数为准。请在数据库中观察聚合状态后，再点击“结束聚合 View”。\n');
+      }
+      this.appendUnifiedCacheSnapshot(after);
+      this.phaseOneSummary = `聚合 View 运行中：${viewName}`;
+    } catch (error) {
+      this.phaseOneViewActive = false;
+      this.phaseOneActiveViewName = '';
+      this.appendResult(`启动聚合生命周期失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async finishPhaseOneAggregation(): Promise<void> {
+    this.isRunning = true;
+    try {
+      const before = await this.loadUnifiedCacheSnapshot('聚合结束前');
+      await FTRUMGlobalManager.getInstance().stopView();
+      const closedViewName = this.phaseOneActiveViewName;
+      this.phaseOneActiveViewName = '';
+      this.phaseOneViewActive = false;
+      await this.waitForWriteSettled(PHASE_ONE_SETTLE_MS);
+      const after = await this.loadUnifiedCacheSnapshot('聚合结束后');
+
+      this.appendResult('\n=== 聚合生命周期已结束 ===\n');
+      this.appendResult(`已结束 View=${closedViewName}；持久化模式=${after.status.mode}。\n`);
+      if (after.status.mode === 'file' || after.status.mode === 'shadow') {
+        this.appendResult(`聚合计数：view ${before.status.viewCount} -> ${after.status.viewCount}，action ${before.status.actionCount} -> ${after.status.actionCount}\n`);
+      }
+      this.appendResult('如需验证“草稿未落盘前不得提前清理”，请在结束前用调试器暂停同步草稿落盘，保存 view/ 与 action/ 文件证据后再继续。\n');
+      this.appendUnifiedCacheSnapshot(after);
+      this.phaseOneSummary = `聚合 View 已结束：${closedViewName}`;
+    } catch (error) {
+      this.appendResult(`结束聚合生命周期失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async inspectPhaseOneShadowMode(): Promise<void> {
+    this.isRunning = true;
+    try {
+      const snapshot = await this.loadUnifiedCacheSnapshot('影子模式检查');
+      this.appendResult('\n=== 影子模式检查 ===\n');
+      this.appendUnifiedCacheSnapshot(snapshot);
+      if (snapshot.status.mode !== 'shadow') {
+        this.appendResult('当前不是影子模式。请在干净测试沙箱配置 setUseFileDataStore(false).setFileDataStoreShadow(true) 后冷启动，再重复创建、读取、关闭、清理与上传操作。\n');
+      } else if (snapshot.status.shadowHealthy) {
+        this.appendResult('shadowHealthy=true：当前镜像未报告错误。仍需按验收指南制造镜像写入失败，并确认其会变为不健康且恢复可写后收敛。\n');
+      } else {
+        this.appendResult('shadowHealthy=false：镜像存在未收敛错误，不应宣称影子校验通过；请保存此快照并完成恢复后的收敛操作。\n');
+      }
+    } catch (error) {
+      this.appendResult(`影子模式检查失败：${error}\n`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
   /**
    * Test all cache policy areas.
    */
@@ -597,6 +1326,24 @@ export struct DBCacheLimitTestPage {
     this.appendLimitReachedNotice();
   }
 
+  private getCapacityUsageLabel(): string {
+    const mode = FTCacheContext.settings.mode;
+    if (mode === 'file') { return '容量策略用量（FileStore）'; }
+    if (mode === 'shadow') { return '容量策略用量（SQLite 主库）'; }
+    return '容量策略用量（SQLite）';
+  }
+
+  private getCapacityUsageHint(): string {
+    const mode = FTCacheContext.settings.mode;
+    if (mode === 'shadow') {
+      return '影子 FileStore 是额外的验证副本；完整物理落盘占用请使用“打印统一缓存明细”查看。';
+    }
+    if (mode === 'file') {
+      return '此值按 FileStore 的本地缓存账本统计；完整物理明细请使用“打印统一缓存明细”。';
+    }
+    return '此值是 SQLite 的页分配容量计量；WAL、旧缓存与失败 Spool 的物理占用请使用“打印统一缓存明细”。';
+  }
+
   private async refreshPolicyStatus(): Promise<void> {
     this.isRunning = true;
     try {
@@ -619,7 +1366,7 @@ export struct DBCacheLimitTestPage {
 
   private resolveEffectivePolicy(dbEnabled: boolean): string {
     if (dbEnabled) {
-      return 'DB Cache Size';
+      return '统一缓存容量';
     }
     return 'Log/RUM Count';
   }
@@ -649,10 +1396,10 @@ export struct DBCacheLimitTestPage {
     this.isRunning = true;
     try {
       this.updatePolicyInfo();
-      this.appendResult('\n=== DB Cache Policy ===\n');
+    this.appendResult('\n=== 统一缓存容量策略 ===\n');
       this.appendDbCachePolicyResult();
     } catch (error) {
-      this.appendResult(`DB Cache Policy Test Failed: ${error}\n`);
+      this.appendResult(`统一缓存容量策略测试失败：${error}\n`);
     } finally {
       this.isRunning = false;
     }
@@ -686,26 +1433,26 @@ export struct DBCacheLimitTestPage {
 
   private appendPolicyOverview() {
     this.appendResult('\n[Overview]\n');
-    this.appendResult(`Effective Mode: ${this.effectivePolicy}\n`);
-    this.appendResult(`DB Size: ${this.currentDbSize}\n`);
-    this.appendResult(`DB Cache: ${this.dbCacheEnabled ? 'Enabled' : 'Disabled'}, Limit=${this.dbCacheLimit}, Reached=${this.dbLimitReached}\n`);
+    this.appendResult(`生效模式：${this.effectivePolicy}\n`);
+    this.appendResult(`${this.getCapacityUsageLabel()}：${this.currentDbSize}\n`);
+    this.appendResult(`统一缓存容量管控：${this.dbCacheEnabled ? '已启用' : '未启用'}，上限=${this.dbCacheLimit}，已触达=${this.dbLimitReached}\n`);
     this.appendResult(`Log Count: ${this.logCountText}, Limit=${this.logLimitText}\n`);
     this.appendResult(`RUM Count: ${this.rumCountText}, Limit=${this.rumLimitText}\n`);
-    this.appendResult(`Actual DB Count: Log=${this.actualLogDbCountText}, RUM=${this.actualRumDbCountText}\n`);
+    this.appendResult(`主库记录数：Log=${this.actualLogDbCountText}, RUM=${this.actualRumDbCountText}\n`);
     this.appendResult(`Discard Strategy: DB=${this.dbCacheDiscard}, RUM=${this.rumCacheDiscard}\n`);
     this.appendResult(`${this.countLimitNote}\n`);
   }
 
   private appendDbCachePolicyResult() {
     const cachePolicy = FTDBCachePolicy.getInstance();
-    this.appendResult('\n[DB Cache]\n');
+    this.appendResult('\n[统一缓存容量]\n');
     this.appendResult(`Enabled: ${this.dbCacheEnabled}\n`);
-    this.appendResult(`Current Size: ${this.currentDbSize}\n`);
-    this.appendResult(`Limit Size: ${this.dbCacheLimit}\n`);
+    this.appendResult(`Capacity Usage: ${this.currentDbSize}\n`);
+    this.appendResult(`容量上限：${this.dbCacheLimit}\n`);
     this.appendResult(`Reached: ${this.dbLimitReached}\n`);
     this.appendResult(`Discard Strategy: ${this.dbCacheDiscard}\n`);
     if (!this.dbCacheEnabled) {
-      this.appendResult('DB cache size limit is disabled.\n');
+      this.appendResult('统一缓存容量上限未启用。\n');
       return;
     }
     this.appendResult(`Log should discard by current effective policy: ${cachePolicy.shouldDiscardData(DataType.LOG)}\n`);
@@ -1469,15 +2216,15 @@ export struct DBCacheLimitTestPage {
         if (count % AUTO_LOG_STATUS_INTERVAL === 0) {
           this.updatePolicyInfo();
           this.refreshActualDbCounts(false);
-          this.appendResult(`Written ${this.writeCount} SDK logs, DB Size: ${this.currentDbSize}\n`);
+          this.appendResult(`已写入 ${this.writeCount} 条 SDK 日志，${this.getCapacityUsageLabel()}：${this.currentDbSize}\n`);
           const stopReason = this.getAutoStopReason(DataType.LOG);
           if (stopReason.length > 0) {
-            this.stopAutoWrite(stopReason);
+            this.stopAutoWriteAndDrain(stopReason);
           }
         }
       } catch (error) {
         this.appendResult(`Error writing logs: ${error}\n`);
-        this.stopAutoWrite();
+        this.stopAutoWriteAndDrain();
       }
     }, 100); // Write once every 100 ms (10 logs each time)
   }
@@ -1509,15 +2256,15 @@ export struct DBCacheLimitTestPage {
         if (count % AUTO_RUM_STATUS_INTERVAL === 0) {
           this.updatePolicyInfo();
           this.refreshActualDbCounts(false);
-          this.appendResult(`Written ${this.writeCount} RUM data, DB Size: ${this.currentDbSize}\n`);
+          this.appendResult(`已写入 ${this.writeCount} 条 RUM 数据，${this.getCapacityUsageLabel()}：${this.currentDbSize}\n`);
           const stopReason = this.getAutoStopReason(DataType.RUM_APP);
           if (stopReason.length > 0) {
-            this.stopAutoWrite(stopReason);
+            this.stopAutoWriteAndDrain(stopReason);
           }
         }
       } catch (error) {
         this.appendResult(`Error writing RUM data: ${error}\n`);
-        this.stopAutoWrite();
+        this.stopAutoWriteAndDrain();
       }
     }, 200); // Write once every 200 ms (2 RUM items each time)
   }
@@ -1539,22 +2286,71 @@ export struct DBCacheLimitTestPage {
     this.updatePolicyInfo();
   }
 
-  private async clearCachedDb() {
+  /** Stop the producer first, then make the mailbox and DB lane acknowledge a drain barrier. */
+  private async stopAutoWriteAndDrain(reason: string = ''): Promise<void> {
+    this.stopAutoWrite(reason);
     this.isRunning = true;
+    this.phaseOnePreflightProgress = '自动写入已停止，正在等待日志邮箱与 DB 队列排空…';
+    try {
+      const drained = await this.awaitCachePipelineDrained('自动写入停止');
+      this.appendResult(drained
+        ? '自动写入排空完成：日志邮箱与此前 DB 写入均已越过栅栏。\n'
+        : '自动写入排空超时：DB 栅栏已执行，但日志邮箱仍有待处理命令；请稍后再做预检或清空。\n');
+    } finally {
+      this.phaseOnePreflightProgress = '';
+      this.isRunning = false;
+    }
+  }
+
+  /**
+   * Mailbox completion means drafts were handed back to the host. The ordered
+   * DB barrier immediately afterwards includes those host-enqueued writes.
+   */
+  private async awaitCachePipelineDrained(label: string): Promise<boolean> {
+    const mailboxDrained = await TrackLogManager.getInstance().flushAndWait(30000);
+    await FTDBTaskPoolExecutor.awaitIdle(this.context);
+    this.appendResult(`${label}：mailbox=${mailboxDrained ? '已排空' : '超时'}，DB 栅栏已完成。\n`);
+    return mailboxDrained;
+  }
+
+  private async clearAllCacheData() {
+    this.isRunning = true;
+    this.cacheClearProgress = '正在停止自动写入…';
     try {
       if (this.autoWriteEnabled) {
         this.stopAutoWrite();
       }
-      this.appendResult('\n=== Clearing Cached DB ===\n');
+      this.appendResult('\n=== 清空所有缓存数据（FTSDK.clearAllData）===\n');
+      this.startCacheClearProgress();
+      this.cacheClearProgress = '正在等待日志邮箱与 DB 队列排空，随后执行清空…';
+      const drained = await this.awaitCachePipelineDrained('清空前排空');
+      if (!drained) {
+        this.appendResult('清空前日志邮箱排空超时；为避免遗漏，取消本次清空，请稍后重试。\n');
+        this.cacheClearProgress = '日志邮箱仍在处理，未执行清空；请稍后重试。';
+        return;
+      }
       await FTSDK.clearAllData();
+      this.stopCacheClearProgress();
+      this.cacheClearProgress = '缓存删除已完成，正在刷新数据库计数…';
       this.writeCount = 0;
       this.limitReachedNoticeShown = false;
       await this.refreshActualDbCounts(true);
       this.updatePolicyInfo();
-      this.appendResult(`Cleared cached DB. Actual DB Count: Log=${this.actualLogDbCountText}, RUM=${this.actualRumDbCountText}\n`);
+      this.appendResult(`已清空所有缓存数据。实际 DB 计数：Log=${this.actualLogDbCountText}，RUM=${this.actualRumDbCountText}\n`);
+      this.cacheClearProgress = '正在校验清空后的统一缓存快照…';
+      const snapshot = await this.loadUnifiedCacheSnapshot('clearAllData 后');
+      this.appendUnifiedCacheSnapshot(snapshot);
+      const cleared = snapshot.status.syncCount === 0 && snapshot.status.viewCount === 0 &&
+        snapshot.status.actionCount === 0 && snapshot.status.usage.spoolBytes === 0;
+      this.appendResult(cleared
+        ? '清理：通过。sync / view / action / spool 均已清空；控制文件可保留。请冷启动后再次检查，确认旧数据不会恢复。\n'
+        : '清理：尚不能下结论。请等待 worker 结束后再次刷新；sync / view / action / spool 必须全部为 0。\n');
+      this.cacheClearProgress = cleared ? '清空完成，统一缓存校验通过。' : '清空已提交，统一缓存仍有待清理数据；请查看测试结果。';
     } catch (error) {
-      this.appendResult(`Clear cached DB failed: ${error}\n`);
+      this.appendResult(`清空所有缓存数据失败：${error}\n`);
+      this.cacheClearProgress = '清空失败，请查看下方测试结果。';
     } finally {
+      this.stopCacheClearProgress();
       this.isRunning = false;
     }
   }
@@ -1666,7 +2462,7 @@ export struct DBCacheLimitTestPage {
       return;
     }
     this.limitReachedNoticeShown = true;
-    this.appendResult(`${stopReason}. Current DB Size: ${this.currentDbSize}, RUM Count: ${this.rumCountText}, Log Count: ${this.logCountText}\n`);
+    this.appendResult(`${stopReason}。${this.getCapacityUsageLabel()}：${this.currentDbSize}，RUM 数量：${this.rumCountText}，日志数量：${this.logCountText}\n`);
   }
 
   private getAutoStopReason(dataType: DataType): string {

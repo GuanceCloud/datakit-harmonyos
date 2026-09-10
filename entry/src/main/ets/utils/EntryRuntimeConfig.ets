@@ -5,7 +5,7 @@ const ENTRY_RUNTIME_DEFAULTS: Record<string, string> = {
   'autoSync': 'true', 'logSamplingRate': '1', 'rumSamplingRate': '1',
   'errorSamplingRate': '1', 'traceSamplingRate': '1',
   'networkRouteTestEnabled': 'false', 'networkRouteTestMode': 'proxy', 'networkRouteTestHost': '',
-  'remoteConfigTestEnabled': 'false', 'localDataFilterEnabled': 'true',
+  'remoteConfigTestEnabled': 'false', 'fileDataStoreShadowTestEnabled': 'false', 'localDataFilterEnabled': 'true',
   'localDataFilterLogRule': '', 'localDataFilterRumRule': ''
 };
 export const ENTRY_RUNTIME_KEYS: string[] = Object.keys(ENTRY_RUNTIME_DEFAULTS);
@@ -47,7 +47,7 @@ export function resolveEntryRuntimeConfig(
     // Preserve the Demo's selection for older preferences containing both endpoints.
     result.datakitUrl = '';
   }
-  for (const key of ['autoSync', 'networkRouteTestEnabled', 'remoteConfigTestEnabled', 'localDataFilterEnabled']) {
+  for (const key of ['autoSync', 'networkRouteTestEnabled', 'remoteConfigTestEnabled', 'fileDataStoreShadowTestEnabled', 'localDataFilterEnabled']) {
     const value = result[key].toLowerCase();
     if (value === 'true' || value === '1' || value === 'on') result[key] = 'true';
     else if (value === 'false' || value === '0' || value === 'off') result[key] = 'false';

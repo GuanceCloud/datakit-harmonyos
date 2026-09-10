@@ -69,15 +69,18 @@ export default function entryTestConfigTest() {
       expect(config.autoSync).assertEqual('true');
       expect(config.localDataFilterEnabled).assertEqual('true');
       expect(config.remoteConfigTestEnabled).assertEqual('false');
+      expect(config.fileDataStoreShadowTestEnabled).assertEqual('false');
       expect(config.datakitUrl).assertEqual('');
       expect(config.appId).assertEqual('');
     });
     it('normalizesSupportedBooleanForms', 0, () => {
       const config = resolveEntryRuntimeConfig({ 'autoSync': 'off', 'localDataFilterEnabled': 'ON',
-        'remoteConfigTestEnabled': '1', 'networkRouteTestEnabled': '0' }, {});
+        'remoteConfigTestEnabled': '1', 'fileDataStoreShadowTestEnabled': 'on',
+        'networkRouteTestEnabled': '0' }, {});
       expect(config.autoSync).assertEqual('false');
       expect(config.localDataFilterEnabled).assertEqual('true');
       expect(config.remoteConfigTestEnabled).assertEqual('true');
+      expect(config.fileDataStoreShadowTestEnabled).assertEqual('true');
       expect(config.networkRouteTestEnabled).assertEqual('false');
     });
     it('normalizesRouteModeOnceAndPreservesTheFallback', 0, () => {
@@ -91,6 +94,7 @@ export default function entryTestConfigTest() {
       assertInvalid({ 'errorSamplingRate': 'NaN' });
       assertInvalid({ 'traceSamplingRate': '' });
       assertInvalid({ 'autoSync': 'maybe' });
+      assertInvalid({ 'fileDataStoreShadowTestEnabled': 'maybe' });
       assertInvalid({ 'datakitUrl': 'http://one.example.com', 'datawayUrl': 'http://two.example.com' });
     });
     it('uploadValidationDoesNotChangeSharedConfiguration', 0, () => {

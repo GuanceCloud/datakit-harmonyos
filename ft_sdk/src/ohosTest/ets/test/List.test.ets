@@ -13,6 +13,7 @@ import autoTrackDeviceTest from './AutoTrackDeviceTest.test';
 import ftExceptionHandlerDeviceTest from './FTExceptionHandlerDeviceTest.test';
 import ftNativeCrashHandlerDeviceTest from './FTNativeCrashHandlerDeviceTest.test';
 import ftSDKLifecycleDeviceTest from './FTSDKLifecycleDeviceTest.test';
+import ftCacheFileStoreDeviceTest from './FTCacheFileStoreDeviceTest.test';
 import ftDBManagerDeviceTest from './FTDBManagerDeviceTest.test';
 import ftDBSpoolDeviceTest from './FTDBSpoolDeviceTest.test';
 import configTest from './ConfigTest.test';
@@ -34,6 +35,7 @@ export default function testsuite() {
   ftExceptionHandlerDeviceTest();
   ftNativeCrashHandlerDeviceTest();
   ftSDKLifecycleDeviceTest();
+  ftCacheFileStoreDeviceTest();
 
   // Public API/demo-triggered data generation, persistence, upload and deletion chains.
   autoTrackDeviceTest();

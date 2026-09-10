@@ -181,10 +181,13 @@ class DemoResourceUrlHandler extends FTInTakeUrlHandler {
  * 8. Enable remote-configuration verification (fetches on every cold start):
  * --ps remoteConfigTestEnabled true
  *
- * 9. Configure local filter rules:
+ * 9. Enable FileStore shadow verification (SQLite remains primary):
+ * --ps fileDataStoreShadowTestEnabled true
+ *
+ * 10. Configure local filter rules:
  * --ps localDataFilterLogRule "{ message match ['.*password.*'] }"
  *
- * 10. Full example:
+ * 11. Full example:
  * --ps datawayUrl https\://rum-openway.guance.com --ps clientToken your_client_token --ps webViewUrl http\://10.0.0.1\:8000 --ps traceUrl http\://10.0.0.1\:8000/api/user --ps appId your_app_id --ps remoteConfigTestEnabled true
  *
  * Behavior:
@@ -361,6 +364,7 @@ export default class EntryAbility extends UIAbility {
       const networkRouteTestMode = this.runtimeConfig.networkRouteTestMode;
       const networkRouteTestHost = this.runtimeConfig.networkRouteTestHost.trim();
       const remoteConfigTestEnabled = this.runtimeConfig.remoteConfigTestEnabled === 'true';
+      const fileDataStoreShadowTestEnabled = this.runtimeConfig.fileDataStoreShadowTestEnabled === 'true';
       const remoteConfigFetchResult: FTRemoteConfigFetchResult | null = remoteConfigTestEnabled
         ? new RemoteConfigTestFetchResult()
         : null;
@@ -404,6 +408,13 @@ export default class EntryAbility extends UIAbility {
         })
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
+        // Official cache governance configuration.
+        .enableLimitWithCacheSize(30 * 1024 * 1024)
+        .setCacheDiscard('discard')
+        // FileStore is the primary cache. On its first launch, copy pending
+        // SQLite / legacy cache data before the source is reclaimed.
+        .enableFileDataStore()
+        .setNeedTransformOldCache(true)
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(networkRouteTestEnabled ? false : this.runtimeConfig.autoSync === 'true')
@@ -430,6 +441,11 @@ export default class EntryAbility extends UIAbility {
         sdkConfig = sdkConfig.setDns({
           servers: [networkRouteTestHost]
         });
+      }
+      if (fileDataStoreShadowTestEnabled) {
+        sdkConfig = sdkConfig
+          .setUseFileDataStore(false)
+          .setFileDataStoreShadow(true);
       }
       // Initialize SDK
       FTSDK.install(sdkConfig, context);
