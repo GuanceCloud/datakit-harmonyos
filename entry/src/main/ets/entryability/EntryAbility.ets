@@ -19,6 +19,7 @@ import {
   FTSDK,
   FTSDKConfig,
   FTTraceConfig,
+  FTViewTrackingContext,
   FTViewTrackingHandler,
   FTViewTrackingType,
   HandlerView,
@@ -92,14 +93,15 @@ class RemoteConfigTestFetchResult implements FTRemoteConfigFetchResult {
 }
 
 class DemoViewTrackingHandler implements FTViewTrackingHandler {
-  resolveHandlerView(viewName: string): HandlerView | null {
-    const normalizedViewName = viewName.trim();
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    const originalViewName = context.originalViewName;
+    const normalizedViewName = originalViewName.trim();
     if (normalizedViewName.length === 0 || /^\d+$/.test(normalizedViewName) ||
       normalizedViewName.startsWith(IGNORED_AUTOMATIC_VIEW_PREFIX)) {
-      DemoLogger.i(LOG_TAG, `Automatic View filtered: ${viewName}`);
+      DemoLogger.i(LOG_TAG, `Automatic View filtered: ${originalViewName}`);
       return null;
     }
-    return new HandlerView(viewName);
+    return new HandlerView(context.viewName);
   }
 }
 

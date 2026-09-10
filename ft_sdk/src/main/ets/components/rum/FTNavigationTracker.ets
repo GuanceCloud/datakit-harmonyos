@@ -6,6 +6,7 @@ import { FTRUMConfig } from '../Configs';
 import { Utils } from '../utils/Utils';
 import { HandlerView } from './bean/HandlerView';
 import { FTViewTrackingType } from './enum/FTViewTrackingType';
+import { FTViewTrackingContext } from './handler/FTViewTrackingContext';
 
 const TAG = 'FTNavigationTracker';
 
@@ -115,7 +116,7 @@ export class FTNavigationTracker {
       return;
     }
 
-    const handlerView = this.resolveNavigationHandlerView(toName);
+    const handlerView = this.resolveNavigationHandlerView(toName, toNameRaw, info);
     if (handlerView === null) {
       await this.startAutomaticView(toName, null);
       return;
@@ -161,7 +162,8 @@ export class FTNavigationTracker {
       return;
     }
     
-    let toName: string = info.name ? info.name : '';
+    const toNameRaw: string = info.name ? info.name : '';
+    let toName: string = toNameRaw;
 
     if (!toName || toName.length === 0) {
       if (info.state === 2) {
@@ -184,7 +186,7 @@ export class FTNavigationTracker {
     // tracked, then record its creation time only for Views that will be sent.
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentPreAttached records start time
     if (info.state === 0) {
-      const handlerView = this.resolveRouterHandlerView(toName);
+      const handlerView = this.resolveRouterHandlerView(toName, toNameRaw, info);
       this.pendingRouterHandlerViews.set(toName, handlerView);
       if (handlerView === null) {
         this.pageCreateStartTimeMap.delete(toName);
@@ -233,7 +235,7 @@ export class FTNavigationTracker {
       } else {
         // A Router page may be restored without emitting state=0. Resolve it
         // at display time in that case, matching Android's resume behavior.
-        handlerView = this.resolveRouterHandlerView(toName);
+        handlerView = this.resolveRouterHandlerView(toName, toNameRaw, info);
       }
 
       if (handlerView === null) {
@@ -270,32 +272,64 @@ export class FTNavigationTracker {
    * Uses the configured Router handler when present. Without a handler, keep
    * the existing automatic behavior and collect the normalized route name.
    */
-  private resolveRouterHandlerView(routeName: string): HandlerView | null {
-    const handler = this.rumConfig?.getViewTrackingHandler(FTViewTrackingType.ROUTER) ?? null;
-    if (handler === null) {
-      return new HandlerView(routeName);
-    }
-    try {
-      return this.validateHandlerView(handler.resolveHandlerView(routeName), 'Router', routeName);
-    } catch (e) {
-      FTInnerLogger.w(TAG, `Router View handler failed for ${routeName}: ${e}`);
-      return null;
-    }
+  private resolveRouterHandlerView(
+    routeName: string,
+    originalRouteName: string,
+    routerPageInfo: uiObserver.RouterPageInfo
+  ): HandlerView | null {
+    const context: FTViewTrackingContext = {
+      trackingType: FTViewTrackingType.ROUTER,
+      routerPageInfo,
+      originalViewName: originalRouteName,
+      viewName: routeName,
+      originalFromViewName: '',
+      fromViewName: '',
+      routerPageState: routerPageInfo.state
+    };
+    return this.resolveAutomaticViewHandler(FTViewTrackingType.ROUTER, routeName, context, 'Router');
   }
 
   /**
    * Uses the configured Navigation handler when present. Without a handler,
    * keep the existing automatic behavior and collect the normalized name.
    */
-  private resolveNavigationHandlerView(destinationName: string): HandlerView | null {
-    const handler = this.rumConfig?.getViewTrackingHandler(FTViewTrackingType.NAVIGATION) ?? null;
+  private resolveNavigationHandlerView(
+    destinationName: string,
+    originalDestinationName: string,
+    navigationInfo: uiObserver.NavDestinationSwitchInfo
+  ): HandlerView | null {
+    const originalFromName = this.getNavName(navigationInfo.from);
+    const fromName = this.normalizeViewName(originalFromName);
+    const context: FTViewTrackingContext = {
+      trackingType: FTViewTrackingType.NAVIGATION,
+      navigationInfo,
+      originalViewName: originalDestinationName,
+      viewName: destinationName,
+      originalFromViewName: originalFromName,
+      fromViewName: fromName
+    };
+    return this.resolveAutomaticViewHandler(FTViewTrackingType.NAVIGATION, destinationName, context, 'Navigation');
+  }
+
+  /**
+   * Invokes either source's configured handler through one path so filtering,
+   * name validation, and failure behavior are identical for Router and
+   * Navigation Views.
+   */
+  private resolveAutomaticViewHandler(
+    trackingType: FTViewTrackingType,
+    viewName: string,
+    context: FTViewTrackingContext,
+    source: string
+  ): HandlerView | null {
+    const handler = this.rumConfig?.getViewTrackingHandler(trackingType) ?? null;
     if (handler === null) {
-      return new HandlerView(destinationName);
+      return new HandlerView(viewName);
     }
     try {
-      return this.validateHandlerView(handler.resolveHandlerView(destinationName), 'Navigation', destinationName);
+      return this.validateHandlerView(handler.resolveHandlerView(context), source, viewName);
     } catch (e) {
-      FTInnerLogger.w(TAG, `Navigation View handler failed for ${destinationName}: ${e}`);
+      FTInnerLogger.w(TAG, `${source} View handler failed for ${viewName}: ${e}`);
       return null;
     }
   }

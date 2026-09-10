@@ -11,6 +11,7 @@ import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobal
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
 import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
+import { FTViewTrackingContext } from '../../../main/ets/components/rum/handler/FTViewTrackingContext';
 import { FTViewTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewTrackingHandler';
 import { FTViewTrackingType } from '../../../main/ets/components/rum/enum/FTViewTrackingType';
 import { DBAssert } from './helpers/DBAssert';
@@ -247,7 +248,8 @@ class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
 class FilteringRouterTrackingHandler implements FTViewTrackingHandler {
   public resolvedRouteNames: string[] = [];
 
-  resolveHandlerView(routeName: string): HandlerView | null {
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    const routeName = context.viewName;
     this.resolvedRouteNames.push(routeName);
     if (routeName === 'IgnoredRouterPage') {
       return null;
@@ -261,7 +263,8 @@ class FilteringRouterTrackingHandler implements FTViewTrackingHandler {
 class FilteringNavigationTrackingHandler implements FTViewTrackingHandler {
   public resolvedDestinationNames: string[] = [];
 
-  resolveHandlerView(destinationName: string): HandlerView | null {
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    const destinationName = context.viewName;
     this.resolvedDestinationNames.push(destinationName);
     if (destinationName === 'IgnoredNavigationDestination') {
       return null;
@@ -273,8 +276,28 @@ class FilteringNavigationTrackingHandler implements FTViewTrackingHandler {
 }
 
 class EmptyViewNameNavigationTrackingHandler implements FTViewTrackingHandler {
-  resolveHandlerView(_destinationName: string): HandlerView | null {
+  resolveHandlerView(_context: FTViewTrackingContext): HandlerView | null {
     return new HandlerView('   ');
+  }
+}
+
+class ContextFilteringViewTrackingHandler implements FTViewTrackingHandler {
+  public contexts: FTViewTrackingContext[] = [];
+
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    this.contexts.push(context);
+    if (context.trackingType === FTViewTrackingType.ROUTER) {
+      if (context.routerPageInfo.name.startsWith('pages/private/')) {
+        return null;
+      }
+    }
+    if (context.trackingType === FTViewTrackingType.NAVIGATION) {
+      const from = context.navigationInfo.from;
+      if (typeof from !== 'string' && typeof from.name === 'string' && from.name === 'pages/Checkout') {
+        return null;
+      }
+    }
+    return new HandlerView(`context_${context.viewName}`);
   }
 }
 
@@ -513,6 +536,53 @@ export default function autoTrackDeviceTest() {
       await WaitUtils.delay(500);
 
       expect(filteredHandler.resolvedRouteNames.length).assertEqual(1);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('viewHandlerCanFilterByRouterAndNavigationContext', 0, async () => {
+      const handler = new ContextFilteringViewTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false)
+        .setViewTrackingHandler(handler, FTViewTrackingType.ALL));
+
+      await uiContext.observer.emitRouterPageUpdate('pages/private/AccountDetail', 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate('pages/private/AccountDetail', 2);
+      await WaitUtils.delay(300);
+
+      expect(handler.contexts.length).assertEqual(1);
+      const routerContext = handler.contexts[0];
+      expect(routerContext.trackingType).assertEqual(FTViewTrackingType.ROUTER);
+      expect(routerContext.originalViewName).assertEqual('pages/private/AccountDetail');
+      expect(routerContext.viewName).assertEqual('AccountDetail');
+      expect(routerContext.originalFromViewName).assertEqual('');
+      expect(routerContext.fromViewName).assertEqual('');
+      if (routerContext.trackingType === FTViewTrackingType.ROUTER) {
+        expect(routerContext.routerPageInfo.name).assertEqual('pages/private/AccountDetail');
+        expect(routerContext.routerPageInfo.state).assertEqual(0);
+        expect(routerContext.routerPageState).assertEqual(0);
+      } else {
+        expect(false).assertTrue();
+      }
+      expect((await DBAssert.queryViews(20)).length).assertEqual(0);
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/Checkout', 'pages/orders/OrderDetail');
+      await WaitUtils.delay(300);
+
+      expect(handler.contexts.length).assertEqual(2);
+      const navigationContext = handler.contexts[1];
+      expect(navigationContext.trackingType).assertEqual(FTViewTrackingType.NAVIGATION);
+      expect(navigationContext.originalViewName).assertEqual('pages/orders/OrderDetail');
+      expect(navigationContext.viewName).assertEqual('OrderDetail');
+      expect(navigationContext.originalFromViewName).assertEqual('pages/Checkout');
+      expect(navigationContext.fromViewName).assertEqual('Checkout');
+      if (navigationContext.trackingType === FTViewTrackingType.NAVIGATION) {
+        const from = navigationContext.navigationInfo.from;
+        expect(typeof from !== 'string' && typeof from.name === 'string' ? from.name : '')
+          .assertEqual('pages/Checkout');
+      } else {
+        expect(false).assertTrue();
+      }
       expect((await DBAssert.queryViews(20)).length).assertEqual(0);
       expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
     });

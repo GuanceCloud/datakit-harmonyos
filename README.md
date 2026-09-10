@@ -165,23 +165,39 @@ Without the plugin, the SDK deliberately does not pretend to collect console log
 When automatic View tracking is enabled, Router pages and `Navigation`
 destinations can be renamed or filtered with one handler. Choose whether it
 applies to `ROUTER`, `NAVIGATION`, or `ALL`. Return a `HandlerView` to collect
-the automatic View; return `null` to skip it. With no handler set, the SDK
-keeps the default behavior and reports the final route segment.
+the automatic View; return `null` to skip it. The handler receives a
+source-specific context: Router Views expose the original `RouterPageInfo`,
+and Navigation Views expose the original `NavDestinationSwitchInfo`. The
+context includes the final normalized route segment as `viewName`. With no
+handler set, the SDK keeps the default behavior and reports that final segment.
 
 ```ts
 import {
   FTRUMConfig,
+  FTViewTrackingContext,
   FTViewTrackingHandler,
   FTViewTrackingType,
   HandlerView
 } from '@guancecloud/ft_sdk/Index'
 
 const automaticViewHandler: FTViewTrackingHandler = {
-  resolveHandlerView: (viewName: string): HandlerView | null => {
-    if (viewName === 'LoginPage') {
+  resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => {
+    if (context.viewName === 'LoginPage') {
       return null // Do not collect this automatic View
     }
-    return new HandlerView(`View_${viewName}`)
+    if (context.trackingType === FTViewTrackingType.ROUTER &&
+      context.routerPageInfo.path.startsWith('pages/internal/')) {
+      return null // Filter directly by RouterPageInfo
+    }
+    if (context.trackingType === FTViewTrackingType.NAVIGATION) {
+      const navigationInfo = context.navigationInfo
+      const from = navigationInfo.from
+      if (navigationInfo.operation === NavigationOperation.POP ||
+        (typeof from !== 'string' && from.name === 'CheckoutPage')) {
+        return null // Filter by operation or NavDestinationSwitchInfo.from
+      }
+    }
+    return new HandlerView(`View_${context.viewName}`)
   }
 }
 
@@ -189,6 +205,12 @@ const rumConfig = new FTRUMConfig()
   .setEnableTraceUserView(true)
   .setViewTrackingHandler(automaticViewHandler, FTViewTrackingType.ALL)
 ```
+
+`originalViewName` preserves the name supplied by ArkUI, while `viewName` is
+the normalized final route segment. When `trackingType` is `ROUTER`, use
+`routerPageInfo` to filter by `name`, `path`, `index`, or `state`. When it is
+`NAVIGATION`, use `navigationInfo` to filter by `from`, `to`, `operation`, or
+the destination `param`, `navigationId`, and `navDestinationId`.
 
 ## Automatic Action Filtering
 

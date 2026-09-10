@@ -1,4 +1,5 @@
 import { HandlerView } from '../bean/HandlerView';
+import { FTViewTrackingContext } from './FTViewTrackingContext';
 
 /**
  * Customizes automatic RUM View collection for Router pages and Navigation
@@ -9,10 +10,12 @@ import { HandlerView } from '../bean/HandlerView';
  */
 export interface FTViewTrackingHandler {
   /**
-   * Resolves an automatic View from its normalized final route segment.
+   * Resolves an automatic View from its source-specific context.
    *
-   * @param viewName The normalized Router page or Navigation destination name.
+   * @param context For a Router View, exposes `routerPageInfo`; for a
+   * Navigation View, exposes `navigationInfo` (`NavDestinationSwitchInfo`).
+   * Both variants include `viewName`, the normalized final route segment.
    * @returns A custom HandlerView, or null to skip this View.
    */
-  resolveHandlerView(viewName: string): HandlerView | null;
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null;
 }

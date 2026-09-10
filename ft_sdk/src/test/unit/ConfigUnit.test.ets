@@ -1,6 +1,6 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context, common } from '@kit.AbilityKit';
-import { UIContext } from '@kit.ArkUI';
+import { UIContext, uiObserver } from '@kit.ArkUI';
 import window from '@ohos.window';
 import {
   FTDnsConfig,
@@ -52,6 +52,7 @@ import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
+import { FTViewTrackingContext } from '../../main/ets/components/rum/handler/FTViewTrackingContext';
 import { FTViewTrackingHandler } from '../../main/ets/components/rum/handler/FTViewTrackingHandler';
 import { FTViewTrackingType } from '../../main/ets/components/rum/enum/FTViewTrackingType';
 import { TestReset } from '../helpers/TestReset';
@@ -106,18 +107,6 @@ class RecordingConfigHeaderHandler implements FTTraceHeaderHandler {
     this.requestSpanId = traceContext.spanId;
     traceContext.headers['x-config-handler-trace-id'] = traceContext.traceId;
     return traceContext;
-  }
-}
-
-class TestViewRouterTrackingHandler implements FTViewRouterTrackingHandler {
-  resolveHandlerView(routeName: string): HandlerView | null {
-    return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
-  }
-}
-
-class TestViewNavigationTrackingHandler implements FTViewNavigationTrackingHandler {
-  resolveHandlerView(destinationName: string): HandlerView | null {
-    return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
   }
 }
 
@@ -474,15 +463,42 @@ export default function configUnitTest() {
     });
 
     it('rumConfigShouldStoreAutomaticViewTrackingHandlersByType', 0, () => {
+      const routerContext: FTViewTrackingContext = {
+        trackingType: FTViewTrackingType.ROUTER,
+        routerPageInfo: {
+          name: 'pages/account/Home',
+          path: 'pages/account/Home',
+          index: 0,
+          state: 0
+        } as Object as uiObserver.RouterPageInfo,
+        originalViewName: 'pages/account/Home',
+        viewName: 'Home',
+        originalFromViewName: '',
+        fromViewName: '',
+        routerPageState: 0
+      };
+      let receivedContext: FTViewTrackingContext | undefined;
       const routerHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (routeName: string): HandlerView | null => {
-          return routeName === 'IgnoredRoute' ? null : new HandlerView(`router_${routeName}`);
+        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => {
+          receivedContext = context;
+          return context.viewName === 'IgnoredRoute' ? null : new HandlerView(`router_${context.viewName}`);
         }
       };
       const navigationHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (destinationName: string): HandlerView | null => {
-          return destinationName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${destinationName}`);
+        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => {
+          return context.viewName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${context.viewName}`);
         }
+      };
+      const navigationContext: FTViewTrackingContext = {
+        trackingType: FTViewTrackingType.NAVIGATION,
+        navigationInfo: {
+          from: { name: 'pages/account/Home' },
+          to: { name: 'pages/account/Detail' }
+        } as Object as uiObserver.NavDestinationSwitchInfo,
+        originalViewName: 'pages/account/Detail',
+        viewName: 'Detail',
+        originalFromViewName: 'pages/account/Home',
+        fromViewName: 'Home'
       };
       const rumConfig = new FTRUMConfig()
         .setViewTrackingHandler(routerHandler, FTViewTrackingType.ROUTER)
@@ -491,17 +507,36 @@ export default function configUnitTest() {
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER) === routerHandler).assertTrue();
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION) === navigationHandler).assertTrue();
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === null).assertTrue();
-      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('Home')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView(routerContext)?.getViewName() ?? '')
         .assertEqual('router_Home');
-      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView('IgnoredRoute') === null)
+      expect(receivedContext?.originalViewName ?? '').assertEqual('pages/account/Home');
+      expect(receivedContext?.routerPageState ?? -1).assertEqual(0);
+      const ignoredRouterContext: FTViewTrackingContext = {
+        trackingType: FTViewTrackingType.ROUTER,
+        routerPageInfo: routerContext.routerPageInfo,
+        originalViewName: 'pages/account/IgnoredRoute',
+        viewName: 'IgnoredRoute',
+        originalFromViewName: '',
+        fromViewName: '',
+        routerPageState: 0
+      };
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView(ignoredRouterContext) === null)
         .assertTrue();
-      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('Detail')?.getViewName() ?? '')
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView(navigationContext)?.getViewName() ?? '')
         .assertEqual('navigation_Detail');
-      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView('IgnoredDestination') === null)
+      const ignoredNavigationContext: FTViewTrackingContext = {
+        trackingType: FTViewTrackingType.NAVIGATION,
+        navigationInfo: navigationContext.navigationInfo,
+        originalViewName: 'pages/account/IgnoredDestination',
+        viewName: 'IgnoredDestination',
+        originalFromViewName: 'pages/account/Home',
+        fromViewName: 'Home'
+      };
+      expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView(ignoredNavigationContext) === null)
         .assertTrue();
 
       const allHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (viewName: string): HandlerView | null => new HandlerView(`all_${viewName}`)
+        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => new HandlerView(`all_${context.viewName}`)
       };
       const allConfig = new FTRUMConfig()
         .setViewTrackingHandler(allHandler, FTViewTrackingType.ALL);

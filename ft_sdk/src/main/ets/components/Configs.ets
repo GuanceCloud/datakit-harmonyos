@@ -316,6 +316,8 @@ export class FTRUMConfig {
    * segment View name.
    *
    * @param handler Handler used to rename, enrich, or filter automatic Views.
+   * It receives a context containing the normalized View name, original route,
+   * and source-specific transition details.
    * @param type Automatic View source to configure. Defaults to ALL.
    * @returns FTRUMConfig instance for method chaining.
    */

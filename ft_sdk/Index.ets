@@ -53,6 +53,11 @@ export { HandlerView } from './src/main/ets/components/rum/bean/HandlerView';
 export { ActionSourceType } from './src/main/ets/components/rum/enum/ActionSourceType';
 export { FTActionTrackingHandler } from './src/main/ets/components/rum/handler/FTActionTrackingHandler';
 export { FTViewTrackingHandler } from './src/main/ets/components/rum/handler/FTViewTrackingHandler';
+export {
+  FTViewTrackingContext,
+  FTViewRouterTrackingContext,
+  FTViewNavigationTrackingContext
+} from './src/main/ets/components/rum/handler/FTViewTrackingContext';
 export { FTViewTrackingType } from './src/main/ets/components/rum/enum/FTViewTrackingType';
 
 // ============================================================================
