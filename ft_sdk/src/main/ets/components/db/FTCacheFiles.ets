@@ -12,6 +12,12 @@ export interface FTCacheMutation {
   body: string | null;
 }
 
+/** Durability timings returned by one forward journal commit. */
+export interface FTCacheCommitTiming {
+  journalMs: number;
+  fsyncMs: number;
+}
+
 interface FTCacheJournal {
   version: number;
   changes: FTCacheMutation[];
@@ -20,7 +26,11 @@ interface FTCacheJournal {
 /** File primitives used only on TaskPool, while the cache directory lock is held. */
 export class FTCacheFiles {
   static readonly MAX_RECORD_BYTES: number = 256 * 1024;
-  static readonly CONTROL_RESERVE: number = 1024 * 1024;
+  /**
+   * Bounds retained corrupt-record evidence only. This is deliberately not a
+   * capacity-admission reserve: normal writes may use the configured limit.
+   */
+  static readonly MAX_QUARANTINE_BYTES: number = FTCacheFiles.MAX_RECORD_BYTES * 2;
 
   static exists(path: string): boolean {
     try { return fs.accessSync(path); } catch (_) { return false; }
@@ -66,12 +76,16 @@ export class FTCacheFiles {
     return size;
   }
 
-  static syncDirectory(path: string): void {
+  static syncDirectory(path: string, timing?: FTCacheCommitTiming): void {
     const file = fs.openSync(path, fs.OpenMode.READ_ONLY);
-    try { fs.fsyncSync(file.fd); } finally { fs.closeSync(file); }
+    try {
+      const startedAt = Date.now();
+      fs.fsyncSync(file.fd);
+      if (timing) { timing.fsyncMs += Math.max(0, Date.now() - startedAt); }
+    } finally { fs.closeSync(file); }
   }
 
-  static atomicWrite(path: string, body: string): void {
+  static atomicWrite(path: string, body: string, timing?: FTCacheCommitTiming, syncParent: boolean = true): void {
     const parent = path.substring(0, path.lastIndexOf('/'));
     FTCacheFiles.mkdir(parent);
     const temp = `${path}.tmp`;
@@ -85,16 +99,18 @@ export class FTCacheFiles {
         if (count <= 0) { throw new Error('CACHE_SHORT_WRITE'); }
         written += count;
       }
+      const startedAt = Date.now();
       fs.fsyncSync(file.fd);
+      if (timing) { timing.fsyncMs += Math.max(0, Date.now() - startedAt); }
     } finally { fs.closeSync(file); }
     fs.renameSync(temp, path);
-    FTCacheFiles.syncDirectory(parent);
+    if (syncParent) { FTCacheFiles.syncDirectory(parent, timing); }
   }
 
-  static remove(path: string): void {
+  static remove(path: string, timing?: FTCacheCommitTiming, syncParent: boolean = true): void {
     if (!FTCacheFiles.exists(path)) { return; }
     fs.unlinkSync(path);
-    FTCacheFiles.syncDirectory(path.substring(0, path.lastIndexOf('/')));
+    if (syncParent) { FTCacheFiles.syncDirectory(path.substring(0, path.lastIndexOf('/')), timing); }
   }
 
   static fileNames(path: string): string[] {
@@ -103,11 +119,20 @@ export class FTCacheFiles {
   }
 
   /** A committed journal is replayed forward, including deletion, before serving any reads. */
-  static commit(root: string, changes: FTCacheMutation[]): void {
-    if (changes.length === 0) { return; }
+  static commit(root: string, changes: FTCacheMutation[]): FTCacheCommitTiming {
+    const timing: FTCacheCommitTiming = { journalMs: 0, fsyncMs: 0 };
+    if (changes.length === 0) { return timing; }
+    const startedAt = Date.now();
     const journal: FTCacheJournal = { version: 1, changes };
-    FTCacheFiles.atomicWrite(`${root}/transaction.json`, JSON.stringify(journal));
-    FTCacheFiles.apply(root, journal);
+    FTCacheFiles.atomicWrite(`${root}/transaction.json`, JSON.stringify(journal), timing);
+    FTCacheFiles.apply(root, journal, timing);
+    timing.journalMs = Math.max(0, Date.now() - startedAt);
+    return timing;
+  }
+
+  /** O(1): the only durable marker needed to replay a partially applied commit. */
+  static hasPendingJournal(root: string): boolean {
+    return FTCacheFiles.exists(`${root}/transaction.json`);
   }
 
   static recover(root: string): void {
@@ -120,15 +145,24 @@ export class FTCacheFiles {
     FTCacheFiles.removeTemps(root);
   }
 
-  private static apply(root: string, journal: FTCacheJournal): void {
+  private static apply(root: string, journal: FTCacheJournal, timing?: FTCacheCommitTiming): void {
+    const changedParents = new Set<string>();
     for (let i = 0; i < journal.changes.length; i++) {
       const change = journal.changes[i];
       if (!change.path.startsWith(`${root}/`) || change.path.includes('/../') ||
         change.path === `${root}/transaction.json`) { throw new Error('CACHE_JOURNAL_PATH_INVALID'); }
-      if (change.body === null) { FTCacheFiles.remove(change.path); }
-      else { FTCacheFiles.atomicWrite(change.path, change.body); }
+      const parent = change.path.substring(0, change.path.lastIndexOf('/'));
+      if (change.body === null) { FTCacheFiles.remove(change.path, timing, false); }
+      else { FTCacheFiles.atomicWrite(change.path, change.body, timing, false); }
+      changedParents.add(parent);
     }
-    FTCacheFiles.remove(`${root}/transaction.json`);
+    // The journal is durable before any mutation. Payload files may therefore
+    // share one directory fsync per parent; only after those syncs succeed is
+    // the journal removed. A crash before then simply replays the journal.
+    for (const parent of changedParents) {
+      FTCacheFiles.syncDirectory(parent, timing);
+    }
+    FTCacheFiles.remove(`${root}/transaction.json`, timing);
   }
 
   private static removeTemps(path: string): void {

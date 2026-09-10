@@ -2,12 +2,13 @@ import { Context } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { FTCacheFiles, FTCacheMutation } from './FTCacheFiles';
 import { FTCacheSettings } from './FTCacheContext';
-import { FTCacheLedger, FTCacheStatus } from './FTCacheLedger';
+import { FTCacheLedger, FTCacheLedgerCommit, FTCacheStatus } from './FTCacheLedger';
 import { FTRumFileStore, FTRumStoreAccess } from './FTRumFileStore';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse, FTDBTaskPoolWriteResponse, FTDBTaskPoolDeleteAllResult } from './FTDBTaskPoolExecutor';
 import { SyncDataJSON } from './bean/SyncData';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 import { DataType } from '../enum/Enums';
+import { FTInnerLogger } from '../log/FTLogger';
 
 export type FTSqliteRunner = (request: FTDBTaskPoolRequest) => Promise<FTDBTaskPoolResponse>;
 
@@ -15,18 +16,35 @@ interface FTCacheLease { digest: string; expires: number; }
 interface FTCacheProjection { requests: FTDBTaskPoolRequest[]; }
 interface FTCacheCounters { evicted: number; rejected: number; corrupt: number; }
 interface FTUploadCandidate { uuid: string; id: number; time: number; bytes: number; }
+interface FTCacheWriteTiming {
+  recoverMs: number;
+  reserveMs: number;
+  journalMs: number;
+  fsyncMs: number;
+  evictionMs: number;
+}
+const TAG = 'FTCacheFileStore';
 
 /** Authoritative file payloads and aggregates. Caller owns the directory lock. */
 export class FTCacheFileStore implements FTRumStoreAccess {
+  private static recoveredRoots: Set<string> = new Set<string>();
   readonly root: string;
   readonly ledger: FTCacheLedger;
   private evicted: number = 0;
   private protectedUuids: Set<string> = new Set<string>();
+  private lastRecoveryMs: number = 0;
 
   readonly settings: FTCacheSettings;
   private sqlite: FTSqliteRunner;
-  constructor(context: Context, settings: FTCacheSettings, sqlite: FTSqliteRunner) {
+  /**
+   * A shadow is populated only from an already-committed SQLite result.  It
+   * must not reject that result just because the two physical stores coexist
+   * and temporarily consume more than one logical cache budget.
+   */
+  private readonly shadowMirror: boolean;
+  constructor(context: Context, settings: FTCacheSettings, sqlite: FTSqliteRunner, shadowMirror: boolean = false) {
     this.settings = settings; this.sqlite = sqlite;
+    this.shadowMirror = shadowMirror;
     this.root = `${context.filesDir}/ft_sdk_cache_v2`;
     this.ledger = new FTCacheLedger(context, settings, this.root);
     FTCacheFiles.mkdir(this.root);
@@ -51,7 +69,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       if (kind === 'meta') { throw new Error(String(error)); }
       // A bounded quarantine keeps evidence without making a bad record block later data.
       const quarantine = `${this.root}/quarantine`;
-      while (FTCacheFiles.size(quarantine) > FTCacheFiles.CONTROL_RESERVE / 2) {
+      while (FTCacheFiles.size(quarantine) > FTCacheFiles.MAX_QUARANTINE_BYTES) {
         const names = FTCacheFiles.fileNames(quarantine).sort();
         if (names.length === 0) { break; }
         FTCacheFiles.remove(`${quarantine}/${names[0]}`);
@@ -59,21 +77,31 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       fs.renameSync(path, `${quarantine}/${Date.now()}-${kind}-${encodeURIComponent(id)}.json`);
       FTCacheFiles.syncDirectory(quarantine);
       FTCacheFiles.syncDirectory(`${this.root}/${kind}`);
+      this.ledger.invalidate();
       this.increment('corrupt', 1);
       return null;
     }
   }
 
   async recover(): Promise<void> {
+    // A journal is an O(1) durable dirty marker. Normal commands no longer
+    // recursively walk every cache directory merely to prove that it is clean.
+    if (FTCacheFileStore.recoveredRoots.has(this.root) && !FTCacheFiles.hasPendingJournal(this.root)) { return; }
+    const startedAt = Date.now();
     FTCacheFiles.recover(this.root);
     await this.repairProjection();
+    const expiredLeases: FTCacheMutation[] = [];
     for (const id of this.list('lease')) {
       const body = this.read('lease', id);
       const lease = body ? JSON.parse(body) as FTCacheLease : null;
       if (!lease || lease.expires <= Date.now() || !FTCacheFiles.exists(this.path('sync', id))) {
-        FTCacheFiles.remove(this.path('lease', id));
+        expiredLeases.push({ path: this.path('lease', id), body: null });
       }
     }
+    if (expiredLeases.length > 0) { this.commitDirect(expiredLeases); }
+    FTCacheFileStore.recoveredRoots.add(this.root);
+    this.lastRecoveryMs = Math.max(0, Date.now() - startedAt);
+    FTInnerLogger.i(TAG, `Recovered FileStore cache: root=${this.root}, expiredLeases=${expiredLeases.length}, cost=${this.lastRecoveryMs}ms`);
   }
 
   status(): FTCacheStatus {
@@ -81,7 +109,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     const counters = JSON.parse(this.read('meta', 'counters') || '{"evicted":0,"rejected":0,"corrupt":0}') as FTCacheCounters;
     return { mode: this.settings.mode, directUpload: this.settings.mode === 'file' && this.settings.directUpload,
       sqliteReleased: this.read('meta', 'sqliteReleased') === 'true',
-      usage: this.ledger.usage(), migration: this.read('meta', 'migration') || 'not-started',
+      usage: this.ledger.usage(true), migration: this.read('meta', 'migration') || 'not-started',
       syncCount: this.list('sync').length, viewCount: this.list('view').length, actionCount: this.list('action').length,
       oldestUuids,
       evicted: counters.evicted, rejected: counters.rejected, corrupt: counters.corrupt,
@@ -99,21 +127,61 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         throw new Error(response.errorMessage || response.write?.result.errorMessage || 'CACHE_INDEX_REPAIR_FAILED');
       }
     }
-    FTCacheFiles.remove(this.path('meta', 'projection'));
+    // Projection completion changes accounted bytes too. Keep this removal in
+    // the ledger protocol (direct FileStore writes never create this marker).
+    this.commitDirect([{ path: this.path('meta', 'projection'), body: null }]);
   }
 
-  async commit(changes: FTCacheMutation[]): Promise<boolean> {
-    if (changes.every((c: FTCacheMutation) => c.body === null)) {
-      FTCacheFiles.commit(this.root, changes); return true;
+  async commit(changes: FTCacheMutation[], timing?: FTCacheWriteTiming): Promise<boolean> {
+    if (this.shadowMirror) {
+      this.commitDirect(changes, timing);
+      return true;
     }
-    const needed = this.ledger.requiredBytes(changes);
+    if (changes.every((c: FTCacheMutation) => c.body === null)) {
+      this.commitDirect(changes, timing); return true;
+    }
+    let prepared = this.ledger.prepareCommit(changes);
+    const reserveStartedAt = Date.now();
+    let needed = this.ledger.requiredBytes(prepared.changes);
     while (!this.ledger.canReserve(needed)) {
-      if (this.settings.mode === 'shadow' || this.settings.discard !== 'discard_oldest' || !await this.evictOne()) {
+      if (this.settings.mode === 'shadow' || this.settings.discard !== 'discard_oldest') {
+        if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
+        FTInnerLogger.w(TAG, `FileStore capacity rejected write: required=${needed}, capacity=${this.settings.capacity}, ` +
+          `mode=${this.settings.mode}, discard=${this.settings.discard}`);
         this.increment('rejected', 1); return false;
       }
+      const evictionStartedAt = Date.now();
+      // One capacity breach may need many old rows. Select and remove them in
+      // one forward journal instead of doing a full oldest-record scan and an
+      // fsync for every candidate.
+      const evicted = await this.evictForReserve(needed);
+      if (timing) { timing.evictionMs += Math.max(0, Date.now() - evictionStartedAt); }
+      if (!evicted) {
+        if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
+        FTInnerLogger.w(TAG, `FileStore capacity rejected write: required=${needed}, capacity=${this.settings.capacity}, no evictable records`);
+        this.increment('rejected', 1); return false;
+      }
+      prepared = this.ledger.prepareCommit(changes);
+      needed = this.ledger.requiredBytes(prepared.changes);
     }
-    FTCacheFiles.commit(this.root, changes);
+    if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
+    this.commitPrepared(prepared.changes, prepared, timing);
     return true;
+  }
+
+  private commitDirect(changes: FTCacheMutation[], timing?: FTCacheWriteTiming): void {
+    const prepared = this.ledger.prepareCommit(changes);
+    this.commitPrepared(prepared.changes, prepared, timing);
+  }
+
+  private commitPrepared(changes: FTCacheMutation[], prepared: FTCacheLedgerCommit,
+    timing?: FTCacheWriteTiming): void {
+    const result = FTCacheFiles.commit(this.root, changes);
+    this.ledger.markCommitted(prepared);
+    if (timing) {
+      timing.journalMs += result.journalMs;
+      timing.fsyncMs += result.fsyncMs;
+    }
   }
 
   private async evictOne(types: string[] = []): Promise<boolean> {
@@ -130,8 +198,8 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     if (!this.settings.directUpload && this.settings.mode === 'file') {
       this.projection(changes, [{ command: 'deleteSyncUuids', ids: [oldest.uuid] }]);
     }
-    // Deletion uses the control reserve, never creates a second payload copy.
-    FTCacheFiles.commit(this.root, changes);
+    // Deletion does not require a payload-sized temporary replacement.
+    this.commitDirect(changes);
     await this.repairProjection();
     if (!this.settings.directUpload && this.settings.mode === 'file') {
       const compact = await this.sqlite({ command: 'compactCacheIndex' });
@@ -141,16 +209,73 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     return true;
   }
 
+  private async evictForReserve(requiredBytes: number): Promise<boolean> {
+    if (!this.settings.limitEnabled) { return true; }
+    const usage = this.ledger.usage(false);
+    let bytesToFree = usage.totalBytes + requiredBytes - this.settings.capacity;
+    if (bytesToFree <= 0) { return true; }
+    const candidates: SyncDataJSON[] = [];
+    for (const id of this.list('sync')) {
+      const row = this.sync(id);
+      if (row && !this.protectedUuids.has(row.uuid) && !this.leased(row)) { candidates.push(row); }
+    }
+    candidates.sort((a: SyncDataJSON, b: SyncDataJSON) => {
+      const aLog = this.type(a) === 'log'; const bLog = this.type(b) === 'log';
+      if (aLog !== bLog) { return aLog ? -1 : 1; }
+      return this.compare(a, b);
+    });
+    const changes: FTCacheMutation[] = [];
+    const ids: string[] = [];
+    for (const row of candidates) {
+      changes.push({ path: this.path('sync', row.uuid), body: null });
+      changes.push({ path: this.path('lease', row.uuid), body: null });
+      ids.push(row.uuid);
+      bytesToFree -= FTCacheFiles.size(this.path('sync', row.uuid)) + FTCacheFiles.size(this.path('lease', row.uuid));
+      if (bytesToFree <= 0) { break; }
+    }
+    if (bytesToFree > 0 || ids.length === 0) { return false; }
+    if (!this.settings.directUpload && this.settings.mode === 'file') {
+      this.projection(changes, [{ command: 'deleteSyncUuids', ids }]);
+    }
+    this.commitDirect(changes);
+    await this.repairProjection();
+    if (!this.settings.directUpload && this.settings.mode === 'file') {
+      const compact = await this.sqlite({ command: 'compactCacheIndex' });
+      if (!compact.ok) { throw new Error(compact.errorMessage || 'CACHE_INDEX_COMPACT'); }
+    }
+    this.evicted += ids.length;
+    this.increment('evicted', ids.length);
+    return true;
+  }
+
   async enforceLimit(): Promise<void> {
-    while (this.settings.limitEnabled && !this.ledger.canReserve(FTCacheFiles.CONTROL_RESERVE)) {
+    while (this.settings.limitEnabled && !this.ledger.canReserve(0)) {
       if (this.settings.discard !== 'discard_oldest' || !await this.evictOne()) { break; }
     }
+  }
+
+  /**
+   * Replays SQLite's discard-oldest result into a shadow without re-scanning
+   * SQLite.  Both stores receive writes in the same order, so their oldest
+   * records have the same order unless the mirror is already marked dirty.
+   */
+  async deleteOldestForShadow(count: number, dataTypes: string[] = []): Promise<void> {
+    const limit = Math.max(0, Math.floor(count));
+    if (limit === 0) { return; }
+    const rows = this.query({ command: 'querySyncData', dataTypes, limit });
+    const changes: FTCacheMutation[] = [];
+    for (const row of rows) {
+      changes.push({ path: this.path('sync', row.uuid), body: null });
+      changes.push({ path: this.path('lease', row.uuid), body: null });
+    }
+    if (changes.length !== limit * 2) { throw new Error('CACHE_SHADOW_EVICTION_MISMATCH'); }
+    this.commitDirect(changes);
   }
 
   async reserveSpool(bytes: number): Promise<void> {
     const state = this.read('meta', 'migration') || '';
     if (!state.includes('"state":"completed"')) { return; }
-    while (!this.ledger.canReserve(bytes + FTCacheFiles.CONTROL_RESERVE)) {
+    while (!this.ledger.canReserve(bytes)) {
       if (this.settings.mode !== 'file' || this.settings.discard !== 'discard_oldest' || !await this.evictOne()) { return; }
     }
   }
@@ -210,6 +335,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     }
     FTCacheFiles.remove(this.path('meta', 'errorTimeLine'));
     FTCacheFiles.remove(this.path('meta', 'clearing'));
+    this.ledger.invalidate();
   }
 
   private async write(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolWriteResponse> {
@@ -218,55 +344,99 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       result: { success: true, source: request.source || 'file.write', requested: rows.length, inserted: 0,
         updated: 0, dropped: 0, duplicateSkipped: 0, deletedOld: 0, acceptedUuids: [], errorMessage: '' },
       logCountDelta: 0, rumCountDelta: 0, currentDbSize: 0, dbLaneWaitMs: 0,
-      computeMs: 0, executeMs: 0, insertMs: 0, sizeCheckMs: 0, cleanupMs: 0
+      computeMs: 0, executeMs: 0, insertMs: 0, sizeCheckMs: 0, cleanupMs: 0,
+      recoverMs: this.lastRecoveryMs, reserveMs: 0, journalMs: 0, fsyncMs: 0, evictionMs: 0
     };
-    const beforeLog = this.countCategory(true); const beforeRum = this.countCategory(false);
+    const startedAt = Date.now();
+    const beforeCounts = this.ledger.counts();
+    const timing: FTCacheWriteTiming = { recoverMs: this.lastRecoveryMs, reserveMs: 0, journalMs: 0, fsyncMs: 0, evictionMs: 0 };
+    const changes: FTCacheMutation[] = [];
+    const pendingRows: SyncDataJSON[] = [];
+    const plannedUuids = new Set<string>();
+    let pendingLog = 0; let pendingRum = 0;
+    let nextId = Number(this.read('meta', 'nextId') || '1');
+    let needsNextId = false;
+    let pendingTimeline = Number(this.read('meta', 'errorTimeLine') || '-1');
     for (const row of rows) { this.protectedUuids.add(row.uuid); }
-    for (const row of rows) {
-      if (!row.uuid || !row.dataString || !(row.time > 0)) { response.result.dropped++; continue; }
-      const existing = this.sync(row.uuid);
-      if (existing && this.digest(existing) === this.digest(row)) {
-        response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+    try {
+      for (const row of rows) {
+        if (!row.uuid || !row.dataString || !(row.time > 0)) { response.result.dropped++; continue; }
+        // A duplicate in the same batch used to be observed after the first
+        // per-row commit. Preserve that result without paying for a second journal.
+        if (plannedUuids.has(row.uuid)) {
+          response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+        }
+        const existing = this.sync(row.uuid);
+        if (existing && this.digest(existing) === this.digest(row)) {
+          response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+        }
+        if (existing && request.options?.updateOrInsertByUuid !== true) {
+          response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+        }
+        if (!existing && !await this.admitCount(row, request, pendingLog, pendingRum)) { response.result.dropped++; continue; }
+        row.id = existing ? existing.id : nextId;
+        const body = JSON.stringify(row);
+        if (FTCacheFiles.bytes(FTCacheFiles.encode(body)) > FTCacheFiles.MAX_RECORD_BYTES) {
+          response.result.dropped++; this.increment('rejected', 1); continue;
+        }
+        if (!existing) { nextId++; needsNextId = true; }
+        changes.push({ path: this.path('sync', row.uuid), body });
+        pendingRows.push(row); plannedUuids.add(row.uuid);
+        if (this.type(row) === 'log' && !existing) { pendingLog++; }
+        else if (['rum_app', 'rum_webview'].includes(this.type(row)) && !existing) { pendingRum++; }
+        if (existing) { response.result.updated++; } else { response.result.inserted++; }
+        response.result.acceptedUuids.push(row.uuid);
       }
-      if (existing && request.options?.updateOrInsertByUuid !== true) {
-        response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+      if (needsNextId) { changes.push({ path: this.path('meta', 'nextId'), body: String(nextId) }); }
+      if (request.options?.lastErrorTimeLine !== undefined && pendingRows.length > 0) {
+        pendingTimeline = Math.max(pendingTimeline, request.options.lastErrorTimeLine);
+        changes.push({ path: this.path('meta', 'errorTimeLine'), body: String(pendingTimeline) });
       }
-      if (!existing && !await this.admitCount(row, request)) { response.result.dropped++; continue; }
-      row.id = existing ? existing.id : Number(this.read('meta', 'nextId') || '1');
-      const body = JSON.stringify(row);
-      if (FTCacheFiles.bytes(FTCacheFiles.encode(body)) > FTCacheFiles.MAX_RECORD_BYTES) {
-        response.result.dropped++; this.increment('rejected', 1); continue;
-      }
-      const changes: FTCacheMutation[] = [{ path: this.path('sync', row.uuid), body }];
-      if (!existing) { changes.push({ path: this.path('meta', 'nextId'), body: String(row.id + 1) }); }
-      if (request.options?.lastErrorTimeLine) {
-        const timeline = Math.max(Number(this.read('meta', 'errorTimeLine') || '-1'), request.options.lastErrorTimeLine);
-        changes.push({ path: this.path('meta', 'errorTimeLine'), body: String(timeline) });
-      }
-      if (!this.settings.directUpload && this.settings.mode === 'file') {
-        this.projection(changes, [{ command: 'writeSyncData', records: [row], options: {
+      if (!this.settings.directUpload && this.settings.mode === 'file' && pendingRows.length > 0) {
+        this.projection(changes, [{ command: 'writeSyncData', records: pendingRows, options: {
           applyCachePolicy: false, reInsert: false, forceTransaction: true, updateOrInsertByUuid: true
         } }]);
       }
-      if (!await this.commit(changes)) { response.result.dropped++; continue; }
-      if (existing) { response.result.updated++; } else { response.result.inserted++; }
-      response.result.acceptedUuids.push(row.uuid);
-      await this.repairProjection();
+      response.computeMs = Math.max(0, Date.now() - startedAt);
+      if (changes.length > 0 && !await this.commit(changes, timing)) {
+        // A journal is all-or-nothing: report no speculative inserts as accepted.
+        const committed = response.result.inserted + response.result.updated;
+        response.result.dropped += committed;
+        response.result.inserted = 0; response.result.updated = 0;
+        response.result.acceptedUuids = response.result.acceptedUuids.filter((uuid: string) => !plannedUuids.has(uuid));
+      } else if (pendingRows.length > 0) {
+        await this.repairProjection();
+      }
+    } finally {
+      this.protectedUuids.clear();
     }
-    this.protectedUuids.clear();
     response.result.deletedOld = this.evicted;
-    response.logCountDelta = this.countCategory(true) - beforeLog;
-    response.rumCountDelta = this.countCategory(false) - beforeRum;
+    const afterCounts = this.ledger.counts();
+    response.logCountDelta = afterCounts.log - beforeCounts.log;
+    response.rumCountDelta = afterCounts.rum - beforeCounts.rum;
     response.currentDbSize = this.ledger.usage().totalBytes;
+    // `insertMs` is the durable sub-phase of FileStore execution, so it is
+    // deliberately contained by executeMs just like SQLite insert timing.
+    response.executeMs = timing.journalMs;
+    response.insertMs = timing.journalMs;
+    response.sizeCheckMs = timing.reserveMs;
+    response.cleanupMs = timing.recoverMs + timing.evictionMs;
+    response.recoverMs = timing.recoverMs;
+    response.reserveMs = timing.reserveMs;
+    response.journalMs = timing.journalMs;
+    response.fsyncMs = timing.fsyncMs;
+    response.evictionMs = timing.evictionMs;
     return response;
   }
 
-  private async admitCount(row: SyncDataJSON, request: FTDBTaskPoolRequest): Promise<boolean> {
+  private async admitCount(row: SyncDataJSON, request: FTDBTaskPoolRequest, pendingLog: number = 0,
+    pendingRum: number = 0): Promise<boolean> {
     if (this.settings.limitEnabled || request.options?.applyCachePolicy !== true || !request.policy) { return true; }
     const log = this.type(row) === 'log';
     if (!log && !['rum_app', 'rum_webview'].includes(this.type(row))) { return true; }
     const limit = log ? request.policy.logLimitCount : request.policy.rumLimitCount;
-    if (limit <= 0 || this.countCategory(log) < limit) { return true; }
+    const counts = this.ledger.counts();
+    if (limit <= 0 || (log ? counts.log + pendingLog : counts.rum + pendingRum) < limit) { return true; }
     const discard = log ? request.policy.logDiscardStrategy : request.policy.rumDiscardStrategy;
     if (discard !== 'discard_oldest') { return false; }
     return await this.evictOne(log ? ['log'] : ['rum_app', 'rum_webview']);
@@ -294,10 +464,10 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       const lease: FTCacheLease = { digest: this.digest(row), expires: Date.now() + 15 * 60 * 1000 };
       changes.push({ path: this.path('lease', row.uuid), body: JSON.stringify(lease) });
     }
-    if (!this.ledger.canReserve(this.ledger.requiredBytes(changes) - FTCacheFiles.CONTROL_RESERVE)) {
+    if (!this.ledger.canReserve(this.ledger.requiredBytes(changes))) {
       throw new Error('CACHE_UPLOAD_LEASE_CAPACITY');
     }
-    FTCacheFiles.commit(this.root, changes);
+    this.commitDirect(changes);
   }
 
   private async uploadPage(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
@@ -344,13 +514,14 @@ export class FTCacheFileStore implements FTRumStoreAccess {
 
   private quarantineOversized(row: SyncDataJSON): void {
     const quarantine = `${this.root}/quarantine`;
-    while (FTCacheFiles.size(quarantine) > FTCacheFiles.CONTROL_RESERVE / 2) {
+    while (FTCacheFiles.size(quarantine) > FTCacheFiles.MAX_QUARANTINE_BYTES) {
       const names = FTCacheFiles.fileNames(quarantine).sort();
       if (names.length === 0) { break; }
       FTCacheFiles.remove(`${quarantine}/${names[0]}`);
     }
     fs.renameSync(this.path('sync', row.uuid), `${quarantine}/oversize-${Date.now()}-${encodeURIComponent(row.uuid)}.json`);
     FTCacheFiles.syncDirectory(quarantine); FTCacheFiles.syncDirectory(`${this.root}/sync`);
+    this.ledger.invalidate();
     this.increment('rejected', 1);
   }
 
@@ -389,7 +560,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       this.projection(changes, requests);
     }
     // ACK/retry is one forward-recoverable transaction. Never delete before reserving retry space.
-    if (replacements.length === 0) { FTCacheFiles.commit(this.root, changes); }
+    if (replacements.length === 0) { this.commitDirect(changes); }
     else if (!await this.commit(changes)) { throw new Error('CACHE_REINSERT_CAPACITY'); }
     await this.repairProjection();
     this.protectedUuids.clear();
@@ -402,18 +573,25 @@ export class FTCacheFileStore implements FTRumStoreAccess {
 
   private async deleteRows(rows: SyncDataJSON[]): Promise<number> {
     let deleted = 0;
+    const changes: FTCacheMutation[] = [];
+    const projectionIds: string[] = [];
+    const seen = new Set<string>();
     for (const row of rows) {
+      if (seen.has(row.uuid)) { continue; }
+      seen.add(row.uuid);
       const existing = this.sync(row.uuid);
-      const changes: FTCacheMutation[] = [];
       // An old in-flight ACK must never delete a newer aggregate version of the same UUID.
       if (existing && this.digest(existing) === this.digest(row)) {
         changes.push({ path: this.path('sync', row.uuid), body: null }); deleted++;
+        projectionIds.push(row.uuid);
       }
       changes.push({ path: this.path('lease', row.uuid), body: null });
-      if (!this.settings.directUpload && this.settings.mode === 'file' && existing && this.digest(existing) === this.digest(row)) {
-        this.projection(changes, [{ command: 'deleteSyncUuids', ids: [row.uuid] }]);
-      }
-      FTCacheFiles.commit(this.root, changes);
+    }
+    if (!this.settings.directUpload && this.settings.mode === 'file' && projectionIds.length > 0) {
+      this.projection(changes, [{ command: 'deleteSyncUuids', ids: projectionIds }]);
+    }
+    if (changes.length > 0) {
+      this.commitDirect(changes);
       await this.repairProjection();
     }
     return deleted;

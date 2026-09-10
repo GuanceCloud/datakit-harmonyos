@@ -115,6 +115,12 @@ export interface FTDBTaskPoolWriteResponse {
   insertMs: number;
   sizeCheckMs: number;
   cleanupMs: number;
+  /** FileStore-only sub-phases; zero for SQLite. */
+  recoverMs: number;
+  reserveMs: number;
+  journalMs: number;
+  fsyncMs: number;
+  evictionMs: number;
 }
 
 export interface FTDBTaskPoolUploadCommitResponse {
@@ -593,7 +599,9 @@ export class FTDBTaskPoolExecutor {
 
   public static async awaitIdle(context: Context): Promise<void> {
     await FTDBTaskPoolExecutor.execute(context, {
-      command: FTDBTaskPoolCommand.INIT
+      // A cheap ordered no-op barrier. INIT may start migration/limit work and
+      // is not suitable for a UI "stop and drain" acknowledgement.
+      command: FTDBTaskPoolCommand.GET_DB_SIZE
     });
   }
 

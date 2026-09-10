@@ -22,6 +22,10 @@ import {
 const TAG = "TrackLogManager";
 const LOG_HOST_MAILBOX_BATCH_SIZE = 64;
 const LOG_HOST_MAILBOX_BATCH_DELAY_MS = 16;
+/** Bounded host admission: each mailbox command carries at most 64 log DTOs. */
+const LOG_HOST_MAILBOX_HIGH_WATER_COMMANDS = 128;
+const LOG_HOST_MAILBOX_HIGH_WATER_LOGS = LOG_HOST_MAILBOX_HIGH_WATER_COMMANDS * LOG_HOST_MAILBOX_BATCH_SIZE;
+const LOG_HOST_MAILBOX_HIGH_WATER_LOG_INTERVAL_MS = 5000;
 
 /**
  * Queue status interface
@@ -75,6 +79,7 @@ export class TrackLogManager {
   private mailboxHandlerRegistered: boolean = false;
   private pendingLogDTOs: SDKLogDTO[] = [];
   private pendingFlushTimer: number | null = null;
+  private lastMailboxHighWaterLogAt: number = 0;
 
   private constructor() {
   }
@@ -135,6 +140,7 @@ export class TrackLogManager {
       return;
     }
 
+    if (!this.canAcceptLog()) { return; }
     this.acceptedCount++;
     this.enqueueLogDTO(this.toLogDTO(logBean, isSilence));
   }
@@ -151,6 +157,7 @@ export class TrackLogManager {
       return;
     }
 
+    if (!this.canAcceptLog()) { return; }
     this.acceptedCount++;
     this.enqueueLogDTO(this.toLogDTO(logBean, isSilence));
   }
@@ -172,6 +179,9 @@ export class TrackLogManager {
       const logBean = logBeans[i];
       if (!this.shouldProcessLog(logBean, false)) {
         this.filteredCount++;
+        continue;
+      }
+      if (!this.canAcceptLog(batchDTOs.length)) {
         continue;
       }
       accepted++;
@@ -223,6 +233,21 @@ export class TrackLogManager {
     if (!posted) {
       FTInnerLogger.w(TAG, 'LogWorker flush mailbox post failed');
     }
+  }
+
+  /**
+   * Stops producer-side buffering and waits until the LOG_CONSUMER has handed
+   * every accepted mailbox command back to the host. Callers can then enqueue
+   * a DB-lane barrier to obtain a real stop-and-drain fence.
+   */
+  public async flushAndWait(timeoutMs: number = 30000): Promise<boolean> {
+    this.forceFlush();
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    while (this.pendingLogDTOs.length > 0 || this.getLogMailboxPending() > 0) {
+      if (Date.now() >= deadline) { return false; }
+      await new Promise<void>((resolve: () => void) => setTimeout(resolve, 20));
+    }
+    return true;
   }
 
   /**
@@ -318,6 +343,12 @@ export class TrackLogManager {
     if (!logDTOs || logDTOs.length === 0) {
       return;
     }
+    if (this.getLogMailboxPending() >= LOG_HOST_MAILBOX_HIGH_WATER_COMMANDS) {
+      this.droppedCount += logDTOs.length;
+      this.acceptedCount = Math.max(0, this.acceptedCount - logDTOs.length);
+      this.logMailboxHighWater(logDTOs.length);
+      return;
+    }
     this.ensureMailboxHandler();
     TrackLogManager.logWorkerCommandSequence++;
     FTTrackInner.getInstance().ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.LOG_CONSUMER);
@@ -374,6 +405,23 @@ export class TrackLogManager {
     const status = SDKDedicatedPoolManager.getInstance().getStatus();
     const pool = status.pools[SDKDedicatedPoolType.LOG_CONSUMER];
     return pool ? pool.mailboxPending : 0;
+  }
+
+  private canAcceptLog(pendingBatchCount: number = 0): boolean {
+    const queuedLogs = this.pendingLogDTOs.length + pendingBatchCount +
+      this.getLogMailboxPending() * LOG_HOST_MAILBOX_BATCH_SIZE;
+    if (queuedLogs < LOG_HOST_MAILBOX_HIGH_WATER_LOGS) { return true; }
+    this.droppedCount++;
+    this.logMailboxHighWater(1);
+    return false;
+  }
+
+  private logMailboxHighWater(dropped: number): void {
+    const now = Date.now();
+    if (now - this.lastMailboxHighWaterLogAt < LOG_HOST_MAILBOX_HIGH_WATER_LOG_INTERVAL_MS) { return; }
+    this.lastMailboxHighWaterLogAt = now;
+    FTInnerLogger.w(TAG, `Log mailbox high-water reached; discarded=${dropped}, ` +
+      `pendingCommands=${this.getLogMailboxPending()}, limit=${LOG_HOST_MAILBOX_HIGH_WATER_COMMANDS}`);
   }
 
   private ensureMailboxHandler(): void {

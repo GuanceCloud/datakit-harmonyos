@@ -30,7 +30,7 @@ import { SyncTaskManager } from "./SyncTaskManager";
 import { FTDBCachePolicy } from "./db/FTDBCachePolicy";
 import { FTDBManager } from "./db/FTDBManager";
 import { FTDBSpoolManager } from "./db/FTDBSpoolManager";
-import { FTCacheContext } from "./db/FTCacheContext";
+import { FTCacheContext, resolveFTCacheMode } from "./db/FTCacheContext";
 import { FTDBTaskPoolExecutor } from "./db/FTDBTaskPoolExecutor";
 import { SyncData } from "./db/bean/SyncData";
 import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
@@ -484,7 +484,7 @@ export class FTSDK {
       FTCacheContext.context = context;
       FTCacheContext.databaseDir = context.databaseDir;
       FTCacheContext.settings = {
-        mode: config.isUseFileDataStore() ? 'file' : config.isFileDataStoreShadow() ? 'shadow' : 'sqlite',
+        mode: resolveFTCacheMode(config.isUseFileDataStore(), config.isFileDataStoreShadow()),
         limitEnabled: config.isLimitWithCacheSize(), capacity: config.getCacheLimit(),
         discard: config.getCacheDiscard(), migrate: config.isNeedTransformOldCache(), directUpload: true
       };

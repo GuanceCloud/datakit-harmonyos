@@ -1335,7 +1335,11 @@ export class FTSDKConfig {
     return this;
   }
 
-  /** Select FileStore (`true`) or SQLite (`false`) as the durable cache mode. */
+  /**
+   * Select FileStore (`true`) or SQLite (`false`) as the durable cache mode
+   * when shadow mode is disabled. If both switches are true, shadow takes
+   * precedence so Android and HarmonyOS keep SQLite as the primary cache.
+   */
   setUseFileDataStore(useFileDataStore: boolean): FTSDKConfig {
     this.fileDataStoreEnabled = this.fileDataStoreEnabled || useFileDataStore;
     this.useFileDataStore = useFileDataStore;
@@ -1347,7 +1351,7 @@ export class FTSDKConfig {
     return this.fileDataStoreEnabled || this.fileDataStoreShadow;
   }
 
-  /** Whether FileStore is the primary durable cache. */
+  /** Raw FileStore-primary switch; it is overridden when shadow is also enabled. */
   isUseFileDataStore(): boolean {
     return this.useFileDataStore;
   }

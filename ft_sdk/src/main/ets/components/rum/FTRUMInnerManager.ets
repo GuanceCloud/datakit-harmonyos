@@ -18,7 +18,7 @@ import {
   FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
-import { FTCacheContext } from '../db/FTCacheContext';
+import { FTCacheContext, isFTCacheSqlitePrimary } from '../db/FTCacheContext';
 import { FTInnerLogger } from "../log/FTLogger";
 import {
   SDKDedicatedPoolManager,
@@ -553,7 +553,7 @@ export class FTRUMInnerManager {
     if (!counterDeltasApplied || resourceIds.length === 0) {
       return true;
     }
-    if (FTCacheContext.settings.mode === 'sqlite') {
+    if (isFTCacheSqlitePrimary(FTCacheContext.settings.mode)) {
       return await this.completePersistedResourceLifecycles(resourceIds);
     }
     if (releasedResourceLifecycle) {
@@ -811,7 +811,7 @@ export class FTRUMInnerManager {
         readyResourceIds.push(resourceId);
       }
     }
-    if (FTCacheContext.settings.mode !== 'sqlite') {
+    if (!isFTCacheSqlitePrimary(FTCacheContext.settings.mode)) {
       for (let i = 0; i < readyResourceIds.length; i++) {
         this.clearResourceLifecycleRegistration(readyResourceIds[i]);
       }
@@ -2039,7 +2039,7 @@ export class FTRUMInnerManager {
     // Actions that were waiting for Resources before a process restart have
     // no active in-memory owner. Rebuild their close state from RDB so a
     // later Resource callback can still finalize the original Action.
-    if (FTCacheContext.settings.mode === 'sqlite') {
+    if (isFTCacheSqlitePrimary(FTCacheContext.settings.mode)) {
       this.recoverPendingActionClosures();
     }
 
@@ -2640,7 +2640,7 @@ export class FTRUMInnerManager {
     if (!this.context || !command || !command.resourceId) {
       return false;
     }
-    const supportsPendingResourcePersistence = FTCacheContext.settings.mode === 'sqlite';
+    const supportsPendingResourcePersistence = isFTCacheSqlitePrimary(FTCacheContext.settings.mode);
     const registration = supportsPendingResourcePersistence ?
       this.pendingResourceRegistrations.get(command.resourceId) : undefined;
     if (registration) {
@@ -3172,7 +3172,7 @@ export class FTRUMInnerManager {
       const draftIds = this.getOrCreateResourceDraftIds(resourceId);
       this.resourceContextById.set(resourceId, context);
       this.updateResourceContextMemoryOnStart(context);
-      if (FTCacheContext.settings.mode === 'sqlite') {
+      if (isFTCacheSqlitePrimary(FTCacheContext.settings.mode)) {
         const pendingResource: FTDBTaskPoolPendingRumResourceDTO = {
           resourceId,
           startTime,
@@ -3962,7 +3962,7 @@ export class FTRUMInnerManager {
         waitingForResource: false
       });
     }
-    if (this.context && FTCacheContext.settings.mode === 'sqlite') {
+    if (this.context && isFTCacheSqlitePrimary(FTCacheContext.settings.mode)) {
       // Persist the close duration before waiting. Recovery can then generate
       // the original Action with the correct duration after a process restart.
       void FTDBTaskPoolExecutor.markRumActionCloseRequested(
@@ -3978,7 +3978,7 @@ export class FTRUMInnerManager {
 
   /** Rebuilds close state for Actions left behind by a process restart. */
   private recoverPendingActionClosures(): void {
-    if (FTCacheContext.settings.mode !== 'sqlite' || this.pendingActionRecoveryStarted || !this.context) {
+    if (!isFTCacheSqlitePrimary(FTCacheContext.settings.mode) || this.pendingActionRecoveryStarted || !this.context) {
       return;
     }
     this.pendingActionRecoveryStarted = true;

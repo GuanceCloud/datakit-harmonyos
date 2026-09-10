@@ -26,9 +26,9 @@ export async function runFTCacheSpool(object: Object, contextObject: Object): Pr
     if (request.command === 'append' && request.cache.limitEnabled) {
       await store.reserveSpool(Math.min(8 * 1024 * 1024,
         FTCacheFiles.bytes(JSON.stringify(request.records || [])) * 3 + 4096));
-      // Reserve journal + append bytes and the fixed recovery headroom.
+      // Reserve journal and append bytes. There is no fixed capacity headroom.
       const usage = store.ledger.usage();
-      const free = Math.max(0, request.cache.capacity - usage.totalBytes - FTCacheFiles.CONTROL_RESERVE);
+      const free = Math.max(0, request.cache.capacity - usage.totalBytes);
       const pending = FTCacheFiles.size(request.spoolDir);
       request.maxCapacityBytes = Math.min(request.maxCapacityBytes || 8 * 1024 * 1024,
         pending + Math.floor(free / 3));

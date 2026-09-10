@@ -10,6 +10,21 @@ export interface FTCacheSettings {
   directUpload: boolean;
 }
 
+/**
+ * Android-compatible conflict resolution for the two FileStore switches.
+ * Shadow intentionally wins when both are enabled: SQLite stays authoritative
+ * while FileStore receives a verification mirror.
+ */
+export function resolveFTCacheMode(useFileDataStore: boolean, fileDataStoreShadow: boolean): string {
+  if (fileDataStoreShadow) { return 'shadow'; }
+  return useFileDataStore ? 'file' : 'sqlite';
+}
+
+/** SQLite remains the primary store while a FileStore shadow is enabled. */
+export function isFTCacheSqlitePrimary(mode: string): boolean {
+  return mode === 'sqlite' || mode === 'shadow';
+}
+
 export class FTCacheContext {
   static context: Context | null = null;
   static filesDir: string = '';

@@ -3,27 +3,43 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { FTCacheSettings } from './FTCacheContext';
 import { FTCacheFiles, FTCacheMutation } from './FTCacheFiles';
 import { FTCacheFileStore, FTSqliteRunner } from './FTCacheFileStore';
-import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecutor';
+import { FTDBTaskPoolRequest, FTDBTaskPoolResponse, FTDBTaskPoolWriteOptions } from './FTDBTaskPoolExecutor';
 import { FTRumFileStore } from './FTRumFileStore';
+import { FTInnerLogger } from '../log/FTLogger';
 import { SyncDataJSON } from './bean/SyncData';
 import { runFTDBSpoolTaskPoolExecute } from './FTDBSpoolTaskPoolOperations';
 import { FTDBSpoolTaskPoolRequest, FTDBSpoolTaskPoolResponse } from './FTDBSpoolTaskPoolExecutor';
 
 interface FTCacheMigration { state: string; afterId: number; legacyDone: boolean; }
+const TAG = 'FTCacheCoordinator';
 
 /** One command boundary for sync payloads, aggregates, migration and recovery. */
 export class FTCacheCoordinator {
   static async run(context: Context, request: FTDBTaskPoolRequest, sqlite: FTSqliteRunner): Promise<FTDBTaskPoolResponse> {
     const settings = request.cache;
     if (!settings || (settings.mode === 'sqlite' && request.command !== 'getCacheStatus')) { return await sqlite(request); }
+    // Shadow keeps SQLite as the primary capacity governor. Do not report the
+    // mirror's physical bytes as the SQLite limit meter on the test page.
+    if (settings.mode === 'shadow' && request.command === 'getDbSize') { return await sqlite(request); }
     const lock = fs.openSync(`${context.filesDir}/ft_sdk_cache.lock`, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE);
     let locked = false;
     try {
       await lock.lock(true); locked = true;
       const store = new FTCacheFileStore(context, settings, sqlite);
       await store.recover();
-      if (request.command === 'getCacheStatus') { return { ok: true, strings: [JSON.stringify(store.status())] }; }
-      if (settings.mode === 'shadow') { return await FTCacheCoordinator.shadow(store, request, sqlite); }
+      if (request.command === 'getCacheStatus') {
+        const status = store.status();
+        if (settings.mode !== 'file') {
+          const primary = await FTCacheCoordinator.checked(sqlite, { command: 'getDbSize' });
+          status.usage.governedBytes = Math.max(0, primary.count || 0);
+          status.usage.governedScope = settings.mode === 'shadow'
+            ? 'SQLite 主库页分配（影子 FileStore 不计入 30 MiB）'
+            : 'SQLite 主库页分配';
+          status.usage.overLimit = settings.limitEnabled && status.usage.governedBytes >= status.usage.capacityBytes;
+        }
+        return { ok: true, strings: [JSON.stringify(status)] };
+      }
+      if (settings.mode === 'shadow') { return await FTCacheCoordinator.shadow(context, store, request, sqlite); }
       await FTCacheCoordinator.migrate(store, context, sqlite);
       if (settings.directUpload && store.read('meta', 'sqliteReleased') === null) {
         // Reclaim the old payload pages before opening the file-only lane; interruption safely retries.
@@ -214,7 +230,12 @@ export class FTCacheCoordinator {
     }
   }
 
-  private static async shadow(store: FTCacheFileStore, request: FTDBTaskPoolRequest,
+  /**
+   * SQLite remains authoritative in shadow mode.  A clean mirror is updated
+   * from the just-committed command; a complete SQLite scan is reserved for
+   * first use and recovery from a durable dirty marker.
+   */
+  private static async shadow(context: Context, store: FTCacheFileStore, request: FTDBTaskPoolRequest,
     sqlite: FTSqliteRunner): Promise<FTDBTaskPoolResponse> {
     if (store.read('meta', 'migration') !== null) {
       if (store.list('sync').length + store.list('view').length + store.list('action').length > 0) {
@@ -223,20 +244,138 @@ export class FTCacheCoordinator {
       FTCacheFiles.remove(store.path('meta', 'migration'));
       FTCacheFiles.remove(store.path('meta', 'sqliteReleased'));
     }
-    FTCacheFiles.atomicWrite(store.path('meta', 'shadowSource'), 'true');
+    // A mirror is diagnostic storage.  It must never reject a successful
+    // SQLite write merely because both physical representations coexist.
+    const mirror = new FTCacheFileStore(context, store.settings, sqlite, true);
+    const source = store.path('meta', 'shadowSource');
     const dirty = store.path('meta', 'shadowDirty');
-    FTCacheFiles.atomicWrite(dirty, 'true');
+    let mirrorReady = true;
+    if (store.read('meta', 'shadowSource') === null || store.read('meta', 'shadowDirty') !== null) {
+      FTInnerLogger.i(TAG, `Reconciling FileStore shadow: command=${request.command}`);
+      await mirror.commit([{ path: source, body: 'true' }, { path: dirty, body: 'true' }]);
+      try {
+        await FTCacheCoordinator.reconcileShadow(mirror, sqlite);
+        FTInnerLogger.i(TAG, 'FileStore shadow reconciliation completed');
+      }
+      catch (error) {
+        mirrorReady = false;
+        await FTCacheCoordinator.markShadowDirty(mirror, String(error));
+        FTInnerLogger.w(TAG, `FileStore shadow reconciliation deferred: ${error}`);
+      }
+    }
+    if (!FTCacheCoordinator.mirrorsCommand(request.command)) {
+      return await FTCacheCoordinator.checked(sqlite, request);
+    }
+    // Mark before SQLite commits.  A process death between the two stores
+    // therefore causes one recovery reconciliation, never a silent gap.
+    await FTCacheCoordinator.markShadowDirty(mirror, 'true');
     const response = await FTCacheCoordinator.checked(sqlite, request);
-    try { await FTCacheCoordinator.reconcileShadow(store, sqlite); }
-    catch (error) { FTCacheFiles.atomicWrite(dirty, String(error)); }
+    if (!mirrorReady) { return response; }
+    try {
+      await FTCacheCoordinator.applyShadowMutation(mirror, request, response, sqlite);
+      if (!await mirror.commit([{ path: dirty, body: null }])) { throw new Error('CACHE_SHADOW_DIRTY_CLEAR_FAILED'); }
+    } catch (error) {
+      await FTCacheCoordinator.markShadowDirty(mirror, String(error));
+      FTInnerLogger.w(TAG, `FileStore shadow update deferred: command=${request.command}, error=${error}`);
+    }
     return response;
+  }
+
+  private static async markShadowDirty(store: FTCacheFileStore, detail: string): Promise<void> {
+    await store.commit([{ path: store.path('meta', 'shadowDirty'), body: detail }]);
+  }
+
+  /** Read-only commands do not need a FileStore mirror transaction. */
+  private static mirrorsCommand(command: string): boolean {
+    return !['init', 'hasSyncData', 'querySyncData', 'queryUploadData', 'queryTotalCount', 'getDbSize',
+      'getLastErrorTimeLine', 'getActionInfo', 'getActionCounts', 'getRumPendingResource', 'getPendingRumResource',
+      'queryPendingRumActions', 'querySumAction', 'querySumView', 'queryRumViewById', 'queryRelatedUUIDsByActionId',
+      'exportRumState', 'queryMigrationPage', 'compactCacheIndex'].includes(command);
+  }
+
+  private static async applyShadowMutation(store: FTCacheFileStore, request: FTDBTaskPoolRequest,
+    response: FTDBTaskPoolResponse, sqlite: FTSqliteRunner): Promise<void> {
+    if (request.command === 'acknowledgeView') {
+      await FTCacheCoordinator.mirrorAcknowledgedView(store, request, response);
+      return;
+    }
+    if (['registerPendingRumResource', 'completePendingRumResources', 'markRumActionCloseRequested'].includes(request.command)) {
+      // These commands own SQLite-only resource rows but also change their
+      // View/Action aggregates.  Reconcile only those small aggregate sets;
+      // never re-scan the sync payload queue.
+      await FTCacheCoordinator.reconcileShadowAggregates(store, sqlite);
+      return;
+    }
+    const mirrorRequest = FTCacheCoordinator.createShadowRequest(request, response);
+    if (mirrorRequest === null) { return; }
+    if (response.write && response.write.result.deletedOld > 0) {
+      const dataTypes = FTCacheCoordinator.shadowEvictionTypes(request);
+      if (dataTypes === null) { throw new Error('CACHE_SHADOW_EVICTION_TYPES_UNKNOWN'); }
+      await store.deleteOldestForShadow(response.write.result.deletedOld, dataTypes);
+    }
+    const mirrorResponse = await store.execute(mirrorRequest);
+    if (response.write) {
+      const expected = response.write.result.acceptedUuids;
+      const actual = mirrorResponse.write?.result.acceptedUuids || [];
+      for (const uuid of expected) {
+        if (!actual.includes(uuid)) { throw new Error(`CACHE_SHADOW_WRITE_MISMATCH:${uuid}`); }
+      }
+    }
+    if (request.options?.lastErrorTimeLine !== undefined) {
+      await store.execute({ command: 'updateLastErrorTimeLine', errorTimeLine: request.options.lastErrorTimeLine });
+    }
+  }
+
+  private static createShadowRequest(request: FTDBTaskPoolRequest, response: FTDBTaskPoolResponse): FTDBTaskPoolRequest | null {
+    if (request.command !== 'writeSyncData' && request.command !== 'writeSyncDrafts') { return request; }
+    if (!response.write) { throw new Error('CACHE_SHADOW_WRITE_RESPONSE_MISSING'); }
+    const accepted = new Set<string>(response.write.result.acceptedUuids);
+    const options: FTDBTaskPoolWriteOptions | undefined = request.options ? {
+      applyCachePolicy: false,
+      reInsert: request.options.reInsert,
+      forceTransaction: true,
+      updateOrInsertByUuid: request.options.updateOrInsertByUuid
+    } : undefined;
+    if (request.records) {
+      return {
+        command: request.command, source: request.source,
+        records: request.records.filter((row) => accepted.has(row.uuid)), options
+      };
+    }
+    return {
+      command: request.command, source: request.source,
+      drafts: (request.drafts || []).filter((row) => accepted.has(row.uuid)),
+      fallbackDataType: request.fallbackDataType, options
+    };
+  }
+
+  private static shadowEvictionTypes(request: FTDBTaskPoolRequest): string[] | null {
+    if (request.policy?.enableLimitWithCacheSize === true) { return []; }
+    const types = new Set<string>();
+    for (const row of request.records || []) { types.add(row.customDataTypeString || String(row.dataType)); }
+    for (const row of request.drafts || []) { types.add(row.customDataType || row.dataType || request.fallbackDataType || 'log'); }
+    if (types.size === 0 || types.size > 1) { return null; }
+    const type = Array.from(types)[0];
+    if (type === 'log') { return ['log']; }
+    if (type === 'rum_app' || type === 'rum_webview') { return ['rum_app', 'rum_webview']; }
+    return null;
+  }
+
+  private static async mirrorAcknowledgedView(store: FTCacheFileStore, request: FTDBTaskPoolRequest,
+    response: FTDBTaskPoolResponse): Promise<void> {
+    const view = request.view;
+    if (!view || response.value !== true) { return; }
+    await store.execute({ command: 'updateViewUploadTime', viewId: view.id,
+      dateTime: view.isClose && view.pendingResource > 0 ? 0 : view.dataUpdateTime });
+    if (view.isClose && view.pendingResource <= 0) {
+      await store.execute({ command: 'cleanCloseViewData', ids: [view.id], now: Date.now() });
+    }
   }
 
   private static async reconcileShadow(store: FTCacheFileStore, sqlite: FTSqliteRunner): Promise<void> {
     // Snapshot reconciliation mirrors every mutation, including close, counters and deletes.
     // The dirty marker is retained on failure; diagnostics never report an incomplete mirror as healthy.
     const dirty = store.path('meta', 'shadowDirty');
-    const rum = await FTCacheCoordinator.checked(sqlite, { command: 'exportRumState' });
     const syncIds = new Set<string>(); let afterId = 0;
     while (true) {
       const page = await FTCacheCoordinator.checked(sqlite, { command: 'querySyncData', afterId, limit: 128 });
@@ -246,8 +385,17 @@ export class FTCacheCoordinator {
       afterId = rows[rows.length - 1].id;
     }
     for (const id of store.list('sync')) {
-      if (!syncIds.has(id)) { FTCacheFiles.commit(store.root, [{ path: store.path('sync', id), body: null }]); }
+      if (!syncIds.has(id) && !await store.commit([{ path: store.path('sync', id), body: null }])) {
+        throw new Error('CACHE_SHADOW_CAPACITY');
+      }
     }
+    await FTCacheCoordinator.reconcileShadowAggregates(store, sqlite);
+    if (!await store.commit([{ path: dirty, body: null }])) { throw new Error('CACHE_SHADOW_DIRTY_CLEAR_FAILED'); }
+  }
+
+  /** Reconciles RUM's small aggregate state without touching sync payloads. */
+  private static async reconcileShadowAggregates(store: FTCacheFileStore, sqlite: FTSqliteRunner): Promise<void> {
+    const rum = await FTCacheCoordinator.checked(sqlite, { command: 'exportRumState' });
     for (const kind of ['view', 'action']) {
       const keep = new Set<string>();
       const changes: FTCacheMutation[] = [];
@@ -259,6 +407,5 @@ export class FTCacheCoordinator {
       for (const id of store.list(kind)) { if (!keep.has(id)) { changes.push({ path: store.path(kind, id), body: null }); } }
       if (changes.length > 0 && !await store.commit(changes)) { throw new Error('CACHE_SHADOW_CAPACITY'); }
     }
-    FTCacheFiles.remove(dirty);
   }
 }

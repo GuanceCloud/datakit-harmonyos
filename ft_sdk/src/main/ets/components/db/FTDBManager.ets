@@ -1137,8 +1137,10 @@ export class FTDBManager extends DBManager {
       result.success = false;
       result.errorMessage = String(error);
     } finally {
-      const dbManagerCostTime = Math.max(0, Date.now() - startTime);
-      const costTime = dbManagerCostTime + dbLaneWaitTime;
+      // startTime is captured before enqueue, so it already contains the
+      // serialized DB-lane wait. Adding dbLaneWait again made FileStore logs
+      // report roughly 2x the real end-to-end cost under backlog.
+      const costTime = Math.max(0, Date.now() - startTime);
       let computeTime = Math.max(0, taskPoolResponse ? taskPoolResponse.computeMs : 0);
       let executeTime = Math.max(0, taskPoolResponse ? taskPoolResponse.executeMs : 0);
       let insertTime = Math.max(0, taskPoolResponse ? taskPoolResponse.insertMs : 0);
@@ -1168,7 +1170,8 @@ export class FTDBManager extends DBManager {
         insertTime,
         sizeCheckTime,
         cleanupTime,
-        costTime
+        costTime,
+        taskPoolResponse
       );
     }
 
@@ -1242,8 +1245,7 @@ export class FTDBManager extends DBManager {
       result.success = false;
       result.errorMessage = String(error);
     } finally {
-      const dbManagerCostTime = Math.max(0, Date.now() - startTime);
-      const costTime = dbManagerCostTime + dbLaneWaitTime;
+      const costTime = Math.max(0, Date.now() - startTime);
       const computeTime = Math.max(0, taskPoolResponse ? taskPoolResponse.computeMs : 0);
       const executeTime = Math.max(0, taskPoolResponse ? taskPoolResponse.executeMs : 0);
       const insertTime = Math.max(0, taskPoolResponse ? taskPoolResponse.insertMs : 0);
@@ -1261,7 +1263,8 @@ export class FTDBManager extends DBManager {
         insertTime,
         sizeCheckTime,
         cleanupTime,
-        costTime
+        costTime,
+        taskPoolResponse
       );
     }
 
@@ -1407,7 +1410,8 @@ export class FTDBManager extends DBManager {
     insertTime: number,
     sizeCheckTime: number,
     cleanupTime: number,
-    costTime: number
+    costTime: number,
+    taskPoolResponse: FTDBTaskPoolWriteResponse | null
   ): void {
     const hasRisk = !result.success || result.dropped > 0 || result.deletedOld > 0 ||
       result.duplicateSkipped > 0 || result.errorMessage.length > 0;
@@ -1430,12 +1434,16 @@ export class FTDBManager extends DBManager {
     }
 
     const errorPart = result.errorMessage.length > 0 ? ` error=${result.errorMessage}` : '';
+    const fileStorePhases = taskPoolResponse && (taskPoolResponse.journalMs > 0 || taskPoolResponse.recoverMs > 0 ||
+      taskPoolResponse.reserveMs > 0 || taskPoolResponse.evictionMs > 0) ?
+      ` recover=${taskPoolResponse.recoverMs}ms reserve=${taskPoolResponse.reserveMs}ms ` +
+      `journal=${taskPoolResponse.journalMs}ms fsync=${taskPoolResponse.fsyncMs}ms eviction=${taskPoolResponse.evictionMs}ms` : '';
     const message =
       `[${label}] source=${source} rows=${result.requested} inserted=${result.inserted} updated=${result.updated} ` +
         `dropped=${result.dropped} duplicate=${result.duplicateSkipped} deletedOld=${result.deletedOld} ` +
         `dbLaneWait=${dbLaneWaitTime}ms lockWait=${lockWaitTime}ms wait=${waitTime}ms compute=${computeTime}ms ` +
         `execute=${executeTime}ms insert=${insertTime}ms sizeCheck=${sizeCheckTime}ms cleanup=${cleanupTime}ms ` +
-        `total=${costTime}ms cost=${costTime}ms${errorPart}`;
+        `total=${costTime}ms cost=${costTime}ms${fileStorePhases}${errorPart}`;
     if (hasRisk) {
       FTInnerLogger.w(TAG, message);
       return;

@@ -119,6 +119,11 @@ export interface FTDBTaskPoolWriteResponse {
   insertMs: number;
   sizeCheckMs: number;
   cleanupMs: number;
+  recoverMs: number;
+  reserveMs: number;
+  journalMs: number;
+  fsyncMs: number;
+  evictionMs: number;
 }
 
 export interface FTDBTaskPoolUploadCommitResponse {
@@ -1414,7 +1419,12 @@ async function writeSyncDataInTaskPool(
     executeMs: timing.executeMs,
     insertMs: timing.insertMs,
     sizeCheckMs: timing.sizeCheckMs,
-    cleanupMs: timing.cleanupMs
+    cleanupMs: timing.cleanupMs,
+    recoverMs: 0,
+    reserveMs: 0,
+    journalMs: 0,
+    fsyncMs: 0,
+    evictionMs: 0
   };
 }
 
