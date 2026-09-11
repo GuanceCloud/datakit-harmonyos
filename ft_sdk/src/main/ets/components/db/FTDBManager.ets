@@ -555,9 +555,9 @@ export class FTDBManager extends DBManager {
   private createTaskPoolCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
     const cachePolicy = FTDBCachePolicy.getInstance();
     return {
-      enableLimitWithCacheSize: cachePolicy.isEnableLimitWithCacheSize(),
-      cacheLimitSize: cachePolicy.getCacheLimitSize(),
-      cacheDiscard: cachePolicy.getCacheDiscard(),
+      enableLimitWithDbSize: cachePolicy.isEnableLimitWithDbSize(),
+      dbLimitSize: cachePolicy.getDbLimitSize(),
+      dbCacheDiscard: cachePolicy.getDBCacheDiscard(),
       logLimitCount: cachePolicy.getLogLimitCount(),
       rumLimitCount: cachePolicy.getRumLimitCount(),
       logCount: cachePolicy.getLogCount(),

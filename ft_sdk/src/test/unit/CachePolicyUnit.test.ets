@@ -217,7 +217,7 @@ export default function cachePolicyUnitTest() {
       expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual('');
     });
 
-    it('cacheSizePolicyShouldUseUnifiedCacheConfiguration', 0, () => {
+    it('cacheSizePolicyShouldNotEnableLegacyDbConfiguration', 0, () => {
       const cachePolicy = FTDBCachePolicy.getInstance();
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .enableLimitWithCacheSize(Constants.MINI_CACHE_LIMIT_SIZE)
@@ -225,9 +225,9 @@ export default function cachePolicyUnitTest() {
 
       cachePolicy.initSDKParams(new TestConfigRecord(config));
 
-      expect(cachePolicy.isEnableLimitWithCacheSize()).assertTrue();
-      expect(cachePolicy.getCacheLimitSize()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
-      expect(cachePolicy.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
+      expect(cachePolicy.isEnableLimitWithDbSize()).assertFalse();
+      expect(cachePolicy.getDbLimitSize()).assertEqual(Constants.DEFAULT_CACHE_LIMIT_SIZE);
+      expect(cachePolicy.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD);
     });
 
     it('cachePolicyShouldIgnoreCountUpdates', 0, () => {

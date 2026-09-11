@@ -350,7 +350,6 @@ export class FTCacheCoordinator {
   }
 
   private static shadowEvictionTypes(request: FTDBTaskPoolRequest): string[] | null {
-    if (request.policy?.enableLimitWithCacheSize === true) { return []; }
     const types = new Set<string>();
     for (const row of request.records || []) { types.add(row.customDataTypeString || String(row.dataType)); }
     for (const row of request.drafts || []) { types.add(row.customDataType || row.dataType || request.fallbackDataType || 'log'); }

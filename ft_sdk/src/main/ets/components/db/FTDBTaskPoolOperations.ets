@@ -1,7 +1,7 @@
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { Constants } from '../Constants';
-import { CacheDiscard, DBCacheDiscard, DataType } from '../enum/Enums';
+import { DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTDBConfig } from './FTDBConfig';
 import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
@@ -65,9 +65,9 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithCacheSize: boolean;
-  cacheLimitSize: number;
-  cacheDiscard: string;
+  enableLimitWithDbSize: boolean;
+  dbLimitSize: number;
+  dbCacheDiscard: string;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */
@@ -637,9 +637,9 @@ function defaultWriteOptions(): FTDBTaskPoolWriteOptions {
 
 function defaultCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
   return {
-    enableLimitWithCacheSize: false,
-    cacheLimitSize: 0,
-    cacheDiscard: CacheDiscard.DISCARD,
+    enableLimitWithDbSize: false,
+    dbLimitSize: 0,
+    dbCacheDiscard: DBCacheDiscard.DISCARD,
     logLimitCount: 0,
     rumLimitCount: 0,
     logCount: 0,
@@ -1121,16 +1121,16 @@ async function resolveAllowedInsertCount(
   const dataTypes = category === FTDBTaskPoolCacheCategory.LOG ?
     [DataType.LOG.toString()] : [DataType.RUM_APP.toString(), DataType.RUM_WEBVIEW.toString()];
 
-  if (policy.enableLimitWithCacheSize) {
+  if (policy.enableLimitWithDbSize) {
     const currentSize = await getCurrentDbSizeInTaskPool(rdbStore, timing);
-    if (currentSize < Math.max(0, policy.cacheLimitSize)) {
+    if (currentSize < Math.max(0, policy.dbLimitSize)) {
       return requested;
     }
-    if (policy.cacheDiscard === CacheDiscard.DISCARD_OLDEST) {
+    if (policy.dbCacheDiscard === DBCacheDiscard.DISCARD_OLDEST) {
       const cleanupStart = Date.now();
       const deleted = await deleteOldestSyncDataInTaskPool(
         rdbStore,
-        [],
+        dataTypes,
         Constants.DB_OLD_CACHE_REMOVE_COUNT,
         timing
       );

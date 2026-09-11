@@ -1,5 +1,5 @@
 import { FTInnerLogger } from '../log/FTLogger';
-import { CacheDiscard, DataType, LogCacheDiscard, RUMCacheDiscard, DBCacheDiscard } from '../enum/Enums';
+import { DataType, LogCacheDiscard, RUMCacheDiscard, DBCacheDiscard } from '../enum/Enums';
 import { ConfigRecord } from '../SyncTaskManager';
 import { Context } from '@kit.AbilityKit';
 import { Constants } from '../Constants';
@@ -7,7 +7,7 @@ import { FTDBTaskPoolExecutor } from './FTDBTaskPoolExecutor';
 import { FTCacheContext } from './FTCacheContext';
 
 // Re-export enum types for external use
-export { CacheDiscard, DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../enum/Enums';
+export { DBCacheDiscard, LogCacheDiscard, RUMCacheDiscard } from '../enum/Enums';
 
 const TAG = "FTDBCachePolicy";
 
@@ -142,12 +142,12 @@ export class FTDBCachePolicy {
    * @param config SDK configuration
    */
   public initSDKParams(config: ConfigRecord): void {
-    this.enableLimitWithDbSize = config.isLimitWithCacheSize();
-    this.dbLimitSize = config.getCacheLimit();
+    this.enableLimitWithDbSize = config.isLimitWithDbSize();
+    this.dbLimitSize = config.getDbCacheLimit();
     this.logLimitCount = Constants.DEFAULT_DB_LOG_CACHE_NUM;
     this.rumLimitCount = Constants.DEFAULT_DB_RUM_CACHE_NUM;
     // Convert string values to enum types
-    const dbCacheDiscardStr = config.getCacheDiscard();
+    const dbCacheDiscardStr = config.getDBCacheDiscard();
     const logCacheDiscardStr = config.getLogCacheDiscard();
 
     this.dbCacheDiscard = (dbCacheDiscardStr === "discard_oldest") ? DBCacheDiscard.DISCARD_OLDEST : DBCacheDiscard.DISCARD;
@@ -156,19 +156,12 @@ export class FTDBCachePolicy {
     this.rumCacheDiscardStrategy = RUMCacheDiscard.DISCARD;
     this.resetCountInitialization();
 
-    FTInnerLogger.d(TAG, `SDK params initialized: enableLimitWithCacheSize=${this.enableLimitWithDbSize}, cacheLimitSize=${this.dbLimitSize}, logLimitCount=${this.logLimitCount}, rumLimitCount=${this.rumLimitCount}`);
+    FTInnerLogger.d(TAG, `SDK params initialized: enableLimitWithDbSize=${this.enableLimitWithDbSize}, dbLimitSize=${this.dbLimitSize}, logLimitCount=${this.logLimitCount}, rumLimitCount=${this.rumLimitCount}`);
   }
 
-  /** Check whether the SDK-wide telemetry cache byte limit is enabled. */
-  public isEnableLimitWithCacheSize(): boolean {
-    return this.enableLimitWithDbSize;
-  }
-
-  /**
-   * @deprecated Use isEnableLimitWithCacheSize().
-   */
+  /** Check whether the legacy SQLite database-size limit is enabled. */
   public isEnableLimitWithDbSize(): boolean {
-    return this.isEnableLimitWithCacheSize();
+    return this.enableLimitWithDbSize;
   }
 
   /**
@@ -302,11 +295,6 @@ export class FTDBCachePolicy {
    * Get database cache limit size
    */
   public getDbLimitSize(): number {
-    return this.getCacheLimitSize();
-  }
-
-  /** Get the SDK-wide telemetry cache byte limit. */
-  public getCacheLimitSize(): number {
     return this.dbLimitSize;
   }
 
@@ -314,11 +302,6 @@ export class FTDBCachePolicy {
    * Get database cache discard strategy.
    */
   public getDBCacheDiscard(): string {
-    return this.getCacheDiscard();
-  }
-
-  /** Get the SDK-wide telemetry cache discard strategy. */
-  public getCacheDiscard(): string {
     return this.dbCacheDiscard;
   }
 
