@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.17] - 2026-09-11
+- Added NetworkKit response performance-timing support for interceptor-chain Resource tracking. Timings are forwarded to the core waterfall mapper, which falls back to the measured request duration when timing data is missing or invalid.
+- Fixed NetworkKit interceptor-chain transport failures with `responseCode=0` producing a Resource without its linked Network Error. They now report both records with diagnostic error details while preserving the caller's original failure.
 - Removed the `observeFTAppFirstFrame(...)` manual first-frame API. The Guance Hvigor compiler plugin injects first-frame observation automatically on API 22 and later.
 
 ## [0.1.17-alpha04] - 2026-09-11
