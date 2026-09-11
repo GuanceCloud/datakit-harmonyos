@@ -1,6 +1,6 @@
 {
   "name": "@cloudcare/hvigor-ohos-plugin",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
   "files": [
@@ -13,6 +13,15 @@
   ],
   "author": "Guance",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GuanceCloud/datakit-harmonyos.git",
+    "directory": "ft_hvigor_plugin"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=18"
   },

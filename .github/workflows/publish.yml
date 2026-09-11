@@ -1,0 +1,134 @@
+name: Publish Hvigor plugin to npm
+run-name: Publish Hvigor ${{ github.event_name == 'push' && github.ref_name || inputs.version }} (${{ github.event_name }})
+
+on:
+  push:
+    tags:
+      - 'plugin_*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version in ft_hvigor_plugin/package.json
+        required: true
+        type: string
+      dist_tag:
+        description: npm distribution tag
+        required: true
+        type: choice
+        default: alpha
+        options:
+          - alpha
+          - beta
+          - rc
+          - latest
+      dry_run:
+        description: Validate and pack without publishing
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-hvigor-ohos-plugin
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'GuanceCloud/datakit-harmonyos'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: ft_hvigor_plugin
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+      RELEASE_EVENT: ${{ github.event_name }}
+      RELEASE_REF_NAME: ${{ github.ref_name }}
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11 --ignore-scripts --no-audit --no-fund
+
+      - name: Validate package identity and release channel
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const pkg = require('./package.json');
+          const tagPush = process.env.RELEASE_EVENT === 'push';
+          if (tagPush) assert.ok(process.env.RELEASE_REF_NAME.startsWith('plugin_'), 'Expected a plugin_ tag');
+          const expectedVersion = tagPush ? process.env.RELEASE_REF_NAME.slice('plugin_'.length) : process.env.INPUT_VERSION;
+          assert.equal(pkg.name, '@cloudcare/hvigor-ohos-plugin', 'Unexpected package name');
+          assert.equal(pkg.version, expectedVersion, 'Tag/input version must match package.json');
+          assert.equal(pkg.repository.url, 'git+https://github.com/GuanceCloud/datakit-harmonyos.git');
+          assert.equal(pkg.repository.directory, 'ft_hvigor_plugin');
+          const stable = /^\d+\.\d+\.\d+$/.test(pkg.version);
+          const prerelease = pkg.version.match(/^\d+\.\d+\.\d+-(alpha|beta|rc)\.\d+$/);
+          assert.ok(stable || prerelease, 'Use a stable version or an alpha.N, beta.N, rc.N prerelease');
+          const distTag = stable ? 'latest' : prerelease[1];
+          if (!tagPush) assert.equal(process.env.INPUT_DIST_TAG, distTag, 'Version and npm tag must match');
+          const [major, minor, patch] = require('node:child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          assert.ok(major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1))), 'npm >= 11.5.1 is required');
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_VERSION=${pkg.version}\nDIST_TAG=${distTag}\n`);
+          console.log(`Validated ${pkg.name}@${pkg.version} -> ${distTag}`);
+          NODE
+          node --check index.js
+
+      # This package ships compiler source and has no npm build dependencies.
+      # HarmonyOS HAR dependencies are supplied by the consuming app/DevEco.
+      - name: Pack and verify the publication contents
+        id: pack
+        run: |
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/hvigor-pack.json"
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const [pack] = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'hvigor-pack.json'), 'utf8'));
+          const expected = [
+            'CHANGELOG.md', 'LICENSE', 'README.md', 'index.js', 'package.json',
+            'hvigorCompile/ft-cold-launch-transform.ts',
+            'hvigorCompile/ft-console-log-transform.ts'
+          ].sort();
+          assert.equal(pack.name, '@cloudcare/hvigor-ohos-plugin');
+          assert.equal(pack.version, process.env.EXPECTED_VERSION);
+          assert.deepEqual(pack.files.map(file => file.path).sort(), expected, 'Unexpected files in npm tarball');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${path.join(process.env.RUNNER_TEMP, pack.filename)}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Package: ${pack.name}@${pack.version}\n\nTag: ${process.env.DIST_TAG}\n\nCommit: ${process.env.GITHUB_SHA}\n\nIntegrity: ${pack.integrity}\n`);
+          NODE
+
+      - name: Preview publication
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "$TARBALL" --dry-run --ignore-scripts --access public --tag "$DIST_TAG"
+
+      - name: Publish with npm Trusted Publisher
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          npm publish "$TARBALL" --ignore-scripts --access public --tag "$DIST_TAG"
+          printf '\nPublished successfully.\n' >> "$GITHUB_STEP_SUMMARY"
