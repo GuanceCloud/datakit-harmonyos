@@ -292,8 +292,9 @@ class ContextFilteringViewTrackingHandler implements FTViewTrackingHandler {
       }
     }
     if (context.trackingType === FTViewTrackingType.NAVIGATION) {
-      const from = context.navigationInfo.from;
-      if (typeof from !== 'string' && typeof from.name === 'string' && from.name === 'pages/Checkout') {
+      const from: uiObserver.NavDestinationInfo | 'navBar' | undefined = context.navigationInfo.from;
+      if (from !== undefined && typeof from !== 'string' && typeof from.name === 'string' &&
+        from.name === 'pages/Checkout') {
         return null;
       }
     }
@@ -577,8 +578,8 @@ export default function autoTrackDeviceTest() {
       expect(navigationContext.originalFromViewName).assertEqual('pages/Checkout');
       expect(navigationContext.fromViewName).assertEqual('Checkout');
       if (navigationContext.trackingType === FTViewTrackingType.NAVIGATION) {
-        const from = navigationContext.navigationInfo.from;
-        expect(typeof from !== 'string' && typeof from.name === 'string' ? from.name : '')
+        const from: uiObserver.NavDestinationInfo | 'navBar' | undefined = navigationContext.navigationInfo.from;
+        expect(from !== undefined && typeof from !== 'string' && typeof from.name === 'string' ? from.name : '')
           .assertEqual('pages/Checkout');
       } else {
         expect(false).assertTrue();
