@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.0-alpha.3] - 2026-09-11
+
+- Added build-time registration of the installed plugin version in SDK `sdk_pkg_info.track`.
+
 ## [0.1.0-alpha.2] - 2026-09-11
 
 - Added GitHub Actions trusted npm publishing triggered by plugin version tags.

@@ -11,7 +11,7 @@ This is a Hvigor tool package, so declare it in the project-level `hvigor/hvigor
 ```json5
 {
   "dependencies": {
-    "@cloudcare/hvigor-ohos-plugin": "0.1.0-alpha.2"
+    "@cloudcare/hvigor-ohos-plugin": "0.1.0-alpha.3"
   }
 }
 ```
@@ -38,10 +38,10 @@ export default {
 }
 ```
 
-The plugin preserves the original console/HiLog output and does not modify application files on disk. It injects cold-launch application initialization into Ability `onCreate()` methods, first-UIAbility creation into `UIAbility.onCreate()`, and first-frame observation into `UIAbility.onWindowStageCreate()`. Do not add manual cold-launch timing calls to application code.
+The plugin preserves the original console/HiLog output and does not modify application files on disk. It injects its installed package version into the SDK's `sdk_pkg_info.track` tag at build time, so rebuilding after a plugin upgrade reports the matching version. It injects cold-launch application initialization into Ability `onCreate()` methods, first-UIAbility creation into `UIAbility.onCreate()`, and first-frame observation into `UIAbility.onWindowStageCreate()`. Do not add manual cold-launch timing calls to application code.
 
 ## Compatibility
 
-The `0.1.0-alpha.2` prerelease is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). It supports `@guancecloud/ft_sdk` `0.1.17` and later releases.
+The `0.1.0-alpha.3` prerelease is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). It supports `@guancecloud/ft_sdk` `0.1.17` and later releases.
 
 `@ohos/hvigor-ohos-plugin` is supplied by DevEco Studio's Hvigor runtime. `@guancecloud/ft_sdk` must still be declared as the application's runtime HAR dependency because the generated imports target that package.

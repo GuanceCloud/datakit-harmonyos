@@ -1,6 +1,6 @@
 {
   "name": "@cloudcare/hvigor-ohos-plugin",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
   "files": [

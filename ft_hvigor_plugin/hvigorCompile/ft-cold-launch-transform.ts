@@ -10,6 +10,7 @@ declare const require: {
     require(moduleName: string): any;
   };
 };
+declare const __dirname: string;
 
 type TypeScriptApi = any;
 type AbilityClassKind = 'stage' | 'ui' | 'other';
@@ -71,6 +72,22 @@ function selectBridgeName(identifiers: Set<string>): string {
     suffix++;
   }
   return bridgeName;
+}
+
+function getPluginVersion(): string {
+  try {
+    const fileSystem = require.main.require('fs');
+    const path = require.main.require('path');
+    const packagePath = path.resolve(__dirname, '..', 'package.json');
+    const packageInfo = JSON.parse(fileSystem.readFileSync(packagePath, 'utf8')) as { version?: string };
+    if (typeof packageInfo.version === 'string') {
+      return packageInfo.version.trim();
+    }
+  } catch (_) {
+    // Do not inject a guessed version when a custom package layout prevents
+    // reading package.json. A missing entry is more accurate than fake data.
+  }
+  return '';
 }
 
 function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
@@ -212,9 +229,10 @@ function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, cod
 }
 
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
-  bridgeName: string): ColdLaunchInjection[] {
+  bridgeName: string, pluginVersion: string): ColdLaunchInjection[] {
   const injections: ColdLaunchInjection[] = [];
   const abilityBindings = collectAbilityBindings(ts, sourceFile);
+  const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
   visit(ts, sourceFile, (node: any) => {
     if (!ts.isClassDeclaration(node)) {
       return;
@@ -232,7 +250,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       const position = member.body.getStart(sourceFile) + 1;
       if (member.name.text === 'onCreate') {
         hasOnCreate = true;
-        let content = `\n${indentation}${bridgeName}.recordApplicationInit(this.context);`;
+        let content = `\n${indentation}${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
         if (kind === 'ui') {
           content += `\n${indentation}${bridgeName}.recordFirstUIAbilityCreate();`;
         }
@@ -269,7 +287,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       injections.push({
         position: node.end - 1,
         content: `\n${indentation}  onCreate(): void {\n` +
-          `${indentation}    ${bridgeName}.recordApplicationInit(this.context);\n` +
+          `${indentation}    ${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});\n` +
           `${indentation}  }\n`
       });
     }
@@ -299,7 +317,8 @@ function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const bridgeName = selectBridgeName(collectIdentifierNames(ts, sourceFile));
-  const injections = createColdLaunchInjections(ts, sourceFile, code, bridgeName);
+  const version = getPluginVersion();
+  const injections = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version);
   if (injections.length === 0) {
     return code;
   }
