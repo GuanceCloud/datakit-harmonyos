@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.0-alpha.2] - 2026-09-11
+
+- Added GitHub Actions trusted npm publishing triggered by plugin version tags.
+- Added the plugin version badge to the package documentation.
+
 ## [0.1.0-alpha.1] - 2026-09-11
 
 - Prepared the initial npm prerelease of the console/HiLog and cold-launch instrumentation plugin.
