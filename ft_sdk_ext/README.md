@@ -60,13 +60,6 @@ const interceptorChain = createFTHttpInterceptorChain({
 })
 ```
 
-## Cold-launch First-frame Timing
-
-Cold-launch first-frame observation is injected automatically by the Guance
-Hvigor compiler plugin. Do not call `observeFTAppFirstFrame()` from application
-code. On API 22 and later the plugin records the real first draw; earlier API
-levels omit the first-frame phase.
-
 ## Dependency
 
 - Required: `@guancecloud/ft_sdk`
