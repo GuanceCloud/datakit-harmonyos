@@ -552,7 +552,7 @@ export default function configUnitTest() {
       expect(config.getLogCacheDiscard()).assertEqual('discard_oldest');
       expect(config.isLimitWithDbSize()).assertTrue();
       expect(config.getDbCacheLimit()).assertEqual(Constants.DEFAULT_CACHE_LIMIT_SIZE);
-      expect(config.isLimitWithCacheSize()).assertFalse();
+      expect(config.isLimitWithCacheSize()).assertTrue();
       expect(config.isDataIntegerCompatible()).assertTrue();
 
       const legacyConfig = FTSDKConfig.builder(TEST_FAKE_URL)
@@ -563,7 +563,7 @@ export default function configUnitTest() {
         .setDbCacheLimit(1);
       expect(legacyLimitConfig.isLimitWithDbSize()).assertTrue();
       expect(legacyLimitConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
-      expect(legacyLimitConfig.isLimitWithCacheSize()).assertFalse();
+      expect(legacyLimitConfig.isLimitWithCacheSize()).assertTrue();
 
       const cacheConfig = FTSDKConfig.builder(TEST_FAKE_URL)
         .enableLimitWithCacheSize(1)
@@ -571,20 +571,10 @@ export default function configUnitTest() {
       expect(cacheConfig.isLimitWithCacheSize()).assertTrue();
       expect(cacheConfig.getCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
       expect(cacheConfig.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
-      // FileStore and legacy SQLite limits are configured independently.
-      expect(cacheConfig.isLimitWithDbSize()).assertFalse();
-      expect(cacheConfig.getDbCacheLimit()).assertEqual(Constants.DEFAULT_CACHE_LIMIT_SIZE);
-      expect(cacheConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD);
-
-      const independentConfig = FTSDKConfig.builder(TEST_FAKE_URL)
-        .enableLimitWithDbSize(Constants.MINI_CACHE_LIMIT_SIZE)
-        .setDbCacheDiscard(DBCacheDiscard.DISCARD)
-        .enableLimitWithCacheSize(Constants.MINI_CACHE_LIMIT_SIZE * 2)
-        .setCacheDiscard(CacheDiscard.DISCARD_OLDEST);
-      expect(independentConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
-      expect(independentConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD);
-      expect(independentConfig.getCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE * 2);
-      expect(independentConfig.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
+      // Legacy readers expose exactly the same configured state.
+      expect(cacheConfig.isLimitWithDbSize()).assertTrue();
+      expect(cacheConfig.getDbCacheLimit()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cacheConfig.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD_OLDEST);
 
       const filePrimaryConfig = FTSDKConfig.builder(TEST_FAKE_URL).enableFileDataStore();
       expect(filePrimaryConfig.isFileDataStoreEnabled()).assertTrue();

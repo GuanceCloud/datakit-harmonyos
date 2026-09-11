@@ -1,6 +1,5 @@
 import { Context } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { FTCacheFiles } from './FTCacheFiles';
 import { FTCacheFileStore } from './FTCacheFileStore';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecutor';
 import { FTDBSpoolTaskPoolRequest } from './FTDBSpoolTaskPoolExecutor';
@@ -23,17 +22,6 @@ export async function runFTCacheSpool(object: Object, contextObject: Object): Pr
         return await runFTSqliteTaskPoolExecute(context, q) as FTDBTaskPoolResponse;
       });
     await store.recover();
-    if (request.command === 'append' && request.cache.limitEnabled) {
-      await store.reserveSpool(Math.min(8 * 1024 * 1024,
-        FTCacheFiles.bytes(JSON.stringify(request.records || [])) * 3 + 4096));
-      // Reserve journal and append bytes. There is no fixed capacity headroom.
-      const usage = store.ledger.usage();
-      const free = Math.max(0, request.cache.capacity - usage.totalBytes);
-      const pending = FTCacheFiles.size(request.spoolDir);
-      request.maxCapacityBytes = Math.min(request.maxCapacityBytes || 8 * 1024 * 1024,
-        pending + Math.floor(free / 3));
-      if (free === 0) { request.maxCapacityBytes = Math.max(1, pending); }
-    }
     return await runFTDBSpoolTaskPoolExecute(request);
   } finally {
     try { if (locked) { lock.unlock(); } } finally { fs.closeSync(lock); }

@@ -142,11 +142,10 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     }
     let prepared = this.ledger.prepareCommit(changes);
     const reserveStartedAt = Date.now();
-    let needed = this.ledger.requiredBytes(prepared.changes);
-    while (!this.ledger.canReserve(needed)) {
+    while (!this.ledger.canCommit(prepared)) {
       if (this.settings.mode === 'shadow' || this.settings.discard !== 'discard_oldest') {
         if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
-        FTInnerLogger.w(TAG, `FileStore capacity rejected write: required=${needed}, capacity=${this.settings.capacity}, ` +
+        FTInnerLogger.w(TAG, `FileStore capacity rejected write: payload=${prepared.state.payloadBytes}, capacity=${this.settings.capacity}, ` +
           `mode=${this.settings.mode}, discard=${this.settings.discard}`);
         this.increment('rejected', 1); return false;
       }
@@ -154,15 +153,14 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       // One capacity breach may need many old rows. Select and remove them in
       // one forward journal instead of doing a full oldest-record scan and an
       // fsync for every candidate.
-      const evicted = await this.evictForReserve(needed);
+      const evicted = await this.evictForReserve(prepared.state.payloadBytes);
       if (timing) { timing.evictionMs += Math.max(0, Date.now() - evictionStartedAt); }
       if (!evicted) {
         if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
-        FTInnerLogger.w(TAG, `FileStore capacity rejected write: required=${needed}, capacity=${this.settings.capacity}, no evictable records`);
+        FTInnerLogger.w(TAG, `FileStore capacity rejected write: payload=${prepared.state.payloadBytes}, capacity=${this.settings.capacity}, no evictable records`);
         this.increment('rejected', 1); return false;
       }
       prepared = this.ledger.prepareCommit(changes);
-      needed = this.ledger.requiredBytes(prepared.changes);
     }
     if (timing) { timing.reserveMs += Math.max(0, Date.now() - reserveStartedAt); }
     this.commitPrepared(prepared.changes, prepared, timing);
@@ -209,10 +207,9 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     return true;
   }
 
-  private async evictForReserve(requiredBytes: number): Promise<boolean> {
+  private async evictForReserve(targetPayloadBytes: number): Promise<boolean> {
     if (!this.settings.limitEnabled) { return true; }
-    const usage = this.ledger.usage(false);
-    let bytesToFree = usage.totalBytes + requiredBytes - this.settings.capacity;
+    let bytesToFree = targetPayloadBytes - this.settings.capacity;
     if (bytesToFree <= 0) { return true; }
     const candidates: SyncDataJSON[] = [];
     for (const id of this.list('sync')) {
@@ -230,7 +227,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       changes.push({ path: this.path('sync', row.uuid), body: null });
       changes.push({ path: this.path('lease', row.uuid), body: null });
       ids.push(row.uuid);
-      bytesToFree -= FTCacheFiles.size(this.path('sync', row.uuid)) + FTCacheFiles.size(this.path('lease', row.uuid));
+      bytesToFree -= FTCacheFiles.size(this.path('sync', row.uuid));
       if (bytesToFree <= 0) { break; }
     }
     if (bytesToFree > 0 || ids.length === 0) { return false; }
@@ -249,34 +246,8 @@ export class FTCacheFileStore implements FTRumStoreAccess {
   }
 
   async enforceLimit(): Promise<void> {
-    while (this.settings.limitEnabled && !this.ledger.canReserve(0)) {
+    while (this.ledger.isOverLimit()) {
       if (this.settings.discard !== 'discard_oldest' || !await this.evictOne()) { break; }
-    }
-  }
-
-  /**
-   * Replays SQLite's discard-oldest result into a shadow without re-scanning
-   * SQLite.  Both stores receive writes in the same order, so their oldest
-   * records have the same order unless the mirror is already marked dirty.
-   */
-  async deleteOldestForShadow(count: number, dataTypes: string[] = []): Promise<void> {
-    const limit = Math.max(0, Math.floor(count));
-    if (limit === 0) { return; }
-    const rows = this.query({ command: 'querySyncData', dataTypes, limit });
-    const changes: FTCacheMutation[] = [];
-    for (const row of rows) {
-      changes.push({ path: this.path('sync', row.uuid), body: null });
-      changes.push({ path: this.path('lease', row.uuid), body: null });
-    }
-    if (changes.length !== limit * 2) { throw new Error('CACHE_SHADOW_EVICTION_MISMATCH'); }
-    this.commitDirect(changes);
-  }
-
-  async reserveSpool(bytes: number): Promise<void> {
-    const state = this.read('meta', 'migration') || '';
-    if (!state.includes('"state":"completed"')) { return; }
-    while (!this.ledger.canReserve(bytes)) {
-      if (this.settings.mode !== 'file' || this.settings.discard !== 'discard_oldest' || !await this.evictOne()) { return; }
     }
   }
 
@@ -294,7 +265,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         for (const id of this.list('sync')) { const row = this.sync(id); if (row && this.matches(row, request.dataTypes || [])) { count++; } }
         return { ok: true, count };
       }
-      case 'getDbSize': return { ok: true, count: this.ledger.usage().totalBytes };
+      case 'getDbSize': return { ok: true, count: this.ledger.usage().governedBytes };
       case 'getLastErrorTimeLine': return { ok: true, count: Number(this.read('meta', 'errorTimeLine') || '-1') };
       case 'updateLastErrorTimeLine':
         if (!await this.commit([{ path: this.path('meta', 'errorTimeLine'), body: String(request.errorTimeLine || -1) }])) {
@@ -414,7 +385,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     const afterCounts = this.ledger.counts();
     response.logCountDelta = afterCounts.log - beforeCounts.log;
     response.rumCountDelta = afterCounts.rum - beforeCounts.rum;
-    response.currentDbSize = this.ledger.usage().totalBytes;
+    response.currentDbSize = this.ledger.usage().governedBytes;
     // `insertMs` is the durable sub-phase of FileStore execution, so it is
     // deliberately contained by executeMs just like SQLite insert timing.
     response.executeMs = timing.journalMs;
@@ -463,9 +434,6 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     for (const row of rows) {
       const lease: FTCacheLease = { digest: this.digest(row), expires: Date.now() + 15 * 60 * 1000 };
       changes.push({ path: this.path('lease', row.uuid), body: JSON.stringify(lease) });
-    }
-    if (!this.ledger.canReserve(this.ledger.requiredBytes(changes))) {
-      throw new Error('CACHE_UPLOAD_LEASE_CAPACITY');
     }
     this.commitDirect(changes);
   }

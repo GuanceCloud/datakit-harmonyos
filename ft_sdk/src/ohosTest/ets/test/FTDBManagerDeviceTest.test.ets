@@ -3,6 +3,8 @@ import relationalStore from '@ohos.data.relationalStore';
 import { FTDBManager } from '../../../main/ets/components/db/FTDBManager';
 import {
   FTDBTaskPoolExecutor,
+  FTDBTaskPoolCachePolicySnapshot,
+  FTDBTaskPoolWriteOptions,
   FTDBTaskPoolPendingRumResourceDTO
 } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
@@ -10,7 +12,7 @@ import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
 import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
-import { DataType } from '../../../main/ets/components/enum/Enums';
+import { CacheDiscard, DataType } from '../../../main/ets/components/enum/Enums';
 import * as FTSQL from '../../../main/ets/components/db/FTSQL';
 import { SDKRumResourceContextDTO, SDKStringRecord } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import { DBAssert } from './helpers/DBAssert';
@@ -243,6 +245,49 @@ export default function ftDBManagerDeviceTest() {
 
       expect(remaining.length).assertEqual(1);
       expect(remaining[0].getDataString().includes('newest')).assertTrue();
+    });
+
+    it('cacheSizeDiscardOldestDeletesLogBeforeRum', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      await DBAssert.insertSyncData([
+        createLogSyncData('evict-log-first', TEST_NOW_NS + 1),
+        createRumSyncData('preserve-rum', TEST_NOW_NS + 2)
+      ]);
+      // Supply the same full-cache signal used by the shadow path. The test
+      // exercises SQLite cache-policy eviction without depending on a large
+      // physical database allocation.
+      const policy: FTDBTaskPoolCachePolicySnapshot = {
+        enableLimitWithCacheSize: true,
+        cacheLimitSize: 1,
+        cacheDiscard: CacheDiscard.DISCARD_OLDEST,
+        shadowMirrorBytes: 1,
+        logLimitCount: 0,
+        rumLimitCount: 0,
+        logCount: 1,
+        rumCount: 1,
+        logDiscardStrategy: 'discard',
+        rumDiscardStrategy: 'discard'
+      };
+      const options: FTDBTaskPoolWriteOptions = {
+        applyCachePolicy: true,
+        reInsert: false,
+        forceTransaction: true,
+        updateOrInsertByUuid: false
+      };
+
+      const response = await FTDBTaskPoolExecutor.writeSyncData(
+        context,
+        'device-cache-limit-log-priority',
+        [createRumSyncData('new-rum', TEST_NOW_NS + 3)],
+        options,
+        (): FTDBTaskPoolCachePolicySnapshot => policy,
+        (_response): void => {}
+      );
+
+      expect(response.result.success).assertTrue();
+      expect(response.result.deletedOld).assertEqual(1);
+      expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(2);
     });
 
     it('migrationSchemaShouldExist', 0, async () => {

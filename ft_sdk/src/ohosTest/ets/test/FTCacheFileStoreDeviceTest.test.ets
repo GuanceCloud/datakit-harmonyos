@@ -5,6 +5,7 @@ import { FTCacheSettings } from '../../../main/ets/components/db/FTCacheContext'
 import { FTCacheFileStore, FTSqliteRunner } from '../../../main/ets/components/db/FTCacheFileStore';
 import { FTCacheFiles, FTCacheMutation } from '../../../main/ets/components/db/FTCacheFiles';
 import { FTCacheLedger } from '../../../main/ets/components/db/FTCacheLedger';
+import { FTDBConfig } from '../../../main/ets/components/db/FTDBConfig';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncDataJSON } from '../../../main/ets/components/db/bean/SyncData';
 import { DataType } from '../../../main/ets/components/enum/Enums';
@@ -59,7 +60,7 @@ export default function ftCacheFileStoreDeviceTest() {
       FTCacheFiles.mkdir(testRoot);
       context = new Object() as Context;
       context.filesDir = testRoot;
-      context.databaseDir = '';
+      context.databaseDir = `${testRoot}/database`;
     });
 
     afterEach(() => {
@@ -94,6 +95,27 @@ export default function ftCacheFileStoreDeviceTest() {
 
       expect(counts.log).assertEqual(1);
       expect(counts.rum).assertEqual(0);
+    });
+
+    it('governsOnlySyncAndRumAggregateFiles', 0, async () => {
+      const primary = new FTCacheFileStore(context, cacheSettings('file', 1024 * 1024), SQLITE_SUCCESS);
+      await primary.execute({ command: 'writeSyncData', records: [logRow('governed-payload')],
+        options: { applyCachePolicy: false, reInsert: false, forceTransaction: true, updateOrInsertByUuid: true } });
+      FTCacheFiles.mkdir(context.databaseDir);
+      FTCacheFiles.mkdir(`${context.filesDir}/ft_sdk_file_store`);
+      FTCacheFiles.mkdir(`${context.filesDir}/ft_sdk_spool`);
+      FTCacheFiles.atomicWrite(`${context.databaseDir}/${FTDBConfig.DATABASE_NAME}`, 'sqlite'.repeat(512));
+      FTCacheFiles.atomicWrite(`${context.filesDir}/ft_sdk_file_store/legacy`, 'legacy'.repeat(512));
+      FTCacheFiles.atomicWrite(`${context.filesDir}/ft_sdk_spool/pending`, 'spool'.repeat(512));
+
+      const fileUsage = primary.status().usage;
+      expect(fileUsage.governedBytes).assertEqual(fileUsage.payloadBytes);
+      expect(fileUsage.totalBytes > fileUsage.governedBytes).assertTrue();
+
+      const shadowLedger = new FTCacheLedger(context, cacheSettings('shadow', 1024 * 1024), `${testRoot}/ft_sdk_cache_v2`);
+      const shadowUsage = shadowLedger.usage(true);
+      expect(shadowUsage.governedBytes).assertEqual(shadowUsage.payloadBytes);
+      expect(shadowUsage.totalBytes > shadowUsage.governedBytes).assertTrue();
     });
 
     it('keepsShadowMirroringDiagnosticWhenItsOwnCapacityIsExhausted', 0, async () => {

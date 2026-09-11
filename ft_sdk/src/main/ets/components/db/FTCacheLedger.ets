@@ -7,8 +7,10 @@ import { SyncDataJSON } from './bean/SyncData';
 import { FTInnerLogger } from '../log/FTLogger';
 
 export interface FTCacheUsage {
-  /** All physical files occupied by SDK cache representations. */
+  /** All physical files in the v2 FileStore root, including metadata and leases. */
   fileBytes: number;
+  /** Sync payloads plus View/Action RUM aggregate files. This is the FileStore capacity meter. */
+  payloadBytes: number;
   sqliteBytes: number;
   legacyFileBytes: number;
   spoolBytes: number;
@@ -43,6 +45,8 @@ interface FTCacheLedgerState {
   version: number;
   /** All cache-root bytes except this small ledger file. */
   cacheBytes: number;
+  /** Bytes in sync payloads and View/Action RUM aggregate files only. */
+  payloadBytes: number;
   logCount: number;
   rumCount: number;
   oldestUuid: string;
@@ -88,19 +92,19 @@ export class FTCacheLedger {
     // changing JSON length never feeds back into the value it stores.
     const fileBytes = exact ? FTCacheFiles.size(this.root) :
       state.cacheBytes + FTCacheFiles.size(this.ledgerPath);
+    const payloadBytes = exact ? this.payloadBytesOnDisk() : state.payloadBytes;
     const sqliteBytes = this.databaseBytes(this.context.databaseDir);
     const legacyFileBytes = FTCacheFiles.size(`${this.context.filesDir}/ft_sdk_file_store`);
     const spoolBytes = FTCacheFiles.size(`${this.context.filesDir}/ft_sdk_spool`);
     const totalBytes = fileBytes + sqliteBytes + legacyFileBytes + spoolBytes;
-    // FileStore-primary mode intentionally governs the complete local cache
-    // footprint. SQLite and shadow modes are finalized in Coordinator with
-    // SQLite's PRAGMA page-count value, which is the same value write policy
-    // compares against the configured limit.
-    const filePrimary = this.settings.mode === 'file';
-    const governedBytes = filePrimary ? totalBytes : sqliteBytes;
-    const governedScope = filePrimary ? 'FileStore 本地缓存总占用' : 'SQLite 数据库物理文件';
+    // Cache-size governance follows the active store's logical footprint.
+    // SQLite pages, migration remnants and the upload spool remain diagnostic
+    // physical usage; they do not consume FileStore's configured cache budget.
+    const fileStoreMeter = this.settings.mode === 'file' || this.settings.mode === 'shadow';
+    const governedBytes = fileStoreMeter ? payloadBytes : sqliteBytes;
+    const governedScope = fileStoreMeter ? 'FileStore 同步数据与 RUM 聚合' : 'SQLite 数据库物理文件';
     return {
-      fileBytes, sqliteBytes, legacyFileBytes, spoolBytes, totalBytes, governedBytes, governedScope,
+      fileBytes, payloadBytes, sqliteBytes, legacyFileBytes, spoolBytes, totalBytes, governedBytes, governedScope,
       capacityBytes: this.settings.capacity,
       overLimit: this.settings.limitEnabled && governedBytes >= this.settings.capacity
     };
@@ -126,6 +130,9 @@ export class FTCacheLedger {
       const oldBytes = currentBytes.has(change.path) ? currentBytes.get(change.path)! : FTCacheFiles.size(change.path);
       const nextBytes = change.body === null ? 0 : FTCacheFiles.bytes(FTCacheFiles.encode(change.body));
       next.cacheBytes = Math.max(0, next.cacheBytes + nextBytes - oldBytes);
+      if (this.isPayloadPath(change.path)) {
+        next.payloadBytes = Math.max(0, next.payloadBytes + nextBytes - oldBytes);
+      }
       if (this.isSyncPath(change.path)) {
         this.applyRow(next, this.parseRow(oldBody), -1);
         this.applyRow(next, this.parseRow(change.body), 1);
@@ -149,25 +156,12 @@ export class FTCacheLedger {
     FTInnerLogger.d(TAG, `Invalidated FileStore ledger: path=${this.ledgerPath}`);
   }
 
-  /** Includes journal and replacement temps, not merely the final net growth. */
-  requiredBytes(changes: FTCacheMutation[]): number {
-    let growth = 0;
-    let largestTemp = 0;
-    for (let i = 0; i < changes.length; i++) {
-      const change = changes[i];
-      if (change.body === null) { continue; }
-      const next = FTCacheFiles.bytes(FTCacheFiles.encode(change.body));
-      growth += Math.max(0, next - FTCacheFiles.size(change.path));
-      largestTemp = Math.max(largestTemp, next);
-      // Temporary compatibility projection: payload pages, WAL and page-allocation slack.
-      if (change.path.endsWith('/meta/projection.json') && next > 1024) { growth += next * 3 + 128 * 1024; }
-    }
-    const journal = FTCacheFiles.bytes(FTCacheFiles.encode(JSON.stringify({ version: 1, changes })));
-    return growth + largestTemp + journal;
+  canCommit(commit: FTCacheLedgerCommit): boolean {
+    return !this.settings.limitEnabled || commit.state.payloadBytes <= this.settings.capacity;
   }
 
-  canReserve(bytes: number): boolean {
-    return !this.settings.limitEnabled || this.usage(false).totalBytes + bytes <= this.settings.capacity;
+  isOverLimit(): boolean {
+    return this.settings.limitEnabled && this.load().payloadBytes >= this.settings.capacity;
   }
 
   private load(): FTCacheLedgerState {
@@ -177,7 +171,8 @@ export class FTCacheLedger {
       const body = FTCacheFiles.read(this.ledgerPath);
       if (body !== null) {
         const parsed = JSON.parse(body) as FTCacheLedgerState;
-        if (parsed.version === 1 && parsed.cacheBytes >= 0 && parsed.logCount >= 0 && parsed.rumCount >= 0) {
+        if (parsed.version === 2 && parsed.cacheBytes >= 0 && parsed.payloadBytes >= 0 &&
+          parsed.logCount >= 0 && parsed.rumCount >= 0) {
           this.state = parsed;
           return parsed;
         }
@@ -198,8 +193,9 @@ export class FTCacheLedger {
 
   private rebuild(): FTCacheLedgerState {
     const state: FTCacheLedgerState = {
-      version: 1,
+      version: 2,
       cacheBytes: Math.max(0, FTCacheFiles.size(this.root) - FTCacheFiles.size(this.ledgerPath)),
+      payloadBytes: this.payloadBytesOnDisk(),
       logCount: 0,
       rumCount: 0,
       oldestUuid: '',
@@ -217,8 +213,9 @@ export class FTCacheLedger {
 
   private copy(value: FTCacheLedgerState): FTCacheLedgerState {
     return {
-      version: 1,
+      version: 2,
       cacheBytes: value.cacheBytes,
+      payloadBytes: value.payloadBytes,
       logCount: value.logCount,
       rumCount: value.rumCount,
       oldestUuid: value.oldestUuid,
@@ -242,6 +239,16 @@ export class FTCacheLedger {
 
   private isSyncPath(path: string): boolean {
     return path.startsWith(`${this.root}/sync/`) && path.endsWith('.json');
+  }
+
+  private isPayloadPath(path: string): boolean {
+    return (path.startsWith(`${this.root}/sync/`) || path.startsWith(`${this.root}/view/`) ||
+      path.startsWith(`${this.root}/action/`)) && path.endsWith('.json');
+  }
+
+  private payloadBytesOnDisk(): number {
+    return FTCacheFiles.size(`${this.root}/sync`) + FTCacheFiles.size(`${this.root}/view`) +
+      FTCacheFiles.size(`${this.root}/action`);
   }
 
   private applyRow(state: FTCacheLedgerState, row: SyncDataJSON | null, delta: number): void {
