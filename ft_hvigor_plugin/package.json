@@ -1,5 +1,5 @@
 {
-  "name": "@guancecloud/ft-hvigor-plugin",
+  "name": "@cloudcare/hvigor-ohos-plugin",
   "version": "0.1.0",
   "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
@@ -15,5 +15,13 @@
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18"
+  },
+  "peerDependencies": {
+    "@guancecloud/ft_sdk": ">=0.1.17"
+  },
+  "peerDependenciesMeta": {
+    "@guancecloud/ft_sdk": {
+      "optional": true
+    }
   }
 }

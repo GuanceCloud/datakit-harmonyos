@@ -3,7 +3,7 @@
   "dependencies": {
     // Local development reference. Publish the same package to the tool registry
     // and replace this with its released version for consumer projects.
-    "@guancecloud/ft-hvigor-plugin": "file:../ft_hvigor_plugin"
+    "@cloudcare/hvigor-ohos-plugin": "file:../ft_hvigor_plugin"
   },
   "execution": {
     // "analyze": "normal",                     /* Define the build analyze mode. Value: [ "normal" | "advanced" | false ]. Default: "normal" */

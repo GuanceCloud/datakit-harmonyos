@@ -128,11 +128,11 @@ export default class EntryAbility extends UIAbility {
 
 HarmonyOS collects application `console.*` and `hilog.*` calls through the standalone Guance Hvigor compiler plugin. This follows Android's `setEnableConsoleLog` model: the switch enables collection, while the build plugin supplies the instrumentation. There is no runtime monkey-patching fallback.
 
-Install `@guancecloud/ft-hvigor-plugin` in the project-level `hvigor/hvigor-config.json5` (this is a Hvigor tool dependency, not an `oh-package.json5` runtime dependency), then register it in the application HAP module's `hvigorfile.ts`:
+Install `@cloudcare/hvigor-ohos-plugin` in the project-level `hvigor/hvigor-config.json5` (this is a Hvigor tool dependency, not an `oh-package.json5` runtime dependency), then register it in the application HAP module's `hvigorfile.ts`:
 
 ```ts
 import { hapTasks } from '@ohos/hvigor-ohos-plugin'
-import { ftConsoleLogPlugin } from '@guancecloud/ft-hvigor-plugin'
+import { ftConsoleLogPlugin } from '@cloudcare/hvigor-ohos-plugin'
 
 export default {
   system: hapTasks,

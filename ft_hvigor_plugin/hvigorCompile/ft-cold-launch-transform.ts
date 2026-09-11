@@ -40,9 +40,11 @@ const TRANSFORM_ID = 'guance-cold-launch-transform';
 
 let registeredFileSystem: any = null;
 
-function isApplicationArkTsSource(id: string): boolean {
-  return (id.endsWith('.ets') || id.endsWith('.ts')) && id.includes('/src/main/ets/') &&
-    !id.includes('/oh_modules/') && !id.includes('/ft_sdk/');
+export function isApplicationArkTsSource(id: string): boolean {
+  const normalizedId = id.replace(/\\/g, '/');
+  return (normalizedId.endsWith('.ets') || normalizedId.endsWith('.ts')) &&
+    normalizedId.includes('/src/main/ets/') && !normalizedId.includes('/oh_modules/') &&
+    !normalizedId.includes('/ft_sdk/src/main/ets/');
 }
 
 function visit(ts: TypeScriptApi, node: any, visitor: (current: any) => void): void {
