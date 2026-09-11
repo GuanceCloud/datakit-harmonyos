@@ -1,7 +1,7 @@
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { Constants } from '../Constants';
-import { DBCacheDiscard, DataType } from '../enum/Enums';
+import { CacheDiscard, DBCacheDiscard, DataType } from '../enum/Enums';
 import { FTDBConfig } from './FTDBConfig';
 import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
@@ -65,9 +65,11 @@ enum FTDBTaskPoolCommand {
 }
 
 export interface FTDBTaskPoolCachePolicySnapshot {
-  enableLimitWithDbSize: boolean;
-  dbLimitSize: number;
-  dbCacheDiscard: string;
+  enableLimitWithCacheSize: boolean;
+  cacheLimitSize: number;
+  cacheDiscard: string;
+  /** Shadow mode supplies the FileStore mirror size instead of SQLite pages. */
+  shadowMirrorBytes?: number;
   logLimitCount: number;
   rumLimitCount: number;
   /** Host-maintained counts; initialized once, not queried for every write. */
@@ -637,9 +639,9 @@ function defaultWriteOptions(): FTDBTaskPoolWriteOptions {
 
 function defaultCachePolicySnapshot(): FTDBTaskPoolCachePolicySnapshot {
   return {
-    enableLimitWithDbSize: false,
-    dbLimitSize: 0,
-    dbCacheDiscard: DBCacheDiscard.DISCARD,
+    enableLimitWithCacheSize: false,
+    cacheLimitSize: 0,
+    cacheDiscard: CacheDiscard.DISCARD,
     logLimitCount: 0,
     rumLimitCount: 0,
     logCount: 0,
@@ -1121,21 +1123,36 @@ async function resolveAllowedInsertCount(
   const dataTypes = category === FTDBTaskPoolCacheCategory.LOG ?
     [DataType.LOG.toString()] : [DataType.RUM_APP.toString(), DataType.RUM_WEBVIEW.toString()];
 
-  if (policy.enableLimitWithDbSize) {
-    const currentSize = await getCurrentDbSizeInTaskPool(rdbStore, timing);
-    if (currentSize < Math.max(0, policy.dbLimitSize)) {
+  if (policy.enableLimitWithCacheSize) {
+    const currentSize = policy.shadowMirrorBytes === undefined ?
+      await getCurrentDbSizeInTaskPool(rdbStore, timing) : Math.max(0, policy.shadowMirrorBytes);
+    if (currentSize < Math.max(0, policy.cacheLimitSize)) {
       return requested;
     }
-    if (policy.dbCacheDiscard === DBCacheDiscard.DISCARD_OLDEST) {
+    if (policy.cacheDiscard === CacheDiscard.DISCARD_OLDEST) {
       const cleanupStart = Date.now();
-      const deleted = await deleteOldestSyncDataInTaskPool(
+      // Keep the global-size eviction order consistent with Android: cached
+      // Logs are disposable before RUM, irrespective of the incoming type.
+      // Only when no Log row can be removed do we fall back to the remaining
+      // oldest sync records.
+      const deletedLogs = await deleteOldestSyncDataInTaskPool(
         rdbStore,
-        dataTypes,
+        [DataType.LOG.toString()],
         Constants.DB_OLD_CACHE_REMOVE_COUNT,
         timing
       );
+      let deleted = deletedLogs;
+      addDeletedTypesDelta(delta, [DataType.LOG.toString()], deletedLogs);
+      if (deletedLogs <= 0) {
+        deleted = await deleteOldestSyncDataInTaskPool(
+          rdbStore,
+          [],
+          Constants.DB_OLD_CACHE_REMOVE_COUNT,
+          timing
+        );
+        addDeletedTypesDelta(delta, dataTypes, deleted);
+      }
       result.deletedOld += deleted;
-      addDeletedTypesDelta(delta, dataTypes, deleted);
       timing.cleanupMs += Math.max(0, Date.now() - cleanupStart);
       return requested;
     }

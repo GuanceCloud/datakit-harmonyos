@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.17] - 2026-09-11
+1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled.
+2. Added compiler-plugin-based cold-launch tracking that automatically reports process startup, AbilityStage initialization, first UIAbility creation, and first-frame timing without manual lifecycle calls.
+3. Added `FTRUMConfig.setResourceUrlHandler(...)` to filter automatically tracked RCP, Axios, and NetworkKit Resources without affecting Trace-header injection or manually reported Resources.
+4. Added file-cache governance with a total cache-capacity limit, discard strategies, direct FileStore uploads, and legacy-cache migration.
+5. Added `FTRUMConfig.setViewTrackingHandler(handler, type)` to filter, rename, and add attributes to automatically tracked Router, Navigation, or all Views. Handlers receive an `FTViewTrackingContext` containing source-page information.
+6. Added NetworkKit and `@ohos/axios` Resource performance-timing collection and waterfall-phase mapping. Missing timings or a final timestamp preceding an earlier phase now fall back to the measured total request duration to avoid invalid phases.
+7. Improved FileStore writes, capacity accounting, and recovery diagnostics for more reliable file-cache and shadow-write scenarios.
+8. Improved remote data-filter refreshes: upload tasks now check `pull_interval` before refreshing, numeric intervals are parsed as nanoseconds, and unchanged server content is not processed again.
+9. Fixed Resource/Error counters and Action associations being lost when an automatically tracked Resource completes after its owning Action has closed.
+10. Fixed View Resource and pending counters not being refreshed promptly when a Resource completes after its Action has closed.
+11. Fixed RCP Resource waterfall first-byte and download phases using reconstructed duration calculations, which could omit transport phases or produce invalid phase durations.
+12. Fixed Resources without an HTTP response, such as timeouts and connection failures, and their associated Network Errors missing `resource_status=0`.
+13. Fixed Worker-generated Actions, Resources, Errors, and Resource-generated Network Errors missing bound user and network attributes.
+14. Fixed custom `LineDataModifier` handling causing Actions, Resources, Errors, and Resource-generated Network Errors to lose SDK public attributes.
+15. Fixed automatically tracked Resources being dropped for Axios and NetworkKit requests that complete with a valid duration but without reported network state.
+
 ## [0.1.17-alpha04] - 2026-09-11
 - Improved FileStore cache durability and throughput with batched journal commits, incremental physical-byte accounting, and recovery diagnostics for FileStore ledgers and shadow reconciliation.
 - Expanded automatic View filtering: `FTViewTrackingHandler.resolveHandlerView(context)` now receives a source-selected `FTViewTrackingContext` with the normalized `viewName` and original `RouterPageInfo` or `NavDestinationSwitchInfo`.
@@ -17,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.17-alpha02] - 2026-09-08
 - Fixed RCP Resource waterfall timings that positioned first-byte and download phases from reconstructed duration sums rather than original `preTransfer` and `startTransfer` points, causing transport-to-ready gaps to disappear, zero-length spans, and inconsistent `resource_trans` origins.
-- Added Resource waterfall phase mapping for NetworkKit and `@ohos/axios` responses exposing platform performance timings; missing timings or a final point preceding an earlier one now fall back to the measured total duration rather than producing invalid phases.
+- Added NetworkKit and `@ohos/axios` Resource performance-timing collection and waterfall phase mapping; missing timings or a final point preceding an earlier one now fall back to the measured total request duration rather than producing invalid phases.
 - Fixed asynchronous Resource delivery where `add` could finalize a lifecycle before an already-queued `stop`, dropping stop properties and leaving View/Action counter updates in a later commit; final drafts and counters now commit together.
 - Fixed auto-tracked Resources finishing after their initiating Action's five-second close timeout: Resource/Error counters and the Resource-to-Action association could be lost, including after process restart, allowing incomplete Actions to be emitted.
 - Fixed scheduled and follow-up uploads starting while HarmonyOS reported no network, which consumed offline retry attempts; queued work now resumes 750 ms after network recovery.

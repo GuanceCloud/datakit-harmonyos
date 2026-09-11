@@ -12,6 +12,3 @@ export {
   HttpInitialRequestInterceptor,
   HttpFinalResponseInterceptor
 } from './src/main/ets/components/network/FTHttpAutoTrackExt';
-
-/** API 22 real first-frame observation for cold-launch timing. */
-export { observeFTAppFirstFrame } from './src/main/ets/components/monitor/FTFirstFrameMonitor';

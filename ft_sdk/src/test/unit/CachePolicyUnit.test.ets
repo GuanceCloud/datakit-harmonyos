@@ -217,17 +217,24 @@ export default function cachePolicyUnitTest() {
       expect(runtime.dbTaskPool.lastDeleteTypes).assertEqual('');
     });
 
-    it('cacheSizePolicyShouldNotEnableLegacyDbConfiguration', 0, () => {
+    it('cacheSizePolicyShouldUseUnifiedCacheConfiguration', 0, async () => {
+      const runtime = new FakeCachePolicyRuntime();
+      DbInternalTestAccess.setCachePolicyRuntime(runtime);
       const cachePolicy = FTDBCachePolicy.getInstance();
+      const context = createContext();
       const config = FTSDKConfig.builder(TEST_FAKE_URL)
         .enableLimitWithCacheSize(Constants.MINI_CACHE_LIMIT_SIZE)
         .setCacheDiscard(CacheDiscard.DISCARD_OLDEST);
 
       cachePolicy.initSDKParams(new TestConfigRecord(config));
 
-      expect(cachePolicy.isEnableLimitWithDbSize()).assertFalse();
-      expect(cachePolicy.getDbLimitSize()).assertEqual(Constants.DEFAULT_CACHE_LIMIT_SIZE);
-      expect(cachePolicy.getDBCacheDiscard()).assertEqual(DBCacheDiscard.DISCARD);
+      expect(cachePolicy.isEnableLimitWithCacheSize()).assertTrue();
+      expect(cachePolicy.getCacheLimitSize()).assertEqual(Constants.MINI_CACHE_LIMIT_SIZE);
+      expect(cachePolicy.getCacheDiscard()).assertEqual(CacheDiscard.DISCARD_OLDEST);
+
+      runtime.dbTaskPool.currentDbSize = cachePolicy.getCacheLimitSize();
+      expect(await cachePolicy.optLogCachePolicy(context, 1)).assertEqual(1);
+      expect(runtime.dbTaskPool.deleteCount).assertEqual(1);
     });
 
     it('cachePolicyShouldIgnoreCountUpdates', 0, () => {

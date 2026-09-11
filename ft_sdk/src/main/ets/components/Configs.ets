@@ -776,15 +776,11 @@ export class FTSDKConfig {
   private mEnableDataIntegerCompatible: boolean = false;
 
 
-  // FileStore telemetry cache limit configuration.
+  // SDK-wide telemetry cache limit configuration. The legacy `db*` API is
+  // retained below as aliases so existing integrations keep their behavior.
   private cacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
   private limitWithCacheSize: boolean = false;
   private cacheDiscard: string = CacheDiscard.DISCARD;
-  // Legacy SQLite database-size limit configuration. This remains separate
-  // from FileStore capacity so existing integrations retain their behavior.
-  private dbCacheLimit: number = Constants.DEFAULT_CACHE_LIMIT_SIZE;
-  private limitWithDbSize: boolean = false;
-  private dbCacheDiscard: string = DBCacheDiscard.DISCARD;
   // FileStore is opt-in. Shadow mode keeps SQLite as the read/upload index
   // while mirroring accepted telemetry to FileStore for migration validation.
   private fileDataStoreEnabled: boolean = false;
@@ -1291,10 +1287,10 @@ export class FTSDKConfig {
   }
 
   /**
-   * Enable the FileStore telemetry cache byte limit.
+   * Enable the SDK-wide telemetry cache byte limit.
    *
-   * The default is 100MB and a custom value is clamped to 30MB. This setting
-   * is independent from the legacy SQLite database-size limit.
+   * The default is 100MB and a custom value is clamped to 30MB. When this is
+   * enabled, Log and RUM record-count limits are not used for admission.
    */
   enableLimitWithCacheSize(cacheSize?: number): FTSDKConfig {
     if (cacheSize !== undefined) {
@@ -1304,23 +1300,23 @@ export class FTSDKConfig {
     return this;
   }
 
-  /** Whether the FileStore telemetry cache byte limit is enabled. */
+  /** Whether the SDK-wide telemetry cache byte limit is enabled. */
   isLimitWithCacheSize(): boolean {
     return this.limitWithCacheSize;
   }
 
-  /** Get the FileStore telemetry cache byte limit. */
+  /** Get the SDK-wide telemetry cache byte limit. */
   getCacheLimit(): number {
     return this.cacheLimit;
   }
 
-  /** Get the strategy applied when the FileStore cache limit is reached. */
+  /** Get the strategy applied when the SDK-wide cache limit is reached. */
   getCacheDiscard(): string {
     return this.cacheDiscard;
   }
 
   /**
-   * Set the strategy applied when the FileStore cache limit is reached.
+   * Set the strategy applied when the SDK-wide cache limit is reached.
    * `DISCARD` rejects new telemetry and `DISCARD_OLDEST` makes room by
    * evicting the oldest pending telemetry first.
    */
@@ -1380,62 +1376,45 @@ export class FTSDKConfig {
   }
 
   /**
-   * Enable the legacy SQLite database-size limit.
-   * This takes priority over the legacy Log and RUM record-count limits.
-   *
-   * @deprecated Retained for SQLite compatibility. Use
-   * enableLimitWithCacheSize(cacheSize) when configuring FileStore capacity.
+   * @deprecated Use enableLimitWithCacheSize(cacheSize).
    */
   enableLimitWithDbSize(dbSize?: number): FTSDKConfig {
-    if (dbSize !== undefined) {
-      this.dbCacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, dbSize);
-    }
-    this.limitWithDbSize = true;
-    return this;
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
-   * Set the legacy SQLite database-size limit with a custom size.
-   *
-   * @deprecated Retained for SQLite compatibility. Use
-   * enableLimitWithCacheSize(cacheSize) when configuring FileStore capacity.
+   * @deprecated Use enableLimitWithCacheSize(cacheSize).
    */
   setDbCacheLimit(dbSize: number): FTSDKConfig {
-    this.dbCacheLimit = Math.max(Constants.MINI_CACHE_LIMIT_SIZE, dbSize);
-    this.limitWithDbSize = true;
-    return this;
+    return this.enableLimitWithCacheSize(dbSize);
   }
 
   /**
-   * Check whether the legacy SQLite database-size limit is enabled.
+   * @deprecated Use isLimitWithCacheSize().
    */
   isLimitWithDbSize(): boolean {
-    return this.limitWithDbSize;
+    return this.isLimitWithCacheSize();
   }
 
   /**
-   * Get the legacy SQLite database-size limit in bytes.
+   * @deprecated Use getCacheLimit().
    */
   getDbCacheLimit(): number {
-    return this.dbCacheLimit;
+    return this.getCacheLimit();
   }
 
   /**
    * Get database cache discard strategy
    */
   getDBCacheDiscard(): string {
-    return this.dbCacheDiscard;
+    return this.getCacheDiscard();
   }
 
   /**
-   * Set the legacy SQLite database-size discard strategy.
-   *
-   * @deprecated Retained for SQLite compatibility. Use
-   * setCacheDiscard(strategy) when configuring FileStore capacity.
+   * @deprecated Use setCacheDiscard(strategy).
    */
   setDbCacheDiscard(strategy: string | DBCacheDiscard): FTSDKConfig {
-    this.dbCacheDiscard = String(strategy);
-    return this;
+    return this.setCacheDiscard(String(strategy));
   }
 }
 

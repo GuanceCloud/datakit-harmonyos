@@ -1,6 +1,6 @@
 {
   "name": "@guancecloud/ft_native",
-  "version": "0.1.2-alpha01",
+  "version": "0.1.2",
   "description": "Guance Native Crash Monitoring Module for HarmonyOS - Provides C++ crash detection and monitoring capabilities",
   "main": "Index.ets",
   "author": "Guance <lizhao@guance.com> (https://www.guance.com)",
