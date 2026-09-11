@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 13. Fixed Worker-generated Actions, Resources, Errors, and Resource-generated Network Errors missing bound user and network attributes.
 14. Fixed custom `LineDataModifier` handling causing Actions, Resources, Errors, and Resource-generated Network Errors to lose SDK public attributes.
 15. Fixed automatically tracked Resources being dropped for Axios and NetworkKit requests that complete with a valid duration but without reported network state.
+16. Added the optional Hvigor compiler-plugin version to `sdk_pkg_info.track`; it is populated only by transformed application builds and refreshes with the installed plugin version.
 
 ## [0.1.17-alpha04] - 2026-09-11
 - Improved FileStore cache durability and throughput with batched journal commits, incremental physical-byte accounting, and recovery diagnostics for FileStore ledgers and shadow reconciliation.

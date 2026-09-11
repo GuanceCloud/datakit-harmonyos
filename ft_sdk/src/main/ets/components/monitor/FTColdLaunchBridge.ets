@@ -28,7 +28,10 @@ export class FTColdLaunchBridge {
   private static firstFrameListeners: Array<() => void> = [];
   private static observedWindowStages: Object[] = [];
 
-  public static recordApplicationInit(context?: Object): void {
+  public static recordApplicationInit(context?: Object, pluginVersion?: string): void {
+    if (pluginVersion && pluginVersion.trim().length > 0) {
+      FTSDK.registerHvigorPluginVersion(pluginVersion);
+    }
     // Cold-launch instrumentation is loaded by the same Hvigor tool package
     // as console/HiLog instrumentation. Mark it before application code
     // installs the log configuration, even if this source has no console call

@@ -280,6 +280,79 @@ export default function configUnitTest() {
       expect(deferredEndpointConfig.getClientToken()).assertEqual('');
     });
 
+    it('hvigorPluginVersionShouldReachRumAndLogPackageInfo', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      const customPackageVersion = 'custom version,=';
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .addPkgInfo('custom', customPackageVersion);
+      SdkInternalTestAccess.setRuntime(runtime);
+      FTSDK.registerHvigorPluginVersion('0.1.0');
+      FTSDK.install(config, createFakeContext());
+      FTSDK.installLogConfig(new FTLoggerConfig());
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+
+      const pkgInfo = JSON.parse(String(config.getGlobalContext().get(Constants.KEY_SDK_PACKAGE_INFO))) as Record<string, string>;
+      expect(pkgInfo[Constants.KEY_SDK_PACKAGE_AGENT].length > 0).assertTrue();
+      expect(pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_TRACK]).assertEqual('0.1.0');
+      expect(pkgInfo['custom']).assertEqual(customPackageVersion);
+
+      const helper = FTTrackInner.getInstance().getDataHelper();
+      const fields = new Map<string, string>();
+      fields.set('message', 'plugin-package-info');
+      const logLine = helper.getBodyContent('custom_log', new Map<string, string>(), fields,
+        1234567890, DataType.LOG, 'plugin-package-log');
+      const rumLine = helper.getBodyContent('rum_action', new Map<string, string>(), fields,
+        1234567890, DataType.RUM_APP, 'plugin-package-rum');
+
+      expect(logLine.includes('"track":"0.1.0"')).assertTrue();
+      expect(rumLine.includes('"track":"0.1.0"')).assertTrue();
+      expect(logLine.includes('"custom":"custom\\ version\\,\\="')).assertTrue();
+      expect(rumLine.includes('"custom":"custom\\ version\\,\\="')).assertTrue();
+    });
+
+    it('hvigorPluginVersionShouldRefreshAfterRebuildAndRemainAbsentWithoutPlugin', 0, () => {
+      const customPackageVersion = 'custom version,=';
+      const noPluginConfig = FTSDKConfig.builder(TEST_FAKE_URL)
+        .addPkgInfo('custom', customPackageVersion);
+      SdkInternalTestAccess.setRuntime(new FakeFTSDKRuntime());
+      FTSDK.install(noPluginConfig, createFakeContext());
+
+      const noPluginInfo = JSON.parse(
+        String(noPluginConfig.getGlobalContext().get(Constants.KEY_SDK_PACKAGE_INFO))
+      ) as Record<string, string>;
+      expect(noPluginInfo[Constants.KEY_RUM_SDK_PACKAGE_TRACK] === undefined).assertTrue();
+      expect(noPluginInfo['custom']).assertEqual(customPackageVersion);
+
+      FTSDK.installLogConfig(new FTLoggerConfig());
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      const helper = FTTrackInner.getInstance().getDataHelper();
+      const fields = new Map<string, string>();
+      fields.set('message', 'no-plugin-package-info');
+      const noPluginLogLine = helper.getBodyContent('custom_log', new Map<string, string>(), fields,
+        1234567890, DataType.LOG, 'no-plugin-log');
+      const noPluginRumLine = helper.getBodyContent('rum_action', new Map<string, string>(), fields,
+        1234567890, DataType.RUM_APP, 'no-plugin-rum');
+      expect(noPluginLogLine.includes('"track"')).assertFalse();
+      expect(noPluginRumLine.includes('"track"')).assertFalse();
+      expect(noPluginLogLine.includes('"custom":"custom\\ version\\,\\="')).assertTrue();
+      expect(noPluginRumLine.includes('"custom":"custom\\ version\\,\\="')).assertTrue();
+
+      FTSDK.registerHvigorPluginVersion('0.1.0');
+      FTSDK.registerHvigorPluginVersion('0.1.1');
+      const upgradedInfo = JSON.parse(
+        String(noPluginConfig.getGlobalContext().get(Constants.KEY_SDK_PACKAGE_INFO))
+      ) as Record<string, string>;
+      expect(upgradedInfo[Constants.KEY_RUM_SDK_PACKAGE_TRACK]).assertEqual('0.1.1');
+      expect(upgradedInfo[Constants.KEY_SDK_PACKAGE_AGENT].length > 0).assertTrue();
+      expect(upgradedInfo['custom']).assertEqual(customPackageVersion);
+      const upgradedLogLine = helper.getBodyContent('custom_log', new Map<string, string>(), fields,
+        1234567890, DataType.LOG, 'upgraded-plugin-log');
+      const upgradedRumLine = helper.getBodyContent('rum_action', new Map<string, string>(), fields,
+        1234567890, DataType.RUM_APP, 'upgraded-plugin-rum');
+      expect(upgradedLogLine.includes('"track":"0.1.1"')).assertTrue();
+      expect(upgradedRumLine.includes('"track":"0.1.1"')).assertTrue();
+    });
+
     it('resourceUrlHandlerShouldUseAndroidFilterSemantics', 0, () => {
       const handler = new TestResourceUrlHandler();
       const config = new FTRUMConfig().setResourceUrlHandler(handler);

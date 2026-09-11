@@ -126,11 +126,11 @@ The Guance Hvigor compiler plugin provides automatic console/HiLog collection an
 
 ### Install the Hvigor Plugin
 
-Install `@guancecloud/ft-hvigor-plugin` in the project-level `hvigor/hvigor-config.json5`. This build-time tool package is separate from the `@guancecloud/ft_sdk` runtime HAR. Register it in the HAP module's `hvigorfile.ts`:
+Install `@cloudcare/hvigor-ohos-plugin` in the project-level `hvigor/hvigor-config.json5`. This build-time tool package is separate from the `@guancecloud/ft_sdk` runtime HAR. Register it in the HAP module's `hvigorfile.ts`:
 
 ```ts
 import { hapTasks } from '@ohos/hvigor-ohos-plugin'
-import { ftConsoleLogPlugin } from '@guancecloud/ft-hvigor-plugin'
+import { ftConsoleLogPlugin } from '@cloudcare/hvigor-ohos-plugin'
 
 export default {
   system: hapTasks,
@@ -138,7 +138,7 @@ export default {
 }
 ```
 
-The plugin instruments application code in `src/main/ets` without rewriting source files on disk or SDK dependencies. It supports:
+The plugin instruments application code in `src/main/ets` without rewriting source files on disk or SDK dependencies. Each build also embeds the installed plugin version into `sdk_pkg_info.track`; when the plugin is absent, this entry is omitted. It supports:
 
 - `console.log`, `debug`, `info`, `warn`, `error`, and `trace`
 - `hilog.debug`, `info`, `warn`, `error`, and `fatal` when `hilog` is imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`
@@ -316,7 +316,7 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
 
 ## Cache Governance and FileStore Migration
 
-The default cache remains SQLite with the existing per-type record-count limits and legacy database-size-limit behavior. In primary FileStore mode, enabling a byte limit applies the shared physical-byte account described below. `DISCARD` preserves existing pending data and rejects new data at the limit; `DISCARD_OLDEST` evicts eligible old records.
+The default cache remains SQLite with the existing per-type record-count limits. Once a cache byte limit is enabled, `DISCARD` preserves existing pending data and rejects new data at the limit; `DISCARD_OLDEST` evicts eligible old records.
 
 ```ts
 import { CacheDiscard, FTSDKConfig } from '@guancecloud/ft_sdk/Index'
@@ -326,7 +326,9 @@ const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
   .setCacheDiscard(CacheDiscard.DISCARD_OLDEST)
 ```
 
-`enableLimitWithDbSize`, `setDbCacheLimit`, and `setDbCacheDiscard` are retained as compatibility aliases. When a byte limit is enabled, the Log and RUM record-count limits do not participate in cache admission.
+`enableLimitWithCacheSize` and `setCacheDiscard` are the single cache-governance configuration, matching Android. `enableLimitWithDbSize`, `setDbCacheLimit`, and `setDbCacheDiscard` are deprecated compatibility aliases for the same settings; they do not establish an independent SQLite policy. With a byte limit enabled, the Log and RUM record-count limits do not participate in cache admission.
+
+The meter follows the active store: SQLite mode uses SQLite page allocation; FileStore primary and Shadow modes use only FileStore sync payloads plus View/Action RUM aggregate files. SQLite copies, legacy cache files, spool files, FileStore metadata, and leases remain visible in physical-usage diagnostics but do not consume the configured cache budget.
 
 FileStore rollout is opt-in. Start with shadow mode, which retains SQLite as the authority while mirroring sync payloads and the complete View/Action lifecycle to `files/ft_sdk_cache_v2`. A failed mirror is marked dirty and reconciled on the next operation; it must not be treated as a verified migration source.
 

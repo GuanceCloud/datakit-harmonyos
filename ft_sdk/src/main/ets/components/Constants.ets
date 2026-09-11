@@ -457,10 +457,10 @@ export class Constants {
    * ft-sdk module release version
    */
   static readonly KEY_SDK_PACKAGE_AGENT = "agent";
-  // /**
-  //  * ft-plugin module release version
-  //  */
-  // static readonly KEY_RUM_SDK_PACKAGE_TRACK = "track";
+  /**
+   * Guance Hvigor compiler-plugin release version.
+   */
+  static readonly KEY_RUM_SDK_PACKAGE_TRACK = "track";
   /**
    * ft-native module release version
    */
