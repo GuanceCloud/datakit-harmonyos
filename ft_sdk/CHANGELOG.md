@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.17-alpha04] - 2026-09-11
+- Improved FileStore cache durability and throughput with batched journal commits, incremental physical-byte accounting, and recovery diagnostics for FileStore ledgers and shadow reconciliation.
+- Expanded automatic View filtering: `FTViewTrackingHandler.resolveHandlerView(context)` now receives a source-selected `FTViewTrackingContext` with the normalized `viewName` and original `RouterPageInfo` or `NavDestinationSwitchInfo`.
+
 ## [0.1.17-alpha03] - 2026-09-10
 - Added FTRUMConfig.setResourceUrlHandler(...) to exclude auto-tracked RCP, Axios, and NetworkKit HTTP Resources without affecting Trace propagation or manual Resources.
 - Added file-backed telemetry cache governance, with capacity eviction, durable recovery, direct file upload, and resumable migration from legacy cache storage.
