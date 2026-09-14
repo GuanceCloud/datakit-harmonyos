@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 14. Fixed custom `LineDataModifier` handling causing Actions, Resources, Errors, and Resource-generated Network Errors to lose SDK public attributes.
 15. Fixed automatically tracked Resources being dropped for Axios and NetworkKit requests that complete with a valid duration but without reported network state.
 16. Added the optional Hvigor compiler-plugin version to `sdk_pkg_info.track`; it is populated only by transformed application builds and refreshes with the installed plugin version.
+17. Fixed shadow-cache cleanup so successfully persisted closed Views and Actions are removed from both SQLite and their file mirror; successful uploads and `FTSDK.clearAllData()` now also remove stale shadow payloads and metadata, preventing closed View snapshots from being emitted again after restart.
+18. Fixed direct FileStore cache handling for persisted View acknowledgements, preventing `Unsupported file-store command: acknowledgeView` and retaining the same stale-snapshot protection as SQLite.
 
 ## [0.1.17-alpha04] - 2026-09-11
 - Improved FileStore cache durability and throughput with batched journal commits, incremental physical-byte accounting, and recovery diagnostics for FileStore ledgers and shadow reconciliation.

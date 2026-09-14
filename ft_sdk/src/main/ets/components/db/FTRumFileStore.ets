@@ -22,7 +22,7 @@ export class FTRumFileStore {
       'forceClearRumPendingResource', 'getActionInfo', 'applyRumCounterDeltas', 'updateViewUpdateTime',
       'insertRumAction', 'closeRumAction', 'querySumAction', 'getActionCounts', 'querySumView',
       'queryRumViewById', 'cleanCloseActionData', 'cleanCloseViewData', 'closeAllActionAndView',
-      'exportRumState'].includes(command);
+      'exportRumState', 'acknowledgeView'].includes(command);
   }
 
   async execute(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
@@ -71,6 +71,9 @@ export class FTRumFileStore {
           if (request.command !== 'increaseViewAction') { view.viewUpdateTime++; }
           this.put(changes, 'view', view.id, view);
         }
+        break;
+      case 'acknowledgeView':
+        response.value = this.acknowledgeView(request.view, changes);
         break;
       case 'getActionInfo': response.actionInfo = action ? { startTime: action.startTime } : null; break;
       case 'getActionCounts':
@@ -207,6 +210,34 @@ export class FTRumFileStore {
     views.forEach((v: ViewBeanJSON) => this.put(changes, 'view', v.id, v));
     actions.forEach((a: ActionBeanJSON) => this.put(changes, 'action', a.id, a));
     return changes.length;
+  }
+
+  // Keep the acknowledgement conditional so a delayed upload completion cannot
+  // overwrite or delete a newer View aggregate. This matches the SQLite
+  // acknowledgement predicates and updates both fields atomically in one commit.
+  private acknowledgeView(snapshot: ViewBeanJSON | undefined, changes: FTCacheMutation[]): boolean {
+    if (!snapshot || snapshot.id.length === 0) { return false; }
+    const current = this.view(snapshot.id);
+    if (!current || !this.matchesAcknowledgedView(current, snapshot)) { return false; }
+    if (current.isClose && current.pendingResource <= 0) {
+      changes.push({ path: this.access.path('view', current.id), body: null });
+      return true;
+    }
+    current.dataUploadTime = current.isClose && current.pendingResource > 0 ? 0 : current.dataUpdateTime;
+    current.viewUpdateTime++;
+    this.put(changes, 'view', current.id, current);
+    return true;
+  }
+
+  private matchesAcknowledgedView(current: ViewBeanJSON, snapshot: ViewBeanJSON): boolean {
+    return current.isClose === snapshot.isClose &&
+      current.dataUpdateTime === snapshot.dataUpdateTime &&
+      current.viewUpdateTime === snapshot.viewUpdateTime &&
+      current.pendingResource === snapshot.pendingResource &&
+      current.actionCount === snapshot.actionCount &&
+      current.errorCount === snapshot.errorCount &&
+      current.resourceCount === snapshot.resourceCount &&
+      current.longTaskCount === snapshot.longTaskCount;
   }
 
   private applyAttr(view: ViewBeanJSON, attr: string): void {

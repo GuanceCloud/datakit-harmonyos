@@ -8,6 +8,7 @@ import { FTCacheLedger } from '../../../main/ets/components/db/FTCacheLedger';
 import { FTDBConfig } from '../../../main/ets/components/db/FTDBConfig';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncDataJSON } from '../../../main/ets/components/db/bean/SyncData';
+import { ViewBeanJSON } from '../../../main/ets/components/db/bean/ViewBean';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import { DBAssert } from './helpers/DBAssert';
 
@@ -43,6 +44,13 @@ function logRow(uuid: string): SyncDataJSON {
     dataString: `df_rum_harmonyos_log,sdk_data_id=${uuid} message="cache device test" 100`,
     time: 100
   };
+}
+
+function rumView(id: string): ViewBeanJSON {
+  return { id, viewName: 'file-store-view', viewReferrer: '', startTime: 1, isClose: false, sessionId: 's',
+    actionCount: 0, errorCount: 0, longTaskCount: 0, viewLoadTime: 0, timeSpent: 0,
+    resourceCount: 0, pendingResource: 0, dataUpdateTime: 1, dataUploadTime: 0, viewUpdateTime: 0,
+    extraAttr: {}, property: {}, tags: {} };
 }
 
 const SQLITE_SUCCESS: FTSqliteRunner = async (_request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> => {
@@ -133,6 +141,20 @@ export default function ftCacheFileStoreDeviceTest() {
       expect(mirrorWrite.write?.result.inserted).assertEqual(1);
       expect(mirrorWrite.write?.result.dropped).assertEqual(0);
       expect(mirror.list('sync').length).assertEqual(1);
+    });
+
+    it('acknowledgesClosedViewsThroughTheFileStoreCommandRouter', 0, async () => {
+      const store = new FTCacheFileStore(context, cacheSettings('file', 1024 * 1024), SQLITE_SUCCESS);
+      const view = rumView('file-store-acknowledged-view');
+      await store.execute({ command: 'upsertRumView', view });
+      const stale = JSON.parse(JSON.stringify(view)) as ViewBeanJSON;
+      await store.execute({ command: 'closeRumView', viewId: view.id, now: 100 });
+
+      expect((await store.execute({ command: 'acknowledgeView', view: stale })).value).assertFalse();
+      const current = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(current !== null && current !== undefined).assertTrue();
+      expect((await store.execute({ command: 'acknowledgeView', view: current! })).value).assertTrue();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
     });
   });
 }

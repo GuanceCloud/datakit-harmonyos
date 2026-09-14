@@ -1820,26 +1820,30 @@ export class FTRUMInnerManager {
         }
       }
       
-      // Call FTTrackInner.rum() to store and sync data
-      // Aligned with Android: use callback to update upload_time after successful upload
+      // Call FTTrackInner.rum() to store the completed View snapshot in the
+      // durable sync queue. The callback must acknowledge that exact snapshot:
+      // a closed View can then be removed, while a View changed in the meantime
+      // remains eligible for a later summary.
       const self = this;
       class ViewUploadCallback implements RunnerCompleteCallBack {
-        private viewId: string;
-        private versionTime: number;
-        constructor(viewId: string, versionTime: number) {
-          this.viewId = viewId;
-          this.versionTime = versionTime;
+        private snapshot: ViewBean;
+        constructor(snapshot: ViewBean) {
+          this.snapshot = snapshot;
         }
         
         onComplete(): void {
-          // Update upload_time after successful upload (aligned with Android)
+          // The sync row is durable at this point; acknowledge only the state
+          // used to build it. This prevents restart-time closeAllActionAndView
+          // from turning already-persisted closed Views into new RUM rows.
           if (self.context) {
-            self.updateUploadedViewAfterComplete(self.context, this.viewId, this.versionTime);
+            self.acknowledgePersistedViewAfterComplete(self.context, this.snapshot);
           }
         }
       }
       
-      const callback = new ViewUploadCallback(viewBean.getId(), viewBean.getDataUpdateTime());
+      // querySumView returns mutable beans. Freeze the version used for this
+      // row so a concurrent close/counter update cannot acknowledge newer data.
+      const callback = new ViewUploadCallback(ViewBean.fromJSON(viewBean.toJSON()));
       // Aligned with Android SDK: pass nanoseconds directly (19 digits) without conversion
       // Android SDK: FTTrackInner.getInstance().rum(bean.getStartTime(), ...)
       FTTrackInner.getInstance().rum(
@@ -1879,16 +1883,16 @@ export class FTRUMInnerManager {
     }
   }
 
-  private async updateUploadedViewAfterComplete(context: Context, viewId: string, versionTime: number): Promise<void> {
+  private async acknowledgePersistedViewAfterComplete(context: Context, snapshot: ViewBean): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.updateViewUploadTime(context, viewId, versionTime);
+      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot);
       if (!success) {
         // The database contains a newer state. Ensure it is serialized even if
         // its earlier generation request overlapped the previous summary pass.
         this.generateRumData();
       }
     } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to update uploaded view state: ${error}`);
+      FTInnerLogger.e(TAG, `Failed to acknowledge persisted view state: ${error}`);
     }
   }
   

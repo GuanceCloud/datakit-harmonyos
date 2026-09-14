@@ -304,7 +304,14 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     for (const kind of ['sync', 'view', 'action', 'lease', 'quarantine']) {
       for (const id of this.list(kind)) { FTCacheFiles.remove(this.path(kind, id)); }
     }
-    FTCacheFiles.remove(this.path('meta', 'errorTimeLine'));
+    // `deleteAll` is also the reset boundary for a SQLite shadow.  Keeping a
+    // source/dirty marker, ID counter, or old projection here would leave
+    // state behind even though its payload directories were emptied.  Retain
+    // only the clearing marker until every other record is gone, so a process
+    // death can safely resume this complete deletion on the next startup.
+    for (const id of this.list('meta')) {
+      if (id !== 'clearing') { FTCacheFiles.remove(this.path('meta', id)); }
+    }
     FTCacheFiles.remove(this.path('meta', 'clearing'));
     this.ledger.invalidate();
   }

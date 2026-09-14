@@ -124,6 +124,22 @@ export default function ftDBManagerDeviceTest() {
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, open.getId())).assertNull();
     });
 
+    it('acknowledgedClosedViewDoesNotReappearAfterRestartClosure', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const closed = new ViewBean('acknowledged-closed-view', 'acknowledged-closed-view', TEST_NOW_NS);
+      closed.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, closed);
+
+      // This is the same acknowledgement performed after the View row reaches
+      // the durable sync queue. A later SDK initialization closes all retained
+      // aggregates, so an acknowledged closed View must already be gone.
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, closed)).assertTrue();
+      await FTDBTaskPoolExecutor.closeAllActionAndView(context);
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, closed.getId())).assertNull();
+      expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
+        .some(view => view.getId() === closed.getId())).assertFalse();
+    });
+
     it('viewAckKeepsNewerAndUnrelatedData', 0, async () => {
       const context = await DBAssert.getAppContext();
       const old = new ViewBean('delayed-counter-view', 'delayed-counter-view', TEST_NOW_NS);

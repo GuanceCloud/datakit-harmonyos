@@ -58,6 +58,35 @@ export default function cacheGovernanceUnitTest() {
       expect(access.list('view').length).assertEqual(0);
     });
 
+    it('acknowledges only the current view snapshot and removes a closed view', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      await store.execute({ command: 'upsertRumView', view });
+      const stale = JSON.parse(JSON.stringify(view)) as ViewBeanJSON;
+      await store.execute({ command: 'closeRumView', viewId: view.id, now: 100 });
+      expect((await store.execute({ command: 'acknowledgeView', view: stale })).value).assertFalse();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view?.isClose).assertTrue();
+      const current = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(current !== null && current !== undefined).assertTrue();
+      expect((await store.execute({ command: 'acknowledgeView', view: current! })).value).assertTrue();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
+    });
+
+    it('keeps a closed view with pending resources after acknowledgement', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      view.isClose = true;
+      view.pendingResource = 1;
+      await store.execute({ command: 'upsertRumView', view });
+      expect((await store.execute({ command: 'acknowledgeView', view })).value).assertTrue();
+      const retained = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(retained !== null && retained !== undefined).assertTrue();
+      expect(retained!.dataUploadTime).assertEqual(0);
+      expect(retained!.viewUpdateTime).assertEqual(1);
+    });
+
     it('persists aggregate deltas and clamps pending resources to zero', 0, async () => {
       const access = new MemoryAggregateAccess();
       const store = new FTRumFileStore(access);
