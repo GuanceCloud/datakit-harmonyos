@@ -1,13 +1,13 @@
-import { Context } from '@kit.AbilityKit';
-import { promptAction } from '@kit.ArkUI';
-import { FTLogger, FTLoggerConfig, FTSDK, LogGlobalContextValue, Status } from '@guancecloud/ft_sdk/Index';
-import FTTrackInner from '@guancecloud/ft_sdk/src/main/ets/components/FTTrackInner';
+import hilog from '@ohos.hilog';
+import { FTLogger, FTSDK, LogGlobalContextValue, Status } from '@guancecloud/ft_sdk/Index';
 import { SyncTaskManager } from '@guancecloud/ft_sdk/src/main/ets/components/SyncTaskManager';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
 
 const TAG = 'LogBackgroundTestPage';
+const LOG_FILTER_TEST_DOMAIN = 0xD002B;
+const LOG_FILTER_TEST_TAG = 'FTLogFilterTest';
 
 /**
  * LogBackground feature test page
@@ -19,43 +19,11 @@ export struct LogBackgroundTestPage {
   @State logCount: number = 0;
   @State testResults: string[] = [];
   @State isConfigInitialized: boolean = false;
-  @State context: Context = getContext(this) as Context;
 
   aboutToAppear() {
     this.addTestResult("🚀 LogBackground Test Page initialized");
-    this.initializeLoggerConfig();
-  }
-
-  /**
-   * Initialize the logger configuration
-   */
-  private initializeLoggerConfig(): void {
-    try {
-      const logConfig = new FTLoggerConfig();
-      logConfig.setEnableCustomLog(true);
-      logConfig.setEnableConsoleLog(true);
-      logConfig.setPrintCustomLogToConsole(true);
-      logConfig.setSamplingRate(1.0);
-      logConfig.setServiceName("harmonyos_log_test");
-      logConfig.setLogLevelFilters([Status.INFO, Status.WARN, Status.ERROR, Status.DEBUG]);
-      logConfig.setLogCacheLimitCount(1000);
-
-      const staticContext = new Map<string, LogGlobalContextValue>();
-      staticContext.set('demo_log_static_tag', 'static_dictionary_value');
-      staticContext.set('demo_log_number_tag', 101);
-      staticContext.set('demo_log_boolean_tag', true);
-      staticContext.set('demo_log_zero_tag', 0);
-      staticContext.set('demo_log_false_tag', false);
-      logConfig.addGlobalContext(staticContext);
-      logConfig.addGlobalContext('demo_log_legacy_tag', 'legacy_key_value');
-
-      // Use FTSDK.installLogConfig for proper initialization
-      FTSDK.installLogConfig(logConfig);
-      this.isConfigInitialized = true;
-      this.addTestResult("✅ Logger configuration initialized successfully");
-    } catch (error) {
-      this.addTestResult(`❌ Logger configuration failed: ${error}`);
-    }
+    this.isConfigInitialized = true;
+    this.addTestResult("✅ Logger configuration is managed by EntryAbility");
   }
 
   /**
@@ -240,10 +208,35 @@ export struct LogBackgroundTestPage {
       FTLogger.logBackground("Console output test - ERROR", Status.ERROR);
       console.log('ft-demo','Console output test - log')
       
-      this.addTestResult("✅ Console output test completed: 3 manual logs sent; 1 console log captured automatically");
+      this.addTestResult("✅ Console output test completed: 3 manual logs sent; the console log's upload depends on the EntryAbility filter");
       this.logCount += 4;
     } catch (error) {
       this.addTestResult(`❌ Console output test failed: ${error}`);
+    }
+  }
+
+  /**
+   * Verifies that a complex automatic-log rule keeps only the matching HiLog.
+   * All four source calls still print locally; only the KEEP marker should be
+   * uploaded after flushSyncData(). EntryAbility installs the rule at startup.
+   */
+  testAutomaticLogFilter(): void {
+    const marker = `${Date.now()}`;
+    const keepMessage = `LOG_FILTER_KEEP_${marker}`;
+    const dropMessage = `LOG_FILTER_DROP_MESSAGE_${marker}`;
+    const dropTagMessage = `LOG_FILTER_KEEP_WRONG_TAG_${marker}`;
+    const dropConsoleMessage = `LOG_FILTER_KEEP_CONSOLE_${marker}`;
+    try {
+      hilog.info(LOG_FILTER_TEST_DOMAIN, LOG_FILTER_TEST_TAG, '%{public}s', keepMessage);
+      hilog.info(LOG_FILTER_TEST_DOMAIN, LOG_FILTER_TEST_TAG, '%{public}s', dropMessage);
+      hilog.info(LOG_FILTER_TEST_DOMAIN, 'FTLogFilterOtherTag', '%{public}s', dropTagMessage);
+      console.info(dropConsoleMessage);
+      FTSDK.flushSyncData();
+
+      this.logCount += 1;
+      this.addTestResult(`✅ Log filter test sent. Upload only ${keepMessage}; do not upload ${dropMessage}, ${dropTagMessage}, or ${dropConsoleMessage}.`);
+    } catch (error) {
+      this.addTestResult(`❌ Log filter test failed: ${error}`);
     }
   }
 
@@ -254,7 +247,7 @@ export struct LogBackgroundTestPage {
     try {
       const properties = new Map<string, object>();
       properties.set("testType", new String("service_name_test"));
-      properties.set("expectedService", new String("harmonyos_log_test"));
+      properties.set("expectedService", new String("HarmonyOS-Test-App"));
       
       FTLogger.logBackground("Service name test log", Status.INFO, properties);
       this.logCount += 1;
@@ -430,6 +423,12 @@ export struct LogBackgroundTestPage {
             .height(50)
             .backgroundColor('#20C997')
             .onClick(() => this.testConsoleOutput())
+
+          Button('Verify Automatic Log Filter')
+            .width('100%')
+            .height(50)
+            .backgroundColor('#6C757D')
+            .onClick(() => this.testAutomaticLogFilter())
 
           Button('Test Service Name')
             .width('100%')

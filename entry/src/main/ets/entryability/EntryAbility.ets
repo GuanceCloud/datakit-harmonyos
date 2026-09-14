@@ -60,6 +60,11 @@ export const RESOURCE_FILTER_TEST_URL_PREFIX = 'https://httpbin.org/anything/ft-
 const FILTERED_AUTOMATIC_RESOURCE_URL_PREFIXES: Array<string> = [
   RESOURCE_FILTER_TEST_URL_PREFIX
 ];
+// Demo rule used by LogBackgroundTestPage's automatic console/HiLog filter
+// verification button. The SDK configuration is installed once here so its
+// RUM linkage (including app_id) remains active for automatic logs.
+const LOG_FILTER_TEST_RULE = "{ log_source = 'hilog' and tag = 'FTLogFilterTest' and domain = '852011' " +
+  "and message match ['^LOG_FILTER_KEEP_'] }";
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -456,12 +461,7 @@ export default class EntryAbility extends UIAbility {
       const logConfig = new FTLoggerConfig()
         .setSamplingRate(Number(this.runtimeConfig.logSamplingRate))  // Shared persisted sampling configuration
         .setEnableCustomLog(true)
-        // Collect every compiler-instrumented console/HiLog call by default.
-        // To keep only selected HiLog records, replace the next line with:
-        // .setEnableConsoleLog(true,
-        //   "{ log_source = 'hilog' and tag = 'Network' and domain = '852011' " +
-        //   "and message match ['^HTTP'] }")
-        .setEnableConsoleLog(true)
+        .setEnableConsoleLog(true, LOG_FILTER_TEST_RULE)
         // .setLogCacheLimitCount(20000)
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
