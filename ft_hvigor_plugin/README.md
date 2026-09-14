@@ -42,6 +42,6 @@ The plugin preserves the original console/HiLog output and does not modify appli
 
 ## Compatibility
 
-Version `0.1.0` is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). It supports `@guancecloud/ft_sdk` `0.1.17` and later releases.
+Version `0.1.1` is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). It supports `@guancecloud/ft_sdk` `0.1.17` and later releases.
 
 `@ohos/hvigor-ohos-plugin` is supplied by DevEco Studio's Hvigor runtime. `@guancecloud/ft_sdk` must still be declared as the application's runtime HAR dependency because the generated imports target that package.

@@ -15,10 +15,8 @@ function ftConsoleLogPlugin() {
     pluginId: 'guance-console-log-compiler',
     apply(node) {
       const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN);
-      const consoleLogTransformPath = path.join(__dirname, 'hvigorCompile', 'ft-console-log-transform.ts');
-      const coldLaunchTransformPath = path.join(__dirname, 'hvigorCompile', 'ft-cold-launch-transform.ts');
-      hapContext.loadCompilePlugin(consoleLogTransformPath);
-      hapContext.loadCompilePlugin(coldLaunchTransformPath);
+      const sourceTransformHostPath = path.join(__dirname, 'hvigorCompile', 'ft-source-transform-host.ts');
+      hapContext.loadCompilePlugin(sourceTransformHostPath);
     }
   };
 }

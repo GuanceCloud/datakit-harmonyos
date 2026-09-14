@@ -7,27 +7,7 @@
  * never changed.
  */
 
-declare const require: {
-  main: {
-    require(moduleName: string): any;
-  };
-};
-
 type TypeScriptApi = any;
-
-interface CompilePluginContext {
-  share: {
-    projectConfig: {
-      etsLoaderPath: string;
-    };
-  };
-}
-
-interface SharedSourceTransformRegistry {
-  originalReadFile: (fileName: string, options?: any) => any;
-  buffer: any;
-  transforms: Map<string, (fileName: string, code: string) => string>;
-}
 
 interface TransformCandidate {
   start: number;
@@ -52,10 +32,6 @@ const BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
 // incremental/daemon build. Keep a marker in the in-memory result so a later
 // reader does not wrap the original console/HiLog call a second time.
 const TRANSFORM_MARKER = '/* guance-console-log-transform:instrumented */';
-const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
-const TRANSFORM_ID = 'guance-console-log-transform';
-
-let registeredFileSystem: any = null;
 
 export function isApplicationArkTsSource(id: string): boolean {
   const normalizedId = id.replace(/\\/g, '/');
@@ -259,7 +235,7 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
   return offset;
 }
 
-function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
+export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: string): string {
   if (!isApplicationArkTsSource(id) || code.includes(TRANSFORM_MARKER)) {
     return code;
   }
@@ -279,61 +255,3 @@ function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
   return transformedCode.slice(0, transformedInsertionOffset) + bridgeImport +
     transformedCode.slice(transformedInsertionOffset);
 }
-
-function installSourceReader(context: CompilePluginContext): void {
-  if (registeredFileSystem !== null) {
-    return;
-  }
-
-  const typeScriptPath = `${context.share.projectConfig.etsLoaderPath}/node_modules/typescript`;
-  const ts = require.main.require(typeScriptPath);
-  const fileSystem = require.main.require('fs');
-  let registry = fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
-  if (!registry) {
-    registry = {
-      originalReadFile: fileSystem.readFileSync as (fileName: string, options?: any) => any,
-      buffer: require.main.require('buffer'),
-      transforms: new Map<string, (fileName: string, code: string) => string>()
-    };
-    fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] = registry;
-    fileSystem.readFileSync = (fileName: string, options?: any): any => {
-      const content = registry!.originalReadFile(fileName, options);
-      if (typeof fileName !== 'string' || !isApplicationArkTsSource(fileName)) {
-        return content;
-      }
-      let transformedCode = typeof content === 'string' ? content : content.toString();
-      registry!.transforms.forEach((transform: (id: string, code: string) => string) => {
-        transformedCode = transform(fileName, transformedCode);
-      });
-      return typeof content === 'string' ? transformedCode : registry!.buffer.Buffer.from(transformedCode);
-    };
-  }
-  registry.transforms.set(TRANSFORM_ID, (fileName: string, code: string) => rewriteSource(ts, fileName, code));
-  registeredFileSystem = fileSystem;
-}
-
-function restoreSourceReader(): void {
-  if (registeredFileSystem === null) {
-    return;
-  }
-  const registry = registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
-  if (registry) {
-    registry.transforms.delete(TRANSFORM_ID);
-    if (registry.transforms.size === 0) {
-      registeredFileSystem.readFileSync = registry.originalReadFile;
-      delete registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY];
-    }
-  }
-  registeredFileSystem = null;
-}
-
-export default {
-  name: 'guance-console-log-transform',
-  order: 'first',
-  buildStart(this: CompilePluginContext): void {
-    installSourceReader(this);
-  },
-  buildEnd(): void {
-    restoreSourceReader();
-  }
-};

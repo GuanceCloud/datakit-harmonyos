@@ -1,10 +1,11 @@
 {
   "name": "@cloudcare/hvigor-ohos-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
   "main": "index.js",
   "files": [
     "index.js",
+    "hvigorCompile/ft-source-transform-host.ts",
     "hvigorCompile/ft-console-log-transform.ts",
     "hvigorCompile/ft-cold-launch-transform.ts",
     "README.md",

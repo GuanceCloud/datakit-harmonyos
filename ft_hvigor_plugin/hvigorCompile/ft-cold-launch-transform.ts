@@ -15,20 +15,6 @@ declare const __dirname: string;
 type TypeScriptApi = any;
 type AbilityClassKind = 'stage' | 'ui' | 'other';
 
-interface CompilePluginContext {
-  share: {
-    projectConfig: {
-      etsLoaderPath: string;
-    };
-  };
-}
-
-interface SharedSourceTransformRegistry {
-  originalReadFile: (fileName: string, options?: any) => any;
-  buffer: any;
-  transforms: Map<string, (fileName: string, code: string) => string>;
-}
-
 interface ColdLaunchInjection {
   position: number;
   content: string;
@@ -36,10 +22,6 @@ interface ColdLaunchInjection {
 
 const COLD_LAUNCH_BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
 const COLD_LAUNCH_TRANSFORM_MARKER = '/* guance-cold-launch-transform:instrumented */';
-const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
-const TRANSFORM_ID = 'guance-cold-launch-transform';
-
-let registeredFileSystem: any = null;
 
 export function isApplicationArkTsSource(id: string): boolean {
   const normalizedId = id.replace(/\\/g, '/');
@@ -311,7 +293,7 @@ function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection
   return transformedCode;
 }
 
-function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
+export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: string): string {
   if (!isApplicationArkTsSource(id) || code.includes(COLD_LAUNCH_TRANSFORM_MARKER)) {
     return code;
   }
@@ -328,60 +310,3 @@ function rewriteSource(ts: TypeScriptApi, id: string, code: string): string {
   const transformedCode = applyColdLaunchInjections(code, injections);
   return transformedCode.slice(0, insertionOffset) + bridgeImport + transformedCode.slice(insertionOffset);
 }
-
-function installSourceReader(context: CompilePluginContext): void {
-  if (registeredFileSystem !== null) {
-    return;
-  }
-  const typeScriptPath = `${context.share.projectConfig.etsLoaderPath}/node_modules/typescript`;
-  const ts = require.main.require(typeScriptPath);
-  const fileSystem = require.main.require('fs');
-  let registry = fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
-  if (!registry) {
-    registry = {
-      originalReadFile: fileSystem.readFileSync as (fileName: string, options?: any) => any,
-      buffer: require.main.require('buffer'),
-      transforms: new Map<string, (fileName: string, code: string) => string>()
-    };
-    fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] = registry;
-    fileSystem.readFileSync = (fileName: string, options?: any): any => {
-      const content = registry!.originalReadFile(fileName, options);
-      if (typeof fileName !== 'string' || !isApplicationArkTsSource(fileName)) {
-        return content;
-      }
-      let transformedCode = typeof content === 'string' ? content : content.toString();
-      registry!.transforms.forEach((transform: (id: string, code: string) => string) => {
-        transformedCode = transform(fileName, transformedCode);
-      });
-      return typeof content === 'string' ? transformedCode : registry!.buffer.Buffer.from(transformedCode);
-    };
-  }
-  registry.transforms.set(TRANSFORM_ID, (fileName: string, code: string) => rewriteSource(ts, fileName, code));
-  registeredFileSystem = fileSystem;
-}
-
-function restoreSourceReader(): void {
-  if (registeredFileSystem === null) {
-    return;
-  }
-  const registry = registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
-  if (registry) {
-    registry.transforms.delete(TRANSFORM_ID);
-    if (registry.transforms.size === 0) {
-      registeredFileSystem.readFileSync = registry.originalReadFile;
-      delete registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY];
-    }
-  }
-  registeredFileSystem = null;
-}
-
-export default {
-  name: 'guance-cold-launch-transform',
-  order: 'first',
-  buildStart(this: CompilePluginContext): void {
-    installSourceReader(this);
-  },
-  buildEnd(): void {
-    restoreSourceReader();
-  }
-};

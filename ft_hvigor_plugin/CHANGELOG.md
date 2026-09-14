@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.1] - 2026-09-14
+
+- Fixed console/HiLog instrumentation being skipped when cold-launch instrumentation is enabled in the same Hvigor plugin.
+
 ## [0.1.0] - 2026-09-14
 
 - Added compiler instrumentation for automatic console/HiLog collection.
@@ -17,5 +21,4 @@
 ## [0.1.0-alpha.1] - 2026-09-11
 
 - Prepared the initial npm prerelease of the console/HiLog and cold-launch instrumentation plugin.
-
 
