@@ -268,7 +268,12 @@ export class TrackLogManager {
       return false;
     }
 
-    if (isConsoleLog && !this.logConfig.checkConsoleLogPrefix(logBean.getContent())) {
+    if (isConsoleLog && !this.logConfig.checkConsoleLogFilter(
+      logBean.getContent(),
+      this.objectValueToString(logBean.getTag('log_source')),
+      this.objectValueToString(logBean.getTag('tag')),
+      this.objectValueToString(logBean.getTag('domain'))
+    )) {
       return false;
     }
 

@@ -977,6 +977,18 @@ export default function configUnitTest() {
       expect(traceConfig.getGlobalContext().get('trace_env')).assertEqual('prod');
     });
 
+    it('consoleLogRuleFiltersByMessageSourceAndHiLogMetadata', 0, () => {
+      const loggerConfig = new FTLoggerConfig().setEnableConsoleLog(true,
+        "{ log_source = 'hilog' and tag in ['Network', 'Auth'] and domain = '4660' and message match ['^upload'] }");
+
+      expect(loggerConfig.checkConsoleLogFilter('upload completed', 'hilog', 'Network', '4660'))
+        .assertTrue();
+      expect(loggerConfig.checkConsoleLogFilter('upload completed', 'console'))
+        .assertFalse();
+      expect(loggerConfig.checkConsoleLogFilter('download completed', 'hilog', 'Network', '4660'))
+        .assertFalse();
+    });
+
     it('consoleCaptureIsIndependent', 0, () => {
       const logManager = TrackLogManager.getInstance();
       const config = new FTLoggerConfig().setEnableConsoleLog(true, 'capture:');
@@ -997,6 +1009,24 @@ export default function configUnitTest() {
       FTConsoleLogBridge.console('log', (): void => delegate.log('outside-console-prefix'), 'outside-console-prefix');
       expect(delegate.callCount).assertEqual(2);
       expect(logManager.getQueueStatus().acceptedCount).assertEqual(2);
+    });
+
+    it('consoleCaptureRuleDropsBeforeWorkerQueue', 0, () => {
+      const logManager = TrackLogManager.getInstance();
+      const config = new FTLoggerConfig().setEnableConsoleLog(true,
+        "{ log_source = 'hilog' and tag = 'Network' and domain = '4660' and message match ['^upload'] }");
+      logManager.setLogConfig(config);
+
+      const delegate = new RecordingConsoleDelegate();
+      FTConsoleLogBridge.console('info', (): void => delegate.info('upload ignored'), 'upload ignored');
+      FTConsoleLogBridge.hilog('warn', 4660, 'Network', '%{public}s',
+        (): void => delegate.warn('upload accepted'), 'upload accepted');
+      FTConsoleLogBridge.hilog('warn', 4660, 'Other', '%{public}s',
+        (): void => delegate.warn('upload ignored'), 'upload ignored');
+
+      expect(delegate.callCount).assertEqual(3);
+      expect(logManager.getQueueStatus().acceptedCount).assertEqual(1);
+      expect(logManager.getQueueStatus().filteredCount).assertEqual(2);
     });
 
     it('consoleCaptureSkipsBeforeLogConfig', 0, () => {

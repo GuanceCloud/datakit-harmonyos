@@ -456,6 +456,11 @@ export default class EntryAbility extends UIAbility {
       const logConfig = new FTLoggerConfig()
         .setSamplingRate(Number(this.runtimeConfig.logSamplingRate))  // Shared persisted sampling configuration
         .setEnableCustomLog(true)
+        // Collect every compiler-instrumented console/HiLog call by default.
+        // To keep only selected HiLog records, replace the next line with:
+        // .setEnableConsoleLog(true,
+        //   "{ log_source = 'hilog' and tag = 'Network' and domain = '852011' " +
+        //   "and message match ['^HTTP'] }")
         .setEnableConsoleLog(true)
         // .setLogCacheLimitCount(20000)
         .setPrintCustomLogToConsole(true)

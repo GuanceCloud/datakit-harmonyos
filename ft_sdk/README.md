@@ -161,6 +161,13 @@ hilog.info(0x0000, 'Demo', '%{public}s', '[business] HiLog example')
 
 Run a clean HAP build, install it on a device, and trigger both calls. Their original output must still appear in DevEco/HiLog. After upload, each generated log should have `log_source=console` or `log_source=hilog`; HiLog logs also have `domain` and `tag`. HiLog privacy is preserved: values without `%{public}` are recorded as `<private>`.
 
+The optional second argument of `setEnableConsoleLog` accepts either a legacy message prefix or an automatic-collection allow rule. A plain string retains `startsWith` behavior. A value beginning with `{` uses the DataKit rule grammar: matching logs are retained, while non-matching logs are discarded before entering the SDK queue. Multiple rule blocks have OR semantics. Rules can use `message`, `log_source` (`console` or `hilog`), and—for HiLog—`tag` and `domain`. Log level is configured separately through `setLogLevelFilters(...)`.
+
+```ts
+const loggerConfig = new FTLoggerConfig().setEnableConsoleLog(true,
+  "{ log_source = 'hilog' and tag = 'Network' and message match ['^HTTP'] }")
+```
+
 To verify the switches, repeat with `setEnableConsoleLog(false)` and confirm that no new automatic logs are uploaded. Keep `setEnableCustomLog(true)` and send an `FTLogger` log: it must still upload. Conversely, disabling `setEnableCustomLog(false)` must not affect auto-collected console/HiLog data while `setEnableConsoleLog(true)` is enabled.
 
 If the compiler plugin is absent, automatic console/HiLog collection is unavailable even when `setEnableConsoleLog(true)` is set. The SDK emits one diagnostic when its log configuration is installed; this is intentional parity with Android's plugin prerequisite. There is no runtime interception fallback. Use `FTLogger` for manual logs, or install the plugin for automatic collection.

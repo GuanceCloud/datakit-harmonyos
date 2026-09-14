@@ -1,6 +1,7 @@
 import { Constants } from "./Constants";
-import { CacheDiscard, DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
+import { CacheDiscard, DataType, DBCacheDiscard, DetectFrequency, EnvType, LogCacheDiscard, RUMCacheDiscard, SDKLogLevel, SyncPageSize } from "./enum/Enums";
 import { Status } from "./bean/Status";
+import { FTDataFilter, FTDataFilterValue } from './FTDataFilter';
 import { TraceType } from "./trace/TraceType";
 import { SyncTaskManager } from "./SyncTaskManager";
 import { FTInTakeUrlHandler } from "./http/FTInTakeUrlHandler";
@@ -476,12 +477,14 @@ export class FTLoggerConfig {
    */
   private serviceName: string = Constants.DEFAULT_SERVICE_NAME;
   /**
-   * Console/HiLog capture filter prefix.
+   * Legacy console/HiLog capture prefix. A filter-rule value is compiled into
+   * consoleLogFilter and evaluated before the log enters the worker mailbox.
    *
    * This is intentionally independent from FTLogger custom logs. It mirrors
    * Android's setEnableConsoleLog(enable, prefix) behavior.
    */
   private consoleLogPrefix: string = "";
+  private consoleLogFilter: FTDataFilter | null = null;
   private logCacheLimitCount: number = Constants.DEFAULT_DB_LOG_CACHE_NUM;
   /**
    * Log level filters
@@ -644,10 +647,38 @@ export class FTLoggerConfig {
   }
 
   /**
-   * Check whether a console/HiLog message matches the configured prefix.
+   * Check whether a console/HiLog message matches the configured filter.
+   *
+   * A plain value keeps the legacy `startsWith` prefix behavior. A value whose
+   * first non-whitespace character is `{` is interpreted as a
+   * DataKit-compatible allow rule for auto-collected console/HiLog logs.
+   * A matching rule keeps the log; a non-matching rule drops it before it is
+   * queued. Consecutive rule blocks have OR semantics.
+   */
+  checkConsoleLogFilter(message: string, source: string = 'console', tag: string = '', domain: string = ''): boolean {
+    if (this.consoleLogFilter === null) {
+      return this.consoleLogPrefix === "" || message.startsWith(this.consoleLogPrefix);
+    }
+
+    const tags = new Map<string, FTDataFilterValue>();
+    tags.set('log_source', source);
+    if (tag.length > 0) {
+      tags.set('tag', tag);
+    }
+    if (domain.length > 0) {
+      tags.set('domain', domain);
+    }
+    const fields = new Map<string, FTDataFilterValue>();
+    fields.set(Constants.KEY_MESSAGE, message);
+    return this.consoleLogFilter.matches(DataType.LOG, Constants.FT_LOG_DEFAULT_MEASUREMENT, tags, fields);
+  }
+
+  /**
+   * @deprecated Use checkConsoleLogFilter. This compatibility helper assumes
+   * a console source because it has no HiLog metadata.
    */
   checkConsoleLogPrefix(message: string): boolean {
-    return this.consoleLogPrefix === "" || message.startsWith(this.consoleLogPrefix);
+    return this.checkConsoleLogFilter(message);
   }
 
   /**
@@ -715,14 +746,38 @@ export class FTLoggerConfig {
    * Set whether to enable console log capture
    * Aligned with Android: setEnableConsoleLog(boolean) and setEnableConsoleLog(boolean, String)
    * @param enableConsoleLog Whether to enable console log capture
-   * @param prefix Optional console/HiLog log filter prefix
+   * @param prefix Optional console/HiLog capture filter. A plain string is a
+   * legacy message prefix; a value beginning with `{` is a DataKit-compatible
+   * allow rule. Supported rule keys are `message`, `log_source`, `tag`, and
+   * `domain`. Log level remains controlled exclusively by
+   * setLogLevelFilters(...). For example:
+   *
+   * ```ts
+   * // Keep automatic console and HiLog logs whose message begins with [business].
+   * new FTLoggerConfig().setEnableConsoleLog(true, '[business]');
+   *
+   * // Keep only HiLog records from the Network tag whose rendered message
+   * // begins with HTTP. Other automatic logs are not queued.
+   * new FTLoggerConfig().setEnableConsoleLog(true,
+   *   "{ log_source = 'hilog' and tag = 'Network' and message match ['^HTTP'] }");
+   * ```
    */
   setEnableConsoleLog(enableConsoleLog: boolean, prefix?: string): FTLoggerConfig {
     this.enableConsoleLog = enableConsoleLog;
     if (prefix !== undefined) {
       this.consoleLogPrefix = prefix;
+      this.consoleLogFilter = this.compileConsoleLogFilter(prefix);
     }
     return this;
+  }
+
+  private compileConsoleLogFilter(prefix: string): FTDataFilter | null {
+    if (!prefix.trim().startsWith('{')) {
+      return null;
+    }
+    const filters = new Map<string, Array<string>>();
+    filters.set(FTDataFilter.CATEGORY_LOGGING, [prefix]);
+    return FTDataFilter.compile(filters);
   }
 }
 

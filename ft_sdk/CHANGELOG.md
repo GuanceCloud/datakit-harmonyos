@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.17] - 2026-09-11
-1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled.
+1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled. Its optional `prefix` supports a plain message prefix and DataKit-compatible allow rules for `message`, `log_source`, and HiLog `tag`/`domain`; log level remains configured through `setLogLevelFilters(...)`, and rules are evaluated before automatic logs enter the SDK queue.
 2. Added compiler-plugin-based cold-launch tracking that automatically reports process startup, AbilityStage initialization, first UIAbility creation, and first-frame timing without manual lifecycle calls.
 3. Added `FTRUMConfig.setResourceUrlHandler(...)` to filter automatically tracked RCP, Axios, and NetworkKit Resources without affecting Trace-header injection or manually reported Resources.
 4. Added file-cache governance with a total cache-capacity limit, discard strategies, direct FileStore uploads, and legacy-cache migration.

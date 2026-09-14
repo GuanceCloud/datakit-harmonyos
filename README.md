@@ -150,7 +150,14 @@ const loggerConfig = new FTLoggerConfig()
 FTSDK.installLogConfig(loggerConfig)
 ```
 
-The plugin rewrites direct calls in the application's `src/main/ets` sources without changing files on disk. It supports `console.log/debug/info/warn/error/trace` and `hilog.debug/info/warn/error/fatal` imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`. Original console/HiLog output is retained. The optional prefix filters automatic collection only.
+The plugin rewrites direct calls in the application's `src/main/ets` sources without changing files on disk. It supports `console.log/debug/info/warn/error/trace` and `hilog.debug/info/warn/error/fatal` imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`. Original console/HiLog output is retained.
+
+The optional second argument of `setEnableConsoleLog` accepts either a legacy message prefix or an automatic-collection allow rule. A plain string retains the old `startsWith` behavior. A value beginning with `{` uses the existing DataKit rule grammar; a matching rule is collected and a non-matching rule is discarded before entering the SDK queue. Rule blocks have OR semantics. Available keys are `message`, `log_source` (`console` or `hilog`), and—only for HiLog—`tag` and `domain`. Log level is configured separately through `setLogLevelFilters(...)`.
+
+```ts
+new FTLoggerConfig().setEnableConsoleLog(true,
+  "{ log_source = 'hilog' and tag = 'Network' and message match ['^HTTP'] }")
+```
 
 | Setup | `console` / `hilog` automatic collection | Manual `FTLogger` reporting |
 | --- | --- | --- |

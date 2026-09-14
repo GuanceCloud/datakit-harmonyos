@@ -666,6 +666,21 @@ export class FTDataFilter {
     tags: Map<string, FTDataFilterValue>,
     fields: Map<string, FTDataFilterValue>
   ): boolean {
+    return this.matches(dataType, measurement, tags, fields);
+  }
+
+  /**
+   * Returns whether at least one configured rule matches a data point.
+   *
+   * The normal data-filter path treats a match as a drop. Other collection
+   * paths can reuse the same DataKit-compatible grammar as an allow rule.
+   */
+  matches(
+    dataType: DataType,
+    measurement: string,
+    tags: Map<string, FTDataFilterValue>,
+    fields: Map<string, FTDataFilterValue>
+  ): boolean {
     const category = FTDataFilter.categoryOf(dataType);
     if (category === null) {
       return false;
