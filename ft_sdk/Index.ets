@@ -78,7 +78,10 @@ export { FTColdLaunchBridge } from './src/main/ets/components/monitor/FTColdLaun
 // Trace Manager
 // ============================================================================
 
-export { FTTraceManager } from './src/main/ets/components/trace/FTTraceManager';
+export {
+  FTTraceManager,
+  FTTraceManagerStatus
+} from './src/main/ets/components/trace/FTTraceManager';
 export { FTTraceConfigManager } from './src/main/ets/components/trace/FTTraceConfigManager';
 export {
   FTTraceContext,
@@ -163,7 +166,10 @@ export {
   RCPResourceInterceptor,
   applyFTAxiosTrack,
   createFTRCPTrackConfig,
+  FTRCPSessionConfigurationOptions,
+  FTAxiosTrackRegistration,
 } from './src/main/ets/components/network/FTHttpAutoTrack';
+export { FTAutoTrackOptions } from './src/main/ets/components/network/FTHttpAutoTrackShared';
 
 // ============================================================================
 // Extension Integration Contract

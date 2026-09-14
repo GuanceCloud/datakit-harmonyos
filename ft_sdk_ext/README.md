@@ -43,9 +43,12 @@ ohpm i @guancecloud/ft_sdk_ext
 import {
   createFTHttpInterceptorChain,
   applyFTHttpTrack,
-  applyFTAxiosChainMethodBridge
+  applyFTAxiosChainMethodBridge,
+  FTHttpInterceptorChainOptions
 } from '@guancecloud/ft_sdk_ext/Index'
 ```
+
+`FTHttpInterceptorChainOptions` describes the optional trace/resource switches and additional NetworkKit interceptors accepted by `createFTHttpInterceptorChain` and `applyFTHttpTrack`.
 
 ## Quick Start
 

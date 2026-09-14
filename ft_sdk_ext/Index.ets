@@ -10,5 +10,6 @@ export {
   applyFTAxiosChainMethodBridge,
   applyFTHttpTrack,
   HttpInitialRequestInterceptor,
-  HttpFinalResponseInterceptor
+  HttpFinalResponseInterceptor,
+  FTHttpInterceptorChainOptions
 } from './src/main/ets/components/network/FTHttpAutoTrackExt';

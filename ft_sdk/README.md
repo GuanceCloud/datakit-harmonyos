@@ -472,9 +472,11 @@ Use `DataModifier` for global key-based rules; it is the lower-overhead option. 
 - `FTTraceRequestContext`: current request context passed to custom Trace Header handlers
 - `FTRUMGlobalManager`: RUM reporting API
 - `FTLogger`: custom log API
-- `FTTraceManager`: trace helper API
+- `FTTraceManager` / `FTTraceManagerStatus`: trace helper API and its status shape
 - `FTWebViewHandler`: WebView bridge integration API
 - `createFTRCPTrackConfig` / `createFTRCPInterceptors`: RCP auto-track helpers
+- `FTRCPSessionConfigurationOptions`: options for the RCP configuration factory
+- `applyFTAxiosTrack` / `FTAutoTrackOptions` / `FTAxiosTrackRegistration`: Axios auto-track API, options, and registration result
 - `RCPTraceInterceptor` / `RCPResourceInterceptor`: advanced manual RCP interceptor assembly
 - `DefaultFTTraceInterceptor`: default low-level trace interceptor implementation
 
