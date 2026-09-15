@@ -35,7 +35,7 @@ Short form:
 ohpm i @guancecloud/ft_sdk_ext
 ```
 
-`@guancecloud/ft_sdk_ext` is an extension package built on top of `@guancecloud/ft_sdk`. Keep both package versions aligned when releasing or consuming them together.
+`@guancecloud/ft_sdk_ext` is an extension package built on top of `@guancecloud/ft_sdk`. Install matching versions of both packages together.
 
 ## Import
 
@@ -66,7 +66,7 @@ const interceptorChain = createFTHttpInterceptorChain({
 ## Dependency
 
 - Required: `@guancecloud/ft_sdk`
-- Recommended: keep `@guancecloud/ft_sdk_ext` and `@guancecloud/ft_sdk` aligned on the same release version
+- Recommended: keep `@guancecloud/ft_sdk_ext` and `@guancecloud/ft_sdk` on the same version
 
 ## Requirements
 

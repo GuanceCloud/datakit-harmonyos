@@ -144,7 +144,7 @@ The plugin instruments application code in `src/main/ets` without rewriting sour
 - `hilog.debug`, `info`, `warn`, `error`, and `fatal` when `hilog` is imported from `@ohos.hilog` or `@kit.PerformanceAnalysisKit`
 - Cold-launch boundaries in `AbilityStage`, `UIAbility`, and other Ability `onCreate()` methods; `UIAbility.onWindowStageCreate()` also receives automatic first-frame observation.
 
-Use the same source-release version as the `@guancecloud/ft_sdk` package. The transformed call evaluates its arguments once, queues the Guance log, and keeps the original console/HiLog output.
+Use a plugin version that supports the installed `@guancecloud/ft_sdk` version. The transformed call evaluates its arguments once, queues the Guance log, and keeps the original console/HiLog output.
 
 ### Configure and Verify
 
@@ -218,11 +218,6 @@ RUM must be initialized before the first UI frame. For AppService/push entries,
 initialize it from AbilityStage or the entry itself when those processes also
 need RUM data; a background-only process does not emit `launch_cold` in this
 case.
-
-The repository Demo accepts the non-persistent launch parameter
-`coldStartDelayMs` (capped at 30,000 ms). For example, use `5000` on a cold
-launch to delay `loadContent()` by five seconds; this safely produces a long
-first-UIAbility-creation-to-first-frame/`launch_cold.duration` scenario without changing normal launches.
 
 ## Automatic View Filtering
 
@@ -360,8 +355,6 @@ In primary file mode, one physical-byte account covers payload/aggregate files, 
 Writes and upload commits use checksummed envelopes, fsync, rename and a forward-recovery journal. Stale ACKs do not delete a newer version of the same UUID. Network delivery remains at-least-once: if the server accepted a request before the client committed its ACK, that UUID can be sent again. `FTSDK.clearAllData()` clears persisted aggregates, sync payloads and the failure spool; stop producers before a manual empty-cache check.
 
 Upload selection retains only page-sized candidate metadata plus the selected payloads; it does not load or rewrite the entire queue for an ACK. A record exceeding the configured upload-page byte limit is moved to the bounded quarantine and counted as rejected so it cannot block later valid records. Expired/orphaned upload leases are reclaimed. Directory enumeration and checksummed record scanning are still linear in the number of cached files; benchmark device latency separately from payload-memory bounds.
-
-The demo's **Inspect Unified Cache** button exposes the physical account and recovery status; these diagnostics are internal, not supported package APIs. Device acceptance must separately verify real power-loss recovery, cross-process locking and server-side delivery.
 
 ## Remote Configuration and Runtime Endpoint
 

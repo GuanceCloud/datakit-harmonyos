@@ -1,6 +1,6 @@
 # GuanceCloud SDK HarmonyOS
 
-![](https://img.shields.io/badge/dynamic/json?label=agent&color=orange&query=%24.version&uri=https%3A%2F%2Fraw.githubusercontent.com%2FGuanceCloud%2Fdatakit-harmonyos%2Fmaster%2Fft_sdk%2Foh-package.json5&link=https://github.com/GuanceCloud/datakit-harmonyos) ![](https://img.shields.io/badge/dynamic/json?label=native&color=orange&query=%24.version&uri=https%3A%2F%2Fraw.githubusercontent.com%2FGuanceCloud%2Fdatakit-harmonyos%2Fmaster%2Fft_native%2Foh-package.json5&link=https://github.com/GuanceCloud/datakit-harmonyos) [![Hvigor plugin version](https://img.shields.io/badge/dynamic/json?label=plugin&color=orange&query=%24.version&uri=https%3A%2F%2Fraw.githubusercontent.com%2FGuanceCloud%2Fdatakit-harmonyos%2Fmaster%2Fft_hvigor_plugin%2Fpackage.json)](https://github.com/GuanceCloud/datakit-harmonyos/tree/master/ft_hvigor_plugin) ![](https://img.shields.io/badge/dynamic/json?label=min.sdk&color=green&query=$.mini_sdk&uri=https://static.guance.com/ft-sdk-package/badge/harmonyos/agent/info.json&link=https://github.com/GuanceCloud/datakit-harmonyos)
+![](https://img.shields.io/badge/dynamic/json?label=agent&color=orange&query=$.version&uri=https://static.guance.com/ft-sdk-package/badge/harmonyos/agent/version.json&link=https://github.com/GuanceCloud/datakit-harmonyos) ![](https://img.shields.io/badge/dynamic/json?label=agent&color=orange&query=$.version&uri=https://static.guance.com/ft-sdk-package/badge/harmonyos/native/version.json&link=https://github.com/GuanceCloud/datakit-harmonyos) ![](https://img.shields.io/badge/dynamic/json?label=plugin&color=orange&query=$.version&uri=https://static.guance.com/ft-sdk-package/badge/harmonyos/plugin/version.json&link=https://github.com/GuanceCloud/datakit-harmonyos) ![](https://img.shields.io/badge/dynamic/json?label=min.sdk&color=green&query=$.mini_sdk&uri=https://static.guance.com/ft-sdk-package/badge/harmonyos/agent/info.json&link=https://github.com/GuanceCloud/datakit-harmonyos)
 
 ## Introduction
 
@@ -77,9 +77,9 @@ SDK HARs are configured to build as bytecode HARs. An application that depends o
 
 Bytecode HAR requires HarmonyOS API 12 or later. Keep the dependency aliases identical to the package names in `oh-package.json5`, and use only APIs exported from each package `Index.ets`.
 
-## Release Obfuscation
+## Obfuscation
 
-Release builds enable ArkGuard obfuscation for all SDK HAR modules. The public APIs exported through `Index.ets`, plus the native crash Node-API bridge, are retained so the obfuscated HAR remains compatible with integrating applications. Do not remove the module `consumer-rules.txt` files: Hvigor packages them as `obfuscation.txt` and applies the required keep rules when an integrating application also enables obfuscation.
+SDK HARs support applications that enable ArkGuard obfuscation. The required consumer rules are included automatically, so no SDK-specific keep rules are needed in the integrating application. APIs exported through each package's `Index.ets`, plus the native-crash bridge, remain available in obfuscated release builds.
 
 ## Quick Start
 
@@ -333,44 +333,6 @@ const rumConfig = new FTRUMConfig()
 ```
 
 Add `@guancecloud/ft_native` to the application dependencies so `libftnativecrash.so` is packaged with the app. When crash tracking is enabled, `ft_sdk` initializes the native crash module internally.
-
-## Demo Runtime Configuration
-
-The Demo saves startup configuration in Preferences. Values are resolved in this
-order: explicit startup argument, saved value, then default. Omitted arguments
-reuse saved values; an explicit empty string clears a string setting. Automatic
-upload and sampling settings are also restored on the next launch.
-
-An explicit DataKit URL selects DataKit and clears the saved Dataway URL and
-token. An explicit Dataway URL selects Dataway and can reuse the saved token.
-Do not supply two non-empty endpoints together. Startup logs identify value
-sources and mask the token.
-
-| Startup argument | Default when not saved / behavior |
-| --- | --- |
-| `datakitUrl` | Empty; DataKit upload endpoint |
-| `datawayUrl`, `clientToken` | Empty; Dataway upload endpoint and token |
-| `appId` | Empty; RUM application ID |
-| `webViewUrl`, `traceUrl` | Empty; Demo WebView and trace request targets |
-| `resourceTestUrl` | Empty; each Demo GET button uses its own fallback target |
-| `autoSync` | `true`; persisted automatic upload switch |
-| `logSamplingRate`, `rumSamplingRate`, `errorSamplingRate`, `traceSamplingRate` | `1`; persisted rates from `0` to `1` |
-| `localDataFilterEnabled` | `true`; persisted local filtering switch |
-| `localDataFilterLogRule`, `localDataFilterRumRule` | Empty; persisted filter expressions |
-| `remoteConfigTestEnabled` | `false`; Demo remote-configuration debugging switch |
-| `networkRouteTestEnabled`, `networkRouteTestMode`, `networkRouteTestHost` | `false`, `proxy`, empty; shared network route test configuration |
-
-Boolean startup arguments accept `true`/`false`, `1`/`0`, or `on`/`off`.
-Invalid flags and sampling rates report their parameter name before saving.
-
-## Release Checklist
-
-- Ensure package names, versions, descriptions, author, and license in each module `oh-package.json5` are correct before `ohpm publish`.
-- Keep the published version compliant with semantic versioning.
-- Verify dependency versions stay aligned. In particular, `@guancecloud/ft_sdk_ext` should depend on the same `@guancecloud/ft_sdk` version that is being released.
-- Confirm the public documentation page is ready and matches the published package behavior.
-- Clean local build artifacts such as `build/` and `oh_modules/` from the release package or release branch if they are not meant to be shipped.
-- Recheck compatibility claims against the demo project settings before release.
 
 ## Documentation
 
