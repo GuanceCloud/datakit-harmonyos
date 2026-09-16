@@ -42,8 +42,10 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppLaunchTracker } from "./monitor/FTAppLaunchTracker";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
+import { FTCrashFreeDurationManager } from "./monitor/FTCrashFreeDurationManager";
 import { FTUIBlockManager } from "./monitor/FTUIBlockManager";
 import { Utils } from "./utils/Utils";
+import { AppState } from './rum/enum/RUMEnums';
 import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
 import { FTRemoteDataFilterManager } from './remote/FTRemoteDataFilterManager';
 import { RemoteConfigBean } from './remote/RemoteConfigBean';
@@ -151,12 +153,20 @@ export class FTSDK {
   public static recordAppLaunchApplicationForeground(): void {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationForeground();
+    FTSDK.updateCrashFreeAppState(AppState.RUN);
   }
 
   /** Internal lifecycle bridge for application foreground/background state. */
   public static recordAppLaunchApplicationBackground(): void {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationBackground();
+    FTSDK.updateCrashFreeAppState(AppState.BACKGROUND);
+  }
+
+  private static updateCrashFreeAppState(state: AppState): void {
+    FTCrashFreeDurationManager.getInstance().transition(state).catch((error: Error): void => {
+      FTInnerLogger.w(TAG, `Unable to update crash-free app state: ${error.message}`);
+    });
   }
 
   /** Internal lifecycle bridge for WindowStage SHOWN/ACTIVE. */
@@ -195,6 +205,7 @@ export class FTSDK {
     FTSDK.cachedPACKAGE_UUID = null;
     FTSDK.nativeCrashVersion = null;
     FTSDK.hvigorPluginVersion = null;
+    FTCrashFreeDurationManager.resetInstanceInternal();
   }
 
   private static resetInitializationSeparatorState(): void {
@@ -526,6 +537,7 @@ export class FTSDK {
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
       FTRUMInnerManager.getInstance().initContext(context);
+      FTCrashFreeDurationManager.getInstance().initialize(context, AppState.RUN);
       this.refreshRandomDeviceUUIDContext(config);
       FTSDK.initRemoteDataFilters(config);
     } else {
@@ -790,6 +802,9 @@ export class FTSDK {
 
   static shutDown() {
     FTUIBlockManager.getInstance().release();
+    FTCrashFreeDurationManager.getInstance().shutdown().catch((error: Error): void => {
+      FTInnerLogger.w(TAG, `Unable to persist crash-free duration at shutdown: ${error.message}`);
+    });
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();
