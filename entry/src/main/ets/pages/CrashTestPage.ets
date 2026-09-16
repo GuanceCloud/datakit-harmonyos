@@ -7,6 +7,8 @@ import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
 
 const TAG = 'CrashTestPage';
+const DEFAULT_CPP_CRASH_DELAY_MS = 500;
+const BACKGROUND_CPP_CRASH_DELAY_MS = 12_000;
 
 @Entry
 @Component
@@ -14,6 +16,7 @@ export struct CrashTestPage {
   @State message: string = 'Crash & ANR';
   @State testResults: string = '';
   @State isSDKInitialized: boolean = false;
+  @State useDelayedCppCrash: boolean = false;
 
   aboutToAppear(): void {
     this.checkSDKStatus();
@@ -50,9 +53,15 @@ export struct CrashTestPage {
   }
 
   private triggerCppCrash(): void {
+    const delayMs = this.useDelayedCppCrash ? BACKGROUND_CPP_CRASH_DELAY_MS : DEFAULT_CPP_CRASH_DELAY_MS;
     this.addTestResult('💥 Triggering C++ crash...');
     this.addTestResult('⚠️ WARNING: This will cause a native crash');
-    this.showToast('Triggering C++ crash...');
+    if (this.useDelayedCppCrash) {
+      this.addTestResult('⏱️ C++ crash scheduled in 12 seconds; press Home now to verify background duration');
+      this.showToast('Cpp Crash scheduled in 12 seconds; move app to background');
+    } else {
+      this.showToast('Triggering C++ crash...');
+    }
 
     setTimeout(() => {
       try {
@@ -60,7 +69,7 @@ export struct CrashTestPage {
       } catch (error) {
         this.addTestResult(`❌ C++ crash error: ${JSON.stringify(error as object)}`);
       }
-    }, 500);
+    }, delayMs);
   }
 
   private triggerANR(): void {
@@ -142,6 +151,20 @@ export struct CrashTestPage {
           .onClick(() => {
             this.triggerCppCrash();
           })
+
+        Row() {
+          Toggle({ type: 0, isOn: this.useDelayedCppCrash })
+            .id('cpp-crash-delay-toggle')
+            .onChange((isOn: boolean) => {
+              this.useDelayedCppCrash = isOn;
+              this.addTestResult(`Cpp Crash 12-second delay: ${isOn ? 'ON' : 'OFF'}`);
+            })
+          Text('Delay Cpp Crash by 12 seconds (background test)')
+            .fontSize(14)
+            .margin({ left: 10 })
+        }
+        .width('100%')
+        .padding({ left: 4, right: 4, bottom: 10 })
 
         Button('ANR (10s)')
           .width('100%')
