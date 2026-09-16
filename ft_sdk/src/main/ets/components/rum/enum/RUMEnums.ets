@@ -215,8 +215,12 @@ export class RUMEnumUtils {
         return ErrorType.CONSOLE;
       case "js_crash":
         return ErrorType.JS_CRASH;
+      case "native_crash":
+        return ErrorType.NATIVE_CRASH;
       case "anr_crash":
         return ErrorType.ANR_CRASH;
+      case "anr_error":
+        return ErrorType.ANR_ERROR;
       default:
         return ErrorType.CUSTOM;
     }
@@ -317,8 +321,21 @@ export class RUMEnumUtils {
       ErrorType.JS_CRASH,
       ErrorType.NATIVE_CRASH,
       ErrorType.ANR_CRASH,
+      ErrorType.ANR_ERROR,
       ErrorType.CUSTOM
     ];
+  }
+
+  /**
+   * Crash-free duration belongs only to Error types representing a process
+   * crash/freeze. Custom, network and ordinary ANR error reports are errors,
+   * but must not reset the crash-free interval.
+   */
+  static isCrashErrorType(type: string | ErrorType): boolean {
+    const value = String(type).toLowerCase();
+    return value === ErrorType.JS_CRASH ||
+      value === ErrorType.NATIVE_CRASH ||
+      value === ErrorType.ANR_CRASH;
   }
   
   /**

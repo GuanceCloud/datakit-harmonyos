@@ -953,6 +953,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const customNested = new Object() as SDKCompletedActionPropertyTestValue;
       customNested.nested = 'yes';
       errorProperty['custom_nested'] = customNested;
+      const foregroundCrashFree = new Object() as SDKCompletedActionPropertyTestValue;
+      foregroundCrashFree.value = 123;
+      errorProperty['foreground_crash_free_duration'] = foregroundCrashFree;
+      const backgroundCrashFree = new Object() as SDKCompletedActionPropertyTestValue;
+      backgroundCrashFree.value = 456;
+      errorProperty['background_crash_free_duration'] = backgroundCrashFree;
       const errorCommand = new Object() as SDKRumErrorCommandDTO;
       errorCommand.context = context;
       errorCommand.log = 'stack-line';
@@ -990,6 +996,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('locale=zh-Hans-CN')).assertTrue();
       expect(line.includes('custom_error="normalized"')).assertTrue();
       expect(line.includes('custom_nested=')).assertTrue();
+      expect(line.includes('foreground_crash_free_duration=123i')).assertTrue();
+      expect(line.includes('background_crash_free_duration=456i')).assertTrue();
       expect(line.includes('stack-line')).assertTrue();
       expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
 
@@ -1023,6 +1031,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         expect(events[0].customDataType).assertEqual('rum_app_error_sampled');
         expect(events[0].tags?.['memory_total']).assertEqual('8GB');
         expect(events[0].fields?.['custom_error']).assertEqual('normalized');
+        expect(events[0].fields?.['foreground_crash_free_duration']).assertEqual('123');
+        expect(events[0].fields?.['background_crash_free_duration']).assertEqual('456');
         expect(events[1].uuid).assertEqual('later-raw-error-uuid');
         expect(events[1].time).assertEqual(700);
         const deltas = getPayloadArray(rawResponse.payload, 'deltas') as Object as SDKRumCounterDeltaDTO[];

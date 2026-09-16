@@ -4,7 +4,7 @@ import {
   FTCrashFreeDurationManager,
   FTCrashFreeStorage
 } from '../../main/ets/components/monitor/FTCrashFreeDurationManager';
-import { AppState } from '../../main/ets/components/rum/enum/RUMEnums';
+import { AppState, ErrorType, RUMEnumUtils } from '../../main/ets/components/rum/enum/RUMEnums';
 
 class FixedCrashFreeClock implements FTCrashFreeClock {
   public uptimeNs: number = 100;
@@ -179,6 +179,18 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       }
       const duplicate = await restartManager.prepareCrashFreeDuration(AppState.RUN, true, 1000080, 'same-native-id');
       expect(duplicate === null).assertTrue();
+    });
+
+    it('onlyCrashErrorTypesAreEligibleForCrashFreeDuration', 0, () => {
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.JS_CRASH)).assertTrue();
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.NATIVE_CRASH)).assertTrue();
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.ANR_CRASH)).assertTrue();
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.ANR_ERROR)).assertFalse();
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.NETWORK)).assertFalse();
+      expect(RUMEnumUtils.isCrashErrorType(ErrorType.CUSTOM)).assertFalse();
+      expect(RUMEnumUtils.parseErrorType('native_crash')).assertEqual(ErrorType.NATIVE_CRASH);
+      expect(RUMEnumUtils.parseErrorType('anr_error')).assertEqual(ErrorType.ANR_ERROR);
+      expect(RUMEnumUtils.getAllErrorTypes().includes(ErrorType.ANR_ERROR)).assertTrue();
     });
   });
 }

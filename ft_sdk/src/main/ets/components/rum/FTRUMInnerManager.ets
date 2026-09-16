@@ -11,6 +11,7 @@ import {
   ErrorSource, 
   AppState, 
   CollectType,
+  RUMEnumUtils,
 } from './enum/RUMEnums';
 import FTTrackInner from '../FTTrackInner';
 import {
@@ -3125,7 +3126,7 @@ export class FTRUMInnerManager {
   }
 
   private isCrashFreeDurationError(errorType: string): boolean {
-    return errorType === ErrorType.JS_CRASH.toString() || errorType === ErrorType.NATIVE_CRASH.toString();
+    return RUMEnumUtils.isCrashErrorType(errorType);
   }
 
   private async prepareCrashFreeDuration(
@@ -3164,6 +3165,22 @@ export class FTRUMInnerManager {
     merged[Constants.KEY_RUM_ERROR_BACKGROUND_CRASH_FREE_DURATION] =
       this.createCrashDurationProperty(duration.backgroundNs);
     return merged;
+  }
+
+  /** `is_pre_crash` controls recovery only and must not become an Error field. */
+  private stripCrashRecoveryProperty(property: Record<string, object> | null): Record<string, object> | null {
+    if (property === null || property[IS_PRE_CRASH] === undefined) {
+      return property;
+    }
+    const result: Record<string, object> = {};
+    const keys = FTRUMInnerManager.getObjectKeys(property);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
+      if (key !== IS_PRE_CRASH) {
+        result[key] = property[key];
+      }
+    }
+    return result;
   }
 
   private createCrashDurationProperty(value: number): object {
@@ -3395,6 +3412,8 @@ export class FTRUMInnerManager {
           SyncTaskManager.getInstance().setErrorTimeLine(actualDateline, null);
 	        }
 	      }
+
+      effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
 
 	      if (actualCallBack === null && crashFreeDuration === undefined) {
 	        const context = this.createCurrentResourceContext();
