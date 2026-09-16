@@ -139,6 +139,11 @@ export function parseANREventInWorker(payload: SDKANRParseRequestDTO): SDKANRPar
   copyProperty(properties, 'bundle_name', params['bundle_name']);
   copyProperty(properties, 'bundle_version', params['bundle_version']);
   copyProperty(properties, 'foreground', params['foreground']);
+  // APP_FREEZE can arrive after the crashed process has restarted. Preserve
+  // the system event's occurrence time and id so crash-free recovery can use
+  // the predecessor process snapshot instead of the new process interval.
+  copyProperty(properties, 'timestamp', params['time']);
+  copyProperty(properties, 'uuid', params['uuid']);
 
   return {
     stackTrace: output.value,

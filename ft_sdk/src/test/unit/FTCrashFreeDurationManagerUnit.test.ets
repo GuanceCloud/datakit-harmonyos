@@ -73,7 +73,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
           foregroundNs: 30,
           backgroundNs: 20,
           state: AppState.BACKGROUND,
-          stateStartUptimeNs: 100,
+          stateStartUptimeNs: 150,
           observedUptimeNs: 150,
           observedWallClockMs: 1000050,
           bootMarkerMs: 1000000,
@@ -179,6 +179,98 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       }
       const duplicate = await restartManager.prepareCrashFreeDuration(AppState.RUN, true, 1000080, 'same-native-id');
       expect(duplicate === null).assertTrue();
+    });
+
+    it('usesPredecessorSnapshotForHistoricalSystemFreezeWithoutNativeMarker', 0, async () => {
+      const clock = new FixedCrashFreeClock();
+      clock.uptimeNs = 200;
+      clock.wallClockMs = 1000100;
+      const storage = new MemoryCrashFreeStorage();
+      storage.value = JSON.stringify({
+        version: 1,
+        current: {
+          foregroundNs: 0,
+          backgroundNs: 40,
+          state: AppState.BACKGROUND,
+          stateStartUptimeNs: 150,
+          observedUptimeNs: 150,
+          observedWallClockMs: 1000050,
+          bootMarkerMs: 1000000,
+          runId: 'freeze-process'
+        },
+        pending: null,
+        reportedNativeCrashIds: []
+      });
+      const manager = new FTCrashFreeDurationManager(clock);
+      await manager.initializeWithStorage(storage, AppState.RUN);
+
+      // APP_FREEZE is delivered after restart. The original event time is
+      // before this process started, even though it lacks is_pre_crash.
+      const duration = await manager.prepareCrashFreeDuration(
+        AppState.BACKGROUND,
+        false,
+        1000080,
+        'historical-freeze-id'
+      );
+      expect(duration !== null).assertTrue();
+      if (duration) {
+        expect(duration.isPreCrash).assertTrue();
+        expect(duration.foregroundNs).assertEqual(0);
+        expect(duration.backgroundNs).assertEqual(30000040);
+        await manager.confirmCrashReported(duration);
+      }
+      const duplicate = await manager.prepareCrashFreeDuration(
+        AppState.BACKGROUND,
+        false,
+        1000080,
+        'historical-freeze-id'
+      );
+      expect(duplicate === null).assertTrue();
+    });
+
+    it('selectsTheNewestPredecessorMatchingEachRecoveredCrashTime', 0, async () => {
+      const clock = new FixedCrashFreeClock();
+      clock.uptimeNs = 500;
+      clock.wallClockMs = 1000400;
+      const storage = new MemoryCrashFreeStorage();
+      storage.value = JSON.stringify({
+        version: 1,
+        current: {
+          foregroundNs: 30,
+          backgroundNs: 0,
+          state: AppState.RUN,
+          stateStartUptimeNs: 300,
+          observedUptimeNs: 300,
+          observedWallClockMs: 1000300,
+          bootMarkerMs: 1000000,
+          runId: 'newer-process'
+        },
+        pending: {
+          foregroundNs: 20,
+          backgroundNs: 0,
+          state: AppState.RUN,
+          stateStartUptimeNs: 100,
+          observedUptimeNs: 100,
+          observedWallClockMs: 1000100,
+          bootMarkerMs: 1000000,
+          runId: 'older-process'
+        },
+        reportedNativeCrashIds: []
+      });
+      const manager = new FTCrashFreeDurationManager(clock);
+      await manager.initializeWithStorage(storage, AppState.RUN);
+
+      const olderDuration = await manager.prepareCrashFreeDuration(AppState.RUN, true, 1000120, 'older-id');
+      expect(olderDuration !== null).assertTrue();
+      if (olderDuration) {
+        expect(olderDuration.foregroundNs).assertEqual(20000020);
+        await manager.confirmCrashReported(olderDuration);
+      }
+      const newerDuration = await manager.prepareCrashFreeDuration(AppState.RUN, true, 1000350, 'newer-id');
+      expect(newerDuration !== null).assertTrue();
+      if (newerDuration) {
+        expect(newerDuration.foregroundNs).assertEqual(50000030);
+      }
     });
 
     it('onlyCrashErrorTypesAreEligibleForCrashFreeDuration', 0, () => {

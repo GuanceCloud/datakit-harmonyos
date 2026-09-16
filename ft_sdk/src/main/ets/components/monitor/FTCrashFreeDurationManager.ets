@@ -10,6 +10,7 @@ const SNAPSHOT_SCHEMA_VERSION = 1;
 const BOOT_MARKER_TOLERANCE_MS = 250;
 const MAX_RECOVERED_TAIL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_REPORTED_NATIVE_CRASH_IDS = 32;
+const MAX_PENDING_CRASH_SNAPSHOTS = 4;
 
 /** One clock origin is used for every in-process duration boundary. */
 export interface FTCrashFreeClock {
@@ -29,6 +30,8 @@ export interface FTCrashFreeDuration {
   reportToken: string;
   isPreCrash: boolean;
   nativeCrashId: string;
+  /** Internal acknowledgement key; never serialized into Error data. */
+  recoveredSnapshotRunId: string;
 }
 
 export interface FTCrashFreeSnapshot {
@@ -45,7 +48,10 @@ export interface FTCrashFreeSnapshot {
 interface FTCrashFreePersistedEnvelope {
   version: number;
   current: FTCrashFreeSnapshot | null;
+  /** Legacy single recovery snapshot retained for forward/backward compatibility. */
   pending: FTCrashFreeSnapshot | null;
+  /** Ordered recovery candidates, newest first. */
+  pendingSnapshots?: FTCrashFreeSnapshot[];
   reportedNativeCrashIds: string[];
 }
 
@@ -94,10 +100,9 @@ class PreferenceCrashFreeStorage implements FTCrashFreeStorage {
 /**
  * Process-wide foreground/background crash-free timer.
  *
- * The persisted payload contains both the currently-running interval and one
- * pending interval from the preceding process. A native crash is reported
- * after the application restarts, so retaining the pending interval until the
- * Error row is durably stored is essential.
+ * Native crashes and historical system-freeze events are reported after the
+ * application restarts. The persisted payload retains a small, ordered set of
+ * predecessor snapshots until their corresponding Error rows are durable.
  */
 export class FTCrashFreeDurationManager {
   private static instance: FTCrashFreeDurationManager | null = null;
@@ -105,8 +110,9 @@ export class FTCrashFreeDurationManager {
   private readonly clock: FTCrashFreeClock;
   private storage: FTCrashFreeStorage | null = null;
   private current: FTCrashFreeSnapshot | null = null;
-  private pending: FTCrashFreeSnapshot | null = null;
+  private pendingSnapshots: FTCrashFreeSnapshot[] = [];
   private reportedNativeCrashIds: string[] = [];
+  private currentProcessStartedWallClockMs: number = 0;
   private initialized: boolean = false;
   private readyPromise: Promise<void> = Promise.resolve();
   private operationChain: Promise<void> = Promise.resolve();
@@ -158,27 +164,12 @@ export class FTCrashFreeDurationManager {
 
     const nowUptimeNs = this.clock.nowUptimeNs();
     const nowWallClockMs = this.clock.nowWallClockMs();
-    const validCurrent = envelope && this.isSnapshotCompatible(envelope.current, nowUptimeNs, nowWallClockMs)
-      ? envelope.current
-      : null;
-    const validPending = envelope && this.isSnapshotCompatible(envelope.pending, nowUptimeNs, nowWallClockMs)
-      ? envelope.pending
-      : null;
-
-    if (envelope && envelope.current !== null && validCurrent === null) {
-      FTInnerLogger.w(TAG, 'Discarded incompatible previous-process crash-free snapshot');
-    }
-    if (envelope && envelope.pending !== null && validPending === null) {
-      FTInnerLogger.w(TAG, 'Discarded incompatible pending crash-free snapshot');
-    }
-
-    // Never replace an unacknowledged pending crash with a later startup.
-    // This makes a repeated recovery of the same native crash id idempotent.
-    this.pending = validPending || validCurrent;
+    this.pendingSnapshots = this.collectCompatibleRecoverySnapshots(envelope, nowUptimeNs, nowWallClockMs);
     this.reportedNativeCrashIds = envelope ? this.sanitizeCrashIds(envelope.reportedNativeCrashIds) : [];
+    this.currentProcessStartedWallClockMs = this.nonNegativeInteger(nowWallClockMs);
     this.current = this.createFreshSnapshot(initialState, nowUptimeNs, nowWallClockMs);
     await this.persistSnapshot();
-    FTInnerLogger.d(TAG, `Crash-free timer initialized: recoveredPending=${this.pending !== null}`);
+    FTInnerLogger.d(TAG, `Crash-free timer initialized: recoveredPending=${this.pendingSnapshots.length > 0}`);
   }
 
   /** Records an application-level foreground/background transition. */
@@ -225,31 +216,34 @@ export class FTCrashFreeDurationManager {
       await this.readyPromise;
       const normalizedState = this.normalizeState(crashState);
       const normalizedCrashId = nativeCrashId || '';
-      if (isPreCrash && normalizedCrashId.length > 0 && this.reportedNativeCrashIds.includes(normalizedCrashId)) {
+      const isRecoveredCrash = isPreCrash || this.isCrashFromPreviousProcess(crashWallClockMs);
+      if (isRecoveredCrash && normalizedCrashId.length > 0 && this.reportedNativeCrashIds.includes(normalizedCrashId)) {
         return null;
       }
 
-      let source: FTCrashFreeSnapshot | null = isPreCrash ? this.pending : this.current;
+      let source: FTCrashFreeSnapshot | null = isRecoveredCrash ?
+        this.selectRecoverySnapshot(crashWallClockMs) : this.current;
       if (!source) {
-        // Native recovery happens in a new process. Its fresh interval has no
+        // Recovery happens in a new process. Its fresh interval has no
         // relationship to the crashed process and must never be reported as
         // that crash's stable-running duration.
-        if (isPreCrash) {
+        if (isRecoveredCrash) {
           this.reportSequence++;
-          FTInnerLogger.w(TAG, 'Native crash-free snapshot unavailable; reporting zero durations');
+          FTInnerLogger.w(TAG, 'Recovered crash-free snapshot unavailable; reporting zero durations');
           return {
             foregroundNs: 0,
             backgroundNs: 0,
             reportToken: `pre:missing:${this.reportSequence}`,
             isPreCrash: true,
-            nativeCrashId: normalizedCrashId
+            nativeCrashId: normalizedCrashId,
+            recoveredSnapshotRunId: ''
           };
         }
         this.ensureCurrentState(normalizedState);
         source = this.current;
       }
       const result = this.copySnapshot(source as FTCrashFreeSnapshot);
-      if (isPreCrash) {
+      if (isRecoveredCrash) {
         const recoveredEndUptimeNs = this.resolveRecoveredCrashUptime(result, crashWallClockMs);
         this.addTail(result, recoveredEndUptimeNs, normalizedState);
       } else {
@@ -260,9 +254,10 @@ export class FTCrashFreeDurationManager {
       return {
         foregroundNs: this.nonNegativeInteger(result.foregroundNs),
         backgroundNs: this.nonNegativeInteger(result.backgroundNs),
-        reportToken: `${isPreCrash ? 'pre' : 'current'}:${result.runId}:${this.reportSequence}`,
-        isPreCrash,
-        nativeCrashId: normalizedCrashId
+        reportToken: `${isRecoveredCrash ? 'pre' : 'current'}:${result.runId}:${this.reportSequence}`,
+        isPreCrash: isRecoveredCrash,
+        nativeCrashId: normalizedCrashId,
+        recoveredSnapshotRunId: isRecoveredCrash ? result.runId : ''
       };
     });
   }
@@ -281,7 +276,7 @@ export class FTCrashFreeDurationManager {
             this.reportedNativeCrashIds = this.sanitizeCrashIds(this.reportedNativeCrashIds);
           }
         }
-        this.pending = null;
+        this.removeRecoverySnapshot(duration.recoveredSnapshotRunId);
       } else {
         const state = this.current ? this.current.state : AppState.RUN;
         this.current = this.createFreshSnapshot(state, this.clock.nowUptimeNs(), this.clock.nowWallClockMs());
@@ -310,7 +305,9 @@ export class FTCrashFreeDurationManager {
   }
 
   private startFreshState(initialState: AppState): void {
-    this.current = this.createFreshSnapshot(initialState, this.clock.nowUptimeNs(), this.clock.nowWallClockMs());
+    const nowWallClockMs = this.clock.nowWallClockMs();
+    this.currentProcessStartedWallClockMs = this.nonNegativeInteger(nowWallClockMs);
+    this.current = this.createFreshSnapshot(initialState, this.clock.nowUptimeNs(), nowWallClockMs);
   }
 
   private ensureCurrentState(initialState: AppState): void {
@@ -384,7 +381,8 @@ export class FTCrashFreeDurationManager {
     const envelope: FTCrashFreePersistedEnvelope = {
       version: SNAPSHOT_SCHEMA_VERSION,
       current: this.current ? this.copySnapshot(this.current) : null,
-      pending: this.pending ? this.copySnapshot(this.pending) : null,
+      pending: this.pendingSnapshots.length > 0 ? this.copySnapshot(this.pendingSnapshots[0]) : null,
+      pendingSnapshots: this.copySnapshots(this.pendingSnapshots),
       reportedNativeCrashIds: this.sanitizeCrashIds(this.reportedNativeCrashIds)
     };
     try {
@@ -407,6 +405,7 @@ export class FTCrashFreeDurationManager {
         version: SNAPSHOT_SCHEMA_VERSION,
         current: decoded.current || null,
         pending: decoded.pending || null,
+        pendingSnapshots: Array.isArray(decoded.pendingSnapshots) ? decoded.pendingSnapshots : [],
         reportedNativeCrashIds: this.sanitizeCrashIds(decoded.reportedNativeCrashIds || [])
       };
     } catch (error) {
@@ -425,6 +424,78 @@ export class FTCrashFreeDurationManager {
     }
     const currentBootMarker = this.calculateBootMarkerMs(nowUptimeNs, nowWallClockMs);
     return Math.abs(currentBootMarker - snapshot.bootMarkerMs) <= BOOT_MARKER_TOLERANCE_MS;
+  }
+
+  /**
+   * Keeps every valid predecessor available until its own Error is confirmed.
+   * Selecting by event time avoids a stale failed recovery shadowing a newer
+   * crash when two processes terminate before either report can be persisted.
+   */
+  private collectCompatibleRecoverySnapshots(
+    envelope: FTCrashFreePersistedEnvelope | null,
+    nowUptimeNs: number,
+    nowWallClockMs: number
+  ): FTCrashFreeSnapshot[] {
+    if (envelope === null) {
+      return [];
+    }
+    const candidates: FTCrashFreeSnapshot[] = [];
+    const pendingSnapshots = envelope.pendingSnapshots || [];
+    for (let index = 0; index < pendingSnapshots.length; index++) {
+      candidates.push(pendingSnapshots[index]);
+    }
+    if (envelope.pending !== null) {
+      candidates.push(envelope.pending);
+    }
+    if (envelope.current !== null) {
+      candidates.push(envelope.current);
+    }
+
+    const compatible: FTCrashFreeSnapshot[] = [];
+    for (let index = 0; index < candidates.length; index++) {
+      const snapshot = candidates[index];
+      if (!this.isSnapshotCompatible(snapshot, nowUptimeNs, nowWallClockMs)) {
+        FTInnerLogger.w(TAG, 'Discarded incompatible previous-process crash-free snapshot');
+        continue;
+      }
+      if (!compatible.some((item: FTCrashFreeSnapshot): boolean => item.runId === snapshot.runId)) {
+        compatible.push(this.copySnapshot(snapshot));
+      }
+    }
+    compatible.sort((left: FTCrashFreeSnapshot, right: FTCrashFreeSnapshot): number =>
+      right.observedWallClockMs - left.observedWallClockMs
+    );
+    return compatible.slice(0, MAX_PENDING_CRASH_SNAPSHOTS);
+  }
+
+  private isCrashFromPreviousProcess(crashWallClockMs: number): boolean {
+    const safeCrashWallClockMs = this.nonNegativeInteger(crashWallClockMs);
+    return safeCrashWallClockMs > 0 && this.currentProcessStartedWallClockMs > 0 &&
+      safeCrashWallClockMs < this.currentProcessStartedWallClockMs;
+  }
+
+  private selectRecoverySnapshot(crashWallClockMs: number): FTCrashFreeSnapshot | null {
+    if (this.pendingSnapshots.length === 0) {
+      return null;
+    }
+    const safeCrashWallClockMs = this.nonNegativeInteger(crashWallClockMs);
+    if (safeCrashWallClockMs <= 0) {
+      return this.pendingSnapshots[0];
+    }
+    for (let index = 0; index < this.pendingSnapshots.length; index++) {
+      const snapshot = this.pendingSnapshots[index];
+      if (snapshot.observedWallClockMs <= safeCrashWallClockMs) {
+        return snapshot;
+      }
+    }
+    return null;
+  }
+
+  private removeRecoverySnapshot(runId: string): void {
+    if (runId.length === 0) {
+      return;
+    }
+    this.pendingSnapshots = this.pendingSnapshots.filter((snapshot: FTCrashFreeSnapshot): boolean => snapshot.runId !== runId);
   }
 
   private isDurationState(state: AppState): boolean {
@@ -450,6 +521,14 @@ export class FTCrashFreeDurationManager {
       bootMarkerMs: snapshot.bootMarkerMs,
       runId: snapshot.runId
     };
+  }
+
+  private copySnapshots(snapshots: FTCrashFreeSnapshot[]): FTCrashFreeSnapshot[] {
+    const copies: FTCrashFreeSnapshot[] = [];
+    for (let index = 0; index < snapshots.length; index++) {
+      copies.push(this.copySnapshot(snapshots[index]));
+    }
+    return copies;
   }
 
   private sanitizeCrashIds(ids: string[]): string[] {

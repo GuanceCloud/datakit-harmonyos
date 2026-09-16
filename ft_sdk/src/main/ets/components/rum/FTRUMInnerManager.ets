@@ -3389,15 +3389,14 @@ export class FTRUMInnerManager {
       const crashFreeDuration = await this.prepareCrashFreeDuration(errorType, state, effectiveProperty);
       // A native crash id is acknowledged only after its Error data is stored.
       // Suppress an already-acknowledged crash file before it reaches counters.
-      if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType) &&
-        this.readCrashPropertyText(effectiveProperty, IS_PRE_CRASH) === 'true') {
+      if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType)) {
         return;
       }
       if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
         effectiveProperty = this.appendCrashFreeDurationFields(effectiveProperty, crashFreeDuration);
       }
       
-	      if (this.readCrashPropertyText(actualProperty, IS_PRE_CRASH) !== "true") {
+	      if (crashFreeDuration === undefined || crashFreeDuration === null || !crashFreeDuration.isPreCrash) {
 	        // Exclude the scenario of reporting the last native crash error
 	        // Set error time line for error sampling (aligned with Android)
         // This enables collection of data within 1 minute before and after the error

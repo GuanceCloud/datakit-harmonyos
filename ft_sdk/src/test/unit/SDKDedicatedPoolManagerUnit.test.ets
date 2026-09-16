@@ -120,6 +120,8 @@ interface SDKANRTestParams {
   foreground: boolean;
   process_name: string;
   threads: SDKANRTestThread[];
+  time?: number;
+  uuid?: string;
 }
 
 function createRumWorkerLineContext(): SDKLineProtocolContextDTO {
@@ -352,7 +354,9 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         freeze_type: 'THREAD_BLOCK_6S',
         foreground: true,
         process_name: 'demo',
-        threads: [thread]
+        threads: [thread],
+        time: 9988,
+        uuid: 'freeze-event-id'
       };
       const payload: SDKANRParseRequestDTO = {
         eventName: 'APP_FREEZE',
@@ -365,6 +369,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(result.stackTrace.includes('App freeze detected: APP_FREEZE')).assertTrue();
       expect(result.stackTrace.includes('onClick (Index.ets:12:3)')).assertTrue();
       expect(result.properties['freeze_type']).assertEqual('THREAD_BLOCK_6S');
+      expect(result.properties['timestamp']).assertEqual('9988');
+      expect(result.properties['uuid']).assertEqual('freeze-event-id');
       expect(result.foreground).assertTrue();
       expect(result.dateline).assertEqual(9988);
       expect(result.filesRead).assertEqual(0);
