@@ -1630,7 +1630,8 @@ class FTTrackInner {
     tags: SDKStringRecord,
     fields: SDKStringRecord,
     callBack: RunnerCompleteCallBack | null = null,
-    collectTypeParam: CollectType | null = null
+    collectTypeParam: CollectType | null = null,
+    draftUuid?: string
   ): void {
     if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
       const errorMessage = this.readStringRecordValue(fields, Constants.KEY_RUM_ERROR_MESSAGE) || 'unknown';
@@ -1641,7 +1642,7 @@ class FTTrackInner {
 
     const sessionId = this.readStringRecordValue(tags, Constants.KEY_RUM_SESSION_ID);
     if (!sessionId && (collectTypeParam === null || collectTypeParam === undefined)) {
-      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack, draftUuid);
       return;
     }
 
@@ -1650,7 +1651,7 @@ class FTTrackInner {
       : FTRUMInnerManager.getInstance().checkSessionWillCollect(sessionId);
 
     if (collectType === CollectType.ALL) {
-      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack);
+      this.syncDataBackgroundRecords(DataType.RUM_APP, time, measurement, tags, fields, callBack, draftUuid);
     } else if (collectType === CollectType.SAMPLING) {
       this.syncDataBackgroundWithErrorSampledRecords(
         DataType.RUM_APP,
@@ -1659,7 +1660,8 @@ class FTTrackInner {
         measurement,
         tags,
         fields,
-        callBack
+        callBack,
+        draftUuid
       );
     } else {
       FTInnerLogger.w(TAG,
@@ -2116,7 +2118,8 @@ class FTTrackInner {
     measurement: string,
     tags: SDKStringRecord,
     fields: SDKStringRecord,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     this.submitRumWorkerDraftRecordTask(
       'data.prepare.errorSampled',
@@ -2127,7 +2130,8 @@ class FTTrackInner {
       tags,
       fields,
       callBack,
-      true
+      true,
+      draftUuid
     );
   }
 
@@ -2166,10 +2170,22 @@ class FTTrackInner {
     measurement: string,
     tags: SDKStringRecord,
     fields: SDKStringRecord,
-    callBack: RunnerCompleteCallBack | null = null
+    callBack: RunnerCompleteCallBack | null = null,
+    draftUuid?: string
   ): void {
     const taskName = `data.prepare:${measurement}`;
-    this.submitRumWorkerDraftRecordTask(taskName, dataType, undefined, time, measurement, tags, fields, callBack, false);
+    this.submitRumWorkerDraftRecordTask(
+      taskName,
+      dataType,
+      undefined,
+      time,
+      measurement,
+      tags,
+      fields,
+      callBack,
+      false,
+      draftUuid
+    );
   }
 
   public rumInputFromWorker(

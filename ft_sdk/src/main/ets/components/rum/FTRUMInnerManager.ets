@@ -64,6 +64,7 @@ import { IS_PRE_CRASH } from '../FTExceptionHandler';
 import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { DataType } from '../enum/Enums';
+import { FTCrashFreeDuration, FTCrashFreeDurationManager } from '../monitor/FTCrashFreeDurationManager';
 
 /**
  * Property wrapper interface for error properties
@@ -3123,6 +3124,70 @@ export class FTRUMInnerManager {
     return record;
   }
 
+  private isCrashFreeDurationError(errorType: string): boolean {
+    return errorType === ErrorType.JS_CRASH.toString() || errorType === ErrorType.NATIVE_CRASH.toString();
+  }
+
+  private async prepareCrashFreeDuration(
+    errorType: string,
+    state: AppState,
+    property: Record<string, object> | null
+  ): Promise<FTCrashFreeDuration | null | undefined> {
+    if (!this.isCrashFreeDurationError(errorType)) {
+      return undefined;
+    }
+    const isPreCrash = this.readCrashPropertyText(property, IS_PRE_CRASH) === 'true';
+    const crashWallClockMs = this.readCrashPropertyNumber(property, Constants.KEY_TIMESTAMP);
+    const nativeCrashId = this.readCrashPropertyText(property, Constants.KEY_UUID);
+    return await FTCrashFreeDurationManager.getInstance().prepareCrashFreeDuration(
+      state,
+      isPreCrash,
+      crashWallClockMs,
+      nativeCrashId
+    );
+  }
+
+  private appendCrashFreeDurationFields(
+    property: Record<string, object> | null,
+    duration: FTCrashFreeDuration
+  ): Record<string, object> {
+    const merged: Record<string, object> = {};
+    if (property !== null) {
+      const keys = FTRUMInnerManager.getObjectKeys(property);
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index];
+        merged[key] = property[key];
+      }
+    }
+    merged[Constants.KEY_RUM_ERROR_FOREGROUND_CRASH_FREE_DURATION] =
+      this.createCrashDurationProperty(duration.foregroundNs);
+    merged[Constants.KEY_RUM_ERROR_BACKGROUND_CRASH_FREE_DURATION] =
+      this.createCrashDurationProperty(duration.backgroundNs);
+    return merged;
+  }
+
+  private createCrashDurationProperty(value: number): object {
+    const wrapper = new Object() as PropertyWrapper;
+    wrapper.value = Math.max(0, Math.floor(value));
+    return wrapper as object;
+  }
+
+  private readCrashPropertyText(property: Record<string, object> | null, key: string): string {
+    if (property === null || property[key] === undefined || property[key] === null) {
+      return '';
+    }
+    const value = property[key] as PropertyWrapper;
+    if (value && value.value !== undefined && value.value !== null) {
+      return String(value.value);
+    }
+    return String(property[key]);
+  }
+
+  private readCrashPropertyNumber(property: Record<string, object> | null, key: string): number {
+    const numericValue = Number.parseFloat(this.readCrashPropertyText(property, key));
+    return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : 0;
+  }
+
   /** Strip ArkTS class prototypes at the Worker transfer boundary only. */
   private toRumPropertyTransferValue(value: object): object {
     try {
@@ -3265,7 +3330,8 @@ export class FTRUMInnerManager {
     state: AppState, 
     property?: Record<string, object> | null, 
     dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string
   ): Promise<void> {
     const actualDateline = dateline !== undefined ? dateline : Utils.getCurrentNanoTime();
     const actualProperty = property !== undefined ? property : null;
@@ -3302,8 +3368,19 @@ export class FTRUMInnerManager {
         }
         effectiveProperty = mergedProperty;
       }
+
+      const crashFreeDuration = await this.prepareCrashFreeDuration(errorType, state, effectiveProperty);
+      // A native crash id is acknowledged only after its Error data is stored.
+      // Suppress an already-acknowledged crash file before it reaches counters.
+      if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType) &&
+        this.readCrashPropertyText(effectiveProperty, IS_PRE_CRASH) === 'true') {
+        return;
+      }
+      if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
+        effectiveProperty = this.appendCrashFreeDurationFields(effectiveProperty, crashFreeDuration);
+      }
       
-	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
+	      if (this.readCrashPropertyText(actualProperty, IS_PRE_CRASH) !== "true") {
 	        // Exclude the scenario of reporting the last native crash error
 	        // Set error time line for error sampling (aligned with Android)
         // This enables collection of data within 1 minute before and after the error
@@ -3319,7 +3396,7 @@ export class FTRUMInnerManager {
 	        }
 	      }
 
-	      if (actualCallBack === null) {
+	      if (actualCallBack === null && crashFreeDuration === undefined) {
 	        const context = this.createCurrentResourceContext();
 	        this.increaseErrorMemoryCount(context);
 	        this.submitErrorWorkerCommand({
@@ -3333,6 +3410,7 @@ export class FTRUMInnerManager {
           deviceTags: errorDeviceData.tags,
           time: actualDateline,
 	          customDataType: this.getResourceCustomDataType(collectType),
+	          uuid: draftUuid,
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
 	        }, 'rum.error');
 	        this.scheduleRumCounterFlush();
@@ -3407,9 +3485,21 @@ export class FTRUMInnerManager {
       class ErrorCallback implements RunnerCompleteCallBack {
         onComplete(): void {
           self.increaseError(allTags);
-          if (actualCallBack != null) {
-            self.stopViewAfterErrorCallback(actualCallBack);
+          const completeError = (): void => {
+            if (actualCallBack != null) {
+              self.stopViewAfterErrorCallback(actualCallBack);
+            }
+          };
+          if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
+            FTCrashFreeDurationManager.getInstance().confirmCrashReported(crashFreeDuration)
+              .then(completeError)
+              .catch((error: Error): void => {
+                FTInnerLogger.w(TAG, `Unable to confirm crash-free duration reset: ${error.message}`);
+                completeError();
+              });
+            return;
           }
+          completeError();
         }
       }
       const callback = new ErrorCallback();
@@ -3420,11 +3510,14 @@ export class FTRUMInnerManager {
         allTags,
         allFields,
         callback,
-        collectType
+        collectType,
+        draftUuid
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error adding error: ${error}`);
-      if (actualCallBack != null) {
+      // Crash callbacks acknowledge recovery state. They must never run from
+      // an in-memory failure path because no Error row was persisted.
+      if (actualCallBack != null && !this.isCrashFreeDurationError(errorType)) {
         actualCallBack.onComplete();
       }
     }

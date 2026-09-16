@@ -276,6 +276,11 @@ export class FTCrashFreeDurationManager {
     });
   }
 
+  /** Best-effort state for synchronous crash callbacks. Duration calculation still serializes on the clock. */
+  public getCurrentAppState(): AppState {
+    return this.current ? this.current.state : AppState.RUN;
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.operationChain.then(operation, operation);
     this.operationChain = result.then((): void => undefined, (): void => undefined);

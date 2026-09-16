@@ -52,7 +52,8 @@ export interface FTNativeCrashRumManager {
     state: AppState,
     property?: Record<string, object> | null,
     dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string
   ): Promise<void>;
   clearSavedRumContext(): void;
 }

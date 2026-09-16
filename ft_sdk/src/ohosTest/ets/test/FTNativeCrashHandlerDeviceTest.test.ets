@@ -183,6 +183,8 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
   lastErrorType: string = '';
   lastState: AppState = AppState.UNKNOWN;
   lastProperty: Record<string, object> | null = null;
+  lastDraftUuid: string = '';
+  completeAddError: boolean = true;
   savedContext: FTNativeCrashRumContext = {
     viewId: 'native-view-id',
     viewName: 'native_crash_saved_view',
@@ -201,7 +203,8 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
     state: AppState,
     property?: Record<string, object> | null,
     _dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string
   ): Promise<void> {
     this.addErrorCount++;
     this.lastLog = log;
@@ -209,7 +212,8 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
     this.lastErrorType = errorType;
     this.lastState = state;
     this.lastProperty = property || null;
-    if (callBack) {
+    this.lastDraftUuid = draftUuid || '';
+    if (this.completeAddError && callBack) {
       callBack.onComplete();
     }
     return Promise.resolve();
@@ -289,8 +293,33 @@ export default function ftNativeCrashHandlerDeviceTest() {
         expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_ID)).assertEqual('native-view-id');
         expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_NAME)).assertEqual('native_crash_saved_view');
         expect(getWrappedValue(property, Constants.KEY_RUM_SESSION_ID)).assertEqual('native-session-id');
+        expect(getWrappedValue(property, Constants.KEY_RUM_ERROR_IS_PRE_CRASH)).assertEqual('true');
       }
+      expect(runtime.rumManager.lastDraftUuid).assertEqual('native-crash-device-uuid');
       expect(runtime.rumManager.clearSavedContextCount).assertEqual(1);
+    });
+
+    it('nativeCrashCallbackUsesNativeBackgroundState', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      const crashData = createNativeCrashData();
+      crashData.foreground = false;
+
+      await runtime.nativeModule.emitCrash(crashData);
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(1);
+      expect(runtime.rumManager.lastState).assertEqual(AppState.BACKGROUND);
+    });
+
+    it('nativeCrashDoesNotClearRecoveryContextBeforePersistenceCallback', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      runtime.rumManager.completeAddError = false;
+
+      await runtime.nativeModule.emitCrash(createNativeCrashData());
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(1);
+      expect(runtime.rumManager.clearSavedContextCount).assertEqual(0);
     });
   });
 }

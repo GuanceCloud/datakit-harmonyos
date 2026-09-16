@@ -2,10 +2,12 @@ import { errorManager } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { FTInnerLogger } from './log/FTLogger';
+import { Constants } from './Constants';
 import { FTRUMConfig } from './Configs';
 import { ErrorType } from './rum/enum/RUMEnums';
 import { AppState } from './rum/enum/RUMEnums';
 import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
+import { FTCrashFreeDurationManager } from './monitor/FTCrashFreeDurationManager';
 import {
   DefaultFTExceptionHandlerRuntime,
   FTExceptionNativeCrashHandler,
@@ -18,7 +20,7 @@ const TAG = "FTExceptionHandler";
  * Whether it is data from a previous crash
  * Aligned with Android: FTExceptionHandler.IS_PRE_CRASH
  */
-export const IS_PRE_CRASH = "is_pre_crash";
+export const IS_PRE_CRASH = Constants.KEY_RUM_ERROR_IS_PRE_CRASH;
 
 /**
  * Exception handler for HarmonyOS
@@ -241,7 +243,7 @@ export class FTExceptionHandler {
       
       // Get app state
       // Aligned with Android: FTActivityManager.get().getAppState()
-      const appState = AppState.RUN; // Default to RUN, can be enhanced later
+      const appState = FTCrashFreeDurationManager.getInstance().getCurrentAppState();
       
       // Upload crash log with callback
       // Aligned with Android: uploadCrashLog(writer.toString(), e.getMessage(), state, callBack)

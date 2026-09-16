@@ -1,11 +1,13 @@
 import { Constants } from './Constants';
 import { FTInnerLogger } from './log/FTLogger';
 import { AppState, ErrorType } from './rum/enum/RUMEnums';
+import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
 import {
   DefaultFTNativeCrashHandlerRuntime,
   FTNativeCrashCallback,
   FTNativeCrashData,
-  FTNativeCrashHandlerRuntime
+  FTNativeCrashHandlerRuntime,
+  FTNativeCrashRumManager
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
 
 const TAG = "FTNativeCrashHandler";
@@ -52,6 +54,20 @@ interface ParsedCrashException {
 
 interface PrimitiveWrapper {
   value: string | number | boolean;
+}
+
+class NativeCrashPersistCallback implements RunnerCompleteCallBack {
+  private readonly rumManager: FTNativeCrashRumManager;
+
+  public constructor(rumManager: FTNativeCrashRumManager) {
+    this.rumManager = rumManager;
+  }
+
+  public onComplete(): void {
+    // The callback is invoked only after the Error draft has been persisted.
+    // Do not discard recovery context on write failure.
+    this.rumManager.clearSavedRumContext();
+  }
 }
 
 export class FTNativeCrashHandler {
@@ -199,6 +215,7 @@ export class FTNativeCrashHandler {
       errorContext[Constants.KEY_TIMESTAMP] = crashData.timestamp;
       errorContext[Constants.KEY_HILOG_SIZE] = crashData.hilogSize;
       errorContext[Constants.KEY_LOG_OVER_LIMIT] = crashData.logOverLimit;
+      errorContext[Constants.KEY_RUM_ERROR_IS_PRE_CRASH] = true;
 
       if (crashData.externalLog) {
         try {
@@ -225,17 +242,17 @@ export class FTNativeCrashHandler {
         errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive('error');
       }
 
-      try {
-        await rumManager.addErrorInternal(
-          crashReport,
-          `Native Crash: ${crashData.crashType}`,
-          ErrorType.NATIVE_CRASH,
-          AppState.RUN,
-          this.convertToRecordStringObject(errorContext)
-        );
-      } finally {
-        rumManager.clearSavedRumContext();
-      }
+      const nativeCrashCallback = new NativeCrashPersistCallback(rumManager);
+      await rumManager.addErrorInternal(
+        crashReport,
+        `Native Crash: ${crashData.crashType}`,
+        ErrorType.NATIVE_CRASH,
+        crashData.foreground ? AppState.RUN : AppState.BACKGROUND,
+        this.convertToRecordStringObject(errorContext),
+        undefined,
+        nativeCrashCallback,
+        crashData.uuid
+      );
       FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** CRASH REPORTED TO RUM SUCCESSFULLY ***");
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ARKTS-CALLBACK> *** CALLBACK ERROR ***: ${error}`);
