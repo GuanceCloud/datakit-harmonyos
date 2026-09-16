@@ -1,3 +1,4 @@
+import { common, Want } from '@kit.AbilityKit';
 import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import promptAction from '@ohos.promptAction';
 import * as ftcrash from 'libftcrash.so';
@@ -13,6 +14,7 @@ const BACKGROUND_CPP_CRASH_DELAY_MS = 12_000;
 @Entry
 @Component
 export struct CrashTestPage {
+  private abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
   @State message: string = 'Crash & ANR';
   @State testResults: string = '';
   @State isSDKInitialized: boolean = false;
@@ -53,15 +55,14 @@ export struct CrashTestPage {
   }
 
   private triggerCppCrash(): void {
-    const delayMs = this.useDelayedCppCrash ? BACKGROUND_CPP_CRASH_DELAY_MS : DEFAULT_CPP_CRASH_DELAY_MS;
+    if (this.useDelayedCppCrash) {
+      void this.scheduleBackgroundCppCrash();
+      return;
+    }
+
     this.addTestResult('💥 Triggering C++ crash...');
     this.addTestResult('⚠️ WARNING: This will cause a native crash');
-    if (this.useDelayedCppCrash) {
-      this.addTestResult('⏱️ C++ crash scheduled in 12 seconds; press Home now to verify background duration');
-      this.showToast('Cpp Crash scheduled in 12 seconds; move app to background');
-    } else {
-      this.showToast('Triggering C++ crash...');
-    }
+    this.showToast('Triggering C++ crash...');
 
     setTimeout(() => {
       try {
@@ -69,7 +70,32 @@ export struct CrashTestPage {
       } catch (error) {
         this.addTestResult(`❌ C++ crash error: ${JSON.stringify(error as object)}`);
       }
-    }, delayMs);
+    }, DEFAULT_CPP_CRASH_DELAY_MS);
+  }
+
+  private async scheduleBackgroundCppCrash(): Promise<void> {
+    this.addTestResult('💥 Scheduling C++ crash through background AppService...');
+    this.addTestResult('⏱️ C++ crash will trigger 12 seconds after scheduling; press Home now');
+
+    const want: Want = {
+      bundleName: this.abilityContext.abilityInfo.bundleName,
+      moduleName: this.abilityContext.abilityInfo.moduleName,
+      abilityName: 'StressServiceAbility',
+      action: 'crash',
+      parameters: {
+        cppCrashDelayMs: BACKGROUND_CPP_CRASH_DELAY_MS
+      }
+    };
+
+    try {
+      await this.abilityContext.startAppServiceExtensionAbility(want);
+      this.addTestResult('✅ Background C++ crash scheduled; move app to background now');
+      this.showToast('Cpp Crash scheduled in 12 seconds; move app to background');
+    } catch (error) {
+      const message = `${error}`;
+      this.addTestResult(`❌ Background C++ crash scheduling failed: ${message}`);
+      this.showToast('Background crash scheduling failed; check logs');
+    }
   }
 
   private triggerANR(): void {

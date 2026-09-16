@@ -1,5 +1,6 @@
 import { AppServiceExtensionAbility, Want } from '@kit.AbilityKit';
 import rpc from "@ohos.rpc";
+import * as ftcrash from 'libftcrash.so';
 import {
   createDefaultStressTestConfig,
   StressTestConfig,
@@ -35,6 +36,7 @@ class StressServiceAbilityStub extends rpc.RemoteObject {
  */
 export default class StressServiceAbility extends AppServiceExtensionAbility {
   private stressTestManager: StressTestManager = StressTestManager.getInstance();
+  private cppCrashTimerId: number | null = null;
 
   onCreate(want: Want): void {
     DemoLogger.i(TAG, "StressServiceAbility onCreate");
@@ -47,6 +49,7 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
   onDestroy(): void {
     DemoLogger.i(TAG, "StressServiceAbility onDestroy");
+    this.cancelScheduledCppCrash();
     markStressServiceEvent(STRESS_SERVICE_STATE_DESTROYED, 'onDestroy', -1, 'service-destroyed');
     this.stressTestManager.stop('service-destroyed');
   }
@@ -70,6 +73,12 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
 
   private handleRequest(want: Want, startId: number): void {
     const action = this.resolveAction(want);
+    if (action === 'crash') {
+      this.scheduleCppCrash(this.readNumber(want, 'cppCrashDelayMs', 12000));
+      markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'cpp crash scheduled', startId);
+      return;
+    }
+
     if (action === 'stop') {
       DemoLogger.i(TAG, "Received stop command");
       markStressServiceEvent(STRESS_SERVICE_STATE_STOPPING, 'stop command', startId, 'service-stop');
@@ -101,6 +110,25 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
       `Starting background stress test: duration=${config.durationSeconds}s, traffic=${config.trafficMode}, logs=${config.enableLogs}, actions=${config.enableActions}, resources=${config.enableResources}, navigation=${config.enableNavigation}, navigationInterval=${config.navigationIntervalMs}, errors=${config.enableErrors}, longTasks=${config.enableLongTasks}`);
     this.stressTestManager.runWithConfig(config);
     markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'start command', startId);
+  }
+
+  private scheduleCppCrash(delayMs: number): void {
+    this.cancelScheduledCppCrash();
+    const safeDelayMs = Math.max(0, delayMs);
+    DemoLogger.i(TAG, `Scheduling C++ crash in ${safeDelayMs} ms`);
+    this.cppCrashTimerId = setTimeout((): void => {
+      this.cppCrashTimerId = null;
+      DemoLogger.i(TAG, 'Triggering scheduled C++ crash');
+      ftcrash.triggerNullPointerCrash();
+    }, safeDelayMs);
+  }
+
+  private cancelScheduledCppCrash(): void {
+    if (this.cppCrashTimerId === null) {
+      return;
+    }
+    clearTimeout(this.cppCrashTimerId);
+    this.cppCrashTimerId = null;
   }
 
   private resolveAction(want: Want): string {
