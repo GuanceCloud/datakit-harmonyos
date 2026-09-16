@@ -165,12 +165,20 @@ export class FTCrashFreeDurationManager {
       ? envelope.pending
       : null;
 
+    if (envelope && envelope.current !== null && validCurrent === null) {
+      FTInnerLogger.w(TAG, 'Discarded incompatible previous-process crash-free snapshot');
+    }
+    if (envelope && envelope.pending !== null && validPending === null) {
+      FTInnerLogger.w(TAG, 'Discarded incompatible pending crash-free snapshot');
+    }
+
     // Never replace an unacknowledged pending crash with a later startup.
     // This makes a repeated recovery of the same native crash id idempotent.
     this.pending = validPending || validCurrent;
     this.reportedNativeCrashIds = envelope ? this.sanitizeCrashIds(envelope.reportedNativeCrashIds) : [];
     this.current = this.createFreshSnapshot(initialState, nowUptimeNs, nowWallClockMs);
     await this.persistSnapshot();
+    FTInnerLogger.d(TAG, `Crash-free timer initialized: recoveredPending=${this.pending !== null}`);
   }
 
   /** Records an application-level foreground/background transition. */
@@ -223,6 +231,20 @@ export class FTCrashFreeDurationManager {
 
       let source: FTCrashFreeSnapshot | null = isPreCrash ? this.pending : this.current;
       if (!source) {
+        // Native recovery happens in a new process. Its fresh interval has no
+        // relationship to the crashed process and must never be reported as
+        // that crash's stable-running duration.
+        if (isPreCrash) {
+          this.reportSequence++;
+          FTInnerLogger.w(TAG, 'Native crash-free snapshot unavailable; reporting zero durations');
+          return {
+            foregroundNs: 0,
+            backgroundNs: 0,
+            reportToken: `pre:missing:${this.reportSequence}`,
+            isPreCrash: true,
+            nativeCrashId: normalizedCrashId
+          };
+        }
         this.ensureCurrentState(normalizedState);
         source = this.current;
       }

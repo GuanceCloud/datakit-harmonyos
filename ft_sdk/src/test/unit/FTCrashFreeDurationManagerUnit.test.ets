@@ -112,7 +112,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       const malformedManager = new FTCrashFreeDurationManager(clock);
       await malformedManager.initializeWithStorage(malformedStorage, AppState.RUN);
 
-      const malformedDuration = await malformedManager.prepareCrashFreeDuration(AppState.BACKGROUND, true, 999999);
+      const malformedDuration = await malformedManager.prepareCrashFreeDuration(AppState.BACKGROUND, true, 1000100);
       expect(malformedDuration !== null).assertTrue();
       if (malformedDuration) {
         expect(malformedDuration.foregroundNs).assertEqual(0);
