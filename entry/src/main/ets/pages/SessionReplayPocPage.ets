@@ -86,9 +86,12 @@ struct SessionReplayPocPage {
       const capture = this.replay.getLastCapture();
       if (capture === null) {
         const root = this.getUIContext().getFrameNodeById('session-replay-poc-root');
+        const failure = this.replay.getLastCaptureFailure();
         this.result = root === null
           ? `${source} did not produce a Replay capture because the Replay root is not attached. Return to this page, enable Replay again, and retry.`
-          : `${source} did not produce a Replay capture. Confirm that Session Replay is enabled before starting the RUM View, then retry.`;
+          : failure === null
+            ? `${source} did not produce a Replay capture. Replay is enabled and the root is attached; retry after the page is fully rendered.`
+            : `${source} did not produce a Replay capture: ${failure}`;
         return;
       }
       const totalRecords = this.replay.getRecordedRecords({
@@ -214,14 +217,24 @@ struct SessionReplayPocPage {
               if (!this.requireRUMBridge()) {
                 return;
               }
-              FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
-                .then(() => {
-                  this.bridgeViewActive = true;
-                  this.showBridgeCapture('RUM View bridge');
-                })
-                .catch((error: Error) => {
-                  this.result = `RUM View bridge failed: ${error.message}`;
-                });
+              // Bind again immediately before RUM creates the View. This makes
+              // the POC resilient when ArkUI reconstructed its root after the
+              // page's aboutToAppear callback.
+              if (!this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1))) {
+                this.replayEnabled = false;
+                this.result = 'Session Replay is disabled. Relaunch the demo with a non-empty RUM appId, then enable Replay before capturing.';
+                return;
+              }
+              setTimeout(() => {
+                FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
+                  .then(() => {
+                    this.bridgeViewActive = true;
+                    this.showBridgeCapture('RUM View bridge');
+                  })
+                  .catch((error: Error) => {
+                    this.result = `RUM View bridge failed: ${error.message}`;
+                  });
+              }, 16);
             })
           Button('Capture through RUM Error Bridge')
             .width('90%')

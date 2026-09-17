@@ -117,6 +117,11 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.getLastCapture();
   }
 
+  /** Returns the last bridge capture failure, when collection could not begin. */
+  public getLastCaptureFailure(): string | null {
+    return this.recorder === null ? 'Session Replay is disabled.' : this.recorder.getLastCaptureFailure();
+  }
+
   /** Returns the bounded in-memory stream for diagnostics before persistence is enabled. */
   public getRecordedRecords(context: SessionReplayContext): Array<SessionReplayRecord> {
     return this.recorder === null ? [] : this.recorder.getRecordedRecords(context);

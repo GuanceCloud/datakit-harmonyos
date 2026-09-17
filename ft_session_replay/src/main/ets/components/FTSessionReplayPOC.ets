@@ -64,6 +64,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
+  // The bridge must return a useful reason to the host app. Previously this
+  // detail was swallowed and the POC incorrectly suggested Replay was off.
+  private lastCaptureFailure: string = '';
   private activeContext: SessionReplayContext | null = null;
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
@@ -135,6 +138,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
 
   public getLastCapture(): SessionReplayCapture | null {
     return this.lastCapture;
+  }
+
+  /** Returns the most recent Full Snapshot failure for integration diagnostics. */
+  public getLastCaptureFailure(): string | null {
+    return this.lastCaptureFailure.length === 0 ? null : this.lastCaptureFailure;
   }
 
   /** Returns a copy of the in-memory protocol stream for one RUM View. */
@@ -498,9 +506,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const records = this.processor.createViewStartRecords(fullCapture.record);
     const capture = this.createCapture(replayContext, records, fullCapture.record);
     if (!this.appendRecordedRecords(replayContext, records)) {
+      this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
       return null;
     }
     this.lastCapture = capture;
+    this.lastCaptureFailure = '';
     this.activeContext = replayContext;
     this.recordViewMetadata(context, records.length);
     this.startObservation();
@@ -512,18 +522,28 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.captureWithRegisteredRoot(replayContext);
     if (capture !== null) {
       if (!this.appendRecordedRecords(replayContext, capture.records)) {
+        this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
         return null;
       }
       this.processor.setFullSnapshotBaseline(capture.record);
       this.lastCapture = capture;
+      this.lastCaptureFailure = '';
       this.recordViewMetadata(context, capture.records.length);
     }
     return capture;
   }
 
   private captureWithRegisteredRoot(context: SessionReplayContext): SessionReplayCapture | null {
-    if (!this.isStarted || this.rootBinding === null || context.applicationId.length === 0 ||
-      context.sessionId.length === 0 || context.viewId.length === 0) {
+    if (!this.isStarted) {
+      this.lastCaptureFailure = 'Session Replay recorder is not started.';
+      return null;
+    }
+    if (this.rootBinding === null) {
+      this.lastCaptureFailure = 'No ArkUI Replay root is registered for the active page.';
+      return null;
+    }
+    if (context.applicationId.length === 0 || context.sessionId.length === 0 || context.viewId.length === 0) {
+      this.lastCaptureFailure = 'The active RUM View does not have complete application, session, and view identifiers.';
       return null;
     }
     try {
@@ -533,7 +553,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
         this.rootBinding.vpToPxScale
       );
       return this.createCapture(context, [record], record);
-    } catch (_error) {
+    } catch (error) {
+      this.lastCaptureFailure = `ArkUI Full Snapshot collection failed: ${String(error)}`;
       return null;
     }
   }

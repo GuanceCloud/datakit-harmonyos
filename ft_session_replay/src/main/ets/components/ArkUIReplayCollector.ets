@@ -70,27 +70,59 @@ export class ArkUIReplayCollector {
       return;
     }
 
-    const position = node.getPositionToWindow();
-    const size = node.getMeasuredSize();
-    const componentId = node.getId();
+    // A FrameNode can be in the middle of ArkUI's teardown while a View is
+    // being started. A single unavailable layout property must not discard an
+    // otherwise valid Full Snapshot for the whole page. Keep the node with a
+    // zero-sized placeholder and continue with the stable fields we can read.
+    let x = 0;
+    let y = 0;
+    let width = 0;
+    let height = 0;
+    try {
+      const position = node.getPositionToWindow();
+      x = Math.round(position.x * vpToPxScale);
+      y = Math.round(position.y * vpToPxScale);
+    } catch (_) { }
+    try {
+      const size = node.getMeasuredSize();
+      width = Math.max(0, Math.round(size.width));
+      height = Math.max(0, Math.round(size.height));
+    } catch (_) { }
+    let componentId = '';
+    try {
+      componentId = node.getId();
+    } catch (_) { }
+    let nodeType = 'UnknownComponent';
+    try {
+      nodeType = node.getNodeType();
+    } catch (_) { }
     const wireframe: ReplayWireframe = {
       id: this.toProtocolId(nodeId),
-      x: Math.round(position.x * vpToPxScale),
-      y: Math.round(position.y * vpToPxScale),
-      width: Math.max(0, Math.round(size.width)),
-      height: Math.max(0, Math.round(size.height)),
+      x,
+      y,
+      width,
+      height,
       type: 'placeholder',
-      label: `ArkUI:${node.getNodeType()}`
+      label: `ArkUI:${nodeType}`
     };
     if (componentId.length > 0) {
       wireframe.permanentId = componentId;
     }
     output.push(wireframe);
 
-    let child = node.getFirstChild();
+    let child: FrameNode | null = null;
+    try {
+      child = node.getFirstChild();
+    } catch (_) {
+      return;
+    }
     while (child !== null && output.length < this.maxNodes) {
       this.appendPreOrder(child, vpToPxScale, output);
-      child = child.getNextSibling();
+      try {
+        child = child.getNextSibling();
+      } catch (_) {
+        return;
+      }
     }
   }
 
