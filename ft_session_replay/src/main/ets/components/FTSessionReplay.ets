@@ -20,6 +20,8 @@ export class FTSessionReplay {
   private recorder: FTSessionReplayPOC | null = null;
   private storage: SessionReplaySegmentStore | null = null;
   private uploader: SessionReplayUploader | null = null;
+  private uploadTimer: number = -1;
+  private uploadInFlight: boolean = false;
 
   public static getInstance(): FTSessionReplay {
     if (FTSessionReplay.instance === null) {
@@ -49,6 +51,7 @@ export class FTSessionReplay {
     const recorder = new FTSessionReplayPOC(this.config, this.storage);
     recorder.start();
     this.recorder = recorder;
+    this.startUploadSchedule();
   }
 
   /** Convenience form for applications that enable Replay during startup. */
@@ -66,10 +69,12 @@ export class FTSessionReplay {
   /** Stops collection and removes the optional bridge from the core SDK. */
   public disable(): void {
     if (this.recorder === null) {
+      this.stopUploadSchedule();
       return;
     }
     this.recorder.stop();
     this.recorder = null;
+    this.stopUploadSchedule();
   }
 
   public isEnabled(): boolean {
@@ -126,7 +131,22 @@ export class FTSessionReplay {
         remainingSegments: 0
       };
     }
-    return await this.uploader.uploadPending();
+    if (this.uploadInFlight) {
+      return {
+        success: false,
+        code: 0,
+        message: 'A Session Replay upload is already in progress.',
+        attemptedSegments: 0,
+        uploadedSegments: 0,
+        remainingSegments: this.storage === null ? 0 : this.storage.list().length
+      };
+    }
+    this.uploadInFlight = true;
+    try {
+      return await this.uploader.uploadPending();
+    } finally {
+      this.uploadInFlight = false;
+    }
   }
 
   /** Captures a manual Full Snapshot only while the global switch is enabled. */
@@ -168,5 +188,24 @@ export class FTSessionReplay {
       this.config.getMaxRecordsPerSegment()
     );
     this.uploader = new SessionReplayUploader(this.storage, this.config);
+  }
+
+  private startUploadSchedule(): void {
+    this.stopUploadSchedule();
+    if (this.uploader === null || this.config.getUploadIntervalMs() <= 0) {
+      return;
+    }
+    this.uploadTimer = setInterval((): void => {
+      this.flush().then((): void => {
+      }).catch((): void => {
+      });
+    }, this.config.getUploadIntervalMs());
+  }
+
+  private stopUploadSchedule(): void {
+    if (this.uploadTimer !== -1) {
+      clearInterval(this.uploadTimer);
+      this.uploadTimer = -1;
+    }
   }
 }

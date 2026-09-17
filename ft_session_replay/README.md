@@ -61,6 +61,9 @@ SDK, and global-context fields. The source is honestly marked `harmonyos`.
 It deletes a local segment only after HTTP `200`; unavailable networking and
 non-200 responses leave every unacknowledged segment on device for retry. For
 a controlled proxy, use `setUploadUrl('https://host/v1/write/rum/replay')`.
+Once Replay is enabled, the queue is also drained automatically every 15 seconds
+by default. Use `setUploadIntervalMs(1000..300000)` to change the interval, or
+`setUploadIntervalMs(0)` to require explicit `flush()` calls.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -215,3 +218,18 @@ values, or image bytes.
    new segment, and upload. The page must report a failed acknowledgement and
    retain the same durable segment count. Restore `200` and upload again; the
    retained segments must then be acknowledged and removed.
+
+## P9 automatic upload scheduling verification
+
+1. Configure a working intake or controlled `200` proxy. Initialize Replay
+   with `setUploadIntervalMs(1000)` for this test, then create a durable
+   segment through the RUM View bridge.
+2. Do not tap **Upload Durable Replay Segments**. Wait up to two seconds and
+   inspect the proxy or intake: it must receive the same Replay multipart
+   request. The durable-segment count must fall after the HTTP `200` response.
+3. Configure `setUploadIntervalMs(0)`, create another segment, and wait at
+   least two seconds. No automatic request may be sent and the segment must
+   remain until the upload button (or `flush()`) is invoked.
+4. Return a non-`200` response while automatic upload is enabled. Confirm the
+   segment remains locally and that a later timer cycle retries it; after a
+   `200` response, it is removed exactly once.

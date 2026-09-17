@@ -34,6 +34,9 @@ export class FTSessionReplayConfig {
   private snapshotIntervalMs: number = 500;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
+  // Android-like background draining cadence. Zero opts out and leaves flush()
+  // as the only upload trigger.
+  private uploadIntervalMs: number = 15_000;
   // Optional absolute Replay intake URL. When omitted, the installed core SDK's
   // DataKit or Dataway endpoint is used with Android's Replay path.
   private uploadUrl: string = '';
@@ -166,6 +169,22 @@ export class FTSessionReplayConfig {
 
   public getUploadUrl(): string {
     return this.uploadUrl;
+  }
+
+  /**
+   * Schedules automatic draining of durable Replay segments. Set to zero to
+   * disable automatic network activity and use `flush()` explicitly instead.
+   */
+  public setUploadIntervalMs(intervalMs: number): FTSessionReplayConfig {
+    if (!Number.isFinite(intervalMs)) {
+      return this;
+    }
+    this.uploadIntervalMs = intervalMs <= 0 ? 0 : Math.max(1000, Math.min(300000, Math.floor(intervalMs)));
+    return this;
+  }
+
+  public getUploadIntervalMs(): number {
+    return this.uploadIntervalMs;
   }
 }
 

@@ -69,6 +69,9 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.setStorageMaxBytes(200 * 1024 * 1024).getStorageMaxBytes()).assertEqual(100 * 1024 * 1024);
       expect(config.setMaxRecordsPerSegment(0).getMaxRecordsPerSegment()).assertEqual(1);
       expect(config.setMaxRecordsPerSegment(1000).getMaxRecordsPerSegment()).assertEqual(500);
+      expect(config.setUploadIntervalMs(1).getUploadIntervalMs()).assertEqual(1000);
+      expect(config.setUploadIntervalMs(500000).getUploadIntervalMs()).assertEqual(300000);
+      expect(config.setUploadIntervalMs(0).getUploadIntervalMs()).assertEqual(0);
     });
 
     it('uses Android native record types for view lifecycle and mutations', 0, () => {
