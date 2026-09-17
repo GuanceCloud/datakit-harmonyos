@@ -116,6 +116,8 @@ export default function sessionReplayProtocolUnitTest() {
       const mutation = processor.createMutationRecord(changedSnapshot);
       expect(mutation !== null).assertTrue();
       expect(mutation?.type).assertEqual(11);
+      processor.setFullSnapshotBaseline(changedSnapshot);
+      expect(processor.createMutationRecord(changedSnapshot) === null).assertTrue();
       expect(processor.createViewEndRecord().type).assertEqual(7);
     });
 

@@ -194,6 +194,60 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return capture;
   }
 
+  /** Emits a Focus record for the currently recorded native RUM View. */
+  public recordActiveFocus(hasFocus: boolean): SessionReplayCapture | null {
+    return this.appendActiveProtocolRecords([this.processor.createFocusRecord(hasFocus)], null);
+  }
+
+  /** Emits a VisualViewport record for the currently recorded native RUM View. */
+  public recordActiveViewport(width: number, height: number, scale: number = 1): SessionReplayCapture | null {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(scale) ||
+      width < 0 || height < 0 || scale <= 0) {
+      return null;
+    }
+    return this.appendActiveProtocolRecords([this.processor.createViewportRecord(width, height, scale)], null);
+  }
+
+  /**
+   * Emits Android's resize mutation and follows it with a Full Snapshot when
+   * a root is still available, so later mutations use the rotated layout as
+   * their baseline.
+   */
+  public recordActiveViewportResize(width: number, height: number): SessionReplayCapture | null {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) {
+      return null;
+    }
+    const activeContext = this.activeContext;
+    if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
+      return null;
+    }
+    const records: Array<SessionReplayRecord> = [this.processor.createViewportResizeRecord(width, height)];
+    let fullSnapshot: SessionReplayRecord | null = null;
+    const snapshotCapture = this.captureWithRegisteredRoot(activeContext);
+    if (snapshotCapture !== null) {
+      fullSnapshot = snapshotCapture.record;
+      records.push(fullSnapshot);
+      this.processor.setFullSnapshotBaseline(fullSnapshot);
+    }
+    return this.appendActiveProtocolRecords(records, fullSnapshot);
+  }
+
+  /** Emits a touch interaction only when the configured privacy policy allows it. */
+  public recordActiveTouch(
+    pointerEventType: 'down' | 'up' | 'move',
+    pointerId: number,
+    x: number,
+    y: number
+  ): SessionReplayCapture | null {
+    if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW || !Number.isFinite(pointerId) ||
+      !Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    return this.appendActiveProtocolRecords([
+      this.processor.createPointerRecord(pointerEventType, Math.floor(pointerId), Math.round(x), Math.round(y))
+    ], null);
+  }
+
   public renewRootEpoch(): void {
     this.collector.renewRootEpoch();
     this.processor.reset();
@@ -574,6 +628,29 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       this.errorSampleStore?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
     }
     return appended;
+  }
+
+  /** Appends a lifecycle signal only when it belongs to an active sampled View. */
+  private appendActiveProtocolRecords(
+    records: Array<SessionReplayRecord>,
+    fullSnapshot: SessionReplayRecord | null
+  ): SessionReplayCapture | null {
+    const activeContext = this.activeContext;
+    if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
+      return null;
+    }
+    const capture = this.createCapture(activeContext, records, fullSnapshot);
+    if (!this.appendRecordedRecords(activeContext, capture.records)) {
+      return null;
+    }
+    this.recordReplayMetadata(activeContext, capture.records.length);
+    this.lastCapture = capture;
+    return capture;
+  }
+
+  private canRecordActiveContext(context: SessionReplayContext): boolean {
+    return this.isStarted &&
+      this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.NONE;
   }
 
   private getStoreForContext(context: SessionReplayContext): SessionReplaySegmentStore | null {

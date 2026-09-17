@@ -46,6 +46,15 @@ polled every 500 ms by default. Unchanged trees do not emit records; changes
 produce Android Incremental Snapshot records (`type:11`, `source:0`). Change
 the bounded cadence with `setSnapshotIntervalMs(100..10000)`.
 
+For lifecycle signals that ArkUI delivers to the application, report them
+without constructing RUM identifiers yourself: `recordFocus(hasFocus)`,
+`recordViewport(width, height, scale)`, `recordViewportResize(width, height)`,
+and `recordTouch(type, pointerId, x, y)` always target the active sampled RUM
+View. `recordViewportResize` appends Android's resize mutation and, while the
+registered root remains available, a Full Snapshot to reset the incremental
+baseline. Touch coordinates are discarded unless `TouchPrivacy.SHOW` was set;
+the default `HIDE` value records nothing.
+
 When `filesDir` is supplied to `init()` or `enable()`, each capture batch is
 atomically persisted below `filesDir/ft_session_replay/segments`. Storage is
 bounded to 10 MiB by default and evicts oldest complete segments before writing
@@ -438,3 +447,17 @@ removed from this directory.
    context-rebind Full Snapshot should be created. Repeat with an unconfigured
    field and confirm it is neither written to `globalContext` nor causes a
    snapshot. Do not configure secrets or personal data as link keys.
+
+## P17 native lifecycle signal verification
+
+1. Configure `TouchPrivacy.SHOW`, enable Replay, register a root, and start a
+   sampled RUM View. In the page's focus, resize/orientation, and touch
+   callbacks call `recordFocus(false)`, `recordViewport(...)`,
+   `recordViewportResize(...)`, and `recordTouch('down', 1, x, y)`.
+2. Inspect the persisted segment. It must include Focus (`type:6`), Viewport
+   (`type:8`), pointer Incremental Snapshot (`type:11`, `source:9`), and a
+   resize Incremental Snapshot (`type:11`, `source:4`). A resize with a live
+   root must be followed by a Full Snapshot (`type:10`).
+3. Repeat with the default `TouchPrivacy.HIDE`: no `source:9` record may be
+   persisted. After stopping the RUM View or disabling Replay, every method
+   must return no capture and must not append a segment.
