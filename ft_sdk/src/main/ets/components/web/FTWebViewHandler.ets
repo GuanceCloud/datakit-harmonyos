@@ -611,7 +611,10 @@ export class FTWebViewHandler implements JsReceiver {
             }
           }
 
-          this.updateSessionReplayWebLinkContext(tagsMap, fieldsMap);
+          const replayLinkContextChanged = this.updateSessionReplayWebLinkContext(tagsMap, fieldsMap);
+          if (replayLinkContextChanged) {
+            this.notifySessionReplayWebContextChanged();
+          }
           
           // Use measurement and timeValue extracted above
           // If timeValue is provided (from Web SDK), use it; otherwise use current nanosecond timestamp
@@ -758,12 +761,44 @@ export class FTWebViewHandler implements JsReceiver {
     });
   }
 
+  /**
+   * Rebinds Browser association data to the native container View. This is
+   * deliberately independent of Browser Replay record forwarding: a changed
+   * configured key requires a native Full Snapshot before later mutations use
+   * the new context.
+   */
+  private notifySessionReplayWebContextChanged(): void {
+    if (!FTRUMConfigManager.getInstance().isRumEnable() || !this.sessionReplaySlotActive) {
+      return;
+    }
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    const rumConfig = FTRUMConfigManager.getInstance().getConfig();
+    const applicationId = rumConfig === null ? '' : rumConfig.getRumAppId();
+    const sessionId = FTRUMInnerManager.getInstance().getSessionId();
+    if (activeView === null || applicationId.length === 0 || sessionId.length === 0 ||
+      activeView.getId().length === 0) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.notifyWebReplayContextChanged({
+      applicationId,
+      sessionId,
+      viewId: activeView.getId(),
+      viewName: activeView.getViewName(),
+      viewReferrer: activeView.getViewReferrer(),
+      linkContext: this.webReplayLinkContext,
+      timestamp: Date.now(),
+      browserViewId: this.webViewId,
+      slotId: this.sessionReplaySlotId
+    });
+  }
+
   /** Extracts only explicitly configured RUM-link keys from Browser RUM data. */
-  private updateSessionReplayWebLinkContext(tags: Map<string, string>, fields: Map<string, string>): void {
+  private updateSessionReplayWebLinkContext(tags: Map<string, string>, fields: Map<string, string>): boolean {
+    const previousSignature = this.getSessionReplayLinkContextSignature(this.webReplayLinkContext);
     const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
     if (linkKeys.length === 0) {
       this.webReplayLinkContext = {};
-      return;
+      return previousSignature.length > 0;
     }
     const linkContext: Record<string, string | number | boolean> = {};
     for (let index = 0; index < linkKeys.length; index++) {
@@ -778,7 +813,24 @@ export class FTWebViewHandler implements JsReceiver {
         linkContext[key] = fieldValue;
       }
     }
+    // Browser Resource/Error points do not necessarily repeat custom context.
+    // Retain the last complete association instead of treating an absent key
+    // as a request to erase it and creating a spurious rebind snapshot.
+    if (Object.keys(linkContext).length === 0) {
+      return false;
+    }
     this.webReplayLinkContext = linkContext;
+    return previousSignature !== this.getSessionReplayLinkContextSignature(linkContext);
+  }
+
+  private getSessionReplayLinkContextSignature(context: Record<string, string | number | boolean>): string {
+    const keys = Object.keys(context).sort();
+    const pairs: Array<string> = [];
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
+      pairs.push(`${key}=${String(context[key])}`);
+    }
+    return pairs.join('&');
   }
 
   /** Keeps Android's ten-second Browser full-snapshot cadence for error samples. */

@@ -27,6 +27,16 @@ export class ReplaySnapshotProcessor {
     this.previousWireframes = [];
   }
 
+  /**
+   * Makes an externally emitted Full Snapshot the next mutation baseline.
+   * Without this, a forced snapshot at a context boundary could be followed by
+   * mutations diffed against the older pre-boundary tree.
+   */
+  public setFullSnapshotBaseline(fullSnapshot: SessionReplayRecord): void {
+    const data = fullSnapshot.data as FullSnapshotData;
+    this.previousWireframes = data.wireframes.slice();
+  }
+
   public createViewStartRecords(fullSnapshot: SessionReplayRecord): Array<SessionReplayRecord> {
     const data = fullSnapshot.data as FullSnapshotData;
     const root = data.wireframes.length > 0 ? data.wireframes[0] : null;
@@ -45,7 +55,7 @@ export class ReplaySnapshotProcessor {
       type: ReplayRecordType.FOCUS,
       data: focus
     };
-    this.previousWireframes = data.wireframes.slice();
+    this.setFullSnapshotBaseline(fullSnapshot);
     return [metaRecord, focusRecord, fullSnapshot];
   }
 

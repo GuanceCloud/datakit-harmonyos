@@ -422,3 +422,19 @@ removed from this directory.
    window. Confirm it does not promote the original session's deferred assets.
    Repeating an Error for the same session must be idempotent: it must not
    duplicate any persisted segment or asset upload.
+
+## P16 Browser RUM link-context rebind verification
+
+1. Initialize Replay with `enableLinkRUMKeys(['tenant_id'])`, open an ArkUI
+   page with a registered root and an active ArkWeb slot, then emit Browser RUM
+   data with `tenant_id: "A"`. Confirm the Replay capture for the native
+   container View contains a Full Snapshot whose `globalContext.tenant_id` is
+   `A`.
+2. Without changing the native RUM View, emit Browser RUM data with
+   `tenant_id: "B"`. Confirm exactly one additional native Full Snapshot is
+   persisted before later mutation records and its `globalContext.tenant_id`
+   is `B`. Earlier records must retain `A`.
+3. Emit additional Browser RUM data with the same `tenant_id: "B"`; no extra
+   context-rebind Full Snapshot should be created. Repeat with an unconfigured
+   field and confirm it is neither written to `globalContext` nor causes a
+   snapshot. Do not configure secrets or personal data as link keys.

@@ -7,6 +7,7 @@ import {
   FTSessionReplaySessionContext,
   FTSessionReplayWebDataContext,
   FTSessionReplayWebErrorContext,
+  FTSessionReplayWebContextChange,
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from '@guancecloud/ft_sdk';
@@ -255,6 +256,29 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
   }
 
+  /**
+   * Browser RUM link fields are attached to the native container View as a
+   * new Full Snapshot, so batches before and after the rebind cannot share
+   * stale association data.
+   */
+  public onWebReplayContextChanged(context: FTSessionReplayWebContextChange): boolean {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+      return false;
+    }
+    const resolvedContext = this.mergeWebLinkContext(context);
+    const nextContext = this.toReplayContext(resolvedContext);
+    if (this.activeContext === null || !this.isSameView(this.activeContext, nextContext) ||
+      this.isSameReplayContext(this.activeContext, nextContext)) {
+      return false;
+    }
+    const capture = this.captureFullSnapshotFromRUMContext(resolvedContext);
+    if (capture === null) {
+      return false;
+    }
+    this.activeContext = nextContext;
+    return true;
+  }
+
   public onWebReplaySlotActive(slotId: string, active: boolean, timestamp: number): void {
     if (slotId.length === 0) {
       return;
@@ -413,6 +437,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       if (!this.appendRecordedRecords(replayContext, capture.records)) {
         return null;
       }
+      this.processor.setFullSnapshotBaseline(capture.record);
       this.lastCapture = capture;
       this.recordViewMetadata(context, capture.records.length);
     }
@@ -446,6 +471,35 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       replayContext.globalContext = context.linkContext;
     }
     return replayContext;
+  }
+
+  /** Keeps native RUM link fields while applying the changed Browser values. */
+  private mergeWebLinkContext(context: FTSessionReplayWebContextChange): FTSessionReplayRUMContext {
+    const linkContext: Record<string, string | number | boolean> = {};
+    const activeContext = this.activeContext;
+    if (activeContext !== null && activeContext.applicationId === context.applicationId &&
+      activeContext.sessionId === context.sessionId && activeContext.viewId === context.viewId &&
+      activeContext.globalContext !== undefined) {
+      const previousKeys = Object.keys(activeContext.globalContext);
+      for (let index = 0; index < previousKeys.length; index++) {
+        const key = previousKeys[index];
+        linkContext[key] = activeContext.globalContext[key];
+      }
+    }
+    const webKeys = Object.keys(context.linkContext);
+    for (let index = 0; index < webKeys.length; index++) {
+      const key = webKeys[index];
+      linkContext[key] = context.linkContext[key];
+    }
+    return {
+      applicationId: context.applicationId,
+      sessionId: context.sessionId,
+      viewId: context.viewId,
+      viewName: context.viewName,
+      viewReferrer: context.viewReferrer,
+      linkContext,
+      timestamp: context.timestamp
+    };
   }
 
   private isSameView(left: SessionReplayContext, right: SessionReplayContext): boolean {

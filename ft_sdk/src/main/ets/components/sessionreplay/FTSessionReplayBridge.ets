@@ -53,6 +53,16 @@ export interface FTSessionReplayWebErrorContext {
   timestamp: number;
 }
 
+/**
+ * A Browser RUM link-context change bound to its current native container
+ * View.  The optional HAR uses this to place a fresh native snapshot at the
+ * association boundary, matching Android's WebView rebind behavior.
+ */
+export interface FTSessionReplayWebContextChange extends FTSessionReplayRUMContext {
+  browserViewId: string;
+  slotId: string;
+}
+
 /** Browser SDK capabilities provided only while the optional Replay HAR runs. */
 export interface FTSessionReplayWebViewOptions {
   privacyLevel: string;
@@ -84,6 +94,8 @@ export interface FTSessionReplayBridge {
   onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
   /** Promotes Browser Replay data when a Browser RUM Error is reported. */
   onWebReplayError?(context: FTSessionReplayWebErrorContext): boolean;
+  /** Forces a native snapshot when Browser RUM association data changes. */
+  onWebReplayContextChanged?(context: FTSessionReplayWebContextChange): boolean;
   /** Marks a stable WebView slot active or inactive for delayed draining. */
   onWebReplaySlotActive?(slotId: string, active: boolean, timestamp: number): void;
   /** Enables the Browser SDK's periodic full snapshots for error sampling. */
@@ -215,6 +227,19 @@ export class FTSessionReplayBridgeRegistry {
       return bridge.onWebReplayError(context);
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay WebView error callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyWebReplayContextChanged(context: FTSessionReplayWebContextChange): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayContextChanged === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayContextChanged(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView context callback failed: ${String(error)}`);
       return false;
     }
   }
