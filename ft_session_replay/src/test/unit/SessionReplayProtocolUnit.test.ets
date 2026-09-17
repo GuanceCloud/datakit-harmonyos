@@ -12,7 +12,8 @@ import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/
 import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
 import {
   createAndroidReplayUploadUrl,
-  createSessionReplayUploadFields
+  createSessionReplayUploadFields,
+  isRetryableReplayUploadStatus
 } from '../../main/ets/components/SessionReplayUploader';
 
 export default function sessionReplayProtocolUnitTest() {
@@ -183,6 +184,10 @@ export default function sessionReplayProtocolUnitTest() {
         .assertEqual('https://dk.example/v1/write/rum/replay?precision=ns');
       expect(createAndroidReplayUploadUrl('', 'https://dw.example/', 'token'))
         .assertEqual('https://dw.example/v1/write/rum/replay?token=token&to_headless=true&precision=ns');
+      expect(isRetryableReplayUploadStatus(0)).assertTrue();
+      expect(isRetryableReplayUploadStatus(429)).assertTrue();
+      expect(isRetryableReplayUploadStatus(503)).assertTrue();
+      expect(isRetryableReplayUploadStatus(400)).assertFalse();
     });
   });
 }

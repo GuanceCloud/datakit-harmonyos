@@ -18,6 +18,8 @@ export interface SessionReplayUploadResult {
   success: boolean;
   code: number;
   message: string;
+  retryable: boolean;
+  endpointBlocked: boolean;
   attemptedSegments: number;
   uploadedSegments: number;
   remainingSegments: number;
@@ -73,6 +75,11 @@ export function createAndroidReplayUploadUrl(
     return `${normalizedHost}/${path}?precision=ns`;
   }
   return `${normalizedHost}/${path}?token=${clientToken}&to_headless=true&precision=ns`;
+}
+
+/** Android-aligned retry classification for the record intake queue. */
+export function isRetryableReplayUploadStatus(code: number): boolean {
+  return code === 0 || code === 408 || code === 429 || code >= 500;
 }
 
 /** Creates Android-aligned form fields and the newline-delimited record payload. */
@@ -140,7 +147,7 @@ export class SessionReplayUploader {
       return this.result(true, 200, 'No pending Session Replay segments.', 0, 0);
     }
     if (target === null) {
-      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0);
+      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, true, true);
     }
 
     const appVersion = this.getAppVersion();
@@ -151,11 +158,12 @@ export class SessionReplayUploader {
       attemptedSegments++;
       const status = await this.uploadSegment(target, segment, appVersion);
       if (status.code !== http.ResponseCode.OK) {
-        return this.result(false, status.code, status.message, attemptedSegments, uploadedSegments);
+        return this.result(false, status.code, status.message, attemptedSegments, uploadedSegments,
+          isRetryableReplayUploadStatus(status.code));
       }
       if (!this.store.remove([segment.id])) {
         return this.result(false, 0, 'Replay endpoint acknowledged a segment but local deletion failed.',
-          attemptedSegments, uploadedSegments);
+          attemptedSegments, uploadedSegments, true);
       }
       uploadedSegments++;
     }
@@ -258,12 +266,16 @@ export class SessionReplayUploader {
     code: number,
     message: string,
     attemptedSegments: number,
-    uploadedSegments: number
+    uploadedSegments: number,
+    retryable: boolean = false,
+    endpointBlocked: boolean = false
   ): SessionReplayUploadResult {
     return {
       success,
       code,
       message,
+      retryable,
+      endpointBlocked,
       attemptedSegments,
       uploadedSegments,
       remainingSegments: this.store.list().length

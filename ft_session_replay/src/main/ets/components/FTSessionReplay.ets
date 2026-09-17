@@ -14,6 +14,7 @@ import { SessionReplayUploader, SessionReplayUploadResult } from './SessionRepla
  * the core SDK independent from the optional HAR.
  */
 export class FTSessionReplay {
+  private static readonly MAX_UPLOAD_RETRY_DELAY_MS: number = 60_000;
   private static instance: FTSessionReplay | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
@@ -23,6 +24,7 @@ export class FTSessionReplay {
   private uploader: SessionReplayUploader | null = null;
   private uploadTimer: number = -1;
   private uploadInFlight: boolean = false;
+  private uploadRetryCount: number = 0;
 
   public static getInstance(): FTSessionReplay {
     if (FTSessionReplay.instance === null) {
@@ -132,6 +134,8 @@ export class FTSessionReplay {
         success: false,
         code: 0,
         message: 'Session Replay storage is not configured. Pass context.filesDir to init() or enable().',
+        retryable: false,
+        endpointBlocked: false,
         attemptedSegments: 0,
         uploadedSegments: 0,
         remainingSegments: 0
@@ -142,6 +146,8 @@ export class FTSessionReplay {
         success: false,
         code: 0,
         message: 'A Session Replay upload is already in progress.',
+        retryable: true,
+        endpointBlocked: false,
         attemptedSegments: 0,
         uploadedSegments: 0,
         remainingSegments: this.storage === null ? 0 : this.storage.list().length
@@ -205,20 +211,58 @@ export class FTSessionReplay {
 
   private startUploadSchedule(): void {
     this.stopUploadSchedule();
+    this.uploadRetryCount = 0;
     if (this.uploader === null || this.config.getUploadIntervalMs() <= 0) {
       return;
     }
-    this.uploadTimer = setInterval((): void => {
-      this.flush().then((): void => {
-      }).catch((): void => {
-      });
-    }, this.config.getUploadIntervalMs());
+    this.scheduleNextUpload(this.config.getUploadIntervalMs());
   }
 
   private stopUploadSchedule(): void {
     if (this.uploadTimer !== -1) {
-      clearInterval(this.uploadTimer);
+      clearTimeout(this.uploadTimer);
       this.uploadTimer = -1;
     }
+  }
+
+  private scheduleNextUpload(delayMs: number): void {
+    if (this.uploader === null || this.config.getUploadIntervalMs() <= 0) {
+      return;
+    }
+    this.stopUploadSchedule();
+    this.uploadTimer = setTimeout((): void => {
+      this.uploadTimer = -1;
+      this.flush().then((result: SessionReplayUploadResult): void => {
+        this.scheduleNextUpload(this.nextUploadDelay(result));
+      }).catch((): void => {
+        this.uploadRetryCount++;
+        this.scheduleNextUpload(this.getRetryDelay());
+      });
+    }, Math.max(0, delayMs));
+  }
+
+  private nextUploadDelay(result: SessionReplayUploadResult): number {
+    if (result.success) {
+      this.uploadRetryCount = 0;
+      return this.config.getUploadIntervalMs();
+    }
+    if (result.endpointBlocked) {
+      this.uploadRetryCount = 0;
+      return FTSessionReplay.MAX_UPLOAD_RETRY_DELAY_MS;
+    }
+    if (result.retryable) {
+      this.uploadRetryCount++;
+      return this.getRetryDelay();
+    }
+    this.uploadRetryCount = 0;
+    return this.config.getUploadIntervalMs();
+  }
+
+  private getRetryDelay(): number {
+    const multiplier = Math.pow(2, Math.max(0, this.uploadRetryCount - 1));
+    return Math.min(
+      FTSessionReplay.MAX_UPLOAD_RETRY_DELAY_MS,
+      this.config.getUploadIntervalMs() * multiplier
+    );
   }
 }

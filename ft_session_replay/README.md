@@ -65,6 +65,11 @@ Once Replay is enabled, the regular queue is also drained automatically every
 15 seconds by default. Use `setUploadIntervalMs(1000..300000)` to change the
 interval, or `setUploadIntervalMs(0)` to require explicit `flush()` calls.
 Error-sampled data deliberately does not enter this queue until an error occurs.
+Network failures, timeouts, `429`, and `5xx` responses are retried with an
+exponential delay capped at 60 seconds. A missing endpoint sends no request and
+waits 60 seconds before checking again; a successful `200` resets scheduling to
+the configured base interval. Other client errors retain data but use the normal
+interval, so they remain diagnosable without a tight retry loop.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -254,6 +259,23 @@ deferred JSON segments while `segments` remains unchanged. After one minute of
 continued error-sampled recording, older complete deferred segments must be
 removed from this directory.
 4. Simulate a failed promotion by filling the normal Replay quota, trigger an
-error, and confirm the source deferred segments remain. Free space and trigger
-another error: the retained data must then be promoted and uploaded without
-silently discarding it.
+   error, and confirm the source deferred segments remain. Free space and trigger
+   another error: the retained data must then be promoted and uploaded without
+   silently discarding it.
+
+## P11 upload retry and endpoint recovery verification
+
+1. Set `setUploadIntervalMs(1000)`, retain at least one regular durable
+   segment, and configure the proxy to return `500`. Verify attempts occur at
+   roughly 1, 2, 4, 8 seconds (up to the 60-second cap) and the segment is not
+   removed. Repeat with `429` and with a network-disconnected device.
+2. Restore a `200` response. The next upload must remove the segment; create a
+   second segment and confirm the following scheduled attempt returns to the
+   configured one-second base interval rather than the prior backoff delay.
+3. Start with no DataKit/Dataway URL and no `setUploadUrl()` override. Confirm
+   no HTTP request is made and the durable segment remains. Configure an
+   endpoint at runtime, wait up to 60 seconds, and verify the same queue resumes
+   without restarting the app.
+4. Return `400` from the proxy. Confirm the segment remains for diagnosis but
+   attempts use the normal configured interval instead of the exponential
+   backoff cadence.
