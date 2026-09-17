@@ -29,16 +29,17 @@ struct SessionReplayPocPage {
   }
 
   aboutToDisappear(): void {
+    this.replay.unregisterRoot();
     if (!this.bridgeViewActive) {
-      this.disableReplay();
       return;
     }
     FTRUMGlobalManager.getInstance().stopView()
       .then(() => {
         this.bridgeViewActive = false;
-        this.disableReplay();
       })
-      .catch(() => this.disableReplay());
+      .catch(() => {
+        this.bridgeViewActive = false;
+      });
   }
 
   private toggleReplay(): void {

@@ -31,6 +31,7 @@ import {
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
 import { FTColdLaunchBridge } from '@guancecloud/ft_sdk/Index';
+import { FTSessionReplay, FTSessionReplayConfig, TouchPrivacy } from '@guancecloud/ft_session_replay';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 
@@ -496,6 +497,17 @@ export default class EntryAbility extends UIAbility {
         // .setRumCacheLimitCount(60000)
 
       FTSDK.installRUMConfig(rumConfig);
+
+      // Demo-wide Replay setup: RUM owns session/view identifiers while each
+      // page registers the ArkUI root that is currently eligible for capture.
+      // SHOW is intentional for the POC touch-signal verification button;
+      // production integrations should keep the SDK default of HIDE.
+      const sessionReplayConfig = new FTSessionReplayConfig()
+        .setSampleRate(1)
+        .setSessionReplayOnErrorSampleRate(0)
+        .setTouchPrivacy(TouchPrivacy.SHOW);
+      FTSessionReplay.getInstance().enable(sessionReplayConfig, context.filesDir);
+      DemoLogger.i(LOG_TAG, 'Session Replay configured after RUM initialization');
 
       // Bind user data using new UserData class with persistence
       const userData = new UserData();
