@@ -61,9 +61,10 @@ SDK, and global-context fields. The source is honestly marked `harmonyos`.
 It deletes a local segment only after HTTP `200`; unavailable networking and
 non-200 responses leave every unacknowledged segment on device for retry. For
 a controlled proxy, use `setUploadUrl('https://host/v1/write/rum/replay')`.
-Once Replay is enabled, the queue is also drained automatically every 15 seconds
-by default. Use `setUploadIntervalMs(1000..300000)` to change the interval, or
-`setUploadIntervalMs(0)` to require explicit `flush()` calls.
+Once Replay is enabled, the regular queue is also drained automatically every
+15 seconds by default. Use `setUploadIntervalMs(1000..300000)` to change the
+interval, or `setUploadIntervalMs(0)` to require explicit `flush()` calls.
+Error-sampled data deliberately does not enter this queue until an error occurs.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -233,3 +234,26 @@ values, or image bytes.
 4. Return a non-`200` response while automatic upload is enabled. Confirm the
    segment remains locally and that a later timer cycle retries it; after a
    `200` response, it is removed exactly once.
+
+## P10 error-sampled rolling-window verification
+
+1. Initialize Replay with `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`
+and a working intake. Create a RUM View bridge capture but do not report an
+error. The POC must display a positive **deferred error segments** count and
+no Replay request may reach the intake, even after the automatic upload period.
+The closed View must not contain Replay metadata.
+2. During a new error-sampled View, wait long enough to create several records,
+then trigger **Capture through RUM Error Bridge**. The deferred count must fall
+as its latest one-minute window moves to durable segments. The next explicit or
+scheduled upload must send those segments; the related RUM View must contain
+`has_replay:true`, a positive `records_count`, and
+`sampled_on_reply_error:true`.
+3. Leave an error-sampled View without an error, restart the application, and
+inspect `filesDir/ft_session_replay/error_segments`. It must contain the
+deferred JSON segments while `segments` remains unchanged. After one minute of
+continued error-sampled recording, older complete deferred segments must be
+removed from this directory.
+4. Simulate a failed promotion by filling the normal Replay quota, trigger an
+error, and confirm the source deferred segments remain. Free space and trigger
+another error: the retained data must then be promoted and uploaded without
+silently discarding it.

@@ -82,7 +82,7 @@ struct SessionReplayPocPage {
         sessionId: capture.envelope.session_id,
         viewId: capture.envelope.view_id
       }).length;
-      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}.\n${capture.payload.substring(0, 600)}`;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
     }, 200);
   }
 
@@ -95,7 +95,7 @@ struct SessionReplayPocPage {
           applicationId: capture.envelope.application_id,
           sessionId: capture.envelope.session_id,
           viewId: capture.envelope.view_id
-        }).length}; durable segments: ${this.replay.getStoredSegments().length}.\n${capture.payload.substring(0, 600)}`;
+        }).length}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
         return;
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';

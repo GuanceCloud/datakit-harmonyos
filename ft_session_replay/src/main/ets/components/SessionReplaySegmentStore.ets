@@ -29,11 +29,19 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private readonly maxRecordsPerSegment: number;
   private sequence: number = 0;
 
-  constructor(filesDir: string, maxBytes: number, maxRecordsPerSegment: number) {
+  constructor(
+    filesDir: string,
+    maxBytes: number,
+    maxRecordsPerSegment: number,
+    directoryName: string = 'segments'
+  ) {
     if (filesDir.trim().length === 0) {
       throw new Error('Session Replay storage requires a non-empty filesDir');
     }
-    this.root = `${filesDir}/ft_session_replay/segments`;
+    if (!/^[a-z0-9_]+$/.test(directoryName)) {
+      throw new Error('Session Replay storage directory name is invalid');
+    }
+    this.root = `${filesDir}/ft_session_replay/${directoryName}`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
     this.maxRecordsPerSegment = Math.max(1, Math.floor(maxRecordsPerSegment));
     this.ensureDirectory(this.root);
@@ -96,6 +104,53 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       }
     }
     return completed;
+  }
+
+  /** Removes complete segments whose latest record is outside a rolling window. */
+  public pruneBefore(timestamp: number): void {
+    const segments = this.list();
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      if (this.latestRecordTimestamp(segment) < timestamp) {
+        this.remove([segment.id]);
+      }
+    }
+  }
+
+  /**
+   * Atomically enough at segment granularity for error sampling: copy the
+   * surviving window to the normal store, then remove the source only after
+   * that durable write succeeds. A failed write leaves source data retryable.
+   */
+  public promoteSessionWindow(
+    sessionId: string,
+    timestamp: number,
+    windowMs: number,
+    destination: SessionReplaySegmentStore
+  ): boolean {
+    const cutoff = timestamp - Math.max(0, windowMs);
+    const segments = this.list();
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      if (segment.context.sessionId !== sessionId) {
+        continue;
+      }
+      const records = segment.records.filter((record: SessionReplayRecord): boolean => record.timestamp >= cutoff);
+      if (records.length === 0) {
+        if (!this.remove([segment.id])) {
+          return false;
+        }
+        continue;
+      }
+      if (!destination.append(segment.context, records)) {
+        return false;
+      }
+      if (!this.remove([segment.id])) {
+        return false;
+      }
+    }
+    this.pruneBefore(cutoff);
+    return true;
   }
 
   public getRoot(): string {
@@ -214,5 +269,13 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private isSafeSegmentId(id: string): boolean {
     return /^\d{13}-\d{6}$/.test(id);
+  }
+
+  private latestRecordTimestamp(segment: SessionReplayStoredSegment): number {
+    let latest = segment.createdAt;
+    for (let index = 0; index < segment.records.length; index++) {
+      latest = Math.max(latest, segment.records[index].timestamp);
+    }
+    return latest;
   }
 }

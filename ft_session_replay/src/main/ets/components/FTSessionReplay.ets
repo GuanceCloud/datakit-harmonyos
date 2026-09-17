@@ -19,6 +19,7 @@ export class FTSessionReplay {
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayPOC | null = null;
   private storage: SessionReplaySegmentStore | null = null;
+  private errorSampleStorage: SessionReplaySegmentStore | null = null;
   private uploader: SessionReplayUploader | null = null;
   private uploadTimer: number = -1;
   private uploadInFlight: boolean = false;
@@ -48,7 +49,7 @@ export class FTSessionReplay {
     if (this.recorder !== null) {
       return;
     }
-    const recorder = new FTSessionReplayPOC(this.config, this.storage);
+    const recorder = new FTSessionReplayPOC(this.config, this.storage, this.errorSampleStorage);
     recorder.start();
     this.recorder = recorder;
     this.startUploadSchedule();
@@ -116,6 +117,11 @@ export class FTSessionReplay {
     return this.storage === null ? null : this.storage.getRoot();
   }
 
+  /** Lists error-sampled segments that await a RUM Error before promotion. */
+  public getDeferredErrorSegments(): Array<SessionReplayStoredSegment> {
+    return this.errorSampleStorage === null ? [] : this.errorSampleStorage.list();
+  }
+
   /**
    * Sends durable segments to the Android-compatible Replay intake. Segments
    * are deleted only after HTTP 200; any failure leaves them for a later call.
@@ -179,6 +185,7 @@ export class FTSessionReplay {
   private configureStorage(filesDir: string): void {
     if (filesDir.trim().length === 0) {
       this.storage = null;
+      this.errorSampleStorage = null;
       this.uploader = null;
       return;
     }
@@ -186,6 +193,12 @@ export class FTSessionReplay {
       filesDir,
       this.config.getStorageMaxBytes(),
       this.config.getMaxRecordsPerSegment()
+    );
+    this.errorSampleStorage = new SessionReplaySegmentStore(
+      filesDir,
+      this.config.getStorageMaxBytes(),
+      this.config.getMaxRecordsPerSegment(),
+      'error_segments'
     );
     this.uploader = new SessionReplayUploader(this.storage, this.config);
   }

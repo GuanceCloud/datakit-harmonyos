@@ -72,6 +72,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.setUploadIntervalMs(1).getUploadIntervalMs()).assertEqual(1000);
       expect(config.setUploadIntervalMs(500000).getUploadIntervalMs()).assertEqual(300000);
       expect(config.setUploadIntervalMs(0).getUploadIntervalMs()).assertEqual(0);
+      expect(config.getErrorSampleWindowMs()).assertEqual(60000);
     });
 
     it('uses Android native record types for view lifecycle and mutations', 0, () => {

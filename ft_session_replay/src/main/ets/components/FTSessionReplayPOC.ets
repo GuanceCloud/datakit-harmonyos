@@ -11,7 +11,7 @@ import { ArkUIReplayCollector } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
-import { SessionReplayRecordStore } from './SessionReplaySegmentStore';
+import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
   createReplayEnvelope,
   FullSnapshotData,
@@ -47,23 +47,27 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
   private readonly sampler: SessionReplaySampler;
-  private readonly store: SessionReplayRecordStore | null;
+  private readonly store: SessionReplaySegmentStore | null;
+  private readonly errorSampleStore: SessionReplaySegmentStore | null;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
   private activeContext: SessionReplayContext | null = null;
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
+  private readonly promotedErrorSessions: Set<string> = new Set();
   private observationTimer: number = -1;
 
   constructor(
     config: FTSessionReplayConfig = new FTSessionReplayConfig(),
-    store: SessionReplayRecordStore | null = null
+    store: SessionReplaySegmentStore | null = null,
+    errorSampleStore: SessionReplaySegmentStore | null = null
   ) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot());
     this.sampler = new SessionReplaySampler(config);
     this.store = store;
+    this.errorSampleStore = errorSampleStore;
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -86,6 +90,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.activeContext = null;
     this.viewMetadata.clear();
     this.recordedRecordsByView.clear();
+    this.promotedErrorSessions.clear();
     this.stopObservation();
     this.processor.reset();
     this.sampler.reset();
@@ -189,6 +194,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (metadata === undefined) {
       return { hasReplay: false, recordsCount: 0, sampledOnError: false };
     }
+    // Error-sampled records are intentionally invisible to RUM and upload
+    // until a RUM Error promotes their rolling pre-error window.
+    if (metadata.sampledOnError && !this.promotedErrorSessions.has(context.sessionId)) {
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
+    }
     return {
       hasReplay: metadata.hasReplay,
       recordsCount: metadata.recordsCount,
@@ -224,16 +234,26 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return false;
     }
     const replayContext = this.toReplayContext(context);
+    let capture: SessionReplayCapture | null;
     if (this.activeContext !== null && !this.isSameReplayContext(this.activeContext, replayContext)) {
-      return this.captureViewStartedFromRUMContext(context) !== null;
+      capture = this.captureViewStartedFromRUMContext(context);
+    } else {
+      capture = this.captureFullSnapshotFromRUMContext(context);
     }
-    return this.captureFullSnapshotFromRUMContext(context) !== null;
+    if (capture === null) {
+      return false;
+    }
+    if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
+      return true;
+    }
+    return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
   }
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     this.renewRootEpoch();
     this.activeContext = null;
     this.stopObservation();
+    this.promotedErrorSessions.clear();
   }
 
   private getWireframeCount(record: SessionReplayRecord): number {
@@ -364,7 +384,42 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       current.splice(0, overflow);
     }
     this.recordedRecordsByView.set(key, current);
-    return this.store === null || this.store.append(context, records);
+    const targetStore = this.getStoreForContext(context);
+    if (targetStore === null) {
+      return true;
+    }
+    const appended = targetStore.append(context, records);
+    if (appended && targetStore === this.errorSampleStore) {
+      this.errorSampleStore?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
+    }
+    return appended;
+  }
+
+  private getStoreForContext(context: SessionReplayContext): SessionReplaySegmentStore | null {
+    const sampling = this.sampler.decide(context.sessionId);
+    if (sampling === SessionReplaySamplingMode.ERROR && !this.promotedErrorSessions.has(context.sessionId)) {
+      return this.errorSampleStore;
+    }
+    return this.store;
+  }
+
+  private promoteErrorSampledSession(sessionId: string, timestamp: number): boolean {
+    if (this.promotedErrorSessions.has(sessionId)) {
+      return true;
+    }
+    if (this.errorSampleStore === null || this.store === null) {
+      return false;
+    }
+    const promoted = this.errorSampleStore.promoteSessionWindow(
+      sessionId,
+      timestamp,
+      this.config.getErrorSampleWindowMs(),
+      this.store
+    );
+    if (promoted) {
+      this.promotedErrorSessions.add(sessionId);
+    }
+    return promoted;
   }
 
   private startObservation(): void {

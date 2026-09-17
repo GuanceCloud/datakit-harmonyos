@@ -37,6 +37,9 @@ export class FTSessionReplayConfig {
   // Android-like background draining cadence. Zero opts out and leaves flush()
   // as the only upload trigger.
   private uploadIntervalMs: number = 15_000;
+  // Android's error-sampled Replay keeps only the one-minute pre-error window
+  // until an error promotes it to the normal upload queue.
+  private errorSampleWindowMs: number = 60_000;
   // Optional absolute Replay intake URL. When omitted, the installed core SDK's
   // DataKit or Dataway endpoint is used with Android's Replay path.
   private uploadUrl: string = '';
@@ -185,6 +188,10 @@ export class FTSessionReplayConfig {
 
   public getUploadIntervalMs(): number {
     return this.uploadIntervalMs;
+  }
+
+  public getErrorSampleWindowMs(): number {
+    return this.errorSampleWindowMs;
   }
 }
 
