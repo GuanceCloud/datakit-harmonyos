@@ -1746,6 +1746,12 @@ export class FTRUMInnerManager {
       if (viewBean.isHasReplay()) {
         fieldsMap.set(Constants.KEY_HAS_REPLAY, 'true');
       }
+      if (viewBean.getRecordsCount() > 0) {
+        fieldsMap.set(Constants.KEY_SESSION_REPLAY_RECORDS_COUNT, viewBean.getRecordsCount().toString());
+      }
+      if (viewBean.isSampledOnReplayError()) {
+        fieldsMap.set(Constants.KEY_SAMPLED_FOR_ERROR_REPLAY, 'true');
+      }
       
       // Device performance fields (aligned with Android: conditional based on DeviceMetricsMonitorType)
       // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
@@ -2358,18 +2364,18 @@ export class FTRUMInnerManager {
   }
 
   private notifySessionReplayViewStarted(view: ActiveViewBean): void {
-    const hasReplay = FTSessionReplayBridgeRegistry.notifyViewStarted(
-      this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime())
-    );
+    const context = this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+    const hasReplay = FTSessionReplayBridgeRegistry.notifyViewStarted(context);
     if (hasReplay) {
       view.setHasReplay(true);
     }
+    this.applySessionReplayViewMetadata(view, context);
   }
 
   private notifySessionReplayViewStopped(view: ActiveViewBean): void {
-    FTSessionReplayBridgeRegistry.notifyViewStopped(
-      this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime())
-    );
+    const context = this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+    FTSessionReplayBridgeRegistry.notifyViewStopped(context);
+    this.applySessionReplayViewMetadata(view, context);
   }
 
   private notifySessionReplayError(view: ActiveViewBean | null, timestamp: number, errorType: string, state: AppState): void {
@@ -2390,6 +2396,20 @@ export class FTRUMInnerManager {
     };
     if (FTSessionReplayBridgeRegistry.notifyError(context)) {
       view.setHasReplay(true);
+    }
+    this.applySessionReplayViewMetadata(view, base);
+  }
+
+  private applySessionReplayViewMetadata(view: ActiveViewBean, context: FTSessionReplayRUMContext): void {
+    const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
+    if (metadata.hasReplay) {
+      view.setHasReplay(true);
+    }
+    if (metadata.recordsCount > view.getRecordsCount()) {
+      view.setRecordsCount(metadata.recordsCount);
+    }
+    if (metadata.sampledOnError) {
+      view.setSampledOnReplayError(true);
     }
   }
 

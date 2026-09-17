@@ -4,7 +4,8 @@ import {
   FTSessionReplayBridgeRegistry,
   FTSessionReplayErrorContext,
   FTSessionReplayRUMContext,
-  FTSessionReplaySessionContext
+  FTSessionReplaySessionContext,
+  FTSessionReplayViewMetadata
 } from '@guancecloud/ft_sdk';
 import { ArkUIReplayCollector } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
@@ -47,6 +48,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
   private activeContext: SessionReplayContext | null = null;
+  private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
 
   constructor(config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.config = config;
@@ -72,6 +74,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.isStarted = false;
     this.rootBinding = null;
     this.activeContext = null;
+    this.viewMetadata.clear();
     this.processor.reset();
     this.sampler.reset();
   }
@@ -151,6 +154,19 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return this.sampler.decide(sessionId);
   }
 
+  /** Returns Android-compatible Replay counters for the current RUM View. */
+  public getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
+    const metadata = this.viewMetadata.get(this.getViewMetadataKey(context));
+    if (metadata === undefined) {
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
+    }
+    return {
+      hasReplay: metadata.hasReplay,
+      recordsCount: metadata.recordsCount,
+      sampledOnError: metadata.sampledOnError
+    };
+  }
+
   public onViewStarted(context: FTSessionReplayRUMContext): boolean {
     if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
@@ -165,6 +181,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     }
     const record = this.processor.createViewEndRecord(context.timestamp);
     this.lastCapture = this.createCapture(replayContext, [record], null);
+    this.recordViewMetadata(context, 1);
     this.activeContext = null;
     this.processor.reset();
   }
@@ -200,6 +217,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.createCapture(replayContext, records, fullCapture.record);
     this.lastCapture = capture;
     this.activeContext = replayContext;
+    this.recordViewMetadata(context, records.length);
     return capture;
   }
 
@@ -208,6 +226,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.captureWithRegisteredRoot(replayContext);
     if (capture !== null) {
       this.lastCapture = capture;
+      this.recordViewMetadata(context, capture.records.length);
     }
     return capture;
   }
@@ -267,6 +286,24 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       values.push(`${key}=${String(globalContext[key])}`);
     }
     return values.join('&');
+  }
+
+  private recordViewMetadata(context: FTSessionReplayRUMContext, recordsCount: number): void {
+    if (recordsCount <= 0) {
+      return;
+    }
+    const key = this.getViewMetadataKey(context);
+    const existing = this.viewMetadata.get(key);
+    const sampledOnError = this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.ERROR;
+    this.viewMetadata.set(key, {
+      hasReplay: true,
+      recordsCount: (existing === undefined ? 0 : existing.recordsCount) + recordsCount,
+      sampledOnError
+    });
+  }
+
+  private getViewMetadataKey(context: FTSessionReplayRUMContext): string {
+    return `${context.applicationId}|${context.sessionId}|${context.viewId}`;
   }
 
   private createCapture(

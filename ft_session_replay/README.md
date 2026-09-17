@@ -9,6 +9,10 @@ registered ArkUI root and mark their RUM View/Action output with `has_replay`.
 Without a registered bridge, the core SDK invokes a NoOp and preserves its
 existing behavior.
 
+For a Replay-enabled RUM View, the core also writes Android-aligned View fields:
+`records_count` and `sampled_on_reply_error`. They describe the accumulated
+Replay records and whether the current session used the error-sampling path.
+
 The generated JSON is compatible with Android's Replay record envelope:
 
 ```json
@@ -78,3 +82,22 @@ values, or image bytes.
 5. Return from the page, revisit a normal demo page, and confirm ordinary RUM
    events still work. This verifies unregistering the bridge leaves the core
    SDK on its NoOp path.
+
+## P4 RUM View metadata verification
+
+1. Set `setSampleRate(1)`, configure a RUM app ID, open **Session Replay POC**,
+   and trigger **Capture through RUM View Bridge**. Leave the page so the RUM
+   View is closed and emitted.
+2. Inspect the emitted RUM View through the configured intake, local capture
+   proxy, or Studio event detail. It must include `has_replay:true` and a
+   positive `records_count` (the initial bridge capture produces at least Meta,
+   Focus, and Full Snapshot records).
+3. Set `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`, reopen the
+   POC, trigger **Capture through RUM View Bridge**, then **Capture through RUM
+   Error Bridge**, and leave the page. Confirm the associated RUM View contains
+   `sampled_on_reply_error:true`, a positive `records_count`, and
+   `has_replay:true`.
+4. Repeat with both sample rates set to `0`. The emitted RUM View must omit
+   Replay metadata (`has_replay`, `records_count`, and
+   `sampled_on_reply_error`), confirming that the NoOp/sampling path does not
+   mark unrelated views.

@@ -12,6 +12,7 @@ import {
 struct SessionReplayPocPage {
   @State result: string = 'Ready to capture a privacy-safe Full Snapshot.';
   @State showMutationProbe: boolean = false;
+  private bridgeViewActive: boolean = false;
   private readonly replay: FTSessionReplayPOC = new FTSessionReplayPOC(
     new FTSessionReplayConfig().setMaxNodesPerSnapshot(300)
   );
@@ -22,7 +23,16 @@ struct SessionReplayPocPage {
   }
 
   aboutToDisappear(): void {
-    this.replay.stop();
+    if (!this.bridgeViewActive) {
+      this.replay.stop();
+      return;
+    }
+    FTRUMGlobalManager.getInstance().stopView()
+      .then(() => {
+        this.bridgeViewActive = false;
+        this.replay.stop();
+      })
+      .catch(() => this.replay.stop());
   }
 
   private showBridgeCapture(source: string): void {
@@ -49,7 +59,10 @@ struct SessionReplayPocPage {
         .height(48)
         .onClick(() => {
           FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
-            .then(() => this.showBridgeCapture('RUM View bridge'))
+            .then(() => {
+              this.bridgeViewActive = true;
+              this.showBridgeCapture('RUM View bridge');
+            })
             .catch((error: Error) => {
               this.result = `RUM View bridge failed: ${error.message}`;
             });

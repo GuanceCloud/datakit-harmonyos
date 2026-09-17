@@ -25,6 +25,13 @@ export interface FTSessionReplaySessionContext {
   timestamp: number;
 }
 
+/** Replay availability state that core RUM persists with a View. */
+export interface FTSessionReplayViewMetadata {
+  hasReplay: boolean;
+  recordsCount: number;
+  sampledOnError: boolean;
+}
+
 /**
  * Optional Replay contract. The core SDK owns no recorder, storage, or upload
  * implementation. A HAR registers this bridge only when Replay is enabled.
@@ -32,6 +39,7 @@ export interface FTSessionReplaySessionContext {
 export interface FTSessionReplayBridge {
   /** Returns the RUM key fragments that the optional Replay HAR may receive. */
   getRUMLinkKeys(): Array<string>;
+  getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata;
   onViewStarted(context: FTSessionReplayRUMContext): boolean;
   onViewStopped(context: FTSessionReplayRUMContext): void;
   onError(context: FTSessionReplayErrorContext): boolean;
@@ -62,6 +70,19 @@ export class FTSessionReplayBridgeRegistry {
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay link-key callback failed: ${String(error)}`);
       return [];
+    }
+  }
+
+  public static getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
+    }
+    try {
+      return bridge.getViewMetadata(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay metadata callback failed: ${String(error)}`);
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
     }
   }
 

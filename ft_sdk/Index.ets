@@ -163,7 +163,8 @@ export {
   FTSessionReplayBridgeRegistry,
   FTSessionReplayErrorContext,
   FTSessionReplayRUMContext,
-  FTSessionReplaySessionContext
+  FTSessionReplaySessionContext,
+  FTSessionReplayViewMetadata
 } from './src/main/ets/components/sessionreplay/FTSessionReplayBridge';
 
 // ============================================================================

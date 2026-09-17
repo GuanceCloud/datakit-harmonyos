@@ -16,6 +16,8 @@ export interface ViewBeanJSON {
   startTime: number;
   isClose: boolean;
   hasReplay?: boolean;
+  recordsCount?: number;
+  sampledOnReplayError?: boolean;
   sessionId: string;
   actionCount: number;
   errorCount: number;
@@ -41,6 +43,8 @@ interface MonitorValue {
 
 interface ReplayMarker {
   value: boolean;
+  recordsCount?: number;
+  sampledOnReplayError?: boolean;
 }
 
 /**
@@ -75,6 +79,8 @@ export class ViewBean {
 
   /** Whether this View is associated with a captured Session Replay record. */
   private hasReplay: boolean = false;
+  private recordsCount: number = 0;
+  private sampledOnReplayError: boolean = false;
 
   /**
    * Session ID
@@ -185,6 +191,14 @@ export class ViewBean {
 
   public isHasReplay(): boolean { return this.hasReplay; }
   public setHasReplay(hasReplay: boolean): void { this.hasReplay = hasReplay; }
+
+  public getRecordsCount(): number { return this.recordsCount; }
+  public setRecordsCount(recordsCount: number): void { this.recordsCount = Math.max(0, Math.floor(recordsCount)); }
+
+  public isSampledOnReplayError(): boolean { return this.sampledOnReplayError; }
+  public setSampledOnReplayError(sampledOnReplayError: boolean): void {
+    this.sampledOnReplayError = sampledOnReplayError;
+  }
 
   public getSessionId(): string { return this.sessionId; }
   public setSessionId(sessionId: string): void { this.sessionId = sessionId; }
@@ -322,7 +336,11 @@ export class ViewBean {
       });
       obj[Constants.KEY_RUM_PROPERTY] = this.property;
       obj[Constants.KEY_RUM_TAGS] = this.tags;
-      const replayMarker: ReplayMarker = { value: this.hasReplay };
+      const replayMarker: ReplayMarker = {
+        value: this.hasReplay,
+        recordsCount: this.recordsCount,
+        sampledOnReplayError: this.sampledOnReplayError
+      };
       obj[Constants.KEY_HAS_REPLAY] = replayMarker;
       return JSON.stringify(obj);
     } catch (error) {
@@ -357,6 +375,8 @@ export class ViewBean {
           } else if (key === Constants.KEY_HAS_REPLAY) {
             const replayMarker = value as ReplayMarker;
             this.hasReplay = replayMarker.value === true;
+            this.recordsCount = replayMarker.recordsCount === undefined ? 0 : Math.max(0, Math.floor(replayMarker.recordsCount));
+            this.sampledOnReplayError = replayMarker.sampledOnReplayError === true;
           } else {
             this.extraAttr.set(key, value);
           }
@@ -509,6 +529,8 @@ export class ViewBean {
       startTime: this.startTime,
       isClose: this.isClose,
       hasReplay: this.hasReplay,
+      recordsCount: this.recordsCount,
+      sampledOnReplayError: this.sampledOnReplayError,
       sessionId: this.sessionId,
       actionCount: this.actionCount,
       errorCount: this.errorCount,
@@ -536,6 +558,8 @@ export class ViewBean {
     viewBean.viewReferrer = json.viewReferrer || "";
     viewBean.isClose = json.isClose || false;
     viewBean.hasReplay = json.hasReplay === true;
+    viewBean.recordsCount = json.recordsCount === undefined ? 0 : Math.max(0, Math.floor(json.recordsCount));
+    viewBean.sampledOnReplayError = json.sampledOnReplayError === true;
     viewBean.sessionId = json.sessionId || "";
     viewBean.actionCount = json.actionCount || 0;
     viewBean.errorCount = json.errorCount || 0;
@@ -575,6 +599,8 @@ export class ViewBean {
     cloned.viewReferrer = this.viewReferrer;
     cloned.isClose = this.isClose;
     cloned.hasReplay = this.hasReplay;
+    cloned.recordsCount = this.recordsCount;
+    cloned.sampledOnReplayError = this.sampledOnReplayError;
     cloned.sessionId = this.sessionId;
     cloned.actionCount = this.actionCount;
     cloned.errorCount = this.errorCount;
