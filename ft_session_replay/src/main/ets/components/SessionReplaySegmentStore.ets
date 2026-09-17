@@ -42,9 +42,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     if (!/^[a-z0-9_]+$/.test(directoryName)) {
       throw new Error('Session Replay storage directory name is invalid');
     }
-    this.root = `${filesDir}/ft_session_replay/${directoryName}`;
+    const replayRoot = `${filesDir}/ft_session_replay`;
+    this.root = `${replayRoot}/${directoryName}`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
     this.maxRecordsPerSegment = Math.max(1, Math.floor(maxRecordsPerSegment));
+    // `mkdirSync(path, true)` is only available from newer platform APIs.
+    // Create each level explicitly so Replay works on the API 12 devices this
+    // SDK supports as well as on newer runtimes.
+    this.ensureDirectory(replayRoot);
     this.ensureDirectory(this.root);
     this.recover();
   }
@@ -243,7 +248,8 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     try {
       fs.accessSync(path);
     } catch (_) {
-      fs.mkdirSync(path, true);
+      fs.mkdirSync(path);
+      fs.accessSync(path);
     }
   }
 

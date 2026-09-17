@@ -35,10 +35,13 @@ export class SessionReplayResourceStore {
     if (!/^[a-z0-9_]+$/.test(directoryName)) {
       throw new Error('Session Replay resource storage directory name is invalid');
     }
-    this.root = `${filesDir}/ft_session_replay/${directoryName}`;
+    const replayRoot = `${filesDir}/ft_session_replay`;
+    this.root = `${replayRoot}/${directoryName}`;
     this.dataRoot = `${this.root}/data`;
     this.metadataRoot = `${this.root}/pending`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
+    this.ensureDirectory(replayRoot);
+    this.ensureDirectory(this.root);
     this.ensureDirectory(this.dataRoot);
     this.ensureDirectory(this.metadataRoot);
     this.recover();
@@ -333,7 +336,12 @@ export class SessionReplayResourceStore {
 
   private ensureDirectory(path: string): void {
     if (!this.exists(path)) {
-      fs.mkdirSync(path, true);
+      fs.mkdirSync(path);
+      // Verify the actual runtime created the directory. This catches older
+      // devices that do not support the recursive mkdir overload.
+      if (!this.exists(path)) {
+        throw new Error(`Session Replay resource directory was not created: ${path}`);
+      }
     }
   }
 
