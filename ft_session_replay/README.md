@@ -92,6 +92,23 @@ error-sampled session, the native bridge requests
 `DATAFLUX_RUM.takeSubsequentFullSnapshot()` every ten seconds while its latest
 WebView slot remains active.
 
+## Replay resource assets
+
+When a collector creates a Replay record that refers to binary content, queue
+that content with `replay.queueResource(context, bytes, mimeType)`. The method
+returns a SHA-256 file name suitable for the record reference. Identical bytes
+are retained once in `filesDir/ft_session_replay/resources/data`; pending
+metadata is scoped by the RUM App ID and `wgt_id`, matching Android's backend
+routing. The current conservative ArkUI collector emits masked placeholder
+wireframes and therefore does not queue image bytes itself.
+
+`flush()` first performs Android-compatible resource processing: it posts
+`{app_id, files, tags}` to `v1/check/rum/replay_assets`, removes assets the
+server already has, then uploads only missing files as repeated `files`
+multipart parts to `v1/write/rum/replay_assets`. Private assets remain until a
+`200` acknowledgement. Use `flushResources()` when validating this phase by
+itself. Asset uploads use the same scheduled retry cycle as Replay records.
+
 The generated JSON is compatible with Android's Replay record envelope:
 
 ```json
@@ -339,3 +356,31 @@ removed from this directory.
    Navigate away and confirm those calls stop. Before a RUM Error, Browser
    Replay remains in `error_segments`; after an Error it promotes and uploads
    with the same rolling-window behavior documented in P10.
+
+## P13 Replay resource asset verification
+
+1. In a test startup path, initialize Replay with a private `filesDir` and a
+   valid DataKit/Dataway endpoint. Construct the same `SessionReplayContext`
+   used by a recorded View and call `queueResource(context, new Uint8Array([1,
+   2, 3, 4]), 'image/png')` twice. Both calls must return the same 64-character
+   SHA-256 file name, and `getStoredResources()` must contain one pending
+   resource for that `wgt_id` route.
+2. With a controlled proxy, return `200` from
+   `v1/check/rum/replay_assets` with `{"content":{"<hash>":true}}`. Call
+   `flushResources()` and confirm no upload request follows, the pending asset
+   is removed, and its private `resources/data/<hash>.bin` file is deleted when
+   no other route references it.
+3. Queue the asset again. This time return
+   `{"content":{"<hash>":false}}` from the check request, then return `200`
+   from `v1/write/rum/replay_assets`. Confirm the check body contains `app_id`,
+   `files:["<hash>"]`, and `tags` when linked context is configured. Confirm
+   the upload is multipart with `app_id`, serialized `tags`, and a `files` part
+   named exactly by the hash with the original four bytes and MIME type.
+4. Return `500` or disconnect the proxy during either check or upload. The
+   resource metadata and binary file must remain. Restore `200` and wait for
+   the scheduled drain (or call `flushResources()`); the same hash must be
+   checked/uploaded again and then removed exactly once.
+5. Queue the same bytes under a different `wgt_id`. Confirm the local byte file
+   is still deduplicated, but the proxy receives a separate check/upload group
+   with that route's `tags`. This verifies that backend asset routing is not
+   accidentally shared across workspaces.

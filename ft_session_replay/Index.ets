@@ -47,4 +47,13 @@ export {
   createSessionReplayUploadFields,
   isRetryableReplayUploadStatus
 } from './src/main/ets/components/SessionReplayUploader';
+export {
+  SessionReplayResourceStore,
+  SessionReplayStoredResource
+} from './src/main/ets/components/SessionReplayResourceStore';
+export {
+  SessionReplayResourceUploader,
+  SessionReplayResourceUploadResult,
+  createAndroidReplayResourceUrl
+} from './src/main/ets/components/SessionReplayResourceUploader';
 export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';

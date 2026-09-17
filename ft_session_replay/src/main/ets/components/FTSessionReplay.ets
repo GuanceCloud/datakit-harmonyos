@@ -4,6 +4,8 @@ import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 import { SessionReplayUploader, SessionReplayUploadResult } from './SessionReplayUploader';
+import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
+import { SessionReplayResourceUploader, SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -22,8 +24,11 @@ export class FTSessionReplay {
   private storage: SessionReplaySegmentStore | null = null;
   private errorSampleStorage: SessionReplaySegmentStore | null = null;
   private uploader: SessionReplayUploader | null = null;
+  private resourceStorage: SessionReplayResourceStore | null = null;
+  private resourceUploader: SessionReplayResourceUploader | null = null;
   private uploadTimer: number = -1;
   private uploadInFlight: boolean = false;
+  private resourceUploadInFlight: boolean = false;
   private uploadRetryCount: number = 0;
 
   public static getInstance(): FTSessionReplay {
@@ -119,6 +124,28 @@ export class FTSessionReplay {
     return this.storage === null ? null : this.storage.getRoot();
   }
 
+  /** Adds a binary asset for a Replay record and returns its SHA-256 file name. */
+  public queueResource(
+    context: SessionReplayContext,
+    data: ArrayBuffer | Uint8Array,
+    mimeType: string = 'application/octet-stream'
+  ): string | null {
+    if (this.resourceStorage === null) {
+      return null;
+    }
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    return this.resourceStorage.put(context, bytes, mimeType);
+  }
+
+  /** Lists resource assets that still need a check/upload acknowledgement. */
+  public getStoredResources(): Array<SessionReplayStoredResource> {
+    return this.resourceStorage === null ? [] : this.resourceStorage.list();
+  }
+
+  public getResourceStorageRoot(): string | null {
+    return this.resourceStorage === null ? null : this.resourceStorage.getRoot();
+  }
+
   /** Lists error-sampled segments that await a RUM Error before promotion. */
   public getDeferredErrorSegments(): Array<SessionReplayStoredSegment> {
     return this.errorSampleStorage === null ? [] : this.errorSampleStorage.list();
@@ -155,10 +182,28 @@ export class FTSessionReplay {
     }
     this.uploadInFlight = true;
     try {
+      const resources = await this.flushResourcesInternal();
+      if (!resources.success) {
+        return {
+          success: false,
+          code: resources.code,
+          message: resources.message,
+          retryable: resources.retryable,
+          endpointBlocked: resources.endpointBlocked,
+          attemptedSegments: 0,
+          uploadedSegments: 0,
+          remainingSegments: this.storage === null ? 0 : this.storage.list().length
+        };
+      }
       return await this.uploader.uploadPending();
     } finally {
       this.uploadInFlight = false;
     }
+  }
+
+  /** Explicitly drains Replay assets before their record references are uploaded. */
+  public async flushResources(): Promise<SessionReplayResourceUploadResult> {
+    return this.flushResourcesInternal();
   }
 
   /** Captures a manual Full Snapshot only while the global switch is enabled. */
@@ -193,6 +238,8 @@ export class FTSessionReplay {
       this.storage = null;
       this.errorSampleStorage = null;
       this.uploader = null;
+      this.resourceStorage = null;
+      this.resourceUploader = null;
       return;
     }
     this.storage = new SessionReplaySegmentStore(
@@ -207,6 +254,41 @@ export class FTSessionReplay {
       'error_segments'
     );
     this.uploader = new SessionReplayUploader(this.storage, this.config);
+    this.resourceStorage = new SessionReplayResourceStore(filesDir, this.config.getStorageMaxBytes());
+    this.resourceUploader = new SessionReplayResourceUploader(this.resourceStorage);
+  }
+
+  private async flushResourcesInternal(): Promise<SessionReplayResourceUploadResult> {
+    if (this.resourceUploader === null) {
+      return {
+        success: true,
+        code: 200,
+        message: 'Session Replay resource storage is not configured.',
+        retryable: false,
+        endpointBlocked: false,
+        attemptedResources: 0,
+        uploadedResources: 0,
+        remainingResources: 0
+      };
+    }
+    if (this.resourceUploadInFlight) {
+      return {
+        success: false,
+        code: 0,
+        message: 'A Session Replay resource upload is already in progress.',
+        retryable: true,
+        endpointBlocked: false,
+        attemptedResources: 0,
+        uploadedResources: 0,
+        remainingResources: this.resourceStorage === null ? 0 : this.resourceStorage.list().length
+      };
+    }
+    this.resourceUploadInFlight = true;
+    try {
+      return await this.resourceUploader.uploadPending();
+    } finally {
+      this.resourceUploadInFlight = false;
+    }
   }
 
   private startUploadSchedule(): void {
