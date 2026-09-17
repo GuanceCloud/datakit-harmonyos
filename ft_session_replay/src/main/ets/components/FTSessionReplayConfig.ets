@@ -31,6 +31,7 @@ export class FTSessionReplayConfig {
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
+  private delayInit: boolean = false;
 
   public setSampleRate(sampleRate: number): FTSessionReplayConfig {
     this.sampleRate = clampRate(sampleRate);
@@ -84,6 +85,16 @@ export class FTSessionReplayConfig {
 
   public getRumLinkKeys(): Array<string> {
     return this.rumLinkKeys.slice();
+  }
+
+  /** Defers activation until the application explicitly calls `start()`. */
+  public setDelayInit(delayInit: boolean): FTSessionReplayConfig {
+    this.delayInit = delayInit;
+    return this;
+  }
+
+  public isDelayInit(): boolean {
+    return this.delayInit;
   }
 
   public setMaxNodesPerSnapshot(maxNodes: number): FTSessionReplayConfig {

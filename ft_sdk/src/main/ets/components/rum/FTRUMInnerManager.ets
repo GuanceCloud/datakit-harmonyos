@@ -2281,6 +2281,68 @@ export class FTRUMInnerManager {
     return this.context;
   }
 
+  private createSessionReplayLinkContext(view: ActiveViewBean): Record<string, string | number | boolean> {
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicTagKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicTagKeys.length; index++) {
+      const key = dynamicTagKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    const viewTags = view.getTags();
+    const viewTagKeys = Object.keys(viewTags);
+    for (let index = 0; index < viewTagKeys.length; index++) {
+      const key = viewTagKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, viewTags[key]);
+    }
+    const properties = view.getProperty();
+    const propertyKeys = Object.keys(properties);
+    for (let index = 0; index < propertyKeys.length; index++) {
+      const key = propertyKeys[index];
+      this.appendSessionReplayObjectLinkValue(result, linkKeys, key, properties[key]);
+    }
+    return result;
+  }
+
+  private appendSessionReplayObjectLinkValue(
+    target: Record<string, string | number | boolean>,
+    linkKeys: Array<string>,
+    key: string,
+    value: object
+  ): void {
+    if (value instanceof String) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.toString());
+    } else if (value instanceof Number) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.valueOf());
+    } else if (value instanceof Boolean) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.valueOf());
+    }
+  }
+
+  private appendSessionReplayScalarLinkValue(
+    target: Record<string, string | number | boolean>,
+    linkKeys: Array<string>,
+    key: string,
+    value: string | number | boolean
+  ): void {
+    for (let index = 0; index < linkKeys.length; index++) {
+      if (key.indexOf(linkKeys[index]) >= 0) {
+        target[key] = value;
+        return;
+      }
+    }
+  }
+
   private createSessionReplayRUMContext(view: ActiveViewBean, timestamp: number): FTSessionReplayRUMContext {
     const config = FTRUMConfigManager.getInstance().getConfig();
     const context: FTSessionReplayRUMContext = {
@@ -2289,6 +2351,7 @@ export class FTRUMInnerManager {
       viewId: view.getId(),
       viewName: view.getViewName(),
       viewReferrer: view.getViewReferrer(),
+      linkContext: this.createSessionReplayLinkContext(view),
       timestamp
     };
     return context;
@@ -2320,6 +2383,7 @@ export class FTRUMInnerManager {
       viewId: base.viewId,
       viewName: base.viewName,
       viewReferrer: base.viewReferrer,
+      linkContext: base.linkContext,
       timestamp: base.timestamp,
       errorType,
       appState: state.toString()

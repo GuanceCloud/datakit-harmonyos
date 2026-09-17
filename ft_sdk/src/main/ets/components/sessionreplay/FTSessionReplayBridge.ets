@@ -9,6 +9,7 @@ export interface FTSessionReplayRUMContext {
   viewId: string;
   viewName: string;
   viewReferrer: string;
+  linkContext: Record<string, string | number | boolean>;
   timestamp: number;
 }
 
@@ -29,6 +30,8 @@ export interface FTSessionReplaySessionContext {
  * implementation. A HAR registers this bridge only when Replay is enabled.
  */
 export interface FTSessionReplayBridge {
+  /** Returns the RUM key fragments that the optional Replay HAR may receive. */
+  getRUMLinkKeys(): Array<string>;
   onViewStarted(context: FTSessionReplayRUMContext): boolean;
   onViewStopped(context: FTSessionReplayRUMContext): void;
   onError(context: FTSessionReplayErrorContext): boolean;
@@ -46,6 +49,19 @@ export class FTSessionReplayBridgeRegistry {
   public static unregister(bridge: FTSessionReplayBridge): void {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
       FTSessionReplayBridgeRegistry.bridge = null;
+    }
+  }
+
+  public static getRUMLinkKeys(): Array<string> {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return [];
+    }
+    try {
+      return bridge.getRUMLinkKeys().filter((key: string): boolean => key.length > 0);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay link-key callback failed: ${String(error)}`);
+      return [];
     }
   }
 

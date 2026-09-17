@@ -9,6 +9,7 @@ import {
 import { ArkUIReplayCollector } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
+import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import {
   createReplayEnvelope,
   FullSnapshotData,
@@ -41,6 +42,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
+  private readonly sampler: SessionReplaySampler;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
@@ -49,6 +51,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   constructor(config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot());
+    this.sampler = new SessionReplaySampler(config);
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -70,6 +73,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.rootBinding = null;
     this.activeContext = null;
     this.processor.reset();
+    this.sampler.reset();
   }
 
   /** Registers the visible ArkUI root to record when RUM starts or errors a View. */
@@ -139,7 +143,18 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.processor.reset();
   }
 
+  public getRUMLinkKeys(): Array<string> {
+    return this.config.getRumLinkKeys();
+  }
+
+  public getSamplingMode(sessionId: string): SessionReplaySamplingMode {
+    return this.sampler.decide(sessionId);
+  }
+
   public onViewStarted(context: FTSessionReplayRUMContext): boolean {
+    if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+      return false;
+    }
     return this.captureViewStartedFromRUMContext(context) !== null;
   }
 
@@ -155,6 +170,13 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public onError(context: FTSessionReplayErrorContext): boolean {
+    if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+      return false;
+    }
+    const replayContext = this.toReplayContext(context);
+    if (this.activeContext !== null && !this.isSameReplayContext(this.activeContext, replayContext)) {
+      return this.captureViewStartedFromRUMContext(context) !== null;
+    }
     return this.captureFullSnapshotFromRUMContext(context) !== null;
   }
 
@@ -214,15 +236,37 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   private toReplayContext(context: FTSessionReplayRUMContext): SessionReplayContext {
-    return {
+    const replayContext: SessionReplayContext = {
       applicationId: context.applicationId,
       sessionId: context.sessionId,
       viewId: context.viewId
     };
+    if (Object.keys(context.linkContext).length > 0) {
+      replayContext.globalContext = context.linkContext;
+    }
+    return replayContext;
   }
 
   private isSameView(left: SessionReplayContext, right: SessionReplayContext): boolean {
     return left.applicationId === right.applicationId && left.sessionId === right.sessionId && left.viewId === right.viewId;
+  }
+
+  private isSameReplayContext(left: SessionReplayContext, right: SessionReplayContext): boolean {
+    return this.isSameView(left, right) && this.getContextSignature(left) === this.getContextSignature(right);
+  }
+
+  private getContextSignature(context: SessionReplayContext): string {
+    const globalContext = context.globalContext;
+    if (globalContext === undefined) {
+      return '';
+    }
+    const keys = Object.keys(globalContext).sort();
+    const values: Array<string> = [];
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
+      values.push(`${key}=${String(globalContext[key])}`);
+    }
+    return values.join('&');
   }
 
   private createCapture(

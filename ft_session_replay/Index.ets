@@ -32,4 +32,5 @@ export {
 } from './src/main/ets/components/SessionReplayProtocol';
 export { ArkUIReplayCollector } from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
+export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
 export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';

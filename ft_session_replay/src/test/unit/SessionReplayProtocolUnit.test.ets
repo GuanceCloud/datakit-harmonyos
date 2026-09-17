@@ -8,6 +8,7 @@ import {
 } from '../../main/ets/components/SessionReplayProtocol';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
+import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/components/SessionReplaySampler';
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
@@ -100,6 +101,26 @@ export default function sessionReplayProtocolUnitTest() {
       expect(mutation !== null).assertTrue();
       expect(mutation?.type).assertEqual(11);
       expect(processor.createViewEndRecord().type).assertEqual(7);
+    });
+
+    it('keeps regular and error sampling decisions independent', 0, () => {
+      const regularConfig = new FTSessionReplayConfig()
+        .setSampleRate(1)
+        .setSessionReplayOnErrorSampleRate(1);
+      expect(new SessionReplaySampler(regularConfig).decide('regular-session'))
+        .assertEqual(SessionReplaySamplingMode.REGULAR);
+
+      const errorConfig = new FTSessionReplayConfig()
+        .setSampleRate(0)
+        .setSessionReplayOnErrorSampleRate(1);
+      expect(new SessionReplaySampler(errorConfig).decide('error-session'))
+        .assertEqual(SessionReplaySamplingMode.ERROR);
+
+      const disabledConfig = new FTSessionReplayConfig()
+        .setSampleRate(0)
+        .setSessionReplayOnErrorSampleRate(0);
+      expect(new SessionReplaySampler(disabledConfig).decide('disabled-session'))
+        .assertEqual(SessionReplaySamplingMode.NONE);
     });
   });
 }

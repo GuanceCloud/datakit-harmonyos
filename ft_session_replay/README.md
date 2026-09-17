@@ -49,6 +49,21 @@ values, or image bytes.
    suppresses them before serialization. Only an explicit `TouchPrivacy.SHOW`
    configuration enables pointer records (`type:11`, `source:9`).
 
+## P3 sampling and RUM link verification
+
+1. Configure `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)` and open
+   the page. The bridge still records the session as error-sampled; with both
+   rates set to `0`, it produces no Replay capture.
+2. Configure `enableLinkRUMKeys(['wgt_id'])`, add `wgt_id` to the RUM global
+   context, then trigger **Capture through RUM View Bridge**. Confirm only
+   `wgt_id` appears in `globalContext`; unconfigured RUM fields and tags must
+   be absent.
+3. Change the configured linked value while staying on the same RUM View and
+   trigger the bridge again. Confirm a new Meta, Focus, Full Snapshot sequence
+   is produced, rather than appending different context values to one batch.
+4. Never configure passwords, tokens, or other secrets as linked keys: selected
+   values are intentionally added to the Replay payload for backend correlation.
+
 ## P1 bridge verification
 
 1. Configure a non-empty RUM app ID in the demo and open **Session Replay POC**.
