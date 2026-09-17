@@ -305,6 +305,7 @@ export interface SDKRumCompletedActionDTO {
   viewName: string;
   viewReferrer: string;
   duration: number;
+  hasReplay?: boolean;
   errorCount: number;
   longTaskCount: number;
   resourceCount: number;

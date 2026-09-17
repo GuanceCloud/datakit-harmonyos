@@ -3,6 +3,12 @@
 This HAR validates an ArkUI-to-Android Session Replay protocol path. It does not
 persist or upload records yet.
 
+When `FTSessionReplayPOC.start()` is called, it registers the optional core SDK
+bridge. RUM View starts and Error reports then capture a Full Snapshot using the
+registered ArkUI root and mark their RUM View/Action output with `has_replay`.
+Without a registered bridge, the core SDK invokes a NoOp and preserves its
+existing behavior.
+
 The generated JSON is compatible with Android's Replay record envelope:
 
 ```json
@@ -28,3 +34,18 @@ values, or image bytes.
    `records` array, `type:10`, and a `wireframes` array.
 4. Confirm the displayed node labels are only `ArkUI:<component type>` and do
    not include the page's visible text or any input value.
+
+## P1 bridge verification
+
+1. Configure a non-empty RUM app ID in the demo and open **Session Replay POC**.
+2. Tap **Capture through RUM View Bridge**. Confirm the displayed envelope has a
+   non-placeholder `application_id`, `session_id`, and `view_id`; record type
+   remains `10`.
+3. Tap **Capture through RUM Error Bridge**. Confirm it again displays a new
+   Full Snapshot without exposing the manual error text in the wireframes.
+4. Using the configured RUM intake or a local capture proxy, inspect the RUM
+   View and any subsequent Action emitted after either capture. Confirm its
+   fields include `has_replay:true`.
+5. Return from the page, revisit a normal demo page, and confirm ordinary RUM
+   events still work. This verifies unregistering the bridge leaves the core
+   SDK on its NoOp path.

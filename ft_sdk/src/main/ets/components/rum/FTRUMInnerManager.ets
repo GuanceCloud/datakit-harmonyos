@@ -64,6 +64,12 @@ import { IS_PRE_CRASH } from '../FTExceptionHandler';
 import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { DataType } from '../enum/Enums';
+import {
+  FTSessionReplayBridgeRegistry,
+  FTSessionReplayErrorContext,
+  FTSessionReplayRUMContext,
+  FTSessionReplaySessionContext
+} from '../sessionreplay/FTSessionReplayBridge';
 
 /**
  * Property wrapper interface for error properties
@@ -1477,6 +1483,7 @@ export class FTRUMInnerManager {
       viewName: actionBean.getViewName(),
       viewReferrer: actionBean.getViewReferrer(),
       duration: actionBean.getDuration(),
+      hasReplay: actionBean.isHasReplay(),
       errorCount: actionBean.getErrorCount(),
       longTaskCount: actionBean.getLongTaskCount(),
       resourceCount: actionBean.getResourceCount(),
@@ -1736,6 +1743,9 @@ export class FTRUMInnerManager {
       fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_COUNT, viewBean.getLongTaskCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, (!viewBean.getIsClose()).toString());
       fieldsMap.set(Constants.KEY_SDK_VIEW_UPDATE_TIME, viewBean.getViewUpdateTime().toString());
+      if (viewBean.isHasReplay()) {
+        fieldsMap.set(Constants.KEY_HAS_REPLAY, 'true');
+      }
       
       // Device performance fields (aligned with Android: conditional based on DeviceMetricsMonitorType)
       // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
@@ -2271,6 +2281,65 @@ export class FTRUMInnerManager {
     return this.context;
   }
 
+  private createSessionReplayRUMContext(view: ActiveViewBean, timestamp: number): FTSessionReplayRUMContext {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplayRUMContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      sessionId: view.getSessionId(),
+      viewId: view.getId(),
+      viewName: view.getViewName(),
+      viewReferrer: view.getViewReferrer(),
+      timestamp
+    };
+    return context;
+  }
+
+  private notifySessionReplayViewStarted(view: ActiveViewBean): void {
+    const hasReplay = FTSessionReplayBridgeRegistry.notifyViewStarted(
+      this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime())
+    );
+    if (hasReplay) {
+      view.setHasReplay(true);
+    }
+  }
+
+  private notifySessionReplayViewStopped(view: ActiveViewBean): void {
+    FTSessionReplayBridgeRegistry.notifyViewStopped(
+      this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime())
+    );
+  }
+
+  private notifySessionReplayError(view: ActiveViewBean | null, timestamp: number, errorType: string, state: AppState): void {
+    if (view === null) {
+      return;
+    }
+    const base = this.createSessionReplayRUMContext(view, timestamp);
+    const context: FTSessionReplayErrorContext = {
+      applicationId: base.applicationId,
+      sessionId: base.sessionId,
+      viewId: base.viewId,
+      viewName: base.viewName,
+      viewReferrer: base.viewReferrer,
+      timestamp: base.timestamp,
+      errorType,
+      appState: state.toString()
+    };
+    if (FTSessionReplayBridgeRegistry.notifyError(context)) {
+      view.setHasReplay(true);
+    }
+  }
+
+  private notifySessionReplaySessionRenewed(previousSessionId: string, sessionId: string): void {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplaySessionContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      previousSessionId,
+      sessionId,
+      timestamp: Utils.getCurrentNanoTime()
+    };
+    FTSessionReplayBridgeRegistry.notifySessionRenewed(context);
+  }
+
   /**
    * Start view
    */
@@ -2330,6 +2399,7 @@ export class FTRUMInnerManager {
         }
         
         const closedViewName = this.activeView.getViewName();
+        this.notifySessionReplayViewStopped(this.activeView);
         this.activeView.close();
         await this.closeView(this.activeView);
         
@@ -2386,6 +2456,7 @@ export class FTRUMInnerManager {
       this.collectInitialViewMetrics(this.activeView);
 
       // Initialize view
+      this.notifySessionReplayViewStarted(this.activeView);
       this.initView(this.activeView);
       this.generateRumData();
       // Save RUM context to preferences for crash recovery
@@ -2441,6 +2512,7 @@ export class FTRUMInnerManager {
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       
       // Close view
+      this.notifySessionReplayViewStopped(this.activeView);
       this.activeView.close();
       
       // Store view name before closing
@@ -2559,6 +2631,7 @@ export class FTRUMInnerManager {
       const viewId = this.activeView?.getId() || "";
       const viewName = this.activeView?.getViewName() || "";
       const viewReferrer = this.activeView?.getViewReferrer() || "";
+      const hasReplay = this.activeView?.isHasReplay() || false;
 
       // Refresh session
       this.checkSessionRefresh(true);
@@ -2584,6 +2657,7 @@ export class FTRUMInnerManager {
         viewName,
         viewReferrer,
         duration: actualDuration,
+        hasReplay,
         errorCount: 0,
         longTaskCount: 0,
         resourceCount: 0,
@@ -3319,6 +3393,8 @@ export class FTRUMInnerManager {
 	        }
 	      }
 
+        this.notifySessionReplayError(this.activeView, actualDateline, errorType, state);
+
 	      if (actualCallBack === null) {
 	        const context = this.createCurrentResourceContext();
 	        this.increaseErrorMemoryCount(context);
@@ -3661,6 +3737,7 @@ export class FTRUMInnerManager {
       this.lastSessionTime = now;
       const oldSessionId = this.sessionId;
       this.sessionId = Utils.generateUUID();
+      this.notifySessionReplaySessionRenewed(oldSessionId, this.sessionId);
       
       FTInnerLogger.d(TAG, `Session Track -> New SessionId: ${this.sessionId}, longTimeSessionReset: ${longTimeSession}`);
       
@@ -3684,6 +3761,7 @@ export class FTRUMInnerManager {
       // Refresh view if needed (aligned with Android)
       if (checkRefreshView) {
         if (this.activeView && !this.activeView.isClose()) {
+          this.notifySessionReplayViewStopped(this.activeView);
           this.activeView.close();
           // closeView will use activeView's session ID (which may have been updated above)
           // If view was already in database with old session ID, closeView will update it with new session ID
@@ -3708,6 +3786,7 @@ export class FTRUMInnerManager {
           this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
           FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
           this.collectInitialViewMetrics(this.activeView);
+          this.notifySessionReplayViewStarted(this.activeView);
           this.initView(this.activeView);
           
           FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
@@ -4618,6 +4697,7 @@ export class FTRUMInnerManager {
       }
       
       if (this.activeView && !this.activeView.isClose()) {
+        this.notifySessionReplayViewStopped(this.activeView);
         this.activeView.close();
         await this.closeView(this.activeView);
       }

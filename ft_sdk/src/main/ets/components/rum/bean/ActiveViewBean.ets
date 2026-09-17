@@ -426,6 +426,7 @@ export class ActiveViewBean {
     viewBean.setSessionId(this.sessionId);
     viewBean.setViewLoadTime(this.loadTime);
     viewBean.setIsClose(this.isClosed);
+    viewBean.setHasReplay(this.hasReplay);
     viewBean.setActionCount(this.actionCount);
     viewBean.setErrorCount(this.errorCount);
     viewBean.setResourceCount(this.resourceCount);

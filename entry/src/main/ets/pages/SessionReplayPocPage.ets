@@ -1,4 +1,5 @@
 import router from '@ohos.router';
+import { AppState, ErrorType, FTRUMGlobalManager } from '@guancecloud/ft_sdk';
 import {
   FTSessionReplayConfig,
   FTSessionReplayPOC,
@@ -14,6 +15,26 @@ struct SessionReplayPocPage {
     new FTSessionReplayConfig().setMaxNodesPerSnapshot(300)
   );
 
+  aboutToAppear(): void {
+    this.replay.start();
+    this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
+  }
+
+  aboutToDisappear(): void {
+    this.replay.stop();
+  }
+
+  private showBridgeCapture(source: string): void {
+    setTimeout(() => {
+      const capture = this.replay.getLastCapture();
+      if (capture === null) {
+        this.result = `${source} did not produce a Replay capture. Confirm that RUM is initialized and try again.`;
+        return;
+      }
+      this.result = `${source} captured ${capture.wireframeCount} wireframes.\n${capture.payload.substring(0, 600)}`;
+    }, 200);
+  }
+
   build() {
     Column({ space: 16 }) {
       Text('Session Replay POC')
@@ -22,6 +43,28 @@ struct SessionReplayPocPage {
       Text('API 12 FrameNode collection → Android replay envelope')
         .fontSize(14)
         .fontColor('#666666')
+      Button('Capture through RUM View Bridge')
+        .width('90%')
+        .height(48)
+        .onClick(() => {
+          FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
+            .then(() => this.showBridgeCapture('RUM View bridge'))
+            .catch((error: Error) => {
+              this.result = `RUM View bridge failed: ${error.message}`;
+            });
+        })
+      Button('Capture through RUM Error Bridge')
+        .width('90%')
+        .height(48)
+        .onClick(() => {
+          FTRUMGlobalManager.getInstance().addError(
+            'SessionReplayPocError',
+            'Manual bridge verification error',
+            ErrorType.CUSTOM,
+            AppState.RUN
+          );
+          this.showBridgeCapture('RUM Error bridge');
+        })
       Button('Capture Full Snapshot')
         .width('90%')
         .height(48)

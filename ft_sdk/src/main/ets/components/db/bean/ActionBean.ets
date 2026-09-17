@@ -3,12 +3,18 @@
  */
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
+import { Constants } from '../../Constants';
+
+interface ReplayMarker {
+  value: boolean;
+}
 
 export interface ActionBeanJSON {
   id: string;
   startTime: number;
   actionDuration: number;
   isClose: boolean;
+  hasReplay?: boolean;
   errorCount: number;
   longTaskCount: number;
   resourceCount: number;
@@ -46,6 +52,9 @@ export class ActionBean {
    * Whether closed
    */
   private isClose: boolean = false;
+
+  /** Whether this Action is associated with a captured Session Replay record. */
+  private hasReplay: boolean = false;
 
   /**
    * Error count
@@ -129,6 +138,9 @@ export class ActionBean {
   public getIsClose(): boolean { return this.isClose; }
   public setIsClose(isClose: boolean): void { this.isClose = isClose; }
 
+  public isHasReplay(): boolean { return this.hasReplay; }
+  public setHasReplay(hasReplay: boolean): void { this.hasReplay = hasReplay; }
+
   public getErrorCount(): number { return this.errorCount; }
   public setErrorCount(errorCount: number): void { this.errorCount = errorCount; }
 
@@ -194,6 +206,8 @@ export class ActionBean {
       this.extraAttr.forEach((value, key) => {
         extraAttrObj[key] = value;
       });
+      const replayMarker: ReplayMarker = { value: this.hasReplay };
+      extraAttrObj[Constants.KEY_HAS_REPLAY] = replayMarker;
       return JSON.stringify(extraAttrObj);
     } catch (error) {
       return "{}";
@@ -212,7 +226,12 @@ export class ActionBean {
         const keys = ActionBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
-          this.extraAttr.set(key, obj[key] as object);
+          if (key === Constants.KEY_HAS_REPLAY) {
+            const replayMarker = obj[key] as ReplayMarker;
+            this.hasReplay = replayMarker.value === true;
+          } else {
+            this.extraAttr.set(key, obj[key] as object);
+          }
         }
       }
     } catch (error) {
@@ -320,6 +339,7 @@ export class ActionBean {
       startTime: this.startTime,
       actionDuration: this.actionDuration,
       isClose: this.isClose,
+      hasReplay: this.hasReplay,
       errorCount: this.errorCount,
       longTaskCount: this.longTaskCount,
       resourceCount: this.resourceCount,
@@ -343,6 +363,7 @@ export class ActionBean {
     const actionBean = new ActionBean(json.id, json.actionName, json.actionType, json.startTime || Utils.getCurrentNanoTime());
     actionBean.actionDuration = json.actionDuration || 0;
     actionBean.isClose = json.isClose || false;
+    actionBean.hasReplay = json.hasReplay === true;
     actionBean.errorCount = json.errorCount || 0;
     actionBean.longTaskCount = json.longTaskCount || 0;
     actionBean.resourceCount = json.resourceCount || 0;
@@ -372,6 +393,7 @@ export class ActionBean {
     const cloned = new ActionBean(this.id, this.actionName, this.actionType, this.startTime);
     cloned.actionDuration = this.actionDuration;
     cloned.isClose = this.isClose;
+    cloned.hasReplay = this.hasReplay;
     cloned.errorCount = this.errorCount;
     cloned.longTaskCount = this.longTaskCount;
     cloned.resourceCount = this.resourceCount;
