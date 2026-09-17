@@ -1,8 +1,8 @@
 # HarmonyOS Session Replay POC
 
-This HAR validates an ArkUI-to-Android Session Replay protocol path. It keeps a
-bounded in-memory record stream per View but does not persist or upload records
-yet.
+This HAR implements an ArkUI-to-Android Session Replay collection path with a
+bounded in-memory diagnostic stream, durable private-file segments, and an
+Android-compatible multipart upload request.
 
 When `FTSessionReplayPOC.start()` is called, it registers the optional core SDK
 bridge. RUM View starts and Error reports then capture a Full Snapshot using the
@@ -51,6 +51,16 @@ atomically persisted below `filesDir/ft_session_replay/segments`. Storage is
 bounded to 10 MiB by default and evicts oldest complete segments before writing
 new data. Use `setStorageMaxBytes()` and `setMaxRecordsPerSegment()` to tune
 the bounds. Private-app storage is durable but not encrypted by this POC.
+
+Call `await replay.flush()` to upload the durable segments. By default, the
+uploader reuses the installed core SDK's DataKit or Dataway intake configuration
+and sends `v1/write/rum/replay` with Android's `multipart/form-data` contract:
+newline-delimited record envelopes are deflate-compressed into the `segment`
+file part and include `start`, `end`, `records_count`, RUM linkage, environment,
+SDK, and global-context fields. The source is honestly marked `harmonyos`.
+It deletes a local segment only after HTTP `200`; unavailable networking and
+non-200 responses leave every unacknowledged segment on device for retry. For
+a controlled proxy, use `setUploadUrl('https://host/v1/write/rum/replay')`.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -186,3 +196,22 @@ values, or image bytes.
 4. Verify each retained `*.json` parses to a segment with `version:1`, one
    `context` object, and a non-empty `records` array. No `*.tmp` file may
    remain after restarting the app.
+
+## P8 Replay intake upload verification
+
+1. Configure the demo SDK with a valid DataKit or Dataway endpoint and a RUM
+   app ID. Alternatively, configure `setUploadUrl()` with a controlled HTTP
+   capture proxy that accepts multipart requests and responds `200`.
+2. Enable Replay, use **Capture through RUM View Bridge**, then use **Upload
+   Durable Replay Segments**. The result must report one or more acknowledged
+   segments and zero (or fewer) durable segments remaining.
+3. Inspect the request in the intake or proxy. It must be `POST` to
+   `v1/write/rum/replay`, use `multipart/form-data`, include a binary `segment`
+   part plus `start`, `end`, `records_count`, `app_id`, `session_id`, `view_id`,
+   `env`, `sdk_name`, and `source:harmonyos`. Inflate the `segment` bytes and
+   confirm it is newline-delimited JSON with Android-compatible Replay
+   envelopes and record types.
+4. Make the endpoint unreachable (or have the proxy return `500`), capture a
+   new segment, and upload. The page must report a failed acknowledgement and
+   retain the same durable segment count. Restore `200` and upload again; the
+   retained segments must then be acknowledged and removed.

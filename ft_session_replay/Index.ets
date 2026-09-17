@@ -39,4 +39,11 @@ export {
   SessionReplaySegmentStore,
   SessionReplayStoredSegment
 } from './src/main/ets/components/SessionReplaySegmentStore';
+export {
+  SessionReplayUploader,
+  SessionReplayUploadFields,
+  SessionReplayUploadResult,
+  createAndroidReplayUploadUrl,
+  createSessionReplayUploadFields
+} from './src/main/ets/components/SessionReplayUploader';
 export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';

@@ -34,6 +34,9 @@ export class FTSessionReplayConfig {
   private snapshotIntervalMs: number = 500;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
+  // Optional absolute Replay intake URL. When omitted, the installed core SDK's
+  // DataKit or Dataway endpoint is used with Android's Replay path.
+  private uploadUrl: string = '';
   private delayInit: boolean = false;
 
   public setSampleRate(sampleRate: number): FTSessionReplayConfig {
@@ -150,6 +153,19 @@ export class FTSessionReplayConfig {
 
   public getMaxRecordsPerSegment(): number {
     return this.maxRecordsPerSegment;
+  }
+
+  /**
+   * Overrides the core SDK intake route for Replay records. This is useful for
+   * a controlled proxy or an isolated backend verification environment.
+   */
+  public setUploadUrl(uploadUrl: string): FTSessionReplayConfig {
+    this.uploadUrl = uploadUrl.trim();
+    return this;
+  }
+
+  public getUploadUrl(): string {
+    return this.uploadUrl;
   }
 }
 

@@ -10,6 +10,10 @@ import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy 
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/components/SessionReplaySampler';
 import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
+import {
+  createAndroidReplayUploadUrl,
+  createSessionReplayUploadFields
+} from '../../main/ets/components/SessionReplayUploader';
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
@@ -143,6 +147,38 @@ export default function sessionReplayProtocolUnitTest() {
 
       replay.disable();
       expect(replay.isEnabled()).assertFalse();
+    });
+
+    it('creates Android-compatible multipart Replay fields and intake URLs', 0, () => {
+      const record: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [] }
+      };
+      const fields = createSessionReplayUploadFields({
+        version: 1,
+        id: '1700000000000-000001',
+        createdAt: 1700000000000,
+        context: {
+          applicationId: 'app-id',
+          sessionId: 'session-id',
+          viewId: 'view-id',
+          globalContext: { release: 1, enabled: true }
+        },
+        records: [record]
+      }, 'prod', '1.2.3');
+      expect(fields.fields.get('start')).assertEqual('1700000000000');
+      expect(fields.fields.get('end')).assertEqual('1700000000000');
+      expect(fields.fields.get('records_count')).assertEqual('1');
+      expect(fields.fields.get('has_full_snapshot')).assertEqual('true');
+      expect(fields.fields.get('source')).assertEqual('harmonyos');
+      expect(fields.fields.get('app_id')).assertEqual('app-id');
+      expect(fields.fields.get('release')).assertEqual('1');
+      expect(fields.rawSegment.endsWith('\n')).assertTrue();
+      expect(createAndroidReplayUploadUrl('https://dk.example', '', ''))
+        .assertEqual('https://dk.example/v1/write/rum/replay?precision=ns');
+      expect(createAndroidReplayUploadUrl('', 'https://dw.example/', 'token'))
+        .assertEqual('https://dw.example/v1/write/rum/replay?token=token&to_headless=true&precision=ns');
     });
   });
 }

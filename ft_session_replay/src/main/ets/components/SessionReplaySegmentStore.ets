@@ -68,8 +68,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       const path = `${this.root}/${names[index]}`;
       try {
         const segment = JSON.parse(fs.readTextSync(path)) as SessionReplayStoredSegment;
-        if (segment.version === SessionReplaySegmentStore.VERSION &&
-          typeof segment.id === 'string' && Array.isArray(segment.records)) {
+        if (this.isValidSegment(segment, names[index])) {
           segments.push(segment);
         } else {
           fs.unlinkSync(path);
@@ -79,6 +78,24 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       }
     }
     return segments;
+  }
+
+  /** Removes only successfully acknowledged segments from private storage. */
+  public remove(ids: Array<string>): boolean {
+    let completed = true;
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index];
+      if (!this.isSafeSegmentId(id)) {
+        completed = false;
+        continue;
+      }
+      try {
+        fs.unlinkSync(`${this.root}/${id}.json`);
+      } catch (_error) {
+        completed = false;
+      }
+    }
+    return completed;
   }
 
   public getRoot(): string {
@@ -183,5 +200,19 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private segmentFileNames(): Array<string> {
     return this.fileNames().filter((name: string) => name.endsWith('.json')).sort();
+  }
+
+  private isValidSegment(segment: SessionReplayStoredSegment, name: string): boolean {
+    return segment.version === SessionReplaySegmentStore.VERSION &&
+      typeof segment.id === 'string' && this.isSafeSegmentId(segment.id) &&
+      name === `${segment.id}.json` && segment.context !== undefined &&
+      typeof segment.context.applicationId === 'string' && segment.context.applicationId.length > 0 &&
+      typeof segment.context.sessionId === 'string' && segment.context.sessionId.length > 0 &&
+      typeof segment.context.viewId === 'string' && segment.context.viewId.length > 0 &&
+      Array.isArray(segment.records) && segment.records.length > 0;
+  }
+
+  private isSafeSegmentId(id: string): boolean {
+    return /^\d{13}-\d{6}$/.test(id);
   }
 }

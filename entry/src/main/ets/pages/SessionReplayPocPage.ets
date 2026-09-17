@@ -14,6 +14,7 @@ struct SessionReplayPocPage {
   @State result: string = 'Ready to capture a privacy-safe Full Snapshot.';
   @State showMutationProbe: boolean = false;
   @State replayEnabled: boolean = false;
+  @State uploadInFlight: boolean = false;
   private bridgeViewActive: boolean = false;
   private readonly replayConfig: FTSessionReplayConfig =
     new FTSessionReplayConfig().setMaxNodesPerSnapshot(300);
@@ -99,6 +100,26 @@ struct SessionReplayPocPage {
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
     }, this.replayConfig.getSnapshotIntervalMs() + 200);
+  }
+
+  private uploadDurableSegments(): void {
+    if (this.uploadInFlight) {
+      return;
+    }
+    this.uploadInFlight = true;
+    this.result = 'Uploading durable Session Replay segments...';
+    this.replay.flush()
+      .then((upload) => {
+        this.result = upload.success
+          ? `Replay upload succeeded: ${upload.uploadedSegments} segment(s) acknowledged; ${upload.remainingSegments} remain.`
+          : `Replay upload was not acknowledged (code ${upload.code}): ${upload.message} ${upload.remainingSegments} segment(s) remain for retry.`;
+      })
+      .catch(() => {
+        this.result = `Replay upload failed unexpectedly. ${this.replay.getStoredSegments().length} segment(s) remain for retry.`;
+      })
+      .finally(() => {
+        this.uploadInFlight = false;
+      });
   }
 
   build() {
@@ -209,6 +230,11 @@ struct SessionReplayPocPage {
             this.result = `Capture failed: ${String(error)}`;
           }
         })
+      Button(this.uploadInFlight ? 'Uploading Replay Segments...' : 'Upload Durable Replay Segments')
+        .width('90%')
+        .height(48)
+        .enabled(!this.uploadInFlight)
+        .onClick(() => this.uploadDurableSegments())
       Scroll() {
         Text(this.result)
           .width('90%')

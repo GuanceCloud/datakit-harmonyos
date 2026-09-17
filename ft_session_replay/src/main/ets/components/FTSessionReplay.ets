@@ -3,6 +3,7 @@ import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
+import { SessionReplayUploader, SessionReplayUploadResult } from './SessionReplayUploader';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -18,6 +19,7 @@ export class FTSessionReplay {
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayPOC | null = null;
   private storage: SessionReplaySegmentStore | null = null;
+  private uploader: SessionReplayUploader | null = null;
 
   public static getInstance(): FTSessionReplay {
     if (FTSessionReplay.instance === null) {
@@ -109,6 +111,24 @@ export class FTSessionReplay {
     return this.storage === null ? null : this.storage.getRoot();
   }
 
+  /**
+   * Sends durable segments to the Android-compatible Replay intake. Segments
+   * are deleted only after HTTP 200; any failure leaves them for a later call.
+   */
+  public async flush(): Promise<SessionReplayUploadResult> {
+    if (this.uploader === null) {
+      return {
+        success: false,
+        code: 0,
+        message: 'Session Replay storage is not configured. Pass context.filesDir to init() or enable().',
+        attemptedSegments: 0,
+        uploadedSegments: 0,
+        remainingSegments: 0
+      };
+    }
+    return await this.uploader.uploadPending();
+  }
+
   /** Captures a manual Full Snapshot only while the global switch is enabled. */
   public captureFullSnapshot(
     uiContext: UIContext,
@@ -139,6 +159,7 @@ export class FTSessionReplay {
   private configureStorage(filesDir: string): void {
     if (filesDir.trim().length === 0) {
       this.storage = null;
+      this.uploader = null;
       return;
     }
     this.storage = new SessionReplaySegmentStore(
@@ -146,5 +167,6 @@ export class FTSessionReplay {
       this.config.getStorageMaxBytes(),
       this.config.getMaxRecordsPerSegment()
     );
+    this.uploader = new SessionReplayUploader(this.storage, this.config);
   }
 }
