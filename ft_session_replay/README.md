@@ -13,6 +13,33 @@ For a Replay-enabled RUM View, the core also writes Android-aligned View fields:
 `records_count` and `sampled_on_reply_error`. They describe the accumulated
 Replay records and whether the current session used the error-sampling path.
 
+## Application integration
+
+Use the process-wide `FTSessionReplay` entry point from the optional HAR. It
+owns bridge registration; bind the root of the currently visible ArkUI page
+after Replay is enabled.
+
+```ts
+const replay = FTSessionReplay.getInstance();
+replay.init(new FTSessionReplayConfig()
+  .setSampleRate(1)
+  .setSessionReplayOnErrorSampleRate(0));
+
+// In an ArkUI page that is currently visible:
+replay.registerRoot(this.getUIContext(), 'checkout-root', vp2px(1));
+
+// When this root is no longer visible:
+replay.unregisterRoot();
+
+// Explicit global kill switch:
+replay.disable();
+```
+
+Use `setDelayInit(true)` with `init()` to retain the configuration without
+starting Replay; call `start()` only after the user grants consent. The sample
+page exposes the same behavior through **Enable/Disable Session Replay** and
+disables all capture actions while Replay is off.
+
 The generated JSON is compatible with Android's Replay record envelope:
 
 ```json
@@ -101,3 +128,18 @@ values, or image bytes.
    Replay metadata (`has_replay`, `records_count`, and
    `sampled_on_reply_error`), confirming that the NoOp/sampling path does not
    mark unrelated views.
+
+## P5 global switch verification
+
+1. Open **Session Replay POC**. **Enable Session Replay** must be visible and
+   every capture button must be disabled.
+2. Enable Replay, then verify all capture buttons become available. Trigger a
+   RUM View bridge capture and confirm the usual Android-compatible payload is
+   displayed.
+3. Tap **Disable Session Replay**. The capture buttons must become disabled;
+   attempts to create a new RUM View or Error capture must not be possible from
+   the page, and a subsequently emitted RUM View must not receive new Replay
+   metadata.
+4. Enable Replay again, trigger a RUM View bridge capture, then leave the
+   page. Confirm the closed View contains Replay metadata, proving that the
+   global switch re-registers the optional core bridge correctly.

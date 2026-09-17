@@ -2,7 +2,7 @@ import router from '@ohos.router';
 import { AppState, ErrorType, FTRUMGlobalManager } from '@guancecloud/ft_sdk';
 import {
   FTSessionReplayConfig,
-  FTSessionReplayPOC,
+  FTSessionReplay,
   SessionReplayContext,
   SessionReplayGlobalContext
 } from '@guancecloud/ft_session_replay';
@@ -12,27 +12,56 @@ import {
 struct SessionReplayPocPage {
   @State result: string = 'Ready to capture a privacy-safe Full Snapshot.';
   @State showMutationProbe: boolean = false;
+  @State replayEnabled: boolean = false;
   private bridgeViewActive: boolean = false;
-  private readonly replay: FTSessionReplayPOC = new FTSessionReplayPOC(
-    new FTSessionReplayConfig().setMaxNodesPerSnapshot(300)
-  );
+  private readonly replayConfig: FTSessionReplayConfig =
+    new FTSessionReplayConfig().setMaxNodesPerSnapshot(300);
+  private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
   aboutToAppear(): void {
-    this.replay.start();
-    this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
+    this.replayEnabled = this.replay.isEnabled();
+    if (this.replayEnabled) {
+      this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
+    }
   }
 
   aboutToDisappear(): void {
     if (!this.bridgeViewActive) {
-      this.replay.stop();
+      this.disableReplay();
       return;
     }
     FTRUMGlobalManager.getInstance().stopView()
       .then(() => {
         this.bridgeViewActive = false;
-        this.replay.stop();
+        this.disableReplay();
       })
-      .catch(() => this.replay.stop());
+      .catch(() => this.disableReplay());
+  }
+
+  private toggleReplay(): void {
+    if (this.replayEnabled) {
+      if (this.bridgeViewActive) {
+        FTRUMGlobalManager.getInstance().stopView()
+          .then(() => {
+            this.bridgeViewActive = false;
+            this.disableReplay();
+          })
+          .catch(() => this.disableReplay());
+      } else {
+        this.disableReplay();
+      }
+      return;
+    }
+    this.replay.enable(this.replayConfig);
+    this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
+    this.replayEnabled = true;
+    this.result = 'Session Replay is enabled. Select a capture action to validate the protocol.';
+  }
+
+  private disableReplay(): void {
+    this.replay.unregisterRoot();
+    this.replay.disable();
+    this.replayEnabled = false;
   }
 
   private showBridgeCapture(source: string): void {
@@ -54,9 +83,15 @@ struct SessionReplayPocPage {
       Text('API 12 FrameNode collection → Android replay envelope')
         .fontSize(14)
         .fontColor('#666666')
+      Button(this.replayEnabled ? 'Disable Session Replay' : 'Enable Session Replay')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.replayEnabled ? '#B91C1C' : '#15803D')
+        .onClick(() => this.toggleReplay())
       Button('Capture through RUM View Bridge')
         .width('90%')
         .height(48)
+        .enabled(this.replayEnabled)
         .onClick(() => {
           FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
             .then(() => {
@@ -70,6 +105,7 @@ struct SessionReplayPocPage {
       Button('Capture through RUM Error Bridge')
         .width('90%')
         .height(48)
+        .enabled(this.replayEnabled)
         .onClick(() => {
           FTRUMGlobalManager.getInstance().addError(
             'SessionReplayPocError',
@@ -82,6 +118,7 @@ struct SessionReplayPocPage {
       Button('Capture Incremental Mutation')
         .width('90%')
         .height(48)
+        .enabled(this.replayEnabled)
         .onClick(() => {
           const previousCapture = this.replay.getLastCapture();
           if (previousCapture === null) {
@@ -119,6 +156,7 @@ struct SessionReplayPocPage {
       Button('Capture Full Snapshot')
         .width('90%')
         .height(48)
+        .enabled(this.replayEnabled)
         .onClick(() => {
           try {
             const globalContext: SessionReplayGlobalContext = {};

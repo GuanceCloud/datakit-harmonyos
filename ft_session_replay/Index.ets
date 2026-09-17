@@ -1,8 +1,8 @@
 /**
- * Public Session Replay POC API.
+ * Public HarmonyOS Session Replay API.
  *
- * This HAR deliberately exposes protocol and collection primitives only. It
- * does not persist or upload replay data until the POC contract is validated.
+ * This HAR exposes a process-wide recorder entry point plus protocol and
+ * collection primitives. Persistence and upload remain subsequent priorities.
  */
 export {
   FTSessionReplayConfig,
@@ -33,4 +33,5 @@ export {
 export { ArkUIReplayCollector } from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
+export { FTSessionReplay } from './src/main/ets/components/FTSessionReplay';
 export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';

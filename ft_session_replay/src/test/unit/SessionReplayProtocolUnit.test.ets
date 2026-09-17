@@ -9,6 +9,7 @@ import {
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/components/SessionReplaySampler';
+import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
@@ -121,6 +122,21 @@ export default function sessionReplayProtocolUnitTest() {
         .setSessionReplayOnErrorSampleRate(0);
       expect(new SessionReplaySampler(disabledConfig).decide('disabled-session'))
         .assertEqual(SessionReplaySamplingMode.NONE);
+    });
+
+    it('supports a process-wide Replay enable switch and delayed start', 0, () => {
+      const replay = FTSessionReplay.getInstance();
+      replay.disable();
+      expect(replay.isEnabled()).assertFalse();
+
+      replay.init(new FTSessionReplayConfig().setDelayInit(true));
+      expect(replay.isEnabled()).assertFalse();
+
+      replay.start();
+      expect(replay.isEnabled()).assertTrue();
+
+      replay.disable();
+      expect(replay.isEnabled()).assertFalse();
     });
   });
 }
