@@ -310,6 +310,15 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
   }
 
+  /** Promotes a completed Resource's retained error window without a stale UI capture. */
+  public onErrorTimeline(context: FTSessionReplayErrorContext): boolean {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+      return false;
+    }
+    return this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR ||
+      this.promoteErrorSampledSession(context.sessionId, context.timestamp);
+  }
+
   /**
    * Browser RUM link fields are attached to the native container View as a
    * new Full Snapshot, so batches before and after the rebind cannot share

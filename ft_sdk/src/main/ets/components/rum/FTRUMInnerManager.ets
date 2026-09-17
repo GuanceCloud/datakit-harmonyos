@@ -2400,6 +2400,70 @@ export class FTRUMInnerManager {
     this.applySessionReplayViewMetadata(view, base);
   }
 
+  /**
+   * A Resource can fail after navigation has made another View active. Capture
+   * a fresh ArkUI snapshot only for the Resource's still-active View; otherwise
+   * promote the matching error-sampled session without attaching the current
+   * page's tree to a historical Resource error.
+   */
+  private notifySessionReplayResourceError(resource: ResourceBean, timestamp: number): void {
+    const activeView = this.activeView;
+    if (activeView !== null && activeView.getId() === resource.viewId &&
+      activeView.getSessionId() === resource.sessionId) {
+      this.notifySessionReplayError(activeView, timestamp, ErrorType.NETWORK.toString(), AppState.RUN);
+      return;
+    }
+    if (resource.sessionId.length === 0 || resource.viewId.length === 0) {
+      return;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplayErrorContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      sessionId: resource.sessionId,
+      viewId: resource.viewId,
+      viewName: resource.viewName,
+      viewReferrer: resource.viewReferrer,
+      linkContext: this.createSessionReplayResourceLinkContext(resource),
+      timestamp,
+      errorType: ErrorType.NETWORK.toString(),
+      appState: AppState.UNKNOWN.toString()
+    };
+    if (context.applicationId.length > 0) {
+      FTSessionReplayBridgeRegistry.notifyErrorTimeline(context);
+    }
+  }
+
+  /**
+   * A completed Resource no longer owns an ActiveViewBean. Preserve selected
+   * application-level link keys, while live matching Views retain their full
+   * View tags and properties through createSessionReplayLinkContext().
+   */
+  private createSessionReplayResourceLinkContext(resource: ResourceBean): Record<string, string | number | boolean> {
+    const activeView = this.activeView;
+    if (activeView !== null && activeView.getId() === resource.viewId &&
+      activeView.getSessionId() === resource.sessionId) {
+      return this.createSessionReplayLinkContext(activeView);
+    }
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicKeys.length; index++) {
+      const key = dynamicKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    return result;
+  }
+
   private applySessionReplayViewMetadata(view: ActiveViewBean, context: FTSessionReplayRUMContext): void {
     const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
     if (metadata.hasReplay) {
@@ -4316,6 +4380,7 @@ export class FTRUMInnerManager {
       } else {
         SyncTaskManager.getInstance().setErrorTimeLine(time, null);
       }
+      this.notifySessionReplayResourceError(resourceBean, time);
       
       // Build error tags (aligned with Android SDK)
       // Merge with global RUM context and dynamic tags (aligned with putRUMResourcePerformance)

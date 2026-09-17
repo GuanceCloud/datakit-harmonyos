@@ -464,3 +464,17 @@ removed from this directory.
 3. Repeat with the default `TouchPrivacy.HIDE`: no `source:9` record may be
    persisted. After stopping the RUM View or disabling Replay, every method
    must return no capture and must not append a segment.
+
+## P19 native network-error promotion verification
+
+1. Initialize Replay with `setSampleRate(0)` and
+   `setSessionReplayOnErrorSampleRate(1)`, begin a sampled RUM View, generate
+   Replay records, and make an instrumented Resource fail with HTTP `500` (or
+   a transport failure with status `0` and an error stack).
+2. Confirm the Resource's RUM Error and Replay data use the same session and
+   View IDs. The matching deferred Replay records/resources must move to the
+   normal queues and upload on the next explicit or scheduled flush.
+3. Start another RUM View before the first Resource completes, then make that
+   first Resource fail. Confirm it promotes the original session window but
+   does not create a snapshot of the newer page or attach the newer View ID to
+   the original Resource error.

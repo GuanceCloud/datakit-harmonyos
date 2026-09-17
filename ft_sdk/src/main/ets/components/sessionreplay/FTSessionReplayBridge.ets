@@ -94,6 +94,8 @@ export interface FTSessionReplayBridge {
   onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
   /** Promotes Browser Replay data when a Browser RUM Error is reported. */
   onWebReplayError?(context: FTSessionReplayWebErrorContext): boolean;
+  /** Promotes an error-sampled session when no live native root can be captured. */
+  onErrorTimeline?(context: FTSessionReplayErrorContext): boolean;
   /** Forces a native snapshot when Browser RUM association data changes. */
   onWebReplayContextChanged?(context: FTSessionReplayWebContextChange): boolean;
   /** Marks a stable WebView slot active or inactive for delayed draining. */
@@ -227,6 +229,24 @@ export class FTSessionReplayBridgeRegistry {
       return bridge.onWebReplayError(context);
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay WebView error callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Error timelines from a completed Resource retain the Resource's View
+   * identity but must not snapshot whichever ArkUI root happens to be visible
+   * now. The optional HAR promotes its existing rolling window only.
+   */
+  public static notifyErrorTimeline(context: FTSessionReplayErrorContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onErrorTimeline === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onErrorTimeline(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay error-timeline callback failed: ${String(error)}`);
       return false;
     }
   }
