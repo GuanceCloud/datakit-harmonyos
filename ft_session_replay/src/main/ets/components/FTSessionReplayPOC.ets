@@ -6,6 +6,7 @@ import {
   FTSessionReplayRUMContext,
   FTSessionReplaySessionContext,
   FTSessionReplayWebDataContext,
+  FTSessionReplayWebErrorContext,
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from '@guancecloud/ft_sdk';
@@ -241,6 +242,17 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.recordReplayMetadata(replayContext, capture.records.length);
     this.lastCapture = capture;
     return true;
+  }
+
+  /** Browser RUM Errors promote only the matching error-sampled session. */
+  public onWebReplayError(context: FTSessionReplayWebErrorContext): boolean {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+      return false;
+    }
+    if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
+      return true;
+    }
+    return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
   }
 
   public onWebReplaySlotActive(slotId: string, active: boolean, timestamp: number): void {

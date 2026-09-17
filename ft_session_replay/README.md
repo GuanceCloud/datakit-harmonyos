@@ -405,3 +405,20 @@ removed from this directory.
    remain in `error_resources`. After freeing space and reporting another
    error, confirm the asset is promoted and uploaded without an unacknowledged
    copy being deleted.
+
+## P15 Browser RUM Error promotion verification
+
+1. Initialize an ArkWeb Browser SDK page with Replay enabled and configure
+   `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`. Generate Browser
+   Replay records and at least one queued resource, but do not emit a Browser
+   RUM Error. Confirm records/resources remain only in the error-sampled
+   directories and no Replay endpoint request is made.
+2. Emit a Browser RUM Error through the existing WebView RUM bridge (the event
+   name is `rum`, with `measurement:"error"` and the Browser `view_id`).
+   Confirm the same session's deferred Replay records and assets are promoted
+   exactly once, then reach the record/resource endpoints on the next flush or
+   scheduled cycle.
+3. Emit a Browser RUM Error from a different session or after the one-minute
+   window. Confirm it does not promote the original session's deferred assets.
+   Repeating an Error for the same session must be idempotent: it must not
+   duplicate any persisted segment or asset upload.

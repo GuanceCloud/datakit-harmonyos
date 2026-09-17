@@ -43,6 +43,16 @@ export interface FTSessionReplayWebDataContext {
   timestamp: number;
 }
 
+/** A Browser RUM Error that can promote an error-sampled Replay session. */
+export interface FTSessionReplayWebErrorContext {
+  applicationId: string;
+  sessionId: string;
+  viewId: string;
+  slotId: string;
+  linkContext: Record<string, string | number | boolean>;
+  timestamp: number;
+}
+
 /** Browser SDK capabilities provided only while the optional Replay HAR runs. */
 export interface FTSessionReplayWebViewOptions {
   privacyLevel: string;
@@ -72,6 +82,8 @@ export interface FTSessionReplayBridge {
   getWebViewOptions?(): FTSessionReplayWebViewOptions | null;
   /** Receives one Browser SDK record, already associated with RUM identity. */
   onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
+  /** Promotes Browser Replay data when a Browser RUM Error is reported. */
+  onWebReplayError?(context: FTSessionReplayWebErrorContext): boolean;
   /** Marks a stable WebView slot active or inactive for delayed draining. */
   onWebReplaySlotActive?(slotId: string, active: boolean, timestamp: number): void;
   /** Enables the Browser SDK's periodic full snapshots for error sampling. */
@@ -190,6 +202,19 @@ export class FTSessionReplayBridgeRegistry {
       return bridge.onWebReplayData(context);
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay WebView data callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyWebReplayError(context: FTSessionReplayWebErrorContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayError === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayError(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView error callback failed: ${String(error)}`);
       return false;
     }
   }

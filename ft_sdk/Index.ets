@@ -165,6 +165,7 @@ export {
   FTSessionReplayRUMContext,
   FTSessionReplaySessionContext,
   FTSessionReplayWebDataContext,
+  FTSessionReplayWebErrorContext,
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from './src/main/ets/components/sessionreplay/FTSessionReplayBridge';

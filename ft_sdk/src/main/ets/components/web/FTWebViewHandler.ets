@@ -617,6 +617,10 @@ export class FTWebViewHandler implements JsReceiver {
           // If timeValue is provided (from Web SDK), use it; otherwise use current nanosecond timestamp
           const time = timeValue !== undefined ? timeValue * 1000000 : Utils.getCurrentNanoTime();
 
+          if (measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+            this.notifySessionReplayWebError();
+          }
+
           // Get collect type
           const sessionIdValue = FTRUMInnerManager.getInstance().getSessionId();
           const collectType = sessionIdValue ? CollectType.ALL : CollectType.DROP;
@@ -727,6 +731,31 @@ export class FTWebViewHandler implements JsReceiver {
       FTInnerLogger.d(TAG, 'WebView Session Replay data was ignored by the optional Replay bridge.');
     }
     this.refreshSessionReplaySnapshotTimer();
+  }
+
+  /** Promotes the Browser Replay error window after Browser RUM reports an Error. */
+  private notifySessionReplayWebError(): void {
+    if (!FTRUMConfigManager.getInstance().isRumEnable() || !this.sessionReplaySlotActive) {
+      return;
+    }
+    const rumConfig = FTRUMConfigManager.getInstance().getConfig();
+    const applicationId = rumConfig === null ? '' : rumConfig.getRumAppId();
+    const sessionId = FTRUMInnerManager.getInstance().getSessionId();
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    const viewId = this.webViewId.length > 0
+      ? this.webViewId
+      : (activeView === null ? '' : activeView.getId());
+    if (applicationId.length === 0 || sessionId.length === 0 || viewId.length === 0) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.notifyWebReplayError({
+      applicationId,
+      sessionId,
+      viewId,
+      slotId: this.sessionReplaySlotId,
+      linkContext: this.webReplayLinkContext,
+      timestamp: Date.now()
+    });
   }
 
   /** Extracts only explicitly configured RUM-link keys from Browser RUM data. */
