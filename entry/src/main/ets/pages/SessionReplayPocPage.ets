@@ -1,6 +1,6 @@
 import router from '@ohos.router';
 import { Context } from '@kit.AbilityKit';
-import { AppState, ErrorType, FTRUMGlobalManager } from '@guancecloud/ft_sdk';
+import { AppState, ErrorType, FTRUMGlobalManager, FTSDK } from '@guancecloud/ft_sdk';
 import {
   FTSessionReplayConfig,
   FTSessionReplay,
@@ -71,11 +71,23 @@ struct SessionReplayPocPage {
     return (getContext(this) as Context).filesDir;
   }
 
+  private requireRUMBridge(): boolean {
+    const rumConfig = FTSDK.getRumConfig();
+    if (rumConfig !== null && rumConfig.getRumAppId().trim().length > 0) {
+      return true;
+    }
+    this.result = 'RUM View bridge is unavailable because RUM is not initialized. Relaunch the demo with a non-empty --ps appId <your_rum_app_id>, then enable Session Replay and try again.';
+    return false;
+  }
+
   private showBridgeCapture(source: string): void {
     setTimeout(() => {
       const capture = this.replay.getLastCapture();
       if (capture === null) {
-        this.result = `${source} did not produce a Replay capture. Confirm that RUM is initialized and try again.`;
+        const root = this.getUIContext().getFrameNodeById('session-replay-poc-root');
+        this.result = root === null
+          ? `${source} did not produce a Replay capture because the Replay root is not attached. Return to this page, enable Replay again, and retry.`
+          : `${source} did not produce a Replay capture. Confirm that Session Replay is enabled before starting the RUM View, then retry.`;
         return;
       }
       const totalRecords = this.replay.getRecordedRecords({
@@ -172,7 +184,7 @@ struct SessionReplayPocPage {
             Text('如何开启会话回放')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
-            Text('1. 确认应用已完成 FTSDK 与 RUM 初始化。\n2. 点击下方 Enable Session Replay。\n3. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n4. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
+            Text('1. 使用非空 appId 初始化 FTSDK 与 RUM。\n2. 点击下方 Enable Session Replay。\n3. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n4. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
               .fontSize(14)
               .fontColor('#444444')
             Text('提示：本 POC 为便于验证将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
@@ -198,6 +210,9 @@ struct SessionReplayPocPage {
             .height(48)
             .enabled(this.replayEnabled)
             .onClick(() => {
+              if (!this.requireRUMBridge()) {
+                return;
+              }
               FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
                 .then(() => {
                   this.bridgeViewActive = true;
@@ -212,6 +227,9 @@ struct SessionReplayPocPage {
             .height(48)
             .enabled(this.replayEnabled)
             .onClick(() => {
+              if (!this.requireRUMBridge()) {
+                return;
+              }
               FTRUMGlobalManager.getInstance().addError(
                 'SessionReplayPocError',
                 'Manual bridge verification error',
