@@ -15,10 +15,10 @@ export const ANDROID_REPLAY_ENDPOINTS: AndroidReplayEndpoints = {
 export enum ReplayRecordType {
   META = 4,
   FOCUS = 6,
+  VIEW_END = 7,
   VIEWPORT = 8,
   FULL_SNAPSHOT = 10,
-  INCREMENTAL_SNAPSHOT = 11,
-  VIEW_END = 12
+  INCREMENTAL_SNAPSHOT = 11
 }
 
 export type SessionReplayScalar = string | number | boolean;
@@ -56,6 +56,78 @@ export interface SessionReplayRecord {
 
 export interface FullSnapshotData {
   wireframes: Array<ReplayWireframe>;
+}
+
+/** Android mobile Meta record payload. */
+export interface ReplayMetaData {
+  width: number;
+  height: number;
+  href?: string;
+}
+
+/** Android mobile Focus record payload. */
+export interface ReplayFocusData {
+  has_focus: boolean;
+}
+
+/** Android mobile VisualViewport record payload. */
+export interface ReplayViewportData {
+  width: number;
+  height: number;
+  offsetLeft: number;
+  offsetTop: number;
+  pageLeft: number;
+  pageTop: number;
+  scale: number;
+}
+
+export interface ReplayMutationAdd {
+  previousId?: number;
+  wireframe: ReplayWireframe;
+}
+
+export interface ReplayMutationRemove {
+  id: number;
+}
+
+/** Placeholder update shape used by Android's mobile mutation payload. */
+export interface ReplayPlaceholderUpdate {
+  id: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  label?: string;
+  type: 'placeholder';
+}
+
+/** Android's `MobileMutationData` payload (`source: 0`). */
+export interface ReplayMutationData {
+  source: 0;
+  adds: Array<ReplayMutationAdd>;
+  removes: Array<ReplayMutationRemove>;
+  updates: Array<ReplayPlaceholderUpdate>;
+}
+
+/** Android's resize incremental payload (`source: 4`). */
+export interface ReplayViewportResizeData {
+  source: 4;
+  width: number;
+  height: number;
+}
+
+/** Android's pointer interaction incremental payload (`source: 9`). */
+export interface ReplayPointerInteractionData {
+  source: 9;
+  pointerEventType: 'down' | 'up' | 'move';
+  pointerType: 'touch' | 'mouse' | 'pen';
+  pointerId: number;
+  x: number;
+  y: number;
+}
+
+/** Android View End has no payload, but ArkTS requires a declared object type. */
+export interface ReplayViewEndData {
 }
 
 /** Serialized shape accepted by Android's `EnrichedRecord` contract. */

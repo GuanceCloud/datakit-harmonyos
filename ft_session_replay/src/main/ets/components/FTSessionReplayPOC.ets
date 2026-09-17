@@ -7,7 +7,8 @@ import {
   FTSessionReplaySessionContext
 } from '@guancecloud/ft_sdk';
 import { ArkUIReplayCollector } from './ArkUIReplayCollector';
-import { FTSessionReplayConfig } from './FTSessionReplayConfig';
+import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
+import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import {
   createReplayEnvelope,
   FullSnapshotData,
@@ -21,6 +22,7 @@ import {
 export interface SessionReplayCapture {
   envelope: SessionReplayEnvelope;
   payload: string;
+  records: Array<SessionReplayRecord>;
   record: SessionReplayRecord;
   wireframeCount: number;
 }
@@ -36,12 +38,16 @@ interface SessionReplayRootBinding {
  * before enabling persistence or network uploads.
  */
 export class FTSessionReplayPOC implements FTSessionReplayBridge {
+  private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
+  private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
+  private activeContext: SessionReplayContext | null = null;
 
   constructor(config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
+    this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot());
   }
 
@@ -62,6 +68,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     FTSessionReplayBridgeRegistry.unregister(this);
     this.isStarted = false;
     this.rootBinding = null;
+    this.activeContext = null;
+    this.processor.reset();
   }
 
   /** Registers the visible ArkUI root to record when RUM starts or errors a View. */
@@ -89,34 +97,70 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     vpToPxScale: number = 1
   ): SessionReplayCapture {
     const record = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
-    const records = [record];
-    return {
-      envelope: createReplayEnvelope(context, records),
-      payload: serializeReplayEnvelope(context, records),
-      record,
-      wireframeCount: this.getWireframeCount(record)
-    };
+    return this.createCapture(context, [record], record);
+  }
+
+  /** Captures only structural changes using Android's mutation record grammar. */
+  public captureIncrementalSnapshot(
+    uiContext: UIContext,
+    rootId: string,
+    context: SessionReplayContext,
+    vpToPxScale: number = 1
+  ): SessionReplayCapture | null {
+    const fullSnapshot = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
+    const mutation = this.processor.createMutationRecord(fullSnapshot);
+    if (mutation === null) {
+      return null;
+    }
+    const capture = this.createCapture(context, [mutation], fullSnapshot);
+    this.lastCapture = capture;
+    return capture;
+  }
+
+  /** Emits a protocol-compatible pointer record only when touch privacy allows it. */
+  public recordTouch(
+    context: SessionReplayContext,
+    pointerEventType: 'down' | 'up' | 'move',
+    pointerId: number,
+    x: number,
+    y: number
+  ): SessionReplayCapture | null {
+    if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
+      return null;
+    }
+    const record = this.processor.createPointerRecord(pointerEventType, pointerId, x, y);
+    const capture = this.createCapture(context, [record], null);
+    this.lastCapture = capture;
+    return capture;
   }
 
   public renewRootEpoch(): void {
     this.collector.renewRootEpoch();
+    this.processor.reset();
   }
 
   public onViewStarted(context: FTSessionReplayRUMContext): boolean {
-    return this.captureFromRUMContext(context) !== null;
+    return this.captureViewStartedFromRUMContext(context) !== null;
   }
 
-  public onViewStopped(_context: FTSessionReplayRUMContext): void {
-    // Android's View-end marker will be added with the durable recorder. The
-    // POC keeps the already captured Full Snapshot available for inspection.
+  public onViewStopped(context: FTSessionReplayRUMContext): void {
+    const replayContext = this.toReplayContext(context);
+    if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
+      return;
+    }
+    const record = this.processor.createViewEndRecord(context.timestamp);
+    this.lastCapture = this.createCapture(replayContext, [record], null);
+    this.activeContext = null;
+    this.processor.reset();
   }
 
   public onError(context: FTSessionReplayErrorContext): boolean {
-    return this.captureFromRUMContext(context) !== null;
+    return this.captureFullSnapshotFromRUMContext(context) !== null;
   }
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
-    this.collector.renewRootEpoch();
+    this.renewRootEpoch();
+    this.activeContext = null;
   }
 
   private getWireframeCount(record: SessionReplayRecord): number {
@@ -124,7 +168,29 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return data.wireframes.length;
   }
 
-  private captureFromRUMContext(context: FTSessionReplayRUMContext): SessionReplayCapture | null {
+  private captureViewStartedFromRUMContext(context: FTSessionReplayRUMContext): SessionReplayCapture | null {
+    const replayContext = this.toReplayContext(context);
+    const fullCapture = this.captureWithRegisteredRoot(replayContext);
+    if (fullCapture === null) {
+      return null;
+    }
+    const records = this.processor.createViewStartRecords(fullCapture.record);
+    const capture = this.createCapture(replayContext, records, fullCapture.record);
+    this.lastCapture = capture;
+    this.activeContext = replayContext;
+    return capture;
+  }
+
+  private captureFullSnapshotFromRUMContext(context: FTSessionReplayRUMContext): SessionReplayCapture | null {
+    const replayContext = this.toReplayContext(context);
+    const capture = this.captureWithRegisteredRoot(replayContext);
+    if (capture !== null) {
+      this.lastCapture = capture;
+    }
+    return capture;
+  }
+
+  private captureWithRegisteredRoot(context: SessionReplayContext): SessionReplayCapture | null {
     if (!this.isStarted || this.rootBinding === null || context.applicationId.length === 0 ||
       context.sessionId.length === 0 || context.viewId.length === 0) {
       return null;
@@ -145,5 +211,32 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     } catch (_error) {
       return null;
     }
+  }
+
+  private toReplayContext(context: FTSessionReplayRUMContext): SessionReplayContext {
+    return {
+      applicationId: context.applicationId,
+      sessionId: context.sessionId,
+      viewId: context.viewId
+    };
+  }
+
+  private isSameView(left: SessionReplayContext, right: SessionReplayContext): boolean {
+    return left.applicationId === right.applicationId && left.sessionId === right.sessionId && left.viewId === right.viewId;
+  }
+
+  private createCapture(
+    context: SessionReplayContext,
+    records: Array<SessionReplayRecord>,
+    snapshotRecord: SessionReplayRecord | null
+  ): SessionReplayCapture {
+    const record = records[records.length - 1];
+    return {
+      envelope: createReplayEnvelope(context, records),
+      payload: serializeReplayEnvelope(context, records),
+      records: records.slice(),
+      record,
+      wireframeCount: snapshotRecord === null ? 0 : this.getWireframeCount(snapshotRecord)
+    };
   }
 }

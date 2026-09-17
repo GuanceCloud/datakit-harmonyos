@@ -7,6 +7,7 @@ import {
   SessionReplayRecord
 } from '../../main/ets/components/SessionReplayProtocol';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
+import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
@@ -56,6 +57,49 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.getTouchPrivacy()).assertEqual(TouchPrivacy.HIDE);
       expect(config.setSampleRate(2).getSampleRate()).assertEqual(1);
       expect(config.setSessionReplayOnErrorSampleRate(-1).getSessionReplayOnErrorSampleRate()).assertEqual(0);
+    });
+
+    it('uses Android native record types for view lifecycle and mutations', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const fullSnapshot: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: {
+          wireframes: [{
+            id: 1,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            type: 'placeholder',
+            label: 'ArkUI:Column'
+          }]
+        }
+      };
+      const startRecords = processor.createViewStartRecords(fullSnapshot);
+      expect(startRecords[0].type).assertEqual(4);
+      expect(startRecords[1].type).assertEqual(6);
+      expect(startRecords[2].type).assertEqual(10);
+
+      const changedSnapshot: SessionReplayRecord = {
+        timestamp: 1700000000100,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: {
+          wireframes: [{
+            id: 1,
+            x: 10,
+            y: 0,
+            width: 100,
+            height: 100,
+            type: 'placeholder',
+            label: 'ArkUI:Column'
+          }]
+        }
+      };
+      const mutation = processor.createMutationRecord(changedSnapshot);
+      expect(mutation !== null).assertTrue();
+      expect(mutation?.type).assertEqual(11);
+      expect(processor.createViewEndRecord().type).assertEqual(7);
     });
   });
 }

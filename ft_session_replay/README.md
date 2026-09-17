@@ -35,6 +35,20 @@ values, or image bytes.
 4. Confirm the displayed node labels are only `ArkUI:<component type>` and do
    not include the page's visible text or any input value.
 
+## P2 native record grammar verification
+
+1. On the same page, first tap **Capture through RUM View Bridge**. The payload
+   must include records in this order: Meta (`type:4`), Focus (`type:6`), then
+   Full Snapshot (`type:10`).
+2. Tap **Capture Incremental Mutation**. Confirm the result is `type:11` and
+   its data has `source:0` plus one or more `adds`, `removes`, or `updates`.
+3. Navigate away after a bridge capture and inspect the latest bridge payload
+   or RUM-side diagnostic. The closing record uses Android's View End type
+   `7`; it has no payload fields.
+4. Do not expect touch positions under default settings: `TouchPrivacy.HIDE`
+   suppresses them before serialization. Only an explicit `TouchPrivacy.SHOW`
+   configuration enables pointer records (`type:11`, `source:9`).
+
 ## P1 bridge verification
 
 1. Configure a non-empty RUM app ID in the demo and open **Session Replay POC**.

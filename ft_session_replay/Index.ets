@@ -14,7 +14,14 @@ export {
   ANDROID_REPLAY_ENDPOINTS,
   AndroidReplayEndpoints,
   FullSnapshotData,
+  ReplayFocusData,
+  ReplayMetaData,
+  ReplayMutationData,
+  ReplayPointerInteractionData,
   ReplayRecordType,
+  ReplayViewportData,
+  ReplayViewportResizeData,
+  ReplayViewEndData,
   SessionReplayContext,
   SessionReplayGlobalContext,
   SessionReplayEnvelope,
@@ -24,4 +31,5 @@ export {
   serializeReplayEnvelope
 } from './src/main/ets/components/SessionReplayProtocol';
 export { ArkUIReplayCollector } from './src/main/ets/components/ArkUIReplayCollector';
+export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';

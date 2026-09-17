@@ -11,6 +11,7 @@ import {
 @Component
 struct SessionReplayPocPage {
   @State result: string = 'Ready to capture a privacy-safe Full Snapshot.';
+  @State showMutationProbe: boolean = false;
   private readonly replay: FTSessionReplayPOC = new FTSessionReplayPOC(
     new FTSessionReplayConfig().setMaxNodesPerSnapshot(300)
   );
@@ -65,6 +66,43 @@ struct SessionReplayPocPage {
           );
           this.showBridgeCapture('RUM Error bridge');
         })
+      Button('Capture Incremental Mutation')
+        .width('90%')
+        .height(48)
+        .onClick(() => {
+          const previousCapture = this.replay.getLastCapture();
+          if (previousCapture === null) {
+            this.result = 'Capture through the RUM View Bridge first to establish a Full Snapshot baseline.';
+            return;
+          }
+          this.showMutationProbe = !this.showMutationProbe;
+          setTimeout(() => {
+            try {
+              const context: SessionReplayContext = {
+                applicationId: previousCapture.envelope.application_id,
+                sessionId: previousCapture.envelope.session_id,
+                viewId: previousCapture.envelope.view_id
+              };
+              const capture = this.replay.captureIncrementalSnapshot(
+                this.getUIContext(),
+                'session-replay-poc-root',
+                context,
+                vp2px(1)
+              );
+              this.result = capture === null
+                ? 'No structural mutation detected after the baseline.'
+                : `Mutation captured with type ${capture.record.type}.\n${capture.payload.substring(0, 600)}`;
+            } catch (error) {
+              this.result = `Mutation capture failed: ${String(error)}`;
+            }
+          }, 80);
+        })
+      if (this.showMutationProbe) {
+        Text('Incremental layout probe')
+          .fontSize(16)
+          .padding(12)
+          .backgroundColor('#DDF4FF')
+      }
       Button('Capture Full Snapshot')
         .width('90%')
         .height(48)
