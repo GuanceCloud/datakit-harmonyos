@@ -384,3 +384,24 @@ removed from this directory.
    is still deduplicated, but the proxy receives a separate check/upload group
    with that route's `tags`. This verifies that backend asset routing is not
    accidentally shared across workspaces.
+
+## P14 error-sampled resource promotion verification
+
+1. Initialize Replay with `setSampleRate(0)` and
+   `setSessionReplayOnErrorSampleRate(1)`. During a sampled RUM View, call
+   `queueResource(...)` with a known byte array and do not report an error.
+   Confirm `getDeferredErrorResources()` contains the asset, while
+   `getStoredResources()` is empty and neither resource endpoint receives a
+   request during the automatic upload cycle.
+2. Trigger a RUM Error for that same application/session/view. Confirm the
+   deferred resource moves to the normal resource queue along with its Replay
+   records, then the next `flush()` or scheduled drain performs the usual
+   existence check and uploads it only when missing.
+3. Queue another error-sampled asset, wait longer than the one-minute error
+   window without reporting an error, and confirm it is removed from
+   `filesDir/ft_session_replay/error_resources`. It must never be uploaded.
+4. Force resource promotion to fail—for example, by exhausting the normal
+   resource quota—then report an error. Confirm the source metadata and bytes
+   remain in `error_resources`. After freeing space and reporting another
+   error, confirm the asset is promoted and uploaded without an unacknowledged
+   copy being deleted.

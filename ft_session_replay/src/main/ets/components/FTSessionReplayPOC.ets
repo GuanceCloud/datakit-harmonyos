@@ -66,6 +66,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
+  private readonly errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null;
   // Zero means active. A positive timestamp retains the Android-compatible
   // two-second grace period after a WebView slot becomes inactive.
   private readonly webSlotInactiveAt: Map<string, number> = new Map();
@@ -74,13 +75,15 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   constructor(
     config: FTSessionReplayConfig = new FTSessionReplayConfig(),
     store: SessionReplaySegmentStore | null = null,
-    errorSampleStore: SessionReplaySegmentStore | null = null
+    errorSampleStore: SessionReplaySegmentStore | null = null,
+    errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null = null
   ) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot());
     this.sampler = new SessionReplaySampler(config);
     this.store = store;
     this.errorSampleStore = errorSampleStore;
+    this.errorSampleResourcePromoter = errorSampleResourcePromoter;
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -249,6 +252,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
 
   public isWebReplayErrorSampled(sessionId: string): boolean {
     return this.isStarted && this.sampler.decide(sessionId) === SessionReplaySamplingMode.ERROR;
+  }
+
+  /** Lets the manager route error-sampled assets to the correct durable queue. */
+  public isErrorSampledSessionPromoted(sessionId: string): boolean {
+    return this.promotedErrorSessions.has(sessionId);
   }
 
   /** Returns Android-compatible Replay counters for the current RUM View. */
@@ -523,10 +531,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       this.config.getErrorSampleWindowMs(),
       this.store
     );
-    if (promoted) {
+    const resourcesPromoted = this.errorSampleResourcePromoter === null ||
+      this.errorSampleResourcePromoter(sessionId, timestamp);
+    if (promoted && resourcesPromoted) {
       this.promotedErrorSessions.add(sessionId);
     }
-    return promoted;
+    return promoted && resourcesPromoted;
   }
 
   private startObservation(): void {

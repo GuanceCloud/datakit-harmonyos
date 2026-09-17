@@ -28,11 +28,14 @@ export class SessionReplayResourceStore {
   private readonly metadataRoot: string;
   private readonly maxBytes: number;
 
-  constructor(filesDir: string, maxBytes: number) {
+  constructor(filesDir: string, maxBytes: number, directoryName: string = 'resources') {
     if (filesDir.trim().length === 0) {
       throw new Error('Session Replay resource storage requires a non-empty filesDir');
     }
-    this.root = `${filesDir}/ft_session_replay/resources`;
+    if (!/^[a-z0-9_]+$/.test(directoryName)) {
+      throw new Error('Session Replay resource storage directory name is invalid');
+    }
+    this.root = `${filesDir}/ft_session_replay/${directoryName}`;
     this.dataRoot = `${this.root}/data`;
     this.metadataRoot = `${this.root}/pending`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
@@ -160,6 +163,52 @@ export class SessionReplayResourceStore {
 
   public getRoot(): string {
     return this.root;
+  }
+
+  /** Drops unpromoted resource assets older than an error-sampling cutoff. */
+  public pruneBefore(timestamp: number): void {
+    const resources = this.list();
+    for (let index = 0; index < resources.length; index++) {
+      if (resources[index].createdAt < timestamp) {
+        this.remove([resources[index].id]);
+      }
+    }
+  }
+
+  /**
+   * Copies one session's retained resource window into the normal queue before
+   * deleting the error-sampled source metadata. A copy failure leaves the
+   * source item available for a later error-promotion attempt.
+   */
+  public promoteSessionWindow(
+    sessionId: string,
+    timestamp: number,
+    windowMs: number,
+    destination: SessionReplayResourceStore
+  ): boolean {
+    const cutoff = timestamp - Math.max(0, windowMs);
+    const resources = this.list();
+    for (let index = 0; index < resources.length; index++) {
+      const resource = resources[index];
+      if (resource.context.sessionId !== sessionId) {
+        continue;
+      }
+      if (resource.createdAt < cutoff) {
+        if (!this.remove([resource.id])) {
+          return false;
+        }
+        continue;
+      }
+      const bytes = this.read(resource);
+      if (bytes === null || destination.put(resource.context, bytes, resource.mimeType) === null) {
+        return false;
+      }
+      if (!this.remove([resource.id])) {
+        return false;
+      }
+    }
+    this.pruneBefore(cutoff);
+    return true;
   }
 
   private recover(): void {

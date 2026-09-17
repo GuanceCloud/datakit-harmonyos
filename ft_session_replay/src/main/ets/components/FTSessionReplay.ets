@@ -2,6 +2,7 @@ import { UIContext } from '@kit.ArkUI';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
+import { SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 import { SessionReplayUploader, SessionReplayUploadResult } from './SessionReplayUploader';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
@@ -25,6 +26,7 @@ export class FTSessionReplay {
   private errorSampleStorage: SessionReplaySegmentStore | null = null;
   private uploader: SessionReplayUploader | null = null;
   private resourceStorage: SessionReplayResourceStore | null = null;
+  private errorSampleResourceStorage: SessionReplayResourceStore | null = null;
   private resourceUploader: SessionReplayResourceUploader | null = null;
   private uploadTimer: number = -1;
   private uploadInFlight: boolean = false;
@@ -56,7 +58,12 @@ export class FTSessionReplay {
     if (this.recorder !== null) {
       return;
     }
-    const recorder = new FTSessionReplayPOC(this.config, this.storage, this.errorSampleStorage);
+    const recorder = new FTSessionReplayPOC(
+      this.config,
+      this.storage,
+      this.errorSampleStorage,
+      (sessionId: string, timestamp: number): boolean => this.promoteErrorSampleResources(sessionId, timestamp)
+    );
     recorder.start();
     this.recorder = recorder;
     this.startUploadSchedule();
@@ -130,11 +137,22 @@ export class FTSessionReplay {
     data: ArrayBuffer | Uint8Array,
     mimeType: string = 'application/octet-stream'
   ): string | null {
-    if (this.resourceStorage === null) {
+    if (this.recorder === null || this.resourceStorage === null) {
       return null;
     }
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    return this.resourceStorage.put(context, bytes, mimeType);
+    const sampling = this.recorder.getSamplingMode(context.sessionId);
+    if (sampling === SessionReplaySamplingMode.NONE) {
+      return null;
+    }
+    const isDeferredErrorSample = sampling === SessionReplaySamplingMode.ERROR &&
+      !this.recorder.isErrorSampledSessionPromoted(context.sessionId);
+    const store = isDeferredErrorSample ? this.errorSampleResourceStorage : this.resourceStorage;
+    const fileName = store === null ? null : store.put(context, bytes, mimeType);
+    if (fileName !== null && isDeferredErrorSample) {
+      this.errorSampleResourceStorage?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
+    }
+    return fileName;
   }
 
   /** Lists resource assets that still need a check/upload acknowledgement. */
@@ -144,6 +162,11 @@ export class FTSessionReplay {
 
   public getResourceStorageRoot(): string | null {
     return this.resourceStorage === null ? null : this.resourceStorage.getRoot();
+  }
+
+  /** Lists error-sampled assets awaiting a same-session RUM Error promotion. */
+  public getDeferredErrorResources(): Array<SessionReplayStoredResource> {
+    return this.errorSampleResourceStorage === null ? [] : this.errorSampleResourceStorage.list();
   }
 
   /** Lists error-sampled segments that await a RUM Error before promotion. */
@@ -239,6 +262,7 @@ export class FTSessionReplay {
       this.errorSampleStorage = null;
       this.uploader = null;
       this.resourceStorage = null;
+      this.errorSampleResourceStorage = null;
       this.resourceUploader = null;
       return;
     }
@@ -255,7 +279,24 @@ export class FTSessionReplay {
     );
     this.uploader = new SessionReplayUploader(this.storage, this.config);
     this.resourceStorage = new SessionReplayResourceStore(filesDir, this.config.getStorageMaxBytes());
+    this.errorSampleResourceStorage = new SessionReplayResourceStore(
+      filesDir,
+      this.config.getStorageMaxBytes(),
+      'error_resources'
+    );
     this.resourceUploader = new SessionReplayResourceUploader(this.resourceStorage);
+  }
+
+  private promoteErrorSampleResources(sessionId: string, timestamp: number): boolean {
+    if (this.resourceStorage === null || this.errorSampleResourceStorage === null) {
+      return false;
+    }
+    return this.errorSampleResourceStorage.promoteSessionWindow(
+      sessionId,
+      timestamp,
+      this.config.getErrorSampleWindowMs(),
+      this.resourceStorage
+    );
   }
 
   private async flushResourcesInternal(): Promise<SessionReplayResourceUploadResult> {
