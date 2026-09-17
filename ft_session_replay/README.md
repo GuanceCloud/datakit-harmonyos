@@ -454,6 +454,9 @@ removed from this directory.
    sampled RUM View. In the page's focus, resize/orientation, and touch
    callbacks call `recordFocus(false)`, `recordViewport(...)`,
    `recordViewportResize(...)`, and `recordTouch('down', 1, x, y)`.
+   The bundled **Session Replay POC** enables `TouchPrivacy.SHOW` only for
+   testing and exposes **Emit Focus Loss Signal**, **Emit Viewport Resize
+   Signal**, and **Emit Touch Signal** after the RUM View bridge is started.
 2. Inspect the persisted segment. It must include Focus (`type:6`), Viewport
    (`type:8`), pointer Incremental Snapshot (`type:11`, `source:9`), and a
    resize Incremental Snapshot (`type:11`, `source:4`). A resize with a live

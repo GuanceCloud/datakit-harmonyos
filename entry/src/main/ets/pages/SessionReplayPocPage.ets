@@ -5,7 +5,8 @@ import {
   FTSessionReplayConfig,
   FTSessionReplay,
   SessionReplayContext,
-  SessionReplayGlobalContext
+  SessionReplayGlobalContext,
+  TouchPrivacy
 } from '@guancecloud/ft_session_replay';
 
 @Entry
@@ -17,7 +18,7 @@ struct SessionReplayPocPage {
   @State uploadInFlight: boolean = false;
   private bridgeViewActive: boolean = false;
   private readonly replayConfig: FTSessionReplayConfig =
-    new FTSessionReplayConfig().setMaxNodesPerSnapshot(300);
+    new FTSessionReplayConfig().setMaxNodesPerSnapshot(300).setTouchPrivacy(TouchPrivacy.SHOW);
   private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
   aboutToAppear(): void {
@@ -102,6 +103,29 @@ struct SessionReplayPocPage {
     }, this.replayConfig.getSnapshotIntervalMs() + 200);
   }
 
+  private showLifecycleSignal(source: string, payload: string | null): void {
+    if (payload === null) {
+      this.result = `${source} was ignored. Enable Replay and start the RUM View bridge first.`;
+      return;
+    }
+    this.result = `${source} captured.\n${payload.substring(0, 600)}`;
+  }
+
+  private recordFocusLoss(): void {
+    const capture = this.replay.recordFocus(false);
+    this.showLifecycleSignal('Focus signal', capture === null ? null : capture.payload);
+  }
+
+  private recordViewportResize(): void {
+    const capture = this.replay.recordViewportResize(vp2px(720), vp2px(360));
+    this.showLifecycleSignal('Viewport resize signal', capture === null ? null : capture.payload);
+  }
+
+  private recordTouchSignal(): void {
+    const capture = this.replay.recordTouch('down', 1, vp2px(120), vp2px(160));
+    this.showLifecycleSignal('Touch signal', capture === null ? null : capture.payload);
+  }
+
   private uploadDurableSegments(): void {
     if (this.uploadInFlight) {
       return;
@@ -167,6 +191,21 @@ struct SessionReplayPocPage {
         .height(48)
         .enabled(this.replayEnabled)
         .onClick(() => this.triggerAutomaticObservation())
+      Button('Emit Focus Loss Signal')
+        .width('90%')
+        .height(48)
+        .enabled(this.replayEnabled)
+        .onClick(() => this.recordFocusLoss())
+      Button('Emit Viewport Resize Signal')
+        .width('90%')
+        .height(48)
+        .enabled(this.replayEnabled)
+        .onClick(() => this.recordViewportResize())
+      Button('Emit Touch Signal')
+        .width('90%')
+        .height(48)
+        .enabled(this.replayEnabled)
+        .onClick(() => this.recordTouchSignal())
       Button('Capture Incremental Mutation')
         .width('90%')
         .height(48)
