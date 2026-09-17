@@ -1,7 +1,7 @@
 import { UIContext } from '@kit.ArkUI';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
-import { SessionReplayContext } from './SessionReplayProtocol';
+import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -89,6 +89,11 @@ export class FTSessionReplay {
   /** Returns the latest protocol capture for diagnostics and the sample page. */
   public getLastCapture(): SessionReplayCapture | null {
     return this.recorder === null ? null : this.recorder.getLastCapture();
+  }
+
+  /** Returns the bounded in-memory stream for diagnostics before persistence is enabled. */
+  public getRecordedRecords(context: SessionReplayContext): Array<SessionReplayRecord> {
+    return this.recorder === null ? [] : this.recorder.getRecordedRecords(context);
   }
 
   /** Captures a manual Full Snapshot only while the global switch is enabled. */

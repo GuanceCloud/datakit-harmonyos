@@ -59,6 +59,8 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.getTouchPrivacy()).assertEqual(TouchPrivacy.HIDE);
       expect(config.setSampleRate(2).getSampleRate()).assertEqual(1);
       expect(config.setSessionReplayOnErrorSampleRate(-1).getSessionReplayOnErrorSampleRate()).assertEqual(0);
+      expect(config.setSnapshotIntervalMs(1).getSnapshotIntervalMs()).assertEqual(100);
+      expect(config.setSnapshotIntervalMs(20000).getSnapshotIntervalMs()).assertEqual(10000);
     });
 
     it('uses Android native record types for view lifecycle and mutations', 0, () => {

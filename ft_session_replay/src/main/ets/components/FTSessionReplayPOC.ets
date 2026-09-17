@@ -40,6 +40,8 @@ interface SessionReplayRootBinding {
  * before enabling persistence or network uploads.
  */
 export class FTSessionReplayPOC implements FTSessionReplayBridge {
+  private static readonly MAX_RECORDS_PER_VIEW: number = 2000;
+
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
@@ -49,6 +51,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private lastCapture: SessionReplayCapture | null = null;
   private activeContext: SessionReplayContext | null = null;
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
+  private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
+  private observationTimer: number = -1;
 
   constructor(config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.config = config;
@@ -75,6 +79,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.rootBinding = null;
     this.activeContext = null;
     this.viewMetadata.clear();
+    this.recordedRecordsByView.clear();
+    this.stopObservation();
     this.processor.reset();
     this.sampler.reset();
   }
@@ -87,14 +93,26 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       vpToPxScale
     };
     this.rootBinding = binding;
+    if (this.activeContext !== null) {
+      this.startObservation();
+    }
   }
 
   public unregisterRoot(): void {
     this.rootBinding = null;
+    this.stopObservation();
   }
 
   public getLastCapture(): SessionReplayCapture | null {
     return this.lastCapture;
+  }
+
+  /** Returns a copy of the in-memory protocol stream for one RUM View. */
+  public getRecordedRecords(context: SessionReplayContext): Array<SessionReplayRecord> {
+    const records = this.recordedRecordsByView.get(
+      this.getViewKey(context.applicationId, context.sessionId, context.viewId)
+    );
+    return records === undefined ? [] : records.slice();
   }
 
   public captureFullSnapshot(
@@ -104,7 +122,10 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     vpToPxScale: number = 1
   ): SessionReplayCapture {
     const record = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
-    return this.createCapture(context, [record], record);
+    const capture = this.createCapture(context, [record], record);
+    this.appendRecordedRecords(context, capture.records);
+    this.lastCapture = capture;
+    return capture;
   }
 
   /** Captures only structural changes using Android's mutation record grammar. */
@@ -120,6 +141,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return null;
     }
     const capture = this.createCapture(context, [mutation], fullSnapshot);
+    this.appendRecordedRecords(context, capture.records);
     this.lastCapture = capture;
     return capture;
   }
@@ -137,6 +159,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     }
     const record = this.processor.createPointerRecord(pointerEventType, pointerId, x, y);
     const capture = this.createCapture(context, [record], null);
+    this.appendRecordedRecords(context, capture.records);
     this.lastCapture = capture;
     return capture;
   }
@@ -180,9 +203,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return;
     }
     const record = this.processor.createViewEndRecord(context.timestamp);
-    this.lastCapture = this.createCapture(replayContext, [record], null);
+    const capture = this.createCapture(replayContext, [record], null);
+    this.lastCapture = capture;
+    this.appendRecordedRecords(replayContext, capture.records);
     this.recordViewMetadata(context, 1);
     this.activeContext = null;
+    this.stopObservation();
     this.processor.reset();
   }
 
@@ -200,6 +226,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     this.renewRootEpoch();
     this.activeContext = null;
+    this.stopObservation();
   }
 
   private getWireframeCount(record: SessionReplayRecord): number {
@@ -217,7 +244,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.createCapture(replayContext, records, fullCapture.record);
     this.lastCapture = capture;
     this.activeContext = replayContext;
+    this.appendRecordedRecords(replayContext, records);
     this.recordViewMetadata(context, records.length);
+    this.startObservation();
     return capture;
   }
 
@@ -226,6 +255,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.captureWithRegisteredRoot(replayContext);
     if (capture !== null) {
       this.lastCapture = capture;
+      this.appendRecordedRecords(replayContext, capture.records);
       this.recordViewMetadata(context, capture.records.length);
     }
     return capture;
@@ -237,18 +267,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return null;
     }
     try {
-      const capture = this.captureFullSnapshot(
+      const record = this.collector.captureFullSnapshot(
         this.rootBinding.uiContext,
         this.rootBinding.rootId,
-        {
-          applicationId: context.applicationId,
-          sessionId: context.sessionId,
-          viewId: context.viewId
-        },
         this.rootBinding.vpToPxScale
       );
-      this.lastCapture = capture;
-      return capture;
+      return this.createCapture(context, [record], record);
     } catch (_error) {
       return null;
     }
@@ -289,10 +313,15 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   private recordViewMetadata(context: FTSessionReplayRUMContext, recordsCount: number): void {
+    const replayContext = this.toReplayContext(context);
+    this.recordReplayMetadata(replayContext, recordsCount);
+  }
+
+  private recordReplayMetadata(context: SessionReplayContext, recordsCount: number): void {
     if (recordsCount <= 0) {
       return;
     }
-    const key = this.getViewMetadataKey(context);
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     const existing = this.viewMetadata.get(key);
     const sampledOnError = this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.ERROR;
     this.viewMetadata.set(key, {
@@ -303,7 +332,68 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   private getViewMetadataKey(context: FTSessionReplayRUMContext): string {
-    return `${context.applicationId}|${context.sessionId}|${context.viewId}`;
+    return this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+  }
+
+  private getViewKey(applicationId: string, sessionId: string, viewId: string): string {
+    return `${applicationId}|${sessionId}|${viewId}`;
+  }
+
+  private appendRecordedRecords(context: SessionReplayContext, records: Array<SessionReplayRecord>): void {
+    if (records.length === 0) {
+      return;
+    }
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    const current = this.recordedRecordsByView.get(key) ?? [];
+    for (let index = 0; index < records.length; index++) {
+      current.push(records[index]);
+    }
+    const overflow = current.length - FTSessionReplayPOC.MAX_RECORDS_PER_VIEW;
+    if (overflow > 0) {
+      current.splice(0, overflow);
+    }
+    this.recordedRecordsByView.set(key, current);
+  }
+
+  private startObservation(): void {
+    this.stopObservation();
+    if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
+      return;
+    }
+    this.observationTimer = setInterval((): void => this.captureActiveViewMutation(), this.config.getSnapshotIntervalMs());
+  }
+
+  private stopObservation(): void {
+    if (this.observationTimer !== -1) {
+      clearInterval(this.observationTimer);
+      this.observationTimer = -1;
+    }
+  }
+
+  private captureActiveViewMutation(): void {
+    const context = this.activeContext;
+    const rootBinding = this.rootBinding;
+    if (!this.isStarted || context === null || rootBinding === null) {
+      return;
+    }
+    try {
+      const fullSnapshot = this.collector.captureFullSnapshot(
+        rootBinding.uiContext,
+        rootBinding.rootId,
+        rootBinding.vpToPxScale
+      );
+      const mutation = this.processor.createMutationRecord(fullSnapshot);
+      if (mutation === null) {
+        return;
+      }
+      const capture = this.createCapture(context, [mutation], fullSnapshot);
+      this.appendRecordedRecords(context, capture.records);
+      this.recordReplayMetadata(context, capture.records.length);
+      this.lastCapture = capture;
+    } catch (_error) {
+      // A root can disappear between an ArkUI lifecycle callback and polling.
+      // Keep the current RUM View alive and retry on the next bounded interval.
+    }
   }
 
   private createCapture(

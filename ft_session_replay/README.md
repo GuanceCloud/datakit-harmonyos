@@ -1,7 +1,8 @@
 # HarmonyOS Session Replay POC
 
-This HAR validates an ArkUI-to-Android Session Replay protocol path. It does not
-persist or upload records yet.
+This HAR validates an ArkUI-to-Android Session Replay protocol path. It keeps a
+bounded in-memory record stream per View but does not persist or upload records
+yet.
 
 When `FTSessionReplayPOC.start()` is called, it registers the optional core SDK
 bridge. RUM View starts and Error reports then capture a Full Snapshot using the
@@ -39,6 +40,11 @@ Use `setDelayInit(true)` with `init()` to retain the configuration without
 starting Replay; call `start()` only after the user grants consent. The sample
 page exposes the same behavior through **Enable/Disable Session Replay** and
 disables all capture actions while Replay is off.
+
+Once a sampled RUM View starts, the registered ArkUI root is structurally
+polled every 500 ms by default. Unchanged trees do not emit records; changes
+produce Android Incremental Snapshot records (`type:11`, `source:0`). Change
+the bounded cadence with `setSnapshotIntervalMs(100..10000)`.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -143,3 +149,19 @@ values, or image bytes.
 4. Enable Replay again, trigger a RUM View bridge capture, then leave the
    page. Confirm the closed View contains Replay metadata, proving that the
    global switch re-registers the optional core bridge correctly.
+
+## P6 continuous ArkUI observation verification
+
+1. Enable Replay and trigger **Capture through RUM View Bridge** to establish
+   the initial Meta, Focus, and Full Snapshot baseline.
+2. Do not use **Capture Incremental Mutation**. Instead select **Toggle Layout
+   for Automatic Observation** and wait roughly 700 ms (the default 500 ms
+   polling interval plus UI settling time).
+3. The result must report **Automatic observer captured a structural mutation**.
+   Its JSON must contain `type:11` and `source:0`; the buffered-record count
+   must be at least four (the three start records plus the observed mutation).
+4. Repeat the layout toggle. Each structural change should add one Mutation
+   record, while waiting without changing the page must not raise the buffered
+   count.
+5. Disable Replay, then confirm the automatic-observation button is disabled.
+   This verifies the polling timer is stopped with the global switch.

@@ -31,6 +31,7 @@ export class FTSessionReplayConfig {
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
+  private snapshotIntervalMs: number = 500;
   private delayInit: boolean = false;
 
   public setSampleRate(sampleRate: number): FTSessionReplayConfig {
@@ -104,6 +105,23 @@ export class FTSessionReplayConfig {
 
   public getMaxNodesPerSnapshot(): number {
     return this.maxNodesPerSnapshot;
+  }
+
+  /**
+   * Controls the bounded structural polling cadence for a visible ArkUI root.
+   * The collector emits an Incremental Snapshot only when its wireframe tree
+   * changes, so unchanged intervals do not create protocol records.
+   */
+  public setSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
+    if (!Number.isFinite(intervalMs)) {
+      return this;
+    }
+    this.snapshotIntervalMs = Math.max(100, Math.min(10000, Math.floor(intervalMs)));
+    return this;
+  }
+
+  public getSnapshotIntervalMs(): number {
+    return this.snapshotIntervalMs;
   }
 }
 

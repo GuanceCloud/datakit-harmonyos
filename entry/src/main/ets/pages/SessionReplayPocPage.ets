@@ -71,8 +71,29 @@ struct SessionReplayPocPage {
         this.result = `${source} did not produce a Replay capture. Confirm that RUM is initialized and try again.`;
         return;
       }
-      this.result = `${source} captured ${capture.wireframeCount} wireframes.\n${capture.payload.substring(0, 600)}`;
+      const totalRecords = this.replay.getRecordedRecords({
+        applicationId: capture.envelope.application_id,
+        sessionId: capture.envelope.session_id,
+        viewId: capture.envelope.view_id
+      }).length;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}.\n${capture.payload.substring(0, 600)}`;
     }, 200);
+  }
+
+  private triggerAutomaticObservation(): void {
+    this.showMutationProbe = !this.showMutationProbe;
+    setTimeout(() => {
+      const capture = this.replay.getLastCapture();
+      if (capture !== null && capture.record.type === 11) {
+        this.result = `Automatic observer captured a structural mutation. Buffered records: ${this.replay.getRecordedRecords({
+          applicationId: capture.envelope.application_id,
+          sessionId: capture.envelope.session_id,
+          viewId: capture.envelope.view_id
+        }).length}.\n${capture.payload.substring(0, 600)}`;
+        return;
+      }
+      this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
+    }, this.replayConfig.getSnapshotIntervalMs() + 200);
   }
 
   build() {
@@ -115,6 +136,11 @@ struct SessionReplayPocPage {
           );
           this.showBridgeCapture('RUM Error bridge');
         })
+      Button('Toggle Layout for Automatic Observation')
+        .width('90%')
+        .height(48)
+        .enabled(this.replayEnabled)
+        .onClick(() => this.triggerAutomaticObservation())
       Button('Capture Incremental Mutation')
         .width('90%')
         .height(48)
