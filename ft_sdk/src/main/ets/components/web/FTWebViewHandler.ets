@@ -10,6 +10,7 @@ import { CollectType } from '../rum/enum/RUMEnums';
 import { JsReceiver } from './WebAppInterface';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
+import { FTSessionReplayBridgeRegistry } from '../sessionreplay/FTSessionReplayBridge';
 
 const TAG = "FTWebViewHandler";
 
@@ -94,6 +95,16 @@ class WebViewMessageReceiver implements JsReceiver {
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] getAllowedWebViewHosts() called - returning null to allow all hosts`);
     return this.handler.getAllowedWebViewHosts();
   }
+
+  /** Android-compatible Browser SDK privacy negotiation for Session Replay. */
+  getPrivacyLevel(): string | null {
+    return this.handler.getSessionReplayPrivacyLevel();
+  }
+
+  /** Android-compatible Browser SDK capability negotiation for Session Replay. */
+  getCapabilities(): string | null {
+    return this.handler.getSessionReplayCapabilities();
+  }
 }
 
 /**
@@ -110,6 +121,9 @@ export const WEB_JS_INNER_TAG = "_tag";
  * RUM data
  */
 export const WEB_JS_TYPE_RUM = "rum";
+
+/** Browser SDK Session Replay record. */
+export const WEB_JS_TYPE_SESSION_REPLAY = "session_replay";
 
 /**
  * Indicator type transmission
@@ -137,11 +151,19 @@ export const WEB_JS_NAME = "name";
 export const WEB_JS_DATA = "data";
 
 export class FTWebViewHandler implements JsReceiver {
+  private static nextSessionReplaySlot: number = 0;
+  private static latestSessionReplaySlot: string = '';
+  private static readonly SESSION_REPLAY_SNAPSHOT_INTERVAL_MS: number = 10_000;
   private webController: webview.WebviewController | null = null;
   private nativeViewName: string = "";
   private messageReceiver: WebViewMessageReceiver | null = null;
   private readonly PROXY_OBJECT_NAME = "FTWebViewJavascriptBridge";
+  private readonly sessionReplaySlotId: string = `harmony-web-${++FTWebViewHandler.nextSessionReplaySlot}`;
   private allowWebViewHost: string[] | null = null;
+  private webViewId: string = '';
+  private webReplayLinkContext: Record<string, string | number | boolean> = {};
+  private sessionReplaySnapshotTimer: number = -1;
+  private sessionReplaySlotActive: boolean = false;
   // Static Set to track processed webview action IDs to prevent duplicate processing across all instances
   // This ensures that even if the same action is received multiple times, it will only be processed once
   // Note: WebView view data deduplication is not needed - WebView may send duplicate views intentionally
@@ -160,6 +182,23 @@ export class FTWebViewHandler implements JsReceiver {
       return null;
     }
     return JSON.stringify(this.allowWebViewHost);
+  }
+
+  /** Returns the stable recorder slot used to associate Browser Replay records. */
+  public getSessionReplaySlotId(): string {
+    return this.sessionReplaySlotId;
+  }
+
+  /** Browser SDK compatibility: null means the optional Replay HAR is absent. */
+  public getSessionReplayPrivacyLevel(): string | null {
+    const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
+    return options === null ? null : options.privacyLevel;
+  }
+
+  /** Browser SDK compatibility: records capability is exposed only with Replay. */
+  public getSessionReplayCapabilities(): string | null {
+    const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
+    return options === null ? null : JSON.stringify(options.capabilities);
   }
   
   /**
@@ -191,7 +230,7 @@ export class FTWebViewHandler implements JsReceiver {
     const proxy: JavaScriptProxy = {
       object: receiver,
       name: this.PROXY_OBJECT_NAME,
-      methodList: ["sendEvent", "sendEventWithCallback", "getAllowedWebViewHosts"],
+      methodList: ["sendEvent", "sendEventWithCallback", "getAllowedWebViewHosts", "getPrivacyLevel", "getCapabilities"],
       controller: webController
     };
     return proxy;
@@ -224,14 +263,23 @@ export class FTWebViewHandler implements JsReceiver {
     }
     
     this.webController = webController;
+    this.sessionReplaySlotActive = true;
+    FTWebViewHandler.latestSessionReplaySlot = this.sessionReplaySlotId;
+    FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(this.sessionReplaySlotId, true, Date.now());
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController assigned successfully`);
     
-    // Keep the remote/local RUM allow-list available to the browser SDK bridge.
-    this.allowWebViewHost = config.getAllowWebViewHost();
+    // WebView pages often pass a lightweight tracing config solely to install
+    // the proxy. Prefer the installed RUM config's allow-list so Browser SDK
+    // host verification remains aligned with the application configuration.
+    const installedRumConfig = FTRUMConfigManager.getInstance().getConfig();
+    this.allowWebViewHost = installedRumConfig === null
+      ? config.getAllowWebViewHost()
+      : installedRumConfig.getAllowWebViewHost();
     
     // Register JavaScript proxy early (before page loads) so browser-sdk can detect it
     // This is similar to Android's addJavascriptInterface which is available immediately
     this.registerJavaScriptProxy();
+    this.refreshSessionReplaySnapshotTimer();
     
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() completed ==========`);
   }
@@ -253,6 +301,12 @@ export class FTWebViewHandler implements JsReceiver {
       }
     }
     
+    this.stopSessionReplaySnapshotTimer();
+    this.sessionReplaySlotActive = false;
+    FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(this.sessionReplaySlotId, false, Date.now());
+    if (FTWebViewHandler.latestSessionReplaySlot === this.sessionReplaySlotId) {
+      FTWebViewHandler.latestSessionReplaySlot = '';
+    }
     this.webController = null;
     this.messageReceiver = null;
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController cleared`);
@@ -279,7 +333,7 @@ export class FTWebViewHandler implements JsReceiver {
       this.webController.registerJavaScriptProxy(
         this.messageReceiver,
         this.PROXY_OBJECT_NAME,
-        ["sendEvent", "sendEventWithCallback", "getAllowedWebViewHosts"],
+        ["sendEvent", "sendEventWithCallback", "getAllowedWebViewHosts", "getPrivacyLevel", "getCapabilities"],
         []
       );
       FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ✅ JavaScript proxy registered successfully`);
@@ -517,6 +571,14 @@ export class FTWebViewHandler implements JsReceiver {
             tagsMap.set('session_id', sessionId);
           }
 
+          // The Browser SDK View ID is the Replay envelope's view_id. It is
+          // captured from the Browser RUM point before the matching Browser
+          // Replay records arrive, as Android does in FTWebViewHandler.
+          const browserViewId = tagsMap.get(Constants.KEY_RUM_VIEW_ID);
+          if (browserViewId !== undefined && browserViewId.length > 0) {
+            this.webViewId = browserViewId;
+          }
+
           // Add webview flag (aligned with Android: KEY_RUM_VIEW_IS_WEB_VIEW = "is_web_view")
           tagsMap.set(Constants.KEY_RUM_VIEW_IS_WEB_VIEW, 'true');
 
@@ -548,6 +610,8 @@ export class FTWebViewHandler implements JsReceiver {
               tagsMap.set(key, String(value));
             }
           }
+
+          this.updateSessionReplayWebLinkContext(tagsMap, fieldsMap);
           
           // Use measurement and timeValue extracted above
           // If timeValue is provided (from Web SDK), use it; otherwise use current nanosecond timestamp
@@ -582,6 +646,8 @@ export class FTWebViewHandler implements JsReceiver {
           );
         }
 
+      } else if (name === WEB_JS_TYPE_SESSION_REPLAY) {
+        this.handleSessionReplayWebEvent(dataJson);
       } else if (name === WEB_JS_TYPE_TRACK) {
         // Not used in current implementation
         FTInnerLogger.d(TAG, "TRACK data received from WebView");
@@ -621,6 +687,104 @@ export class FTWebViewHandler implements JsReceiver {
       FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ Error handling WebView event: ${error}`);
       FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] Error details: ${JSON.stringify(error)}`);
       FTInnerLogger.e(TAG, `Error handling WebView event: ${error}`);
+    }
+  }
+
+  /**
+   * Forwards one Browser SDK rrweb record into the optional Replay HAR. Core
+   * supplies RUM identity and a handler-stable slot; it never persists or
+   * parses the replay payload itself.
+   */
+  private handleSessionReplayWebEvent(dataJson: Record<string, string | object> | null): void {
+    if (dataJson === null || !FTRUMConfigManager.getInstance().isRumEnable()) {
+      return;
+    }
+    if (!this.sessionReplaySlotActive ||
+      FTWebViewHandler.latestSessionReplaySlot !== this.sessionReplaySlotId) {
+      return;
+    }
+    const rumConfig = FTRUMConfigManager.getInstance().getConfig();
+    const applicationId = rumConfig === null ? '' : rumConfig.getRumAppId();
+    const sessionId = FTRUMInnerManager.getInstance().getSessionId();
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    const viewId = this.webViewId.length > 0
+      ? this.webViewId
+      : (activeView === null ? '' : activeView.getId());
+    if (applicationId.length === 0 || sessionId.length === 0 || viewId.length === 0) {
+      FTInnerLogger.w(TAG, 'Ignore WebView Session Replay data without active RUM linkage.');
+      return;
+    }
+    const accepted = FTSessionReplayBridgeRegistry.notifyWebReplayData({
+      applicationId,
+      sessionId,
+      viewId,
+      slotId: this.sessionReplaySlotId,
+      linkContext: this.webReplayLinkContext,
+      payload: JSON.stringify(dataJson),
+      timestamp: Date.now()
+    });
+    if (!accepted) {
+      FTInnerLogger.d(TAG, 'WebView Session Replay data was ignored by the optional Replay bridge.');
+    }
+    this.refreshSessionReplaySnapshotTimer();
+  }
+
+  /** Extracts only explicitly configured RUM-link keys from Browser RUM data. */
+  private updateSessionReplayWebLinkContext(tags: Map<string, string>, fields: Map<string, string>): void {
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      this.webReplayLinkContext = {};
+      return;
+    }
+    const linkContext: Record<string, string | number | boolean> = {};
+    for (let index = 0; index < linkKeys.length; index++) {
+      const key = linkKeys[index];
+      const tagValue = tags.get(key);
+      if (tagValue !== undefined) {
+        linkContext[key] = tagValue;
+        continue;
+      }
+      const fieldValue = fields.get(key);
+      if (fieldValue !== undefined) {
+        linkContext[key] = fieldValue;
+      }
+    }
+    this.webReplayLinkContext = linkContext;
+  }
+
+  /** Keeps Android's ten-second Browser full-snapshot cadence for error samples. */
+  private refreshSessionReplaySnapshotTimer(): void {
+    this.stopSessionReplaySnapshotTimer();
+    if (this.webController === null || !this.sessionReplaySlotActive ||
+      FTWebViewHandler.latestSessionReplaySlot !== this.sessionReplaySlotId) {
+      return;
+    }
+    const sessionId = FTRUMInnerManager.getInstance().getSessionId();
+    if (!FTSessionReplayBridgeRegistry.isWebReplayErrorSampled(sessionId)) {
+      return;
+    }
+    this.sessionReplaySnapshotTimer = setInterval((): void => {
+      if (this.webController === null || !this.sessionReplaySlotActive ||
+        FTWebViewHandler.latestSessionReplaySlot !== this.sessionReplaySlotId ||
+        !FTSessionReplayBridgeRegistry.isWebReplayErrorSampled(FTRUMInnerManager.getInstance().getSessionId())) {
+        this.stopSessionReplaySnapshotTimer();
+        return;
+      }
+      this.webController.runJavaScript(
+        'if (typeof DATAFLUX_RUM !== "undefined" && typeof DATAFLUX_RUM.takeSubsequentFullSnapshot === "function") { DATAFLUX_RUM.takeSubsequentFullSnapshot(); }',
+        (error?: BusinessError<void>): void => {
+          if (error !== undefined) {
+            FTInnerLogger.w(TAG, `WebView Session Replay full-snapshot request failed: ${error.message}`);
+          }
+        }
+      );
+    }, FTWebViewHandler.SESSION_REPLAY_SNAPSHOT_INTERVAL_MS);
+  }
+
+  private stopSessionReplaySnapshotTimer(): void {
+    if (this.sessionReplaySnapshotTimer !== -1) {
+      clearInterval(this.sessionReplaySnapshotTimer);
+      this.sessionReplaySnapshotTimer = -1;
     }
   }
 

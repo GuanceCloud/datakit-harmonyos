@@ -25,6 +25,30 @@ export interface FTSessionReplaySessionContext {
   timestamp: number;
 }
 
+/**
+ * A Browser SDK Replay record forwarded by the native WebView bridge.
+ *
+ * `payload` is deliberately kept as the Browser SDK's JSON record instead of
+ * being converted into an ArkUI snapshot. The optional Replay HAR owns its
+ * validation and persistence, while core supplies the trusted RUM linkage and
+ * a stable slot ID for the WebView instance.
+ */
+export interface FTSessionReplayWebDataContext {
+  applicationId: string;
+  sessionId: string;
+  viewId: string;
+  slotId: string;
+  linkContext: Record<string, string | number | boolean>;
+  payload: string;
+  timestamp: number;
+}
+
+/** Browser SDK capabilities provided only while the optional Replay HAR runs. */
+export interface FTSessionReplayWebViewOptions {
+  privacyLevel: string;
+  capabilities: Array<string>;
+}
+
 /** Replay availability state that core RUM persists with a View. */
 export interface FTSessionReplayViewMetadata {
   hasReplay: boolean;
@@ -44,6 +68,14 @@ export interface FTSessionReplayBridge {
   onViewStopped(context: FTSessionReplayRUMContext): void;
   onError(context: FTSessionReplayErrorContext): boolean;
   onSessionRenewed(context: FTSessionReplaySessionContext): void;
+  /** Returns Browser SDK privacy/capability negotiation values. */
+  getWebViewOptions?(): FTSessionReplayWebViewOptions | null;
+  /** Receives one Browser SDK record, already associated with RUM identity. */
+  onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
+  /** Marks a stable WebView slot active or inactive for delayed draining. */
+  onWebReplaySlotActive?(slotId: string, active: boolean, timestamp: number): void;
+  /** Enables the Browser SDK's periodic full snapshots for error sampling. */
+  isWebReplayErrorSampled?(sessionId: string): boolean;
 }
 
 /** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
@@ -133,6 +165,57 @@ export class FTSessionReplayBridgeRegistry {
       bridge.onSessionRenewed(context);
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay session callback failed: ${String(error)}`);
+    }
+  }
+
+  public static getWebViewOptions(): FTSessionReplayWebViewOptions | null {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.getWebViewOptions === undefined) {
+      return null;
+    }
+    try {
+      return bridge.getWebViewOptions();
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView options callback failed: ${String(error)}`);
+      return null;
+    }
+  }
+
+  public static notifyWebReplayData(context: FTSessionReplayWebDataContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayData === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayData(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView data callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyWebReplaySlotActive(slotId: string, active: boolean, timestamp: number): void {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplaySlotActive === undefined) {
+      return;
+    }
+    try {
+      bridge.onWebReplaySlotActive(slotId, active, timestamp);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView slot callback failed: ${String(error)}`);
+    }
+  }
+
+  public static isWebReplayErrorSampled(sessionId: string): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.isWebReplayErrorSampled === undefined) {
+      return false;
+    }
+    try {
+      return bridge.isWebReplayErrorSampled(sessionId);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView sampling callback failed: ${String(error)}`);
+      return false;
     }
   }
 }

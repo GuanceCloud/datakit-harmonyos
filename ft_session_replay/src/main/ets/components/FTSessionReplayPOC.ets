@@ -5,16 +5,19 @@ import {
   FTSessionReplayErrorContext,
   FTSessionReplayRUMContext,
   FTSessionReplaySessionContext,
+  FTSessionReplayWebDataContext,
+  FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from '@guancecloud/ft_sdk';
 import { ArkUIReplayCollector } from './ArkUIReplayCollector';
-import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
+import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
   createReplayEnvelope,
   FullSnapshotData,
+  ReplayRecordType,
   serializeReplayEnvelope,
   SessionReplayContext,
   SessionReplayEnvelope,
@@ -36,12 +39,19 @@ interface SessionReplayRootBinding {
   vpToPxScale: number;
 }
 
+interface BrowserReplayRecord {
+  timestamp?: number;
+  type?: number;
+  data?: object;
+}
+
 /**
  * Entry point used to validate ArkUI collection and Android replay serialization
  * before enabling persistence or network uploads.
  */
 export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private static readonly MAX_RECORDS_PER_VIEW: number = 2000;
+  private static readonly WEB_REPLAY_INACTIVE_GRACE_MS: number = 2_000;
 
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
@@ -56,6 +66,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
+  // Zero means active. A positive timestamp retains the Android-compatible
+  // two-second grace period after a WebView slot becomes inactive.
+  private readonly webSlotInactiveAt: Map<string, number> = new Map();
   private observationTimer: number = -1;
 
   constructor(
@@ -91,6 +104,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.viewMetadata.clear();
     this.recordedRecordsByView.clear();
     this.promotedErrorSessions.clear();
+    this.webSlotInactiveAt.clear();
     this.stopObservation();
     this.processor.reset();
     this.sampler.reset();
@@ -188,6 +202,55 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return this.sampler.decide(sessionId);
   }
 
+  /** Supplies Android-compatible Browser SDK initialization values. */
+  public getWebViewOptions(): FTSessionReplayWebViewOptions | null {
+    if (!this.isStarted) {
+      return null;
+    }
+    return {
+      privacyLevel: this.getWebReplayPrivacyLevel(),
+      capabilities: ['records']
+    };
+  }
+
+  /** Accepts native-associated Browser SDK records without ArkUI conversion. */
+  public onWebReplayData(context: FTSessionReplayWebDataContext): boolean {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE ||
+      !this.isWebReplaySlotWithinGracePeriod(context.slotId, context.timestamp)) {
+      return false;
+    }
+    const record = this.parseWebReplayRecord(context.payload, context.slotId);
+    if (record === null) {
+      return false;
+    }
+    const replayContext: SessionReplayContext = {
+      applicationId: context.applicationId,
+      sessionId: context.sessionId,
+      viewId: context.viewId
+    };
+    if (Object.keys(context.linkContext).length > 0) {
+      replayContext.globalContext = context.linkContext;
+    }
+    const capture = this.createCapture(replayContext, [record], null);
+    if (!this.appendRecordedRecords(replayContext, capture.records)) {
+      return false;
+    }
+    this.recordReplayMetadata(replayContext, capture.records.length);
+    this.lastCapture = capture;
+    return true;
+  }
+
+  public onWebReplaySlotActive(slotId: string, active: boolean, timestamp: number): void {
+    if (slotId.length === 0) {
+      return;
+    }
+    this.webSlotInactiveAt.set(slotId, active ? 0 : timestamp);
+  }
+
+  public isWebReplayErrorSampled(sessionId: string): boolean {
+    return this.isStarted && this.sampler.decide(sessionId) === SessionReplaySamplingMode.ERROR;
+  }
+
   /** Returns Android-compatible Replay counters for the current RUM View. */
   public getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
     const metadata = this.viewMetadata.get(this.getViewMetadataKey(context));
@@ -254,6 +317,50 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.activeContext = null;
     this.stopObservation();
     this.promotedErrorSessions.clear();
+    this.webSlotInactiveAt.clear();
+  }
+
+  private getWebReplayPrivacyLevel(): string {
+    if (this.config.getTouchPrivacy() === TouchPrivacy.SHOW) {
+      if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS) {
+        return 'allow';
+      }
+      if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_ALL_INPUTS) {
+        return 'mask-user-input';
+      }
+    }
+    return 'mask';
+  }
+
+  private isWebReplaySlotWithinGracePeriod(slotId: string, timestamp: number): boolean {
+    const inactiveAt = this.webSlotInactiveAt.get(slotId);
+    if (inactiveAt === undefined || inactiveAt === 0) {
+      return true;
+    }
+    return timestamp - inactiveAt < FTSessionReplayPOC.WEB_REPLAY_INACTIVE_GRACE_MS;
+  }
+
+  private parseWebReplayRecord(payload: string, slotId: string): SessionReplayRecord | null {
+    try {
+      const browserRecord = JSON.parse(payload) as BrowserReplayRecord;
+      const timestamp = browserRecord.timestamp;
+      const type = browserRecord.type;
+      const data = browserRecord.data;
+      if (timestamp === undefined || type === undefined || data === undefined || data === null ||
+        !Number.isFinite(timestamp) || !Number.isInteger(timestamp) ||
+        !Number.isFinite(type) || !Number.isInteger(type) || type < 0 || type > 20 ||
+        typeof data !== 'object' || Array.isArray(data)) {
+        return null;
+      }
+      return {
+        timestamp,
+        type: type as ReplayRecordType,
+        data,
+        slotId
+      };
+    } catch (_error) {
+      return null;
+    }
   }
 
   private getWireframeCount(record: SessionReplayRecord): number {

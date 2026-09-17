@@ -71,6 +71,27 @@ waits 60 seconds before checking again; a successful `200` resets scheduling to
 the configured base interval. Other client errors retain data but use the normal
 interval, so they remain diagnosable without a tight retry loop.
 
+## ArkWeb Browser Replay integration
+
+`FTWebViewHandler` now exposes the same JavaScript bridge contract as Android
+when this optional HAR is enabled: `getPrivacyLevel()` returns `mask` by
+default, `getCapabilities()` returns `["records"]`, and Browser SDK events
+named `session_replay` enter the regular Replay segment pipeline. Keep
+`FTRUMConfig.setEnableTraceWebView(true)` enabled and configure its
+`allowWebViewHost` list before loading the Browser SDK page; the Browser SDK
+uses that allow-list returned by `getAllowedWebViewHosts()` before sending any
+data to native.
+
+Each `FTWebViewHandler` assigns a stable `harmony-web-*` slot ID. Browser
+records retain their original rrweb `timestamp`, `type`, and `data`, receive
+only that `slotId`, and are enveloped with the configured RUM App ID, current
+RUM session, Browser RUM `view_id`, and only explicitly configured
+`enableLinkRUMKeys(...)` values. A stale WebView slot remains acceptable for
+two seconds after it is cleared, then its records are ignored. For an
+error-sampled session, the native bridge requests
+`DATAFLUX_RUM.takeSubsequentFullSnapshot()` every ten seconds while its latest
+WebView slot remains active.
+
 The generated JSON is compatible with Android's Replay record envelope:
 
 ```json
@@ -279,3 +300,42 @@ removed from this directory.
 4. Return `400` from the proxy. Confirm the segment remains for diagnosis but
    attempts use the normal configured interval instead of the exponential
    backoff cadence.
+
+## P12 ArkWeb Browser Replay verification
+
+1. In the demo `EntryAbility` (or a test application startup path), initialize
+   Replay with `FTSessionReplay.getInstance().init(new
+   FTSessionReplayConfig().setSampleRate(1), this.context.filesDir)`. Configure
+   a non-empty RUM App ID, enable WebView tracing with
+   `setEnableTraceWebView(true)`, and configure `setAllowWebViewHost([...])`
+   to include the test page host. Then open the demo's **WebView Test** page
+   loading a Browser SDK page with Session Replay enabled. Initializing at app
+   startup is important: the POC page's Enable/Disable control is intentionally
+   scoped to its own ArkUI-root demonstration.
+2. In WebView DevTools or the page's diagnostic console, verify
+   `window.FTWebViewJavascriptBridge.getAllowedWebViewHosts()` returns the
+   configured JSON host list, `getPrivacyLevel()` returns `mask` with the
+   default Replay configuration, and `getCapabilities()` returns
+   `["records"]`. Change the host to one outside the allow-list and confirm
+   the Browser SDK sends neither RUM nor Replay data through the native bridge.
+3. Generate a Browser full snapshot and an interaction. Inspect the controlled
+   Replay intake request after calling `flush()` (or waiting for automatic
+   upload). Inflate its `segment` part and confirm the Browser records keep
+   their rrweb `type`/`data` structure, carry a non-empty `slotId` beginning
+   `harmony-web-`, and are enveloped with the Browser RUM `view_id`, current
+   session ID, and RUM App ID. They must not be converted into ArkUI
+   `wireframes`.
+4. Configure `enableLinkRUMKeys(['order_id'])`, attach that value to Browser
+   RUM data, and generate another Browser Replay record. Confirm only
+   `order_id` is included in the Replay envelope's `globalContext`; an
+   unconfigured Browser tag/field must not appear.
+5. Navigate away from the WebView, then cause the page to emit a delayed
+   `session_replay` message within two seconds and another after more than two
+   seconds. The former may be persisted; the latter must be ignored. Reopen or
+   rebind the WebView and confirm a new active latest slot resumes recording.
+6. Configure `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`. While
+   the WebView is active, observe its page hook or DevTools for
+   `DATAFLUX_RUM.takeSubsequentFullSnapshot()` roughly every ten seconds.
+   Navigate away and confirm those calls stop. Before a RUM Error, Browser
+   Replay remains in `error_segments`; after an Error it promotes and uploads
+   with the same rolling-window behavior documented in P10.
