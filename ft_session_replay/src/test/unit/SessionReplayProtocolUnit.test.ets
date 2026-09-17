@@ -10,6 +10,7 @@ import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy 
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/components/SessionReplaySampler';
 import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
+import { FTSessionReplayPOC } from '../../main/ets/components/FTSessionReplayPOC';
 import {
   createAndroidReplayUploadUrl,
   createSessionReplayUploadFields,
@@ -154,6 +155,55 @@ export default function sessionReplayProtocolUnitTest() {
 
       replay.disable();
       expect(replay.isEnabled()).assertFalse();
+    });
+
+    it('forwards Browser records only while the WebView slot is active or in grace period', 0, () => {
+      const recorder = new FTSessionReplayPOC(new FTSessionReplayConfig().setSampleRate(1));
+      recorder.start();
+      expect(recorder.getWebViewOptions()?.privacyLevel).assertEqual('mask');
+      const now = Date.now();
+      const context = {
+        applicationId: 'browser-app',
+        sessionId: 'browser-session',
+        viewId: 'browser-view',
+        slotId: 'harmony-web-test',
+        linkContext: { order_id: 'A-1' },
+        payload: JSON.stringify({ timestamp: now, type: 10, data: { node: 1 } }),
+        timestamp: now
+      };
+      recorder.onWebReplaySlotActive(context.slotId, true, now);
+      expect(recorder.onWebReplayData(context)).assertTrue();
+      const records = recorder.getRecordedRecords({
+        applicationId: context.applicationId,
+        sessionId: context.sessionId,
+        viewId: context.viewId
+      });
+      expect(records.length).assertEqual(1);
+      expect(records[0].slotId).assertEqual('harmony-web-test');
+      expect(records[0].timestamp).assertEqual(now);
+
+      recorder.onWebReplaySlotActive(context.slotId, false, now);
+      const withinGrace = {
+        applicationId: context.applicationId,
+        sessionId: context.sessionId,
+        viewId: context.viewId,
+        slotId: context.slotId,
+        linkContext: context.linkContext,
+        payload: JSON.stringify({ timestamp: now + 1000, type: 11, data: { source: 0 } }),
+        timestamp: now + 1000
+      };
+      expect(recorder.onWebReplayData(withinGrace)).assertTrue();
+      const afterGrace = {
+        applicationId: context.applicationId,
+        sessionId: context.sessionId,
+        viewId: context.viewId,
+        slotId: context.slotId,
+        linkContext: context.linkContext,
+        payload: JSON.stringify({ timestamp: now + 2000, type: 11, data: { source: 0 } }),
+        timestamp: now + 2000
+      };
+      expect(recorder.onWebReplayData(afterGrace)).assertFalse();
+      recorder.stop();
     });
 
     it('creates Android-compatible multipart Replay fields and intake URLs', 0, () => {

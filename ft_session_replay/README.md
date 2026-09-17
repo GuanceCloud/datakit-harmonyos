@@ -492,3 +492,11 @@ removed from this directory.
    initialization still consumes the bounded pending crash timeline; it must
    not capture the newly opened page as the old View. Repeat after more than
    one minute and confirm expired deferred data is not promoted.
+
+## Automated protocol coverage
+
+`SessionReplayProtocolUnit.test.ets` covers record grammar and snapshot
+baselines, sampling boundaries, retry classification, global enable/disable,
+and Browser record forwarding including the active-slot two-second grace
+window. Run the HarmonyOS unit-test product on a device or emulator in addition
+to the manual scenarios above.
