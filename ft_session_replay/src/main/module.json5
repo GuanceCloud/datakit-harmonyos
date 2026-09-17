@@ -1,0 +1,7 @@
+{
+  "module": {
+    "name": "ft_session_replay",
+    "type": "har",
+    "deviceTypes": ["default", "tablet", "2in1"]
+  }
+}
