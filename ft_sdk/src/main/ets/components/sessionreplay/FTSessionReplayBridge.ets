@@ -107,9 +107,17 @@ export interface FTSessionReplayBridge {
 /** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
 export class FTSessionReplayBridgeRegistry {
   private static bridge: FTSessionReplayBridge | null = null;
+  private static readonly MAX_PENDING_ERROR_TIMELINES: number = 8;
+  /** Holds crash recovery notifications until an optional HAR registers. */
+  private static pendingErrorTimelines: Array<FTSessionReplayErrorContext> = [];
 
   public static register(bridge: FTSessionReplayBridge): void {
     FTSessionReplayBridgeRegistry.bridge = bridge;
+    const pending = FTSessionReplayBridgeRegistry.pendingErrorTimelines.slice();
+    FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
+    for (let index = 0; index < pending.length; index++) {
+      FTSessionReplayBridgeRegistry.notifyErrorTimeline(pending[index]);
+    }
   }
 
   public static unregister(bridge: FTSessionReplayBridge): void {
@@ -241,6 +249,7 @@ export class FTSessionReplayBridgeRegistry {
   public static notifyErrorTimeline(context: FTSessionReplayErrorContext): boolean {
     const bridge = FTSessionReplayBridgeRegistry.bridge;
     if (bridge === null || bridge.onErrorTimeline === undefined) {
+      FTSessionReplayBridgeRegistry.rememberPendingErrorTimeline(context);
       return false;
     }
     try {
@@ -248,6 +257,24 @@ export class FTSessionReplayBridgeRegistry {
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay error-timeline callback failed: ${String(error)}`);
       return false;
+    }
+  }
+
+  private static rememberPendingErrorTimeline(context: FTSessionReplayErrorContext): void {
+    if (context.applicationId.length === 0 || context.sessionId.length === 0 || context.viewId.length === 0) {
+      return;
+    }
+    const pending = FTSessionReplayBridgeRegistry.pendingErrorTimelines;
+    for (let index = 0; index < pending.length; index++) {
+      const candidate = pending[index];
+      if (candidate.applicationId === context.applicationId && candidate.sessionId === context.sessionId &&
+        candidate.viewId === context.viewId && candidate.timestamp === context.timestamp) {
+        return;
+      }
+    }
+    pending.push(context);
+    if (pending.length > FTSessionReplayBridgeRegistry.MAX_PENDING_ERROR_TIMELINES) {
+      pending.splice(0, pending.length - FTSessionReplayBridgeRegistry.MAX_PENDING_ERROR_TIMELINES);
     }
   }
 

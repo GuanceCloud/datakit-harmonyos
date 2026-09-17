@@ -307,7 +307,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
       return true;
     }
-    return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
+    return this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
   }
 
   /** Promotes a completed Resource's retained error window without a stale UI capture. */
@@ -316,7 +316,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return false;
     }
     return this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR ||
-      this.promoteErrorSampledSession(context.sessionId, context.timestamp);
+      this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
   }
 
   /**
@@ -388,7 +388,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
       return;
     }
-    const record = this.processor.createViewEndRecord(context.timestamp);
+    const record = this.processor.createViewEndRecord(this.toEpochMilliseconds(context.timestamp));
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
     if (this.appendRecordedRecords(replayContext, capture.records)) {
@@ -416,7 +416,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
       return true;
     }
-    return this.promoteErrorSampledSession(context.sessionId, context.timestamp);
+    return this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
   }
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
@@ -437,6 +437,20 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       }
     }
     return 'mask';
+  }
+
+  /** Core RUM timestamps are nanoseconds; Replay records use epoch milliseconds. */
+  private toEpochMilliseconds(timestamp: number): number {
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      return Date.now();
+    }
+    if (timestamp >= 100000000000000000) {
+      return Math.floor(timestamp / 1000000);
+    }
+    if (timestamp >= 100000000000000) {
+      return Math.floor(timestamp / 1000);
+    }
+    return Math.floor(timestamp);
   }
 
   private isWebReplaySlotWithinGracePeriod(slotId: string, timestamp: number): boolean {

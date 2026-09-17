@@ -2434,6 +2434,77 @@ export class FTRUMInnerManager {
   }
 
   /**
+   * Native crash recovery may run before a new RUM View exists. Its property
+   * contains the persisted prior-session linkage; send that exact timeline to
+   * Replay before normal RUM sampling examines the newly-created session.
+   */
+  private notifySessionReplayPersistedCrashError(
+    property: Record<string, object> | null,
+    timestamp: number,
+    errorType: string,
+    state: AppState
+  ): void {
+    if (property === null || this.readSessionReplayProperty(property, Constants.KEY_NATIVE_CRASH) !== 'true') {
+      return;
+    }
+    const sessionId = this.readSessionReplayProperty(property, Constants.KEY_RUM_SESSION_ID);
+    const viewId = this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_ID);
+    if (sessionId.length === 0 || viewId.length === 0 || viewId === 'unknown' || viewId === 'error') {
+      return;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const applicationId = config === null ? '' : config.getRumAppId();
+    if (applicationId.length === 0) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.notifyErrorTimeline({
+      applicationId,
+      sessionId,
+      viewId,
+      viewName: this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_NAME),
+      viewReferrer: this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_REFERRER),
+      linkContext: this.createSessionReplayResourceLinkContextForStoredView(),
+      timestamp,
+      errorType,
+      appState: state.toString()
+    });
+  }
+
+  private readSessionReplayProperty(property: Record<string, object>, key: string): string {
+    const raw = property[key];
+    if (raw === undefined || raw === null) {
+      return '';
+    }
+    const wrapper = raw as PropertyWrapper;
+    if (wrapper.value !== undefined && wrapper.value !== null) {
+      return String(wrapper.value);
+    }
+    return String(raw);
+  }
+
+  /** Restored crashes have no live View; retain only configured app-level keys. */
+  private createSessionReplayResourceLinkContextForStoredView(): Record<string, string | number | boolean> {
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicKeys.length; index++) {
+      const key = dynamicKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    return result;
+  }
+
+  /**
    * A completed Resource no longer owns an ActiveViewBean. Preserve selected
    * application-level link keys, while live matching Views retain their full
    * View tags and properties through createSessionReplayLinkContext().
@@ -3493,6 +3564,7 @@ export class FTRUMInnerManager {
     const actualProperty = property !== undefined ? property : null;
     const actualCallBack = callBack !== undefined ? callBack : null;
     try {
+      this.notifySessionReplayPersistedCrashError(actualProperty, actualDateline, errorType, state);
       // Refresh session
       this.checkSessionRefresh(true);
       const collectType = this.checkSessionWillCollect(this.sessionId);

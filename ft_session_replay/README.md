@@ -478,3 +478,17 @@ removed from this directory.
    first Resource fail. Confirm it promotes the original session window but
    does not create a snapshot of the newer page or attach the newer View ID to
    the original Resource error.
+
+## P20 crash recovery promotion verification
+
+1. Use `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`, create a
+   deferred Replay segment for a RUM View, then trigger a native crash through
+   the existing demo crash test without clearing application data.
+2. Restart the application. Initialize the optional Replay HAR during startup
+   and wait for the native-crash reporter. Confirm the saved prior session and
+   View IDs promote only their surviving one-minute deferred records/resources
+   and that they upload on the next flush.
+3. Delay Replay initialization until after the crash reporter begins. Confirm
+   initialization still consumes the bounded pending crash timeline; it must
+   not capture the newly opened page as the old View. Repeat after more than
+   one minute and confirm expired deferred data is not promoted.
