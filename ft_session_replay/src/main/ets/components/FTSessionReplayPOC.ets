@@ -506,7 +506,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const records = this.processor.createViewStartRecords(fullCapture.record);
     const capture = this.createCapture(replayContext, records, fullCapture.record);
     if (!this.appendRecordedRecords(replayContext, records)) {
-      this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
+      if (this.lastCaptureFailure.length === 0) {
+        this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
+      }
       return null;
     }
     this.lastCapture = capture;
@@ -522,7 +524,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const capture = this.captureWithRegisteredRoot(replayContext);
     if (capture !== null) {
       if (!this.appendRecordedRecords(replayContext, capture.records)) {
-        this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
+        if (this.lastCaptureFailure.length === 0) {
+          this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
+        }
         return null;
       }
       this.processor.setFullSnapshotBaseline(capture.record);
@@ -668,6 +672,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return true;
     }
     const appended = targetStore.append(context, records);
+    if (!appended) {
+      const writeError = targetStore.getLastWriteError();
+      this.lastCaptureFailure = writeError === null
+        ? 'The Full Snapshot was collected but could not be saved to Session Replay storage.'
+        : writeError;
+    }
     if (appended && targetStore === this.errorSampleStore) {
       this.errorSampleStore?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
     }

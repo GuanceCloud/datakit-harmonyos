@@ -28,6 +28,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private readonly maxBytes: number;
   private readonly maxRecordsPerSegment: number;
   private sequence: number = 0;
+  private lastWriteError: string = '';
 
   constructor(
     filesDir: string,
@@ -52,20 +53,28 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     if (records.length === 0) {
       return true;
     }
+    this.lastWriteError = '';
     try {
       for (let start = 0; start < records.length; start += this.maxRecordsPerSegment) {
         const segmentRecords = records.slice(start, start + this.maxRecordsPerSegment);
         const segment = this.createSegment(context, segmentRecords);
         const body = JSON.stringify(segment);
         if (!this.reserveBytes(this.byteLength(body))) {
+          this.lastWriteError = `Replay segment exceeds the configured ${this.maxBytes}-byte local storage quota.`;
           return false;
         }
         this.atomicWrite(`${this.root}/${segment.id}.json`, body);
       }
       return true;
-    } catch (_error) {
+    } catch (error) {
+      this.lastWriteError = `Unable to write Replay segment in ${this.root}: ${String(error)}`;
       return false;
     }
+  }
+
+  /** Exposes the latest append failure without leaking application content. */
+  public getLastWriteError(): string | null {
+    return this.lastWriteError.length === 0 ? null : this.lastWriteError;
   }
 
   /** Reopens valid segments after process restart and removes interrupted writes. */
@@ -214,17 +223,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private atomicWrite(path: string, body: string): void {
     const temp = `${path}.tmp`;
-    const bytes = util.TextEncoder.create('utf-8').encodeInto(body);
     const file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      let written = 0;
-      while (written < bytes.length) {
-        const remaining = bytes.slice(written).buffer as ArrayBuffer;
-        const count = fs.writeSync(file.fd, remaining);
-        if (count <= 0) {
-          throw new Error('Session Replay storage short write');
-        }
-        written += count;
+      // CoreFileKit's string overload is supported on the API levels used by
+      // the demo. It avoids depending on an ArrayBuffer view's backing store
+      // while preserving exact UTF-8 byte accounting for the durable payload.
+      const written = fs.writeSync(file.fd, body);
+      if (written !== this.byteLength(body)) {
+        throw new Error(`Session Replay storage short write: ${written}/${this.byteLength(body)} bytes`);
       }
       fs.fsyncSync(file.fd);
     } finally {
