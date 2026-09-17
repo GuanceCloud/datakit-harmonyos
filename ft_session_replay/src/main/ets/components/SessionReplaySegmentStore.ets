@@ -24,6 +24,7 @@ export interface SessionReplayRecordStore {
 export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private static readonly VERSION: number = 1;
 
+  private readonly replayRoot: string;
   private readonly root: string;
   private readonly maxBytes: number;
   private readonly maxRecordsPerSegment: number;
@@ -42,14 +43,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     if (!/^[a-z0-9_]+$/.test(directoryName)) {
       throw new Error('Session Replay storage directory name is invalid');
     }
-    const replayRoot = `${filesDir}/ft_session_replay`;
-    this.root = `${replayRoot}/${directoryName}`;
+    this.replayRoot = `${filesDir}/ft_session_replay`;
+    this.root = `${this.replayRoot}/${directoryName}`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
     this.maxRecordsPerSegment = Math.max(1, Math.floor(maxRecordsPerSegment));
     // `mkdirSync(path, true)` is only available from newer platform APIs.
     // Create each level explicitly so Replay works on the API 12 devices this
     // SDK supports as well as on newer runtimes.
-    this.ensureDirectory(replayRoot);
+    this.ensureDirectory(this.replayRoot);
     this.ensureDirectory(this.root);
     this.recover();
   }
@@ -60,6 +61,10 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     }
     this.lastWriteError = '';
     try {
+      // App sandbox storage may be reclaimed between initialization and a
+      // later RUM View. Recreate both levels immediately before the write.
+      this.ensureDirectory(this.replayRoot);
+      this.ensureDirectory(this.root);
       for (let start = 0; start < records.length; start += this.maxRecordsPerSegment) {
         const segmentRecords = records.slice(start, start + this.maxRecordsPerSegment);
         const segment = this.createSegment(context, segmentRecords);
