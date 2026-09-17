@@ -24,7 +24,7 @@ after Replay is enabled.
 const replay = FTSessionReplay.getInstance();
 replay.init(new FTSessionReplayConfig()
   .setSampleRate(1)
-  .setSessionReplayOnErrorSampleRate(0));
+  .setSessionReplayOnErrorSampleRate(0), context.filesDir);
 
 // In an ArkUI page that is currently visible:
 replay.registerRoot(this.getUIContext(), 'checkout-root', vp2px(1));
@@ -45,6 +45,12 @@ Once a sampled RUM View starts, the registered ArkUI root is structurally
 polled every 500 ms by default. Unchanged trees do not emit records; changes
 produce Android Incremental Snapshot records (`type:11`, `source:0`). Change
 the bounded cadence with `setSnapshotIntervalMs(100..10000)`.
+
+When `filesDir` is supplied to `init()` or `enable()`, each capture batch is
+atomically persisted below `filesDir/ft_session_replay/segments`. Storage is
+bounded to 10 MiB by default and evicts oldest complete segments before writing
+new data. Use `setStorageMaxBytes()` and `setMaxRecordsPerSegment()` to tune
+the bounds. Private-app storage is durable but not encrypted by this POC.
 
 The generated JSON is compatible with Android's Replay record envelope:
 
@@ -165,3 +171,18 @@ values, or image bytes.
    count.
 5. Disable Replay, then confirm the automatic-observation button is disabled.
    This verifies the polling timer is stopped with the global switch.
+
+## P7 durable segment verification
+
+1. Enable Replay, trigger **Capture through RUM View Bridge**, then toggle the
+   layout once. The sample result must display a positive **durable segments**
+   count.
+2. Force-stop the application without clearing its data, then start it again.
+   Enable Replay and perform another View bridge capture. The durable-segment
+   count must include the records written before the restart.
+3. Set `setStorageMaxBytes(1024 * 1024)` and repeatedly generate captures.
+   Confirm the app remains usable and older segment files are removed once the
+   private `ft_session_replay/segments` directory reaches its quota.
+4. Verify each retained `*.json` parses to a segment with `version:1`, one
+   `context` object, and a non-empty `records` array. No `*.tmp` file may
+   remain after restarting the app.

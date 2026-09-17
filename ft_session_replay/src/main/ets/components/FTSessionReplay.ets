@@ -2,6 +2,7 @@ import { UIContext } from '@kit.ArkUI';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
+import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -16,6 +17,7 @@ export class FTSessionReplay {
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayPOC | null = null;
+  private storage: SessionReplaySegmentStore | null = null;
 
   public static getInstance(): FTSessionReplay {
     if (FTSessionReplay.instance === null) {
@@ -28,9 +30,10 @@ export class FTSessionReplay {
    * Stores configuration and starts Replay unless delayed initialization was
    * requested. Call `start()` later when `setDelayInit(true)` is used.
    */
-  public init(config: FTSessionReplayConfig): void {
+  public init(config: FTSessionReplayConfig, filesDir: string = ''): void {
     this.disable();
     this.config = config;
+    this.configureStorage(filesDir);
     if (!config.isDelayInit()) {
       this.start();
     }
@@ -41,18 +44,19 @@ export class FTSessionReplay {
     if (this.recorder !== null) {
       return;
     }
-    const recorder = new FTSessionReplayPOC(this.config);
+    const recorder = new FTSessionReplayPOC(this.config, this.storage);
     recorder.start();
     this.recorder = recorder;
   }
 
   /** Convenience form for applications that enable Replay during startup. */
-  public enable(config?: FTSessionReplayConfig): void {
+  public enable(config?: FTSessionReplayConfig, filesDir: string = ''): void {
     if (config !== undefined) {
       if (this.recorder !== null) {
         this.disable();
       }
       this.config = config;
+      this.configureStorage(filesDir);
     }
     this.start();
   }
@@ -96,6 +100,15 @@ export class FTSessionReplay {
     return this.recorder === null ? [] : this.recorder.getRecordedRecords(context);
   }
 
+  /** Lists valid durable segments restored from the application's private files directory. */
+  public getStoredSegments(): Array<SessionReplayStoredSegment> {
+    return this.storage === null ? [] : this.storage.list();
+  }
+
+  public getStorageRoot(): string | null {
+    return this.storage === null ? null : this.storage.getRoot();
+  }
+
   /** Captures a manual Full Snapshot only while the global switch is enabled. */
   public captureFullSnapshot(
     uiContext: UIContext,
@@ -121,5 +134,17 @@ export class FTSessionReplay {
       throw new Error('Session Replay is disabled. Call enable() before capturing.');
     }
     return this.recorder;
+  }
+
+  private configureStorage(filesDir: string): void {
+    if (filesDir.trim().length === 0) {
+      this.storage = null;
+      return;
+    }
+    this.storage = new SessionReplaySegmentStore(
+      filesDir,
+      this.config.getStorageMaxBytes(),
+      this.config.getMaxRecordsPerSegment()
+    );
   }
 }

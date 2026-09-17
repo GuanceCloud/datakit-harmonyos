@@ -11,6 +11,7 @@ import { ArkUIReplayCollector } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
+import { SessionReplayRecordStore } from './SessionReplaySegmentStore';
 import {
   createReplayEnvelope,
   FullSnapshotData,
@@ -46,6 +47,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
   private readonly sampler: SessionReplaySampler;
+  private readonly store: SessionReplayRecordStore | null;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
@@ -54,10 +56,14 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private observationTimer: number = -1;
 
-  constructor(config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
+  constructor(
+    config: FTSessionReplayConfig = new FTSessionReplayConfig(),
+    store: SessionReplayRecordStore | null = null
+  ) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot());
     this.sampler = new SessionReplaySampler(config);
+    this.store = store;
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -205,8 +211,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const record = this.processor.createViewEndRecord(context.timestamp);
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
-    this.appendRecordedRecords(replayContext, capture.records);
-    this.recordViewMetadata(context, 1);
+    if (this.appendRecordedRecords(replayContext, capture.records)) {
+      this.recordViewMetadata(context, 1);
+    }
     this.activeContext = null;
     this.stopObservation();
     this.processor.reset();
@@ -242,9 +249,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     }
     const records = this.processor.createViewStartRecords(fullCapture.record);
     const capture = this.createCapture(replayContext, records, fullCapture.record);
+    if (!this.appendRecordedRecords(replayContext, records)) {
+      return null;
+    }
     this.lastCapture = capture;
     this.activeContext = replayContext;
-    this.appendRecordedRecords(replayContext, records);
     this.recordViewMetadata(context, records.length);
     this.startObservation();
     return capture;
@@ -254,8 +263,10 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const replayContext = this.toReplayContext(context);
     const capture = this.captureWithRegisteredRoot(replayContext);
     if (capture !== null) {
+      if (!this.appendRecordedRecords(replayContext, capture.records)) {
+        return null;
+      }
       this.lastCapture = capture;
-      this.appendRecordedRecords(replayContext, capture.records);
       this.recordViewMetadata(context, capture.records.length);
     }
     return capture;
@@ -339,9 +350,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return `${applicationId}|${sessionId}|${viewId}`;
   }
 
-  private appendRecordedRecords(context: SessionReplayContext, records: Array<SessionReplayRecord>): void {
+  private appendRecordedRecords(context: SessionReplayContext, records: Array<SessionReplayRecord>): boolean {
     if (records.length === 0) {
-      return;
+      return true;
     }
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     const current = this.recordedRecordsByView.get(key) ?? [];
@@ -353,6 +364,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       current.splice(0, overflow);
     }
     this.recordedRecordsByView.set(key, current);
+    return this.store === null || this.store.append(context, records);
   }
 
   private startObservation(): void {
@@ -387,8 +399,9 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
         return;
       }
       const capture = this.createCapture(context, [mutation], fullSnapshot);
-      this.appendRecordedRecords(context, capture.records);
-      this.recordReplayMetadata(context, capture.records.length);
+      if (this.appendRecordedRecords(context, capture.records)) {
+        this.recordReplayMetadata(context, capture.records.length);
+      }
       this.lastCapture = capture;
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and polling.

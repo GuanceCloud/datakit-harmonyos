@@ -32,6 +32,8 @@ export class FTSessionReplayConfig {
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
   private snapshotIntervalMs: number = 500;
+  private storageMaxBytes: number = 10 * 1024 * 1024;
+  private maxRecordsPerSegment: number = 100;
   private delayInit: boolean = false;
 
   public setSampleRate(sampleRate: number): FTSessionReplayConfig {
@@ -122,6 +124,32 @@ export class FTSessionReplayConfig {
 
   public getSnapshotIntervalMs(): number {
     return this.snapshotIntervalMs;
+  }
+
+  /** Bounds all retained on-device Replay segments. Default: 10 MiB. */
+  public setStorageMaxBytes(maxBytes: number): FTSessionReplayConfig {
+    if (!Number.isFinite(maxBytes)) {
+      return this;
+    }
+    this.storageMaxBytes = Math.max(1024 * 1024, Math.min(100 * 1024 * 1024, Math.floor(maxBytes)));
+    return this;
+  }
+
+  public getStorageMaxBytes(): number {
+    return this.storageMaxBytes;
+  }
+
+  /** Caps the number of protocol records written into one atomic segment. */
+  public setMaxRecordsPerSegment(maxRecords: number): FTSessionReplayConfig {
+    if (!Number.isFinite(maxRecords)) {
+      return this;
+    }
+    this.maxRecordsPerSegment = Math.max(1, Math.min(500, Math.floor(maxRecords)));
+    return this;
+  }
+
+  public getMaxRecordsPerSegment(): number {
+    return this.maxRecordsPerSegment;
   }
 }
 

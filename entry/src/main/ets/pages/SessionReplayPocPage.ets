@@ -1,4 +1,5 @@
 import router from '@ohos.router';
+import { Context } from '@kit.AbilityKit';
 import { AppState, ErrorType, FTRUMGlobalManager } from '@guancecloud/ft_sdk';
 import {
   FTSessionReplayConfig,
@@ -52,7 +53,7 @@ struct SessionReplayPocPage {
       }
       return;
     }
-    this.replay.enable(this.replayConfig);
+    this.replay.enable(this.replayConfig, this.getFilesDir());
     this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
     this.replayEnabled = true;
     this.result = 'Session Replay is enabled. Select a capture action to validate the protocol.';
@@ -62,6 +63,10 @@ struct SessionReplayPocPage {
     this.replay.unregisterRoot();
     this.replay.disable();
     this.replayEnabled = false;
+  }
+
+  private getFilesDir(): string {
+    return (getContext(this) as Context).filesDir;
   }
 
   private showBridgeCapture(source: string): void {
@@ -76,7 +81,7 @@ struct SessionReplayPocPage {
         sessionId: capture.envelope.session_id,
         viewId: capture.envelope.view_id
       }).length;
-      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}.\n${capture.payload.substring(0, 600)}`;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}.\n${capture.payload.substring(0, 600)}`;
     }, 200);
   }
 
@@ -89,7 +94,7 @@ struct SessionReplayPocPage {
           applicationId: capture.envelope.application_id,
           sessionId: capture.envelope.session_id,
           viewId: capture.envelope.view_id
-        }).length}.\n${capture.payload.substring(0, 600)}`;
+        }).length}; durable segments: ${this.replay.getStoredSegments().length}.\n${capture.payload.substring(0, 600)}`;
         return;
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
