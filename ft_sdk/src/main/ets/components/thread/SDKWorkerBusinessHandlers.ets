@@ -50,6 +50,7 @@ import {
 } from './SDKWorkerProtocol';
 import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
+import { ErrorType } from '../rum/enum/RUMEnums';
 import {
   DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
@@ -1662,7 +1663,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
   const tags: SDKStringRecord = {};
   mergeStringRecords(tags, resource.context.dynamicTags || {});
   tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
-  tags[Constants.KEY_RUM_ERROR_TYPE] = 'network';
+  tags[Constants.KEY_RUM_ERROR_TYPE] = String(ErrorType.NETWORK);
   tags[Constants.KEY_RUM_ERROR_SOURCE] = 'network';
   tags[Constants.KEY_RUM_ERROR_SITUATION] = 'run';
   tags[Constants.KEY_RUM_ACTION_ID] = resource.context.actionId;

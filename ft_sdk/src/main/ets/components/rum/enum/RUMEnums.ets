@@ -7,7 +7,7 @@
  */
 export enum ErrorType {
   JS = "js",
-  NETWORK = "network",
+  NETWORK = "network_error",
   CONSOLE = "console",
   JS_CRASH = "js_crash",
   NATIVE_CRASH = "native_crash",
@@ -209,6 +209,8 @@ export class RUMEnumUtils {
       case "js":
       case "javascript":
         return ErrorType.JS;
+      case "network_error":
+      // Accept the legacy value used by earlier HarmonyOS SDK versions.
       case "network":
         return ErrorType.NETWORK;
       case "console":

@@ -810,7 +810,7 @@ export default function dataSyncTest() {
       ];
       const errorFragments = [
         'error',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',

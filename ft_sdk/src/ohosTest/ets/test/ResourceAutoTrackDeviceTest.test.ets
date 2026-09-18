@@ -741,7 +741,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -818,7 +818,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -1038,7 +1038,7 @@ export default function resourceAutoTrackDeviceTest() {
         'error,',
         `resource_url=${resourceUrl}`,
         `action_name=${actionName}`,
-        'error_type=network'
+        'error_type=network_error'
       ], 5000);
 
       expect(actionRecord !== null).assertTrue();
@@ -1348,7 +1348,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
