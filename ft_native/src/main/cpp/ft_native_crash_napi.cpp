@@ -94,6 +94,15 @@ static void CallJs(napi_env env, napi_value jsCallback, void* context, void* dat
     napi_create_int32(env, crashDataWrapper->crashData.uid, &uidValue);
     napi_set_named_property(env, crashObj, "uid", uidValue);
 
+    // HarmonyOS supplies a unique value for this process run. Preserve it for
+    // recovery deduplication; the platform's `uuid` is only a stack fingerprint.
+    napi_value appRunningUniqueIdValue;
+    napi_create_string_utf8(env,
+                           crashDataWrapper->crashData.appRunningUniqueId.c_str(),
+                           crashDataWrapper->crashData.appRunningUniqueId.length(),
+                           &appRunningUniqueIdValue);
+    napi_set_named_property(env, crashObj, "appRunningUniqueId", appRunningUniqueIdValue);
+
     // Set uuid
     napi_value uuidValue;
     napi_create_string_utf8(env,

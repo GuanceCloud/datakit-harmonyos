@@ -189,11 +189,37 @@ interface TimeDuration {
 /**
  * RUM context for crash recovery
  */
-interface RUMContext {
-    viewId: string;
-    viewName: string;
-    viewReferrer: string;
-    sessionId: string;
+export interface FTRUMCrashRecoveryContext {
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  sessionId: string;
+}
+
+/** A recovery association is valid only when it identifies both its View and Session. */
+export function hasFTRUMCrashRecoveryContext(
+  context: FTRUMCrashRecoveryContext | null | undefined
+): boolean {
+  return context !== null && context !== undefined && context.viewId.length > 0 && context.sessionId.length > 0;
+}
+
+/**
+ * Historical crashes are associated with the predecessor process. The data is
+ * written as Tags so Error page correlation and aggregation can consume it.
+ */
+export function applyFTRUMCrashRecoveryContext(
+  tags: Record<string, string>,
+  context: FTRUMCrashRecoveryContext | null | undefined
+): boolean {
+  if (!hasFTRUMCrashRecoveryContext(context)) {
+    return false;
+  }
+  const recovered = context as FTRUMCrashRecoveryContext;
+  tags[Constants.KEY_RUM_SESSION_ID] = recovered.sessionId;
+  tags[Constants.KEY_RUM_VIEW_ID] = recovered.viewId;
+  tags[Constants.KEY_RUM_VIEW_NAME] = recovered.viewName;
+  tags[Constants.KEY_RUM_VIEW_REFERRER] = recovered.viewReferrer;
+  return true;
 }
 
 interface SDKRumCounterMailboxPayload {
@@ -2097,7 +2123,7 @@ export class FTRUMInnerManager {
     const viewName = this.activeView?.getViewName() || '';
     const viewReferrer = this.activeView?.getViewReferrer() || '';
     const sessionId = this.sessionId;
-    const snapshot: RUMContext = { viewId, viewName, viewReferrer, sessionId };
+    const snapshot: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
 
     if (!this.preferencesStore && this.preferencesInitPromise) {
       await this.preferencesInitPromise;
@@ -2128,8 +2154,8 @@ export class FTRUMInnerManager {
    * Get saved RUM context from preferences (for crash recovery)
    * Returns an object with viewId, viewName, viewReferrer, and sessionId
    */
-  public async getSavedRumContext(): Promise<RUMContext> {
-    const defaultContext: RUMContext = {
+  public async getSavedRumContext(): Promise<FTRUMCrashRecoveryContext> {
+    const defaultContext: FTRUMCrashRecoveryContext = {
       viewId: '',
       viewName: '',
       viewReferrer: '',
@@ -2151,7 +2177,7 @@ export class FTRUMInnerManager {
       const sessionId = await this.preferencesStore.get(FTRUMInnerManager.KEY_SESSION_ID, '') as string;
 
       FTInnerLogger.i(TAG, `Retrieved saved RUM context: viewId=${viewId}, viewName=${viewName}, sessionId=${sessionId}`);
-      const result: RUMContext = { viewId, viewName, viewReferrer, sessionId };
+      const result: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
       return result;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3132,14 +3158,19 @@ export class FTRUMInnerManager {
   private async prepareCrashFreeDuration(
     errorType: string,
     state: AppState,
-    property: Record<string, object> | null
+    property: Record<string, object> | null,
+    nativeCrashRecoveryId?: string
   ): Promise<FTCrashFreeDuration | null | undefined> {
     if (!this.isCrashFreeDurationError(errorType)) {
       return undefined;
     }
     const isPreCrash = this.readCrashPropertyText(property, IS_PRE_CRASH) === 'true';
     const crashWallClockMs = this.readCrashPropertyNumber(property, Constants.KEY_TIMESTAMP);
-    const nativeCrashId = this.readCrashPropertyText(property, Constants.KEY_UUID);
+    // The HarmonyOS `uuid` value is a crash fingerprint: separate crashes at
+    // the same C++ stack share it. Native recovery supplies the per-process
+    // event id separately so duplicate suppression cannot hide a later crash.
+    const nativeCrashId = nativeCrashRecoveryId && nativeCrashRecoveryId.length > 0 ?
+      nativeCrashRecoveryId : this.readCrashPropertyText(property, Constants.KEY_UUID);
     return await FTCrashFreeDurationManager.getInstance().prepareCrashFreeDuration(
       state,
       isPreCrash,
@@ -3348,10 +3379,14 @@ export class FTRUMInnerManager {
     property?: Record<string, object> | null, 
     dateline?: number,
     callBack?: RunnerCompleteCallBack | null,
-    draftUuid?: string
+    draftUuid?: string,
+    nativeCrashRecoveryId?: string,
+    recoveryContext?: FTRUMCrashRecoveryContext | null
   ): Promise<void> {
     const actualDateline = dateline !== undefined ? dateline : Utils.getCurrentNanoTime();
     const actualProperty = property !== undefined ? property : null;
+    const validRecoveryContext: FTRUMCrashRecoveryContext | null =
+      hasFTRUMCrashRecoveryContext(recoveryContext) ? recoveryContext as FTRUMCrashRecoveryContext : null;
     const actualCallBack = callBack !== undefined ? callBack : null;
     try {
       // Refresh session
@@ -3386,7 +3421,12 @@ export class FTRUMInnerManager {
         effectiveProperty = mergedProperty;
       }
 
-      const crashFreeDuration = await this.prepareCrashFreeDuration(errorType, state, effectiveProperty);
+      const crashFreeDuration = await this.prepareCrashFreeDuration(
+        errorType,
+        state,
+        effectiveProperty,
+        nativeCrashRecoveryId
+      );
       // A native crash id is acknowledged only after its Error data is stored.
       // Suppress an already-acknowledged crash file before it reaches counters.
       if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType)) {
@@ -3450,8 +3490,13 @@ export class FTRUMInnerManager {
         allTags[key] = dynamicTags[key];
       }
       
-      // Layer 3: RUM association
-      this.attachRUMRelative(allTags,true)
+      // Historical crashes are correlated to their predecessor View and must
+      // never inherit a View or Action created after process restart.
+      if (validRecoveryContext !== null) {
+        applyFTRUMCrashRecoveryContext(allTags, validRecoveryContext);
+      } else {
+        this.attachRUMRelative(allTags,true);
+      }
 
       const errorDeviceTagKeys = Object.keys(errorDeviceData.tags);
       for (let i = 0; i < errorDeviceTagKeys.length; i++) {

@@ -32,6 +32,7 @@ struct NativeCrashData {
     std::string bundleName;
     int pid;
     int uid;
+    std::string appRunningUniqueId; // Unique per HarmonyOS application run
     std::string uuid;
     std::string exception;      // JSON string containing exception details
     int hilogSize;

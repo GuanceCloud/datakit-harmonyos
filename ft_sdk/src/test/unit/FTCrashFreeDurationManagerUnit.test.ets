@@ -4,6 +4,11 @@ import {
   FTCrashFreeDurationManager,
   FTCrashFreeStorage
 } from '../../main/ets/components/monitor/FTCrashFreeDurationManager';
+import {
+  applyFTRUMCrashRecoveryContext,
+  FTRUMCrashRecoveryContext
+} from '../../main/ets/components/rum/FTRUMInnerManager';
+import { Constants } from '../../main/ets/components/Constants';
 import { AppState, ErrorType, RUMEnumUtils } from '../../main/ets/components/rum/enum/RUMEnums';
 
 class FixedCrashFreeClock implements FTCrashFreeClock {
@@ -181,6 +186,40 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       expect(duplicate === null).assertTrue();
     });
 
+    it('recoveredCrashContextUsesPredecessorViewAndSessionTags', 0, () => {
+      const tags: Record<string, string> = {};
+      const recovered: FTRUMCrashRecoveryContext = {
+        sessionId: 'crashed-session',
+        viewId: 'crashed-view',
+        viewName: 'CrashTestPage',
+        viewReferrer: 'HomePage'
+      };
+
+      expect(applyFTRUMCrashRecoveryContext(tags, recovered)).assertTrue();
+      expect(tags[Constants.KEY_RUM_SESSION_ID]).assertEqual('crashed-session');
+      expect(tags[Constants.KEY_RUM_VIEW_ID]).assertEqual('crashed-view');
+      expect(tags[Constants.KEY_RUM_VIEW_NAME]).assertEqual('CrashTestPage');
+      expect(tags[Constants.KEY_RUM_VIEW_REFERRER]).assertEqual('HomePage');
+      expect(tags[Constants.KEY_RUM_ACTION_ID] === undefined).assertTrue();
+      expect(tags[Constants.KEY_RUM_ACTION_NAME] === undefined).assertTrue();
+    });
+
+    it('recoveredCrashContextWithoutViewAndSessionDoesNotOverwriteTags', 0, () => {
+      const tags: Record<string, string> = {};
+      tags[Constants.KEY_RUM_SESSION_ID] = 'current-session';
+      tags[Constants.KEY_RUM_VIEW_ID] = 'current-view';
+      const incomplete: FTRUMCrashRecoveryContext = {
+        sessionId: '',
+        viewId: '',
+        viewName: '',
+        viewReferrer: ''
+      };
+
+      expect(applyFTRUMCrashRecoveryContext(tags, incomplete)).assertFalse();
+      expect(tags[Constants.KEY_RUM_SESSION_ID]).assertEqual('current-session');
+      expect(tags[Constants.KEY_RUM_VIEW_ID]).assertEqual('current-view');
+    });
+
     it('usesPredecessorSnapshotForHistoricalSystemFreezeWithoutNativeMarker', 0, async () => {
       const clock = new FixedCrashFreeClock();
       clock.uptimeNs = 200;
@@ -282,6 +321,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       expect(RUMEnumUtils.isCrashErrorType(ErrorType.CUSTOM)).assertFalse();
       expect(RUMEnumUtils.parseErrorType('native_crash')).assertEqual(ErrorType.NATIVE_CRASH);
       expect(RUMEnumUtils.parseErrorType('anr_error')).assertEqual(ErrorType.ANR_ERROR);
+      expect(RUMEnumUtils.parseErrorType('network_error')).assertEqual(ErrorType.NETWORK);
+      expect(RUMEnumUtils.parseErrorType('network')).assertEqual(ErrorType.NETWORK);
       expect(RUMEnumUtils.getAllErrorTypes().includes(ErrorType.ANR_ERROR)).assertTrue();
     });
   });
