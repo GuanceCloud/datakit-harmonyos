@@ -1,4 +1,4 @@
-import { common, Want } from '@kit.AbilityKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import promptAction from '@ohos.promptAction';
 import * as ftcrash from 'libftcrash.so';
@@ -10,11 +10,14 @@ import { DemoLogger } from '../utils/DemoLogger';
 const TAG = 'CrashTestPage';
 const DEFAULT_CPP_CRASH_DELAY_MS = 500;
 const BACKGROUND_CPP_CRASH_DELAY_MS = 12_000;
+const SHORT_ANR_BLOCK_DURATION_MS = 3_000;
+const FATAL_ANR_BLOCK_DURATION_MS = 10_000;
 
 @Entry
 @Component
 export struct CrashTestPage {
-  private abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+  private delayedCppCrashTimerId: number | null = null;
+  private suspendDelayRequestId: number | null = null;
   @State message: string = 'Crash & ANR';
   @State testResults: string = '';
   @State isSDKInitialized: boolean = false;
@@ -73,23 +76,37 @@ export struct CrashTestPage {
     }, DEFAULT_CPP_CRASH_DELAY_MS);
   }
 
-  private async scheduleBackgroundCppCrash(): Promise<void> {
-    this.addTestResult('💥 Scheduling C++ crash through background AppService...');
+  private scheduleBackgroundCppCrash(): void {
+    this.cancelDelayedCppCrash();
+    this.addTestResult('💥 Scheduling C++ crash with transient background keepalive...');
     this.addTestResult('⏱️ C++ crash will trigger 12 seconds after scheduling; press Home now');
-
-    const want: Want = {
-      bundleName: this.abilityContext.abilityInfo.bundleName,
-      moduleName: this.abilityContext.abilityInfo.moduleName,
-      abilityName: 'StressServiceAbility',
-      action: 'crash',
-      parameters: {
-        cppCrashDelayMs: BACKGROUND_CPP_CRASH_DELAY_MS
-      }
-    };
-
     try {
-      await this.abilityContext.startAppServiceExtensionAbility(want);
-      this.addTestResult('✅ Background C++ crash scheduled; move app to background now');
+      const suspendDelay = backgroundTaskManager.requestSuspendDelay(
+        'Delayed C++ crash test',
+        (): void => {
+          this.suspendDelayRequestId = null;
+          this.addTestResult('⚠️ Background keepalive expired before the C++ crash timer fired');
+        }
+      );
+      if (suspendDelay.actualDelayTime < BACKGROUND_CPP_CRASH_DELAY_MS) {
+        backgroundTaskManager.cancelSuspendDelay(suspendDelay.requestId);
+        this.addTestResult(
+          `❌ Background keepalive is only ${suspendDelay.actualDelayTime} ms; 12-second crash test was not scheduled`
+        );
+        this.showToast('Background keepalive is shorter than 12 seconds');
+        return;
+      }
+
+      this.suspendDelayRequestId = suspendDelay.requestId;
+      this.delayedCppCrashTimerId = setTimeout((): void => {
+        this.delayedCppCrashTimerId = null;
+        this.cancelSuspendDelay();
+        DemoLogger.i(TAG, 'Triggering scheduled background C++ crash');
+        ftcrash.triggerNullPointerCrash();
+      }, BACKGROUND_CPP_CRASH_DELAY_MS);
+      this.addTestResult(
+        `✅ Background keepalive granted for ${suspendDelay.actualDelayTime} ms; move app to background now`
+      );
       this.showToast('Cpp Crash scheduled in 12 seconds; move app to background');
     } catch (error) {
       const message = `${error}`;
@@ -98,7 +115,27 @@ export struct CrashTestPage {
     }
   }
 
-  private triggerANR(): void {
+  private cancelDelayedCppCrash(): void {
+    if (this.delayedCppCrashTimerId !== null) {
+      clearTimeout(this.delayedCppCrashTimerId);
+      this.delayedCppCrashTimerId = null;
+    }
+    this.cancelSuspendDelay();
+  }
+
+  private cancelSuspendDelay(): void {
+    if (this.suspendDelayRequestId === null) {
+      return;
+    }
+    try {
+      backgroundTaskManager.cancelSuspendDelay(this.suspendDelayRequestId);
+    } catch (error) {
+      DemoLogger.w(TAG, `Failed to cancel background keepalive: ${error}`);
+    }
+    this.suspendDelayRequestId = null;
+  }
+
+  private triggerANR(durationMs: number): void {
     if (!this.isSDKInitialized) {
       this.addTestResult('❌ SDK not initialized, skipping ANR test');
       this.showToast('SDK not initialized');
@@ -106,9 +143,9 @@ export struct CrashTestPage {
     }
 
     try {
-      this.addTestResult('⏱️ Triggering ANR test for 10 seconds...');
+      this.addTestResult(`⏱️ Triggering ANR test for ${durationMs / 1000} seconds...`);
       this.addTestResult('📋 Check logs for ANR detection output');
-      SimpleAPMManager.getInstance().triggerANRTest(10000);
+      SimpleAPMManager.getInstance().triggerANRTest(durationMs);
       this.showToast('ANR test started');
     } catch (error) {
       this.addTestResult(`❌ Failed to trigger ANR test: ${JSON.stringify(error as object)}`);
@@ -199,7 +236,17 @@ export struct CrashTestPage {
           .backgroundColor('#FF9800')
           .fontColor(Color.White)
           .onClick(() => {
-            this.triggerANR();
+            this.triggerANR(FATAL_ANR_BLOCK_DURATION_MS);
+          })
+
+        Button('ANR (3s)')
+          .width('100%')
+          .height(50)
+          .margin({ bottom: 10 })
+          .backgroundColor('#FFB74D')
+          .fontColor(Color.White)
+          .onClick(() => {
+            this.triggerANR(SHORT_ANR_BLOCK_DURATION_MS);
           })
 
         Row() {
