@@ -555,7 +555,6 @@ export interface SDKUploadPreparePageResultDTO {
   bodyLength: number;
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
   transportLimitReached: boolean;
   bodyPreview: string;
   /** False only when no acceptable row can be sent in this round. */
@@ -596,7 +595,6 @@ export interface SDKUploadExecutePageResultDTO {
   bodyLength: number;
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
   transportLimitReached: boolean;
   bodyPreview: string;
   shouldUpload: boolean;

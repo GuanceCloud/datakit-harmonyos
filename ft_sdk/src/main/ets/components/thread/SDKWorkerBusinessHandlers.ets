@@ -51,7 +51,7 @@ import {
 import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
@@ -2712,11 +2712,9 @@ function prepareUploadRows(
       packageId = provisionalPackageId;
       if (bodySelection.rows.length > 0 && bodySelection.rows.length !== candidateRows.length) {
         const bodyLimitReached = bodySelection.bodyLimitReached;
-        const oversizedRows = bodySelection.oversizedRows;
         packageId = createUploadPackageId(dataType, bodySelection.rows.length, state);
         bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
         bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
-        bodySelection.oversizedRows += oversizedRows;
       }
     } else {
       bodySelection = selectUploadRowsForBody(candidateRows, packageId);
@@ -2784,7 +2782,7 @@ function handleUploadPreparePage(
     state
   );
   const body = prepared.bodySelection.lines.join('\n');
-  const hasMoreData = prepared.deferredRows > 0 || prepared.bodySelection.oversizedRows > 0;
+  const hasMoreData = prepared.deferredRows > 0;
   if (hasMoreData) {
     state.uploadRoundHasMoreData = true;
   }
@@ -2802,7 +2800,6 @@ function handleUploadPreparePage(
     bodyLength: body.length,
     bodyBytes: prepared.bodySelection.bodyBytes,
     bodyLimitReached: prepared.bodySelection.bodyLimitReached,
-    oversizedRows: prepared.bodySelection.oversizedRows,
     transportLimitReached: payload.transportLimitReached === true,
     bodyPreview: body,
     shouldExecute: prepared.rows.length > 0,
@@ -2860,7 +2857,6 @@ async function handleUploadExecutePage(
       bodyLength: 0,
       bodyBytes: 0,
       bodyLimitReached: preparedRows.bodySelection.bodyLimitReached,
-      oversizedRows: preparedRows.bodySelection.oversizedRows,
       transportLimitReached: payload.transportLimitReached === true,
       bodyPreview: '',
       shouldUpload: false,
@@ -2981,7 +2977,6 @@ async function handleUploadExecutePage(
     bodyLength: body.length,
     bodyBytes: bodySelection.bodyBytes,
     bodyLimitReached: bodySelection.bodyLimitReached,
-    oversizedRows: bodySelection.oversizedRows,
     transportLimitReached: payload.transportLimitReached === true,
     // This value is emitted by the UPLOAD BODY PREVIEW diagnostic. Keep every
     // byte of the prepared request body so the log can be compared directly
@@ -3371,7 +3366,6 @@ interface SDKUploadBodySelection {
   lines: string[];
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
 }
 
 function createEmptyUploadBodySelection(): SDKUploadBodySelection {
@@ -3380,7 +3374,6 @@ function createEmptyUploadBodySelection(): SDKUploadBodySelection {
     lines: [],
     bodyBytes: 0,
     bodyLimitReached: false,
-    oversizedRows: 0
   };
 }
 
@@ -3460,22 +3453,22 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
       continue;
     }
     const lineBytes = getUploadUtf8ByteLength(line);
-    if (lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
-      result.bodyLimitReached = true;
-      // Never delete a row merely because a local limit rejected it. Keep it
-      // cached and continue scanning this page so it cannot block a later
-      // uploadable cold-launch record.
-      result.oversizedRows++;
-      continue;
-    }
     const separatorBytes = result.lines.length > 0 ? 1 : 0;
-    if (result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
+    const exceedsBatchTarget = result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_BODY_TARGET_BYTES;
+    if (exceedsBatchTarget && result.lines.length > 0) {
       result.bodyLimitReached = true;
       break;
     }
     result.rows.push(row);
     result.lines.push(line);
     result.bodyBytes += separatorBytes + lineBytes;
+    if (exceedsBatchTarget) {
+      // A large Error is sent alone rather than being retained forever by a
+      // local request-size gate. The target still prevents normal batches
+      // from growing without bound.
+      result.bodyLimitReached = true;
+      break;
+    }
   }
   return result;
 }

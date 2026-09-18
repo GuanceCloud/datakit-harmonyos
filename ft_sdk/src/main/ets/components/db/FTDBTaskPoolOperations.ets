@@ -910,20 +910,21 @@ async function queryUploadDataInTaskPool(
         row.customDataType = storedType;
       }
       const rowBytes = estimateUploadTransportRowBytes(row);
-      if (rowBytes > maxBytes) {
-        // This row can never cross the Host-to-Worker transport boundary.
-        // Keep it cached, but do not let it block later uploadable rows.
-        result.hasMore = true;
-        result.byteLimitReached = true;
-        continue;
-      }
-      if (result.byteCount + rowBytes > maxBytes) {
+      const exceedsBatchTarget = result.byteCount + rowBytes > maxBytes;
+      if (exceedsBatchTarget && result.rows.length > 0) {
         result.hasMore = true;
         result.byteLimitReached = true;
         break;
       }
       result.rows.push(row);
       result.byteCount += rowBytes;
+      if (exceedsBatchTarget) {
+        // The target bounds normal pages only. Preserve Android's semantics:
+        // an individually large Error still crosses Host-to-Worker alone.
+        result.hasMore = true;
+        result.byteLimitReached = true;
+        break;
+      }
     }
   } finally {
     resultSet.close();

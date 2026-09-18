@@ -36,7 +36,7 @@ import {
   SDKWorkerRequest,
   SDKWorkerResponse
 } from '../../main/ets/components/thread/SDKWorkerProtocol';
-import { DATA_UPLOAD_MAX_TRANSPORT_BYTES } from '../../main/ets/components/thread/workers/DataUploadLimits';
+import { DATA_UPLOAD_TRANSPORT_TARGET_BYTES } from '../../main/ets/components/thread/workers/DataUploadLimits';
 import {
   DataUploadPayloadCompressor,
   resetDataUploadPayloadCompressorInternal,
@@ -315,16 +315,17 @@ class FakeDbTaskPool implements SyncTaskDbTaskPool {
         row.customDataType = customDataType;
       }
       const rowBytes = this.estimateUploadTransportRowBytes(row);
-      if (rowBytes > maxBytes) {
-        byteLimitReached = true;
-        continue;
-      }
-      if (transportBytes + rowBytes > maxBytes) {
+      const exceedsBatchTarget = transportBytes + rowBytes > maxBytes;
+      if (exceedsBatchTarget && rows.length > 0) {
         byteLimitReached = true;
         break;
       }
       rows.push(row);
       transportBytes += rowBytes;
+      if (exceedsBatchTarget) {
+        byteLimitReached = true;
+        break;
+      }
     }
     return {
       rows,
@@ -777,7 +778,7 @@ export default function syncTaskManagerUnitTest() {
 
       expect(runtime.executeHttpCount).assertEqual(1);
       expect(runtime.lastHttpModel).assertEqual(Constants.URL_MODEL_LOG);
-      expect(db.lastUploadMaxBytes).assertEqual(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
+      expect(db.lastUploadMaxBytes).assertEqual(DATA_UPLOAD_TRANSPORT_TARGET_BYTES);
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
@@ -910,45 +911,48 @@ export default function syncTaskManagerUnitTest() {
       expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
     });
 
-    it('uploadStopWhenMoreDataMakesNoProgress', 0, async () => {
+    it('uploadSendsSingleRecordBeyondTransportTarget', 0, async () => {
       const db = new FakeDbTaskPool();
       runtime.dbTaskPool = db;
       manager.init(createConfig(), createContext());
-      const oversizedPayload = 'x'.repeat(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
+      const largePayload = 'x'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES);
       queueUploadRowsForOnly(db, DataType.LOG, [
         createSyncData(DataType.LOG, 'transport-limit-row',
-          `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${oversizedPayload}" 100`)
+          `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${largePayload}" 100`)
       ]);
-
-      manager.executePoll(false);
-      await runScheduledUpload(runtime);
-
-      const uploadStatus = manager.getStatus().uploadLaneStatus;
-      expect(runtime.executeHttpCount).assertEqual(0);
-      expect(runtime.sleepDurations.length).assertEqual(0);
-      expect(uploadStatus.isScheduled).assertFalse();
-    });
-
-    it('uploadSkipsOversizedRowsAndContinues', 0, async () => {
-      const db = new FakeDbTaskPool();
-      runtime.dbTaskPool = db;
-      manager.init(createConfig(), createContext());
-      const oversizedPayload = 'x'.repeat(DATA_UPLOAD_MAX_TRANSPORT_BYTES);
-      queueUploadRowsForOnly(db, DataType.LOG, [
-        createSyncData(DataType.LOG, 'transport-limit-row',
-          `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${oversizedPayload}" 100`),
-        createSyncData(DataType.LOG, 'cold-launch-row',
-          'df_rum_harmonyos_log,sdk_data_id=cold-launch-row value=1i 101')
-      ]);
-      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''));
 
       manager.executePoll(false);
       await runScheduledUpload(runtime);
 
       expect(runtime.executeHttpCount).assertEqual(1);
-      expect(runtime.lastHttpBody.includes('sdk_data_id=')).assertTrue();
-      expect(runtime.lastHttpBody.includes('cold-launch-row')).assertTrue();
-      expect(runtime.lastHttpBody.includes('transport-limit-row')).assertFalse();
+      expect(runtime.lastHttpBody.includes('transport-limit-row')).assertTrue();
+      expect(runtime.lastHttpBody.length > DATA_UPLOAD_TRANSPORT_TARGET_BYTES).assertTrue();
+      expect(runtime.sleepDurations.length).assertEqual(0);
+      expect(manager.getStatus().uploadLaneStatus.isScheduled).assertFalse();
+    });
+
+    it('uploadSendsFollowingRecordInNextBatchAfterLargeRecord', 0, async () => {
+      const db = new FakeDbTaskPool();
+      runtime.dbTaskPool = db;
+      manager.init(createConfig(), createContext());
+      const largePayload = 'x'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES);
+      const largeRow = createSyncData(DataType.LOG, 'transport-limit-row',
+        `df_rum_harmonyos_log,sdk_data_id=transport-limit-row message="${largePayload}" 100`);
+      const followingRow = createSyncData(DataType.LOG, 'cold-launch-row',
+        'df_rum_harmonyos_log,sdk_data_id=cold-launch-row value=1i 101');
+      db.queryQueue.push([], [], [
+        largeRow,
+        followingRow
+      ], [followingRow], []);
+      runtime.httpResults.push(new FakeHttpResult(204, 'ok', ''), new FakeHttpResult(204, 'ok', ''));
+
+      manager.executePoll(false);
+      await runScheduledUpload(runtime);
+
+      expect(runtime.executeHttpCount).assertEqual(2);
+      expect(runtime.httpBodies[0].includes('transport-limit-row')).assertTrue();
+      expect(runtime.httpBodies[0].length > DATA_UPLOAD_TRANSPORT_TARGET_BYTES).assertTrue();
+      expect(runtime.httpBodies[1].includes('cold-launch-row')).assertTrue();
     });
 
     it('syncPollUploadsCacheAfterInit', 0, async () => {

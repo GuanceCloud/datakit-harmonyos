@@ -53,7 +53,7 @@ import {
   SDKWorkerRuntimeState
 } from '../../main/ets/components/thread/SDKWorkerBusinessHandlers';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
 } from '../../main/ets/components/thread/workers/DataUploadLimits';
@@ -875,6 +875,40 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(view['viewUpdateTimeDelta'])).assertEqual('50');
       expect(String(action['actionId'])).assertEqual('action-long-task');
       expect(String(action['actionLongTaskDelta'])).assertEqual('50');
+    });
+
+    it('rumErrorCounterRefreshesItsViewAggregate', 0, async () => {
+      const update: SDKRumCounterUpdateDTO = {
+        updateType: 'rum.error', viewId: 'crash-view', actionId: 'crash-action'
+      };
+      const updateResponse = await executeWorkerCommandForUnit({
+        id: 'rum-crash-error-counter',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_UPDATE,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: update as Object as SDKWorkerPayload
+      });
+      expect(updateResponse.ok).assertTrue();
+
+      const flushResponse = await executeWorkerCommandForUnit({
+        id: 'rum-crash-error-counter-flush',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+        priority: 7,
+        createdAt: Date.now()
+      });
+      expect(flushResponse.ok).assertTrue();
+      expect(getPayloadString(flushResponse.payload, 'needsRumDataGenerate')).assertEqual('true');
+      const deltas = getPayloadArray(flushResponse.payload, 'deltas');
+      expect(deltas.length).assertEqual(2);
+      const view = deltas[0] as Record<string, object>;
+      const action = deltas[1] as Record<string, object>;
+      expect(String(view['viewId'])).assertEqual('crash-view');
+      expect(String(view['viewErrorDelta'])).assertEqual('1');
+      expect(String(view['viewUpdateTimeDelta'])).assertEqual('1');
+      expect(String(action['actionId'])).assertEqual('crash-action');
+      expect(String(action['actionErrorDelta'])).assertEqual('1');
     });
 
     it('rumDtoTracksActionAndResourceState', 0, async () => {
@@ -2862,7 +2896,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(start.pageSize).assertEqual(DATA_UPLOAD_MAX_PAGE_SIZE);
       expect(start.maxRetryCount).assertEqual(DATA_UPLOAD_MAX_RETRY_COUNT);
 
-      const largeMessage = 'x'.repeat(Math.floor(DATA_UPLOAD_MAX_BODY_BYTES * 0.6));
+      const largeMessage = 'x'.repeat(Math.floor(DATA_UPLOAD_BODY_TARGET_BYTES * 0.6));
       const rows: SDKUploadRowDTO[] = [{
         id: 41,
         dataType: 'log',
@@ -2905,7 +2939,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(executed.acceptedRows).assertEqual(1);
       expect(executed.deferredRows).assertEqual(1);
       expect(executed.bodyLimitReached).assertTrue();
-      expect(executed.bodyBytes <= DATA_UPLOAD_MAX_BODY_BYTES).assertTrue();
+      expect(executed.bodyBytes <= DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
       expect((successExecutor.lastRequest as SDKUploadHttpRequestDTO).body.length > 0).assertTrue();
 
       const commitPayload: SDKUploadCommitPageDTO = {
@@ -2925,7 +2959,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(committed.roundHasMoreData).assertTrue();
     });
 
-    it('uploadDeferOversizedRowWithoutDbDelete', 0, async () => {
+    it('uploadSendsSingleRowBeyondBodyTarget', 0, async () => {
       const state = createSDKWorkerRuntimeStateWithBackend(
         SDKDedicatedPoolType.DATA_UPLOAD, 'OversizedRowWorker', 'unit-worker');
       const startPayload: SDKUploadRoundStartDTO = {
@@ -2947,7 +2981,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         id: 51,
         dataType: 'log',
         dataString: `df_rum_harmonyos_log,sdk_data_id=oversized message="${
-          'x'.repeat(DATA_UPLOAD_MAX_BODY_BYTES + 1024)}" 100`,
+          'x'.repeat(DATA_UPLOAD_BODY_TARGET_BYTES + 1024)}" 100`,
         uuid: 'oversized',
         time: 100
       };
@@ -2955,8 +2989,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         roundId: start.roundId,
         dataType: 'log',
         rows: [row],
-        queryHasMore: true,
-        transportLimitReached: true,
+        queryHasMore: false,
+        transportLimitReached: false,
         httpConfig: {
           datakitUrl: 'https://localhost',
           datawayUrl: '',
@@ -2980,15 +3014,15 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }, state, httpExecutor);
       const result = response.payload as Object as SDKUploadExecutePageResultDTO;
 
-      expect(result.acceptedRows).assertEqual(0);
-      expect(result.rows.length).assertEqual(0);
-      expect(result.attemptId.length).assertEqual(0);
-      expect(result.dbAction).assertEqual(SDKUploadDbActionDTO.NONE);
-      expect(result.oversizedRows).assertEqual(1);
-      expect(result.transportLimitReached).assertTrue();
-      expect(result.roundHasMoreData).assertTrue();
-      expect(result.delayMs >= 500).assertTrue();
-      expect(httpExecutor.lastRequest === null).assertTrue();
+      expect(result.acceptedRows).assertEqual(1);
+      expect(result.rows.length).assertEqual(1);
+      expect(result.attemptId.length > 0).assertTrue();
+      expect(result.dbAction === SDKUploadDbActionDTO.NONE).assertFalse();
+      expect(result.bodyBytes > DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
+      expect(result.bodyLimitReached).assertTrue();
+      expect(result.transportLimitReached).assertFalse();
+      expect(result.roundHasMoreData).assertFalse();
+      expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.length > DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
     });
 
     it('ackWindowRestartRestoresCheckpoint', 0, async () => {
