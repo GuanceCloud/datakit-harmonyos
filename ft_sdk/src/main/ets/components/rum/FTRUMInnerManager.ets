@@ -263,6 +263,11 @@ interface RumSemanticJournalEntry {
   semanticCommitted: boolean;
 }
 
+interface RumSemanticApplyWaiter {
+  timeoutId: number;
+  resolve: (applied: boolean) => void;
+}
+
 interface RumResourceDraftIds {
   resourceUuid: string;
   errorUuid: string;
@@ -392,6 +397,8 @@ export class FTRUMInnerManager {
    */
   private rumSemanticJournalHead: number = 0;
   private rumSemanticJournalByRequestId: Map<string, RumSemanticJournalEntry> = new Map();
+  /** Crash finalization waits for a counter-flush response after its DB delta is applied. */
+  private rumSemanticApplyWaiters: Map<string, RumSemanticApplyWaiter[]> = new Map();
   private rumSemanticSequence: number = 0;
   private committedRumSemanticResponseIds: Map<string, boolean> = new Map();
   private committedRumSemanticResponseOrder: string[] = [];
@@ -540,12 +547,69 @@ export class FTRUMInnerManager {
       // de-duplication marker rather than restoring an old journal entry.
       this.rememberCommittedRumSemanticResponse(requestId);
     }
+    this.resolveRumSemanticApplyWaiters(requestId, true);
   }
 
   /** A failed/lost transport attempt must not permanently pin a retained aggregate. */
   public markRumSemanticHostFailed(requestId: string): void {
     const entry = this.rumSemanticJournalByRequestId.get(requestId);
     if (entry) { this.releaseCompletedActionAttempt(entry); }
+    this.resolveRumSemanticApplyWaiters(requestId, false);
+  }
+
+  /** Wait for the Host to commit the DB effects represented by one Worker response. */
+  private waitForRumSemanticHostApply(requestId: string, timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        this.resolveRumSemanticApplyWaiter(requestId, resolve, false);
+      }, Math.max(1, timeoutMs)) as number;
+      const waiters = this.rumSemanticApplyWaiters.get(requestId) || [];
+      waiters.push({ timeoutId, resolve });
+      this.rumSemanticApplyWaiters.set(requestId, waiters);
+    });
+  }
+
+  private resolveRumSemanticApplyWaiter(
+    requestId: string,
+    target: (applied: boolean) => void,
+    applied: boolean
+  ): void {
+    const waiters = this.rumSemanticApplyWaiters.get(requestId);
+    if (!waiters) {
+      return;
+    }
+    for (let i = 0; i < waiters.length; i++) {
+      const waiter = waiters[i];
+      if (waiter.resolve !== target) {
+        continue;
+      }
+      waiters.splice(i, 1);
+      clearTimeout(waiter.timeoutId);
+      if (waiters.length === 0) {
+        this.rumSemanticApplyWaiters.delete(requestId);
+      }
+      target(applied);
+      return;
+    }
+  }
+
+  private resolveRumSemanticApplyWaiters(requestId: string, applied: boolean): void {
+    const waiters = this.rumSemanticApplyWaiters.get(requestId);
+    if (!waiters || waiters.length === 0) {
+      return;
+    }
+    this.rumSemanticApplyWaiters.delete(requestId);
+    for (let i = 0; i < waiters.length; i++) {
+      clearTimeout(waiters[i].timeoutId);
+      waiters[i].resolve(applied);
+    }
+  }
+
+  private cancelRumSemanticApplyWaiters(): void {
+    const requestIds = Array.from(this.rumSemanticApplyWaiters.keys());
+    for (let i = 0; i < requestIds.length; i++) {
+      this.resolveRumSemanticApplyWaiters(requestIds[i], false);
+    }
   }
 
   private releaseCompletedActionAttempt(entry: RumSemanticJournalEntry): void {
@@ -1236,6 +1300,40 @@ export class FTRUMInnerManager {
     this.registerRumSemanticRequest(workerRequest);
   }
 
+  /**
+   * A crash cannot wait for the normal one-second aggregation timer. Force all
+   * queued counter deltas through the Event Worker and wait until its Host-side
+   * database application has completed.
+   */
+  private async flushRumCountersForCrash(): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+    if (this.rumCounterFlushTimer !== null) {
+      clearTimeout(this.rumCounterFlushTimer);
+      this.rumCounterFlushTimer = null;
+    }
+    this.flushRumCounterUpdateBatch('rum.crash.counter', true);
+
+    const traceName = this.nextRumEventTaskName('rum.crash.counter.flush');
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now()
+    };
+    const waitForApply = this.waitForRumSemanticHostApply(workerRequest.id, 2000);
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
+      this.resolveRumSemanticApplyWaiters(workerRequest.id, false);
+      FTInnerLogger.w(TAG, 'Crash counter flush could not be posted before View finalization');
+      return false;
+    }
+    this.registerRumSemanticRequest(workerRequest);
+    return await waitForApply;
+  }
+
   private scheduleRumCounterFlush(delayMs: number = 1000): void {
     if (!this.context) {
       return;
@@ -1701,7 +1799,7 @@ export class FTRUMInnerManager {
    * Insert view data 
    * Call FTTrackInner.rum() to store and sync data
    */
-  private insertView(viewBean: ViewBean): void {
+  private insertView(viewBean: ViewBean, persistedCallback: RunnerCompleteCallBack | null = null): void {
     try {
       // Build tags and fields
       const tagsMap = new Map<string, string>();
@@ -1866,6 +1964,9 @@ export class FTRUMInnerManager {
           if (self.context) {
             self.acknowledgePersistedViewAfterComplete(self.context, this.snapshot);
           }
+          if (persistedCallback) {
+            persistedCallback.onComplete();
+          }
         }
       }
       
@@ -1886,6 +1987,54 @@ export class FTRUMInnerManager {
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
       // Remove from both sets if insert failed, so it can be retried
+    }
+  }
+
+  /**
+   * Finalize a crash in this process only. Recovery reports have no live
+   * predecessor View to close or refresh.
+   */
+  private async finalizeCurrentCrashViewAfterError(): Promise<void> {
+    const countersApplied = await this.flushRumCountersForCrash();
+    if (!countersApplied) {
+      FTInnerLogger.w(TAG, 'Crash View finalization continued without a confirmed counter flush');
+    }
+    const currentView = this.activeView;
+    if (!currentView) {
+      return;
+    }
+    const viewId = currentView.getId();
+    if (!currentView.isClose()) {
+      await this.stopView({}, false);
+    }
+    if (!this.context) {
+      return;
+    }
+    const viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, viewId);
+    if (!viewBean) {
+      FTInnerLogger.w(TAG, 'Crash View snapshot unavailable');
+      return;
+    }
+    const persisted = await new Promise<boolean>((resolve) => {
+      let completed = false;
+      const finish = (success: boolean): void => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        clearTimeout(timeoutId);
+        resolve(success);
+      };
+      const timeoutId = setTimeout(() => finish(false), 2000) as number;
+      class CrashViewPersistCallback implements RunnerCompleteCallBack {
+        onComplete(): void {
+          finish(true);
+        }
+      }
+      this.insertView(viewBean, new CrashViewPersistCallback());
+    });
+    if (!persisted) {
+      FTInnerLogger.w(TAG, 'Crash View was not persisted before termination');
     }
   }
 
@@ -2015,6 +2164,7 @@ export class FTRUMInnerManager {
     this.rumSemanticJournal = [];
     this.rumSemanticJournalHead = 0;
     this.rumSemanticJournalByRequestId.clear();
+    this.cancelRumSemanticApplyWaiters();
     this.rumSemanticSequence = 0;
     this.committedRumSemanticResponseIds.clear();
     this.committedRumSemanticResponseOrder = [];
@@ -2438,7 +2588,10 @@ export class FTRUMInnerManager {
   /**
    * Stop view
    */
-  public async stopView(property: Record<string, object> = {}): Promise<void> {
+  public async stopView(
+    property: Record<string, object> = {},
+    shouldGenerateSummary: boolean = true
+  ): Promise<void> {
     // Use Promise-based lock to ensure thread-safe view operations
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
@@ -2473,7 +2626,7 @@ export class FTRUMInnerManager {
       
       // Store view name before closing
       const viewName = this.activeView.getViewName();
-      await this.closeView(this.activeView);
+      await this.closeView(this.activeView, shouldGenerateSummary);
       FTInnerLogger.d(TAG, `stopView success: ${viewName}`);
       
       } catch (error) {
@@ -3550,7 +3703,17 @@ export class FTRUMInnerManager {
           self.increaseError(allTags);
           const completeError = (): void => {
             if (actualCallBack != null) {
-              self.stopViewAfterErrorCallback(actualCallBack);
+              if (crashFreeDuration === undefined || crashFreeDuration === null || crashFreeDuration.isPreCrash) {
+                actualCallBack.onComplete();
+                return;
+              }
+              self.finalizeCurrentCrashViewAfterError()
+                .catch((error: Error): void => {
+                  FTInnerLogger.e(TAG, `Crash View finalization failed: ` + error.message);
+                })
+                .then((): void => {
+                  actualCallBack.onComplete();
+                });
             }
           };
           if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
@@ -3998,7 +4161,7 @@ export class FTRUMInnerManager {
   /**
    * Close view
    */
-  private async closeView(activeViewBean: ActiveViewBean): Promise<void> {
+  private async closeView(activeViewBean: ActiveViewBean, shouldGenerateSummary: boolean = true): Promise<void> {
     try {
       // Capture the final View-scoped sample before stopping its monitor.
       await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
@@ -4037,12 +4200,14 @@ export class FTRUMInnerManager {
         }
       }
       
-      // Generate RUM data (aligned with Android)
-      // This will call generateViewSum() which queries from database with latest view_update_time
-      // Note: Android also calls generateRumData() immediately without waiting for database write
-      // The 100ms debounce in generateRumData() gives time for database writes to complete
-      this.generateRumData();
-      FTInnerLogger.d(TAG, `closeView scheduled generateRumData: ${activeViewBean.getViewName()}`);
+      if (shouldGenerateSummary) {
+        // Generate RUM data (aligned with Android)
+        // This will call generateViewSum() which queries from database with latest view_update_time
+        // Note: Android also calls generateRumData() immediately without waiting for database write
+        // The 100ms debounce in generateRumData() gives time for database writes to complete
+        this.generateRumData();
+        FTInnerLogger.d(TAG, `closeView scheduled generateRumData: ${activeViewBean.getViewName()}`);
+      }
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error closing view: ${error}`);
@@ -4570,10 +4735,10 @@ export class FTRUMInnerManager {
     
     // Update memory count if activeAction/activeView exists
     // This updates the in-memory count for immediate use
-    if (this.activeView) {
+    if (this.activeView && this.activeView.getId() === viewId) {
       this.activeView.increaseErrorCount();
     }
-    if (this.activeAction) {
+    if (this.activeAction && this.activeAction.getId() === actionId) {
       this.activeAction.increaseErrorCount();
     }
     
@@ -4847,6 +5012,7 @@ export class FTRUMInnerManager {
       this.rumSemanticJournal = [];
       this.rumSemanticJournalHead = 0;
       this.rumSemanticJournalByRequestId.clear();
+      this.cancelRumSemanticApplyWaiters();
       this.committedRumSemanticResponseIds.clear();
       this.committedRumSemanticResponseOrder = [];
       this.committedRumSemanticResponseOrderHead = 0;
@@ -4879,18 +5045,6 @@ export class FTRUMInnerManager {
       return false;
     }
   }
-
-  private async stopViewAfterErrorCallback(callBack: RunnerCompleteCallBack): Promise<void> {
-    try {
-      await this.stopView();
-      FTInnerLogger.i(TAG, "View stopped after error, calling crash callback");
-      callBack.onComplete();
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to stop view after error: ${error}`);
-      callBack.onComplete();
-    }
-  }
-
 
   /**
    * Add long task

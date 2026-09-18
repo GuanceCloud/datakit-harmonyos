@@ -253,44 +253,14 @@ export class FTExceptionHandler {
       const exceptionHandler = this; // Capture reference to FTExceptionHandler instance
       class CrashCallback implements RunnerCompleteCallBack {
         onComplete(): void {
-          FTInnerLogger.i(TAG, "Crash error uploaded, now stopping view, writing to DB, and closing window");
-          
-          // Step 1: Stop current view to generate RUM data
-          // Aligned with Android: stopView(null, callBack) in addError callback
-          const rumManager = FTExceptionHandler.runtime.getRumManager();
-          rumManager.stopView().then(() => {
-            FTInnerLogger.i(TAG, "View stopped after crash");
-            
-            // Step 2: Wait a bit for data to be written to database
-            // This ensures all pending data operations complete before closing
-            FTExceptionHandler.runtime.schedule((): void => {
-              FTInnerLogger.i(TAG, "Ensuring data is written to database");
-              
-              // Step 3: Flush sync data to ensure data is written to database
-              // This triggers immediate database write and upload
-              FTExceptionHandler.runtime.flushSyncData();
-              
-              // Step 4: Wait a bit more for database write to complete
-              FTExceptionHandler.runtime.schedule((): void => {
-                FTInnerLogger.i(TAG, "Data written to database, now closing window");
-                
-                // Step 5: Close current window
-                exceptionHandler.closeCurrentWindow();
-                
-                // Step 6: Wait a bit before rethrowing exception to ensure window closes
-                FTExceptionHandler.runtime.schedule((): void => {
-                  FTInnerLogger.i(TAG, "Window closed, app will crash");
-                }, 100);
-              }, 200); // Wait 200ms for database write
-            }, 100); // Wait 100ms for view stop to complete
-          }).catch((err: Error) => {
-            FTInnerLogger.e(TAG, `Failed to stop view after crash: ${err}`);
-            // Still try to flush data and close window even if stopView fails
-            FTExceptionHandler.runtime.flushSyncData();
-            FTExceptionHandler.runtime.schedule((): void => {
-              exceptionHandler.closeCurrentWindow();
-            }, 200);
-          });
+          // addErrorInternal already completed the crash barrier: Error and
+          // counter deltas are durable, and the closed View snapshot has been
+          // placed in the local cache. Do not stop the View again here.
+          FTInnerLogger.i(TAG, 'Crash RUM finalization completed; flushing before window termination');
+          FTExceptionHandler.runtime.flushSyncData();
+          FTExceptionHandler.runtime.schedule((): void => {
+            exceptionHandler.closeCurrentWindow();
+          }, 200);
         }
       }
       

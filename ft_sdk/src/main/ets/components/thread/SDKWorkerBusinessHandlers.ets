@@ -1838,6 +1838,12 @@ function applyRumErrorDelta(state: SDKWorkerRuntimeState, viewId: string, action
   const delta = getOrCreateRumCounterDelta(state, viewId || '', actionId || '');
   delta.viewErrorDelta += viewId && viewId.length > 0 ? 1 : 0;
   delta.actionErrorDelta += actionId && actionId.length > 0 ? 1 : 0;
+  if (viewId && viewId.length > 0) {
+    // A View summary is a persisted aggregate. Error-only changes must make
+    // the associated View eligible for a newer snapshot as well.
+    delta.viewUpdateTimeDelta += 1;
+    state.rumCounterNeedsRumDataGenerate = true;
+  }
   state.rumCounterNeedsActionCloseCheck = true;
   state.rumCounterPendingEventCount++;
 }
@@ -2145,6 +2151,10 @@ function applyRumCounterUpdate(
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
     delta.viewErrorDelta += viewId.length > 0 ? count : 0;
     delta.actionErrorDelta += actionId.length > 0 ? count : 0;
+    if (viewId.length > 0) {
+      delta.viewUpdateTimeDelta += count;
+      state.rumCounterNeedsRumDataGenerate = true;
+    }
     state.rumCounterNeedsActionCloseCheck = true;
     state.rumCounterPendingEventCount += count;
   } else if (updateType === 'resource.complete') {
