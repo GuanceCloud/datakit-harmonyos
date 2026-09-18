@@ -3,6 +3,7 @@ import { FTCacheEnvelope, FTCacheFiles, FTCacheMutation } from '../../main/ets/c
 import { FTRumFileStore, FTRumStoreAccess } from '../../main/ets/components/db/FTRumFileStore';
 import { FTDBTaskPoolRumCounterDeltaDTO } from '../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBeanJSON } from '../../main/ets/components/db/bean/ViewBean';
+import { ActionBeanJSON } from '../../main/ets/components/db/bean/ActionBean';
 
 class MemoryAggregateAccess implements FTRumStoreAccess {
   readonly records: Map<string, string> = new Map<string, string>();
@@ -31,6 +32,15 @@ function newView(): ViewBeanJSON {
     actionCount: 0, errorCount: 0, longTaskCount: 0, viewLoadTime: 0, timeSpent: 0,
     resourceCount: 0, pendingResource: 0, dataUpdateTime: 1, dataUploadTime: 0, viewUpdateTime: 0,
     extraAttr: {}, property: {}, tags: {} };
+}
+
+function newAction(id: string = 'a', viewId: string = 'v'): ActionBeanJSON {
+  return {
+    id, startTime: 1, actionDuration: 0, isClose: false, errorCount: 0,
+    longTaskCount: 0, resourceCount: 0, pendingResource: 0, sessionId: 's',
+    viewName: 'view', viewId, viewReferrer: '', actionName: 'tap',
+    actionType: 'click', extraAttr: {}
+  };
 }
 
 export default function cacheGovernanceUnitTest() {
@@ -101,6 +111,48 @@ export default function cacheGovernanceUnitTest() {
       expect(result.view?.resourceCount).assertEqual(3);
       expect(result.view?.pendingResource).assertEqual(0);
       expect(result.view?.dataUpdateTime).assertEqual(50);
+    });
+
+    it('commits an Action and its View action count together', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      await store.execute({ command: 'upsertRumView', view: newView() });
+
+      expect((await store.execute({ command: 'insertRumAction', actionBean: newAction(), now: 99 })).value).assertTrue();
+      const view = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view;
+      expect(view?.actionCount).assertEqual(1);
+      expect(view?.viewUpdateTime).assertEqual(1);
+      expect(view?.dataUpdateTime).assertEqual(99);
+      expect(access.list('action').length).assertEqual(1);
+
+      // The duplicate is rejected before any View mutation, so retrying a
+      // recovered Action cannot double-count its owning View.
+      expect((await store.execute({ command: 'insertRumAction', actionBean: newAction(), now: 100 })).value).assertFalse();
+      const afterDuplicate = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view;
+      expect(afterDuplicate?.actionCount).assertEqual(1);
+      expect(afterDuplicate?.viewUpdateTime).assertEqual(1);
+    });
+
+    it('marks a closed uploaded View as changed when an Action arrives in the same millisecond', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      view.isClose = true;
+      view.dataUpdateTime = 99;
+      view.dataUploadTime = 99;
+      await store.execute({ command: 'upsertRumView', view });
+
+      expect((await store.execute({ command: 'insertRumAction', actionBean: newAction(), now: 99 })).value).assertTrue();
+      const refreshed = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(refreshed!.dataUpdateTime).assertEqual(100);
+      expect((await store.execute({ command: 'querySumView', limit: 10 })).views?.length).assertEqual(1);
+    });
+
+    it('rejects an Action with an unavailable owning View without persisting either side', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      expect((await store.execute({ command: 'insertRumAction', actionBean: newAction() })).value).assertFalse();
+      expect(access.list('action').length).assertEqual(0);
     });
 
     it('does not report aggregate success when capacity admission fails', 0, async () => {

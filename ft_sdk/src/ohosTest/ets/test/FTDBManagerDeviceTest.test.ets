@@ -176,6 +176,30 @@ export default function ftDBManagerDeviceTest() {
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
     });
 
+    it('insertsActionAndOwningViewCountInOneTransaction', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('atomic-action-view', 'atomic-action-view', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      const action = new ActionBean('atomic-action', 'atomic action', 'click', TEST_NOW_NS);
+      action.setViewInfo(view.getViewName(), view.getId(), '');
+
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, action)).assertTrue();
+      const persistedView = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(persistedView !== null).assertTrue();
+      expect(persistedView!.getActionCount()).assertEqual(1);
+      expect(persistedView!.getViewUpdateTime()).assertEqual(view.getViewUpdateTime() + 1);
+      expect((await FTDBTaskPoolExecutor.querySumAction(context, 10))
+        .some(item => item.getId() === action.getId())).assertTrue();
+
+      // A View-qualified Action cannot be accepted alone. This prevents a
+      // restart/retry from creating the mismatch this transaction fixes.
+      const unavailableViewAction = new ActionBean('missing-view-action', 'missing view', 'click', TEST_NOW_NS);
+      unavailableViewAction.setViewInfo('missing', 'missing-view', '');
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, unavailableViewAction)).assertFalse();
+      expect((await FTDBTaskPoolExecutor.querySumAction(context, 10))
+        .some(item => item.getId() === unavailableViewAction.getId())).assertFalse();
+    });
+
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {
       const context = await DBAssert.getAppContext();
       const actionId = 'pending-resource-action';

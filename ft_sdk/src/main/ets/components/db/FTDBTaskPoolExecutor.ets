@@ -785,7 +785,11 @@ export class FTDBTaskPoolExecutor {
   public static async insertRumAction(context: Context, actionBean: ActionBean): Promise<boolean> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.INSERT_RUM_ACTION,
-      actionBean: actionBean.toJSON()
+      actionBean: actionBean.toJSON(),
+      // The Action row and its View aggregate are committed together.  Keep
+      // this timestamp on the request so all cache backends advance the View
+      // version with the same write.
+      now: Date.now()
     });
     return response.value === true;
   }

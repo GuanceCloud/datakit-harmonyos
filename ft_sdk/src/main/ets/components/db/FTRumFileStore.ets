@@ -37,10 +37,30 @@ export class FTRumFileStore {
         response.value = !!request.view && (request.command === 'upsertRumView' || !!this.view(request.view!.id));
         if (response.value && request.view) { this.put(changes, 'view', request.view.id, request.view); }
         break;
-      case 'insertRumAction':
-        response.value = !!request.actionBean && !this.action(request.actionBean!.id);
-        if (response.value && request.actionBean) { this.put(changes, 'action', request.actionBean.id, request.actionBean); }
+      case 'insertRumAction': {
+        const actionBean = request.actionBean;
+        const actionView = actionBean && actionBean.viewId ? this.view(actionBean.viewId) : null;
+        response.value = !!actionBean && !this.action(actionBean!.id);
+        // Match SQLite's all-or-nothing contract: an Action that names a
+        // View is not durable unless that View's action count advances too.
+        if (response.value && actionBean && actionBean.viewId && !actionView) {
+          response.value = false;
+        }
+        if (response.value && actionBean) {
+          this.put(changes, 'action', actionBean.id, actionBean);
+          if (actionView) {
+            actionView.actionCount++;
+            actionView.viewUpdateTime++;
+            actionView.dataUpdateTime = Math.max(
+              now,
+              actionView.dataUpdateTime + 1,
+              actionView.dataUploadTime + 1
+            );
+            this.put(changes, 'view', actionView.id, actionView);
+          }
+        }
         break;
+      }
       case 'closeRumView':
         response.value = view !== null;
         if (view) {

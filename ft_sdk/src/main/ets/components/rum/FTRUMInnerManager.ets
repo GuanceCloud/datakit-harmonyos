@@ -4064,9 +4064,9 @@ export class FTRUMInnerManager {
       this.increaseActionCount(actionBean.getViewId());
       this.submitCompletedActionWorkerInput(actionBean, `rum.addAction:${actionName}`);
     } else {
-      // Increase action count
-      this.increaseActionCount(actionBean.getViewId());
-      // startAction: First stores to FT_TABLE_ACTION, then enters FT_SYNC_DATA_FLAT_TABLE_NAME after closing
+      // startAction atomically stores the Action and increments the persisted
+      // View aggregate.  Do not enqueue the old independent counter update:
+      // a C++ crash could otherwise persist the Action before that update.
       if (this.context) {
         this.insertRumActionAsync(this.context, actionBean, actionName);
       } else {
@@ -4087,6 +4087,10 @@ export class FTRUMInnerManager {
       const result = await insertion;
       if (!result) {
         FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-5] startAction insertion failed: ${actionName}`);
+      } else {
+        // The RDB transaction is authoritative. Mirror its committed count
+        // in the active View only after both Action and aggregate succeeded.
+        this.increaseActionCountInMemory(actionBean.getViewId());
       }
     } finally {
       if (this.pendingActionInsertions.get(actionId) === insertion) {
