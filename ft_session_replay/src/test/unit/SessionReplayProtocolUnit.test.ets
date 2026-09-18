@@ -1,8 +1,12 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ANDROID_REPLAY_ENDPOINTS,
+  createAndroidReplayMobileSegment,
   createReplayEnvelope,
+  ReplayImageWireframe,
   ReplayRecordType,
+  ReplayMutationData,
+  ReplayViewportData,
   serializeReplayEnvelope,
   SessionReplayRecord
 } from '../../main/ets/components/SessionReplayProtocol';
@@ -77,6 +81,77 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.getErrorSampleWindowMs()).assertEqual(60000);
     });
 
+    it('serializes visual shape, text and resource-backed image wireframes', 0, () => {
+      const records: Array<SessionReplayRecord> = [{
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: {
+          wireframes: [
+            {
+              id: 1, x: 0, y: 0, width: 1080, height: 2400, type: 'shape',
+              shapeStyle: {
+                backgroundColor: '#FFFFFFFF',
+                opacity: 1,
+                cornerRadius: 8.5,
+                backgroundGradient: {
+                  kind: 'linear', colors: ['#112233FF', '#445566FF'], stops: [0, 1], angle: 90
+                },
+                shadow: { color: '#00000066', offsetX: 0, offsetY: 2, blurRadius: 8 },
+                transform: { scaleX: 1, scaleY: 1 },
+                visible: true
+              },
+              zIndex: 3
+            },
+            {
+              id: 2, x: 40, y: 80, width: 600, height: 48, type: 'text', text: 'Replay title',
+              textStyle: {
+                family: 'HarmonyOS Sans, sans-serif', size: 20, color: '#1F2937FF', weight: 700,
+                lineHeight: 28, letterSpacing: 0.5, decoration: 'underline'
+              }
+            },
+            {
+              id: 3, x: 40, y: 160, width: 72, height: 72, type: 'image',
+              resourceId: 'a'.repeat(64), mimeType: 'image/png', isEmpty: false,
+              imageStyle: { objectFit: 'contain', tintColor: '#FFFFFFFF' }
+            }
+          ]
+        }
+      }];
+      const payload = serializeReplayEnvelope({
+        applicationId: 'visual-app', sessionId: 'visual-session', viewId: 'visual-view'
+      }, records);
+      expect(payload.includes('"type":"shape"')).assertTrue();
+      expect(payload.includes('"type":"text"')).assertTrue();
+      expect(payload.includes('"type":"image"')).assertTrue();
+      expect(payload.includes('"resourceId":"' + 'a'.repeat(64) + '"')).assertTrue();
+      expect(payload.includes('"weight":700')).assertTrue();
+      expect(payload.includes('"backgroundGradient"')).assertTrue();
+      expect(payload.includes('"cornerRadius":8.5')).assertTrue();
+      expect(payload.includes('"zIndex":3')).assertTrue();
+      expect(payload.includes('"objectFit":"contain"')).assertTrue();
+    });
+
+    it('converts the persisted envelope into Studio\'s Android mobile segment', 0, () => {
+      const older: SessionReplayRecord = {
+        timestamp: 1700000000000, type: ReplayRecordType.META, data: { width: 100, height: 100 }
+      };
+      const newer: SessionReplayRecord = {
+        timestamp: 1700000000100, type: ReplayRecordType.FULL_SNAPSHOT, data: { wireframes: [] }
+      };
+      const segment = createAndroidReplayMobileSegment({
+        applicationId: 'app-id', sessionId: 'session-id', viewId: 'view-id', globalContext: { release: 1 }
+      }, [newer, older]);
+      expect(segment.application.id).assertEqual('app-id');
+      expect(segment.session.id).assertEqual('session-id');
+      expect(segment.view.id).assertEqual('view-id');
+      expect(segment.source).assertEqual('harmonyos');
+      expect(segment.start).assertEqual(1700000000000);
+      expect(segment.end).assertEqual(1700000000100);
+      expect(segment.records_count).assertEqual(2);
+      expect(segment.has_full_snapshot).assertTrue();
+      expect(segment.records[0].timestamp).assertEqual(1700000000000);
+    });
+
     it('uses Android native record types for view lifecycle and mutations', 0, () => {
       const processor = new ReplaySnapshotProcessor();
       const fullSnapshot: SessionReplayRecord = {
@@ -97,7 +172,11 @@ export default function sessionReplayProtocolUnitTest() {
       const startRecords = processor.createViewStartRecords(fullSnapshot);
       expect(startRecords[0].type).assertEqual(4);
       expect(startRecords[1].type).assertEqual(6);
-      expect(startRecords[2].type).assertEqual(10);
+      expect(startRecords[2].type).assertEqual(8);
+      expect(startRecords[3].type).assertEqual(10);
+      const viewport = startRecords[2].data as ReplayViewportData;
+      expect(viewport.width).assertEqual(100);
+      expect(viewport.height).assertEqual(100);
 
       const changedSnapshot: SessionReplayRecord = {
         timestamp: 1700000000100,
@@ -120,6 +199,126 @@ export default function sessionReplayProtocolUnitTest() {
       processor.setFullSnapshotBaseline(changedSnapshot);
       expect(processor.createMutationRecord(changedSnapshot) === null).assertTrue();
       expect(processor.createViewEndRecord().type).assertEqual(7);
+    });
+
+    it('uses typed updates when visual wireframes change', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const first: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 7, x: 0, y: 0, width: 100, height: 100, type: 'shape',
+          shapeStyle: { backgroundColor: '#FFFFFFFF' }, zIndex: 1
+        }] }
+      };
+      processor.setFullSnapshotBaseline(first);
+      const second: SessionReplayRecord = {
+        timestamp: 1700000000100,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 7, x: 8, y: 0, width: 100, height: 100, type: 'shape',
+          shapeStyle: { backgroundColor: '#0A59F7FF' }, zIndex: 4
+        }] }
+      };
+      const mutation = processor.createMutationRecord(second);
+      expect(mutation !== null).assertTrue();
+      const mutationData = mutation?.data as ReplayMutationData;
+      expect(mutationData.updates.length).assertEqual(1);
+      expect(mutationData.updates[0].type).assertEqual('shape');
+      expect(mutationData.updates[0].x).assertEqual(8);
+      expect(mutationData.updates[0].zIndex).assertEqual(4);
+      expect(mutationData.updates[0].shapeStyle?.backgroundColor).assertEqual('#0A59F7FF');
+    });
+
+    it('preserves native text insets and alignment in Android wireframes', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const first: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
+          textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
+          textPosition: {
+            padding: { top: 12, right: 16, bottom: 12, left: 16 },
+            alignment: { horizontal: 'center', vertical: 'center' }
+          }
+        }] }
+      };
+      processor.setFullSnapshotBaseline(first);
+      const second: SessionReplayRecord = {
+        timestamp: 1700000000100,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
+          textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
+          textPosition: {
+            padding: { top: 12, right: 16, bottom: 12, left: 16 },
+            alignment: { horizontal: 'right', vertical: 'center' }
+          }
+        }] }
+      };
+      const mutation = processor.createMutationRecord(second);
+      expect(mutation !== null).assertTrue();
+      const mutationData = mutation?.data as ReplayMutationData;
+      expect(mutationData.updates.length).assertEqual(1);
+      expect(mutationData.updates[0].type).assertEqual('text');
+      expect(mutationData.updates[0].textPosition?.padding?.left).assertEqual(16);
+      expect(mutationData.updates[0].textPosition?.alignment?.horizontal).assertEqual('right');
+    });
+
+    it('replaces a visual wireframe when an optional image resource is removed', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const first: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image',
+          resourceId: 'b'.repeat(64), mimeType: 'image/png', isEmpty: false
+        }] }
+      };
+      processor.setFullSnapshotBaseline(first);
+      const masked: SessionReplayRecord = {
+        timestamp: 1700000000100,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image', isEmpty: true
+        }] }
+      };
+      const mutation = processor.createMutationRecord(masked);
+      expect(mutation !== null).assertTrue();
+      const mutationData = mutation?.data as ReplayMutationData;
+      expect(mutationData.updates.length).assertEqual(0);
+      expect(mutationData.removes.length).assertEqual(1);
+      expect(mutationData.adds.length).assertEqual(1);
+      expect((mutationData.adds[0].wireframe as ReplayImageWireframe).isEmpty).assertTrue();
+    });
+
+    it('emits image placement changes as a typed visual mutation', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const first: SessionReplayRecord = {
+        timestamp: 1700000000000,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
+          resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
+          imageStyle: { objectFit: 'contain' }
+        }] }
+      };
+      processor.setFullSnapshotBaseline(first);
+      const second: SessionReplayRecord = {
+        timestamp: 1700000000100,
+        type: ReplayRecordType.FULL_SNAPSHOT,
+        data: { wireframes: [{
+          id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
+          resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
+          imageStyle: { objectFit: 'cover' }
+        }] }
+      };
+      const mutation = processor.createMutationRecord(second);
+      expect(mutation !== null).assertTrue();
+      const mutationData = mutation?.data as ReplayMutationData;
+      expect(mutationData.updates.length).assertEqual(1);
+      expect(mutationData.updates[0].imageStyle?.objectFit).assertEqual('cover');
     });
 
     it('keeps regular and error sampling decisions independent', 0, () => {
@@ -229,9 +428,13 @@ export default function sessionReplayProtocolUnitTest() {
       expect(fields.fields.get('records_count')).assertEqual('1');
       expect(fields.fields.get('has_full_snapshot')).assertEqual('true');
       expect(fields.fields.get('source')).assertEqual('harmonyos');
+      expect(fields.fields.get('sdk_name')).assertEqual('df_harmonyos_rum_sdk');
       expect(fields.fields.get('app_id')).assertEqual('app-id');
       expect(fields.fields.get('release')).assertEqual('1');
       expect(fields.rawSegment.endsWith('\n')).assertTrue();
+      expect(fields.rawSegment.includes('"application":{"id":"app-id"}')).assertTrue();
+      expect(fields.rawSegment.includes('"source":"harmonyos"')).assertTrue();
+      expect(fields.rawSegment.includes('"application_id"')).assertFalse();
       expect(createAndroidReplayUploadUrl('https://dk.example', '', ''))
         .assertEqual('https://dk.example/v1/write/rum/replay?precision=ns');
       expect(createAndroidReplayUploadUrl('', 'https://dw.example/', 'token'))

@@ -8,8 +8,6 @@ import { isRetryableReplayUploadStatus } from './SessionReplayUploader';
 
 const CONNECT_TIMEOUT_MS = 60_000;
 const READ_TIMEOUT_MS = 60_000;
-const HARMONY_REPLAY_SDK_NAME = 'df_harmonyos_rum_sdk';
-
 export interface SessionReplayResourceUploadResult {
   success: boolean;
   code: number;

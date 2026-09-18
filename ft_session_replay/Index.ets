@@ -12,9 +12,13 @@ export {
 } from './src/main/ets/components/FTSessionReplayConfig';
 export {
   ANDROID_REPLAY_ENDPOINTS,
+  HARMONY_REPLAY_SOURCE,
   AndroidReplayEndpoints,
+  AndroidReplayEntityReference,
+  AndroidReplayMobileSegment,
   FullSnapshotData,
   ReplayFocusData,
+  ReplayImageWireframe,
   ReplayMetaData,
   ReplayMutationData,
   ReplayPointerInteractionData,
@@ -22,15 +26,27 @@ export {
   ReplayViewportData,
   ReplayViewportResizeData,
   ReplayViewEndData,
+  ReplayShapeBorder,
+  ReplayShapeStyle,
+  ReplayShapeWireframe,
+  ReplayTextAlignment,
+  ReplayTextPadding,
+  ReplayTextPosition,
+  ReplayTextStyle,
+  ReplayTextWireframe,
   SessionReplayContext,
   SessionReplayGlobalContext,
   SessionReplayEnvelope,
   SessionReplayRecord,
   ReplayWireframe,
+  ReplayWireframeBase,
+  ReplayWireframeUpdate,
   createReplayEnvelope,
-  serializeReplayEnvelope
+  serializeReplayEnvelope,
+  createAndroidReplayMobileSegment,
+  serializeAndroidReplayMobileSegment
 } from './src/main/ets/components/SessionReplayProtocol';
-export { ArkUIReplayCollector } from './src/main/ets/components/ArkUIReplayCollector';
+export { ArkUIReplayCollector, CapturedReplayImageResource } from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
 export { FTSessionReplay } from './src/main/ets/components/FTSessionReplay';

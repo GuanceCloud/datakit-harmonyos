@@ -5,12 +5,16 @@ import zlib from '@ohos.zlib';
 import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
-import { ANDROID_REPLAY_ENDPOINTS, ReplayRecordType, serializeReplayEnvelope } from './SessionReplayProtocol';
+import {
+  ANDROID_REPLAY_ENDPOINTS,
+  HARMONY_REPLAY_SOURCE,
+  ReplayRecordType,
+  serializeAndroidReplayMobileSegment
+} from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 
 const UPLOAD_CONNECT_TIMEOUT_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MS = 60_000;
-const HARMONY_REPLAY_SOURCE = 'harmonyos';
 const HARMONY_REPLAY_SDK_NAME = 'df_harmonyos_rum_sdk';
 
 /** Observable result of an explicit Replay flush. Failed segments remain local. */
@@ -100,7 +104,9 @@ export function createSessionReplayUploadFields(
       hasFullSnapshot = true;
     }
   }
-  const rawSegment = `${serializeReplayEnvelope(segment.context, records)}\n`;
+  // Android converts its persisted EnrichedRecord to MobileSegment here. The
+  // Studio player expects this final structure, not the persisted envelope.
+  const rawSegment = `${serializeAndroidReplayMobileSegment(segment.context, records)}\n`;
   const fields = new Map<string, string>();
   fields.set('start', String(start));
   fields.set('end', String(end));

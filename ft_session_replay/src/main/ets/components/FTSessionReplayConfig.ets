@@ -20,8 +20,8 @@ export enum TouchPrivacy {
 
 /**
  * POC configuration that preserves Android's public sampling and privacy
- * vocabulary. The collector is intentionally conservative: it never reads
- * text, input values, image data, or inspector payloads.
+ * vocabulary. The collector reads only whitelisted visual fields and applies
+ * these policies before any text or image bytes are retained or uploaded.
  */
 export class FTSessionReplayConfig {
   private sampleRate: number = 1;

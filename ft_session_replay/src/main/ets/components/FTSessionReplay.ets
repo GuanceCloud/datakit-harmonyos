@@ -62,7 +62,9 @@ export class FTSessionReplay {
       this.config,
       this.storage,
       this.errorSampleStorage,
-      (sessionId: string, timestamp: number): boolean => this.promoteErrorSampleResources(sessionId, timestamp)
+      (sessionId: string, timestamp: number): boolean => this.promoteErrorSampleResources(sessionId, timestamp),
+      (context: SessionReplayContext, data: Uint8Array, mimeType: string): string | null =>
+        this.queueResource(context, data, mimeType)
     );
     recorder.start();
     this.recorder = recorder;
@@ -169,6 +171,24 @@ export class FTSessionReplay {
     return this.resourceStorage === null ? null : this.resourceStorage.getRoot();
   }
 
+  /**
+   * Associates image bytes with an ArkUI Image `.id()` value or its public
+   * source string. On its next snapshot the collector persists the asset,
+   * inserts the resulting resource id into the image wireframe, and flushes
+   * it before its replay segment.
+   */
+  public registerImageAsset(
+    componentId: string,
+    data: ArrayBuffer | Uint8Array,
+    mimeType: string = 'image/png'
+  ): boolean {
+    return this.recorder === null ? false : this.recorder.registerImageAsset(componentId, data, mimeType);
+  }
+
+  public unregisterImageAsset(componentId: string): void {
+    this.recorder?.unregisterImageAsset(componentId);
+  }
+
   /** Lists error-sampled assets awaiting a same-session RUM Error promotion. */
   public getDeferredErrorResources(): Array<SessionReplayStoredResource> {
     return this.errorSampleResourceStorage === null ? [] : this.errorSampleResourceStorage.list();
@@ -259,17 +279,17 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveFocus(hasFocus);
   }
 
-  /** Records the current native viewport for the active sampled RUM View. */
+  /** Records the current native viewport in physical px for the active sampled RUM View. */
   public recordViewport(width: number, height: number, scale: number = 1): SessionReplayCapture | null {
     return this.recorder === null ? null : this.recorder.recordActiveViewport(width, height, scale);
   }
 
-  /** Records a viewport/rotation boundary and a fresh Full Snapshot when possible. */
+  /** Records a physical-px viewport/rotation boundary and a fresh Full Snapshot when possible. */
   public recordViewportResize(width: number, height: number): SessionReplayCapture | null {
     return this.recorder === null ? null : this.recorder.recordActiveViewportResize(width, height);
   }
 
-  /** Records a pointer interaction for the active RUM View when touch privacy permits it. */
+  /** Records a physical-px pointer interaction for the active RUM View when touch privacy permits it. */
   public recordTouch(
     pointerEventType: 'down' | 'up' | 'move',
     pointerId: number,
