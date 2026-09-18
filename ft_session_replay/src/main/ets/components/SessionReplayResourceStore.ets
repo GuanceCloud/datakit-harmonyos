@@ -23,6 +23,7 @@ export interface SessionReplayStoredResource {
  */
 export class SessionReplayResourceStore {
   private static readonly VERSION: number = 1;
+  private readonly replayRoot: string;
   private readonly root: string;
   private readonly dataRoot: string;
   private readonly metadataRoot: string;
@@ -35,12 +36,12 @@ export class SessionReplayResourceStore {
     if (!/^[a-z0-9_]+$/.test(directoryName)) {
       throw new Error('Session Replay resource storage directory name is invalid');
     }
-    const replayRoot = `${filesDir}/ft_session_replay`;
-    this.root = `${replayRoot}/${directoryName}`;
+    this.replayRoot = `${filesDir}/ft_session_replay`;
+    this.root = `${this.replayRoot}/${directoryName}`;
     this.dataRoot = `${this.root}/data`;
     this.metadataRoot = `${this.root}/pending`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
-    this.ensureDirectory(replayRoot);
+    this.ensureDirectory(this.replayRoot);
     this.ensureDirectory(this.root);
     this.ensureDirectory(this.dataRoot);
     this.ensureDirectory(this.metadataRoot);
@@ -53,6 +54,12 @@ export class SessionReplayResourceStore {
       return null;
     }
     try {
+      // App sandbox storage may be reclaimed after initialization. Recreate
+      // every level before writing bytes or metadata for a later snapshot.
+      this.ensureDirectory(this.replayRoot);
+      this.ensureDirectory(this.root);
+      this.ensureDirectory(this.dataRoot);
+      this.ensureDirectory(this.metadataRoot);
       const fileName = sha256(data);
       const routeKey = this.getRouteKey(context);
       const id = `${fileName}-${routeKey}`;
@@ -331,7 +338,11 @@ export class SessionReplayResourceStore {
   }
 
   private exists(path: string): boolean {
-    try { fs.accessSync(path); return true; } catch (_) { return false; }
+    try {
+      return fs.accessSync(path);
+    } catch (_) {
+      return false;
+    }
   }
 
   private ensureDirectory(path: string): void {

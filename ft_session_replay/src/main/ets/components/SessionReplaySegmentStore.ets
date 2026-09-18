@@ -250,11 +250,19 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private ensureDirectory(path: string): void {
-    try {
-      fs.accessSync(path);
-    } catch (_) {
+    if (!this.exists(path)) {
       fs.mkdirSync(path);
-      fs.accessSync(path);
+      if (!this.exists(path)) {
+        throw new Error(`Session Replay storage directory was not created: ${path}`);
+      }
+    }
+  }
+
+  private exists(path: string): boolean {
+    try {
+      return fs.accessSync(path);
+    } catch (_) {
+      return false;
     }
   }
 
