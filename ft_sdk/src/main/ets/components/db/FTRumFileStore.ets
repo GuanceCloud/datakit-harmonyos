@@ -93,7 +93,7 @@ export class FTRumFileStore {
         }
         break;
       case 'acknowledgeView':
-        response.value = this.acknowledgeView(request.view, changes);
+        response.value = this.acknowledgeView(request.view, changes, request.keepClosedView === true);
         break;
       case 'getActionInfo': response.actionInfo = action ? { startTime: action.startTime } : null; break;
       case 'getActionCounts':
@@ -235,11 +235,15 @@ export class FTRumFileStore {
   // Keep the acknowledgement conditional so a delayed upload completion cannot
   // overwrite or delete a newer View aggregate. This matches the SQLite
   // acknowledgement predicates and updates both fields atomically in one commit.
-  private acknowledgeView(snapshot: ViewBeanJSON | undefined, changes: FTCacheMutation[]): boolean {
+  private acknowledgeView(
+    snapshot: ViewBeanJSON | undefined,
+    changes: FTCacheMutation[],
+    keepClosedView: boolean = false
+  ): boolean {
     if (!snapshot || snapshot.id.length === 0) { return false; }
     const current = this.view(snapshot.id);
     if (!current || !this.matchesAcknowledgedView(current, snapshot)) { return false; }
-    if (current.isClose && current.pendingResource <= 0) {
+    if (current.isClose && current.pendingResource <= 0 && !keepClosedView) {
       changes.push({ path: this.access.path('view', current.id), body: null });
       return true;
     }

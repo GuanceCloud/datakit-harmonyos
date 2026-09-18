@@ -5,7 +5,8 @@ import {
   FTDBTaskPoolExecutor,
   FTDBTaskPoolCachePolicySnapshot,
   FTDBTaskPoolWriteOptions,
-  FTDBTaskPoolPendingRumResourceDTO
+  FTDBTaskPoolPendingRumResourceDTO,
+  FTDBTaskPoolRumCounterDeltaDTO
 } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
@@ -138,6 +139,32 @@ export default function ftDBManagerDeviceTest() {
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, closed.getId())).assertNull();
       expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
         .some(view => view.getId() === closed.getId())).assertFalse();
+    });
+
+    it('recoveredClosedViewCanBeRefreshedAfterItsFirstDurableSnapshot', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('recovered-crash-view', 'recovered-crash-view', TEST_NOW_NS);
+      view.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+
+      // The first predecessor-process View record is durable, but recovery
+      // must retain its aggregate row until the historical Error is counted.
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, view, true)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId()) !== null).assertTrue();
+      const delta: FTDBTaskPoolRumCounterDeltaDTO = {
+        viewId: view.getId(), actionId: '', viewActionDelta: 0, viewErrorDelta: 1,
+        viewLongTaskDelta: 0, viewResourceDelta: 0, viewPendingDelta: 0,
+        viewUpdateTimeDelta: 1, actionErrorDelta: 0, actionLongTaskDelta: 0,
+        actionResourceDelta: 0, actionPendingDelta: 0
+      };
+      expect(await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, [delta])).assertEqual(1);
+      const refreshed = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(refreshed !== null).assertTrue();
+      expect(refreshed!.getErrorCount()).assertEqual(1);
+      expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
+        .some(item => item.getId() === view.getId())).assertTrue();
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, refreshed!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
     });
 
     it('viewAckKeepsNewerAndUnrelatedData', 0, async () => {

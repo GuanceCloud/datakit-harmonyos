@@ -83,6 +83,37 @@ export default function cacheGovernanceUnitTest() {
       expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
     });
 
+    it('keeps a recovered closed view until its Error counter is re-emitted', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      await store.execute({ command: 'upsertRumView', view });
+      await store.execute({ command: 'closeRumView', viewId: view.id, now: 100 });
+      const closed = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(closed !== null && closed !== undefined).assertTrue();
+
+      // Recovery acknowledges the predecessor View draft, but must retain its
+      // aggregate row until the historical Error has incremented it.
+      expect((await store.execute({
+        command: 'acknowledgeView', view: closed!, keepClosedView: true
+      })).value).assertTrue();
+      const retained = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(retained !== null && retained !== undefined).assertTrue();
+
+      const errorDelta: FTDBTaskPoolRumCounterDeltaDTO = {
+        viewId: view.id, actionId: '', viewActionDelta: 0, viewErrorDelta: 1,
+        viewLongTaskDelta: 0, viewResourceDelta: 0, viewPendingDelta: 0,
+        viewUpdateTimeDelta: 1, actionErrorDelta: 0, actionLongTaskDelta: 0,
+        actionResourceDelta: 0, actionPendingDelta: 0
+      };
+      await store.execute({ command: 'applyRumCounterDeltas', counterDeltas: [errorDelta], now: 101 });
+      const refreshed = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      expect(refreshed!.errorCount).assertEqual(1);
+      expect((await store.execute({ command: 'querySumView', limit: 10 })).views?.length).assertEqual(1);
+      expect((await store.execute({ command: 'acknowledgeView', view: refreshed! })).value).assertTrue();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
+    });
+
     it('keeps a closed view with pending resources after acknowledgement', 0, async () => {
       const access = new MemoryAggregateAccess();
       const store = new FTRumFileStore(access);

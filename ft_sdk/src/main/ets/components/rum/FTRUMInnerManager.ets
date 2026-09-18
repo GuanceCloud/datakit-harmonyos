@@ -485,6 +485,12 @@ export class FTRUMInnerManager {
   private preferencesInitialized: boolean = false;
   private preferencesInitPromise: Promise<void> | null = null;
   private rumContextPersistChain: Promise<void> = Promise.resolve();
+  /**
+   * A recovered crash reports against a View from the predecessor process.
+   * Keep that closed aggregate until its final Error counter and replacement
+   * View snapshot have crossed the durable cache boundary.
+   */
+  private protectedCrashRecoveryViewIds: Set<string> = new Set<string>();
 
 
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
@@ -1991,14 +1997,115 @@ export class FTRUMInnerManager {
   }
 
   /**
-   * Finalize a crash in this process only. Recovery reports have no live
-   * predecessor View to close or refresh.
+   * Stores one exact View snapshot and waits until its Line Protocol draft is
+   * durable in the local cache. This is intentionally used only by terminal
+   * crash paths; normal View collection remains debounced and batched.
    */
-  private async finalizeCurrentCrashViewAfterError(): Promise<void> {
+  private async persistCrashViewSnapshot(viewBean: ViewBean): Promise<boolean> {
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (persisted: boolean): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(persisted);
+      };
+      const timeoutId = setTimeout(() => {
+        finish(false);
+      }, 2000) as number;
+      class CrashViewPersistCallback implements RunnerCompleteCallBack {
+        onComplete(): void {
+          finish(true);
+        }
+      }
+      this.insertView(viewBean, new CrashViewPersistCallback());
+    });
+  }
+
+  private async persistCrashViewById(viewId: string): Promise<boolean> {
+    if (!this.context || viewId.length === 0) {
+      return false;
+    }
+    const viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, viewId);
+    if (!viewBean) {
+      FTInnerLogger.w(TAG, `Crash View snapshot unavailable: viewId=${viewId}`);
+      return false;
+    }
+    return await this.persistCrashViewSnapshot(viewBean);
+  }
+
+  /** Closes a predecessor-process View before re-emitting its updated counters. */
+  private async persistRecoveredCrashView(
+    recoveryContext: FTRUMCrashRecoveryContext,
+    crashTime: number
+  ): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+    let viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, recoveryContext.viewId);
+    if (!viewBean) {
+      FTInnerLogger.w(TAG, `Recovered crash View was already cleaned: viewId=${recoveryContext.viewId}`);
+      return false;
+    }
+    if (!viewBean.getIsClose()) {
+      const closeTime = crashTime > 0 ? crashTime : Utils.getCurrentNanoTime();
+      const timeSpent = Math.max(0, closeTime - viewBean.getStartTime());
+      await FTDBTaskPoolExecutor.closeRumView(
+        this.context,
+        viewBean.getId(),
+        viewBean.getViewLoadTime(),
+        timeSpent,
+        viewBean.getAttrJsonString(),
+        viewBean.getSessionId()
+      );
+      await FTDBTaskPoolExecutor.updateViewUpdateTime(this.context, viewBean.getId());
+      const closedView = await FTDBTaskPoolExecutor.queryRumViewById(this.context, recoveryContext.viewId);
+      if (!closedView) {
+        return false;
+      }
+      viewBean = closedView;
+    }
+    return await this.persistCrashViewSnapshot(viewBean);
+  }
+
+  /**
+   * Terminal errors need a durable ordering that ordinary RUM events do not:
+   * Error draft -> counters -> closed View draft -> process termination. A
+   * recovered crash never closes the new process View; it refreshes only its
+   * predecessor-process View.
+   */
+  private async finalizeCrashViewAfterError(
+    isPreCrash: boolean,
+    recoveryContext: FTRUMCrashRecoveryContext | null,
+    crashTime: number
+  ): Promise<void> {
     const countersApplied = await this.flushRumCountersForCrash();
     if (!countersApplied) {
       FTInnerLogger.w(TAG, 'Crash View finalization continued without a confirmed counter flush');
     }
+
+    if (isPreCrash) {
+      if (recoveryContext !== null) {
+        const persisted = await this.persistRecoveredCrashView(recoveryContext, crashTime);
+        if (!persisted) {
+          FTInnerLogger.w(TAG, `Recovered crash View was not persisted: viewId=${recoveryContext.viewId}`);
+        } else if (this.context) {
+          // insertView schedules its acknowledgement before resolving the
+          // crash-persist callback. The DB lane serializes this cleanup after
+          // that acknowledgement, so the re-emitted aggregate is durable
+          // before its predecessor row is finally discarded.
+          try {
+            await FTDBTaskPoolExecutor.cleanCloseViewData(this.context, [recoveryContext.viewId]);
+          } catch (error) {
+            FTInnerLogger.w(TAG, `Recovered crash View cleanup deferred: viewId=${recoveryContext.viewId}, error=${error}`);
+          }
+        }
+      }
+      return;
+    }
+
     const currentView = this.activeView;
     if (!currentView) {
       return;
@@ -2007,34 +2114,9 @@ export class FTRUMInnerManager {
     if (!currentView.isClose()) {
       await this.stopView({}, false);
     }
-    if (!this.context) {
-      return;
-    }
-    const viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, viewId);
-    if (!viewBean) {
-      FTInnerLogger.w(TAG, 'Crash View snapshot unavailable');
-      return;
-    }
-    const persisted = await new Promise<boolean>((resolve) => {
-      let completed = false;
-      const finish = (success: boolean): void => {
-        if (completed) {
-          return;
-        }
-        completed = true;
-        clearTimeout(timeoutId);
-        resolve(success);
-      };
-      const timeoutId = setTimeout(() => finish(false), 2000) as number;
-      class CrashViewPersistCallback implements RunnerCompleteCallBack {
-        onComplete(): void {
-          finish(true);
-        }
-      }
-      this.insertView(viewBean, new CrashViewPersistCallback());
-    });
+    const persisted = await this.persistCrashViewById(viewId);
     if (!persisted) {
-      FTInnerLogger.w(TAG, 'Crash View was not persisted before termination');
+      FTInnerLogger.w(TAG, `Crash View was not persisted before termination: viewId=${viewId}`);
     }
   }
 
@@ -2062,7 +2144,11 @@ export class FTRUMInnerManager {
 
   private async acknowledgePersistedViewAfterComplete(context: Context, snapshot: ViewBean): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot);
+      // Capture this before awaiting: the recovered Error callback clears the
+      // persisted context immediately after its replacement View draft is
+      // cached, while this acknowledgement may still be queued behind it.
+      const keepClosedView = this.protectedCrashRecoveryViewIds.has(snapshot.getId());
+      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot, keepClosedView);
       if (!success) {
         // The database contains a newer state. Ensure it is serialized even if
         // its earlier generation request overlapped the previous summary pass.
@@ -2204,6 +2290,7 @@ export class FTRUMInnerManager {
     this.preferencesInitialized = false;
     this.preferencesInitPromise = null;
     this.rumContextPersistChain = Promise.resolve();
+    this.protectedCrashRecoveryViewIds.clear();
   }
   
   /**
@@ -2328,6 +2415,12 @@ export class FTRUMInnerManager {
 
       FTInnerLogger.i(TAG, `Retrieved saved RUM context: viewId=${viewId}, viewName=${viewName}, sessionId=${sessionId}`);
       const result: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
+      // This API is reached only after a Native Crash/APP_FREEZE record was
+      // accepted for recovery. Keep its predecessor View until the Error
+      // counter and refreshed View snapshot are durable.
+      if (hasFTRUMCrashRecoveryContext(result)) {
+        this.protectedCrashRecoveryViewIds.add(result.viewId);
+      }
       return result;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2367,6 +2460,7 @@ export class FTRUMInnerManager {
       await store.delete(FTRUMInnerManager.KEY_VIEW_REFERRER);
       await store.delete(FTRUMInnerManager.KEY_SESSION_ID);
       await store.flush();
+      this.protectedCrashRecoveryViewIds.clear();
       FTInnerLogger.d(TAG, "Saved RUM context cleared");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2641,7 +2735,7 @@ export class FTRUMInnerManager {
     });
     await this.viewOperationLock;
   }
-  
+
   /**
    * Update current view load time
    * @param duration Load time in nanoseconds
@@ -2816,6 +2910,21 @@ export class FTRUMInnerManager {
       viewReferrer: this.activeView?.getViewReferrer() || '',
       actionId,
       actionName,
+      rumAppId: this.getSemanticRumAppId(),
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
+    };
+  }
+
+  private createCrashRecoveryResourceContext(
+    recoveryContext: FTRUMCrashRecoveryContext
+  ): SDKRumResourceContextDTO {
+    return {
+      sessionId: recoveryContext.sessionId,
+      viewId: recoveryContext.viewId,
+      viewName: recoveryContext.viewName,
+      viewReferrer: recoveryContext.viewReferrer,
+      actionId: '',
+      actionName: '',
       rumAppId: this.getSemanticRumAppId(),
       dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
     };
@@ -3538,9 +3647,9 @@ export class FTRUMInnerManager {
   ): Promise<void> {
     const actualDateline = dateline !== undefined ? dateline : Utils.getCurrentNanoTime();
     const actualProperty = property !== undefined ? property : null;
+    const actualCallBack = callBack !== undefined ? callBack : null;
     const validRecoveryContext: FTRUMCrashRecoveryContext | null =
       hasFTRUMCrashRecoveryContext(recoveryContext) ? recoveryContext as FTRUMCrashRecoveryContext : null;
-    const actualCallBack = callBack !== undefined ? callBack : null;
     try {
       // Refresh session
       this.checkSessionRefresh(true);
@@ -3608,7 +3717,8 @@ export class FTRUMInnerManager {
       effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
 
 	      if (actualCallBack === null && crashFreeDuration === undefined) {
-	        const context = this.createCurrentResourceContext();
+	        const context = validRecoveryContext !== null ?
+	          this.createCrashRecoveryResourceContext(validRecoveryContext) : this.createCurrentResourceContext();
 	        this.increaseErrorMemoryCount(context);
 	        this.submitErrorWorkerCommand({
 	          context,
@@ -3703,13 +3813,15 @@ export class FTRUMInnerManager {
           self.increaseError(allTags);
           const completeError = (): void => {
             if (actualCallBack != null) {
-              if (crashFreeDuration === undefined || crashFreeDuration === null || crashFreeDuration.isPreCrash) {
+              if (crashFreeDuration === undefined || crashFreeDuration === null) {
                 actualCallBack.onComplete();
                 return;
               }
-              self.finalizeCurrentCrashViewAfterError()
+              const isPreCrash = crashFreeDuration !== undefined && crashFreeDuration !== null &&
+                crashFreeDuration.isPreCrash;
+              self.finalizeCrashViewAfterError(isPreCrash, validRecoveryContext, actualDateline)
                 .catch((error: Error): void => {
-                  FTInnerLogger.e(TAG, `Crash View finalization failed: ` + error.message);
+                  FTInnerLogger.e(TAG, `Crash View finalization failed: ${error.message}`);
                 })
                 .then((): void => {
                   actualCallBack.onComplete();
@@ -5027,6 +5139,7 @@ export class FTRUMInnerManager {
       this.rumConfig = null;
       this.preferencesStore = null;
       this.preferencesInitialized = false;
+      this.protectedCrashRecoveryViewIds.clear();
     } catch (error) {
       FTInnerLogger.e(TAG, `Error during shutdown: ${error}`);
     }

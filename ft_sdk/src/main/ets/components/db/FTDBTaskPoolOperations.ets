@@ -213,6 +213,7 @@ interface FTDBTaskPoolRequest {
   attr?: string;
   newSessionId?: string;
   dateTime?: number;
+  keepClosedView?: boolean;
   force?: boolean;
   target?: string;
   ids?: string[];
@@ -464,7 +465,11 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
           request.dateTime || 0
         ));
       case FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW:
-        return okResponse(undefined, await acknowledgeViewInTaskPool(rdbStore, request.view));
+        return okResponse(undefined, await acknowledgeViewInTaskPool(
+          rdbStore,
+          request.view,
+          request.keepClosedView === true
+        ));
       case FTDBTaskPoolCommand.INCREASE_VIEW_ACTION:
         return okCountResponse(await increaseViewActionInTaskPool(rdbStore, request.viewId || ''));
       case FTDBTaskPoolCommand.GET_RUM_PENDING_RESOURCE:
@@ -2008,7 +2013,8 @@ async function updateViewUploadTimeInTaskPool(
 // snapshot, and delete it in the same transaction after successful persistence.
 async function acknowledgeViewInTaskPool(
   rdbStore: relationalStore.RdbStore,
-  view: ViewBeanJSON | undefined
+  view: ViewBeanJSON | undefined,
+  keepClosedView: boolean = false
 ): Promise<boolean> {
   if (!view || view.id.length === 0) return false;
   const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -2029,7 +2035,7 @@ async function acknowledgeViewInTaskPool(
   rdbStore.beginTransaction();
   try {
     const updated = await rdbStore.update(values, predicates);
-    if (updated > 0 && view.isClose && view.pendingResource <= 0) {
+    if (updated > 0 && view.isClose && view.pendingResource <= 0 && !keepClosedView) {
       const closed = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
       closed.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
       await rdbStore.delete(closed);

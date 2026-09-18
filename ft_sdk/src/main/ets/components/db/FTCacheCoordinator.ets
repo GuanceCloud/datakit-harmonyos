@@ -359,7 +359,9 @@ export class FTCacheCoordinator {
     if (!view || response.value !== true) { return; }
     await store.execute({ command: 'updateViewUploadTime', viewId: view.id,
       dateTime: view.isClose && view.pendingResource > 0 ? 0 : view.dataUpdateTime });
-    if (view.isClose && view.pendingResource <= 0) {
+    // Recovery keeps the predecessor View after its first cached snapshot so
+    // the historical Error counter can produce one newer View record.
+    if (view.isClose && view.pendingResource <= 0 && request.keepClosedView !== true) {
       await store.execute({ command: 'cleanCloseViewData', ids: [view.id], now: Date.now() });
     }
   }
