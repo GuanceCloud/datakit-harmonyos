@@ -93,7 +93,7 @@ export class EntryRumUploadAssert {
       if (failed) {
         const error = matches[0];
         EntryRumUploadAssert.sameTags(error, resource, VIEW_LINKS.concat(ACTION_LINKS).concat(RESOURCE_LINKS));
-        EntryRumUploadAssert.check(error.tags.get('error_type') === 'network' &&
+        EntryRumUploadAssert.check(error.tags.get('error_type') === 'network_error' &&
           error.tags.get('error_situation') === 'run', 'incorrect network error attributes');
         EntryRumUploadAssert.check(error.tags.get('resource_status') === String(status), 'error/resource status mismatch');
         if (status > 0) {

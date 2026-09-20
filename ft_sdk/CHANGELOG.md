@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.18-alpha01] - 2026-09-22
+- Added `foreground_crash_free_duration` and `background_crash_free_duration` nanosecond Fields to crash Errors. Compatible persisted snapshots support process-restart recovery; unavailable or invalid snapshots safely degrade, and a cycle resets only after its Error is stored in the local cache.
+- Aligned newly generated RUM Network Error `error_type` with Android as `network_error`; existing cached Line Protocol retains its original value and is uploaded without migration.
+- Changed upload size caps to batch targets: a first record exceeding a Host-to-Worker or HTTP batch target is sent individually instead of being locally rejected. This applies to all telemetry records, including Errors.
+- Fixed recovered Native Crash and system APP_FREEZE ANR Errors, when a valid predecessor RUM context is available, to retain the predecessor View and Session as Error Tags instead of associating a restarted-process View.
+- Fixed recovery to retain and refresh a cached predecessor View after the Error increment, so its View Error aggregate can be reported alongside the recovered Error.
+- Improved terminal crash handling to wait for pending Action and View counter application before caching the final View snapshot; an unconfirmed flush is logged and handled safely.
+
 ## [0.1.17] - 2026-09-11
 1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled. Its optional `prefix` supports a plain message prefix and DataKit-compatible allow rules for `message`, `log_source`, and HiLog `tag`/`domain`; log level remains configured through `setLogLevelFilters(...)`, and rules are evaluated before automatic logs enter the SDK queue.
 2. Added compiler-plugin-based cold-launch tracking that automatically reports process startup, AbilityStage initialization, first UIAbility creation, and first-frame timing without manual lifecycle calls.

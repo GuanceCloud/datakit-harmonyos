@@ -11,6 +11,11 @@ export interface FTNativeCrashData {
   bundleName: string;
   pid: number;
   uid: number;
+  /**
+   * HarmonyOS assigns this value per application run. Unlike `uuid`, which is
+   * a crash-stack fingerprint, it can identify one recovered crash event.
+   */
+  appRunningUniqueId?: string;
   uuid: string;
   exception: string;
   hilogSize: number;
@@ -52,7 +57,10 @@ export interface FTNativeCrashRumManager {
     state: AppState,
     property?: Record<string, object> | null,
     dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string,
+    nativeCrashRecoveryId?: string,
+    recoveryContext?: FTNativeCrashRumContext | null
   ): Promise<void>;
   clearSavedRumContext(): void;
 }

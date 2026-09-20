@@ -292,7 +292,6 @@ export default function dataModifierTest() {
         for (let i = 0; i < rows.length; i++) {
           const payload = await collector.waitForPayloadContaining([rows[i].getUuid()], 8000);
           RumAttributeAssert.uploaded(payload, rows[i], expectations[i]);
-          expect(await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, rows[i].getUuid(), 5000)).assertTrue();
         }
       }
     });

@@ -213,6 +213,7 @@ interface FTDBTaskPoolRequest {
   attr?: string;
   newSessionId?: string;
   dateTime?: number;
+  keepClosedView?: boolean;
   force?: boolean;
   target?: string;
   ids?: string[];
@@ -464,7 +465,11 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
           request.dateTime || 0
         ));
       case FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW:
-        return okResponse(undefined, await acknowledgeViewInTaskPool(rdbStore, request.view));
+        return okResponse(undefined, await acknowledgeViewInTaskPool(
+          rdbStore,
+          request.view,
+          request.keepClosedView === true
+        ));
       case FTDBTaskPoolCommand.INCREASE_VIEW_ACTION:
         return okCountResponse(await increaseViewActionInTaskPool(rdbStore, request.viewId || ''));
       case FTDBTaskPoolCommand.GET_RUM_PENDING_RESOURCE:
@@ -521,7 +526,8 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
           request.now || 0
         ));
       case FTDBTaskPoolCommand.INSERT_RUM_ACTION:
-        return okResponse(undefined, request.actionBean ? await insertRumActionInTaskPool(rdbStore, request.actionBean) : false);
+        return okResponse(undefined, request.actionBean ?
+          await insertRumActionInTaskPool(rdbStore, request.actionBean, request.now || Date.now()) : false);
       case FTDBTaskPoolCommand.CLOSE_RUM_ACTION:
         return {
           ok: true,
@@ -910,20 +916,21 @@ async function queryUploadDataInTaskPool(
         row.customDataType = storedType;
       }
       const rowBytes = estimateUploadTransportRowBytes(row);
-      if (rowBytes > maxBytes) {
-        // This row can never cross the Host-to-Worker transport boundary.
-        // Keep it cached, but do not let it block later uploadable rows.
-        result.hasMore = true;
-        result.byteLimitReached = true;
-        continue;
-      }
-      if (result.byteCount + rowBytes > maxBytes) {
+      const exceedsBatchTarget = result.byteCount + rowBytes > maxBytes;
+      if (exceedsBatchTarget && result.rows.length > 0) {
         result.hasMore = true;
         result.byteLimitReached = true;
         break;
       }
       result.rows.push(row);
       result.byteCount += rowBytes;
+      if (exceedsBatchTarget) {
+        // The target bounds normal pages only. Preserve Android's semantics:
+        // an individually large Error still crosses Host-to-Worker alone.
+        result.hasMore = true;
+        result.byteLimitReached = true;
+        break;
+      }
     }
   } finally {
     resultSet.close();
@@ -2006,7 +2013,8 @@ async function updateViewUploadTimeInTaskPool(
 // snapshot, and delete it in the same transaction after successful persistence.
 async function acknowledgeViewInTaskPool(
   rdbStore: relationalStore.RdbStore,
-  view: ViewBeanJSON | undefined
+  view: ViewBeanJSON | undefined,
+  keepClosedView: boolean = false
 ): Promise<boolean> {
   if (!view || view.id.length === 0) return false;
   const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -2027,7 +2035,7 @@ async function acknowledgeViewInTaskPool(
   rdbStore.beginTransaction();
   try {
     const updated = await rdbStore.update(values, predicates);
-    if (updated > 0 && view.isClose && view.pendingResource <= 0) {
+    if (updated > 0 && view.isClose && view.pendingResource <= 0 && !keepClosedView) {
       const closed = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
       closed.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
       await rdbStore.delete(closed);
@@ -2450,7 +2458,8 @@ async function updateViewUpdateTimeInTaskPool(
 
 async function insertRumActionInTaskPool(
   rdbStore: relationalStore.RdbStore,
-  actionBean: ActionBeanJSON
+  actionBean: ActionBeanJSON,
+  now: number
 ): Promise<boolean> {
   if (!actionBean.id || actionBean.id.length === 0) {
     return false;
@@ -2461,8 +2470,67 @@ async function insertRumActionInTaskPool(
   const values = toActionValues(actionBean);
   const pending = await countPendingRumResourcesForActionInTaskPool(rdbStore, actionBean.id);
   values[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = Math.max(actionBean.pendingResource, pending);
-  const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
-  return Number(rowId) > 0;
+  rdbStore.beginTransaction();
+  try {
+    const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
+    if (Number(rowId) <= 0) {
+      rdbStore.rollBack();
+      return false;
+    }
+
+    // startAction is durable before close/recovery can publish it.  Update
+    // the related View in this same transaction so a native process death
+    // cannot leave an Action row visible with view_action_count still zero.
+    // Actions without a View (for example cold launch) retain their existing
+    // standalone storage behavior.
+    if (actionBean.viewId && actionBean.viewId.length > 0) {
+      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+      predicates.equalTo(FTSQL.RUM_COLUMN_ID, actionBean.viewId);
+      const resultSet = await rdbStore.query(predicates, [
+        FTSQL.RUM_COLUMN_ACTION_COUNT,
+        FTSQL.RUM_VIEW_UPDATE_TIME,
+        FTSQL.RUM_DATA_UPDATE_TIME,
+        FTSQL.RUM_DATA_UPLOAD_TIME
+      ]);
+      let actionCount = 0;
+      let viewUpdateTime = 0;
+      let dataUpdateTime = 0;
+      let dataUploadTime = 0;
+      let hasView = false;
+      try {
+        if (resultSet.goToFirstRow()) {
+          hasView = true;
+          actionCount = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_COUNT));
+          viewUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME));
+          dataUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME));
+          dataUploadTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME));
+        }
+      } finally {
+        resultSet.close();
+      }
+      if (!hasView) {
+        rdbStore.rollBack();
+        return false;
+      }
+
+      const viewValues = {} as relationalStore.ValuesBucket;
+      viewValues[FTSQL.RUM_COLUMN_ACTION_COUNT] = actionCount + 1;
+      viewValues[FTSQL.RUM_VIEW_UPDATE_TIME] = viewUpdateTime + 1;
+      // querySumView uses data_update_time to decide whether a closed View
+      // must be emitted again. Keep it strictly ahead of a prior snapshot,
+      // even when the Action and upload happen in the same wall-clock ms.
+      viewValues[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(now, dataUpdateTime + 1, dataUploadTime + 1);
+      const updated = await rdbStore.update(viewValues, predicates);
+      if (updated !== 1) {
+        throw new Error(`Action View update failed: ${actionBean.viewId}`);
+      }
+    }
+    rdbStore.commit();
+    return true;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function closeRumActionInTaskPool(

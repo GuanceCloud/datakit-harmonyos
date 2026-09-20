@@ -171,7 +171,7 @@ class WebViewResourceTags {
 
 class WebViewNetworkErrorTags extends WebViewResourceTags {
   error_source: string = 'network';
-  error_type: string = 'network';
+  error_type: string = 'network_error';
 
   constructor(viewId: string, viewName: string, resourceUrl: string, resourceStatus: string) {
     super(viewId, viewName, resourceUrl, resourceStatus);

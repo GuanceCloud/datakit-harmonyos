@@ -209,6 +209,7 @@ export interface FTDBTaskPoolRequest {
   attr?: string;
   newSessionId?: string;
   dateTime?: number;
+  keepClosedView?: boolean;
   force?: boolean;
   target?: string;
   ids?: string[];
@@ -652,10 +653,15 @@ export class FTDBTaskPoolExecutor {
     return response.value === true;
   }
 
-  public static async acknowledgeView(context: Context, view: ViewBean): Promise<boolean> {
+  public static async acknowledgeView(
+    context: Context,
+    view: ViewBean,
+    keepClosedView: boolean = false
+  ): Promise<boolean> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW,
-      view: view.toJSON()
+      view: view.toJSON(),
+      keepClosedView
     });
     return response.value === true;
   }
@@ -785,7 +791,11 @@ export class FTDBTaskPoolExecutor {
   public static async insertRumAction(context: Context, actionBean: ActionBean): Promise<boolean> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.INSERT_RUM_ACTION,
-      actionBean: actionBean.toJSON()
+      actionBean: actionBean.toJSON(),
+      // The Action row and its View aggregate are committed together.  Keep
+      // this timestamp on the request so all cache backends advance the View
+      // version with the same write.
+      now: Date.now()
     });
     return response.value === true;
   }

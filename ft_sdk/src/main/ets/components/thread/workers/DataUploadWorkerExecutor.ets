@@ -34,7 +34,6 @@ import {
   DataUploadWorkerCapabilities
 } from './DataUploadWorkerCapabilities';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
   DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
@@ -271,11 +270,11 @@ export class DataUploadWorkerExecutor {
       }
       if (!prepared.rows || prepared.rows.length === 0 || !prepared.shouldExecute) {
         const hasBlockedCachedRows = prepared.queriedRows > 0 || prepared.deferredRows > 0 ||
-          prepared.oversizedRows > 0 || prepared.bodyLimitReached || prepared.transportLimitReached;
+          prepared.bodyLimitReached || prepared.transportLimitReached;
         if (hasBlockedCachedRows) {
           FTInnerLogger.w(TAG,
             `Upload page made no progress: type=${dataType}, queried=${prepared.queriedRows}, ` +
-            `deferred=${prepared.deferredRows}, oversized=${prepared.oversizedRows}, ` +
+            `deferred=${prepared.deferredRows}, ` +
             `bodyLimit=${prepared.bodyLimitReached}, transportLimit=${prepared.transportLimitReached}`);
         }
         state.hasMoreData = state.hasMoreData || prepared.roundHasMoreData;
@@ -338,10 +337,6 @@ export class DataUploadWorkerExecutor {
       if (executed.shouldUpload) {
         this.logPreparedUpload(dataType, executed.packageId, executed.acceptedRows,
           executed.bodyLength, executed.bodyBytes, executed.bodyLimitReached, executed.bodyPreview);
-      } else if (executed.oversizedRows > 0) {
-        FTInnerLogger.e(TAG,
-          `Deferred ${executed.oversizedRows} oversized upload row(s) in DB: type=${dataType}, maxBodyBytes=${
-            DATA_UPLOAD_MAX_BODY_BYTES}`);
       }
       const dbSucceeded = await this.applyDbDecision(capabilities, dataType, executed, state);
       if (!dbSucceeded) {

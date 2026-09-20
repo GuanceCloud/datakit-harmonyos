@@ -1,11 +1,14 @@
 import { Constants } from './Constants';
 import { FTInnerLogger } from './log/FTLogger';
 import { AppState, ErrorType } from './rum/enum/RUMEnums';
+import { RunnerCompleteCallBack } from './rum/callback/RunnerCompleteCallBack';
 import {
   DefaultFTNativeCrashHandlerRuntime,
   FTNativeCrashCallback,
   FTNativeCrashData,
-  FTNativeCrashHandlerRuntime
+  FTNativeCrashHandlerRuntime,
+  FTNativeCrashRumContext,
+  FTNativeCrashRumManager
 } from './internal/runtime/FTNativeCrashHandlerRuntime';
 
 const TAG = "FTNativeCrashHandler";
@@ -52,6 +55,21 @@ interface ParsedCrashException {
 
 interface PrimitiveWrapper {
   value: string | number | boolean;
+}
+
+class NativeCrashPersistCallback implements RunnerCompleteCallBack {
+  private readonly rumManager: FTNativeCrashRumManager;
+
+  public constructor(rumManager: FTNativeCrashRumManager) {
+    this.rumManager = rumManager;
+  }
+
+  public onComplete(): void {
+    // The callback is invoked only after the Error draft has been persisted.
+    // Do not discard recovery context on write failure.
+    this.rumManager.clearSavedRumContext();
+    FTInnerLogger.i(TAG, '<FT-ARKTS-CALLBACK> *** CRASH ERROR PERSISTED TO RUM CACHE ***');
+  }
 }
 
 export class FTNativeCrashHandler {
@@ -186,6 +204,10 @@ export class FTNativeCrashHandler {
     const rumManager = FTNativeCrashHandler.runtime.getRumManager();
     try {
       const crashReport = this.formatCrashReport(crashData);
+      // HarmonyOS calls its crash-stack fingerprint `uuid`. It is stable for
+      // repeat crashes at the same location, so it must not be used as either
+      // the cache row id or the recovery deduplication key.
+      const crashEventId = this.createNativeCrashEventId(crashData);
       const errorContext: Record<string, string | number | boolean | object> = {};
 
       errorContext[Constants.KEY_CRASH_TYPE] = crashData.crashType;
@@ -199,6 +221,7 @@ export class FTNativeCrashHandler {
       errorContext[Constants.KEY_TIMESTAMP] = crashData.timestamp;
       errorContext[Constants.KEY_HILOG_SIZE] = crashData.hilogSize;
       errorContext[Constants.KEY_LOG_OVER_LIMIT] = crashData.logOverLimit;
+      errorContext[Constants.KEY_RUM_ERROR_IS_PRE_CRASH] = true;
 
       if (crashData.externalLog) {
         try {
@@ -208,35 +231,29 @@ export class FTNativeCrashHandler {
         }
       }
 
+      let recoveryContext: FTNativeCrashRumContext | null = null;
       try {
-        const savedContext = await rumManager.getSavedRumContext();
-        if (savedContext.viewId && savedContext.viewId !== '') {
-          errorContext[Constants.KEY_RUM_VIEW_ID] = this.wrapPrimitive(savedContext.viewId);
-          errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive(savedContext.viewName);
-          errorContext[Constants.KEY_RUM_VIEW_REFERRER] = this.wrapPrimitive(savedContext.viewReferrer);
-          errorContext[Constants.KEY_RUM_SESSION_ID] = this.wrapPrimitive(savedContext.sessionId);
-        } else {
-          errorContext[Constants.KEY_RUM_VIEW_ID] = this.wrapPrimitive('unknown');
-          errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive('unknown');
-        }
+        recoveryContext = await rumManager.getSavedRumContext();
       } catch (error) {
         FTInnerLogger.w(TAG, `<FT-ARKTS-CALLBACK> Failed to get saved RUM context: ${error}`);
-        errorContext[Constants.KEY_RUM_VIEW_ID] = this.wrapPrimitive('error');
-        errorContext[Constants.KEY_RUM_VIEW_NAME] = this.wrapPrimitive('error');
       }
 
-      try {
-        await rumManager.addErrorInternal(
-          crashReport,
-          `Native Crash: ${crashData.crashType}`,
-          ErrorType.NATIVE_CRASH,
-          AppState.RUN,
-          this.convertToRecordStringObject(errorContext)
-        );
-      } finally {
-        rumManager.clearSavedRumContext();
-      }
-      FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** CRASH REPORTED TO RUM SUCCESSFULLY ***");
+      const nativeCrashCallback = new NativeCrashPersistCallback(rumManager);
+      await rumManager.addErrorInternal(
+        crashReport,
+        `Native Crash: ${crashData.crashType}`,
+        ErrorType.NATIVE_CRASH,
+        crashData.foreground ? AppState.RUN : AppState.BACKGROUND,
+        this.convertToRecordStringObject(errorContext),
+        undefined,
+        nativeCrashCallback,
+        crashEventId,
+        crashEventId,
+        recoveryContext
+      );
+      // addErrorInternal hands the record to the asynchronous RUM pipeline.
+      // NativeCrashPersistCallback logs the durable-success boundary.
+      FTInnerLogger.i(TAG, "<FT-ARKTS-CALLBACK> *** CRASH SUBMITTED FOR RUM PERSISTENCE ***");
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ARKTS-CALLBACK> *** CALLBACK ERROR ***: ${error}`);
     }
@@ -287,6 +304,7 @@ export class FTNativeCrashHandler {
       bundleName: crashData.bundleName || '',
       pid: crashData.pid || 0,
       uid: crashData.uid || 0,
+      appRunningUniqueId: crashData.appRunningUniqueId || '',
       uuid: crashData.uuid || '',
       exception: crashData.exception || '',
       hilogSize: crashData.hilogSize || 0,
@@ -296,6 +314,26 @@ export class FTNativeCrashHandler {
       maps: crashData.maps || '',
       hilog: crashData.hilog || ''
     };
+  }
+
+  /**
+   * Builds an event identity that is stable when HarmonyOS replays the same
+   * crash file, yet distinct when the same stack crashes in a later process.
+   */
+  private createNativeCrashEventId(crashData: NativeCrashData): string {
+    const appRunningUniqueId = crashData.appRunningUniqueId || '';
+    if (appRunningUniqueId.length > 0) {
+      return `native-run-${appRunningUniqueId}`;
+    }
+
+    const pid = Number.isFinite(crashData.pid) && crashData.pid > 0 ? Math.floor(crashData.pid) : 0;
+    const timestamp = Number.isFinite(crashData.timestamp) && crashData.timestamp > 0 ?
+      Math.floor(crashData.timestamp) : 0;
+    if (pid > 0 || timestamp > 0) {
+      return `native-event-${pid}-${timestamp}-${crashData.uuid || 'unknown'}`;
+    }
+    // Keep legacy duplicate protection for incomplete platform payloads.
+    return crashData.uuid || '';
   }
 
   private formatCrashReport(crashData: NativeCrashData): string {

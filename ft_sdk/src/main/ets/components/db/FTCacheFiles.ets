@@ -25,12 +25,11 @@ interface FTCacheJournal {
 
 /** File primitives used only on TaskPool, while the cache directory lock is held. */
 export class FTCacheFiles {
-  static readonly MAX_RECORD_BYTES: number = 256 * 1024;
   /**
    * Bounds retained corrupt-record evidence only. This is deliberately not a
    * capacity-admission reserve: normal writes may use the configured limit.
    */
-  static readonly MAX_QUARANTINE_BYTES: number = FTCacheFiles.MAX_RECORD_BYTES * 2;
+  static readonly MAX_QUARANTINE_BYTES: number = 512 * 1024;
 
   static exists(path: string): boolean {
     try { return fs.accessSync(path); } catch (_) { return false; }

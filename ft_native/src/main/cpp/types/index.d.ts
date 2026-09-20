@@ -14,6 +14,7 @@ export interface NativeCrashData {
     bundleName: string;
     pid: number;
     uid: number;
+    appRunningUniqueId?: string;
     uuid: string;
     exception: string;      // JSON string containing exception details
     hilogSize: number;

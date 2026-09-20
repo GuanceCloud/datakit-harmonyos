@@ -10,6 +10,7 @@ import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from '../../../main/ets/com
 import { SyncDataJSON } from '../../../main/ets/components/db/bean/SyncData';
 import { ViewBeanJSON } from '../../../main/ets/components/db/bean/ViewBean';
 import { DataType } from '../../../main/ets/components/enum/Enums';
+import { DATA_UPLOAD_TRANSPORT_TARGET_BYTES } from '../../../main/ets/components/thread/workers/DataUploadLimits';
 import { DBAssert } from './helpers/DBAssert';
 
 let testSequence: number = 0;
@@ -141,6 +142,63 @@ export default function ftCacheFileStoreDeviceTest() {
       expect(mirrorWrite.write?.result.inserted).assertEqual(1);
       expect(mirrorWrite.write?.result.dropped).assertEqual(0);
       expect(mirror.list('sync').length).assertEqual(1);
+    });
+
+    it('persistsLargeCrashRecordWithinConfiguredCacheCapacity', 0, async () => {
+      const store = new FTCacheFileStore(context, cacheSettings('file', 2 * 1024 * 1024), SQLITE_SUCCESS);
+      const row = logRow('large-native-crash-record');
+      row.customDataTypeString = 'error';
+      row.dataString = `df_rum_harmonyos_error,sdk_data_id=${row.uuid} error="${'m'.repeat(600 * 1024)}" 100`;
+
+      const write = await store.execute({ command: 'writeSyncData', records: [row],
+        options: { applyCachePolicy: false, reInsert: false, forceTransaction: true, updateOrInsertByUuid: true } });
+      const rows = (await store.execute({ command: 'querySyncData', limit: 1 })).rows || [];
+
+      expect(write.write?.result.inserted).assertEqual(1);
+      expect(write.write?.result.dropped).assertEqual(0);
+      expect(rows.length).assertEqual(1);
+      expect(rows[0].dataString.length).assertEqual(row.dataString.length);
+    });
+
+    it('returnsSingleRecordBeyondTransportTargetForUpload', 0, async () => {
+      const store = new FTCacheFileStore(context, cacheSettings('file', 3 * 1024 * 1024), SQLITE_SUCCESS);
+      const row = logRow('large-upload-record');
+      row.dataType = DataType.RUM_APP;
+      row.customDataTypeString = DataType.RUM_APP.toString();
+      row.dataString = `df_rum_harmonyos_error,sdk_data_id=${row.uuid} error="${
+        'm'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES + 32 * 1024)}" 100`;
+      const write = await store.execute({ command: 'writeSyncData', records: [row],
+        options: { applyCachePolicy: false, reInsert: false, forceTransaction: true, updateOrInsertByUuid: true } });
+      const page = await store.execute({ command: 'queryUploadData', dataTypes: ['rum_app'], limit: 10,
+        maxBytes: DATA_UPLOAD_TRANSPORT_TARGET_BYTES });
+
+      expect(write.write?.result.inserted).assertEqual(1);
+      expect(page.uploadRows?.length).assertEqual(1);
+      expect((page.uploadRows || [])[0].uuid).assertEqual(row.uuid);
+      expect((page.byteCount || 0) > DATA_UPLOAD_TRANSPORT_TARGET_BYTES).assertTrue();
+      expect(page.byteLimitReached).assertTrue();
+      expect(store.list('quarantine').length).assertEqual(0);
+    });
+
+    it('restoresPreviouslyQuarantinedOversizeRecordForUpload', 0, async () => {
+      const store = new FTCacheFileStore(context, cacheSettings('file', 3 * 1024 * 1024), SQLITE_SUCCESS);
+      const row = logRow('previously-quarantined-record');
+      row.dataType = DataType.RUM_APP;
+      row.customDataTypeString = DataType.RUM_APP.toString();
+      row.dataString = `df_rum_harmonyos_error,sdk_data_id=${row.uuid} error="${
+        'm'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES + 32 * 1024)}" 100`;
+      await store.execute({ command: 'writeSyncData', records: [row],
+        options: { applyCachePolicy: false, reInsert: false, forceTransaction: true, updateOrInsertByUuid: true } });
+      fs.renameSync(store.path('sync', row.uuid), `${store.root}/quarantine/oversize-100-${row.uuid}.json`);
+
+      const recovered = new FTCacheFileStore(context, cacheSettings('file', 3 * 1024 * 1024), SQLITE_SUCCESS);
+      await recovered.recover();
+      const page = await recovered.execute({ command: 'queryUploadData', dataTypes: ['rum_app'], limit: 10,
+        maxBytes: DATA_UPLOAD_TRANSPORT_TARGET_BYTES });
+
+      expect(page.uploadRows?.length).assertEqual(1);
+      expect((page.uploadRows || [])[0].uuid).assertEqual(row.uuid);
+      expect(recovered.list('quarantine').length).assertEqual(0);
     });
 
     it('acknowledgesClosedViewsThroughTheFileStoreCommandRouter', 0, async () => {

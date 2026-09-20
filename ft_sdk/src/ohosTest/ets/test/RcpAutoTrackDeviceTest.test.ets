@@ -612,7 +612,7 @@ export default function rcpAutoTrackDeviceTest() {
       const errorFragments = [
         'error',
         'error_source=network',
-        'error_type=network',
+        'error_type=network_error',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
         `view_name=${viewName}`

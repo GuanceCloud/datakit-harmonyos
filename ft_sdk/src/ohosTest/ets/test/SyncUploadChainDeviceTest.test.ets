@@ -17,9 +17,9 @@ import {
   SDKWorkerRequest
 } from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_MAX_PAGE_SIZE,
-  DATA_UPLOAD_MAX_TRANSPORT_BYTES
+  DATA_UPLOAD_TRANSPORT_TARGET_BYTES
 } from '../../../main/ets/components/thread/workers/DataUploadLimits';
 
 const TEST_HOST = 'http://127.0.0.1:1';
@@ -617,7 +617,38 @@ export default function syncUploadChainDeviceTest() {
       expect(collector.getRequests().length).assertEqual(0);
     });
 
-    it('largeUploadBoundsBodyAndMainLoopDelay', 0, async () => {
+    it('uploadsSingleErrorBeyondTransportAndBodyTargets', 0, async () => {
+      syncTaskManager.init(
+        FTSDKConfig.builder(TEST_HOST)
+          .setAutoSync(false)
+          .setSyncPageSize(SyncPageSize.MINI)
+          .setDataSyncRetryCount(0),
+        context
+      );
+      const error = new SyncData(DataType.RUM_APP);
+      const marker = 'large-error-beyond-upload-target';
+      error.setTime(TEST_NOW_NS + 4999);
+      error.setDataString(
+        `df_rum_harmonyos_error,sdk_data_id=${error.getUuid()},error_type=native_crash message="${marker}-${
+          'x'.repeat(DATA_UPLOAD_BODY_TARGET_BYTES + 16 * 1024)}" ${TEST_NOW_NS + 4999}`
+      );
+      await DBAssert.insertSyncData([error]);
+      collector.setResponse(200, '');
+      collector.clearRequests();
+
+      syncTaskManager.executePoll(false);
+      const uploaded = await waitUntil(async () => {
+        return await DBAssert.querySyncCount([DataType.RUM_APP]) === 0;
+      }, 10000);
+      const payload = await collector.waitForPayloadContaining([marker], 3000);
+
+      expect(uploaded).assertTrue();
+      expect(payload.length > DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
+      expect(payload.length > DATA_UPLOAD_TRANSPORT_TARGET_BYTES).assertTrue();
+      expect(await DBAssert.querySyncCount([DataType.RUM_APP])).assertEqual(0);
+    });
+
+    it('largeUploadKeepsNormalBatchTargetAndMainLoopDelay', 0, async () => {
       syncTaskManager.init(
         FTSDKConfig.builder(TEST_HOST)
           .setAutoSync(false)
@@ -645,8 +676,8 @@ export default function syncUploadChainDeviceTest() {
       expect(captured).assertTrue();
       expect(requests.length > 0).assertTrue();
       expect(syncTaskManager.getPageSize()).assertEqual(DATA_UPLOAD_MAX_PAGE_SIZE);
-      expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_BODY_BYTES).assertTrue();
-      expect(requests[0].bodyString.length <= DATA_UPLOAD_MAX_TRANSPORT_BYTES).assertTrue();
+      expect(requests[0].bodyString.length <= DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
+      expect(requests[0].bodyString.length <= DATA_UPLOAD_TRANSPORT_TARGET_BYTES).assertTrue();
       expect(countBodyLines(requests[0].bodyString) < DATA_UPLOAD_MAX_PAGE_SIZE).assertTrue();
       expect(watchdog.samples >= 5).assertTrue();
       expect(watchdog.maxDelayMs <= 750).assertTrue();

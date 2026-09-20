@@ -66,6 +66,10 @@ export class FTAbilityLifecycleListener {
   private lifecycleId: number = -1;
   private applicationStateCallback: ApplicationStateChangeCallback | null = null;
   private applicationStateRegistered: boolean = false;
+  // Application state events are authoritative. Keep this set as a fallback
+  // for platforms that only provide UIAbility lifecycle callbacks, so one of
+  // several UIAbilities going background cannot classify the whole process.
+  private foregroundAbilities: Set<UIAbility> = new Set();
   
   /**
    * Sleep delay time (10 seconds)
@@ -166,6 +170,7 @@ export class FTAbilityLifecycleListener {
           this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
         },
         onAbilityForeground: (ability: UIAbility) => {
+          this.foregroundAbilities.add(ability);
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
           FTSDK.recordAppLaunchApplicationForeground();
@@ -227,9 +232,12 @@ export class FTAbilityLifecycleListener {
         },
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
+          this.foregroundAbilities.delete(ability);
           FTMonitorManager.getInstance().setAppInForeground(false);
           FTUIBlockManager.getInstance().setAppInForeground(false);
-          FTSDK.recordAppLaunchApplicationBackground();
+          if (this.foregroundAbilities.size === 0) {
+            FTSDK.recordAppLaunchApplicationBackground();
+          }
           // Stop view when ability goes to background (aligned with Android onActivityPaused)
           this.flushDbLaneOnLifecycleChange("onAbilityBackground");
           
@@ -239,8 +247,12 @@ export class FTAbilityLifecycleListener {
         },
         onAbilityDestroy: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
+          this.foregroundAbilities.delete(ability);
           FTMonitorManager.getInstance().setAppInForeground(false);
           FTUIBlockManager.getInstance().setAppInForeground(false);
+          if (this.foregroundAbilities.size === 0) {
+            FTSDK.recordAppLaunchApplicationBackground();
+          }
           // Stop view when ability is destroyed (aligned with Android onDestroy)
           this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
         }
@@ -379,6 +391,7 @@ export class FTAbilityLifecycleListener {
       this.alreadySleep = false; // Reset to default
       this.startTimeNanoTime = 0;
       this.startClockTimeNano = 0;
+      this.foregroundAbilities.clear();
       
       FTInnerLogger.i(TAG, "UIAbility lifecycle listener unregistered successfully");
 

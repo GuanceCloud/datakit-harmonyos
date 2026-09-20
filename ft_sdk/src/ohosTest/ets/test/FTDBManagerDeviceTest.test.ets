@@ -5,7 +5,8 @@ import {
   FTDBTaskPoolExecutor,
   FTDBTaskPoolCachePolicySnapshot,
   FTDBTaskPoolWriteOptions,
-  FTDBTaskPoolPendingRumResourceDTO
+  FTDBTaskPoolPendingRumResourceDTO,
+  FTDBTaskPoolRumCounterDeltaDTO
 } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
@@ -140,6 +141,32 @@ export default function ftDBManagerDeviceTest() {
         .some(view => view.getId() === closed.getId())).assertFalse();
     });
 
+    it('recoveredClosedViewCanBeRefreshedAfterItsFirstDurableSnapshot', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('recovered-crash-view', 'recovered-crash-view', TEST_NOW_NS);
+      view.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+
+      // The first predecessor-process View record is durable, but recovery
+      // must retain its aggregate row until the historical Error is counted.
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, view, true)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId()) !== null).assertTrue();
+      const delta: FTDBTaskPoolRumCounterDeltaDTO = {
+        viewId: view.getId(), actionId: '', viewActionDelta: 0, viewErrorDelta: 1,
+        viewLongTaskDelta: 0, viewResourceDelta: 0, viewPendingDelta: 0,
+        viewUpdateTimeDelta: 1, actionErrorDelta: 0, actionLongTaskDelta: 0,
+        actionResourceDelta: 0, actionPendingDelta: 0
+      };
+      expect(await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, [delta])).assertEqual(1);
+      const refreshed = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(refreshed !== null).assertTrue();
+      expect(refreshed!.getErrorCount()).assertEqual(1);
+      expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
+        .some(item => item.getId() === view.getId())).assertTrue();
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, refreshed!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
     it('viewAckKeepsNewerAndUnrelatedData', 0, async () => {
       const context = await DBAssert.getAppContext();
       const old = new ViewBean('delayed-counter-view', 'delayed-counter-view', TEST_NOW_NS);
@@ -174,6 +201,30 @@ export default function ftDBManagerDeviceTest() {
       expect(finalView!.getPendingResource()).assertEqual(0);
       expect(await FTDBTaskPoolExecutor.acknowledgeView(context, finalView!)).assertTrue();
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
+    it('insertsActionAndOwningViewCountInOneTransaction', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('atomic-action-view', 'atomic-action-view', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      const action = new ActionBean('atomic-action', 'atomic action', 'click', TEST_NOW_NS);
+      action.setViewInfo(view.getViewName(), view.getId(), '');
+
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, action)).assertTrue();
+      const persistedView = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(persistedView !== null).assertTrue();
+      expect(persistedView!.getActionCount()).assertEqual(1);
+      expect(persistedView!.getViewUpdateTime()).assertEqual(view.getViewUpdateTime() + 1);
+      const persistedAction = await FTDBTaskPoolExecutor.getActionInfo(context, action.getId());
+      expect(persistedAction !== null).assertTrue();
+      expect(persistedAction!.startTime).assertEqual(TEST_NOW_NS);
+
+      // A View-qualified Action cannot be accepted alone. This prevents a
+      // restart/retry from creating the mismatch this transaction fixes.
+      const unavailableViewAction = new ActionBean('missing-view-action', 'missing view', 'click', TEST_NOW_NS);
+      unavailableViewAction.setViewInfo('missing', 'missing-view', '');
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, unavailableViewAction)).assertFalse();
+      expect(await FTDBTaskPoolExecutor.getActionInfo(context, unavailableViewAction.getId())).assertNull();
     });
 
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {

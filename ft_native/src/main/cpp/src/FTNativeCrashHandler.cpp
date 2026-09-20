@@ -354,6 +354,7 @@ static void OnCrashEventReceive(const char* domain,
                 crashData.bundleName = extractJsonString(paramsStr, "bundle_name");
                 crashData.pid = static_cast<int>(extractJsonInt(paramsStr, "pid"));
                 crashData.uid = static_cast<int>(extractJsonInt(paramsStr, "uid"));
+                crashData.appRunningUniqueId = extractJsonString(paramsStr, "app_running_unique_id");
                 crashData.uuid = extractJsonString(paramsStr, "uuid");
                 crashData.exception = paramsStr;  // Store full params as exception
                 crashData.hilogSize = static_cast<int>(extractJsonInt(paramsStr, "hilog_size"));

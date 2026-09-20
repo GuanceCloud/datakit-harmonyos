@@ -155,6 +155,9 @@ export class Constants {
   static readonly KEY_RUM_ERROR_SITUATION = "error_situation";
   static readonly KEY_RUM_ERROR_MESSAGE = "error_message";
   static readonly KEY_RUM_ERROR_STACK = "error_stack";
+  static readonly KEY_RUM_ERROR_FOREGROUND_CRASH_FREE_DURATION = "foreground_crash_free_duration";
+  static readonly KEY_RUM_ERROR_BACKGROUND_CRASH_FREE_DURATION = "background_crash_free_duration";
+  static readonly KEY_RUM_ERROR_IS_PRE_CRASH = "is_pre_crash";
   
   /**
    * HTTP request and response headers

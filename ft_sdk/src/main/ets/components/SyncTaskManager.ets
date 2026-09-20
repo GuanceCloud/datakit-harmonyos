@@ -35,10 +35,10 @@ import {
   SDKWorkerResponse
 } from './thread/SDKWorkerProtocol';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT,
-  DATA_UPLOAD_MAX_TRANSPORT_BYTES
+  DATA_UPLOAD_TRANSPORT_TARGET_BYTES
 } from './thread/workers/DataUploadLimits';
 
 /**
@@ -163,7 +163,7 @@ class SyncTaskDataUploadCapabilities implements DataUploadWorkerCapabilities {
       context,
       [dataType.toString()],
       normalizedPageSize,
-      DATA_UPLOAD_MAX_TRANSPORT_BYTES
+      DATA_UPLOAD_TRANSPORT_TARGET_BYTES
     );
     return {
       rows: page.rows,
@@ -375,7 +375,8 @@ export class SyncTaskManager {
   public static readonly SYNC_SLEEP_MINI_TIME_MS = 0;
   public static readonly MAX_ERROR_COUNT = DATA_UPLOAD_MAX_RETRY_COUNT;
   public static readonly MAX_PAGE_SIZE = DATA_UPLOAD_MAX_PAGE_SIZE;
-  public static readonly MAX_BODY_BYTES = DATA_UPLOAD_MAX_BODY_BYTES;
+  /** Preferred batch size; an individual record may be larger. */
+  public static readonly UPLOAD_BATCH_TARGET_BYTES = DATA_UPLOAD_BODY_TARGET_BYTES;
   /**
    * Delay automatic upload triggers so records produced close together are
    * uploaded in a single batch. Kept aligned with Android's SLEEP_TIME.

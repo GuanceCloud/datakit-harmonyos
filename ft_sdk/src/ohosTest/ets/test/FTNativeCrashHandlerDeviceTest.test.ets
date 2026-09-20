@@ -88,6 +88,7 @@ function createNativeCrashData(): NativeCrashData {
     bundleName: 'com.guance.native.test',
     pid: 1234,
     uid: 5678,
+    appRunningUniqueId: 'native-device-app-run-1',
     uuid: 'native-crash-device-uuid',
     exception: JSON.stringify(exceptionPayload),
     hilogSize: 2,
@@ -183,6 +184,10 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
   lastErrorType: string = '';
   lastState: AppState = AppState.UNKNOWN;
   lastProperty: Record<string, object> | null = null;
+  lastRecoveryContext: FTNativeCrashRumContext | null = null;
+  lastDraftUuid: string = '';
+  draftUuids: string[] = [];
+  completeAddError: boolean = true;
   savedContext: FTNativeCrashRumContext = {
     viewId: 'native-view-id',
     viewName: 'native_crash_saved_view',
@@ -201,7 +206,10 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
     state: AppState,
     property?: Record<string, object> | null,
     _dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string,
+    _nativeCrashRecoveryId?: string,
+    recoveryContext?: FTNativeCrashRumContext | null
   ): Promise<void> {
     this.addErrorCount++;
     this.lastLog = log;
@@ -209,7 +217,10 @@ class DeviceFakeNativeCrashRumManager implements FTNativeCrashRumManager {
     this.lastErrorType = errorType;
     this.lastState = state;
     this.lastProperty = property || null;
-    if (callBack) {
+    this.lastRecoveryContext = recoveryContext || null;
+    this.lastDraftUuid = draftUuid || '';
+    this.draftUuids.push(this.lastDraftUuid);
+    if (this.completeAddError && callBack) {
       callBack.onComplete();
     }
     return Promise.resolve();
@@ -286,11 +297,74 @@ export default function ftNativeCrashHandlerDeviceTest() {
         expect(getWrappedValue(property, Constants.KEY_NATIVE_CRASH)).assertEqual('true');
         expect(getWrappedValue(property, Constants.KEY_BUNDLE_NAME)).assertEqual('com.guance.native.test');
         expect(getWrappedValue(property, Constants.KEY_UUID)).assertEqual('native-crash-device-uuid');
-        expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_ID)).assertEqual('native-view-id');
-        expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_NAME)).assertEqual('native_crash_saved_view');
-        expect(getWrappedValue(property, Constants.KEY_RUM_SESSION_ID)).assertEqual('native-session-id');
+        expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_ID)).assertEqual('');
+        expect(getWrappedValue(property, Constants.KEY_RUM_VIEW_NAME)).assertEqual('');
+        expect(getWrappedValue(property, Constants.KEY_RUM_SESSION_ID)).assertEqual('');
+        expect(getWrappedValue(property, Constants.KEY_RUM_ERROR_IS_PRE_CRASH)).assertEqual('true');
       }
+      expect(runtime.rumManager.lastRecoveryContext !== null).assertTrue();
+      if (runtime.rumManager.lastRecoveryContext) {
+        expect(runtime.rumManager.lastRecoveryContext.viewId).assertEqual('native-view-id');
+        expect(runtime.rumManager.lastRecoveryContext.viewName).assertEqual('native_crash_saved_view');
+        expect(runtime.rumManager.lastRecoveryContext.viewReferrer).assertEqual('native-referrer');
+        expect(runtime.rumManager.lastRecoveryContext.sessionId).assertEqual('native-session-id');
+      }
+      expect(runtime.rumManager.lastDraftUuid).assertEqual('native-run-native-device-app-run-1');
       expect(runtime.rumManager.clearSavedContextCount).assertEqual(1);
+    });
+
+    it('nativeCrashCallbackUsesNativeBackgroundState', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      const crashData = createNativeCrashData();
+      crashData.foreground = false;
+
+      await runtime.nativeModule.emitCrash(crashData);
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(1);
+      expect(runtime.rumManager.lastState).assertEqual(AppState.BACKGROUND);
+    });
+
+    it('nativeCrashCallbackPreservesLargeDiagnosticText', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      const crashData = createNativeCrashData();
+      crashData.maps = `${'m'.repeat(600 * 1024)}\nend-of-native-maps`;
+
+      await runtime.nativeModule.emitCrash(crashData);
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(1);
+      expect(runtime.rumManager.lastLog.length > 600 * 1024).assertTrue();
+      expect(runtime.rumManager.lastLog.includes('end-of-native-maps')).assertTrue();
+    });
+
+    it('nativeCrashUsesProcessIdentityInsteadOfStackFingerprintForDraftId', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      const firstCrash = createNativeCrashData();
+      const laterCrash = createNativeCrashData();
+      laterCrash.pid = 5679;
+      laterCrash.timestamp += 1000;
+      laterCrash.appRunningUniqueId = 'native-device-app-run-2';
+
+      await runtime.nativeModule.emitCrash(firstCrash);
+      await runtime.nativeModule.emitCrash(laterCrash);
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(2);
+      expect(runtime.rumManager.draftUuids.length).assertEqual(2);
+      expect(runtime.rumManager.draftUuids[0]).assertEqual('native-run-native-device-app-run-1');
+      expect(runtime.rumManager.draftUuids[1]).assertEqual('native-run-native-device-app-run-2');
+    });
+
+    it('nativeCrashDoesNotClearRecoveryContextBeforePersistenceCallback', 0, async () => {
+      const initialized = await handler.initialize();
+      expect(initialized).assertTrue();
+      runtime.rumManager.completeAddError = false;
+
+      await runtime.nativeModule.emitCrash(createNativeCrashData());
+
+      expect(runtime.rumManager.addErrorCount).assertEqual(1);
+      expect(runtime.rumManager.clearSavedContextCount).assertEqual(0);
     });
   });
 }
