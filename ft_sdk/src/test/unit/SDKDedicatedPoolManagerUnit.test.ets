@@ -102,6 +102,30 @@ interface SDKCompletedActionLaunchPhaseTestValue {
   duration: number;
 }
 
+class SDKCrashFreeDurationTestCase {
+  public readonly marker: string;
+  public readonly errorType: string;
+  public readonly foregroundNs: number;
+  public readonly backgroundNs: number;
+
+  public constructor(marker: string, errorType: string, foregroundNs: number, backgroundNs: number) {
+    this.marker = marker;
+    this.errorType = errorType;
+    this.foregroundNs = foregroundNs;
+    this.backgroundNs = backgroundNs;
+  }
+}
+
+class SDKNonCrashErrorTestCase {
+  public readonly marker: string;
+  public readonly errorType: string;
+
+  public constructor(marker: string, errorType: string) {
+    this.marker = marker;
+    this.errorType = errorType;
+  }
+}
+
 interface SDKANRTestFrame {
   file: string;
   line: number;
@@ -1084,6 +1108,113 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         }
         expect(viewErrors).assertEqual(2);
         expect(actionErrors).assertEqual(2);
+      }
+    });
+
+    it('rumWorkerEmitsCrashFreeDurationsOnlyForCrashErrorLineProtocolFields', 0, async () => {
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'crash-free-session',
+        viewId: 'crash-free-view',
+        viewName: 'CrashFreeView',
+        viewReferrer: 'root',
+        actionId: 'crash-free-action',
+        actionName: 'tap',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const crashCases: SDKCrashFreeDurationTestCase[] = [
+        new SDKCrashFreeDurationTestCase('js-foreground-crash', 'js_crash', 80, 50),
+        new SDKCrashFreeDurationTestCase('js-background-crash', 'js_crash', 40, 70),
+        new SDKCrashFreeDurationTestCase('native-foreground-crash', 'native_crash', 30000030, 20),
+        new SDKCrashFreeDurationTestCase('native-background-crash', 'native_crash', 30, 30000020)
+      ];
+      const nonCrashCases: SDKNonCrashErrorTestCase[] = [
+        new SDKNonCrashErrorTestCase('custom-error', 'custom'),
+        new SDKNonCrashErrorTestCase('network-error', 'network_error'),
+        new SDKNonCrashErrorTestCase('anr-error', 'anr_error')
+      ];
+      const commands: SDKRumErrorCommandDTO[] = [];
+
+      for (const crashCase of crashCases) {
+        const property = new Object() as SDKPropertyRecord;
+        const foregroundDuration = new Object() as SDKCompletedActionPropertyTestValue;
+        foregroundDuration.value = crashCase.foregroundNs;
+        property['foreground_crash_free_duration'] = foregroundDuration;
+        const backgroundDuration = new Object() as SDKCompletedActionPropertyTestValue;
+        backgroundDuration.value = crashCase.backgroundNs;
+        property['background_crash_free_duration'] = backgroundDuration;
+        commands.push({
+          context,
+          log: `stack-${crashCase.marker}`,
+          message: crashCase.marker,
+          errorType: crashCase.errorType,
+          errorSource: 'logger',
+          appState: crashCase.marker.includes('background') ? 'background' : 'run',
+          property,
+          time: 1000 + commands.length
+        });
+      }
+      for (const nonCrashCase of nonCrashCases) {
+        commands.push({
+          context,
+          log: `stack-${nonCrashCase.marker}`,
+          message: nonCrashCase.marker,
+          errorType: nonCrashCase.errorType,
+          errorSource: 'logger',
+          appState: 'run',
+          property: new Object() as SDKPropertyRecord,
+          time: 1000 + commands.length
+        });
+      }
+
+      const batch = new Object() as SDKRumErrorCommandBatchDTO;
+      batch.lineContext = createRumWorkerLineContext();
+      batch.commands = commands;
+      const request = new Object() as SDKWorkerRequest;
+      request.id = 'rum-crash-free-error-lines';
+      request.pool = SDKDedicatedPoolType.EVENT_CONSUMER;
+      request.command = SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH;
+      request.priority = 7;
+      request.createdAt = Date.now();
+      request.payload = batch as Object as SDKWorkerPayload;
+      const response = await executeWorkerCommandForUnit(request);
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(crashCases.length + nonCrashCases.length);
+      for (const crashCase of crashCases) {
+        let line = '';
+        for (const draft of drafts) {
+          const candidate = String((draft as Record<string, object>)['dataString']);
+          if (candidate.includes(crashCase.marker)) {
+            line = candidate;
+            break;
+          }
+        }
+        const foregroundField = `foreground_crash_free_duration=${crashCase.foregroundNs}i`;
+        const backgroundField = `background_crash_free_duration=${crashCase.backgroundNs}i`;
+        expect(line.length > 0).assertTrue();
+        expect(line.includes(`error_type=${crashCase.errorType}`)).assertTrue();
+        expect(line.includes(foregroundField)).assertTrue();
+        expect(line.includes(backgroundField)).assertTrue();
+        // The first space separates Line Protocol tags from fields. Both
+        // crash-free values must remain numeric fields, never tags.
+        const firstFieldOffset = line.indexOf(' ');
+        expect(line.indexOf(foregroundField) > firstFieldOffset).assertTrue();
+        expect(line.indexOf(backgroundField) > firstFieldOffset).assertTrue();
+      }
+      for (const nonCrashCase of nonCrashCases) {
+        let line = '';
+        for (const draft of drafts) {
+          const candidate = String((draft as Record<string, object>)['dataString']);
+          if (candidate.includes(nonCrashCase.marker)) {
+            line = candidate;
+            break;
+          }
+        }
+        expect(line.length > 0).assertTrue();
+        expect(line.includes(`error_type=${nonCrashCase.errorType}`)).assertTrue();
+        expect(line.includes('foreground_crash_free_duration=')).assertFalse();
+        expect(line.includes('background_crash_free_duration=')).assertFalse();
       }
     });
 

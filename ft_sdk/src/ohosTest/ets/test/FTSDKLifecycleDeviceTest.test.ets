@@ -14,6 +14,14 @@ import { FTAppStartCounter } from '../../../main/ets/components/monitor/FTAppSta
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
 import { DataType } from '../../../main/ets/components/enum/Enums';
+import { FTAbilityLifecycleListener } from '../../../main/ets/components/monitor/FTAbilityLifecycleListener';
+import {
+  FTCrashFreeClock,
+  FTCrashFreeDurationManager,
+  FTCrashFreeStorage
+} from '../../../main/ets/components/monitor/FTCrashFreeDurationManager';
+import { AppState } from '../../../main/ets/components/rum/enum/RUMEnums';
+import { Utils } from '../../../main/ets/components/utils/Utils';
 import { DBAssert } from './helpers/DBAssert';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
@@ -46,6 +54,36 @@ class DeviceLifecycleUIContext {
 interface DeviceApplicationStateCallback {
   onApplicationForeground: () => void;
   onApplicationBackground: () => void;
+}
+
+interface DeviceAbilityLifecycleCallback {
+  onAbilityForeground?: (ability: Object) => void;
+  onAbilityBackground?: (ability: Object) => void;
+}
+
+class DeviceCrashFreeClock implements FTCrashFreeClock {
+  public uptimeNs: number = 100;
+  public wallClockMs: number = 1000000;
+
+  public nowUptimeNs(): number {
+    return this.uptimeNs;
+  }
+
+  public nowWallClockMs(): number {
+    return this.wallClockMs;
+  }
+}
+
+class DeviceCrashFreeStorage implements FTCrashFreeStorage {
+  public value: string = '';
+
+  public async read(): Promise<string> {
+    return this.value;
+  }
+
+  public async write(value: string): Promise<void> {
+    this.value = value;
+  }
 }
 
 class DeviceProcessInformation {
@@ -82,6 +120,47 @@ class DeviceLaunchApplicationContext {
 
   public emitForeground(): void {
     this.stateCallback?.onApplicationForeground();
+  }
+}
+
+class DeviceMultiAbilityApplicationContext {
+  public stateCallback: DeviceApplicationStateCallback | null = null;
+  public lifecycleCallback: DeviceAbilityLifecycleCallback | null = null;
+
+  public on(type: string, callback: Object): number {
+    if (type === 'applicationStateChange') {
+      this.stateCallback = callback as DeviceApplicationStateCallback;
+      return 1;
+    }
+    if (type === 'abilityLifecycle') {
+      this.lifecycleCallback = callback as DeviceAbilityLifecycleCallback;
+      return 2;
+    }
+    return -1;
+  }
+
+  public off(type: string, callbackOrId?: Object | number): Promise<void> {
+    if (type === 'applicationStateChange' &&
+      (callbackOrId === undefined || callbackOrId === this.stateCallback)) {
+      this.stateCallback = null;
+    }
+    if (type === 'abilityLifecycle' &&
+      (callbackOrId === undefined || callbackOrId === 2)) {
+      this.lifecycleCallback = null;
+    }
+    return Promise.resolve();
+  }
+}
+
+class DeviceMultiAbilityStageContext {
+  private readonly applicationContext: DeviceMultiAbilityApplicationContext;
+
+  public constructor(applicationContext: DeviceMultiAbilityApplicationContext) {
+    this.applicationContext = applicationContext;
+  }
+
+  public getApplicationContext(): Object {
+    return this.applicationContext;
   }
 }
 
@@ -290,6 +369,64 @@ export default function ftSDKLifecycleDeviceTest() {
       ]);
       expect(record !== null).assertTrue();
       expect(record!.getDataString().includes('app_launch_type')).assertFalse();
+    });
+
+    it('multipleUiAbilitiesKeepOneCrashFreeApplicationTimeline', 0, async () => {
+      const originalAbilityContext = Utils.getAbilityContext();
+      const applicationContext = new DeviceMultiAbilityApplicationContext();
+      const stageContext = new DeviceMultiAbilityStageContext(applicationContext);
+      const clock = new DeviceCrashFreeClock();
+      const crashFreeManager = new FTCrashFreeDurationManager(clock);
+      const listener = FTAbilityLifecycleListener.getInstance();
+      const firstAbility = new Object();
+      const secondAbility = new Object();
+
+      try {
+        await crashFreeManager.initializeWithStorage(new DeviceCrashFreeStorage(), AppState.RUN);
+        FTCrashFreeDurationManager.setInstanceForTesting(crashFreeManager);
+        Utils.init(stageContext as Object as common.UIAbilityContext);
+        listener.register();
+
+        expect(applicationContext.lifecycleCallback !== null).assertTrue();
+        expect(applicationContext.stateCallback !== null).assertTrue();
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
+        clock.uptimeNs = 130;
+        clock.wallClockMs = 1000030;
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(secondAbility);
+
+        // One of two foreground abilities leaving must not classify the
+        // application as background or add a background duration.
+        clock.uptimeNs = 160;
+        clock.wallClockMs = 1000060;
+        applicationContext.lifecycleCallback?.onAbilityBackground?.(firstAbility);
+        await crashFreeManager.getCurrentSnapshot();
+
+        clock.uptimeNs = 200;
+        clock.wallClockMs = 1000100;
+        applicationContext.lifecycleCallback?.onAbilityBackground?.(secondAbility);
+        await crashFreeManager.getCurrentSnapshot();
+
+        clock.uptimeNs = 250;
+        clock.wallClockMs = 1000150;
+        applicationContext.stateCallback?.onApplicationForeground();
+        await crashFreeManager.getCurrentSnapshot();
+
+        clock.uptimeNs = 310;
+        clock.wallClockMs = 1000210;
+        const duration = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+        expect(duration !== null).assertTrue();
+        if (duration) {
+          // foreground: 100-130 + 130-200 + 250-310 = 160
+          // background: 200-250 = 50. The first ability's background event
+          // at 160 is intentionally absent from the application timeline.
+          expect(duration.foregroundNs).assertEqual(160);
+          expect(duration.backgroundNs).assertEqual(50);
+        }
+      } finally {
+        listener.unregister();
+        FTCrashFreeDurationManager.setInstanceForTesting(null);
+        Utils.init(originalAbilityContext);
+      }
     });
   });
 }

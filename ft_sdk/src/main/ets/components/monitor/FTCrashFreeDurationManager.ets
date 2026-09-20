@@ -134,6 +134,11 @@ export class FTCrashFreeDurationManager {
     FTCrashFreeDurationManager.instance = null;
   }
 
+  /** Test seam for lifecycle tests that need a deterministic monotonic clock. */
+  public static setInstanceForTesting(instance: FTCrashFreeDurationManager | null): void {
+    FTCrashFreeDurationManager.instance = instance;
+  }
+
   /**
    * Starts asynchronous preference recovery. Callers may immediately send
    * lifecycle events: every public mutation waits for this promise in order.

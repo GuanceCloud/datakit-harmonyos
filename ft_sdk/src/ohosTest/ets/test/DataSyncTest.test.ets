@@ -23,6 +23,8 @@ import { TraceType } from '../../../main/ets/components/trace/TraceType';
 import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandler';
 import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManager';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
+import { FTCrashFreeDurationManager } from '../../../main/ets/components/monitor/FTCrashFreeDurationManager';
+import { DbInternalTestAccess } from '../../../main/ets/components/internal/testaccess/DbInternalTestAccess';
 import { DBAssert } from './helpers/DBAssert';
 import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
@@ -41,6 +43,41 @@ const KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
 
 interface ActionPropertyValue {
   value: string | number | boolean;
+}
+
+class NonCrashErrorCase {
+  public readonly message: string;
+  public readonly errorType: ErrorType;
+  public readonly expectedType: string;
+
+  public constructor(
+    message: string,
+    errorType: ErrorType,
+    expectedType: string
+  ) {
+    this.message = message;
+    this.errorType = errorType;
+    this.expectedType = expectedType;
+  }
+}
+
+class CrashErrorCase {
+  public readonly message: string;
+  public readonly errorType: ErrorType;
+  public readonly expectedType: string;
+  public readonly state: AppState;
+
+  public constructor(
+    message: string,
+    errorType: ErrorType,
+    expectedType: string,
+    state: AppState
+  ) {
+    this.message = message;
+    this.errorType = errorType;
+    this.expectedType = expectedType;
+    this.state = state;
+  }
 }
 
 function buildDefaultSdkConfig(): FTSDKConfig {
@@ -602,6 +639,130 @@ export default function dataSyncTest() {
       expect(uploaded.length > 0).assertTrue();
       RumAttributeAssert.uploaded(uploaded, errorRecord, attributes);
       expect(consumed).assertTrue();
+    });
+
+    it('crashFreeDurationWaitsForSuccessfulErrorLocalWrite', 0, async () => {
+      const failedMessage = 'crash_free_duration_forced_local_write_failure';
+      const persistedMessage = 'crash_free_duration_local_write_recovered';
+      const crashFreeManager = FTCrashFreeDurationManager.getInstance();
+
+      // Give the process-level clock a visible interval, then fail the exact
+      // write used for the first Crash Error. The DB manager will spool this
+      // record but the Error write callback must not acknowledge the timer.
+      await WaitUtils.delay(250);
+      DbInternalTestAccess.forceNextSyncDataWriteFailure();
+      FTRUMGlobalManager.getInstance().addError(
+        `Error: ${failedMessage}\n  at DataSyncTest`,
+        failedMessage,
+        ErrorType.JS_CRASH,
+        AppState.RUN
+      );
+      await WaitUtils.delay(250);
+      const failedRowWasNotStored = await DBAssert.waitForNoSyncRecordContaining(DataType.RUM_APP, [
+        'error,',
+        failedMessage
+      ], 100);
+      expect(failedRowWasNotStored).assertTrue();
+      const afterFailedWrite = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterFailedWrite !== null).assertTrue();
+      if (afterFailedWrite) {
+        // A reset at the failed write would leave only the latter ~250 ms.
+        // Keeping the pre-failure interval yields at least ~500 ms here.
+        expect(afterFailedWrite.foregroundNs > 400000000).assertTrue();
+      }
+
+      // A following successful Error row is the first acknowledgement and
+      // must start the next crash-free cycle exactly once.
+      FTRUMGlobalManager.getInstance().addError(
+        `Error: ${persistedMessage}\n  at DataSyncTest`,
+        persistedMessage,
+        ErrorType.JS_CRASH,
+        AppState.RUN
+      );
+      const persistedRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'error,',
+        'error_type=js_crash',
+        persistedMessage,
+        'foreground_crash_free_duration=',
+        'background_crash_free_duration='
+      ], 5000);
+      expect(persistedRecord !== null).assertTrue();
+
+      await WaitUtils.delay(30);
+      const afterSuccessfulWrite = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterSuccessfulWrite !== null).assertTrue();
+      if (afterFailedWrite && afterSuccessfulWrite) {
+        expect(afterSuccessfulWrite.foregroundNs < afterFailedWrite.foregroundNs).assertTrue();
+      }
+
+      // No second acknowledgement arrives for the prior failed/spooled Error:
+      // the new interval grows monotonically instead of being cleared again.
+      await WaitUtils.delay(80);
+      const afterRecoverySettles = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterRecoverySettles !== null).assertTrue();
+      if (afterSuccessfulWrite && afterRecoverySettles) {
+        expect(afterRecoverySettles.foregroundNs > afterSuccessfulWrite.foregroundNs).assertTrue();
+      }
+
+      // The forced write was spooled; clean it explicitly so it cannot leak
+      // into later device tests.
+      await FTSDK.clearAllData();
+    });
+
+    it('nonCrashErrorsDoNotWriteCrashFreeDurationFields', 0, async () => {
+      const cases: NonCrashErrorCase[] = [
+        new NonCrashErrorCase('crash_free_custom_error', ErrorType.CUSTOM, 'custom'),
+        new NonCrashErrorCase('crash_free_network_error', ErrorType.NETWORK, 'network_error'),
+        new NonCrashErrorCase('crash_free_anr_error', ErrorType.ANR_ERROR, 'anr_error')
+      ];
+
+      for (const testCase of cases) {
+        FTRUMGlobalManager.getInstance().addError(
+          `Error: ${testCase.message}\n  at DataSyncTest`,
+          testCase.message,
+          testCase.errorType,
+          AppState.RUN
+        );
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'error,',
+          `error_type=${testCase.expectedType}`,
+          testCase.message
+        ], 5000);
+        const line = record?.getDataString() ?? '';
+        expect(record !== null).assertTrue();
+        expect(line.includes('foreground_crash_free_duration=')).assertFalse();
+        expect(line.includes('background_crash_free_duration=')).assertFalse();
+      }
+    });
+
+    it('foregroundAndBackgroundJsAndNativeCrashesWriteBothDurationFields', 0, async () => {
+      const cases: CrashErrorCase[] = [
+        new CrashErrorCase('crash_free_js_foreground', ErrorType.JS_CRASH, 'js_crash', AppState.RUN),
+        new CrashErrorCase('crash_free_js_background', ErrorType.JS_CRASH, 'js_crash', AppState.BACKGROUND),
+        new CrashErrorCase('crash_free_native_foreground', ErrorType.NATIVE_CRASH, 'native_crash', AppState.RUN),
+        new CrashErrorCase('crash_free_native_background', ErrorType.NATIVE_CRASH, 'native_crash', AppState.BACKGROUND)
+      ];
+
+      for (const testCase of cases) {
+        FTRUMGlobalManager.getInstance().addError(
+          `Error: ${testCase.message}\n  at DataSyncTest`,
+          testCase.message,
+          testCase.errorType,
+          testCase.state
+        );
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'error,',
+          `error_type=${testCase.expectedType}`,
+          `error_situation=${testCase.state.toString()}`,
+          testCase.message,
+          'foreground_crash_free_duration=',
+          'background_crash_free_duration='
+        ], 5000);
+        const line = record?.getDataString() ?? '';
+        expect(record !== null).assertTrue();
+        expect(/foreground_crash_free_duration=\d+i/.test(line)).assertTrue();
+        expect(/background_crash_free_duration=\d+i/.test(line)).assertTrue();
+      }
     });
 
     it('anrErrorShouldUploadAndDelete', 0, async () => {

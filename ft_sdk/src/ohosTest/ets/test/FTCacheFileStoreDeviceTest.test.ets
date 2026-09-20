@@ -164,7 +164,7 @@ export default function ftCacheFileStoreDeviceTest() {
       const store = new FTCacheFileStore(context, cacheSettings('file', 3 * 1024 * 1024), SQLITE_SUCCESS);
       const row = logRow('large-upload-record');
       row.dataType = DataType.RUM_APP;
-      row.customDataTypeString = 'error';
+      row.customDataTypeString = DataType.RUM_APP.toString();
       row.dataString = `df_rum_harmonyos_error,sdk_data_id=${row.uuid} error="${
         'm'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES + 32 * 1024)}" 100`;
       const write = await store.execute({ command: 'writeSyncData', records: [row],
@@ -184,7 +184,7 @@ export default function ftCacheFileStoreDeviceTest() {
       const store = new FTCacheFileStore(context, cacheSettings('file', 3 * 1024 * 1024), SQLITE_SUCCESS);
       const row = logRow('previously-quarantined-record');
       row.dataType = DataType.RUM_APP;
-      row.customDataTypeString = 'error';
+      row.customDataTypeString = DataType.RUM_APP.toString();
       row.dataString = `df_rum_harmonyos_error,sdk_data_id=${row.uuid} error="${
         'm'.repeat(DATA_UPLOAD_TRANSPORT_TARGET_BYTES + 32 * 1024)}" 100`;
       await store.execute({ command: 'writeSyncData', records: [row],

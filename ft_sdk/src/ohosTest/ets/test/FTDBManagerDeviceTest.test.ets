@@ -215,16 +215,16 @@ export default function ftDBManagerDeviceTest() {
       expect(persistedView !== null).assertTrue();
       expect(persistedView!.getActionCount()).assertEqual(1);
       expect(persistedView!.getViewUpdateTime()).assertEqual(view.getViewUpdateTime() + 1);
-      expect((await FTDBTaskPoolExecutor.querySumAction(context, 10))
-        .some(item => item.getId() === action.getId())).assertTrue();
+      const persistedAction = await FTDBTaskPoolExecutor.getActionInfo(context, action.getId());
+      expect(persistedAction !== null).assertTrue();
+      expect(persistedAction!.startTime).assertEqual(TEST_NOW_NS);
 
       // A View-qualified Action cannot be accepted alone. This prevents a
       // restart/retry from creating the mismatch this transaction fixes.
       const unavailableViewAction = new ActionBean('missing-view-action', 'missing view', 'click', TEST_NOW_NS);
       unavailableViewAction.setViewInfo('missing', 'missing-view', '');
       expect(await FTDBTaskPoolExecutor.insertRumAction(context, unavailableViewAction)).assertFalse();
-      expect((await FTDBTaskPoolExecutor.querySumAction(context, 10))
-        .some(item => item.getId() === unavailableViewAction.getId())).assertFalse();
+      expect(await FTDBTaskPoolExecutor.getActionInfo(context, unavailableViewAction.getId())).assertNull();
     });
 
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {

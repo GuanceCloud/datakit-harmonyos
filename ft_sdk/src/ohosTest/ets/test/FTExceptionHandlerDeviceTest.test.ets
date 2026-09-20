@@ -184,7 +184,10 @@ export default function ftExceptionHandlerDeviceTest() {
       expect(runtime.rumManager.lastErrorType).assertEqual(ErrorType.JS_CRASH.toString());
       expect(runtime.rumManager.lastState).assertEqual(AppState.RUN);
       expect(runtime.rumManager.lastLog.includes('device js crash message')).assertTrue();
-      expect(runtime.rumManager.stopViewCount).assertEqual(1);
+      // addErrorInternal owns the Crash persistence barrier, including the
+      // current View finalization. Calling stopView again here would race or
+      // duplicate the final View snapshot.
+      expect(runtime.rumManager.stopViewCount).assertEqual(0);
       expect(runtime.flushCount).assertEqual(1);
       expect(runtime.unregisterCount).assertEqual(1);
       expect(runtime.rumManager.context.terminateCount).assertEqual(1);

@@ -67,6 +67,187 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       }
     });
 
+    it('reportsExactForegroundAndBackgroundTailsForJsAndNativeCrashes', 0, async () => {
+      const jsClock = new FixedCrashFreeClock();
+      const jsStorage = new MemoryCrashFreeStorage();
+      const jsManager = new FTCrashFreeDurationManager(jsClock);
+      await jsManager.initializeWithStorage(jsStorage, AppState.RUN);
+
+      // JS crash while foreground: [100, 130] is foreground and [130, 180]
+      // is background; the foreground crash tail is [180, 230].
+      jsClock.uptimeNs = 130;
+      jsClock.wallClockMs = 1000030;
+      await jsManager.transition(AppState.BACKGROUND);
+      jsClock.uptimeNs = 180;
+      jsClock.wallClockMs = 1000080;
+      await jsManager.transition(AppState.RUN);
+      jsClock.uptimeNs = 230;
+      jsClock.wallClockMs = 1000130;
+      const foregroundJs = await jsManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(foregroundJs !== null).assertTrue();
+      if (foregroundJs) {
+        expect(foregroundJs.foregroundNs).assertEqual(80);
+        expect(foregroundJs.backgroundNs).assertEqual(50);
+        await jsManager.confirmCrashReported(foregroundJs);
+      }
+
+      // After the confirmed foreground crash, only [230, 270] belongs to the
+      // foreground and the background crash tail is [270, 340].
+      jsClock.uptimeNs = 270;
+      jsClock.wallClockMs = 1000170;
+      await jsManager.transition(AppState.BACKGROUND);
+      jsClock.uptimeNs = 340;
+      jsClock.wallClockMs = 1000240;
+      const backgroundJs = await jsManager.prepareCrashFreeDuration(AppState.BACKGROUND, false);
+      expect(backgroundJs !== null).assertTrue();
+      if (backgroundJs) {
+        expect(backgroundJs.foregroundNs).assertEqual(40);
+        expect(backgroundJs.backgroundNs).assertEqual(70);
+      }
+
+      // Native crashes are recovered in the next process. The recovery tail
+      // is derived from the native event wall clock and is placed on the
+      // crash state, not on the state saved before the process exited.
+      const nativeForegroundClock = new FixedCrashFreeClock();
+      nativeForegroundClock.uptimeNs = 200;
+      nativeForegroundClock.wallClockMs = 1000100;
+      const nativeForegroundStorage = new MemoryCrashFreeStorage();
+      nativeForegroundStorage.value = JSON.stringify({
+        version: 1,
+        current: {
+          foregroundNs: 30,
+          backgroundNs: 20,
+          state: AppState.RUN,
+          stateStartUptimeNs: 150,
+          observedUptimeNs: 150,
+          observedWallClockMs: 1000050,
+          bootMarkerMs: 1000000,
+          runId: 'native-foreground-process'
+        },
+        pending: null,
+        reportedNativeCrashIds: []
+      });
+      const nativeForegroundManager = new FTCrashFreeDurationManager(nativeForegroundClock);
+      await nativeForegroundManager.initializeWithStorage(nativeForegroundStorage, AppState.RUN);
+      const foregroundNative = await nativeForegroundManager.prepareCrashFreeDuration(
+        AppState.RUN, true, 1000080, 'native-foreground-id');
+      expect(foregroundNative !== null).assertTrue();
+      if (foregroundNative) {
+        expect(foregroundNative.foregroundNs).assertEqual(30000030);
+        expect(foregroundNative.backgroundNs).assertEqual(20);
+      }
+
+      const nativeBackgroundClock = new FixedCrashFreeClock();
+      nativeBackgroundClock.uptimeNs = 200;
+      nativeBackgroundClock.wallClockMs = 1000100;
+      const nativeBackgroundStorage = new MemoryCrashFreeStorage();
+      nativeBackgroundStorage.value = JSON.stringify({
+        version: 1,
+        current: {
+          foregroundNs: 30,
+          backgroundNs: 20,
+          state: AppState.BACKGROUND,
+          stateStartUptimeNs: 150,
+          observedUptimeNs: 150,
+          observedWallClockMs: 1000050,
+          bootMarkerMs: 1000000,
+          runId: 'native-background-process'
+        },
+        pending: null,
+        reportedNativeCrashIds: []
+      });
+      const nativeBackgroundManager = new FTCrashFreeDurationManager(nativeBackgroundClock);
+      await nativeBackgroundManager.initializeWithStorage(nativeBackgroundStorage, AppState.RUN);
+      const backgroundNative = await nativeBackgroundManager.prepareCrashFreeDuration(
+        AppState.BACKGROUND, true, 1000080, 'native-background-id');
+      expect(backgroundNative !== null).assertTrue();
+      if (backgroundNative) {
+        expect(backgroundNative.foregroundNs).assertEqual(30);
+        expect(backgroundNative.backgroundNs).assertEqual(30000020);
+      }
+    });
+
+    it('serializesRepeatedForegroundBackgroundTransitionsWithoutOverlap', 0, async () => {
+      const clock = new FixedCrashFreeClock();
+      const storage = new MemoryCrashFreeStorage();
+      const manager = new FTCrashFreeDurationManager(clock);
+      await manager.initializeWithStorage(storage, AppState.RUN);
+
+      // Repeated foreground signals model overlapping UIAbility foreground
+      // callbacks. Repeated background signals are emitted only after the
+      // final foreground ability has left. Each boundary must split, rather
+      // than duplicate, the one monotonic process timeline.
+      clock.uptimeNs = 110;
+      clock.wallClockMs = 1000010;
+      await manager.transition(AppState.RUN);
+      clock.uptimeNs = 125;
+      clock.wallClockMs = 1000025;
+      await manager.transition(AppState.BACKGROUND);
+      clock.uptimeNs = 160;
+      clock.wallClockMs = 1000060;
+      await manager.transition(AppState.RUN);
+      clock.uptimeNs = 200;
+      clock.wallClockMs = 1000100;
+      await manager.transition(AppState.BACKGROUND);
+      clock.uptimeNs = 235;
+      clock.wallClockMs = 1000135;
+      await manager.transition(AppState.RUN);
+      clock.uptimeNs = 265;
+      clock.wallClockMs = 1000165;
+      await manager.transition(AppState.BACKGROUND);
+      clock.uptimeNs = 275;
+      clock.wallClockMs = 1000175;
+      await manager.transition(AppState.BACKGROUND);
+      clock.uptimeNs = 300;
+      clock.wallClockMs = 1000200;
+
+      const duration = await manager.prepareCrashFreeDuration(AppState.BACKGROUND, false);
+      expect(duration !== null).assertTrue();
+      if (duration) {
+        // foreground: 100-125 + 160-200 + 235-265 = 95
+        // background: 125-160 + 200-235 + 265-300 = 105
+        expect(duration.foregroundNs).assertEqual(95);
+        expect(duration.backgroundNs).assertEqual(105);
+      }
+    });
+
+    it('keepsTheIntervalWhenErrorPersistenceDoesNotAcknowledgeThenResetsOnce', 0, async () => {
+      const clock = new FixedCrashFreeClock();
+      const storage = new MemoryCrashFreeStorage();
+      const manager = new FTCrashFreeDurationManager(clock);
+      await manager.initializeWithStorage(storage, AppState.RUN);
+
+      clock.uptimeNs = 180;
+      clock.wallClockMs = 1000080;
+      const failedError = await manager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(failedError !== null).assertTrue();
+      if (failedError) {
+        expect(failedError.foregroundNs).assertEqual(80);
+      }
+      // A failed local Error write never invokes confirmCrashReported().
+
+      clock.uptimeNs = 220;
+      clock.wallClockMs = 1000120;
+      const persistedError = await manager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(persistedError !== null).assertTrue();
+      if (persistedError) {
+        // The failed Error did not clear [100, 180], so the successful Error
+        // still includes the full [100, 220] interval.
+        expect(persistedError.foregroundNs).assertEqual(120);
+        await manager.confirmCrashReported(persistedError);
+      }
+
+      clock.uptimeNs = 250;
+      clock.wallClockMs = 1000150;
+      const afterOneConfirmation = await manager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterOneConfirmation !== null).assertTrue();
+      if (afterOneConfirmation) {
+        // Exactly one acknowledged Error starts the next cycle at 220.
+        expect(afterOneConfirmation.foregroundNs).assertEqual(30);
+        expect(afterOneConfirmation.backgroundNs).assertEqual(0);
+      }
+    });
+
     it('recoversPriorProcessSnapshotAndAssignsRecoveredTailToCrashState', 0, async () => {
       const clock = new FixedCrashFreeClock();
       clock.uptimeNs = 200;
