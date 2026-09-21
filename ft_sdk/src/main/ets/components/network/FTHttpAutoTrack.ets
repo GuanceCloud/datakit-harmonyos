@@ -15,6 +15,7 @@ import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import {
   createFTNetworkErrorContext,
+  FTNetworkErrorContext,
   FTNetworkErrorHandler,
   FTNetworkErrorHandlingResult,
   FTNetworkErrorSource,
@@ -32,6 +33,7 @@ import {
   FTAutoTrackOptions,
   FTNetworkPerformanceTiming,
   FTResourceTiming,
+  HttpAutoTrackCompletionStore,
   HttpAutoTrackState,
   normalizeObjectHeaders,
   PerformanceMetricValue,
@@ -49,7 +51,15 @@ import {
 const TAG = "FTHttpAutoTrack";
 const MS_TO_NS = 1000000;
 
-function addNetworkErrorFields(resourceParams: ResourceParams, handling: FTNetworkErrorHandlingResult | undefined): void {
+function addNetworkErrorFields(
+  resourceParams: ResourceParams,
+  handling: FTNetworkErrorHandlingResult | undefined,
+  context?: FTNetworkErrorContext
+): void {
+  if (context) {
+    resourceParams.addProperty('network_error_kind', new String(context.kind));
+    resourceParams.addProperty('network_error_message', new String(context.message));
+  }
   if (!handling) {
     return;
   }
@@ -291,6 +301,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
         `[RCP-Resource] Completed ${method} ${url}, status=${resourceParams.resourceStatus}, duration=${responseTime}ms, contentType=${resourceParams.responseContentType}, contentLength=${resourceParams.responseContentLength}`
       );
 
+      if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
+        FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate completion ignored: ${resourceId}`);
+        return response;
+      }
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
       FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
       const fallbackActionId = this.resourceActionMap.get(resourceId);
@@ -301,10 +315,24 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
       return response;
     } catch (err) {
+      if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
+        FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate failure completion ignored: ${resourceId}`);
+        if (err instanceof Error) {
+          throw err;
+        }
+        throw new Error(String(err));
+      }
       const errorMessage = getFTNetworkErrorMessage(err);
       const errorStack = getFTNetworkErrorStack(err) || String(err);
-      const handling = handleFTNetworkError(this.networkErrorHandler,
-        createFTNetworkErrorContext(url, method, FTNetworkErrorSource.RCP, err, errorMessage, errorStack));
+      const errorContext = createFTNetworkErrorContext(
+        url,
+        method,
+        FTNetworkErrorSource.RCP,
+        err,
+        errorMessage,
+        errorStack
+      );
+      const handling = handleFTNetworkError(this.networkErrorHandler, errorContext);
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
       const resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
@@ -317,7 +345,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       resourceParams.setRequestErrorMsg(errorMessage);
       resourceParams.setRequestErrorStack(errorStack);
       resourceParams.setResourceStatus(0);
-      addNetworkErrorFields(resourceParams, handling);
+      addNetworkErrorFields(resourceParams, handling, errorContext);
 
       FTInnerLogger.e(
         TAG,
@@ -855,7 +883,8 @@ function completeAxiosResource(
   errorMessage?: string,
   errorStack?: string,
   performanceTiming?: FTNetworkPerformanceTiming,
-  networkErrorHandling?: FTNetworkErrorHandlingResult
+  networkErrorHandling?: FTNetworkErrorHandlingResult,
+  networkErrorContext?: FTNetworkErrorContext
 ): void {
   if (!state.resourceEnabled) {
     return;
@@ -899,7 +928,7 @@ function completeAxiosResource(
   if (errorStack) {
     resourceParams.setRequestErrorStack(errorStack);
   }
-  addNetworkErrorFields(resourceParams, networkErrorHandling);
+  addNetworkErrorFields(resourceParams, networkErrorHandling, networkErrorContext);
 
   const netStatusBean = createFTNetStatusBean(resourceTiming);
   FTInnerLogger.d(TAG,
@@ -985,8 +1014,10 @@ export function applyFTAxiosTrack(
 
       // console.info('ft-lizhao-axios', JSON.stringify(response.performanceTiming));
       completeAxiosTrace(state, response.status || 0, responseHeaders, responseBodyText);
-      completeAxiosResource(state, response.status || 0, responseHeaders, undefined, undefined, undefined,
-        response.performanceTiming);
+      if (state.resourceEnabled && HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId)) {
+        completeAxiosResource(state, response.status || 0, responseHeaders, undefined, undefined, undefined,
+          response.performanceTiming);
+      }
 
       FTInnerLogger.d(
         TAG,
@@ -1005,26 +1036,31 @@ export function applyFTAxiosTrack(
         const status = error.response ? error.response.status || 0 : 0;
 
         completeAxiosTrace(state, status, responseHeaders, responseBodyText);
+        const resourceCompletionClaimed = state.resourceEnabled &&
+          HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId);
         const hasHttpResponse = error.response !== undefined && status > 0;
-        const handling = !state.resourceEnabled || hasHttpResponse ? undefined : handleFTNetworkError(state.networkErrorHandler,
-          createFTNetworkErrorContext(
+        const errorContext = !resourceCompletionClaimed || hasHttpResponse ? undefined : createFTNetworkErrorContext(
             state.url,
             state.method,
             FTNetworkErrorSource.AXIOS,
             rawError,
             error.message || responseBodyText || 'Unknown error',
             error.stack
-          ));
-        completeAxiosResource(
-          state,
-          status,
-          responseHeaders,
-          responseBodyText,
-          error.message || responseBodyText || 'Unknown error',
-          error.stack,
-          error.response ? error.response.performanceTiming : undefined,
-          handling
-        );
+          );
+        const handling = errorContext ? handleFTNetworkError(state.networkErrorHandler, errorContext) : undefined;
+        if (resourceCompletionClaimed) {
+          completeAxiosResource(
+            state,
+            status,
+            responseHeaders,
+            responseBodyText,
+            error.message || responseBodyText || 'Unknown error',
+            error.stack,
+            error.response ? error.response.performanceTiming : undefined,
+            handling,
+            errorContext
+          );
+        }
 
         FTInnerLogger.e(
           TAG,

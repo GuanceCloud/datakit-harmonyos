@@ -36,6 +36,7 @@ interface ResourceBeanJSON {
     // Error information
     errorStack: string;
     errorMsg: string;
+    suppressNetworkError: boolean;
     
     // Status and performance
     resourceStatus: number;
@@ -117,6 +118,8 @@ export class ResourceBean {
   // Error information
   public errorStack: string = "";
   public errorMsg: string = "";
+  /** Retains the Resource while suppressing its derived local network Error. */
+  public suppressNetworkError: boolean = false;
   
   // Status and performance metrics
   public resourceStatus: number = 0;
@@ -477,6 +480,7 @@ export class ResourceBean {
       
       // Others
       hasSessionReplay: this.hasSessionReplay,
+      suppressNetworkError: this.suppressNetworkError,
       property: this.property,
       tags: this.tags,
       

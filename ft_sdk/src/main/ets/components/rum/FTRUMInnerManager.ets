@@ -4777,7 +4777,8 @@ export class FTRUMInnerManager {
       // Aligned with Android SDK: generate error data for HTTP error status codes (>= 400)
       // Android logic: if (bean.resourceStatus >= HttpsURLConnection.HTTP_BAD_REQUEST || (bean.resourceStatus == 0 && !Utils.isNullOrEmpty(bean.errorStack)))
       const resourceStatus = resourceBean.resourceStatus;
-      if (resourceStatus >= 400 || (resourceStatus === 0 && resourceBean.errorStack && resourceBean.errorStack.length > 0)) {
+      if (resourceStatus >= 400 || (resourceStatus === 0 && resourceBean.errorStack &&
+        resourceBean.errorStack.length > 0 && !resourceBean.suppressNetworkError)) {
         FTInnerLogger.d(TAG, `<FT-RESOURCE-ERROR> Generating error data for resource ${resourceId}, status=${resourceStatus}`);
         // Build resourceTags for error callback (to increase error count)
         const resourceTagsForError: Record<string, string> = {};

@@ -9,6 +9,7 @@ import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import {
   createFTNetworkErrorContext,
+  FTNetworkErrorContext,
   FTNetworkErrorHandler,
   FTNetworkErrorHandlingResult,
   FTNetworkErrorRaw,
@@ -25,6 +26,7 @@ import {
   ensureHttpResourceId,
   extractContentLength,
   FTNetworkPerformanceTiming,
+  HttpAutoTrackCompletionStore,
   HttpAutoTrackState,
   HttpAutoTrackStateStore,
   normalizeObjectHeaders,
@@ -197,6 +199,7 @@ export class FTSDKExtensionBridge {
     }
 
     const resourceId = state.resourceId;
+    let resourceCompletionClaimed = false;
     try {
       const responseHeaders = FTSDKExtensionBridge.normalizeHeaders(response.responseHeaders);
       const responseBodyText = tryGetOptionalResponseBodyText(response.body);
@@ -206,6 +209,9 @@ export class FTSDKExtensionBridge {
       }
 
       if (state.resourceEnabled) {
+        resourceCompletionClaimed = HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId);
+      }
+      if (resourceCompletionClaimed) {
         FTSDKExtensionBridge.completeResource(state, response, responseHeaders, responseBodyText);
         FTInnerLogger.d(
           TAG,
@@ -214,7 +220,8 @@ export class FTSDKExtensionBridge {
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Final] Failed to complete response for ${resourceId}: ${error}`);
-      if (state.resourceEnabled) {
+      if (state.resourceEnabled && (resourceCompletionClaimed ||
+        HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId))) {
         FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined,
           response.performanceTiming);
       }
@@ -243,6 +250,7 @@ export class FTSDKExtensionBridge {
       return false;
     }
 
+    let resourceCompletionClaimed = false;
     try {
       if (state.traceEnabled) {
         try {
@@ -255,8 +263,10 @@ export class FTSDKExtensionBridge {
       }
 
       if (state.resourceEnabled) {
-        const handling = response.statusCode === 0 ? handleFTNetworkError(state.networkErrorHandler,
-          createFTNetworkErrorContext(
+        resourceCompletionClaimed = HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId);
+      }
+      if (resourceCompletionClaimed) {
+        const errorContext = response.statusCode === 0 ? createFTNetworkErrorContext(
             state.url,
             state.method,
             FTNetworkErrorSource.HTTP_CHAIN,
@@ -264,19 +274,22 @@ export class FTSDKExtensionBridge {
             response.errorMessage || 'Unknown error',
             response.errorStack,
             response.errorCode
-          )) : undefined;
+          ) : undefined;
+        const handling = errorContext ? handleFTNetworkError(state.networkErrorHandler, errorContext) : undefined;
         FTSDKExtensionBridge.completeResourceError(
           state,
           response.url,
           response.errorMessage || 'Unknown error',
           response.errorStack,
           response.performanceTiming,
-          handling
+          handling,
+          errorContext
         );
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Error] Failed to complete error for ${state.resourceId}: ${error}`);
-      if (state.resourceEnabled) {
+      if (state.resourceEnabled && (resourceCompletionClaimed ||
+        HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId))) {
         FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined,
           response.performanceTiming);
       }
@@ -491,7 +504,8 @@ export class FTSDKExtensionBridge {
     errorMessage: string,
     errorStack?: string,
     performanceTiming?: FTNetworkPerformanceTiming,
-    networkErrorHandling?: FTNetworkErrorHandlingResult
+    networkErrorHandling?: FTNetworkErrorHandlingResult,
+    networkErrorContext?: FTNetworkErrorContext
   ): void {
     const resourceParams = new ResourceParams();
     resourceParams.setUrl(url);
@@ -501,6 +515,10 @@ export class FTSDKExtensionBridge {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
+    if (networkErrorContext) {
+      resourceParams.addProperty('network_error_kind', new String(networkErrorContext.kind));
+      resourceParams.addProperty('network_error_message', new String(networkErrorContext.message));
+    }
     if (networkErrorHandling) {
       const propertyKeys = Object.keys(networkErrorHandling.resourceFields);
       for (let i = 0; i < propertyKeys.length; i++) {

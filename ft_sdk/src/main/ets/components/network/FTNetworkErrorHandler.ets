@@ -10,6 +10,31 @@ import { FTInnerLogger } from '../log/FTLogger';
 
 const TAG = 'FTNetworkErrorHandler';
 
+/**
+ * Callback fields are appended to a Resource after SDK fields are built. Keep
+ * that extension point from altering lifecycle identity, RUM associations or
+ * built-in Resource measurements.
+ */
+const RESERVED_RESOURCE_FIELD_NAMES: Set<string> = new Set([
+  'resource_id', 'resource_url', 'resource_url_host', 'resource_url_path',
+  'resource_url_path_group', 'resource_url_query', 'resource_method',
+  'resource_type', 'resource_status', 'resource_status_group',
+  'resource_host_ip', 'trace_id', 'span_id', 'session_id', 'session_type',
+  'view_id', 'view_name', 'view_referrer', 'action_id', 'action_name',
+  'action_type', 'rum_app_id', 'sdk_data_id', 'sdk_name', 'sdk_version',
+  'service', 'env', 'version', 'resource_size', 'duration', 'resource_dns',
+  'resource_dns_time', 'resource_tcp', 'resource_connect_time',
+  'resource_tcp_time', 'resource_ssl', 'resource_ssl_time', 'resource_ttfb',
+  'resource_trans', 'resource_first_byte', 'resource_first_byte_time',
+  'resource_download_time', 'request_header', 'response_header',
+  'response_connection', 'response_content_type', 'response_content_encoding',
+  'resource_dns', 'resource_tcp', 'resource_ssl', 'resource_ttfb',
+  'resource_trans', 'resource_first_byte', 'resource_download_time',
+  'resourcedns', 'resourcetcp', 'resourcessl', 'resourcettfb', 'resourcetrans',
+  'resourcefirstbyte', 'resourcedownloadtime', 'resourceload',
+  'network_error_kind', 'network_error_message', 'network_error_stack'
+]);
+
 export type FTNetworkErrorRaw = object | string | number | boolean | null | undefined;
 export type FTNetworkResourceFieldValue = string | number | boolean | object;
 export type FTNetworkResourceFields = Record<string, FTNetworkResourceFieldValue>;
@@ -54,6 +79,26 @@ export interface FTNetworkErrorHandler {
 export interface FTNetworkErrorHandlingResult {
   suppressNetworkError: boolean;
   resourceFields: FTNetworkResourceFields;
+}
+
+/** Removes callback fields that could alter SDK-owned Resource data. */
+export function sanitizeFTNetworkResourceFields(fields: FTNetworkResourceFields): FTNetworkResourceFields {
+  const sanitized: FTNetworkResourceFields = {};
+  const keys = Object.keys(fields);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const normalizedKey = key.toLowerCase();
+    const value = fields[key];
+    if (!key || RESERVED_RESOURCE_FIELD_NAMES.has(normalizedKey) || key.startsWith('_')) {
+      FTInnerLogger.w(TAG, `Ignored protected Resource field from network error handler: ${key}`);
+      continue;
+    }
+    if (value === undefined || value === null) {
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  return sanitized;
 }
 
 interface FTNetworkErrorLike {
@@ -167,7 +212,7 @@ export function handleFTNetworkError(
   try {
     return {
       suppressNetworkError: handler.onExceptionWithFilter(context, fields) === true,
-      resourceFields: fields
+      resourceFields: sanitizeFTNetworkResourceFields(fields)
     };
   } catch (error) {
     FTInnerLogger.w(TAG,

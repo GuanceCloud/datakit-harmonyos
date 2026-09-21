@@ -1327,6 +1327,113 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(actionResourceDelta).assertEqual(1);
     });
 
+    it('suppressedLocalResourceShouldKeepResourceWithoutErrorSideEffects', 0, async () => {
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'suppressed-session',
+        viewId: 'suppressed-view',
+        viewName: 'SuppressedView',
+        viewReferrer: 'root',
+        actionId: 'suppressed-action',
+        actionName: 'load',
+        rumAppId: 'gc_app_harmonyos_demo'
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://offline.example.com',
+        requestHeader: '',
+        responseHeader: '',
+        responseConnection: '',
+        responseContentType: '',
+        responseContentEncoding: '',
+        responseContentLength: 0,
+        resourceMethod: 'GET',
+        responseBody: '',
+        resourceStatus: 0,
+        resourceType: 'network',
+        requestErrorStack: 'timeout stack',
+        requestErrorMsg: 'timeout',
+        suppressNetworkError: true,
+        property: new Object() as SDKPropertyRecord
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0,
+        sslTime: 0, sslStartTime: 0, ttfbTime: 0, responseTime: 0,
+        firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
+        downloadStartTime: 0, holeRequestTime: 10, resourceHostIP: ''
+      };
+      const batch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'start', resourceId: 'suppressed-resource', context, startTime: 10
+        }, {
+          commandType: 'setContent', resourceId: 'suppressed-resource', context, params, eventTime: 20
+        }, {
+          commandType: 'setNetState', resourceId: 'suppressed-resource', context, netStatus, eventTime: 30
+        }, {
+          commandType: 'stop', resourceId: 'suppressed-resource', context, endTime: 40
+        }]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'rum-suppressed-local-resource',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      expect(String((drafts[0] as Record<string, object>)['dataString']).startsWith('resource,')).assertTrue();
+      const deltas = getPayloadArray(response.payload, 'deltas');
+      for (let i = 0; i < deltas.length; i++) {
+        const delta = deltas[i] as Record<string, object>;
+        if (String(delta['actionId']) === 'suppressed-action') {
+          expect(Number(delta['actionErrorDelta'])).assertEqual(0);
+          expect(Number(delta['actionResourceDelta'])).assertEqual(1);
+        }
+      }
+
+      const httpErrorParams: SDKRumResourceParamsDTO = {
+        url: 'https://offline.example.com',
+        requestHeader: '',
+        responseHeader: '',
+        responseConnection: '',
+        responseContentType: '',
+        responseContentEncoding: '',
+        responseContentLength: 0,
+        resourceMethod: 'GET',
+        responseBody: 'HTTP 500',
+        resourceStatus: 500,
+        resourceType: 'network',
+        requestErrorStack: 'server response stack',
+        requestErrorMsg: 'server error',
+        suppressNetworkError: true,
+        property: new Object() as SDKPropertyRecord
+      };
+      const httpResponse = await executeWorkerCommandForUnit({
+        id: 'rum-http-resource-must-still-error',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+        priority: 7,
+        createdAt: Date.now(),
+        payload: {
+          lineContext: createRumWorkerLineContext(),
+          commands: [{
+            commandType: 'start', resourceId: 'http-error-resource', context, startTime: 50
+          }, {
+            commandType: 'setContent', resourceId: 'http-error-resource', context, params: httpErrorParams, eventTime: 60
+          }, {
+            commandType: 'setNetState', resourceId: 'http-error-resource', context, netStatus, eventTime: 70
+          }, {
+            commandType: 'stop', resourceId: 'http-error-resource', context, endTime: 80
+          }]
+        } as Object as SDKWorkerPayload
+      });
+      expect(httpResponse.ok).assertTrue();
+      expect(getPayloadArray(httpResponse.payload, 'syncDrafts').length).assertEqual(2);
+    });
+
     it('resourceCompletionKeepsStopPropertiesWhenAddArrivesFirst', 0, () => {
       const context: SDKRumResourceContextDTO = {
         sessionId: 'lifecycle-session', viewId: 'lifecycle-view', viewName: 'LifecycleView', viewReferrer: 'root',

@@ -6,7 +6,8 @@ import {
   FTNetworkErrorKind,
   FTNetworkErrorSource,
   FTNetworkResourceFields,
-  handleFTNetworkError
+  handleFTNetworkError,
+  sanitizeFTNetworkResourceFields
 } from '../../main/ets/components/network/FTNetworkErrorHandler';
 
 class FilteringNetworkErrorHandler implements FTNetworkErrorHandler {
@@ -64,6 +65,19 @@ export default function ftNetworkErrorHandlerUnitTest() {
 
       expect(result.suppressNetworkError).assertFalse();
       expect(Object.keys(result.resourceFields).length).assertEqual(0);
+    });
+
+    it('protectedResourceFieldsShouldBeDiscarded', 0, () => {
+      const fields: FTNetworkResourceFields = {
+        resource_id: 'attempted-override',
+        view_id: 'attempted-view-override',
+        handler_reason: 'timeout'
+      };
+
+      const sanitized = sanitizeFTNetworkResourceFields(fields);
+
+      expect(Object.keys(sanitized).length).assertEqual(1);
+      expect(String(sanitized['handler_reason'])).assertEqual('timeout');
     });
   });
 }

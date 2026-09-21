@@ -303,6 +303,43 @@ export class HttpAutoTrackStateStore {
   }
 }
 
+/**
+ * A request can cross more than one automatic interceptor implementation.
+ * Claim its completion before invoking a local-failure callback so only the
+ * terminal owner reports the Resource and derives its Error.
+ */
+export class HttpAutoTrackCompletionStore {
+  private static instance: HttpAutoTrackCompletionStore | null = null;
+  private readonly completedResourceIds: Set<string> = new Set();
+
+  public static getInstance(): HttpAutoTrackCompletionStore {
+    if (HttpAutoTrackCompletionStore.instance === null) {
+      HttpAutoTrackCompletionStore.instance = new HttpAutoTrackCompletionStore();
+    }
+    return HttpAutoTrackCompletionStore.instance;
+  }
+
+  public tryClaim(resourceId: string): boolean {
+    if (!resourceId || resourceId.length === 0 || this.completedResourceIds.has(resourceId)) {
+      return false;
+    }
+    if (this.completedResourceIds.size >= Constants.MAX_MAP_SIZE_RESOURCE) {
+      FTInnerLogger.w(TAG, '[HTTP-AutoTrack] completion ledger reached its limit, clearing old completions');
+      this.completedResourceIds.clear();
+    }
+    this.completedResourceIds.add(resourceId);
+    return true;
+  }
+
+  public clear(): void {
+    this.completedResourceIds.clear();
+  }
+
+  public size(): number {
+    return this.completedResourceIds.size;
+  }
+}
+
 export class AxiosChainMethodStore {
   private static instance: AxiosChainMethodStore | null = null;
   private readonly methodMap: Map<string, string> = new Map();

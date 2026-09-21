@@ -5,6 +5,7 @@ import {
   AxiosChainMethodStore,
   ensureHttpResourceId,
   extractContentLength,
+  HttpAutoTrackCompletionStore,
   HttpAutoTrackStateStore,
 } from '../../main/ets/components/network/FTHttpAutoTrackShared';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
@@ -76,6 +77,7 @@ export default function httpAutoTrackSharedUnitTest() {
     it('testResetClearSharedStoresAndTraceState', 0, () => {
       const stateStore = HttpAutoTrackStateStore.getInstance();
       const methodStore = AxiosChainMethodStore.getInstance();
+      const completionStore = HttpAutoTrackCompletionStore.getInstance();
       const resourceId = 'reset-resource';
 
       stateStore.put({
@@ -86,6 +88,7 @@ export default function httpAutoTrackSharedUnitTest() {
         requestHeaders: {}
       });
       methodStore.put(resourceId, 'POST');
+      expect(completionStore.tryClaim(resourceId)).assertTrue();
       FTTraceConfigManager.getInstance().initWithConfig(new FTTraceConfig().setTraceType(TraceType.JAEGER));
       FTTraceManager.getInstance().getTraceHeader(resourceId, 'https://example.com/reset');
 
@@ -93,8 +96,17 @@ export default function httpAutoTrackSharedUnitTest() {
 
       expect(stateStore.size()).assertEqual(0);
       expect(methodStore.size()).assertEqual(0);
+      expect(completionStore.size()).assertEqual(0);
       expect(FTTraceConfigManager.getInstance().getConfig() === null).assertTrue();
       expect(FTTraceManager.getInstance().getHandlerCount()).assertEqual(0);
+    });
+
+    it('completionStoreShouldClaimOneTerminalOwner', 0, () => {
+      const completionStore = HttpAutoTrackCompletionStore.getInstance();
+
+      expect(completionStore.tryClaim('one-request')).assertTrue();
+      expect(completionStore.tryClaim('one-request')).assertFalse();
+      expect(completionStore.tryClaim('another-request')).assertTrue();
     });
 
   });
