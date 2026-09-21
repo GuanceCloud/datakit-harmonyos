@@ -7,7 +7,11 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
-import { SDKRumResourceContextDTO, SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+import {
+  SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
+  SDKUploadRowDTO
+} from '../thread/SDKWorkerProtocol';
 import { FTCacheCoordinator } from './FTCacheCoordinator';
 import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse } from './FTDBTaskPoolExecutor';
 
@@ -2143,6 +2147,8 @@ function pendingResourceValues(resource: FTDBTaskPoolPendingRumResourceDTO): rel
   values[FTSQL.PENDING_RESOURCE_COLUMN_ACTION_NAME] = context.actionName || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID] = context.rumAppId || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS] = JSON.stringify(context.dynamicTags || {});
+  values[FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT] = context.networkSnapshot ?
+    JSON.stringify(context.networkSnapshot) : '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_DRAFT_UUID] = resource.draftUuid || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID] = resource.errorDraftUuid || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_START_TIME] = resource.startTime;
@@ -2158,6 +2164,52 @@ function parsePendingResourceDynamicTags(value: string): Record<string, string> 
     tags[keys[i]] = String(parsed[keys[i]]);
   }
   return tags;
+}
+
+function parsePendingResourceNetworkSnapshot(value: string): SDKRumResourceNetworkSnapshotDTO | undefined {
+  const parsed = parseJsonRecord(value);
+  const available = parsed['available'];
+  // Historical pending rows did not retain the start snapshot. Preserve that
+  // fact by omitting all new fields rather than manufacturing unavailable.
+  if (typeof available !== 'boolean') {
+    return undefined;
+  }
+  const snapshot: SDKRumResourceNetworkSnapshotDTO = { available };
+  if (!available) {
+    return snapshot;
+  }
+  const validated = parsed['validated'];
+  if (typeof validated === 'boolean') {
+    snapshot.validated = validated;
+  }
+  const downlinkKbps = getPendingResourceNetworkMetric(parsed['downlinkKbps'], false);
+  if (downlinkKbps !== undefined) {
+    snapshot.downlinkKbps = downlinkKbps;
+  }
+  const uplinkKbps = getPendingResourceNetworkMetric(parsed['uplinkKbps'], false);
+  if (uplinkKbps !== undefined) {
+    snapshot.uplinkKbps = uplinkKbps;
+  }
+  const signalStrength = getPendingResourceNetworkMetric(parsed['signalStrength'], true);
+  if (signalStrength !== undefined) {
+    snapshot.signalStrength = signalStrength;
+  }
+  return snapshot;
+}
+
+function getPendingResourceNetworkMetric(value: object | undefined, allowsZero: boolean): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return undefined;
+  }
+  if (allowsZero ? value >= 0 : value > 0) {
+    return value;
+  }
+  return undefined;
+}
+
+function getPendingResourceColumnString(resultSet: relationalStore.ResultSet, columnName: string): string {
+  const index = resultSet.getColumnIndex(columnName);
+  return index >= 0 ? resultSet.getString(index) : '';
 }
 
 function readPendingRumResourceFromResultSet(
@@ -2185,6 +2237,9 @@ function readPendingRumResourceFromResultSet(
       rumAppId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID)),
       dynamicTags: parsePendingResourceDynamicTags(
         resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS))
+      ),
+      networkSnapshot: parsePendingResourceNetworkSnapshot(
+        getPendingResourceColumnString(resultSet, FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT)
       )
     }
   };

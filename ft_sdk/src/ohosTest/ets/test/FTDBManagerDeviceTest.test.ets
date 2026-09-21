@@ -41,6 +41,7 @@ function createRumSyncData(label: string, time: number = TEST_NOW_NS): SyncData 
 class SchemaProbeCallback implements DataBaseCallBack {
   public hasViewMigrationColumns: boolean = false;
   public hasSyncDataFlatTable: boolean = false;
+  public hasPendingResourceNetworkSnapshotColumn: boolean = false;
 
   async run(rdbStore: relationalStore.RdbStore): Promise<void> {
     const viewResult = await rdbStore.querySql(
@@ -55,11 +56,25 @@ class SchemaProbeCallback implements DataBaseCallBack {
     );
     this.hasSyncDataFlatTable = syncResult.goToFirstRow();
     syncResult.close();
+
+    const pendingResourceResult = await rdbStore.querySql(
+      `SELECT ${FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT} ` +
+      `FROM ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE} LIMIT 1`
+    );
+    this.hasPendingResourceNetworkSnapshotColumn = true;
+    pendingResourceResult.close();
   }
 }
 
 class PendingResourceContextFixture implements SDKRumResourceContextDTO {
   dynamicTags?: SDKStringRecord;
+  networkSnapshot = {
+    available: true,
+    validated: true,
+    downlinkKbps: 1200,
+    uplinkKbps: 600,
+    signalStrength: 3
+  };
   sessionId: string = 'pending-resource-session';
   viewId: string = '';
   viewName: string = '';
@@ -248,6 +263,11 @@ export default function ftDBManagerDeviceTest() {
       expect(restored !== null).assertTrue();
       expect(restored!.context.actionId).assertEqual(actionId);
       expect(restored!.draftUuid).assertEqual('pending-resource-one-draft');
+      expect(restored!.context.networkSnapshot?.available).assertTrue();
+      expect(restored!.context.networkSnapshot?.validated).assertTrue();
+      expect(restored!.context.networkSnapshot?.downlinkKbps).assertEqual(1200);
+      expect(restored!.context.networkSnapshot?.uplinkKbps).assertEqual(600);
+      expect(restored!.context.networkSnapshot?.signalStrength).assertEqual(3);
 
       const waitingClose = await FTDBTaskPoolExecutor.closeRumAction(context, actionId, 100);
       expect(waitingClose.wasClosed).assertFalse();
@@ -365,6 +385,7 @@ export default function ftDBManagerDeviceTest() {
 
       expect(callback.hasViewMigrationColumns).assertTrue();
       expect(callback.hasSyncDataFlatTable).assertTrue();
+      expect(callback.hasPendingResourceNetworkSnapshotColumn).assertTrue();
     });
 
     it('errorSampledShouldMigrateExpire', 0, async () => {

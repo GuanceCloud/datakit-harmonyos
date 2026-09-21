@@ -145,6 +145,8 @@ export class DatabaseHelper {
         await this.update2to3();
       }
 
+      await this.ensurePendingResourceNetworkSnapshotColumn();
+
       FTInnerLogger.i(TAG, "Database version check completed");
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to check/upgrade database version: ${error}`);
@@ -170,6 +172,28 @@ export class DatabaseHelper {
   }
 
   /**
+   * CREATE TABLE IF NOT EXISTS cannot add a column to existing installations.
+   * Keep this independent from the legacy version markers so all prior SDK
+   * versions retain incomplete Resource snapshots after the upgrade.
+   */
+  private async ensurePendingResourceNetworkSnapshotColumn(): Promise<void> {
+    if (!this.rdbStore || !(await this.hasTable(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE))) {
+      return;
+    }
+    if (await this.hasColumn(
+      FTSQL.FT_TABLE_PENDING_RUM_RESOURCE,
+      FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT
+    )) {
+      return;
+    }
+    await this.rdbStore.executeSql(
+      `ALTER TABLE ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE} ADD COLUMN ` +
+      `${FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT} TEXT`
+    );
+    FTInnerLogger.i(TAG, "Added network_snapshot to rum_pending_resource");
+  }
+
+  /**
    * Check if a table exists
    */
   private async hasTable(tableName: string): Promise<boolean> {
@@ -179,6 +203,21 @@ export class DatabaseHelper {
 
     try {
       await this.rdbStore.querySql("SELECT COUNT(*) FROM " + tableName + " LIMIT 1");
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  private async hasColumn(tableName: string, columnName: string): Promise<boolean> {
+    if (!this.rdbStore) {
+      return false;
+    }
+    try {
+      const resultSet = await this.rdbStore.querySql(
+        `SELECT ${columnName} FROM ${tableName} LIMIT 1`
+      );
+      resultSet.close();
       return true;
     } catch (error) {
       return false;
