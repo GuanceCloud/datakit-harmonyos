@@ -29,6 +29,7 @@ import {
 } from '../entryability/EntryAbility';
 import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
+import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 import {
   preInitChainClientInfo,
   preInitCompatClientInfo,
@@ -104,9 +105,9 @@ export struct HttpAutoTrackTestPage {
   }
 
   private createNetworkErrorHandler(): FTNetworkErrorHandler | null | undefined {
-    // Enabled defers to the FTRUMConfig default; disabled explicitly opts this
-    // request path out so the global default remains installed for other code.
-    return this.localNetworkErrorFilterEnabled ? undefined : null;
+    // An enabled local filter overrides the FTRUMConfig default. Leaving this
+    // undefined deliberately inherits the app-wide default instead.
+    return this.localNetworkErrorFilterEnabled ? new DemoLocalNetworkErrorFilter() : undefined;
   }
 
   private getLocalFailureUrl(source: string): string {
