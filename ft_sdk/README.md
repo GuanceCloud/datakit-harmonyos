@@ -133,7 +133,21 @@ class LocalFailureFilter implements FTNetworkErrorHandler {
 const networkErrorHandler = new LocalFailureFilter()
 ```
 
-Attach this handler to each automatic collection entry point used by the app:
+Configure it once on `FTRUMConfig` to make it the default for automatic RCP,
+Axios, and NetworkKit HTTP collection. This mirrors Android's global
+`setOkHttpResourceContentHandler(...)` configuration while applying to all
+HarmonyOS automatic network integrations:
+
+```ts
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTraceUserResource(true)
+  .setNetworkErrorHandler(networkErrorHandler)
+
+FTSDK.installRUMConfig(rumConfig)
+```
+
+An individual automatic collection entry point can override that default:
 
 ```ts
 // RCP
@@ -146,6 +160,10 @@ applyFTAxiosTrack(axiosClient, { networkErrorHandler })
 applyFTHttpTrack(httpRequest, { networkErrorHandler })
 // or: createFTHttpInterceptorChain({ networkErrorHandler })
 ```
+
+An explicit handler has priority over the `FTRUMConfig` default. Pass
+`networkErrorHandler: null` on a Session, Axios Client, or NetworkKit chain to
+keep the global default configured for the app but opt that integration out.
 
 The context includes the URL, method, source (`rcp`, `http_chain`, or `axios`),
 original failure value, optional platform error code, message, stack, and a

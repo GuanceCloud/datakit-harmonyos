@@ -33,6 +33,7 @@ import {
 import { FTColdLaunchBridge } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
+import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
@@ -490,6 +491,7 @@ export default class EntryAbility extends UIAbility {
         .setViewTrackingHandler(new DemoViewTrackingHandler(), FTViewTrackingType.ALL)
         .setActionTrackingHandler(new DemoActionTrackingHandler())
         .setResourceUrlHandler(new DemoResourceUrlHandler())
+        .setNetworkErrorHandler(new DemoLocalNetworkErrorFilter())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)

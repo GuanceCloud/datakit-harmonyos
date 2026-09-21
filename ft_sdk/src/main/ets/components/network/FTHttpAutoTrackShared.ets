@@ -264,7 +264,11 @@ export interface FTAutoTrackOptions {
   enableTraceInterceptor?: boolean;
   enableResourceInterceptor?: boolean;
   /** Handles local failures only; HTTP responses, including 4xx/5xx, bypass it. */
-  networkErrorHandler?: FTNetworkErrorHandler;
+  /**
+   * Overrides FTRUMConfig's default handler for this integration. Pass null
+   * to opt this integration out of the configured global default.
+   */
+  networkErrorHandler?: FTNetworkErrorHandler | null;
 }
 
 export class HttpAutoTrackStateStore {

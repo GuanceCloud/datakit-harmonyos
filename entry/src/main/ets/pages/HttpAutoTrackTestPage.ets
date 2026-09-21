@@ -5,9 +5,7 @@
 import {
   applyFTAxiosTrack,
   createFTRCPTrackConfig,
-  FTNetworkErrorContext,
   FTNetworkErrorHandler,
-  FTNetworkResourceFields,
   FTSDK,
   FTTraceConfigManager,
 } from '@guancecloud/ft_sdk/Index';
@@ -76,19 +74,6 @@ interface AxiosErrorTarget {
 }
 
 /**
- * The demo keeps the local failure visible to application code while adding
- * predictable Resource fields and suppressing only the derived network Error.
- */
-class DemoLocalNetworkErrorFilter implements FTNetworkErrorHandler {
-  onExceptionWithFilter(context: FTNetworkErrorContext, resourceFields: FTNetworkResourceFields): boolean {
-    resourceFields['demo_network_error_source'] = context.source;
-    resourceFields['demo_network_error_kind'] = context.kind;
-    resourceFields['demo_network_error_filtered'] = true;
-    return true;
-  }
-}
-
-/**
  * HTTP Interceptor Test Page Component
  */
 @Entry
@@ -118,8 +103,10 @@ export struct HttpAutoTrackTestPage {
     }));
   }
 
-  private createNetworkErrorHandler(): FTNetworkErrorHandler | undefined {
-    return this.localNetworkErrorFilterEnabled ? new DemoLocalNetworkErrorFilter() : undefined;
+  private createNetworkErrorHandler(): FTNetworkErrorHandler | null | undefined {
+    // Enabled defers to the FTRUMConfig default; disabled explicitly opts this
+    // request path out so the global default remains installed for other code.
+    return this.localNetworkErrorFilterEnabled ? undefined : null;
   }
 
   private getLocalFailureUrl(source: string): string {

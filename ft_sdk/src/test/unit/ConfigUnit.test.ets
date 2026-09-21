@@ -55,11 +55,18 @@ import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
 import { FTViewTrackingContext } from '../../main/ets/components/rum/handler/FTViewTrackingContext';
 import { FTViewTrackingHandler } from '../../main/ets/components/rum/handler/FTViewTrackingHandler';
 import { FTViewTrackingType } from '../../main/ets/components/rum/enum/FTViewTrackingType';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
 const TEST_FAKE_CLIENT_TOKEN = 'fake_client_token';
 const TEST_FAKE_RUM_ID = 'rumId';
+
+class TestGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
+  }
+}
 
 class TestConfigRecord implements ConfigRecord {
   private config: FTSDKConfig;
@@ -363,6 +370,20 @@ export default function configUnitTest() {
       expect(manager.shouldFilterResourceUrl('https://ignored.example.com/metrics')).assertTrue();
       expect(manager.shouldFilterResourceUrl('https://api.example.com/orders')).assertFalse();
       expect(handler.calls).assertEqual(2);
+    });
+
+    it('networkErrorHandlerShouldBeStoredAsGlobalAutoTrackDefault', 0, () => {
+      const handler = new TestGlobalNetworkErrorHandler();
+      const config = new FTRUMConfig().setNetworkErrorHandler(handler);
+      const manager = FTRUMConfigManager.getInstance();
+      manager.initWithConfig(config);
+
+      expect(config.getNetworkErrorHandler() === handler).assertTrue();
+      expect(manager.getNetworkErrorHandler() === handler).assertTrue();
+
+      config.setNetworkErrorHandler(null);
+      expect(config.getNetworkErrorHandler() === null).assertTrue();
+      expect(manager.getNetworkErrorHandler() === undefined).assertTrue();
     });
 
     it('runtimeEndpointUpdatesSwitchUploadModes', 0, () => {

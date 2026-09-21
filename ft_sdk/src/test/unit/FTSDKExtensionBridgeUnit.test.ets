@@ -17,11 +17,18 @@ import {
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 class IgnoredResourceUrlHandler extends FTInTakeUrlHandler {
   public isInTakeUrl(url: string): boolean {
     return url.includes('/ignored-resource');
+  }
+}
+
+class ExtensionGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
   }
 }
 
@@ -157,6 +164,21 @@ export default function ftSDKExtensionBridgeUnitTest() {
         responseHeaders: {},
         statusCode: 200
       })).assertTrue();
+    });
+
+    it('httpOptionsShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
+      const globalHandler = new ExtensionGlobalNetworkErrorHandler();
+      const explicitHandler = new ExtensionGlobalNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setNetworkErrorHandler(globalHandler));
+
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({}).networkErrorHandler === globalHandler).assertTrue();
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({
+        networkErrorHandler: explicitHandler
+      }).networkErrorHandler === explicitHandler).assertTrue();
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({
+        networkErrorHandler: null
+      }).networkErrorHandler === undefined).assertTrue();
     });
 
     it('httpPrepareShouldPassTraceIds', 0, () => {

@@ -11,6 +11,7 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 import { FTViewTrackingHandler } from "./rum/handler/FTViewTrackingHandler";
 import { FTViewTrackingType } from "./rum/enum/FTViewTrackingType";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
+import { FTNetworkErrorHandler } from './network/FTNetworkErrorHandler';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
@@ -92,6 +93,9 @@ export class FTRUMConfig {
   // private extraLogCatWithNativeCrash: ExtraLogCatSetting | null = null;
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
+  // Default handler for automatically collected local network failures. A
+  // client/session/chain-level handler takes precedence over this value.
+  private networkErrorHandler: FTNetworkErrorHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
   private viewRouterTrackingHandler: FTViewTrackingHandler | null = null;
   private viewNavigationTrackingHandler: FTViewTrackingHandler | null = null;
@@ -400,6 +404,22 @@ export class FTRUMConfig {
 
   public getResourceUrlHandler(): FTInTakeUrlHandler | null {
     return this.intTakeUrlHandler;
+  }
+
+  /**
+   * Sets the default local Network Error handler for automatic RCP, NetworkKit
+   * HTTP, and Axios Resource collection. It is used only when that individual
+   * Session, client, or interceptor chain does not provide its own handler.
+   * Pass null to clear the default.
+   */
+  public setNetworkErrorHandler(handler: FTNetworkErrorHandler | null): FTRUMConfig {
+    this.networkErrorHandler = handler;
+    return this;
+  }
+
+  /** Returns the global default local Network Error handler, if configured. */
+  public getNetworkErrorHandler(): FTNetworkErrorHandler | null {
+    return this.networkErrorHandler;
   }
 
   /**

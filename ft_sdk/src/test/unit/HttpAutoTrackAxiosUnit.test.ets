@@ -8,6 +8,7 @@ import {
 import { FTRUMConfig } from '../../main/ets/components/Configs';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 const FT_AXIOS_AUTOTRACK_CONTEXT_KEY = '__ftAxiosAutoTrackState';
@@ -20,6 +21,13 @@ class IgnoredAxiosResourceUrlHandler extends FTInTakeUrlHandler {
 
 interface StoredAxiosAutoTrackState {
   resourceEnabled: boolean;
+  networkErrorHandler?: FTNetworkErrorHandler;
+}
+
+class AxiosGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
+  }
 }
 
 type AxiosRequestFulfilled = (value: FTAxiosRequestConfigTarget) => FTAxiosRequestConfigTarget | Promise<FTAxiosRequestConfigTarget>;
@@ -178,6 +186,42 @@ export default function httpAutoTrackAxiosUnitTest() {
 
       target.responseManager.fulfilled!(new FakeAxiosResponse(preparedConfig));
       expect(getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
+    });
+
+    it('axiosShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
+      const globalHandler = new AxiosGlobalNetworkErrorHandler();
+      const explicitHandler = new AxiosGlobalNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setNetworkErrorHandler(globalHandler));
+
+      const globalTarget = new FakeAxiosTarget();
+      applyFTAxiosTrack(globalTarget as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false
+      });
+      const globalState = getContext(createPreparedConfig(globalTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
+        as StoredAxiosAutoTrackState;
+      expect(globalState.networkErrorHandler === globalHandler).assertTrue();
+
+      const explicitTarget = new FakeAxiosTarget();
+      applyFTAxiosTrack(explicitTarget as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false,
+        networkErrorHandler: explicitHandler
+      });
+      const explicitState = getContext(createPreparedConfig(explicitTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
+        as StoredAxiosAutoTrackState;
+      expect(explicitState.networkErrorHandler === explicitHandler).assertTrue();
+
+      const disabledTarget = new FakeAxiosTarget();
+      applyFTAxiosTrack(disabledTarget as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false,
+        networkErrorHandler: null
+      });
+      const disabledState = getContext(createPreparedConfig(disabledTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
+        as StoredAxiosAutoTrackState;
+      expect(disabledState.networkErrorHandler === undefined).assertTrue();
     });
   });
 }

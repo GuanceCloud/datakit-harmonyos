@@ -6,6 +6,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import { DeviceUtils } from '../utils/DeviceUtils';
 import { FTRUMConfig } from '../Configs';
+import { FTNetworkErrorHandler } from '../network/FTNetworkErrorHandler';
 import { UserDataManager } from './UserDataManager';
 
 const TAG = "FTRUMConfigManager";
@@ -73,6 +74,14 @@ export class FTRUMConfigManager {
 
   public isResourceTraceEnable(): boolean {
     return this.config !== null && this.config.isEnableTraceUserResource();
+  }
+
+  /**
+   * Returns the RUM-level default handler used by automatic network
+   * integrations when they were not given an explicit handler.
+   */
+  public getNetworkErrorHandler(): FTNetworkErrorHandler | undefined {
+    return this.config?.getNetworkErrorHandler() ?? undefined;
   }
 
   /**

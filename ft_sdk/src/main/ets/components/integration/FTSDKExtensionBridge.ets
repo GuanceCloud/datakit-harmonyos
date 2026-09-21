@@ -45,7 +45,11 @@ export const FT_SDK_EXTENSION_CONTRACT_VERSION = 1;
 export interface FTSDKExtensionAutoTrackOptions {
   enableTraceInterceptor?: boolean;
   enableResourceInterceptor?: boolean;
-  networkErrorHandler?: FTNetworkErrorHandler;
+  /**
+   * Overrides FTRUMConfig's default handler for this interceptor chain. Pass
+   * null to opt this chain out of the configured global default.
+   */
+  networkErrorHandler?: FTNetworkErrorHandler | null;
 }
 
 export interface FTSDKExtensionResolvedAutoTrackOptions {
@@ -109,7 +113,9 @@ export class FTSDKExtensionBridge {
     return {
       enableTraceInterceptor: traceEnabled,
       enableResourceInterceptor: resourceEnabled,
-      networkErrorHandler: options.networkErrorHandler
+      networkErrorHandler: options.networkErrorHandler !== undefined
+        ? options.networkErrorHandler ?? undefined
+        : FTRUMConfigManager.getInstance().getNetworkErrorHandler()
     };
   }
 

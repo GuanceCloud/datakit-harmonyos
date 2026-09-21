@@ -51,6 +51,16 @@ import {
 const TAG = "FTHttpAutoTrack";
 const MS_TO_NS = 1000000;
 
+/** Resolves a per-integration override before the RUM-level default. */
+function resolveNetworkErrorHandler(
+  handler: FTNetworkErrorHandler | null | undefined
+): FTNetworkErrorHandler | undefined {
+  if (handler !== undefined) {
+    return handler ?? undefined;
+  }
+  return FTRUMConfigManager.getInstance().getNetworkErrorHandler();
+}
+
 function addNetworkErrorFields(
   resourceParams: ResourceParams,
   handling: FTNetworkErrorHandlingResult | undefined,
@@ -941,7 +951,7 @@ function completeAxiosResource(
 export function createFTRCPInterceptors(
   enableTraceInterceptor?: boolean,
   enableResourceInterceptor?: boolean,
-  networkErrorHandler?: FTNetworkErrorHandler
+  networkErrorHandler?: FTNetworkErrorHandler | null
 ): rcp.Interceptor[] {
   const traceEnabled = enableTraceInterceptor !== undefined
     ? enableTraceInterceptor
@@ -949,13 +959,14 @@ export function createFTRCPInterceptors(
   const resourceEnabled = enableResourceInterceptor !== undefined
     ? enableResourceInterceptor
     : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+  const resolvedNetworkErrorHandler = resolveNetworkErrorHandler(networkErrorHandler);
 
   const interceptors: rcp.Interceptor[] = [];
   if (traceEnabled) {
     interceptors.push(new RCPTraceInterceptor());
   }
   if (resourceEnabled) {
-    interceptors.push(new RCPResourceInterceptor(networkErrorHandler));
+    interceptors.push(new RCPResourceInterceptor(resolvedNetworkErrorHandler));
   }
   return interceptors;
 }
@@ -976,9 +987,10 @@ export function applyFTAxiosTrack(
   const resourceEnabled = options.enableResourceInterceptor !== undefined
     ? options.enableResourceInterceptor
     : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+  const networkErrorHandler = resolveNetworkErrorHandler(options.networkErrorHandler);
 
   const requestInterceptorId = target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
-    const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled, options.networkErrorHandler);
+    const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled, networkErrorHandler);
     config.headers = state.requestHeaders as Object;
 
     if (state.resourceEnabled && FTRUMConfigManager.getInstance().shouldFilterResourceUrl(state.url)) {

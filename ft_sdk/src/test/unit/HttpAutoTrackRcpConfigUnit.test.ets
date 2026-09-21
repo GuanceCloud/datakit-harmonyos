@@ -10,12 +10,23 @@ import {
 import { FTRUMConfig } from '../../main/ets/components/Configs';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 class IgnoredRcpResourceUrlHandler extends FTInTakeUrlHandler {
   public isInTakeUrl(url: string): boolean {
     return url.includes('/ignored-resource');
   }
+}
+
+class RcpGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
+  }
+}
+
+interface RcpResourceInterceptorTestAccess {
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 class CustomRcpInterceptor implements rcp.Interceptor {
@@ -176,6 +187,36 @@ export default function httpAutoTrackRcpConfigUnitTest() {
         enableResourceInterceptor: false
       });
       expect((disabled.interceptors ?? []).length).assertEqual(0);
+    });
+
+    it('rcpConfigShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
+      const globalHandler = new RcpGlobalNetworkErrorHandler();
+      const explicitHandler = new RcpGlobalNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setNetworkErrorHandler(globalHandler));
+
+      const globalInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      }).interceptors ?? [];
+      const globalResource = globalInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(globalResource.networkErrorHandler === globalHandler).assertTrue();
+
+      const explicitInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: explicitHandler
+      }).interceptors ?? [];
+      const explicitResource = explicitInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(explicitResource.networkErrorHandler === explicitHandler).assertTrue();
+
+      const disabledInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: null
+      }).interceptors ?? [];
+      const disabledResource = disabledInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(disabledResource.networkErrorHandler === undefined).assertTrue();
     });
 
     it('rcpConfigShouldAppendCustom', 0, () => {
