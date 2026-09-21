@@ -146,6 +146,12 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_SPAN_ID = "span_id";
   static readonly KEY_RUM_RESOURCE_REQUEST_HEADER = "request_header";
   static readonly KEY_RUM_RESOURCE_RESPONSE_HEADER = "response_header";
+  /** Resource network snapshot fields (aligned with Android). */
+  static readonly KEY_RUM_RESOURCE_NETWORK_AVAILABLE = "network_available";
+  static readonly KEY_RUM_RESOURCE_NETWORK_VALIDATED = "network_validated";
+  static readonly KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS = "network_downlink_kbps";
+  static readonly KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS = "network_uplink_kbps";
+  static readonly KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH = "network_signal_strength";
   
   /**
    * RUM error related keys

@@ -1327,6 +1327,95 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(actionResourceDelta).assertEqual(1);
     });
 
+    it('resourceNetworkSnapshotUsesStartContextAndOmitsUnknownMetrics', 0, async () => {
+      const startOnlineContext: SDKRumResourceContextDTO = {
+        sessionId: 'network-snapshot-session', viewId: 'network-snapshot-view', viewName: 'NetworkSnapshotView',
+        viewReferrer: 'root', actionId: 'network-snapshot-action', actionName: 'request',
+        networkSnapshot: {
+          available: true, validated: true, downlinkKbps: 1500, uplinkKbps: 800, signalStrength: 0
+        }
+      };
+      const laterOfflineContext: SDKRumResourceContextDTO = {
+        sessionId: 'later-session', viewId: 'later-view', viewName: 'LaterView', viewReferrer: 'root',
+        actionId: 'later-action', actionName: 'later', networkSnapshot: { available: false }
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/network-snapshot', requestHeader: '', responseHeader: '', responseConnection: '',
+        responseContentType: '', responseContentEncoding: '', responseContentLength: 0, resourceMethod: 'GET',
+        responseBody: '', resourceStatus: 200, resourceType: 'network', requestErrorStack: '', requestErrorMsg: '',
+        property: new Object() as SDKPropertyRecord
+      };
+      const netStatus: SDKRumResourceNetStatusDTO = {
+        dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0, sslTime: 0, sslStartTime: 0,
+        ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
+        downloadStartTime: 0, holeRequestTime: 10, resourceHostIP: ''
+      };
+      const onlineResponse = await executeWorkerCommandForUnit({
+        id: 'resource-network-snapshot-online', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+        payload: {
+          lineContext: createRumWorkerLineContext(),
+          commands: [{
+            commandType: 'start', resourceId: 'network-snapshot-online', context: startOnlineContext, startTime: 10
+          }, {
+            commandType: 'setContent', resourceId: 'network-snapshot-online', context: laterOfflineContext,
+            params, eventTime: 20
+          }, {
+            commandType: 'setNetState', resourceId: 'network-snapshot-online', context: laterOfflineContext,
+            netStatus, eventTime: 30
+          }, {
+            commandType: 'stop', resourceId: 'network-snapshot-online', context: laterOfflineContext, endTime: 40
+          }]
+        } as Object as SDKWorkerPayload
+      });
+      const onlineDrafts = getPayloadArray(onlineResponse.payload, 'syncDrafts');
+      expect(onlineDrafts.length).assertEqual(1);
+      const onlineLine = String((onlineDrafts[0] as Record<string, object>)['dataString']);
+      expect(onlineLine.includes('network_available=true')).assertTrue();
+      expect(onlineLine.includes('network_validated=true')).assertTrue();
+      expect(onlineLine.includes('network_downlink_kbps=1500i')).assertTrue();
+      expect(onlineLine.includes('network_uplink_kbps=800i')).assertTrue();
+      // Zero is emitted only for a platform-provided signal reading.
+      expect(onlineLine.includes('network_signal_strength=0i')).assertTrue();
+      expect(onlineLine.includes('network_available=false')).assertFalse();
+
+      const offlineStartContext: SDKRumResourceContextDTO = {
+        sessionId: 'offline-session', viewId: 'offline-view', viewName: 'OfflineView', viewReferrer: 'root',
+        actionId: 'offline-action', actionName: 'request', networkSnapshot: { available: false }
+      };
+      const laterOnlineContext: SDKRumResourceContextDTO = {
+        sessionId: 'online-session', viewId: 'online-view', viewName: 'OnlineView', viewReferrer: 'root',
+        actionId: 'online-action', actionName: 'later',
+        networkSnapshot: { available: true, validated: true, downlinkKbps: 1, uplinkKbps: 1, signalStrength: 1 }
+      };
+      const offlineResponse = await executeWorkerCommandForUnit({
+        id: 'resource-network-snapshot-offline', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+        payload: {
+          lineContext: createRumWorkerLineContext(),
+          commands: [{
+            commandType: 'start', resourceId: 'network-snapshot-offline', context: offlineStartContext, startTime: 50
+          }, {
+            commandType: 'setContent', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
+            params, eventTime: 60
+          }, {
+            commandType: 'setNetState', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
+            netStatus, eventTime: 70
+          }, {
+            commandType: 'stop', resourceId: 'network-snapshot-offline', context: laterOnlineContext, endTime: 80
+          }]
+        } as Object as SDKWorkerPayload
+      });
+      const offlineDrafts = getPayloadArray(offlineResponse.payload, 'syncDrafts');
+      expect(offlineDrafts.length).assertEqual(1);
+      const offlineLine = String((offlineDrafts[0] as Record<string, object>)['dataString']);
+      expect(offlineLine.includes('network_available=false')).assertTrue();
+      expect(offlineLine.includes('network_validated=')).assertFalse();
+      expect(offlineLine.includes('network_downlink_kbps=')).assertFalse();
+      expect(offlineLine.includes('network_uplink_kbps=')).assertFalse();
+      expect(offlineLine.includes('network_signal_strength=')).assertFalse();
+    });
+
     it('suppressedLocalResourceShouldKeepResourceWithoutErrorSideEffects', 0, async () => {
       const context: SDKRumResourceContextDTO = {
         sessionId: 'suppressed-session',

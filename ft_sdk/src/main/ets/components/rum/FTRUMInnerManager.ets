@@ -50,6 +50,7 @@ import {
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
 import { DeviceUtils } from '../utils/DeviceUtils';
+import { FTNetworkListener } from '../utils/FTNetworkListener';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
 import { ErrorMonitorType } from './enum/ErrorMonitorType';
@@ -2911,7 +2912,10 @@ export class FTRUMInnerManager {
       actionId,
       actionName,
       rumAppId: this.getSemanticRumAppId(),
-      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
+      // The listener owns all platform I/O. Resource creation only copies its
+      // cached value, so a request never observes its completion-time network.
+      networkSnapshot: FTNetworkListener.getInstance().getResourceNetworkSnapshot()
     };
   }
 
@@ -2926,7 +2930,8 @@ export class FTRUMInnerManager {
       actionId: '',
       actionName: '',
       rumAppId: this.getSemanticRumAppId(),
-      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
+      networkSnapshot: FTNetworkListener.getInstance().getResourceNetworkSnapshot()
     };
   }
 

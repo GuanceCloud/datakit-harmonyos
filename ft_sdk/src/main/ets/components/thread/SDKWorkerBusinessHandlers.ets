@@ -19,6 +19,7 @@ import {
   SDKRumResourceCommandBatchDTO,
   SDKRumResourceCommandDTO,
   SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
   SDKStringRecord,
@@ -1431,6 +1432,7 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   // addResource without a preceding startResource), preventing a late
   // completion from being rebound to a newer action.
   resource.context.dynamicTags = resource.context.dynamicTags || context.dynamicTags;
+  resource.context.networkSnapshot = resource.context.networkSnapshot || context.networkSnapshot;
   resource.context.sessionId = resource.context.sessionId || context.sessionId;
   resource.context.viewId = resource.context.viewId || context.viewId;
   resource.context.viewName = resource.context.viewName || context.viewName;
@@ -1771,6 +1773,7 @@ function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecor
 
 function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const fields: SDKStringRecord = {};
+  appendResourceNetworkSnapshot(fields, resource.context.networkSnapshot);
   if (resource.resourceSize > 0) {
     fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resource.resourceSize);
   }
@@ -1816,6 +1819,40 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   }
   mergeStringRecords(fields, resource.properties);
   return fields;
+}
+
+function appendResourceNetworkSnapshot(
+  fields: SDKStringRecord,
+  snapshot: SDKRumResourceNetworkSnapshotDTO | undefined
+): void {
+  if (!snapshot) {
+    return;
+  }
+  fields[Constants.KEY_RUM_RESOURCE_NETWORK_AVAILABLE] = String(snapshot.available);
+  // An unavailable network has no meaningful capability, bandwidth, or signal
+  // values. Defend this invariant again in the Worker for recovered commands.
+  if (!snapshot.available) {
+    return;
+  }
+  if (snapshot.validated !== undefined) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_VALIDATED] = String(snapshot.validated);
+  }
+  if (isValidResourceNetworkMetric(snapshot.downlinkKbps, false)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS] = String(snapshot.downlinkKbps);
+  }
+  if (isValidResourceNetworkMetric(snapshot.uplinkKbps, false)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS] = String(snapshot.uplinkKbps);
+  }
+  if (isValidResourceNetworkMetric(snapshot.signalStrength, true)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH] = String(snapshot.signalStrength);
+  }
+}
+
+function isValidResourceNetworkMetric(value: number | undefined, allowsZero: boolean): boolean {
+  if (value === undefined || !Number.isInteger(value)) {
+    return false;
+  }
+  return allowsZero ? value >= 0 : value > 0;
 }
 
 function applyResourceCompleteDelta(state: SDKWorkerRuntimeState, viewId: string, actionId: string): void {

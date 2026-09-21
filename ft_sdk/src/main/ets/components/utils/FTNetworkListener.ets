@@ -1,8 +1,10 @@
 import connection from '@ohos.net.connection';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { radio, data } from '@kit.TelephonyKit';
 import { DeviceUtils } from './DeviceUtils';
 import { FTInnerLogger } from '../log/FTLogger';
 import { SyncTaskManager } from '../SyncTaskManager';
+import { SDKRumResourceNetworkSnapshotDTO } from '../thread/SDKWorkerProtocol';
 
 const TAG = "FTNetworkListener";
 
@@ -17,6 +19,12 @@ export class FTNetworkListener {
   private isMonitoring: boolean = false;
   /** Tracks reachability so a recovery is scheduled once, not on every capability update. */
   private hasInternetCapability: boolean = false;
+  /**
+   * Resource creation reads only this value. Platform APIs run during listener
+   * registration/callbacks, never on an application's request path.
+   */
+  private resourceNetworkSnapshot: SDKRumResourceNetworkSnapshotDTO = { available: false };
+  private currentNetId: number = 0;
 
   private constructor() {
   }
@@ -26,6 +34,29 @@ export class FTNetworkListener {
       FTNetworkListener.instance = new FTNetworkListener();
     }
     return FTNetworkListener.instance;
+  }
+
+  /**
+   * Returns a fresh serializable copy for one Resource lifecycle. The copy is
+   * intentionally primitive-only so later network callbacks cannot mutate a
+   * Resource that has already started.
+   */
+  public getResourceNetworkSnapshot(): SDKRumResourceNetworkSnapshotDTO {
+    const snapshot = this.resourceNetworkSnapshot;
+    const copy: SDKRumResourceNetworkSnapshotDTO = { available: snapshot.available };
+    if (snapshot.validated !== undefined) {
+      copy.validated = snapshot.validated;
+    }
+    if (snapshot.downlinkKbps !== undefined) {
+      copy.downlinkKbps = snapshot.downlinkKbps;
+    }
+    if (snapshot.uplinkKbps !== undefined) {
+      copy.uplinkKbps = snapshot.uplinkKbps;
+    }
+    if (snapshot.signalStrength !== undefined) {
+      copy.signalStrength = snapshot.signalStrength;
+    }
+    return copy;
   }
 
   /**
@@ -42,23 +73,9 @@ export class FTNetworkListener {
 
       // Create network connection listener
       this.netConnection = connection.createNetConnection();
-      
-      // Register callback
-      this.netConnection.register((error: BusinessError) => {
-        if (error) {
-          FTInnerLogger.e(TAG, `Failed to register network listener: ${error.message}`);
-          this.isMonitoring = false;
-        } else {
-          this.isMonitoring = true;
-          FTInnerLogger.i(TAG, "Network listener registered");
-          
-          // Fetch initial network state
-          this.fetchNetworkState();
-        }
-      });
 
-      // Listen for network capabilities changes (network type changes)
-      // Note: The callback parameter structure may vary by API version
+      // HarmonyOS requires callbacks to be attached before register(), or a
+      // fast network switch between those calls can be lost.
       this.netConnection.on("netCapabilitiesChange", (data: connection.NetCapabilityInfo) => {
         this.onNetworkCapabilitiesChanged(data);
       });
@@ -80,6 +97,21 @@ export class FTNetworkListener {
         this.onNetworkUnavailable();
       });
 
+      // Seed the cache before the first Resource can be started. Failure keeps
+      // the conservative initial unavailable value and never blocks callers.
+      this.refreshSnapshotFromDefaultNetwork();
+
+      this.netConnection.register((error: BusinessError) => {
+        if (error) {
+          FTInnerLogger.e(TAG, `Failed to register network listener: ${error.message}`);
+          this.isMonitoring = false;
+        } else {
+          this.isMonitoring = true;
+          FTInnerLogger.i(TAG, "Network listener registered");
+          this.fetchNetworkState();
+        }
+      });
+
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `Failed to start network monitoring: ${errorMsg}`);
@@ -93,6 +125,7 @@ export class FTNetworkListener {
    */
   private async fetchNetworkState(): Promise<void> {
     try {
+      this.refreshSnapshotFromDefaultNetwork();
       // Refresh network type cache to get latest network type
       await DeviceUtils.refreshNetworkTypeCache();
     } catch (error) {
@@ -133,6 +166,11 @@ export class FTNetworkListener {
       const networkRecovered = hasInternetCapability && !this.hasInternetCapability;
       this.hasInternetCapability = hasInternetCapability;
 
+      const netId = data && data.netHandle ? data.netHandle.netId : 0;
+      if (netId > 0 && this.isCurrentDefaultNetwork(netId)) {
+        this.updateSnapshotFromCapabilities(netId, data.netCap);
+      }
+
       // Update network type cache when capabilities change. Some devices emit
       // this event, rather than netAvailable, when Internet access returns.
       this.fetchNetworkState().catch((err: ESObject) => {
@@ -157,6 +195,13 @@ export class FTNetworkListener {
       FTInnerLogger.i(TAG, `Network became available, netId=${data.netId}`);
 
       this.hasInternetCapability = true;
+      if (data.netId > 0) {
+        this.currentNetId = data.netId;
+        // Capabilities can arrive after netAvailable. Record availability now
+        // and let capability callbacks fill optional values when available.
+        this.resourceNetworkSnapshot = { available: true };
+      }
+      this.refreshSnapshotFromDefaultNetwork();
       this.fetchNetworkState().catch((err: ESObject) => {
         const errorMsg = this.getErrorMessage(err);
         FTInnerLogger.e(TAG, `[onNetworkAvailable] Failed to update network state: ${errorMsg}`);
@@ -175,8 +220,14 @@ export class FTNetworkListener {
   private onNetworkLost(data: connection.NetHandle): void {
     try {
       FTInnerLogger.i(TAG, `Network lost, netId=${data.netId}`);
+      // During Wi-Fi -> cellular handover HarmonyOS may deliver netLost for
+      // the old network after the new default is already available.
+      if (data.netId > 0 && this.currentNetId > 0 && data.netId !== this.currentNetId) {
+        return;
+      }
       this.hasInternetCapability = false;
       SyncTaskManager.getInstance().updateNetworkAvailability(false);
+      this.setNetworkUnavailable();
 
       // Update network type cache to "unknown"
       DeviceUtils.setCachedNetworkType("unknown");
@@ -194,6 +245,7 @@ export class FTNetworkListener {
       FTInnerLogger.i(TAG, "Network unavailable");
       this.hasInternetCapability = false;
       SyncTaskManager.getInstance().updateNetworkAvailability(false);
+      this.setNetworkUnavailable();
 
       // Update network type cache to "unknown"
       DeviceUtils.setCachedNetworkType("unknown");
@@ -214,6 +266,111 @@ export class FTNetworkListener {
       }
     }
     return false;
+  }
+
+  private refreshSnapshotFromDefaultNetwork(): void {
+    try {
+      if (!connection.hasDefaultNetSync()) {
+        this.setNetworkUnavailable();
+        return;
+      }
+      const netHandle = connection.getDefaultNetSync();
+      if (!netHandle || netHandle.netId <= 0) {
+        this.setNetworkUnavailable();
+        return;
+      }
+      const netCapabilities = connection.getNetCapabilitiesSync(netHandle);
+      this.updateSnapshotFromCapabilities(netHandle.netId, netCapabilities);
+    } catch (err) {
+      // A permission/API failure is an unknown capability state, not evidence
+      // that a previously known network disappeared. Keep the last safe value.
+      FTInnerLogger.w(TAG, `[refreshSnapshotFromDefaultNetwork] ${this.getErrorMessage(err)}`);
+    }
+  }
+
+  private isCurrentDefaultNetwork(netId: number): boolean {
+    try {
+      if (!connection.hasDefaultNetSync()) {
+        return false;
+      }
+      return connection.getDefaultNetSync().netId === netId;
+    } catch (err) {
+      // Do not replace the current cache with an arbitrary stale callback when
+      // the default network can no longer be queried.
+      return this.currentNetId === netId;
+    }
+  }
+
+  private updateSnapshotFromCapabilities(netId: number, capabilities: connection.NetCapabilities): void {
+    if (netId <= 0 || !capabilities) {
+      return;
+    }
+    const snapshot: SDKRumResourceNetworkSnapshotDTO = { available: true };
+    const networkCapabilities = capabilities.networkCap;
+    const isCheckingConnectivity = this.hasCapability(
+      networkCapabilities,
+      connection.NetCap.NET_CAPABILITY_CHECKING_CONNECTIVITY
+    );
+    if (!isCheckingConnectivity && networkCapabilities !== undefined) {
+      snapshot.validated = this.hasCapability(networkCapabilities, connection.NetCap.NET_CAPABILITY_VALIDATED);
+    }
+    const downlinkKbps = this.toKnownPositiveInteger(capabilities.linkDownBandwidthKbps);
+    if (downlinkKbps !== undefined) {
+      snapshot.downlinkKbps = downlinkKbps;
+    }
+    const uplinkKbps = this.toKnownPositiveInteger(capabilities.linkUpBandwidthKbps);
+    if (uplinkKbps !== undefined) {
+      snapshot.uplinkKbps = uplinkKbps;
+    }
+    const signalStrength = this.readCellularSignalStrength(capabilities);
+    if (signalStrength !== undefined) {
+      snapshot.signalStrength = signalStrength;
+    }
+    this.currentNetId = netId;
+    this.resourceNetworkSnapshot = snapshot;
+  }
+
+  private hasCapability(capabilities: connection.NetCap[] | undefined, target: connection.NetCap): boolean {
+    if (!capabilities) {
+      return false;
+    }
+    return capabilities.includes(target);
+  }
+
+  private toKnownPositiveInteger(value: number | undefined): number | undefined {
+    // HarmonyOS documents bandwidth 0 as unavailable; it must be omitted.
+    if (value === undefined || !Number.isInteger(value) || value <= 0) {
+      return undefined;
+    }
+    return value;
+  }
+
+  private readCellularSignalStrength(capabilities: connection.NetCapabilities): number | undefined {
+    if (!capabilities.bearerTypes || !capabilities.bearerTypes.includes(connection.NetBearType.BEARER_CELLULAR)) {
+      return undefined;
+    }
+    try {
+      const slotId = data.getDefaultCellularDataSlotIdSync();
+      if (slotId < 0) {
+        return undefined;
+      }
+      const signals = radio.getSignalInformationSync(slotId);
+      if (!signals || signals.length === 0 || !signals[0]) {
+        return undefined;
+      }
+      const signalLevel = signals[0].signalLevel;
+      // signalLevel is a native discrete level. Zero is retained only when it
+      // was actually supplied by the platform, unlike bandwidth's sentinel 0.
+      return Number.isInteger(signalLevel) && signalLevel >= 0 ? signalLevel : undefined;
+    } catch (err) {
+      FTInnerLogger.w(TAG, `[readCellularSignalStrength] ${this.getErrorMessage(err)}`);
+      return undefined;
+    }
+  }
+
+  private setNetworkUnavailable(): void {
+    this.currentNetId = 0;
+    this.resourceNetworkSnapshot = { available: false };
   }
 
   private resumePendingUploadAfterNetworkRecovery(reason: string): void {
@@ -239,6 +396,7 @@ export class FTNetworkListener {
       }
       this.isMonitoring = false;
       this.hasInternetCapability = false;
+      this.setNetworkUnavailable();
       FTInnerLogger.i(TAG, "Network monitoring stopped");
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);

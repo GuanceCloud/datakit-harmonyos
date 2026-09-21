@@ -108,6 +108,19 @@ export type SDKStringRecord = Record<string, string>;
 export type SDKNumberRecord = Record<string, number>;
 export type SDKPropertyRecord = Record<string, object>;
 
+/**
+ * A point-in-time view of the default network captured when a Resource starts.
+ * Optional values deliberately remain absent when HarmonyOS cannot provide a
+ * trustworthy value; callers must never substitute a synthetic zero.
+ */
+export interface SDKRumResourceNetworkSnapshotDTO {
+  available: boolean;
+  validated?: boolean;
+  downlinkKbps?: number;
+  uplinkKbps?: number;
+  signalStrength?: number;
+}
+
 export interface SDKLogDTO {
   measurement: string;
   content: string;
@@ -189,6 +202,8 @@ export interface SDKWorkerResponseCreditDTO {
 export interface SDKRumResourceContextDTO {
   /** User and network attributes captured with the initiating event. */
   dynamicTags?: SDKStringRecord;
+  /** Immutable default-network snapshot captured by startResource. */
+  networkSnapshot?: SDKRumResourceNetworkSnapshotDTO;
   sessionId: string;
   viewId: string;
   viewName: string;
