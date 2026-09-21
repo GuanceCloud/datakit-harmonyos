@@ -275,6 +275,7 @@ interface SDKRumWorkerResourceState {
   responseBody: string;
   requestErrorStack: string;
   requestErrorMsg: string;
+  suppressNetworkError: boolean;
   traceId: string;
   spanId: string;
   resourceHostIP: string;
@@ -1388,6 +1389,7 @@ function getOrCreateRumResourceState(
     responseBody: '',
     requestErrorStack: '',
     requestErrorMsg: '',
+    suppressNetworkError: false,
     traceId: '',
     spanId: '',
     resourceHostIP: '',
@@ -1455,6 +1457,7 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   resource.responseBody = params.responseBody || '';
   resource.requestErrorStack = params.requestErrorStack || '';
   resource.requestErrorMsg = params.requestErrorMsg || '';
+  resource.suppressNetworkError = params.suppressNetworkError === true;
   resource.resourceSize = params.responseContentLength || 0;
   if (resource.resourceSize <= 0) {
     resource.resourceSize = (resource.responseBody ? resource.responseBody.length : 0) + resource.responseHeader.length;
@@ -1899,7 +1902,7 @@ function isResourceMetricProperty(key: string): boolean {
 
 function isWorkerResourceError(resource: SDKRumWorkerResourceState): boolean {
   return resource.resourceStatus >= 400 ||
-    (resource.resourceStatus === 0 && resource.requestErrorStack.length > 0);
+    (resource.resourceStatus === 0 && resource.requestErrorStack.length > 0 && !resource.suppressNetworkError);
 }
 
 function handleRumCompletedAction(

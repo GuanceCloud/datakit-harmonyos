@@ -3123,6 +3123,7 @@ export class FTRUMInnerManager {
       resourceType: params.resourceType || 'network',
       requestErrorStack: params.requestErrorStack || '',
       requestErrorMsg: params.requestErrorMsg || '',
+      suppressNetworkError: params.suppressNetworkError === true,
       property: this.resourcePropertyToRecord(params.property),
       traceId,
       spanId

@@ -14,6 +14,15 @@ import { FTTraceManager } from '../trace/FTTraceManager';
 import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import {
+  createFTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkErrorHandlingResult,
+  FTNetworkErrorSource,
+  getFTNetworkErrorMessage,
+  getFTNetworkErrorStack,
+  handleFTNetworkError
+} from './FTNetworkErrorHandler';
+import {
   AxiosChainMethodStore,
   buildAutoTrackResourceId,
   buildRequestHeaderMap,
@@ -39,6 +48,18 @@ import {
 
 const TAG = "FTHttpAutoTrack";
 const MS_TO_NS = 1000000;
+
+function addNetworkErrorFields(resourceParams: ResourceParams, handling: FTNetworkErrorHandlingResult | undefined): void {
+  if (!handling) {
+    return;
+  }
+  const keys = Object.keys(handling.resourceFields);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    resourceParams.addProperty(key, handling.resourceFields[key] as object);
+  }
+  resourceParams.setSuppressNetworkError(handling.suppressNetworkError);
+}
 
 function createGeneratedResourceId(): string {
   const headers: Record<string, string> = {};
@@ -119,6 +140,11 @@ function createRCPResourceTiming(timeInfo: TimeInfoStructure, fallbackLoadNs: nu
 export class RCPResourceInterceptor implements rcp.Interceptor {
   private isEnabled: boolean = true;
   private resourceActionMap: Map<string, string> = new Map();
+  private readonly networkErrorHandler: FTNetworkErrorHandler | undefined;
+
+  constructor(networkErrorHandler?: FTNetworkErrorHandler) {
+    this.networkErrorHandler = networkErrorHandler;
+  }
 
   public enable(): void {
     this.isEnabled = true;
@@ -275,7 +301,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
       return response;
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
+      const errorMessage = getFTNetworkErrorMessage(err);
+      const errorStack = getFTNetworkErrorStack(err) || String(err);
+      const handling = handleFTNetworkError(this.networkErrorHandler,
+        createFTNetworkErrorContext(url, method, FTNetworkErrorSource.RCP, err, errorMessage, errorStack));
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
       const resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
@@ -285,13 +314,14 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       resourceParams.setResourceMethod(method);
       resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
       resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
-      resourceParams.setRequestErrorMsg(error.message || 'Unknown error');
-      resourceParams.setRequestErrorStack((error.stack && error.stack.length > 0) ? error.stack : String(error));
+      resourceParams.setRequestErrorMsg(errorMessage);
+      resourceParams.setRequestErrorStack(errorStack);
       resourceParams.setResourceStatus(0);
+      addNetworkErrorFields(resourceParams, handling);
 
       FTInnerLogger.e(
         TAG,
-        `[RCP-Resource] Request failed ${method} ${url}, duration=${responseTime}ms, error=${error.message}, stack=${error.stack || 'N/A'}`
+        `[RCP-Resource] Request failed ${method} ${url}, duration=${responseTime}ms, error=${errorMessage}, stack=${errorStack || 'N/A'}`
       );
 
       FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
@@ -301,7 +331,13 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
-      throw error;
+      // ArkTS permits throwing Error values only. Preserve the native Error
+      // object unchanged; primitive/non-Error adapter rejections retain the
+      // SDK's existing compatibility wrapper.
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error(String(err));
     }
   }
 }
@@ -558,6 +594,7 @@ export interface FTAxiosTrackRegistration {
 interface FTAxiosAutoTrackState extends HttpAutoTrackState {
   traceEnabled: boolean;
   resourceEnabled: boolean;
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 interface FTRCPInfoToCollectConfiguration {
@@ -692,7 +729,8 @@ function createAxiosTraceInterceptor(): FTTraceInterceptor | null {
 function buildAxiosAutoTrackState(
   config: FTAxiosRequestConfigTarget,
   traceEnabled: boolean,
-  resourceEnabled: boolean
+  resourceEnabled: boolean,
+  networkErrorHandler?: FTNetworkErrorHandler
 ): FTAxiosAutoTrackState {
   const url = resolveAxiosFullUrl(config);
   const method = (config.method || 'GET').toUpperCase();
@@ -771,7 +809,8 @@ function buildAxiosAutoTrackState(
     startTime: Date.now(),
     requestHeaders: finalHeaders,
     traceEnabled: traceEnabled,
-    resourceEnabled: resourceEnabled
+    resourceEnabled: resourceEnabled,
+    networkErrorHandler: networkErrorHandler
   };
 }
 
@@ -815,7 +854,8 @@ function completeAxiosResource(
   _responseBody?: string,
   errorMessage?: string,
   errorStack?: string,
-  performanceTiming?: FTNetworkPerformanceTiming
+  performanceTiming?: FTNetworkPerformanceTiming,
+  networkErrorHandling?: FTNetworkErrorHandlingResult
 ): void {
   if (!state.resourceEnabled) {
     return;
@@ -859,6 +899,7 @@ function completeAxiosResource(
   if (errorStack) {
     resourceParams.setRequestErrorStack(errorStack);
   }
+  addNetworkErrorFields(resourceParams, networkErrorHandling);
 
   const netStatusBean = createFTNetStatusBean(resourceTiming);
   FTInnerLogger.d(TAG,
@@ -870,7 +911,8 @@ function completeAxiosResource(
 
 export function createFTRCPInterceptors(
   enableTraceInterceptor?: boolean,
-  enableResourceInterceptor?: boolean
+  enableResourceInterceptor?: boolean,
+  networkErrorHandler?: FTNetworkErrorHandler
 ): rcp.Interceptor[] {
   const traceEnabled = enableTraceInterceptor !== undefined
     ? enableTraceInterceptor
@@ -884,7 +926,7 @@ export function createFTRCPInterceptors(
     interceptors.push(new RCPTraceInterceptor());
   }
   if (resourceEnabled) {
-    interceptors.push(new RCPResourceInterceptor());
+    interceptors.push(new RCPResourceInterceptor(networkErrorHandler));
   }
   return interceptors;
 }
@@ -907,7 +949,7 @@ export function applyFTAxiosTrack(
     : FTRUMConfigManager.getInstance().isResourceTraceEnable();
 
   const requestInterceptorId = target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
-    const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled);
+    const state = buildAxiosAutoTrackState(config, traceEnabled, resourceEnabled, options.networkErrorHandler);
     config.headers = state.requestHeaders as Object;
 
     if (state.resourceEnabled && FTRUMConfigManager.getInstance().shouldFilterResourceUrl(state.url)) {
@@ -963,6 +1005,16 @@ export function applyFTAxiosTrack(
         const status = error.response ? error.response.status || 0 : 0;
 
         completeAxiosTrace(state, status, responseHeaders, responseBodyText);
+        const hasHttpResponse = error.response !== undefined && status > 0;
+        const handling = !state.resourceEnabled || hasHttpResponse ? undefined : handleFTNetworkError(state.networkErrorHandler,
+          createFTNetworkErrorContext(
+            state.url,
+            state.method,
+            FTNetworkErrorSource.AXIOS,
+            rawError,
+            error.message || responseBodyText || 'Unknown error',
+            error.stack
+          ));
         completeAxiosResource(
           state,
           status,
@@ -970,7 +1022,8 @@ export function applyFTAxiosTrack(
           responseBodyText,
           error.message || responseBodyText || 'Unknown error',
           error.stack,
-          error.response ? error.response.performanceTiming : undefined
+          error.response ? error.response.performanceTiming : undefined,
+          handling
         );
 
         FTInnerLogger.e(
@@ -980,6 +1033,8 @@ export function applyFTAxiosTrack(
         clearAxiosAutoTrackState(responseConfig);
       }
 
+      // Preserve the business error object. The fallback is required by
+      // ArkTS, which rejects throws of arbitrary values.
       if (rawError instanceof Error) {
         throw rawError;
       }
@@ -1014,7 +1069,8 @@ export function createFTRCPTrackConfig(
 
   const interceptors = createFTRCPInterceptors(
     options.enableTraceInterceptor,
-    options.enableResourceInterceptor
+    options.enableResourceInterceptor,
+    options.networkErrorHandler
   );
 
   if (options.interceptors && options.interceptors.length > 0) {

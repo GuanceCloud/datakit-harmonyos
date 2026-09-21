@@ -213,6 +213,8 @@ export interface SDKRumResourceParamsDTO {
   resourceType: string;
   requestErrorStack: string;
   requestErrorMsg: string;
+  /** Suppresses only the local network_error derived from a status-0 Resource. */
+  suppressNetworkError?: boolean;
   property: SDKPropertyRecord;
   traceId?: string;
   spanId?: string;

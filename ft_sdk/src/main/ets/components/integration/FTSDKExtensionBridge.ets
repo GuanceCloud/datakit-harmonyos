@@ -8,6 +8,14 @@ import { FTTraceContext, FTTraceRequestContext } from '../trace/FTTraceHeaderHan
 import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import {
+  createFTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkErrorHandlingResult,
+  FTNetworkErrorRaw,
+  FTNetworkErrorSource,
+  handleFTNetworkError
+} from '../network/FTNetworkErrorHandler';
+import {
   AxiosChainMethodStore,
   buildAutoTrackResourceId,
   buildRequestHeaderMap,
@@ -35,11 +43,13 @@ export const FT_SDK_EXTENSION_CONTRACT_VERSION = 1;
 export interface FTSDKExtensionAutoTrackOptions {
   enableTraceInterceptor?: boolean;
   enableResourceInterceptor?: boolean;
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 export interface FTSDKExtensionResolvedAutoTrackOptions {
   enableTraceInterceptor: boolean;
   enableResourceInterceptor: boolean;
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 export interface FTSDKExtensionRequestInput {
@@ -71,11 +81,16 @@ export interface FTSDKExtensionResponseInput {
   performanceTiming?: FTNetworkPerformanceTiming;
   errorMessage?: string;
   errorStack?: string;
+  /** Native transport failure when NetworkKit or an adapter exposes it. */
+  transportError?: FTNetworkErrorRaw;
+  /** Raw platform status/error code when no exception object is available. */
+  errorCode?: string | number;
 }
 
 interface FTSDKExtensionHttpState extends HttpAutoTrackState {
   traceEnabled: boolean;
   resourceEnabled: boolean;
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 export class FTSDKExtensionBridge {
@@ -91,7 +106,8 @@ export class FTSDKExtensionBridge {
 
     return {
       enableTraceInterceptor: traceEnabled,
-      enableResourceInterceptor: resourceEnabled
+      enableResourceInterceptor: resourceEnabled,
+      networkErrorHandler: options.networkErrorHandler
     };
   }
 
@@ -139,7 +155,8 @@ export class FTSDKExtensionBridge {
         requestHeaders: finalHeaders,
         actionId: actionId,
         traceEnabled: resolvedOptions.enableTraceInterceptor,
-        resourceEnabled: resourceEnabled
+        resourceEnabled: resourceEnabled,
+        networkErrorHandler: resolvedOptions.networkErrorHandler
       };
       HttpAutoTrackStateStore.getInstance().put(state);
 
@@ -238,12 +255,23 @@ export class FTSDKExtensionBridge {
       }
 
       if (state.resourceEnabled) {
+        const handling = response.statusCode === 0 ? handleFTNetworkError(state.networkErrorHandler,
+          createFTNetworkErrorContext(
+            state.url,
+            state.method,
+            FTNetworkErrorSource.HTTP_CHAIN,
+            response.transportError,
+            response.errorMessage || 'Unknown error',
+            response.errorStack,
+            response.errorCode
+          )) : undefined;
         FTSDKExtensionBridge.completeResourceError(
           state,
           response.url,
           response.errorMessage || 'Unknown error',
           response.errorStack,
-          response.performanceTiming
+          response.performanceTiming,
+          handling
         );
       }
     } catch (error) {
@@ -462,7 +490,8 @@ export class FTSDKExtensionBridge {
     url: string,
     errorMessage: string,
     errorStack?: string,
-    performanceTiming?: FTNetworkPerformanceTiming
+    performanceTiming?: FTNetworkPerformanceTiming,
+    networkErrorHandling?: FTNetworkErrorHandlingResult
   ): void {
     const resourceParams = new ResourceParams();
     resourceParams.setUrl(url);
@@ -472,6 +501,14 @@ export class FTSDKExtensionBridge {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
+    if (networkErrorHandling) {
+      const propertyKeys = Object.keys(networkErrorHandling.resourceFields);
+      for (let i = 0; i < propertyKeys.length; i++) {
+        const key = propertyKeys[i];
+        resourceParams.addProperty(key, networkErrorHandling.resourceFields[key] as object);
+      }
+      resourceParams.setSuppressNetworkError(networkErrorHandling.suppressNetworkError);
+    }
     const fallbackLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
     const resourceTiming = createFTResourceTimingFromNetworkPerformance(performanceTiming, fallbackLoadNs);
     const metricValue: PerformanceMetricValue = { value: resourceTiming.loadTime };

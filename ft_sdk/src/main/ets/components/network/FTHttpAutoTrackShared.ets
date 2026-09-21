@@ -2,6 +2,7 @@ import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
 import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { Utils } from '../utils/Utils';
+import { FTNetworkErrorHandler } from './FTNetworkErrorHandler';
 
 const TAG = "FTHttpAutoTrack";
 const FT_RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
@@ -262,6 +263,8 @@ export interface HttpAutoTrackState {
 export interface FTAutoTrackOptions {
   enableTraceInterceptor?: boolean;
   enableResourceInterceptor?: boolean;
+  /** Handles local failures only; HTTP responses, including 4xx/5xx, bypass it. */
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 export class HttpAutoTrackStateStore {

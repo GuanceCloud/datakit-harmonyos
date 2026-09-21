@@ -170,6 +170,14 @@ export {
   FTAxiosTrackRegistration,
 } from './src/main/ets/components/network/FTHttpAutoTrack';
 export { FTAutoTrackOptions } from './src/main/ets/components/network/FTHttpAutoTrackShared';
+export {
+  FTNetworkErrorHandler,
+  FTNetworkErrorContext,
+  FTNetworkErrorKind,
+  FTNetworkErrorSource,
+  FTNetworkResourceFields,
+  FTNetworkResourceFieldValue
+} from './src/main/ets/components/network/FTNetworkErrorHandler';
 
 // ============================================================================
 // Extension Integration Contract

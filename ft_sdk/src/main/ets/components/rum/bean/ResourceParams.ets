@@ -17,6 +17,7 @@ interface ResourceParamsJSON {
   resourceType: string;
   requestErrorStack: string;
   requestErrorMsg: string;
+  suppressNetworkError: boolean;
   property: Record<string, object>;
 }
 
@@ -99,6 +100,12 @@ export class ResourceParams {
    * Error message
    */
   public requestErrorMsg: string = "";
+
+  /**
+   * Internal auto-track marker. A true value retains this Resource but stops
+   * the Worker from deriving a separate network_error for a local failure.
+   */
+  public suppressNetworkError: boolean = false;
 
   /**
    * Additional property parameters
@@ -208,6 +215,14 @@ export class ResourceParams {
   }
 
   /**
+   * Suppress only the network Error derived from this completed Resource.
+   * This does not discard Resource data.
+   */
+  public setSuppressNetworkError(suppressNetworkError: boolean): void {
+    this.suppressNetworkError = suppressNetworkError === true;
+  }
+
+  /**
    * Set properties
    */
   public setProperty(property: Map<string, object>): void {
@@ -257,6 +272,7 @@ export class ResourceParams {
       resourceType: this.resourceType,
       requestErrorStack: this.requestErrorStack,
       requestErrorMsg: this.requestErrorMsg,
+      suppressNetworkError: this.suppressNetworkError,
       property: property
     };
     

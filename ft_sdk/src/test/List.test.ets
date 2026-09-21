@@ -12,6 +12,7 @@ import cacheGovernanceUnitTest from './unit/CacheGovernanceUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
+import ftNetworkErrorHandlerUnitTest from './unit/FTNetworkErrorHandlerUnit.test';
 import ftAppLaunchTrackerUnitTest from './unit/FTAppLaunchTrackerUnit.test';
 import ftCrashFreeDurationManagerUnitTest from './unit/FTCrashFreeDurationManagerUnit.test';
 import ftDataFilterUnitTest from './unit/FTDataFilterUnit.test';
@@ -58,6 +59,7 @@ export default function testsuite() {
   sdkDedicatedPoolManagerUnitTest();
   sdkWorkerRetryPolicyUnitTest();
   ftExceptionHandlerUnitTest();
+  ftNetworkErrorHandlerUnitTest();
   ftDBSpoolUnitTest();
   cachePolicyUnitTest();
   cacheGovernanceUnitTest();

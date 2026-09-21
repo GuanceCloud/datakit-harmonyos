@@ -3,7 +3,8 @@ import {
   FTSDKExtensionBridge,
   FTSDKExtensionAutoTrackOptions,
   FTSDKExtensionResolvedAutoTrackOptions,
-  FTSDKExtensionResponseInput
+  FTSDKExtensionResponseInput,
+  FTNetworkErrorHandler
 } from '@guancecloud/ft_sdk/Index';
 
 const TAG = 'FTHttpAutoTrackExt';
@@ -63,13 +64,17 @@ class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
   performanceTiming?: http.PerformanceTiming;
   errorMessage?: string;
   errorStack?: string;
+  transportError?: Object | string | number | boolean | null;
+  errorCode?: string | number;
 
   constructor(
     request: http.HttpRequestContext,
     response: http.HttpResponse,
     statusCode: number,
     errorMessage?: string,
-    errorStack?: string
+    errorStack?: string,
+    transportError?: Object | string | number | boolean | null,
+    errorCode?: string | number
   ) {
     this.url = request.url;
     this.requestHeaders = request.header;
@@ -79,6 +84,8 @@ class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
     this.performanceTiming = response.performanceTiming;
     this.errorMessage = errorMessage;
     this.errorStack = errorStack;
+    this.transportError = transportError;
+    this.errorCode = errorCode;
   }
 }
 
@@ -126,14 +133,16 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 
   private readonly traceEnabled: boolean;
   private readonly resourceEnabled: boolean;
+  private readonly networkErrorHandler: FTNetworkErrorHandler | undefined;
 
-  constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
+  constructor(traceEnabled?: boolean, resourceEnabled?: boolean, networkErrorHandler?: FTNetworkErrorHandler) {
     const resolvedOptions = FTSDKExtensionBridge.resolveAutoTrackOptions({
       enableTraceInterceptor: traceEnabled,
       enableResourceInterceptor: resourceEnabled
     });
     this.traceEnabled = resolvedOptions.enableTraceInterceptor;
     this.resourceEnabled = resolvedOptions.enableResourceInterceptor;
+    this.networkErrorHandler = networkErrorHandler;
   }
 
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
@@ -155,7 +164,8 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
         },
         {
           enableTraceInterceptor: this.traceEnabled,
-          enableResourceInterceptor: this.resourceEnabled
+          enableResourceInterceptor: this.resourceEnabled,
+          networkErrorHandler: this.networkErrorHandler
         }
       );
       applyNormalizedHeadersToHttpContext(reqContext, preparedRequest.headers);
@@ -185,7 +195,7 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
       if (!rspContext.responseCode) {
         const error = new Error('NetworkKit request failed without an HTTP response');
         FTSDKExtensionBridge.completeHttpError(
-          new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack)
+          new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack, undefined, 0)
         );
         return true;
       }
@@ -206,7 +216,8 @@ function createFTHttpInterceptors(options: FTSDKExtensionResolvedAutoTrackOption
   if (options.enableTraceInterceptor || options.enableResourceInterceptor) {
     interceptors.push(new HttpInitialRequestInterceptor(
       options.enableTraceInterceptor,
-      options.enableResourceInterceptor
+      options.enableResourceInterceptor,
+      options.networkErrorHandler
     ));
     interceptors.push(new HttpFinalResponseInterceptor(
       options.enableTraceInterceptor,
