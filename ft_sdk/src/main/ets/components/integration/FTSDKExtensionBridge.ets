@@ -55,7 +55,12 @@ export interface FTSDKExtensionAutoTrackOptions {
 export interface FTSDKExtensionResolvedAutoTrackOptions {
   enableTraceInterceptor: boolean;
   enableResourceInterceptor: boolean;
-  networkErrorHandler?: FTNetworkErrorHandler;
+  /**
+   * Preserve null until the request state is created so a chain-level opt-out
+   * cannot be mistaken for an omitted option and fall back to the global
+   * handler.
+   */
+  networkErrorHandler?: FTNetworkErrorHandler | null;
 }
 
 export interface FTSDKExtensionRequestInput {
@@ -114,7 +119,7 @@ export class FTSDKExtensionBridge {
       enableTraceInterceptor: traceEnabled,
       enableResourceInterceptor: resourceEnabled,
       networkErrorHandler: options.networkErrorHandler !== undefined
-        ? options.networkErrorHandler ?? undefined
+        ? options.networkErrorHandler
         : FTRUMConfigManager.getInstance().getNetworkErrorHandler()
     };
   }
@@ -164,7 +169,7 @@ export class FTSDKExtensionBridge {
         actionId: actionId,
         traceEnabled: resolvedOptions.enableTraceInterceptor,
         resourceEnabled: resourceEnabled,
-        networkErrorHandler: resolvedOptions.networkErrorHandler
+        networkErrorHandler: resolvedOptions.networkErrorHandler ?? undefined
       };
       HttpAutoTrackStateStore.getInstance().put(state);
 

@@ -27,7 +27,10 @@ class IgnoredResourceUrlHandler extends FTInTakeUrlHandler {
 }
 
 class ExtensionGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  public invocationCount: number = 0;
+
   onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    this.invocationCount++;
     return false;
   }
 }
@@ -178,7 +181,42 @@ export default function ftSDKExtensionBridgeUnitTest() {
       }).networkErrorHandler === explicitHandler).assertTrue();
       expect(FTSDKExtensionBridge.resolveAutoTrackOptions({
         networkErrorHandler: null
-      }).networkErrorHandler === undefined).assertTrue();
+      }).networkErrorHandler === null).assertTrue();
+
+      const disabledRequest = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'http://example.com/network-handler-disabled',
+        method: 'GET',
+        headers: {}
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: null
+      });
+      FTSDKExtensionBridge.completeHttpError({
+        url: disabledRequest.url,
+        method: disabledRequest.method,
+        requestHeaders: disabledRequest.headers,
+        statusCode: 0,
+        errorMessage: 'Connection refused'
+      });
+      expect(globalHandler.invocationCount).assertEqual(0);
+
+      const defaultRequest = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'http://example.com/network-handler-default',
+        method: 'GET',
+        headers: {}
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+      FTSDKExtensionBridge.completeHttpError({
+        url: defaultRequest.url,
+        method: defaultRequest.method,
+        requestHeaders: defaultRequest.headers,
+        statusCode: 0,
+        errorMessage: 'Connection refused'
+      });
+      expect(globalHandler.invocationCount).assertEqual(1);
     });
 
     it('httpPrepareShouldPassTraceIds', 0, () => {

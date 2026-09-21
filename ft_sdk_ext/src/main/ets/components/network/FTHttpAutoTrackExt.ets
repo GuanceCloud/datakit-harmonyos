@@ -133,9 +133,13 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 
   private readonly traceEnabled: boolean;
   private readonly resourceEnabled: boolean;
-  private readonly networkErrorHandler: FTNetworkErrorHandler | undefined;
+  private readonly networkErrorHandler: FTNetworkErrorHandler | null | undefined;
 
-  constructor(traceEnabled?: boolean, resourceEnabled?: boolean, networkErrorHandler?: FTNetworkErrorHandler) {
+  constructor(
+    traceEnabled?: boolean,
+    resourceEnabled?: boolean,
+    networkErrorHandler?: FTNetworkErrorHandler | null
+  ) {
     const resolvedOptions = FTSDKExtensionBridge.resolveAutoTrackOptions({
       enableTraceInterceptor: traceEnabled,
       enableResourceInterceptor: resourceEnabled
