@@ -104,6 +104,68 @@ Native network auto-tracking reports `resource_status=0` when no HTTP response i
 
 Following the existing SDK contract, a collected Resource generates one linked Network Error for HTTP status >=400, or for status 0 with a non-empty error stack. A manually supplied status 0 without an error stack does not alone create an Error. Auto-tracking supplies the failure message and stack (or the available platform failure description), and links both records through `resource_id`.
 
+### Filter local Network Errors
+
+`FTNetworkErrorHandler` can suppress only the Error derived from a local
+transport failure. It is called only when the request has no HTTP response, so
+HTTP 4xx and 5xx Resources keep their existing Error behavior.
+
+```ts
+import {
+  FTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkErrorKind,
+  FTNetworkResourceFields
+} from '@guancecloud/ft_sdk/Index'
+
+class LocalFailureFilter implements FTNetworkErrorHandler {
+  onExceptionWithFilter(
+    context: FTNetworkErrorContext,
+    resourceFields: FTNetworkResourceFields
+  ): boolean {
+    resourceFields['network_failure_kind'] = context.kind
+    resourceFields['network_failure_code'] = String(context.errorCode || '')
+    return context.kind === FTNetworkErrorKind.TIMEOUT ||
+      context.kind === FTNetworkErrorKind.CANCELED
+  }
+}
+
+const networkErrorHandler = new LocalFailureFilter()
+```
+
+Attach this handler to each automatic collection entry point used by the app:
+
+```ts
+// RCP
+const session = rcp.createSession(createFTRCPTrackConfig({ networkErrorHandler }))
+
+// Axios compatibility interceptor
+applyFTAxiosTrack(axiosClient, { networkErrorHandler })
+
+// NetworkKit HTTP interceptor chain (from @guancecloud/ft_sdk_ext)
+applyFTHttpTrack(httpRequest, { networkErrorHandler })
+// or: createFTHttpInterceptorChain({ networkErrorHandler })
+```
+
+The context includes the URL, method, source (`rcp`, `http_chain`, or `axios`),
+original failure value, optional platform error code, message, stack, and a
+portable kind: `dns`, `timeout`, `canceled`, `certificate`, `connection`, or
+`unknown`. Returning `true` keeps the Resource lifecycle intact, including its
+duration, status `0`, error details, and callback fields, then suppresses only
+the linked `network_error`. It never changes the business request result or
+replaces its thrown error.
+
+Returning `false`, omitting the handler, or throwing from the handler retains
+the default behavior. A callback exception is logged in a controlled manner and
+is treated as `false`. Callback fields pass through the normal `DataModifier`
+flow, but SDK-owned Resource, session, view, and action keys are ignored.
+
+The **HTTP Interceptor Test** demo page has a Local Error Filter switch and
+RCP, NetworkKit, and Axios actions that use an unused loopback port. With the
+switch on, verify one status-0 Resource with `demo_network_error_*` fields and
+no linked Error; with it off, verify the linked Error returns. Existing 404
+actions must keep their Resource and Error in either mode.
+
 ### Filter automatically tracked Resources
 
 Use `FTRUMConfig.setResourceUrlHandler(...)` to exclude URLs from automatically tracked RCP, Axios, and NetworkKit HTTP Resources. The handler follows the Android contract: return `true` to skip Resource collection and `false` to collect. It does not affect Trace header injection or manually reported Resources.

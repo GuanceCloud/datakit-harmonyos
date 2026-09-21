@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.18-alpha01] - 2026-09-22
+- Added `FTNetworkErrorHandler` for RCP, NetworkKit HTTP, and Axios automatic collection. It can suppress only the Error derived from a no-response local failure while retaining the completed Resource, custom fields, and associations. HTTP 4xx/5xx behavior is unchanged.
 - Added `foreground_crash_free_duration` and `background_crash_free_duration` nanosecond Fields to crash Errors. Compatible persisted snapshots support process-restart recovery; unavailable or invalid snapshots safely degrade, and a cycle resets only after its Error is stored in the local cache.
 - Aligned newly generated RUM Network Error `error_type` with Android as `network_error`; existing cached Line Protocol retains its original value and is uploaded without migration.
 - Changed upload size caps to batch targets: a first record exceeding a Host-to-Worker or HTTP batch target is sent individually instead of being locally rejected. This applies to all telemetry records, including Errors.
