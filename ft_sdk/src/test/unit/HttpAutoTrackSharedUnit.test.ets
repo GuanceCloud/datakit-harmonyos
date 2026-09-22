@@ -7,6 +7,8 @@ import {
   extractContentLength,
   HttpAutoTrackCompletionStore,
   HttpAutoTrackStateStore,
+  mergeResourceTransportMetricsInput,
+  normalizeResourceHttpProtocol,
 } from '../../main/ets/components/network/FTHttpAutoTrackShared';
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
@@ -125,6 +127,22 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(snapshot.requestSize).assertEqual(24);
       expect(snapshot.httpProtocol).assertEqual('h2');
       expect(snapshot.connectionReuse === false).assertTrue();
+    });
+
+    it('integrationMetricMergeShouldPreserveKnownValuesAndFalse', 0, () => {
+      const merged = mergeResourceTransportMetricsInput(
+        { requestBodySize: 12, connectionReuse: false },
+        { requestHeaderSize: 8, httpProtocol: '2' }
+      );
+
+      expect(merged !== undefined).assertTrue();
+      expect(merged!.requestBodySize).assertEqual(12);
+      expect(merged!.requestHeaderSize).assertEqual(8);
+      expect(merged!.connectionReuse === false).assertTrue();
+      expect(merged!.httpProtocol).assertEqual('2');
+      expect(normalizeResourceHttpProtocol(merged!.httpProtocol)).assertEqual('h2');
+      expect(normalizeResourceHttpProtocol('HTTP/1.1')).assertEqual('http/1.1');
+      expect(normalizeResourceHttpProtocol('spdy')).assertEqual(undefined);
     });
 
   });

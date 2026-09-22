@@ -26,11 +26,16 @@ import {
   ensureHttpResourceId,
   extractContentLength,
   FTNetworkPerformanceTiming,
+  FTResourceTransportMetricsInput,
+  FTResourceTransportMetricsProvider,
   HttpAutoTrackCompletionStore,
   HttpAutoTrackState,
   HttpAutoTrackStateStore,
   normalizeObjectHeaders,
+  mergeResourceTransportMetricsInput,
   PerformanceMetricValue,
+  applyIntegrationTransportMetrics,
+  applyPlatformTransportMetrics,
   resolveAxiosChainMethod,
   summarizeHeaderKeys,
   tryGetOptionalResponseBodyText
@@ -50,6 +55,8 @@ export interface FTSDKExtensionAutoTrackOptions {
    * null to opt this chain out of the configured global default.
    */
   networkErrorHandler?: FTNetworkErrorHandler | null;
+  /** Supplies integration-verified request transport values after headers are finalized. */
+  resourceTransportMetricsProvider?: FTResourceTransportMetricsProvider;
 }
 
 export interface FTSDKExtensionResolvedAutoTrackOptions {
@@ -61,6 +68,7 @@ export interface FTSDKExtensionResolvedAutoTrackOptions {
    * handler.
    */
   networkErrorHandler?: FTNetworkErrorHandler | null;
+  resourceTransportMetricsProvider?: FTResourceTransportMetricsProvider;
 }
 
 export interface FTSDKExtensionRequestInput {
@@ -68,6 +76,8 @@ export interface FTSDKExtensionRequestInput {
   method?: string;
   headers?: Object | null;
   body?: string | Object | ArrayBuffer;
+  /** Explicit values for this request; they override the options provider. */
+  transportMetrics?: FTResourceTransportMetricsInput;
 }
 
 export interface FTSDKExtensionPreparedRequest {
@@ -90,6 +100,10 @@ export interface FTSDKExtensionResponseInput {
   body?: string | Object | ArrayBuffer;
   /** NetworkKit/axios cumulative wire timing; absent on unsupported adapters. */
   performanceTiming?: FTNetworkPerformanceTiming;
+  /** Explicit integration values available only after request completion. */
+  transportMetrics?: FTResourceTransportMetricsInput;
+  /** Final values obtained from a platform transport API. */
+  platformTransportMetrics?: FTResourceTransportMetricsInput;
   errorMessage?: string;
   errorStack?: string;
   /** Native transport failure when NetworkKit or an adapter exposes it. */
@@ -120,7 +134,8 @@ export class FTSDKExtensionBridge {
       enableResourceInterceptor: resourceEnabled,
       networkErrorHandler: options.networkErrorHandler !== undefined
         ? options.networkErrorHandler
-        : FTRUMConfigManager.getInstance().getNetworkErrorHandler()
+        : FTRUMConfigManager.getInstance().getNetworkErrorHandler(),
+      resourceTransportMetricsProvider: options.resourceTransportMetricsProvider
     };
   }
 
@@ -160,6 +175,19 @@ export class FTSDKExtensionBridge {
         }
       }
 
+      let providerMetrics: FTResourceTransportMetricsInput | undefined = undefined;
+      if (resolvedOptions.resourceTransportMetricsProvider) {
+        try {
+          providerMetrics = resolvedOptions.resourceTransportMetricsProvider({
+            url: request.url,
+            method: method,
+            headers: finalHeaders,
+            body: request.body
+          });
+        } catch (error) {
+          FTInnerLogger.w(TAG, `[HTTP-Initial] Ignored transport metrics provider error for resourceId=${resourceId}: ${error}`);
+        }
+      }
       const state: FTSDKExtensionHttpState = {
         resourceId: resourceId,
         url: request.url,
@@ -169,7 +197,8 @@ export class FTSDKExtensionBridge {
         actionId: actionId,
         traceEnabled: resolvedOptions.enableTraceInterceptor,
         resourceEnabled: resourceEnabled,
-        networkErrorHandler: resolvedOptions.networkErrorHandler ?? undefined
+        networkErrorHandler: resolvedOptions.networkErrorHandler ?? undefined,
+        transportMetrics: mergeResourceTransportMetricsInput(providerMetrics, request.transportMetrics)
       };
       HttpAutoTrackStateStore.getInstance().put(state);
 
@@ -305,6 +334,8 @@ export class FTSDKExtensionBridge {
           response.errorMessage || 'Unknown error',
           response.errorStack,
           response.performanceTiming,
+          response.transportMetrics,
+          response.platformTransportMetrics,
           handling,
           errorContext
         );
@@ -480,6 +511,11 @@ export class FTSDKExtensionBridge {
     resourceParams.setResourceStatus(response.statusCode || 0);
     resourceParams.setResponseHeaderMap(buildResponseHeaderMap(responseHeaders));
     resourceParams.setResponseHeader(JSON.stringify(responseHeaders));
+    applyIntegrationTransportMetrics(
+      resourceParams,
+      mergeResourceTransportMetricsInput(state.transportMetrics, response.transportMetrics)
+    );
+    applyPlatformTransportMetrics(resourceParams, response.platformTransportMetrics);
 
     const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
     const contentEncoding = responseHeaders['content-encoding'] || responseHeaders['Content-Encoding'];
@@ -534,6 +570,8 @@ export class FTSDKExtensionBridge {
     errorMessage: string,
     errorStack?: string,
     performanceTiming?: FTNetworkPerformanceTiming,
+    responseTransportMetrics?: FTResourceTransportMetricsInput,
+    platformTransportMetrics?: FTResourceTransportMetricsInput,
     networkErrorHandling?: FTNetworkErrorHandlingResult,
     networkErrorContext?: FTNetworkErrorContext
   ): void {
@@ -545,6 +583,9 @@ export class FTSDKExtensionBridge {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack || errorMessage);
     resourceParams.setResourceStatus(0);
+    applyIntegrationTransportMetrics(resourceParams, state.transportMetrics);
+    applyIntegrationTransportMetrics(resourceParams, responseTransportMetrics);
+    applyPlatformTransportMetrics(resourceParams, platformTransportMetrics);
     if (networkErrorContext) {
       resourceParams.addProperty('network_error_kind', new String(networkErrorContext.kind));
       resourceParams.addProperty('network_error_message', new String(networkErrorContext.message));

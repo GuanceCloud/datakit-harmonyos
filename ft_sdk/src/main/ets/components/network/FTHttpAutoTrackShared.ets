@@ -3,6 +3,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { Utils } from '../utils/Utils';
 import { FTNetworkErrorHandler } from './FTNetworkErrorHandler';
+import { ResourceParams } from '../rum/bean/ResourceParams';
 
 const TAG = "FTHttpAutoTrack";
 const FT_RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
@@ -258,6 +259,152 @@ export interface HttpAutoTrackState {
   startTime: number;
   requestHeaders: Record<string, string>;
   actionId?: string;
+  /** Integration-provided transport values captured at request start. */
+  transportMetrics?: FTResourceTransportMetricsInput;
+}
+
+/**
+ * Values supplied by an integration that has reliable transport knowledge.
+ * Undefined means unknown; zero is a valid byte count.
+ */
+export interface FTResourceTransportMetricsInput {
+  requestBodySize?: number;
+  requestHeaderSize?: number;
+  requestSize?: number;
+  httpProtocol?: string;
+  connectionReuse?: boolean;
+}
+
+export interface FTResourceTransportMetricsRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string | Object | ArrayBuffer;
+}
+
+export type FTResourceTransportMetricsProvider = (
+  request: FTResourceTransportMetricsRequest
+) => FTResourceTransportMetricsInput | undefined;
+
+/**
+ * Combines two explicit metric sources for the same request. The latter
+ * source wins only for values it actually supplies, so a completion-time
+ * protocol does not discard request-start byte counts. This is deliberately
+ * not used for platform-vs-integration ordering; ResourceParams owns that
+ * priority decision.
+ */
+export function mergeResourceTransportMetricsInput(
+  first?: FTResourceTransportMetricsInput,
+  second?: FTResourceTransportMetricsInput
+): FTResourceTransportMetricsInput | undefined {
+  if (!first && !second) {
+    return undefined;
+  }
+  const result: FTResourceTransportMetricsInput = {};
+  const requestBodySize = second && second.requestBodySize !== undefined
+    ? second.requestBodySize
+    : first?.requestBodySize;
+  const requestHeaderSize = second && second.requestHeaderSize !== undefined
+    ? second.requestHeaderSize
+    : first?.requestHeaderSize;
+  const requestSize = second && second.requestSize !== undefined
+    ? second.requestSize
+    : first?.requestSize;
+  const httpProtocol = second && second.httpProtocol !== undefined
+    ? second.httpProtocol
+    : first?.httpProtocol;
+  const connectionReuse = second && second.connectionReuse !== undefined
+    ? second.connectionReuse
+    : first?.connectionReuse;
+  if (requestBodySize !== undefined) {
+    result.requestBodySize = requestBodySize;
+  }
+  if (requestHeaderSize !== undefined) {
+    result.requestHeaderSize = requestHeaderSize;
+  }
+  if (requestSize !== undefined) {
+    result.requestSize = requestSize;
+  }
+  if (httpProtocol !== undefined) {
+    result.httpProtocol = httpProtocol;
+  }
+  if (connectionReuse !== undefined) {
+    result.connectionReuse = connectionReuse;
+  }
+  return result;
+}
+
+export function normalizeResourceHttpProtocol(protocol?: string): string | undefined {
+  const value = protocol ? protocol.trim().toLowerCase() : '';
+  if (value === '1.0' || value === 'http/1.0') {
+    return 'http/1.0';
+  }
+  if (value === '1.1' || value === 'http/1.1') {
+    return 'http/1.1';
+  }
+  if (value === '2' || value === 'h2' || value === 'http/2' || value === 'http/2.0') {
+    return 'h2';
+  }
+  if (value === '3' || value === 'h3' || value === 'http/3' || value === 'http/3.0') {
+    return 'h3';
+  }
+  return undefined;
+}
+
+function isKnownTransportSize(size: number | undefined): boolean {
+  return size !== undefined && Number.isFinite(size) && size >= 0;
+}
+
+/** Apply integration-supplied values without allowing generic properties to override them. */
+export function applyIntegrationTransportMetrics(
+  params: ResourceParams,
+  metrics?: FTResourceTransportMetricsInput
+): void {
+  if (!metrics) {
+    return;
+  }
+  if (isKnownTransportSize(metrics.requestBodySize)) {
+    params.setRequestBodySize(metrics.requestBodySize!);
+  }
+  if (isKnownTransportSize(metrics.requestHeaderSize)) {
+    params.setRequestHeaderSize(metrics.requestHeaderSize!);
+  }
+  if (isKnownTransportSize(metrics.requestSize)) {
+    params.setRequestSize(metrics.requestSize!);
+  }
+  const httpProtocol = normalizeResourceHttpProtocol(metrics.httpProtocol);
+  if (httpProtocol !== undefined) {
+    params.setHttpProtocol(httpProtocol);
+  }
+  if (metrics.connectionReuse !== undefined) {
+    params.setConnectionReuse(metrics.connectionReuse);
+  }
+}
+
+/** Applies platform values returned by an adapter, retaining the top priority. */
+export function applyPlatformTransportMetrics(
+  params: ResourceParams,
+  metrics?: FTResourceTransportMetricsInput
+): void {
+  if (!metrics) {
+    return;
+  }
+  if (isKnownTransportSize(metrics.requestBodySize)) {
+    params.setPlatformRequestBodySize(metrics.requestBodySize!);
+  }
+  if (isKnownTransportSize(metrics.requestHeaderSize)) {
+    params.setPlatformRequestHeaderSize(metrics.requestHeaderSize!);
+  }
+  if (isKnownTransportSize(metrics.requestSize)) {
+    params.setPlatformRequestSize(metrics.requestSize!);
+  }
+  const httpProtocol = normalizeResourceHttpProtocol(metrics.httpProtocol);
+  if (httpProtocol !== undefined) {
+    params.setPlatformHttpProtocol(httpProtocol);
+  }
+  if (metrics.connectionReuse !== undefined) {
+    params.setPlatformConnectionReuse(metrics.connectionReuse);
+  }
 }
 
 export interface FTAutoTrackOptions {
@@ -269,6 +416,8 @@ export interface FTAutoTrackOptions {
    * to opt this integration out of the configured global default.
    */
   networkErrorHandler?: FTNetworkErrorHandler | null;
+  /** Optional per-request source of integration-verified transport metrics. */
+  resourceTransportMetricsProvider?: FTResourceTransportMetricsProvider;
 }
 
 export class HttpAutoTrackStateStore {

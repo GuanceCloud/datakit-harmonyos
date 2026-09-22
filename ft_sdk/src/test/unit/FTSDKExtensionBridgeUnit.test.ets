@@ -169,6 +169,35 @@ export default function ftSDKExtensionBridgeUnitTest() {
       })).assertTrue();
     });
 
+    it('httpPrepareShouldInvokeTransportMetricsProviderAfterHeadersFinalize', 0, () => {
+      let providerResourceId = '';
+      let providerMethod = '';
+      const request = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'https://example.com/metrics-provider',
+        method: 'post',
+        headers: {},
+        transportMetrics: { requestSize: 123, connectionReuse: false }
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false,
+        resourceTransportMetricsProvider: (preparedRequest) => {
+          providerResourceId = preparedRequest.headers['X-FT-Resource-ID'];
+          providerMethod = preparedRequest.method;
+          return { httpProtocol: 'http/1.1' };
+        }
+      });
+
+      expect(providerResourceId).assertEqual(request.uniqueId);
+      expect(providerMethod).assertEqual('POST');
+      expect(FTSDKExtensionBridge.completeHttpResponse({
+        url: request.url,
+        method: request.method,
+        requestHeaders: request.headers,
+        responseHeaders: {},
+        statusCode: 204
+      })).assertTrue();
+    });
+
     it('httpOptionsShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
       const globalHandler = new ExtensionGlobalNetworkErrorHandler();
       const explicitHandler = new ExtensionGlobalNetworkErrorHandler();

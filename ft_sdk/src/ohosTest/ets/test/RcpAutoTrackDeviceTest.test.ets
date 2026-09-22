@@ -530,6 +530,38 @@ export default function rcpAutoTrackDeviceTest() {
       await flushAndAssertUploaded(collector, fragments, record);
     });
 
+    it('rcpResourceShouldUseExplicitMetricsWhenPlatformDoesNotProvideThem', 0, async () => {
+      const viewName = 'rcp_explicit_transport_metrics_view';
+      const resourceUrl = 'https://device.test/rcp-explicit-transport-metrics';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({
+        enableResourceInterceptor: true,
+        resourceTransportMetricsProvider: (_request) => ({
+          requestSize: 321,
+          httpProtocol: 'http/1.1',
+          connectionReuse: false
+        })
+      });
+      const context = new FakeRcpRequestContext(resourceUrl, 'POST');
+      await runRcpChain(config.interceptors ?? [], context, 200, 'ok', 'text/plain',
+        new FakeRcpTimeInfo(), undefined, 0, '2');
+      await WaitUtils.delay(5);
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_request_size=321',
+        'resource_http_protocol=h2',
+        'resource_connection_reuse=false',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      await flushAndAssertUploaded(collector, fragments, record);
+    });
+
     it('rcpHttpWithoutTlsShouldKeepTransferStartsAndOmitTlsBasedTrans', 0, async () => {
       const viewName = 'rcp_http_timing_resource_view';
       const resourceUrl = 'http://device.test/rcp-http-timing-resource';

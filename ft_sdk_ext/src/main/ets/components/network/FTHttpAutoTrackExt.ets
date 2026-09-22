@@ -4,7 +4,8 @@ import {
   FTSDKExtensionAutoTrackOptions,
   FTSDKExtensionResolvedAutoTrackOptions,
   FTSDKExtensionResponseInput,
-  FTNetworkErrorHandler
+  FTNetworkErrorHandler,
+  FTResourceTransportMetricsProvider
 } from '@guancecloud/ft_sdk/Index';
 
 const TAG = 'FTHttpAutoTrackExt';
@@ -134,19 +135,23 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
   private readonly traceEnabled: boolean;
   private readonly resourceEnabled: boolean;
   private readonly networkErrorHandler: FTNetworkErrorHandler | null | undefined;
+  private readonly resourceTransportMetricsProvider: FTResourceTransportMetricsProvider | undefined;
 
   constructor(
     traceEnabled?: boolean,
     resourceEnabled?: boolean,
-    networkErrorHandler?: FTNetworkErrorHandler | null
+    networkErrorHandler?: FTNetworkErrorHandler | null,
+    resourceTransportMetricsProvider?: FTResourceTransportMetricsProvider
   ) {
     const resolvedOptions = FTSDKExtensionBridge.resolveAutoTrackOptions({
       enableTraceInterceptor: traceEnabled,
-      enableResourceInterceptor: resourceEnabled
+      enableResourceInterceptor: resourceEnabled,
+      resourceTransportMetricsProvider: resourceTransportMetricsProvider
     });
     this.traceEnabled = resolvedOptions.enableTraceInterceptor;
     this.resourceEnabled = resolvedOptions.enableResourceInterceptor;
     this.networkErrorHandler = networkErrorHandler;
+    this.resourceTransportMetricsProvider = resourceTransportMetricsProvider;
   }
 
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
@@ -169,7 +174,8 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
         {
           enableTraceInterceptor: this.traceEnabled,
           enableResourceInterceptor: this.resourceEnabled,
-          networkErrorHandler: this.networkErrorHandler
+          networkErrorHandler: this.networkErrorHandler,
+          resourceTransportMetricsProvider: this.resourceTransportMetricsProvider
         }
       );
       applyNormalizedHeadersToHttpContext(reqContext, preparedRequest.headers);
@@ -224,7 +230,8 @@ function createFTHttpInterceptors(options: FTSDKExtensionResolvedAutoTrackOption
     interceptors.push(new HttpInitialRequestInterceptor(
       options.enableTraceInterceptor,
       options.enableResourceInterceptor,
-      options.networkErrorHandler
+      options.networkErrorHandler,
+      options.resourceTransportMetricsProvider
     ));
     interceptors.push(new HttpFinalResponseInterceptor(
       options.enableTraceInterceptor,

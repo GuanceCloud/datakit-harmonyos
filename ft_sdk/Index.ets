@@ -169,7 +169,12 @@ export {
   FTRCPSessionConfigurationOptions,
   FTAxiosTrackRegistration,
 } from './src/main/ets/components/network/FTHttpAutoTrack';
-export { FTAutoTrackOptions } from './src/main/ets/components/network/FTHttpAutoTrackShared';
+export {
+  FTAutoTrackOptions,
+  FTResourceTransportMetricsInput,
+  FTResourceTransportMetricsProvider,
+  FTResourceTransportMetricsRequest
+} from './src/main/ets/components/network/FTHttpAutoTrackShared';
 export {
   FTNetworkErrorHandler,
   FTNetworkErrorContext,
