@@ -3,6 +3,8 @@ import router from '@ohos.router';
 import { CommonConstants } from '../constants/CommonConstants';
 import { Context } from '@kit.AbilityKit';
 import { LengthMetrics } from '@kit.ArkUI';
+import { promptAction } from '@kit.ArkUI';
+import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 
 const TAG = 'Index';
@@ -12,6 +14,8 @@ const TAG = 'Index';
 struct Index {
   @State message: string = 'FT SDK HarmonyOS Test App';
   @State context: Context = getContext(this) as Context;
+  @State verificationRound: string = '';
+  @State activeVerificationRound: string = '未设置';
 
   build() {
     Column() {
@@ -22,6 +26,41 @@ struct Index {
             .fontWeight(FontWeight.Bold)
             .margin({ top: 20, bottom: 20 })
             .textAlign(TextAlign.Center)
+
+          Column({ space: 8 }) {
+            Text('验证轮次')
+              .fontSize(16)
+              .fontWeight(FontWeight.Medium)
+              .width(CommonConstants.FULL_PERCENT)
+
+            Row({ space: 8 }) {
+              TextInput({ text: this.verificationRound, placeholder: '例如：第 1 轮' })
+                .layoutWeight(1)
+                .height(42)
+                .backgroundColor('#FFFFFF')
+                .border({ width: 1, color: '#D7DFEA' })
+                .borderRadius(6)
+                .onChange((value: string) => {
+                  this.verificationRound = value;
+                })
+
+              Button('确认轮次')
+                .height(42)
+                .backgroundColor('#2563EB')
+                .onClick(() => this.applyVerificationRound())
+            }
+            .width(CommonConstants.FULL_PERCENT)
+
+            Text(`当前轮次：${this.activeVerificationRound}`)
+              .fontSize(13)
+              .fontColor(Color.Gray)
+              .width(CommonConstants.FULL_PERCENT)
+          }
+          .width(CommonConstants.FULL_PERCENT)
+          .padding(12)
+          .margin({ bottom: 12 })
+          .backgroundColor('#F8FAFC')
+          .borderRadius(8)
 
           List() {
             // Unified RUM data test page
@@ -328,6 +367,20 @@ struct Index {
     
     // SDK is initialized in EntryAbility
     DemoLogger.i(TAG, 'SDK already initialized in EntryAbility');
+  }
+
+  private applyVerificationRound(): void {
+    const round = this.verificationRound.trim();
+    if (round.length === 0) {
+      promptAction.showToast({ message: '请输入验证轮次' });
+      return;
+    }
+
+    FTSDK.appendGlobalContextKeyValue('verification_round', round);
+    this.verificationRound = round;
+    this.activeVerificationRound = round;
+    DemoLogger.i(TAG, `Verification round set to: ${round}`);
+    promptAction.showToast({ message: `已设置验证轮次：${round}` });
   }
 
 
