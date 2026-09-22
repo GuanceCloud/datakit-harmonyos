@@ -110,6 +110,12 @@ class TestHttpResponse implements http.HttpResponse {
   }
 }
 
+class ThrowingHeaderValue {
+  public toString(): string {
+    throw new Error('response header cannot be stringified');
+  }
+}
+
 class TestExtensionResponse implements FTSDKExtensionResponseInput {
   public url: string;
   public requestHeaders?: Object;
@@ -234,6 +240,32 @@ export default function httpInterceptorChainUnitTest() {
 
       expect(shouldContinue).assertTrue();
       const duplicateResponse = new TestExtensionResponse(reqContext.url, reqContext.header, responseHeaders, 200, '');
+      expect(FTSDKExtensionBridge.completeHttpResponse(duplicateResponse)).assertFalse();
+    });
+
+    it('finalInterceptorShouldKeepKnownStatusWhenResponseHeadersAreInvalid', 0, async () => {
+      const initial = new HttpInitialRequestInterceptor(true, true);
+      const finalResponse = new HttpFinalResponseInterceptor(true, true);
+      const requestHeaders: Record<string, Object> = {};
+      const reqContext = new TestHttpRequestContext('https://example.com/not-found', requestHeaders);
+      const emptyInitialHeaders: Record<string, Object> = {};
+      const invalidResponseHeaders: Record<string, Object> = {};
+      invalidResponseHeaders['x-invalid'] = new ThrowingHeaderValue() as Object;
+
+      await initial.interceptorHandle(reqContext, new TestHttpResponse(0, emptyInitialHeaders, ''));
+      const shouldContinue = await finalResponse.interceptorHandle(
+        reqContext,
+        new TestHttpResponse(404, invalidResponseHeaders, 'not-found')
+      );
+
+      expect(shouldContinue).assertTrue();
+      const duplicateResponse = new TestExtensionResponse(
+        reqContext.url,
+        reqContext.header,
+        invalidResponseHeaders,
+        404,
+        ''
+      );
       expect(FTSDKExtensionBridge.completeHttpResponse(duplicateResponse)).assertFalse();
     });
 

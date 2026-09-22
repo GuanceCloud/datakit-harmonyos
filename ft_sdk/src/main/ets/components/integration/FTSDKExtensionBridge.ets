@@ -212,11 +212,28 @@ export class FTSDKExtensionBridge {
     const resourceId = state.resourceId;
     let resourceCompletionClaimed = false;
     try {
-      const responseHeaders = FTSDKExtensionBridge.normalizeHeaders(response.responseHeaders);
-      const responseBodyText = tryGetOptionalResponseBodyText(response.body);
+      let responseHeaders: Record<string, string> = {};
+      try {
+        responseHeaders = FTSDKExtensionBridge.normalizeHeaders(response.responseHeaders);
+      } catch (error) {
+        // Response metadata is optional. A malformed platform header must not
+        // turn an already-known HTTP response into a transport failure.
+        FTInnerLogger.e(TAG, `[HTTP-Final] Failed to normalize response headers for ${resourceId}: ${error}`);
+      }
+
+      let responseBodyText: string | undefined = undefined;
+      try {
+        responseBodyText = tryGetOptionalResponseBodyText(response.body);
+      } catch (error) {
+        FTInnerLogger.e(TAG, `[HTTP-Final] Failed to read response body for ${resourceId}: ${error}`);
+      }
 
       if (state.traceEnabled) {
-        FTSDKExtensionBridge.completeTrace(state, response.statusCode, responseHeaders, responseBodyText);
+        try {
+          FTSDKExtensionBridge.completeTrace(state, response.statusCode, responseHeaders, responseBodyText);
+        } catch (error) {
+          FTInnerLogger.e(TAG, `[HTTP-Final] Failed to complete trace for ${resourceId}: ${error}`);
+        }
       }
 
       if (state.resourceEnabled) {
@@ -231,11 +248,6 @@ export class FTSDKExtensionBridge {
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Final] Failed to complete response for ${resourceId}: ${error}`);
-      if (state.resourceEnabled && (resourceCompletionClaimed ||
-        HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId))) {
-        FTSDKExtensionBridge.completeResourceError(state, response.url, String(error), undefined,
-          response.performanceTiming);
-      }
     } finally {
       FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
       HttpAutoTrackStateStore.getInstance().delete(resourceId);
@@ -488,7 +500,14 @@ export class FTSDKExtensionBridge {
     }
 
     const fallbackLoadNs = Math.max(Date.now() - state.startTime, 1) * 1000000;
-    const resourceTiming = createFTResourceTimingFromNetworkPerformance(response.performanceTiming, fallbackLoadNs);
+    let resourceTiming = createFTResourceTimingFromNetworkPerformance(undefined, fallbackLoadNs);
+    try {
+      resourceTiming = createFTResourceTimingFromNetworkPerformance(response.performanceTiming, fallbackLoadNs);
+    } catch (error) {
+      // Timing is auxiliary to an HTTP response. Keep the response and use
+      // local elapsed time when a platform timing object is invalid.
+      FTInnerLogger.e(TAG, `[Extension-Resource] Failed to parse timing for ${state.resourceId}: ${error}`);
+    }
     const metricValue: PerformanceMetricValue = { value: resourceTiming.loadTime };
     resourceParams.addProperty('resourceLoad', metricValue);
 

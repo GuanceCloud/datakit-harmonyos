@@ -191,12 +191,13 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
   }
 
   async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
+    const statusCode = rspContext.responseCode || 0;
     try {
       // console.info('ft-lizhao-http', JSON.stringify(rspContext.performanceTiming));
       // NetworkKit also invokes FINAL_RESPONSE for transport failures, with
       // responseCode=0. The normal response path has no error stack and would
       // produce a Resource without the corresponding network Error.
-      if (!rspContext.responseCode) {
+      if (!statusCode) {
         const error = new Error('NetworkKit request failed without an HTTP response');
         FTSDKExtensionBridge.completeHttpError(
           new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack, undefined, 0)
@@ -204,12 +205,14 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
         return true;
       }
       FTSDKExtensionBridge.completeHttpResponse(
-        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0)
+        new NetworkKitResponseInput(reqContext, rspContext, statusCode)
       );
     } catch (error) {
-      FTSDKExtensionBridge.completeHttpError(
-        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0, String(error))
-      );
+      // Once NetworkKit provides an HTTP status, a telemetry processing
+      // failure must not reclassify that response as a status-0 transport
+      // error. The bridge already makes response metadata best-effort.
+      FTSDKExtensionBridge.logError(TAG,
+        `[HTTP-Final] Failed to process response with status=${statusCode}: ${error}`);
     }
     return true;
   }

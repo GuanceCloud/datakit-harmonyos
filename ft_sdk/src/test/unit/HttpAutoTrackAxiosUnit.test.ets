@@ -30,6 +30,15 @@ class AxiosGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
   }
 }
 
+class CountingAxiosNetworkErrorHandler implements FTNetworkErrorHandler {
+  callCount: number = 0;
+
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    this.callCount++;
+    return true;
+  }
+}
+
 type AxiosRequestFulfilled = (value: FTAxiosRequestConfigTarget) => FTAxiosRequestConfigTarget | Promise<FTAxiosRequestConfigTarget>;
 type AxiosResponseFulfilled = (value: FTAxiosResponseTarget) => FTAxiosResponseTarget | Promise<FTAxiosResponseTarget>;
 type AxiosRejected = (error: Object) => Object | Promise<Object>;
@@ -69,6 +78,12 @@ class FakeAxiosTarget {
 }
 
 class FakeAxiosHeaders {
+}
+
+class FakeAxiosThrowingHeaders {
+  toJSON(): Object {
+    throw new Error('Axios response headers cannot be serialized');
+  }
 }
 
 class FakeAxiosRequestConfig implements FTAxiosRequestConfigTarget {
@@ -167,6 +182,62 @@ export default function httpAutoTrackAxiosUnitTest() {
       const contextAfterResponse = getContext(preparedConfig);
       expect(contextAfterResponse[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
       expect(contextAfterResponse['existing']).assertEqual('keep-me');
+    });
+
+    it('axiosHttpErrorWithInvalidMetadataShouldPreserveBusinessErrorAndClearState', 0, () => {
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false
+      });
+
+      const preparedConfig = createPreparedConfig(target);
+      const rawError = new Error('Request failed with status code 404') as FTAxiosErrorTarget;
+      rawError.config = preparedConfig;
+      const response = new FakeAxiosResponse(preparedConfig);
+      response.status = 404;
+      response.headers = new FakeAxiosThrowingHeaders();
+      rawError.response = response;
+
+      let thrownError: Object | null = null;
+      try {
+        target.responseManager.rejected!(rawError as Object);
+      } catch (error) {
+        thrownError = error;
+      }
+
+      expect(thrownError === rawError).assertTrue();
+      const contextAfterResponse = getContext(preparedConfig);
+      expect(contextAfterResponse[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
+      expect(contextAfterResponse['existing']).assertEqual('keep-me');
+    });
+
+    it('axiosStatusZeroResponsePlaceholderShouldInvokeGlobalNetworkErrorHandler', 0, () => {
+      const globalHandler = new CountingAxiosNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setNetworkErrorHandler(globalHandler));
+
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      const preparedConfig = createPreparedConfig(target);
+      const rawError = new Error('Failed to connect to the server') as FTAxiosErrorTarget;
+      rawError.config = preparedConfig;
+      const responsePlaceholder = new FakeAxiosResponse(preparedConfig);
+      responsePlaceholder.status = 0;
+      rawError.response = responsePlaceholder;
+
+      try {
+        target.responseManager.rejected!(rawError as Object);
+      } catch (_error) {
+        // Axios must continue to throw the original business error.
+      }
+
+      expect(globalHandler.callCount).assertEqual(1);
     });
 
     it('axiosShouldSkipFilteredResource', 0, () => {

@@ -194,6 +194,7 @@ export class FTNetworkListener {
       // remains available. Keep it diagnostic-only; it must never be treated
       // as a normal cold-launch upload gate.
       FTInnerLogger.d(TAG, "Network capabilities changed");
+      // console.info('ft-lizhao',JSON.stringify(data.netCap))
 
       const hasInternetCapability = this.hasNetworkCapability(data, connection.NetCap.NET_CAPABILITY_INTERNET);
       // VALIDATED is a connectivity-probe result, not a network lifecycle

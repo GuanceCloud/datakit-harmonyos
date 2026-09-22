@@ -72,6 +72,12 @@ class ChainResponse implements http.HttpResponse {
   }
 }
 
+class ChainThrowingHeaderValue {
+  public toString(): string {
+    throw new Error('NetworkKit response header cannot be normalized');
+  }
+}
+
 interface DeviceAxiosRequestConfigTarget {
   url?: string;
   baseURL?: string;
@@ -466,6 +472,52 @@ export default function httpChainModeDeviceTest() {
             `Expected chain HTTP error resource record.\nCurrent sync records:\n${await ExtDBAssert.dumpSyncRecords()}`
           );
         }
+        await flushAndAssertUploaded(collector, fragments, record.getUuid());
+      } finally {
+        request.destroy();
+      }
+    });
+
+    it('httpErrorStatusShouldNotDowngradeWhenResponseHeadersAreInvalid', 0, async () => {
+      const viewName = 'http_chain_invalid_response_header_view';
+      const resourceUrl = 'http://device.test/http-chain-invalid-response-header';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const request = http.createHttp();
+      try {
+        const interceptors = applyFTHttpTrack(request, {
+          enableTraceInterceptor: true,
+          enableResourceInterceptor: true
+        }).getChain();
+        const requestHeaders: Record<string, Object> = {};
+        const requestContext = new ChainRequestContext(resourceUrl, requestHeaders);
+        const emptyResponseHeaders: Record<string, Object> = {};
+        await interceptors[0].interceptorHandle(requestContext, new ChainResponse(0, emptyResponseHeaders, ''));
+        const traceIds = assertTraceparentHeaders(requestContext.header);
+
+        const invalidResponseHeaders: Record<string, Object> = {};
+        invalidResponseHeaders['x-invalid'] = new ChainThrowingHeaderValue() as Object;
+        await interceptors[1].interceptorHandle(
+          requestContext,
+          new ChainResponse(404, invalidResponseHeaders, 'not-found')
+        );
+
+        const fragments = [
+          'resource',
+          `resource_url=${resourceUrl}`,
+          'resource_status=404',
+          'resource_status_group=4xx',
+          `view_name=${viewName}`,
+          `trace_id=${traceIds[0]}`,
+          `span_id=${traceIds[1]}`
+        ];
+        const record = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+        if (record === null) {
+          throw new Error(
+            `Expected HTTP 404 resource record after invalid response headers.\nCurrent sync records:\n${await ExtDBAssert.dumpSyncRecords()}`
+          );
+        }
+
         await flushAndAssertUploaded(collector, fragments, record.getUuid());
       } finally {
         request.destroy();

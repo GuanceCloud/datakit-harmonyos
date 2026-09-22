@@ -168,9 +168,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
   }
 
   /**
-   * Completes a local failure before the SDK can derive a network Error. It is
-   * deliberately independent of the RCP control path: the caller's rejected
-   * request or status-zero Response remains under intercept()'s control.
+   * Completes the Resource for a transport failure before the SDK can create
+   * its derived network Error. The caller's RCP result is intentionally not
+   * handled here: a rejected request is rethrown by intercept(), while a
+   * status-0 response is returned unchanged to the application.
    */
   private completeLocalFailure(
     resourceId: string,
@@ -315,43 +316,65 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
     const startTime = Date.now();
 
+    let response: rcp.Response;
     try {
-      const response = await next.handle(context);
-      // RCP normally rejects local transport failures. If a platform version
-      // returns a status-zero Response instead, it is still a local failure,
-      // not an HTTP response. Record it before the SDK can create an Error,
-      // then preserve the original Response for the application.
-      if ((response.statusCode || 0) <= 0) {
-        try {
-          this.completeLocalFailure(
-            resourceId,
-            url,
-            method,
-            savedRequestHeaders,
-            startTime,
-            new Error('RCP request completed without an HTTP response (statusCode=0)')
-          );
-        } catch (trackingError) {
-          FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record status-zero response for resourceId=${resourceId}: ${trackingError}`);
-        }
-        return response;
+      response = await next.handle(context);
+    } catch (err) {
+      try {
+        this.completeLocalFailure(resourceId, url, method, savedRequestHeaders, startTime, err);
+      } catch (trackingError) {
+        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
       }
-      const responseTime = Date.now() - startTime;
-      const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
-      let netStatusBean = createFTNetStatusBean(resourceTiming);
+      // ArkTS permits throwing Error values only. Preserve the native Error
+      // object unchanged; primitive/non-Error adapter rejections retain the
+      // SDK's existing compatibility wrapper.
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error(String(err));
+    }
 
-      const resourceParams = new ResourceParams();
-      resourceParams.setUrl(url);
-      resourceParams.setResourceMethod(method);
-      resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
-      resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
-      resourceParams.setResourceStatus(response.statusCode || 0);
+    // A positive status is the only shape that represents a real HTTP
+    // response. Should an RCP version resolve a status-0 Response for a local
+    // failure, handle it before Error creation but preserve that Response for
+    // the caller unchanged.
+    if ((response.statusCode || 0) <= 0) {
+      try {
+        this.completeLocalFailure(
+          resourceId,
+          url,
+          method,
+          savedRequestHeaders,
+          startTime,
+          new Error('RCP request completed without an HTTP response (statusCode=0)')
+        );
+      } catch (trackingError) {
+        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record status-zero response for resourceId=${resourceId}: ${trackingError}`);
+      }
+      return response;
+    }
 
+    const responseTime = Date.now() - startTime;
+    const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
+    let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
+    let netStatusBean = createFTNetStatusBean(resourceTiming);
+
+    const resourceParams = new ResourceParams();
+    resourceParams.setUrl(url);
+    resourceParams.setResourceMethod(method);
+    resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
+    resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
+    resourceParams.setResourceStatus(response.statusCode || 0);
+
+    // A response has already been received. Header and timing collection are
+    // best-effort only: a malformed platform value must not turn an HTTP
+    // response (including 4xx/5xx) into a local network failure with status 0.
+    try {
       if (response.headers) {
         const responseHeaders = normalizeObjectHeaders(response.headers as Object);
+        const responseHeader = JSON.stringify(response.headers);
         resourceParams.setResponseHeaderMap(buildResponseHeaderMap(responseHeaders));
-        resourceParams.setResponseHeader(JSON.stringify(response.headers));
+        resourceParams.setResponseHeader(responseHeader);
 
         const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
         const contentLength = responseHeaders['content-length'] || responseHeaders['Content-Length'];
@@ -374,15 +397,22 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
           resourceParams.setResponseConnection(connection);
         }
       }
+    } catch (error) {
+      FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid response headers for resourceId=${resourceId}: ${error}`);
+    }
 
+    try {
       if (response.timeInfo) {
         const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
-        // console.info('ft-lizhao',JSON.stringify(timeInfoObj))
         resourceTiming = createRCPResourceTiming(timeInfoObj, fallbackLoadNs);
         netStatusBean = createFTNetStatusBean(resourceTiming);
         FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
       }
+    } catch (error) {
+      FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid timing data for resourceId=${resourceId}: ${error}`);
+    }
 
+    try {
       FTInnerLogger.d(
         TAG,
         `[RCP-Resource] Completed ${method} ${url}, status=${resourceParams.resourceStatus}, duration=${responseTime}ms, contentType=${resourceParams.responseContentType}, contentLength=${resourceParams.responseContentLength}`
@@ -399,61 +429,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
-
-      return response;
-    } catch (err) {
-      if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
-        FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate failure completion ignored: ${resourceId}`);
-        if (err instanceof Error) {
-          throw err;
-        }
-        throw new Error(String(err));
-      }
-      const errorMessage = getFTNetworkErrorMessage(err);
-      const errorStack = getFTNetworkErrorStack(err) || String(err);
-      const errorContext = createFTNetworkErrorContext(
-        url,
-        method,
-        FTNetworkErrorSource.RCP,
-        err,
-        errorMessage,
-        errorStack
-      );
-      const handling = handleFTNetworkError(this.networkErrorHandler, errorContext);
-      const responseTime = Date.now() - startTime;
-      const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-      const resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
-      const netStatusBean = createFTNetStatusBean(resourceTiming);
-      const resourceParams = new ResourceParams();
-      resourceParams.setUrl(url);
-      resourceParams.setResourceMethod(method);
-      resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
-      resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
-      resourceParams.setRequestErrorMsg(errorMessage);
-      resourceParams.setRequestErrorStack(errorStack);
-      resourceParams.setResourceStatus(0);
-      addNetworkErrorFields(resourceParams, handling, errorContext);
-
-      FTInnerLogger.e(
-        TAG,
-        `[RCP-Resource] Request failed ${method} ${url}, duration=${responseTime}ms, error=${errorMessage}, stack=${errorStack || 'N/A'}`
-      );
-
-      FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
-      FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
-      const fallbackActionId = this.resourceActionMap.get(resourceId);
-      FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
-      if (fallbackActionId) {
-        this.resourceActionMap.delete(resourceId);
-      }
-      // ArkTS permits throwing Error values only. Preserve the native Error
-      // object unchanged; primitive/non-Error adapter rejections retain the
-      // SDK's existing compatibility wrapper.
-      if (err instanceof Error) {
-        throw err;
-      }
-      throw new Error(String(err));
+    } catch (error) {
+      FTInnerLogger.e(TAG, `[RCP-Resource] Failed to record completed response for resourceId=${resourceId}: ${error}`);
     }
+    return response;
   }
 }
 
@@ -712,6 +691,13 @@ interface FTAxiosAutoTrackState extends HttpAutoTrackState {
   networkErrorHandler?: FTNetworkErrorHandler;
 }
 
+interface FTAxiosResponseSnapshot {
+  status: number;
+  headers: Record<string, string>;
+  body?: string;
+  performanceTiming?: FTNetworkPerformanceTiming;
+}
+
 interface FTRCPInfoToCollectConfiguration {
   incomingHeader: boolean;
   outgoingHeader: boolean;
@@ -790,6 +776,41 @@ function normalizeAxiosHeaders(headers?: Object | null): Record<string, string> 
   }
 
   return normalizeObjectHeaders(headers);
+}
+
+function captureAxiosResponseSnapshot(
+  response: FTAxiosResponseTarget | undefined,
+  resourceId: string
+): FTAxiosResponseSnapshot {
+  const snapshot: FTAxiosResponseSnapshot = {
+    status: 0,
+    headers: {}
+  };
+  if (!response) {
+    return snapshot;
+  }
+
+  try {
+    snapshot.status = response.status || 0;
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Ignored invalid response status for resourceId=${resourceId}: ${error}`);
+  }
+  try {
+    snapshot.headers = normalizeAxiosHeaders(response.headers);
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Ignored invalid response headers for resourceId=${resourceId}: ${error}`);
+  }
+  try {
+    snapshot.body = tryGetOptionalResponseBodyText(response.data);
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Ignored invalid response body for resourceId=${resourceId}: ${error}`);
+  }
+  try {
+    snapshot.performanceTiming = response.performanceTiming;
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Ignored invalid performance timing for resourceId=${resourceId}: ${error}`);
+  }
+  return snapshot;
 }
 
 function ensureAxiosContext(config: FTAxiosRequestConfigTarget): Record<string, Object> {
@@ -1025,6 +1046,42 @@ function completeAxiosResource(
   FTRUMInnerManager.getInstance().stopResourceInternal(state.resourceId, state.actionId);
 }
 
+function completeAxiosTraceSafely(
+  state: FTAxiosAutoTrackState,
+  snapshot: FTAxiosResponseSnapshot
+): void {
+  try {
+    completeAxiosTrace(state, snapshot.status, snapshot.headers, snapshot.body);
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Trace] Failed to record response for resourceId=${state.resourceId}: ${error}`);
+  }
+}
+
+function completeAxiosResourceSafely(
+  state: FTAxiosAutoTrackState,
+  snapshot: FTAxiosResponseSnapshot,
+  errorMessage?: string,
+  errorStack?: string,
+  networkErrorHandling?: FTNetworkErrorHandlingResult,
+  networkErrorContext?: FTNetworkErrorContext
+): void {
+  try {
+    completeAxiosResource(
+      state,
+      snapshot.status,
+      snapshot.headers,
+      snapshot.body,
+      errorMessage,
+      errorStack,
+      snapshot.performanceTiming,
+      networkErrorHandling,
+      networkErrorContext
+    );
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Failed to record response for resourceId=${state.resourceId}: ${error}`);
+  }
+}
+
 export function createFTRCPInterceptors(
   enableTraceInterceptor?: boolean,
   enableResourceInterceptor?: boolean,
@@ -1098,21 +1155,21 @@ export function applyFTAxiosTrack(
         return response;
       }
 
-      const responseHeaders = normalizeAxiosHeaders(response.headers);
-      const responseBodyText = tryGetOptionalResponseBodyText(response.data);
-
-      // console.info('ft-lizhao-axios', JSON.stringify(response.performanceTiming));
-      completeAxiosTrace(state, response.status || 0, responseHeaders, responseBodyText);
-      if (state.resourceEnabled && HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId)) {
-        completeAxiosResource(state, response.status || 0, responseHeaders, undefined, undefined, undefined,
-          response.performanceTiming);
+      try {
+        const snapshot = captureAxiosResponseSnapshot(response, state.resourceId);
+        completeAxiosTraceSafely(state, snapshot);
+        if (state.resourceEnabled && HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId)) {
+          completeAxiosResourceSafely(state, snapshot);
+        }
+        FTInnerLogger.d(
+          TAG,
+          `[Axios-Response] Completed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${snapshot.status}, duration=${Date.now() - state.startTime}ms`
+        );
+      } catch (error) {
+        FTInnerLogger.w(TAG, `[Axios-Response] Failed to record completed response for resourceId=${state.resourceId}: ${error}`);
+      } finally {
+        clearAxiosAutoTrackState(response.config);
       }
-
-      FTInnerLogger.d(
-        TAG,
-        `[Axios-Response] Completed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${response.status || 0}, duration=${Date.now() - state.startTime}ms`
-      );
-      clearAxiosAutoTrackState(response.config);
       return response;
     },
     (rawError: Object) => {
@@ -1120,42 +1177,44 @@ export function applyFTAxiosTrack(
       const responseConfig = error.config || (error.response ? error.response.config : undefined);
       const state = getAxiosAutoTrackState(responseConfig);
       if (state) {
-        const responseHeaders = normalizeAxiosHeaders(error.response ? error.response.headers : undefined);
-        const responseBodyText = error.response ? tryGetOptionalResponseBodyText(error.response.data) : undefined;
-        const status = error.response ? error.response.status || 0 : 0;
+        try {
+          const snapshot = captureAxiosResponseSnapshot(error.response, state.resourceId);
+          completeAxiosTraceSafely(state, snapshot);
+          const resourceCompletionClaimed = state.resourceEnabled &&
+            HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId);
+          // @ohos/axios may put the HttpRequest itself in `error.response`
+          // for a local failure. Only a positive status represents an actual
+          // HTTP response (normally 4xx/5xx).
+          const hasHttpResponse = snapshot.status > 0;
+          const errorContext = !resourceCompletionClaimed || hasHttpResponse ? undefined : createFTNetworkErrorContext(
+              state.url,
+              state.method,
+              FTNetworkErrorSource.AXIOS,
+              rawError,
+              error.message || snapshot.body || 'Unknown error',
+              error.stack
+            );
+          const handling = errorContext ? handleFTNetworkError(state.networkErrorHandler, errorContext) : undefined;
+          if (resourceCompletionClaimed) {
+            completeAxiosResourceSafely(
+              state,
+              snapshot,
+              error.message || snapshot.body || 'Unknown error',
+              error.stack,
+              handling,
+              errorContext
+            );
+          }
 
-        completeAxiosTrace(state, status, responseHeaders, responseBodyText);
-        const resourceCompletionClaimed = state.resourceEnabled &&
-          HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId);
-        const hasHttpResponse = error.response !== undefined && status > 0;
-        const errorContext = !resourceCompletionClaimed || hasHttpResponse ? undefined : createFTNetworkErrorContext(
-            state.url,
-            state.method,
-            FTNetworkErrorSource.AXIOS,
-            rawError,
-            error.message || responseBodyText || 'Unknown error',
-            error.stack
+          FTInnerLogger.e(
+            TAG,
+            `[Axios-Response] Request failed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${snapshot.status}, error=${error.message || 'Unknown error'}`
           );
-        const handling = errorContext ? handleFTNetworkError(state.networkErrorHandler, errorContext) : undefined;
-        if (resourceCompletionClaimed) {
-          completeAxiosResource(
-            state,
-            status,
-            responseHeaders,
-            responseBodyText,
-            error.message || responseBodyText || 'Unknown error',
-            error.stack,
-            error.response ? error.response.performanceTiming : undefined,
-            handling,
-            errorContext
-          );
+        } catch (trackingError) {
+          FTInnerLogger.w(TAG, `[Axios-Response] Failed to record rejected response for resourceId=${state.resourceId}: ${trackingError}`);
+        } finally {
+          clearAxiosAutoTrackState(responseConfig);
         }
-
-        FTInnerLogger.e(
-          TAG,
-          `[Axios-Response] Request failed ${state.method} ${state.url}, resourceId=${state.resourceId}, status=${status}, error=${error.message || 'Unknown error'}`
-        );
-        clearAxiosAutoTrackState(responseConfig);
       }
 
       // Preserve the business error object. The fallback is required by
