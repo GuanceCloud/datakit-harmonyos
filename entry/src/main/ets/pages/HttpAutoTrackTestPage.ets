@@ -87,7 +87,7 @@ export struct HttpAutoTrackTestPage {
   @State successCount: number = 0;
   @State errorCount: number = 0;
   @State axiosMode: AxiosAutoTrackMode = 'compat';
-  @State localNetworkErrorFilterEnabled: boolean = true;
+  @State localNetworkErrorFilterEnabled: boolean = false;
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
   @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
@@ -629,7 +629,7 @@ export struct HttpAutoTrackTestPage {
     const message = (error as BusinessError).message || String(error);
     const filterState = this.localNetworkErrorFilterEnabled ? 'enabled' : 'disabled';
     this.addTestResult(`✅ ${source} local failure reached caller (${message}); filter=${filterState}. ` +
-      'Verify one status=0 Resource. With filter enabled, it has demo_network_error_* fields and no linked Error.');
+      'Verify one status=0 Resource. With filter enabled, it has network_error_* fields and no linked Error.');
   }
 
   /** Requests an unused loopback port so no HTTP response exists. */

@@ -21,11 +21,11 @@ export class DemoGlobalNetworkErrorFilter implements FTNetworkErrorHandler {
 /** Only the on-demand timeout and cancellation cases suppress their Error. */
 export class DemoLocalNetworkErrorFilter implements FTNetworkErrorHandler {
   onExceptionWithFilter(context: FTNetworkErrorContext, resourceFields: FTNetworkResourceFields): boolean {
-    resourceFields['demo_network_error_source'] = context.source;
-    resourceFields['demo_network_error_kind'] = context.kind;
+    resourceFields['network_error_source'] = context.source;
+    resourceFields['network_error_kind'] = context.kind;
     const shouldFilter = context.kind === FTNetworkErrorKind.TIMEOUT ||
       context.kind === FTNetworkErrorKind.CANCELED;
-    resourceFields['demo_network_error_filtered'] = shouldFilter;
+    resourceFields['network_error_filtered'] = shouldFilter;
     return shouldFilter;
   }
 }
