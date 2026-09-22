@@ -18,6 +18,7 @@ import {
   FTNetworkErrorContext,
   FTNetworkErrorHandler,
   FTNetworkErrorHandlingResult,
+  FTNetworkErrorRaw,
   FTNetworkErrorSource,
   getFTNetworkErrorMessage,
   getFTNetworkErrorStack,
@@ -166,6 +167,63 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     this.networkErrorHandler = networkErrorHandler;
   }
 
+  /**
+   * Completes a local failure before the SDK can derive a network Error. It is
+   * deliberately independent of the RCP control path: the caller's rejected
+   * request or status-zero Response remains under intercept()'s control.
+   */
+  private completeLocalFailure(
+    resourceId: string,
+    url: string,
+    method: string,
+    savedRequestHeaders: Record<string, string>,
+    startTime: number,
+    rawError: FTNetworkErrorRaw
+  ): void {
+    if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
+      FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate failure completion ignored: ${resourceId}`);
+      return;
+    }
+
+    const errorMessage = getFTNetworkErrorMessage(rawError);
+    const errorStack = getFTNetworkErrorStack(rawError) || String(rawError);
+    const errorContext = createFTNetworkErrorContext(
+      url,
+      method,
+      FTNetworkErrorSource.RCP,
+      rawError,
+      errorMessage,
+      errorStack
+    );
+    const handling = handleFTNetworkError(this.networkErrorHandler, errorContext);
+    const responseTime = Date.now() - startTime;
+    const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
+    const resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
+    const netStatusBean = createFTNetStatusBean(resourceTiming);
+    const resourceParams = new ResourceParams();
+    resourceParams.setUrl(url);
+    resourceParams.setResourceMethod(method);
+    resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
+    resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
+    resourceParams.setRequestErrorMsg(errorMessage);
+    resourceParams.setRequestErrorStack(errorStack);
+    resourceParams.setResourceStatus(0);
+    addNetworkErrorFields(resourceParams, handling, errorContext);
+
+    FTInnerLogger.e(
+      TAG,
+      `[RCP-Resource] Request failed ${method} ${url}, duration=${responseTime}ms, error=${errorMessage}, stack=${errorStack || 'N/A'}`
+    );
+
+    FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+    FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
+    const fallbackActionId = this.resourceActionMap.get(resourceId);
+    FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
+    if (fallbackActionId) {
+      this.resourceActionMap.delete(resourceId);
+    }
+  }
+
   public enable(): void {
     this.isEnabled = true;
     FTInnerLogger.d(TAG, "RCP Resource Interceptor enabled");
@@ -259,6 +317,25 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
 
     try {
       const response = await next.handle(context);
+      // RCP normally rejects local transport failures. If a platform version
+      // returns a status-zero Response instead, it is still a local failure,
+      // not an HTTP response. Record it before the SDK can create an Error,
+      // then preserve the original Response for the application.
+      if ((response.statusCode || 0) <= 0) {
+        try {
+          this.completeLocalFailure(
+            resourceId,
+            url,
+            method,
+            savedRequestHeaders,
+            startTime,
+            new Error('RCP request completed without an HTTP response (statusCode=0)')
+          );
+        } catch (trackingError) {
+          FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record status-zero response for resourceId=${resourceId}: ${trackingError}`);
+        }
+        return response;
+      }
       const responseTime = Date.now() - startTime;
       const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
       let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);

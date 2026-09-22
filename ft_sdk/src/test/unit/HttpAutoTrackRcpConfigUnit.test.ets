@@ -25,6 +25,28 @@ class RcpGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
   }
 }
 
+class RecordingRcpNetworkErrorHandler implements FTNetworkErrorHandler {
+  callCount: number = 0;
+  lastContext: FTNetworkErrorContext | undefined;
+  private readonly suppressNetworkError: boolean;
+  private readonly throwsError: boolean;
+
+  constructor(suppressNetworkError: boolean, throwsError: boolean = false) {
+    this.suppressNetworkError = suppressNetworkError;
+    this.throwsError = throwsError;
+  }
+
+  onExceptionWithFilter(context: FTNetworkErrorContext, resourceFields: FTNetworkResourceFields): boolean {
+    this.callCount++;
+    this.lastContext = context;
+    resourceFields['test_rcp_network_error_handler'] = true;
+    if (this.throwsError) {
+      throw new Error('RCP network error handler failed');
+    }
+    return this.suppressNetworkError;
+  }
+}
+
 interface RcpResourceInterceptorTestAccess {
   networkErrorHandler?: FTNetworkErrorHandler;
 }
@@ -58,10 +80,13 @@ class ThrowingTraceInterceptor implements FTTraceInterceptor {
 }
 
 class SingleDispatchResponse implements rcp.Response {
-  readonly statusCode: number = 201;
+  readonly statusCode: number;
   readonly headers: rcp.ResponseHeaders = {};
   readonly request: rcp.Request;
-  constructor(request: rcp.Request) { this.request = request; }
+  constructor(request: rcp.Request, statusCode: number = 201) {
+    this.request = request;
+    this.statusCode = statusCode;
+  }
   toString(): string | null { return '{}'; }
   toJSON(): object | null;
   toJSON(options: json.ParseOptions): object | null;
@@ -157,6 +182,74 @@ export default function httpAutoTrackRcpConfigUnitTest() {
       } finally {
         session.close();
       }
+    });
+
+    it('rcpStatusZeroResponseShouldInvokeHandlerAndPreserveResponse', 0, async () => {
+      const handler = new RecordingRcpNetworkErrorHandler(true);
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setNetworkErrorHandler(handler));
+      const interceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      }).interceptors ?? [];
+      const interceptor = interceptors[0] as RCPResourceInterceptor;
+      const request = new rcp.Request('https://example.com/status-zero', 'GET');
+      const session = rcp.createSession();
+      const context: rcp.RequestContext = { request, session };
+      const response = new SingleDispatchResponse(request, 0);
+      const next = new SingleDispatchHandler(response, null);
+      try {
+        const actual = await interceptor.intercept(context, next);
+        expect(actual === response).assertTrue();
+        expect(next.calls).assertEqual(1);
+        expect(handler.callCount).assertEqual(1);
+        expect(handler.lastContext !== undefined).assertTrue();
+        expect(handler.lastContext!.source).assertEqual('rcp');
+        expect(handler.lastContext!.message.includes('without an HTTP response')).assertTrue();
+      } finally {
+        session.close();
+      }
+    });
+
+    it('rcpStatusZeroResponseHandlerFailureShouldNotChangeResponse', 0, async () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true));
+
+      const handler = new RecordingRcpNetworkErrorHandler(false, true);
+      const interceptor = new RCPResourceInterceptor(handler);
+      const request = new rcp.Request('https://example.com/status-zero-handler-failure', 'GET');
+      const session = rcp.createSession();
+      const context: rcp.RequestContext = { request, session };
+      const response = new SingleDispatchResponse(request, 0);
+      try {
+        const actual = await interceptor.intercept(context, new SingleDispatchHandler(response, null));
+        expect(actual === response).assertTrue();
+        expect(handler.callCount).assertEqual(1);
+      } finally {
+        session.close();
+      }
+    });
+
+    it('rcpHttpErrorResponsesShouldNotInvokeLocalNetworkErrorHandler', 0, async () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true));
+
+      const handler = new RecordingRcpNetworkErrorHandler(true);
+      const interceptor = new RCPResourceInterceptor(handler);
+      for (const statusCode of [404, 500]) {
+        const request = new rcp.Request(`https://example.com/http-${statusCode}`, 'GET');
+        const session = rcp.createSession();
+        const context: rcp.RequestContext = { request, session };
+        const response = new SingleDispatchResponse(request, statusCode);
+        try {
+          const actual = await interceptor.intercept(context, new SingleDispatchHandler(response, null));
+          expect(actual === response).assertTrue();
+        } finally {
+          session.close();
+        }
+      }
+      expect(handler.callCount).assertEqual(0);
     });
 
     it('rcpConfigShouldCreateInterceptors', 0, () => {

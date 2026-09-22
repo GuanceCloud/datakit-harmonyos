@@ -9,6 +9,11 @@ import { ErrorMonitorType } from '../../../main/ets/components/rum/enum/ErrorMon
 import { TraceType } from '../../../main/ets/components/trace/TraceType';
 import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandler';
 import {
+  FTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkResourceFields
+} from '../../../main/ets/components/network/FTNetworkErrorHandler';
+import {
   createFTRCPTrackConfig,
   RCPResourceInterceptor,
   RCPTraceInterceptor
@@ -22,6 +27,26 @@ import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
+
+class RcpStatusZeroNetworkErrorHandler implements FTNetworkErrorHandler {
+  callCount: number = 0;
+  private readonly suppressNetworkError: boolean;
+  private readonly throwsError: boolean;
+
+  constructor(suppressNetworkError: boolean, throwsError: boolean = false) {
+    this.suppressNetworkError = suppressNetworkError;
+    this.throwsError = throwsError;
+  }
+
+  onExceptionWithFilter(_context: FTNetworkErrorContext, resourceFields: FTNetworkResourceFields): boolean {
+    this.callCount++;
+    resourceFields['test_rcp_status_zero_handler'] = 'called';
+    if (this.throwsError) {
+      throw new Error('RCP status-zero test handler failed');
+    }
+    return this.suppressNetworkError;
+  }
+}
 
 class FakeRcpRequestContext implements rcp.RequestContext {
   request: rcp.Request;
@@ -581,6 +606,105 @@ export default function rcpAutoTrackDeviceTest() {
       expect(record!.getDataString().includes('resource_tcp=')).assertFalse();
       expect(record!.getDataString().includes('resource_ttfb=')).assertFalse();
       await flushAndAssertUploaded(collector, fragments, record);
+    });
+
+    it('rcpStatusZeroResponseShouldFilterOnlyDerivedNetworkError', 0, async () => {
+      const viewName = 'rcp_status_zero_filtered_view';
+      const resourceUrl = 'http://device.test/rcp-status-zero-filtered';
+      const handler = new RcpStatusZeroNetworkErrorHandler(true);
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: handler
+      });
+      const response = await runRcpChain(
+        config.interceptors ?? [],
+        new FakeRcpRequestContext(resourceUrl, 'GET'),
+        0,
+        '',
+        'text/plain'
+      );
+      await WaitUtils.delay(5);
+
+      expect(response.statusCode).assertEqual(0);
+      expect(handler.callCount).assertEqual(1);
+      const resourceFragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'resource_status=0',
+        'test_rcp_status_zero_handler=called',
+        `view_name=${viewName}`
+      ];
+      const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments, 5000);
+      const hasNetworkError = await DBAssert.waitForNoSyncRecordContaining(DataType.RUM_APP, [
+        'error_source=network',
+        'error_type=network_error',
+        `resource_url=${resourceUrl}`
+      ], 1000);
+      const records = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      let resourceCount = 0;
+      for (const record of records) {
+        if (record.getDataString().includes(`resource_url=${resourceUrl}`)) {
+          resourceCount++;
+        }
+      }
+
+      expect(resourceRecord !== null).assertTrue();
+      expect(hasNetworkError).assertTrue();
+      expect(resourceCount).assertEqual(1);
+      await flushAndAssertUploaded(collector, resourceFragments, resourceRecord);
+    });
+
+    it('rcpStatusZeroResponseShouldKeepDefaultErrorForUnfilteredHandlers', 0, async () => {
+      const viewName = 'rcp_status_zero_default_error_view';
+      const handlers: (RcpStatusZeroNetworkErrorHandler | undefined)[] = [
+        new RcpStatusZeroNetworkErrorHandler(false),
+        new RcpStatusZeroNetworkErrorHandler(false, true),
+        undefined
+      ];
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      for (let i = 0; i < handlers.length; i++) {
+        const resourceUrl = `http://device.test/rcp-status-zero-default-${i}`;
+        const handler = handlers[i];
+        const config = createFTRCPTrackConfig({
+          enableTraceInterceptor: false,
+          enableResourceInterceptor: true,
+          networkErrorHandler: handler
+        });
+        const response = await runRcpChain(
+          config.interceptors ?? [],
+          new FakeRcpRequestContext(resourceUrl, 'GET'),
+          0,
+          '',
+          'text/plain'
+        );
+        await WaitUtils.delay(5);
+
+        expect(response.statusCode).assertEqual(0);
+        if (handler) {
+          expect(handler.callCount).assertEqual(1);
+        }
+        const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'resource',
+          `resource_url=${resourceUrl}`,
+          'resource_status=0',
+          `view_name=${viewName}`
+        ], 5000);
+        const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'error',
+          'error_source=network',
+          'error_type=network_error',
+          `resource_url=${resourceUrl}`,
+          'resource_status=0',
+          `view_name=${viewName}`
+        ], 5000);
+        expect(resourceRecord !== null).assertTrue();
+        expect(errorRecord !== null).assertTrue();
+      }
     });
 
     it('rcpErrorShouldWriteResourceError', 0, async () => {
