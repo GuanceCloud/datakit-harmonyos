@@ -52,6 +52,83 @@ import {
 const TAG = "FTHttpAutoTrack";
 const MS_TO_NS = 1000000;
 
+/**
+ * RCP reports upload progress outside the interceptor's call stack. Keep only
+ * Resource-owned request IDs so concurrent requests cannot exchange byte
+ * counts, and consume the value as soon as the Resource completes.
+ */
+class RcpPlatformMetricStore {
+  private static instance: RcpPlatformMetricStore | null = null;
+  private readonly trackedRequestIds: Set<string> = new Set();
+  private readonly uploadedBytesByRequestId: Map<string, number> = new Map();
+
+  public static getInstance(): RcpPlatformMetricStore {
+    if (RcpPlatformMetricStore.instance === null) {
+      RcpPlatformMetricStore.instance = new RcpPlatformMetricStore();
+    }
+    return RcpPlatformMetricStore.instance;
+  }
+
+  public track(requestId: string): void {
+    if (requestId && requestId.length > 0) {
+      this.trackedRequestIds.add(requestId);
+    }
+  }
+
+  public recordUpload(requestId: string | undefined, transferredBytes: number): void {
+    if (!requestId || !this.trackedRequestIds.has(requestId) || !Number.isFinite(transferredBytes) || transferredBytes < 0) {
+      return;
+    }
+    const current = this.uploadedBytesByRequestId.get(requestId);
+    if (current === undefined || transferredBytes > current) {
+      this.uploadedBytesByRequestId.set(requestId, transferredBytes);
+    }
+  }
+
+  public takeUploadedBytes(requestId: string): number | undefined {
+    if (!requestId) {
+      return undefined;
+    }
+    const bytes = this.uploadedBytesByRequestId.get(requestId);
+    this.uploadedBytesByRequestId.delete(requestId);
+    this.trackedRequestIds.delete(requestId);
+    return bytes;
+  }
+}
+
+function normalizeRcpHttpVersion(httpVersion?: string): string | undefined {
+  if (httpVersion === '1.0') {
+    return 'http/1.0';
+  }
+  if (httpVersion === '1.1') {
+    return 'http/1.1';
+  }
+  if (httpVersion === '2') {
+    return 'h2';
+  }
+  if (httpVersion === '3') {
+    return 'h3';
+  }
+  return undefined;
+}
+
+function getRcpOutgoingHeaderByteSize(response: rcp.Response): number | undefined {
+  const debugInfo = response.debugInfo;
+  if (!debugInfo || debugInfo.length === 0) {
+    return undefined;
+  }
+  let finalHeaderSize: number | undefined = undefined;
+  for (let i = 0; i < debugInfo.length; i++) {
+    const event = debugInfo[i];
+    if (event.type === 'headerOut' && event.data && Number.isFinite(event.data.byteLength) && event.data.byteLength >= 0) {
+      // Redirects can yield multiple headerOut events. The final event is the
+      // effective request represented by this Resource.
+      finalHeaderSize = event.data.byteLength;
+    }
+  }
+  return finalHeaderSize;
+}
+
 /** Resolves a per-integration override before the RUM-level default. */
 function resolveNetworkErrorHandler(
   handler: FTNetworkErrorHandler | null | undefined
@@ -175,6 +252,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
    */
   private completeLocalFailure(
     resourceId: string,
+    requestId: string,
     url: string,
     method: string,
     savedRequestHeaders: Record<string, string>,
@@ -209,6 +287,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     resourceParams.setRequestErrorMsg(errorMessage);
     resourceParams.setRequestErrorStack(errorStack);
     resourceParams.setResourceStatus(0);
+    const uploadedBytes = RcpPlatformMetricStore.getInstance().takeUploadedBytes(requestId);
+    if (uploadedBytes !== undefined) {
+      resourceParams.setPlatformRequestBodySize(uploadedBytes);
+    }
     addNetworkErrorFields(resourceParams, handling, errorContext);
 
     FTInnerLogger.e(
@@ -267,6 +349,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     }
 
     const resourceId = `${method}_${url}_${uniqueId}`;
+    RcpPlatformMetricStore.getInstance().track(context.request.id);
 
     const savedRequestHeaders: Record<string, string> = {};
     if (context.request.headers) {
@@ -321,7 +404,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       response = await next.handle(context);
     } catch (err) {
       try {
-        this.completeLocalFailure(resourceId, url, method, savedRequestHeaders, startTime, err);
+        this.completeLocalFailure(resourceId, context.request.id, url, method, savedRequestHeaders, startTime, err);
       } catch (trackingError) {
         FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
       }
@@ -342,6 +425,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       try {
         this.completeLocalFailure(
           resourceId,
+          context.request.id,
           url,
           method,
           savedRequestHeaders,
@@ -365,6 +449,18 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
     resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
     resourceParams.setResourceStatus(response.statusCode || 0);
+    const uploadedBytes = RcpPlatformMetricStore.getInstance().takeUploadedBytes(response.request.id);
+    if (uploadedBytes !== undefined) {
+      resourceParams.setPlatformRequestBodySize(uploadedBytes);
+    }
+    const outgoingHeaderBytes = getRcpOutgoingHeaderByteSize(response);
+    if (outgoingHeaderBytes !== undefined) {
+      resourceParams.setPlatformRequestHeaderSize(outgoingHeaderBytes);
+    }
+    const httpProtocol = normalizeRcpHttpVersion(response.httpVersion);
+    if (httpProtocol !== undefined) {
+      resourceParams.setPlatformHttpProtocol(httpProtocol);
+    }
 
     // A response has already been received. Header and timing collection are
     // best-effort only: a malformed platform value must not turn an HTTP
@@ -705,10 +801,15 @@ interface FTRCPInfoToCollectConfiguration {
   outgoingData: boolean;
 }
 
+interface FTRCPHttpEventsHandler {
+  onUploadProgress?: (totalSize: number, transferredSize: number, request?: rcp.Request) => void;
+}
+
 interface FTRCPTracingConfiguration {
   verbose?: boolean;
   infoToCollect?: FTRCPInfoToCollectConfiguration;
   collectTimeInfo?: boolean;
+  httpEventsHandler?: FTRCPHttpEventsHandler;
 }
 
 interface FTRCPTimeoutConfiguration {
@@ -1235,6 +1336,24 @@ export function applyFTAxiosTrack(
 /**
  * Create a default RCP session configuration that includes FT interceptors.
  */
+function createRcpHttpEventsHandler(
+  applicationHandler?: FTRCPHttpEventsHandler
+): FTRCPHttpEventsHandler {
+  return {
+    onUploadProgress: (totalSize: number, transferredSize: number, request?: rcp.Request): void => {
+      try {
+        if (applicationHandler && applicationHandler.onUploadProgress) {
+          applicationHandler.onUploadProgress(totalSize, transferredSize, request);
+        }
+      } catch (error) {
+        // Instrumentation must not break application upload callbacks.
+        FTInnerLogger.w(TAG, `[RCP-Resource] Application upload progress callback failed: ${error}`);
+      }
+      RcpPlatformMetricStore.getInstance().recordUpload(request ? request.id : undefined, transferredSize);
+    }
+  };
+}
+
 export function createFTRCPTrackConfig(
   options: FTRCPSessionConfigurationOptions = {}
 ): rcp.SessionConfiguration {
@@ -1248,7 +1367,8 @@ export function createFTRCPTrackConfig(
   const tracingConfig: FTRCPTracingConfiguration = {
     verbose: false,
     infoToCollect: defaultInfoToCollect,
-    collectTimeInfo: true
+    collectTimeInfo: true,
+    httpEventsHandler: createRcpHttpEventsHandler()
   };
 
   const interceptors = createFTRCPInterceptors(
@@ -1272,7 +1392,8 @@ export function createFTRCPTrackConfig(
       incomingData: defaultInfoToCollect.incomingData,
       outgoingData: defaultInfoToCollect.outgoingData
     },
-    collectTimeInfo: true
+    collectTimeInfo: true,
+    httpEventsHandler: createRcpHttpEventsHandler()
   };
 
   if (options.requestConfiguration && options.requestConfiguration.tracing) {
@@ -1296,7 +1417,8 @@ export function createFTRCPTrackConfig(
       },
       collectTimeInfo: customTracing.collectTimeInfo !== undefined
         ? customTracing.collectTimeInfo
-        : true
+        : true,
+      httpEventsHandler: createRcpHttpEventsHandler(customTracing.httpEventsHandler)
     };
   }
 

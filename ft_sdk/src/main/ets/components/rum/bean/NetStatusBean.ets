@@ -1,3 +1,8 @@
+import {
+  ResourceTransportMetrics,
+  ResourceTransportMetricsSnapshot
+} from './ResourceTransportMetrics';
+
 /**
  * JSON representation interface for NetStatusBean
  */
@@ -16,6 +21,7 @@ interface NetStatusBeanJSON {
   downloadStartTime: number;
   holeRequestTime: number;
   resourceHostIP: string;
+  transportMetrics: ResourceTransportMetricsSnapshot;
 }
 
 /**
@@ -54,6 +60,9 @@ export class NetStatusBean {
 
   // Host IP
   public resourceHostIP: string = "";
+
+  /** Deferred platform transport observations associated with this Resource. */
+  private readonly transportMetrics: ResourceTransportMetrics = new ResourceTransportMetrics();
 
   constructor() {
     // Constructor
@@ -256,6 +265,38 @@ export class NetStatusBean {
   }
 
   /**
+   * NetStatus is populated by automatic collectors, so these values have
+   * platform precedence when merged with ResourceParams in the Worker.
+   */
+  public setPlatformRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'platform');
+  }
+
+  public setPlatformRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'platform');
+  }
+
+  public setPlatformRequestSize(size: number): void {
+    this.transportMetrics.setRequestSize(size, 'platform');
+  }
+
+  public setPlatformHttpProtocol(protocol: string): void {
+    this.transportMetrics.setHttpProtocol(protocol, 'platform');
+  }
+
+  public setPlatformConnectionReuse(connectionReuse: boolean): void {
+    this.transportMetrics.setConnectionReuse(connectionReuse, 'platform');
+  }
+
+  public getTransportMetrics(): ResourceTransportMetricsSnapshot {
+    return this.transportMetrics.snapshot();
+  }
+
+  public mergeTransportMetrics(metrics?: ResourceTransportMetricsSnapshot): void {
+    this.transportMetrics.merge(metrics);
+  }
+
+  /**
    * Convert to JSON
    */
   public toJSON(): NetStatusBeanJSON {
@@ -273,7 +314,8 @@ export class NetStatusBean {
       downloadTime: this.downloadTime,
       downloadStartTime: this.downloadStartTime,
       holeRequestTime: this.holeRequestTime,
-      resourceHostIP: this.resourceHostIP
+      resourceHostIP: this.resourceHostIP,
+      transportMetrics: this.transportMetrics.snapshot()
     };
     return result;
   }

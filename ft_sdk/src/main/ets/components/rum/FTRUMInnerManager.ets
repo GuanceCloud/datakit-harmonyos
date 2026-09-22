@@ -4,6 +4,7 @@ import { ResourceBean } from './bean/ResourceBean';
 import { UserData } from './bean/UserData';
 import { ResourceParams } from './bean/ResourceParams';
 import { NetStatusBean } from './bean/NetStatusBean';
+import { ResourceTransportMetricsSnapshot } from './bean/ResourceTransportMetrics';
 import { ViewBean } from '../db/bean/ViewBean';
 import { ActionBean } from '../db/bean/ActionBean';
 import {
@@ -38,6 +39,7 @@ import {
   SDKRumResourceContextDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
+  SDKRumResourceTransportMetricsDTO,
   SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
   SDKPropertyRecord,
@@ -116,6 +118,9 @@ interface ResourceTags {
  * Resource-specific fields for line protocol
  */
 interface ResourceFields {
+  resource_request_size?: string;
+  resource_http_protocol?: string;
+  resource_connection_reuse?: string;
   resource_dns?: string;
   resource_tcp?: string;
   resource_ssl?: string;
@@ -3105,6 +3110,23 @@ export class FTRUMInnerManager {
     }
   }
 
+  private createResourceTransportMetricsDTO(
+    metrics: ResourceTransportMetricsSnapshot
+  ): SDKRumResourceTransportMetricsDTO {
+    return {
+      requestBodySize: metrics.requestBodySize,
+      requestBodySizeSource: metrics.requestBodySizeSource,
+      requestHeaderSize: metrics.requestHeaderSize,
+      requestHeaderSizeSource: metrics.requestHeaderSizeSource,
+      requestSize: metrics.requestSize,
+      requestSizeSource: metrics.requestSizeSource,
+      httpProtocol: metrics.httpProtocol,
+      httpProtocolSource: metrics.httpProtocolSource,
+      connectionReuse: metrics.connectionReuse,
+      connectionReuseSource: metrics.connectionReuseSource
+    };
+  }
+
   private createResourceParamsDTO(resourceId: string, params: ResourceParams): SDKRumResourceParamsDTO {
     const traceContext = FTTraceManager.getInstance().getTraceContext(resourceId);
     const traceConfigManager = FTTraceConfigManager.getInstance();
@@ -3129,6 +3151,7 @@ export class FTRUMInnerManager {
       requestErrorStack: params.requestErrorStack || '',
       requestErrorMsg: params.requestErrorMsg || '',
       suppressNetworkError: params.suppressNetworkError === true,
+      transportMetrics: this.createResourceTransportMetricsDTO(params.getTransportMetrics()),
       property: this.resourcePropertyToRecord(params.property),
       traceId,
       spanId
@@ -3168,7 +3191,8 @@ export class FTRUMInnerManager {
       downloadTime: netStatusBean.getDownloadTime(),
       downloadStartTime: netStatusBean.getDownloadTimeStart(),
       holeRequestTime: netStatusBean.getHoleRequestTime(),
-      resourceHostIP: netStatusBean.getResourceHostIP()
+      resourceHostIP: netStatusBean.getResourceHostIP(),
+      transportMetrics: this.createResourceTransportMetricsDTO(netStatusBean.getTransportMetrics())
     };
   }
 
@@ -5493,6 +5517,17 @@ export class FTRUMInnerManager {
           }
         }
       }
+    }
+
+    const transportMetrics = resourceBean.getTransportMetrics();
+    if (transportMetrics.requestSize > 0) {
+      fields[Constants.KEY_RUM_RESOURCE_REQUEST_SIZE] = String(transportMetrics.requestSize);
+    }
+    if (transportMetrics.httpProtocol.length > 0) {
+      fields[Constants.KEY_RUM_RESOURCE_HTTP_PROTOCOL] = transportMetrics.httpProtocol;
+    }
+    if (transportMetrics.connectionReuse !== undefined) {
+      fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(transportMetrics.connectionReuse);
     }
     
     return fields;

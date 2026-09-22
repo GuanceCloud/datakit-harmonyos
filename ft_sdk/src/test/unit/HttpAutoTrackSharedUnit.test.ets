@@ -11,6 +11,7 @@ import {
 import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceConfigManager';
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
+import { ResourceTransportMetrics } from '../../main/ets/components/rum/bean/ResourceTransportMetrics';
 import { TestReset } from '../helpers/TestReset';
 
 const RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
@@ -107,6 +108,23 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(completionStore.tryClaim('one-request')).assertTrue();
       expect(completionStore.tryClaim('one-request')).assertFalse();
       expect(completionStore.tryClaim('another-request')).assertTrue();
+    });
+
+    it('platformTransportMetricsShouldOutrankIntegrationAndKeepFalse', 0, () => {
+      const metrics = new ResourceTransportMetrics();
+      metrics.setRequestBodySize(12, 'integration');
+      metrics.setRequestHeaderSize(8, 'integration');
+      metrics.setHttpProtocol('http/1.1', 'integration');
+      metrics.setConnectionReuse(false, 'integration');
+      metrics.setRequestBodySize(16, 'platform');
+      metrics.setHttpProtocol('h2', 'platform');
+
+      const snapshot = metrics.snapshot();
+      expect(snapshot.requestBodySize).assertEqual(16);
+      expect(snapshot.requestHeaderSize).assertEqual(8);
+      expect(snapshot.requestSize).assertEqual(24);
+      expect(snapshot.httpProtocol).assertEqual('h2');
+      expect(snapshot.connectionReuse === false).assertTrue();
     });
 
   });

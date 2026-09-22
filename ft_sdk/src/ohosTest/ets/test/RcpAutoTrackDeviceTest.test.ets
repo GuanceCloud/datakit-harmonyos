@@ -134,11 +134,13 @@ class FakeRcpResponse implements rcp.Response {
   readonly statusCode: number;
   readonly headers: rcp.ResponseHeaders;
   readonly timeInfo?: rcp.TimeInfo;
+  readonly httpVersion?: rcp.HttpVersion;
   private responseBody: string;
 
   constructor(request: rcp.Request, statusCode: number, body: string, contentType: string,
     timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
-    contentLength?: number) {
+    contentLength?: number,
+    httpVersion?: rcp.HttpVersion) {
     this.request = request;
     this.statusCode = statusCode;
     this.responseBody = body;
@@ -148,6 +150,7 @@ class FakeRcpResponse implements rcp.Response {
     this.headers = {};
     this.headers['content-type'] = contentType;
     this.headers['content-length'] = String(contentLength ?? body.length);
+    this.httpVersion = httpVersion;
   }
 
   toString(): string | null {
@@ -168,15 +171,17 @@ class FakeRcpTerminalHandler implements rcp.RequestHandler {
   private timeInfo: rcp.TimeInfo | null;
   private contentLength?: number;
   private delayMs: number;
+  private httpVersion?: rcp.HttpVersion;
 
   constructor(statusCode: number, body: string, contentType: string, timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
-    contentLength?: number, delayMs: number = 0) {
+    contentLength?: number, delayMs: number = 0, httpVersion?: rcp.HttpVersion) {
     this.statusCode = statusCode;
     this.body = body;
     this.contentType = contentType;
     this.timeInfo = timeInfo;
     this.contentLength = contentLength;
     this.delayMs = delayMs;
+    this.httpVersion = httpVersion;
   }
 
   async handle(_context: rcp.RequestContext): Promise<rcp.Response> {
@@ -184,7 +189,7 @@ class FakeRcpTerminalHandler implements rcp.RequestHandler {
       await WaitUtils.delay(this.delayMs);
     }
     return new FakeRcpResponse(_context.request, this.statusCode, this.body, this.contentType, this.timeInfo,
-      this.contentLength);
+      this.contentLength, this.httpVersion);
   }
 }
 
@@ -266,9 +271,10 @@ async function runRcpChain(
   contentType: string,
   timeInfo: rcp.TimeInfo | null = new FakeRcpTimeInfo(),
   contentLength?: number,
-  delayMs: number = 0
+  delayMs: number = 0,
+  httpVersion?: rcp.HttpVersion
 ): Promise<rcp.Response> {
-  const terminal = new FakeRcpTerminalHandler(statusCode, body, contentType, timeInfo, contentLength, delayMs);
+  const terminal = new FakeRcpTerminalHandler(statusCode, body, contentType, timeInfo, contentLength, delayMs, httpVersion);
   const handler = new FakeRcpChainHandler(interceptors, 0, terminal);
   return await handler.handle(context);
 }
@@ -497,6 +503,30 @@ export default function rcpAutoTrackDeviceTest() {
       // remain visible instead of shifting the following phases left.
       assertResourceTimingField(record, 'resource_first_byte_time', 100000000, 50000000);
       assertResourceTimingField(record, 'resource_download_time', 150000000, 30000000);
+      await flushAndAssertUploaded(collector, fragments, record);
+    });
+
+    it('rcpResourceShouldWriteNegotiatedHttpProtocolAsField', 0, async () => {
+      const viewName = 'rcp_http_protocol_resource_view';
+      const resourceUrl = 'https://device.test/rcp-http-protocol-resource';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const config = createFTRCPTrackConfig({ enableResourceInterceptor: true });
+      const context = new FakeRcpRequestContext(resourceUrl, 'GET');
+      await runRcpChain(config.interceptors ?? [], context, 200, 'ok', 'text/plain',
+        new FakeRcpTimeInfo(), undefined, 0, '2');
+      await WaitUtils.delay(5);
+
+      const fragments = [
+        'resource',
+        `resource_url=${resourceUrl}`,
+        'resource_http_protocol=h2',
+        `view_name=${viewName}`
+      ];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
+
+      expect(record !== null).assertTrue();
+      assertResourceFieldAbsent(record, 'resource_connection_reuse');
       await flushAndAssertUploaded(collector, fragments, record);
     });
 

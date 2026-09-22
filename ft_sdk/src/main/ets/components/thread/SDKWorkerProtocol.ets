@@ -108,6 +108,22 @@ export type SDKStringRecord = Record<string, string>;
 export type SDKNumberRecord = Record<string, number>;
 export type SDKPropertyRecord = Record<string, object>;
 
+/** Transport metric provenance is retained across asynchronous Resource commands. */
+export type SDKRumResourceMetricSource = 'header' | 'integration' | 'platform';
+
+export interface SDKRumResourceTransportMetricsDTO {
+  requestBodySize: number;
+  requestBodySizeSource?: SDKRumResourceMetricSource;
+  requestHeaderSize: number;
+  requestHeaderSizeSource?: SDKRumResourceMetricSource;
+  requestSize: number;
+  requestSizeSource?: SDKRumResourceMetricSource;
+  httpProtocol: string;
+  httpProtocolSource?: SDKRumResourceMetricSource;
+  connectionReuse?: boolean;
+  connectionReuseSource?: SDKRumResourceMetricSource;
+}
+
 /**
  * A point-in-time view of the default network captured when a Resource starts.
  * Optional values deliberately remain absent when HarmonyOS cannot provide a
@@ -230,6 +246,7 @@ export interface SDKRumResourceParamsDTO {
   requestErrorMsg: string;
   /** Suppresses only the local network_error derived from a status-0 Resource. */
   suppressNetworkError?: boolean;
+  transportMetrics?: SDKRumResourceTransportMetricsDTO;
   property: SDKPropertyRecord;
   traceId?: string;
   spanId?: string;
@@ -250,6 +267,7 @@ export interface SDKRumResourceNetStatusDTO {
   downloadStartTime: number;
   holeRequestTime: number;
   resourceHostIP: string;
+  transportMetrics?: SDKRumResourceTransportMetricsDTO;
 }
 
 export interface SDKRumResourceCommandDTO {

@@ -22,6 +22,7 @@ import {
   SDKRumResourceNetworkSnapshotDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
+  SDKRumResourceTransportMetricsDTO,
   SDKStringRecord,
   SDKSyncDataDraftDTO,
   SDKUploadCheckpointDTO,
@@ -272,6 +273,17 @@ interface SDKRumWorkerResourceState {
   resourceStatus: number;
   resourceStatusGroup: string;
   resourceSize: number;
+  requestBodySize: number;
+  requestBodySizeSource?: string;
+  requestHeaderSize: number;
+  requestHeaderSizeSource?: string;
+  requestSize: number;
+  requestSizeSource?: string;
+  requestSizeIsDerived: boolean;
+  httpProtocol: string;
+  httpProtocolSource?: string;
+  connectionReuse?: boolean;
+  connectionReuseSource?: string;
   resourceType: string;
   responseBody: string;
   requestErrorStack: string;
@@ -1386,6 +1398,11 @@ function getOrCreateRumResourceState(
     resourceStatus: 0,
     resourceStatusGroup: '',
     resourceSize: -1,
+    requestBodySize: -1,
+    requestHeaderSize: -1,
+    requestSize: -1,
+    requestSizeIsDerived: false,
+    httpProtocol: '',
     resourceType: 'network',
     responseBody: '',
     requestErrorStack: '',
@@ -1460,6 +1477,7 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   resource.requestErrorStack = params.requestErrorStack || '';
   resource.requestErrorMsg = params.requestErrorMsg || '';
   resource.suppressNetworkError = params.suppressNetworkError === true;
+  mergeResourceTransportMetrics(resource, params.transportMetrics);
   resource.resourceSize = params.responseContentLength || 0;
   if (resource.resourceSize <= 0) {
     resource.resourceSize = (resource.responseBody ? resource.responseBody.length : 0) + resource.responseHeader.length;
@@ -1478,6 +1496,80 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   mergeStringRecords(resource.contentProperties, normalizeRumPropertyRecord(property));
   applyResourcePropertyMetrics(resource, property);
   resource.contentSet = true;
+}
+
+function resourceTransportSourceRank(source?: string): number {
+  if (source === 'platform') {
+    return 3;
+  }
+  if (source === 'integration') {
+    return 2;
+  }
+  if (source === 'header') {
+    return 1;
+  }
+  return 0;
+}
+
+function isKnownResourceRequestSize(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Every Resource command is keyed by resourceId. Merge each transport metric
+ * independently so a later timing/status callback cannot overwrite a stronger
+ * value collected by the request/response interceptor for another source.
+ */
+function mergeResourceTransportMetrics(
+  resource: SDKRumWorkerResourceState,
+  metrics?: SDKRumResourceTransportMetricsDTO
+): void {
+  if (!metrics) {
+    return;
+  }
+  if (metrics.requestBodySizeSource && isKnownResourceRequestSize(metrics.requestBodySize) &&
+    resourceTransportSourceRank(metrics.requestBodySizeSource) >= resourceTransportSourceRank(resource.requestBodySizeSource)) {
+    resource.requestBodySize = metrics.requestBodySize;
+    resource.requestBodySizeSource = metrics.requestBodySizeSource;
+  }
+  if (metrics.requestHeaderSizeSource && isKnownResourceRequestSize(metrics.requestHeaderSize) &&
+    resourceTransportSourceRank(metrics.requestHeaderSizeSource) >= resourceTransportSourceRank(resource.requestHeaderSizeSource)) {
+    resource.requestHeaderSize = metrics.requestHeaderSize;
+    resource.requestHeaderSizeSource = metrics.requestHeaderSizeSource;
+  }
+  if (metrics.requestSizeSource && isKnownResourceRequestSize(metrics.requestSize) &&
+    resourceTransportSourceRank(metrics.requestSizeSource) >= resourceTransportSourceRank(resource.requestSizeSource)) {
+    resource.requestSize = metrics.requestSize;
+    resource.requestSizeSource = metrics.requestSizeSource;
+    resource.requestSizeIsDerived = false;
+  }
+  if (metrics.httpProtocolSource && metrics.httpProtocol && metrics.httpProtocol.trim().length > 0 &&
+    resourceTransportSourceRank(metrics.httpProtocolSource) >= resourceTransportSourceRank(resource.httpProtocolSource)) {
+    resource.httpProtocol = metrics.httpProtocol.trim();
+    resource.httpProtocolSource = metrics.httpProtocolSource;
+  }
+  if (metrics.connectionReuseSource && metrics.connectionReuse !== undefined &&
+    resourceTransportSourceRank(metrics.connectionReuseSource) >= resourceTransportSourceRank(resource.connectionReuseSource)) {
+    resource.connectionReuse = metrics.connectionReuse;
+    resource.connectionReuseSource = metrics.connectionReuseSource;
+  }
+  deriveResourceRequestSize(resource);
+}
+
+function deriveResourceRequestSize(resource: SDKRumWorkerResourceState): void {
+  if (resource.requestSizeSource && !resource.requestSizeIsDerived) {
+    return;
+  }
+  if (!isKnownResourceRequestSize(resource.requestBodySize) || !isKnownResourceRequestSize(resource.requestHeaderSize) ||
+    !resource.requestBodySizeSource || !resource.requestHeaderSizeSource) {
+    return;
+  }
+  resource.requestSize = resource.requestBodySize + resource.requestHeaderSize;
+  resource.requestSizeSource = resourceTransportSourceRank(resource.requestBodySizeSource) <=
+    resourceTransportSourceRank(resource.requestHeaderSizeSource)
+    ? resource.requestBodySizeSource
+    : resource.requestHeaderSizeSource;
+  resource.requestSizeIsDerived = true;
 }
 
 function recordResourceLifecycleProperties(
@@ -1557,6 +1649,7 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
 }
 
 function applyResourceNetStatus(resource: SDKRumWorkerResourceState, netStatus: SDKRumResourceNetStatusDTO): void {
+  mergeResourceTransportMetrics(resource, netStatus.transportMetrics);
   if (netStatus.dnsTime > 0) {
     resource.resourceDNS = netStatus.dnsTime;
     resource.resourceDNSStart = netStatus.dnsStartTime;
@@ -1818,6 +1911,18 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
     fields[Constants.KEY_RUM_RESOURCE_RESPONSE_HEADER] = resource.responseHeader;
   }
   mergeStringRecords(fields, resource.properties);
+  // These are Resource Fields, never Tags. Add them after custom properties
+  // so callers cannot weaken a platform/integration transport observation by
+  // supplying a same-named generic property.
+  if (resource.requestSize > 0) {
+    fields[Constants.KEY_RUM_RESOURCE_REQUEST_SIZE] = String(resource.requestSize);
+  }
+  if (resource.httpProtocol.length > 0) {
+    fields[Constants.KEY_RUM_RESOURCE_HTTP_PROTOCOL] = resource.httpProtocol;
+  }
+  if (resource.connectionReuse !== undefined) {
+    fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(resource.connectionReuse);
+  }
   return fields;
 }
 

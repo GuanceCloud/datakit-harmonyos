@@ -1,3 +1,9 @@
+import {
+  ResourceTransportMetricSource,
+  ResourceTransportMetrics,
+  ResourceTransportMetricsSnapshot
+} from './ResourceTransportMetrics';
+
 /**
  * JSON representation interface for ResourceParams
  */
@@ -18,6 +24,7 @@ interface ResourceParamsJSON {
   requestErrorStack: string;
   requestErrorMsg: string;
   suppressNetworkError: boolean;
+  transportMetrics: ResourceTransportMetricsSnapshot;
   property: Record<string, object>;
 }
 
@@ -106,6 +113,12 @@ export class ResourceParams {
    * the Worker from deriving a separate network_error for a local failure.
    */
   public suppressNetworkError: boolean = false;
+
+  /**
+   * Request transport metrics. They are deliberately separate from response
+   * content length: RUM resource_size remains a response-size metric.
+   */
+  private readonly transportMetrics: ResourceTransportMetrics = new ResourceTransportMetrics();
 
   /**
    * Additional property parameters
@@ -222,6 +235,79 @@ export class ResourceParams {
     this.suppressNetworkError = suppressNetworkError === true;
   }
 
+  /** Set an integration-verified request body byte count. Zero is valid. */
+  public setRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'integration');
+  }
+
+  /** Set an integration-verified request header byte count. Zero is valid. */
+  public setRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'integration');
+  }
+
+  /** Set an integration-verified total request byte count. */
+  public setRequestSize(size: number): void {
+    this.transportMetrics.setRequestSize(size, 'integration');
+  }
+
+  /** Set an integration-verified negotiated HTTP protocol. */
+  public setHttpProtocol(protocol: string): void {
+    this.transportMetrics.setHttpProtocol(protocol, 'integration');
+  }
+
+  /**
+   * Set an integration-verified connection reuse result. Do not call this
+   * when the transport cannot distinguish false from unknown.
+   */
+  public setConnectionReuse(connectionReuse: boolean): void {
+    this.transportMetrics.setConnectionReuse(connectionReuse, 'integration');
+  }
+
+  /** Internal platform collector entry point. */
+  public setPlatformRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'platform');
+  }
+
+  /** Internal platform collector entry point. */
+  public setPlatformRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'platform');
+  }
+
+  /** Internal platform collector entry point. */
+  public setPlatformRequestSize(size: number): void {
+    this.transportMetrics.setRequestSize(size, 'platform');
+  }
+
+  /** Internal platform collector entry point. */
+  public setPlatformHttpProtocol(protocol: string): void {
+    this.transportMetrics.setHttpProtocol(protocol, 'platform');
+  }
+
+  /** Internal platform collector entry point. */
+  public setPlatformConnectionReuse(connectionReuse: boolean): void {
+    this.transportMetrics.setConnectionReuse(connectionReuse, 'platform');
+  }
+
+  /** Internal fallback collector entry point. */
+  public setHeaderInferredRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'header');
+  }
+
+  /** Internal fallback collector entry point. */
+  public setHeaderInferredRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'header');
+  }
+
+  /** Read-only serializable transport data for the RUM Worker. */
+  public getTransportMetrics(): ResourceTransportMetricsSnapshot {
+    return this.transportMetrics.snapshot();
+  }
+
+  /** Merge a deferred transport update without weakening a stronger value. */
+  public mergeTransportMetrics(metrics?: ResourceTransportMetricsSnapshot): void {
+    this.transportMetrics.merge(metrics);
+  }
+
   /**
    * Set properties
    */
@@ -273,6 +359,7 @@ export class ResourceParams {
       requestErrorStack: this.requestErrorStack,
       requestErrorMsg: this.requestErrorMsg,
       suppressNetworkError: this.suppressNetworkError,
+      transportMetrics: this.transportMetrics.snapshot(),
       property: property
     };
     

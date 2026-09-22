@@ -129,6 +129,9 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_STATUS = "resource_status";
   static readonly KEY_RUM_RESOURCE_STATUS_GROUP = "resource_status_group";
   static readonly KEY_RUM_RESOURCE_SIZE = "resource_size";
+  static readonly KEY_RUM_RESOURCE_REQUEST_SIZE = "resource_request_size";
+  static readonly KEY_RUM_RESOURCE_HTTP_PROTOCOL = "resource_http_protocol";
+  static readonly KEY_RUM_RESOURCE_CONNECTION_REUSE = "resource_connection_reuse";
   static readonly KEY_RUM_RESOURCE_DURATION = "duration";
   static readonly KEY_RUM_RESOURCE_DNS = "resource_dns";
   static readonly KEY_RUM_RESOURCE_DNS_TIME = "resource_dns_time";
