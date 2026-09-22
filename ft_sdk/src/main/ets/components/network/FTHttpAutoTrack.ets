@@ -44,7 +44,9 @@ import {
   createFTNetStatusBean,
   createFTResourceTimingFromCumulative,
   createFTResourceTimingFromNetworkPerformance,
+  createHeaderInferredTransportMetrics,
   applyIntegrationTransportMetrics,
+  applyHeaderInferredTransportMetrics,
   applyPlatformTransportMetrics,
   resolveAxiosChainMethod,
   summarizeHeaderKeys,
@@ -225,6 +227,10 @@ interface FTRCPRequestWithContent {
   content?: string | Object | ArrayBuffer;
 }
 
+function getRcpRequestBody(request: rcp.Request): string | Object | ArrayBuffer | undefined {
+  return (request as Object as FTRCPRequestWithContent).content;
+}
+
 /**
  * RCP preTransfer means transfer-ready, while startTransfer is the received
  * first byte. The shared mapper retains those exact protocol time points.
@@ -271,11 +277,14 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     url: string,
     method: string,
     savedRequestHeaders: Record<string, string>,
+    finalRequestHeaders: Object,
+    requestBody: string | Object | ArrayBuffer | undefined,
     startTime: number,
     rawError: FTNetworkErrorRaw
   ): void {
     if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
       FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate failure completion ignored: ${resourceId}`);
+      this.resourceTransportMetricsMap.delete(resourceId);
       return;
     }
 
@@ -307,6 +316,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     if (uploadedBytes !== undefined) {
       resourceParams.setPlatformRequestBodySize(uploadedBytes);
     }
+    applyHeaderInferredTransportMetrics(
+      resourceParams,
+      createHeaderInferredTransportMetrics(finalRequestHeaders, savedRequestHeaders, requestBody)
+    );
     addNetworkErrorFields(resourceParams, handling, errorContext);
 
     FTInnerLogger.e(
@@ -403,7 +416,9 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     const savedHeaderKeys = Object.keys(savedRequestHeaders);
     for (let i = 0; i < savedHeaderKeys.length; i++) {
       const key = savedHeaderKeys[i];
-      context.request.headers[key] = savedRequestHeaders[key];
+      if (context.request.headers[key] === undefined) {
+        context.request.headers[key] = savedRequestHeaders[key];
+      }
     }
     if (this.resourceTransportMetricsProvider) {
       try {
@@ -437,7 +452,17 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       response = await next.handle(context);
     } catch (err) {
       try {
-        this.completeLocalFailure(resourceId, context.request.id, url, method, savedRequestHeaders, startTime, err);
+        this.completeLocalFailure(
+          resourceId,
+          context.request.id,
+          url,
+          method,
+          savedRequestHeaders,
+          context.request.headers as Object,
+          getRcpRequestBody(context.request),
+          startTime,
+          err
+        );
       } catch (trackingError) {
         FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
       }
@@ -462,6 +487,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
           url,
           method,
           savedRequestHeaders,
+          context.request.headers as Object,
+          getRcpRequestBody(context.request),
           startTime,
           new Error('RCP request completed without an HTTP response (statusCode=0)')
         );
@@ -495,6 +522,14 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     if (httpProtocol !== undefined) {
       resourceParams.setPlatformHttpProtocol(httpProtocol);
     }
+    applyHeaderInferredTransportMetrics(
+      resourceParams,
+      createHeaderInferredTransportMetrics(
+        response.request.headers as Object,
+        savedRequestHeaders,
+        getRcpRequestBody(response.request)
+      )
+    );
 
     // A response has already been received. Header and timing collection are
     // best-effort only: a malformed platform value must not turn an HTTP
@@ -559,9 +594,10 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
       if (fallbackActionId) {
         this.resourceActionMap.delete(resourceId);
       }
-      this.resourceTransportMetricsMap.delete(resourceId);
     } catch (error) {
       FTInnerLogger.e(TAG, `[RCP-Resource] Failed to record completed response for resourceId=${resourceId}: ${error}`);
+    } finally {
+      this.resourceTransportMetricsMap.delete(resourceId);
     }
     return response;
   }
@@ -908,16 +944,18 @@ function resolveAxiosFullUrl(config: FTAxiosRequestConfigTarget): string {
 }
 
 function normalizeAxiosHeaders(headers?: Object | null): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
+  return normalizeObjectHeaders(getAxiosRawHeaders(headers));
+}
 
+function getAxiosRawHeaders(headers?: Object | null): Object | null | undefined {
+  if (!headers) {
+    return headers;
+  }
   const toJSONCandidate = headers as FTAxiosHeadersSerializable;
   if (typeof toJSONCandidate.toJSON === 'function') {
-    return normalizeObjectHeaders(toJSONCandidate.toJSON());
+    return toJSONCandidate.toJSON();
   }
-
-  return normalizeObjectHeaders(headers);
+  return headers;
 }
 
 function captureAxiosResponseSnapshot(
@@ -1019,7 +1057,8 @@ function buildAxiosAutoTrackState(
 ): FTAxiosAutoTrackState {
   const url = resolveAxiosFullUrl(config);
   const method = (config.method || 'GET').toUpperCase();
-  const headers = normalizeAxiosHeaders(config.headers);
+  const rawHeaders = getAxiosRawHeaders(config.headers);
+  const headers = normalizeObjectHeaders(rawHeaders);
   const uniqueId = ensureHttpResourceId(headers);
   AxiosChainMethodStore.getInstance().put(uniqueId, method);
   const resourceId = buildAutoTrackResourceId(method, url, uniqueId);
@@ -1086,6 +1125,11 @@ function buildAxiosAutoTrackState(
   }
 
   finalHeaders['X-FT-Resource-ID'] = uniqueId;
+  const headerInferredTransportMetrics = createHeaderInferredTransportMetrics(
+    rawHeaders,
+    finalHeaders,
+    config.data
+  );
 
   let transportMetrics: FTResourceTransportMetricsInput | undefined = undefined;
   if (resourceTransportMetricsProvider) {
@@ -1110,7 +1154,8 @@ function buildAxiosAutoTrackState(
     traceEnabled: traceEnabled,
     resourceEnabled: resourceEnabled,
     networkErrorHandler: networkErrorHandler,
-    transportMetrics: transportMetrics
+    transportMetrics: transportMetrics,
+    headerInferredTransportMetrics: headerInferredTransportMetrics
   };
 }
 
@@ -1175,6 +1220,7 @@ function completeAxiosResource(
   applyIntegrationTransportMetrics(resourceParams, state.transportMetrics);
   applyIntegrationTransportMetrics(resourceParams, responseTransportMetrics);
   applyPlatformTransportMetrics(resourceParams, platformTransportMetrics);
+  applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
 
   const contentType = headers['content-type'] || headers['Content-Type'];
   const contentEncoding = headers['content-encoding'] || headers['Content-Encoding'];

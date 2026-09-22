@@ -3,8 +3,12 @@ import { FTTraceConfig } from '../../main/ets/components/Configs';
 import { Constants } from '../../main/ets/components/Constants';
 import {
   AxiosChainMethodStore,
+  buildHeaderValuesForFinalRequest,
+  createHeaderInferredTransportMetrics,
   ensureHttpResourceId,
+  estimateRequestHeaderByteSize,
   extractContentLength,
+  getKnownRequestBodyByteSize,
   HttpAutoTrackCompletionStore,
   HttpAutoTrackStateStore,
   mergeResourceTransportMetricsInput,
@@ -143,6 +147,32 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(normalizeResourceHttpProtocol(merged!.httpProtocol)).assertEqual('h2');
       expect(normalizeResourceHttpProtocol('HTTP/1.1')).assertEqual('http/1.1');
       expect(normalizeResourceHttpProtocol('spdy')).assertEqual(undefined);
+    });
+
+    it('headerInferenceShouldUseUtf8MultiValueAndBinaryByteLengths', 0, () => {
+      const rawHeaders: Record<string, Object> = {};
+      rawHeaders['X-Name'] = '值' as Object;
+      rawHeaders['X-Multi'] = ['one', '二'] as Object;
+      rawHeaders['X-Ignored'] = new Map<string, string>() as Object;
+      const finalHeaders: Record<string, string> = { 'X-Added': '✓' };
+      const normalized = buildHeaderValuesForFinalRequest(rawHeaders, finalHeaders);
+
+      // X-Name: 6 + 2 + 3 + 2; X-Multi: (7 + 2 + 3 + 2) +
+      // (7 + 2 + 3 + 2); X-Added: 7 + 2 + 3 + 2; final CRLF: 2.
+      expect(estimateRequestHeaderByteSize(normalized)).assertEqual(57);
+      expect(getKnownRequestBodyByteSize('A你', normalized)).assertEqual(4);
+      expect(getKnownRequestBodyByteSize(new ArrayBuffer(6), normalized)).assertEqual(6);
+      expect(getKnownRequestBodyByteSize(new Uint8Array(5), normalized)).assertEqual(5);
+      expect(getKnownRequestBodyByteSize(new Map<string, string>(), normalized)).assertEqual(undefined);
+
+      const streamHeaders = buildHeaderValuesForFinalRequest(
+        { 'Content-Length': '7' } as Object,
+        { 'Content-Length': '7' }
+      );
+      expect(getKnownRequestBodyByteSize(new Map<string, string>(), streamHeaders)).assertEqual(7);
+      const inferred = createHeaderInferredTransportMetrics(rawHeaders, finalHeaders, '');
+      expect(inferred.requestHeaderSize).assertEqual(57);
+      expect(inferred.requestBodySize).assertEqual(0);
     });
 
   });

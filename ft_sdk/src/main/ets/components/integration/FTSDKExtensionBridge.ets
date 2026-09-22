@@ -23,6 +23,7 @@ import {
   buildResponseHeaderMap,
   createFTNetStatusBean,
   createFTResourceTimingFromNetworkPerformance,
+  createHeaderInferredTransportMetrics,
   ensureHttpResourceId,
   extractContentLength,
   FTNetworkPerformanceTiming,
@@ -35,6 +36,7 @@ import {
   mergeResourceTransportMetricsInput,
   PerformanceMetricValue,
   applyIntegrationTransportMetrics,
+  applyHeaderInferredTransportMetrics,
   applyPlatformTransportMetrics,
   resolveAxiosChainMethod,
   summarizeHeaderKeys,
@@ -198,7 +200,12 @@ export class FTSDKExtensionBridge {
         traceEnabled: resolvedOptions.enableTraceInterceptor,
         resourceEnabled: resourceEnabled,
         networkErrorHandler: resolvedOptions.networkErrorHandler ?? undefined,
-        transportMetrics: mergeResourceTransportMetricsInput(providerMetrics, request.transportMetrics)
+        transportMetrics: mergeResourceTransportMetricsInput(providerMetrics, request.transportMetrics),
+        headerInferredTransportMetrics: createHeaderInferredTransportMetrics(
+          request.headers,
+          finalHeaders,
+          request.body
+        )
       };
       HttpAutoTrackStateStore.getInstance().put(state);
 
@@ -516,6 +523,7 @@ export class FTSDKExtensionBridge {
       mergeResourceTransportMetricsInput(state.transportMetrics, response.transportMetrics)
     );
     applyPlatformTransportMetrics(resourceParams, response.platformTransportMetrics);
+    applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
 
     const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
     const contentEncoding = responseHeaders['content-encoding'] || responseHeaders['Content-Encoding'];
@@ -586,6 +594,7 @@ export class FTSDKExtensionBridge {
     applyIntegrationTransportMetrics(resourceParams, state.transportMetrics);
     applyIntegrationTransportMetrics(resourceParams, responseTransportMetrics);
     applyPlatformTransportMetrics(resourceParams, platformTransportMetrics);
+    applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
     if (networkErrorContext) {
       resourceParams.addProperty('network_error_kind', new String(networkErrorContext.kind));
       resourceParams.addProperty('network_error_message', new String(networkErrorContext.message));

@@ -104,6 +104,15 @@ Native network auto-tracking reports `resource_status=0` when no HTTP response i
 
 Following the existing SDK contract, a collected Resource generates one linked Network Error for HTTP status >=400, or for status 0 with a non-empty error stack. A manually supplied status 0 without an error stack does not alone create an Error. Auto-tracking supplies the failure message and stack (or the available platform failure description), and links both records through `resource_id`.
 
+### Resource transport fields
+
+Resource records can also report request size, negotiated HTTP protocol, and
+connection reuse as Fields. RCP platform values take precedence; RCP, Axios,
+and NetworkKit HTTP Chain integrations can supply explicit values when the
+platform does not expose them. See
+[Resource transport metrics](RESOURCE_TRANSPORT_METRICS.md) for API examples,
+priority rules, byte-counting semantics, and HarmonyOS platform limitations.
+
 ### Filter local Network Errors
 
 `FTNetworkErrorHandler` can suppress only the Error derived from a local

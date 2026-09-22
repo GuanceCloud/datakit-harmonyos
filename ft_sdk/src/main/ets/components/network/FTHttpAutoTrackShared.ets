@@ -1,4 +1,5 @@
 import { Constants } from '../Constants';
+import { util } from '@kit.ArkTS';
 import { FTInnerLogger } from '../log/FTLogger';
 import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { Utils } from '../utils/Utils';
@@ -261,6 +262,8 @@ export interface HttpAutoTrackState {
   actionId?: string;
   /** Integration-provided transport values captured at request start. */
   transportMetrics?: FTResourceTransportMetricsInput;
+  /** Low-priority byte estimates calculated from inspectable request data. */
+  headerInferredTransportMetrics?: FTResourceTransportMetricsInput;
 }
 
 /**
@@ -405,6 +408,203 @@ export function applyPlatformTransportMetrics(
   if (metrics.connectionReuse !== undefined) {
     params.setPlatformConnectionReuse(metrics.connectionReuse);
   }
+}
+
+/**
+ * Applies only the components that can be calculated from inspectable request
+ * data. Protocol and connection reuse are never guessed from headers.
+ */
+export function applyHeaderInferredTransportMetrics(
+  params: ResourceParams,
+  metrics?: FTResourceTransportMetricsInput
+): void {
+  if (!metrics) {
+    return;
+  }
+  if (isKnownTransportSize(metrics.requestBodySize)) {
+    params.setHeaderInferredRequestBodySize(metrics.requestBodySize!);
+  }
+  if (isKnownTransportSize(metrics.requestHeaderSize)) {
+    params.setHeaderInferredRequestHeaderSize(metrics.requestHeaderSize!);
+  }
+}
+
+type FTHeaderValue = string | string[];
+
+/**
+ * Keeps only serializable HTTP header values. Objects and non-string values
+ * are intentionally ignored instead of being coerced with toString().
+ */
+export function normalizeHeaderValues(headers?: Object | null): Record<string, FTHeaderValue> {
+  const normalized: Record<string, FTHeaderValue> = {};
+  if (!headers) {
+    return normalized;
+  }
+  const rawHeaders = headers as Record<string, Object>;
+  const keys = Object.keys(rawHeaders);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = rawHeaders[key];
+    if (typeof value === 'string') {
+      normalized[key] = value;
+    } else if (Array.isArray(value)) {
+      const values: string[] = [];
+      for (let j = 0; j < value.length; j++) {
+        if (typeof value[j] !== 'string') {
+          values.length = 0;
+          break;
+        }
+        values.push(value[j] as string);
+      }
+      if (values.length > 0) {
+        normalized[key] = values;
+      }
+    }
+  }
+  return normalized;
+}
+
+function containsHeaderIgnoreCase(headers: Record<string, FTHeaderValue>, key: string): boolean {
+  const normalizedKey = key.toLowerCase();
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase() === normalizedKey) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Starts from the caller's multi-value headers, then appends interceptor-added
+ * headers such as trace/resource identifiers. Existing values are retained
+ * because they are already part of the final normalized request.
+ */
+export function buildHeaderValuesForFinalRequest(
+  rawHeaders: Object | null | undefined,
+  finalHeaders: Record<string, string>
+): Record<string, FTHeaderValue> {
+  const result = normalizeHeaderValues(rawHeaders);
+  const finalKeys = Object.keys(finalHeaders);
+  for (let i = 0; i < finalKeys.length; i++) {
+    const key = finalKeys[i];
+    if (!containsHeaderIgnoreCase(result, key)) {
+      result[key] = finalHeaders[key];
+    }
+  }
+  return result;
+}
+
+function utf8ByteLength(value: string): number {
+  return util.TextEncoder.create('utf-8').encodeInto(value).byteLength;
+}
+
+function parseNonNegativeDecimal(value: string): number | undefined {
+  if (!/^\d+$/.test(value)) {
+    return undefined;
+  }
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function getHeaderValuesIgnoreCase(
+  headers: Record<string, FTHeaderValue>,
+  name: string
+): string[] {
+  const result: string[] = [];
+  const normalizedName = name.toLowerCase();
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase() !== normalizedName) {
+      continue;
+    }
+    const value = headers[keys[i]];
+    if (typeof value === 'string') {
+      result.push(value);
+    } else {
+      for (let j = 0; j < value.length; j++) {
+        result.push(value[j]);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Uses Content-Length only if all supplied values are valid and agree. It is
+ * an on-wire body length fallback for streams or other opaque bodies.
+ */
+export function getKnownRequestContentLength(headers: Record<string, FTHeaderValue>): number | undefined {
+  const values = getHeaderValuesIgnoreCase(headers, 'content-length');
+  if (values.length === 0) {
+    return undefined;
+  }
+  let contentLength: number | undefined = undefined;
+  for (let i = 0; i < values.length; i++) {
+    const parsed = parseNonNegativeDecimal(values[i]);
+    if (parsed === undefined || (contentLength !== undefined && contentLength !== parsed)) {
+      return undefined;
+    }
+    contentLength = parsed;
+  }
+  return contentLength;
+}
+
+/**
+ * Header byte estimate: UTF-8 bytes for every normalized `Name: Value\\r\\n`
+ * line, plus the final CRLF. It excludes the HTTP request line and any HTTP/2
+ * header compression, matching the portable request-header serialization
+ * contract rather than pretending to know compressed wire bytes.
+ */
+export function estimateRequestHeaderByteSize(headers: Record<string, FTHeaderValue>): number {
+  let total = 2;
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    const values = headers[keys[i]];
+    const normalizedValues = typeof values === 'string' ? [values] : values;
+    for (let j = 0; j < normalizedValues.length; j++) {
+      total += utf8ByteLength(keys[i]) + 2 + utf8ByteLength(normalizedValues[j]) + 2;
+    }
+  }
+  return total;
+}
+
+/** Returns an exact byteLength only for ArrayBuffer and TypedArray/DataView. */
+export function getKnownBinaryByteLength(body?: Object | ArrayBuffer): number | undefined {
+  if (body instanceof ArrayBuffer) {
+    return body.byteLength;
+  }
+  if (body && ArrayBuffer.isView(body)) {
+    return body.byteLength;
+  }
+  return undefined;
+}
+
+export function getKnownRequestBodyByteSize(
+  body: string | Object | ArrayBuffer | undefined,
+  headers: Record<string, FTHeaderValue>
+): number | undefined {
+  if (typeof body === 'string') {
+    return utf8ByteLength(body);
+  }
+  const binaryLength = getKnownBinaryByteLength(body);
+  if (binaryLength !== undefined) {
+    return binaryLength;
+  }
+  return getKnownRequestContentLength(headers);
+}
+
+/** Builds low-priority byte estimates without guessing protocol or connection reuse. */
+export function createHeaderInferredTransportMetrics(
+  rawHeaders: Object | null | undefined,
+  finalHeaders: Record<string, string>,
+  body?: string | Object | ArrayBuffer
+): FTResourceTransportMetricsInput {
+  const headers = buildHeaderValuesForFinalRequest(rawHeaders, finalHeaders);
+  return {
+    requestHeaderSize: estimateRequestHeaderByteSize(headers),
+    requestBodySize: getKnownRequestBodyByteSize(body, headers)
+  };
 }
 
 export interface FTAutoTrackOptions {
