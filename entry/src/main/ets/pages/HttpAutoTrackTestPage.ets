@@ -100,7 +100,13 @@ export struct HttpAutoTrackTestPage {
     return rcp.createSession(createFTRCPTrackConfig({
       baseAddress: baseAddress,
       requestConfiguration: { transfer: { timeout: { connectMs: 10000, transferMs: 10000 } } },
-      networkErrorHandler: this.createNetworkErrorHandler()
+      networkErrorHandler: this.createNetworkErrorHandler(),
+      // resourceTransportMetricsProvider: (_request) => ({
+      //   httpProtocol: 'http/1.1',
+      //   requestBodySize: 1,
+      //   requestHeaderSize: 1,
+      //   connectionReuse: false,
+      // })
     }));
   }
 
@@ -119,7 +125,15 @@ export struct HttpAutoTrackTestPage {
     options: http.HttpRequestOptions = {}
   ): Promise<http.HttpResponse> {
     const request = http.createHttp();
-    applyFTHttpTrack(request, { networkErrorHandler: this.createNetworkErrorHandler() });
+    applyFTHttpTrack(request, {
+      networkErrorHandler: this.createNetworkErrorHandler(),
+      // resourceTransportMetricsProvider: (_request) => ({
+      //   httpProtocol: 'http/1.1',
+      //   requestBodySize: 1,
+      //   requestHeaderSize: 1,
+      //   connectionReuse: true,
+      // })
+    });
     try {
       return await request.request(url, options);
     } finally {
@@ -196,13 +210,27 @@ export struct HttpAutoTrackTestPage {
       // Keep the interceptorChain path for newer @ohos/axios versions that
       // support wiring NetworkKit interceptors directly through request config.
       axiosConfig.interceptorChain = createFTHttpInterceptorChain({
-        networkErrorHandler: this.createNetworkErrorHandler()
+        networkErrorHandler: this.createNetworkErrorHandler(),
+        // resourceTransportMetricsProvider: (_request) => ({
+        //   httpProtocol: 'http/1.1',
+        //   requestBodySize: 1,
+        //   requestHeaderSize: 1,
+        //   connectionReuse: false,
+        // })
       });
     }
 
     const client = axios.create(axiosConfig);
     if (mode === 'compat') {
-      applyFTAxiosTrack(client, { networkErrorHandler: this.createNetworkErrorHandler() });
+      applyFTAxiosTrack(client, {
+        networkErrorHandler: this.createNetworkErrorHandler(),
+        // resourceTransportMetricsProvider: (_request) => ({
+        //   httpProtocol: 'http/1.1',
+        //   requestBodySize: 1,
+        //   requestHeaderSize: 1,
+        //   connectionReuse: false,
+        // })
+      });
     } else if (mode === 'chain') {
       applyFTAxiosChainMethodBridge(client);
     }

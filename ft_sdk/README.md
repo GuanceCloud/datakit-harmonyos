@@ -565,7 +565,24 @@ Use `DataModifier` for global key-based rules; it is the lower-overhead option. 
 ## Requirements
 
 - HarmonyOS application project with `ohpm` support
-- Network permission for data reporting
+- The `ft_sdk` HAR declares these normal permissions in its own `module.json5`:
+
+  ```json5
+  {
+    "module": {
+      "requestPermissions": [
+        { "name": "ohos.permission.INTERNET" },
+        { "name": "ohos.permission.GET_WIFI_INFO" },
+        { "name": "ohos.permission.GET_NETWORK_INFO" }
+      ]
+    }
+  }
+  ```
+
+  `INTERNET` uploads SDK data. `GET_NETWORK_INFO` supports network availability
+  and transport-type collection, while `GET_WIFI_INFO` supports Wi-Fi signal
+  collection. A consuming HAP does not need to duplicate these declarations;
+  they are introduced by the `ft_sdk` HAR.
 - Verify compatibility against your target HarmonyOS API level before release
 
 ## Notes

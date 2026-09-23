@@ -72,6 +72,8 @@ const interceptorChain = createFTHttpInterceptorChain({
 
 - HarmonyOS project using NetworkKit interceptor-chain APIs
 - This package is an addition to the core SDK, not a replacement for it
+- `ft_sdk_ext` declares no permissions. Its `ft_sdk` dependency declares the
+  core normal permissions, so a consuming HAP does not need to duplicate them.
 
 ## Documentation
 

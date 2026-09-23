@@ -49,6 +49,32 @@ Then declare the dependency in your app `oh-package.json5` if needed:
 `@guancecloud/ft_sdk_ext` depends on `@guancecloud/ft_sdk`. If you only need the core monitoring capability, install `@guancecloud/ft_sdk` alone.
 `@guancecloud/ft_native` is optional and only needed when you want native crash monitoring. Once it is packaged with the app, `ft_sdk` initializes the native crash module internally when crash tracking is enabled.
 
+## Permissions
+
+The `ft_sdk` HAR declares the following normal permissions in its own
+`module.json5`:
+
+```json5
+{
+  "module": {
+    "requestPermissions": [
+      { "name": "ohos.permission.INTERNET" },
+      { "name": "ohos.permission.GET_WIFI_INFO" },
+      { "name": "ohos.permission.GET_NETWORK_INFO" }
+    ]
+  }
+}
+```
+
+`INTERNET` is used to report SDK data. `GET_NETWORK_INFO` supports network
+availability and transport-type collection, and `GET_WIFI_INFO` supports Wi-Fi
+signal collection. A consuming HAP does not need to duplicate these
+declarations; they are introduced by the `ft_sdk` HAR. Keep the SDK store
+permission list consistent with the HAR manifest when publishing.
+
+`ft_sdk_ext` only attaches HTTP interceptors and declares no permissions of its
+own. Its `ft_sdk` dependency supplies the core permissions above.
+
 For cold-launch phase timing, enable the Guance Hvigor compiler plugin. It
 injects the required Ability lifecycle and first-frame hooks during the build,
 so the host application does not add timing calls. See the module
