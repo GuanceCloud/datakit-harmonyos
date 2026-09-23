@@ -17,6 +17,7 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMGlobalManager } from '../rum/FTRUMGlobalManager';
+import { FTNavigationTracker } from '../rum/FTNavigationTracker';
 import { FTSDK } from '../FTSDK';
 import { Utils } from '../utils/Utils';
 import { FTAppLaunchTracker } from './FTAppLaunchTracker';
@@ -70,6 +71,9 @@ export class FTAbilityLifecycleListener {
   // for platforms that only provide UIAbility lifecycle callbacks, so one of
   // several UIAbilities going background cannot classify the whole process.
   private foregroundAbilities: Set<UIAbility> = new Set();
+  // A quick return to the foreground must not resume a View before the
+  // background callback has finished closing it.
+  private pendingViewStop: Promise<void> = Promise.resolve();
   
   /**
    * Sleep delay time (10 seconds)
@@ -149,6 +153,11 @@ export class FTAbilityLifecycleListener {
         onWindowStageCreate: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageCreate: UIAbility lifecycle event`);
           this.registerLaunchWindowStateListener(windowStage);
+          try {
+            FTSDK.onWindowStageCreate(windowStage.getMainWindowSync());
+          } catch (error) {
+            FTInnerLogger.w(TAG, `MainWindow unavailable during window stage creation: ${String(error)}`);
+          }
         },
         onWindowStageActive: (ability: UIAbility, windowStage: window.WindowStage) => {
           FTInnerLogger.d(TAG, `onWindowStageActive: UIAbility lifecycle event`);
@@ -174,6 +183,7 @@ export class FTAbilityLifecycleListener {
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
           FTSDK.recordAppLaunchApplicationForeground();
+          this.resumeViewOnForeground(ability);
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -416,6 +426,19 @@ export class FTAbilityLifecycleListener {
     }
   }
 
+  private async resumeViewOnForeground(ability: UIAbility): Promise<void> {
+    try {
+      await this.pendingViewStop;
+      // The ability may have returned to the background while its previous
+      // View was closing. Only the current foreground transition can resume it.
+      if (this.isRegistered && this.foregroundAbilities.has(ability) && FTSDK.isViewTrackingEnabled()) {
+        await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      }
+    } catch (error) {
+      FTInnerLogger.e(TAG, `Error resuming View in onAbilityForeground: ${String(error)}`);
+    }
+  }
+
   private flushDbLaneOnLifecycleChange(context: string): void {
     this.flushDbLaneOnLifecycleChangeAsync(context).catch((error: Error) => {
       FTInnerLogger.e(TAG, `DB lane flush failed in ${context}: ${error.message}`);
@@ -423,7 +446,9 @@ export class FTAbilityLifecycleListener {
   }
 
   private async flushDbLaneOnLifecycleChangeAsync(context: string): Promise<void> {
-    await this.stopViewOnLifecycleChange(context);
+    const stop = this.stopViewOnLifecycleChange(context);
+    this.pendingViewStop = stop;
+    await stop;
     await this.awaitDbLaneWithTimeout(context);
 
     const abilityContext = Utils.getAbilityContext();

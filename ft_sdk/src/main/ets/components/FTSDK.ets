@@ -1081,6 +1081,12 @@ export class FTSDK {
     FTSDK.tryInitializeUIFeaturesInternal();
   }
 
+  /** Register Router/Navigation observers before the first loadContent page is shown. */
+  public static onWindowStageCreate(mainWindow: window.Window): void {
+    getFTSDKRuntime().setMainWindow(mainWindow);
+    FTSDK.tryInitializeUIFeaturesInternal();
+  }
+
   /**
    * Enable or disable automatic click tracking (FTActionTracker)
    */

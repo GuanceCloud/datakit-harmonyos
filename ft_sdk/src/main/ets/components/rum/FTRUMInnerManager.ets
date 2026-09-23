@@ -476,6 +476,8 @@ export class FTRUMInnerManager {
   // Promise-based lock to ensure thread-safe view operations (startView/stopView)
   // Prevents race condition where multiple threads modify activeView simultaneously
   private viewOperationLock: Promise<void> = Promise.resolve();
+  // Keep first-process View inserts behind the predecessor-process closure.
+  private startupViewRecovery: Promise<void> = Promise.resolve();
 
   // Promise-based lock to ensure thread-safe session refresh
   // Prevents race condition where multiple threads generate different sessionIds simultaneously
@@ -2501,7 +2503,7 @@ export class FTRUMInnerManager {
     // Close all existing actions and views (aligned with Android)
     // This is done asynchronously to avoid blocking initialization
     if (this.context) {
-      this.closeAllActionAndViewAsync(this.context);
+      this.startupViewRecovery = this.closeAllActionAndViewAsync(this.context);
     }
     
   }
@@ -2510,6 +2512,10 @@ export class FTRUMInnerManager {
     try {
       await FTDBTaskPoolExecutor.closeAllActionAndView(context);
       FTInnerLogger.d(TAG, "Closed all existing actions and views");
+      // A forced rerun may not have delivered a lifecycle stop. The closed
+      // predecessor View must be serialized even if the user does nothing in
+      // this process and no later event requests a RUM summary.
+      this.generateRumData();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `Failed to close all actions and views: ${errorMessage}`);
@@ -2557,6 +2563,7 @@ export class FTRUMInnerManager {
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
+      await this.startupViewRecovery;
       // Save previous view name before updating viewList (for referrer calculation)
       // This ensures we can use the previous active view as referrer even if viewList is empty
       // Note: Even if activeView is closed (isClose()=true), we should still use its viewName as previousViewName
@@ -2591,14 +2598,7 @@ export class FTRUMInnerManager {
       
       // Close current active view
       // Aligned with Android: if activeView exists and is not closed, close it before starting new view
-      // Also check if the new viewName is the same as current active view (prevent duplicate startView calls)
       if (this.activeView && !this.activeView.isClose()) {
-        // If starting the same view again, skip to prevent duplicate view creation
-        if (this.activeView.getViewName() === viewName) {
-          FTInnerLogger.d(TAG, ` startView skipped duplicate view: ${viewName}`);
-          return;
-        }
-        
         // A View change closes the Action to new events, but an already-started
         // Resource still owns its durable Action reference and must be allowed
         // to write its final counters before this Action is generated.
@@ -4050,8 +4050,9 @@ export class FTRUMInnerManager {
    * 
    * @param viewName View name
    * @param loadTime Load time in nanoseconds
+   * @param updateActiveView Whether this timing belongs to the current View
    */
-  public recordViewLoadTimeInternal(viewName: string, loadTime: number): void {
+  public recordViewLoadTimeInternal(viewName: string, loadTime: number, updateActiveView: boolean = true): void {
     if (viewName && viewName.length > 0 && loadTime > 0) {
       this.preActivityDuration.set(viewName, loadTime);
       
@@ -4059,7 +4060,7 @@ export class FTRUMInnerManager {
       // This handles load-time records that arrive after a manual startView call.
       // Also handles the case where startView is called multiple times (e.g., navigation tracker + manual call)
       // Keep the latest automatic-tracking load time when a matching view already exists.
-      if (this.activeView && this.activeView.getViewName() === viewName) {
+      if (updateActiveView && this.activeView && this.activeView.getViewName() === viewName) {
         // Always update loadTime if activeView exists, even if it's not -1
         // This ensures loadTime is preserved even if startView is called multiple times
         this.activeView.setLoadTime(loadTime);
