@@ -12,6 +12,8 @@ export interface ResourceTransportMetricsSnapshot {
   requestHeaderSizeSource?: ResourceTransportMetricSource;
   requestSize: number;
   requestSizeSource?: ResourceTransportMetricSource;
+  /** True only when requestSize was calculated from the two component sizes. */
+  requestSizeIsDerived?: boolean;
   httpProtocol: string;
   httpProtocolSource?: ResourceTransportMetricSource;
   connectionReuse?: boolean;
@@ -107,7 +109,10 @@ export class ResourceTransportMetrics {
     if (snapshot.requestHeaderSizeSource) {
       this.setRequestHeaderSize(snapshot.requestHeaderSize, snapshot.requestHeaderSizeSource);
     }
-    if (snapshot.requestSizeSource) {
+    // A derived total must stay derived after crossing the async Resource
+    // boundary. Otherwise a later platform body/header value cannot recalculate
+    // it and an old inferred total can mask the platform observation.
+    if (snapshot.requestSizeSource && snapshot.requestSizeIsDerived !== true) {
       this.setRequestSize(snapshot.requestSize, snapshot.requestSizeSource);
     }
     if (snapshot.httpProtocolSource) {
@@ -126,6 +131,7 @@ export class ResourceTransportMetrics {
       requestHeaderSizeSource: this.requestHeaderSizeSource,
       requestSize: this.requestSize,
       requestSizeSource: this.requestSizeSource,
+      requestSizeIsDerived: this.requestSizeIsDerived,
       httpProtocol: this.httpProtocol,
       httpProtocolSource: this.httpProtocolSource,
       connectionReuse: this.connectionReuse,
@@ -134,17 +140,28 @@ export class ResourceTransportMetrics {
   }
 
   private deriveRequestSizeIfPossible(): void {
-    if (this.requestSizeSource && !this.requestSizeIsDerived) {
-      return;
-    }
     if (!isKnownSize(this.requestBodySize) || !isKnownSize(this.requestHeaderSize) ||
       !this.requestBodySizeSource || !this.requestHeaderSizeSource) {
       return;
     }
-    this.requestSize = this.requestBodySize + this.requestHeaderSize;
-    this.requestSizeSource = sourceRank(this.requestBodySizeSource) <= sourceRank(this.requestHeaderSizeSource)
+    // A total built from a platform-observed component and a lower-priority
+    // fallback must still replace a user-supplied total. The platform component
+    // is the decisive observation for this Resource; the other component only
+    // fills the part that the platform did not expose.
+    const componentSource = sourceRank(this.requestBodySizeSource) >= sourceRank(this.requestHeaderSizeSource)
       ? this.requestBodySizeSource
       : this.requestHeaderSizeSource;
+    // A direct total is authoritative only while it is at least as reliable as
+    // both component values. For example, an integration may provide 40 at
+    // request start, while the platform later exposes the actual 30-byte body
+    // and 50-byte header. The platform total (80) must replace the earlier
+    // integration value rather than remain masked by it.
+    if (this.requestSizeSource && !this.requestSizeIsDerived &&
+      sourceRank(this.requestSizeSource) >= sourceRank(componentSource)) {
+      return;
+    }
+    this.requestSize = this.requestBodySize + this.requestHeaderSize;
+    this.requestSizeSource = componentSource;
     this.requestSizeIsDerived = true;
   }
 }

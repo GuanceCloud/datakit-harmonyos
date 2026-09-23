@@ -3120,6 +3120,7 @@ export class FTRUMInnerManager {
       requestHeaderSizeSource: metrics.requestHeaderSizeSource,
       requestSize: metrics.requestSize,
       requestSizeSource: metrics.requestSizeSource,
+      requestSizeIsDerived: metrics.requestSizeIsDerived,
       httpProtocol: metrics.httpProtocol,
       httpProtocolSource: metrics.httpProtocolSource,
       connectionReuse: metrics.connectionReuse,

@@ -1537,7 +1537,7 @@ function mergeResourceTransportMetrics(
     resource.requestHeaderSize = metrics.requestHeaderSize;
     resource.requestHeaderSizeSource = metrics.requestHeaderSizeSource;
   }
-  if (metrics.requestSizeSource && isKnownResourceRequestSize(metrics.requestSize) &&
+  if (metrics.requestSizeSource && metrics.requestSizeIsDerived !== true && isKnownResourceRequestSize(metrics.requestSize) &&
     resourceTransportSourceRank(metrics.requestSizeSource) >= resourceTransportSourceRank(resource.requestSizeSource)) {
     resource.requestSize = metrics.requestSize;
     resource.requestSizeSource = metrics.requestSizeSource;
@@ -1557,18 +1557,23 @@ function mergeResourceTransportMetrics(
 }
 
 function deriveResourceRequestSize(resource: SDKRumWorkerResourceState): void {
-  if (resource.requestSizeSource && !resource.requestSizeIsDerived) {
-    return;
-  }
   if (!isKnownResourceRequestSize(resource.requestBodySize) || !isKnownResourceRequestSize(resource.requestHeaderSize) ||
     !resource.requestBodySizeSource || !resource.requestHeaderSizeSource) {
     return;
   }
-  resource.requestSize = resource.requestBodySize + resource.requestHeaderSize;
-  resource.requestSizeSource = resourceTransportSourceRank(resource.requestBodySizeSource) <=
+  const componentSource = resourceTransportSourceRank(resource.requestBodySizeSource) >=
     resourceTransportSourceRank(resource.requestHeaderSizeSource)
     ? resource.requestBodySizeSource
     : resource.requestHeaderSizeSource;
+  // Preserve an explicit total only when it has equal or stronger provenance
+  // than both components. Higher-ranked platform body/header values must be
+  // allowed to replace an earlier integration total after worker handoff.
+  if (resource.requestSizeSource && !resource.requestSizeIsDerived &&
+    resourceTransportSourceRank(resource.requestSizeSource) >= resourceTransportSourceRank(componentSource)) {
+    return;
+  }
+  resource.requestSize = resource.requestBodySize + resource.requestHeaderSize;
+  resource.requestSizeSource = componentSource;
   resource.requestSizeIsDerived = true;
 }
 

@@ -118,6 +118,8 @@ export interface SDKRumResourceTransportMetricsDTO {
   requestHeaderSizeSource?: SDKRumResourceMetricSource;
   requestSize: number;
   requestSizeSource?: SDKRumResourceMetricSource;
+  /** Preserves whether requestSize is a body/header calculation, not a direct measurement. */
+  requestSizeIsDerived?: boolean;
   httpProtocol: string;
   httpProtocolSource?: SDKRumResourceMetricSource;
   connectionReuse?: boolean;

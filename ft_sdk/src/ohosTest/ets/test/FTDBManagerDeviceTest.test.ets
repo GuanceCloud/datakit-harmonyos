@@ -15,7 +15,11 @@ import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseC
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { CacheDiscard, DataType } from '../../../main/ets/components/enum/Enums';
 import * as FTSQL from '../../../main/ets/components/db/FTSQL';
-import { SDKRumResourceContextDTO, SDKStringRecord } from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import {
+  SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
+  SDKStringRecord
+} from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import { DBAssert } from './helpers/DBAssert';
 
 const TEST_NOW_NS = 1700000000000;
@@ -68,7 +72,7 @@ class SchemaProbeCallback implements DataBaseCallBack {
 
 class PendingResourceContextFixture implements SDKRumResourceContextDTO {
   dynamicTags?: SDKStringRecord;
-  networkSnapshot = {
+  networkSnapshot: SDKRumResourceNetworkSnapshotDTO = {
     available: true,
     validated: true,
     downlinkKbps: 1200,

@@ -133,6 +133,37 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(snapshot.connectionReuse === false).assertTrue();
     });
 
+    it('platformRequestSizeShouldOverrideAndDerivedSizeShouldRemainRecalculable', 0, () => {
+      const inferred = new ResourceTransportMetrics();
+      inferred.setRequestBodySize(20, 'integration');
+      inferred.setRequestHeaderSize(20, 'integration');
+      inferred.setRequestSize(40, 'integration');
+      const inferredSnapshot = inferred.snapshot();
+
+      expect(inferredSnapshot.requestSize).assertEqual(40);
+      expect(inferredSnapshot.requestSizeIsDerived === false).assertTrue();
+
+      const transported = new ResourceTransportMetrics();
+      transported.merge(inferredSnapshot);
+      transported.setRequestBodySize(30, 'platform');
+      const platformBodySnapshot = transported.snapshot();
+      expect(platformBodySnapshot.requestSize).assertEqual(50);
+      expect(platformBodySnapshot.requestSizeSource).assertEqual('platform');
+      expect(platformBodySnapshot.requestSizeIsDerived === true).assertTrue();
+
+      transported.setRequestHeaderSize(50, 'platform');
+      const platformComponentsSnapshot = transported.snapshot();
+      expect(platformComponentsSnapshot.requestSize).assertEqual(80);
+      expect(platformComponentsSnapshot.requestSizeSource).assertEqual('platform');
+      expect(platformComponentsSnapshot.requestSizeIsDerived === true).assertTrue();
+
+      transported.setRequestSize(99, 'platform');
+      const platformSnapshot = transported.snapshot();
+      expect(platformSnapshot.requestSize).assertEqual(99);
+      expect(platformSnapshot.requestSizeSource).assertEqual('platform');
+      expect(platformSnapshot.requestSizeIsDerived === false).assertTrue();
+    });
+
     it('integrationMetricMergeShouldPreserveKnownValuesAndFalse', 0, () => {
       const merged = mergeResourceTransportMetricsInput(
         { requestBodySize: 12, connectionReuse: false },
