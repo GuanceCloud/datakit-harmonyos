@@ -1,5 +1,4 @@
 import { Constants } from '../Constants';
-import { util } from '@kit.ArkTS';
 import { FTInnerLogger } from '../log/FTLogger';
 import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { Utils } from '../utils/Utils';
@@ -496,7 +495,31 @@ export function buildHeaderValuesForFinalRequest(
 }
 
 function utf8ByteLength(value: string): number {
-  return util.TextEncoder.create('utf-8').encodeInto(value).byteLength;
+  // Do not use TextEncoder here. In an HTTP interceptor's INITIAL_REQUEST
+  // callback, some HarmonyOS runtimes can return undefined from encodeInto,
+  // which must not prevent the Resource state from being recorded.
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x7f) {
+      bytes++;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else {
+        // A lone surrogate is represented by the replacement character in
+        // UTF-8, which occupies three bytes.
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }
 
 function parseNonNegativeDecimal(value: string): number | undefined {

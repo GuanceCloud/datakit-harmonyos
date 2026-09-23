@@ -191,7 +191,10 @@ export default function httpAutoTrackSharedUnitTest() {
       // X-Name: 6 + 2 + 3 + 2; X-Multi: (7 + 2 + 3 + 2) +
       // (7 + 2 + 3 + 2); X-Added: 7 + 2 + 3 + 2; final CRLF: 2.
       expect(estimateRequestHeaderByteSize(normalized)).assertEqual(57);
+      expect(getKnownRequestBodyByteSize('', normalized)).assertEqual(0);
       expect(getKnownRequestBodyByteSize('A你', normalized)).assertEqual(4);
+      expect(getKnownRequestBodyByteSize('A你😀', normalized)).assertEqual(8);
+      expect(getKnownRequestBodyByteSize('\uD800', normalized)).assertEqual(3);
       expect(getKnownRequestBodyByteSize(new ArrayBuffer(6), normalized)).assertEqual(6);
       expect(getKnownRequestBodyByteSize(new Uint8Array(5), normalized)).assertEqual(5);
       expect(getKnownRequestBodyByteSize(new Map<string, string>(), normalized)).assertEqual(undefined);
