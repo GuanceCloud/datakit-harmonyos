@@ -520,7 +520,7 @@ export default function rcpAutoTrackDeviceTest() {
       const fragments = [
         'resource',
         `resource_url=${resourceUrl}`,
-        'resource_http_protocol=h2',
+        'resource_http_protocol="h2"',
         `view_name=${viewName}`
       ];
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments, 5000);
@@ -552,7 +552,7 @@ export default function rcpAutoTrackDeviceTest() {
         'resource',
         `resource_url=${resourceUrl}`,
         'resource_request_size=321',
-        'resource_http_protocol=h2',
+        'resource_http_protocol="h2"',
         'resource_connection_reuse=false',
         `view_name=${viewName}`
       ];
@@ -722,7 +722,7 @@ export default function rcpAutoTrackDeviceTest() {
         `resource_url=${resourceUrl}`,
         'resource_method=GET',
         'resource_status=0',
-        'test_rcp_status_zero_handler=called',
+        'test_rcp_status_zero_handler="called"',
         `view_name=${viewName}`
       ];
       const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments, 5000);

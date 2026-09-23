@@ -22,6 +22,13 @@ class IgnoredAxiosResourceUrlHandler extends FTInTakeUrlHandler {
 interface StoredAxiosAutoTrackState {
   resourceEnabled: boolean;
   networkErrorHandler?: FTNetworkErrorHandler;
+  platformTransportMetrics?: {
+    requestBodySize?: number;
+  };
+  headerInferredTransportMetrics?: {
+    requestHeaderSize?: number;
+    requestBodySize?: number;
+  };
 }
 
 class AxiosGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
@@ -91,6 +98,7 @@ class FakeAxiosRequestConfig implements FTAxiosRequestConfigTarget {
   method?: string;
   headers?: Object;
   context?: Object;
+  onUploadProgress?: (progress: { loaded?: number; total?: number }) => void;
 
   constructor(context: Record<string, Object>) {
     this.url = 'https://example.com/api';
@@ -257,6 +265,49 @@ export default function httpAutoTrackAxiosUnitTest() {
 
       target.responseManager.fulfilled!(new FakeAxiosResponse(preparedConfig));
       expect(getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
+    });
+
+    it('axiosEmptyBodyShouldKeepHeaderBytesForFinalResource', 0, () => {
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      const preparedConfig = createPreparedConfig(target);
+      const state = getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
+
+      expect(state.headerInferredTransportMetrics !== undefined).assertTrue();
+      expect(state.headerInferredTransportMetrics!.requestHeaderSize! > 0).assertTrue();
+      expect(state.headerInferredTransportMetrics!.requestBodySize).assertEqual(0);
+    });
+
+    it('axiosUploadProgressShouldKeepThePlatformMaximumAndPreserveTheApplicationCallback', 0, () => {
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        resourceTransportMetricsProvider: (_request) => ({
+          requestBodySize: 20,
+          requestHeaderSize: 20,
+          requestSize: 40
+        })
+      });
+
+      const context: Record<string, Object> = {};
+      const config = new FakeAxiosRequestConfig(context);
+      let applicationUploadedBytes = -1;
+      config.onUploadProgress = (progress: { loaded?: number; total?: number }): void => {
+        applicationUploadedBytes = progress.loaded || 0;
+      };
+      const preparedConfig = target.requestManager.fulfilled!(config) as FTAxiosRequestConfigTarget;
+      const state = getContext(preparedConfig)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
+
+      preparedConfig.onUploadProgress!({ loaded: 30 });
+      preparedConfig.onUploadProgress!({ loaded: 10 });
+
+      expect(state.platformTransportMetrics!.requestBodySize).assertEqual(30);
+      expect(applicationUploadedBytes).assertEqual(10);
     });
 
     it('axiosShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {

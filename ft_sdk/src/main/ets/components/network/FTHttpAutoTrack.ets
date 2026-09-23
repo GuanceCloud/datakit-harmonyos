@@ -813,6 +813,12 @@ export interface FTAxiosRequestConfigTarget {
   headers?: Object;
   data?: Object | string | ArrayBuffer;
   context?: Object;
+  onUploadProgress?: (progress: FTAxiosUploadProgressTarget) => void;
+}
+
+interface FTAxiosUploadProgressTarget {
+  loaded?: number;
+  total?: number;
 }
 
 export interface FTAxiosResponseTarget<T = Object | string | ArrayBuffer> {
@@ -860,6 +866,8 @@ interface FTAxiosAutoTrackState extends HttpAutoTrackState {
   traceEnabled: boolean;
   resourceEnabled: boolean;
   networkErrorHandler?: FTNetworkErrorHandler;
+  /** Cumulative bytes forwarded by Axios from NetworkKit dataSendProgress. */
+  platformTransportMetrics?: FTResourceTransportMetricsInput;
 }
 
 interface FTAxiosResponseSnapshot {
@@ -1125,10 +1133,14 @@ function buildAxiosAutoTrackState(
   }
 
   finalHeaders['X-FT-Resource-ID'] = uniqueId;
+  // Axios omits `data` for a request with no body. Treat that known absence
+  // as a zero-byte body so the final Resource can include the calculated
+  // request Header bytes. Do not coerce a supplied opaque body to zero.
+  const requestBodyForTransportMetrics = config.data === undefined ? '' : config.data;
   const headerInferredTransportMetrics = createHeaderInferredTransportMetrics(
     rawHeaders,
     finalHeaders,
-    config.data
+    requestBodyForTransportMetrics
   );
 
   let transportMetrics: FTResourceTransportMetricsInput | undefined = undefined;
@@ -1145,7 +1157,7 @@ function buildAxiosAutoTrackState(
     }
   }
 
-  return {
+  const state: FTAxiosAutoTrackState = {
     resourceId: resourceId,
     url: url,
     method: method,
@@ -1157,6 +1169,24 @@ function buildAxiosAutoTrackState(
     transportMetrics: transportMetrics,
     headerInferredTransportMetrics: headerInferredTransportMetrics
   };
+  const applicationUploadProgress = config.onUploadProgress;
+  config.onUploadProgress = (progress: FTAxiosUploadProgressTarget): void => {
+    const uploadedBytes = progress ? progress.loaded : undefined;
+    if (uploadedBytes !== undefined && Number.isFinite(uploadedBytes) && uploadedBytes >= 0) {
+      if (!state.platformTransportMetrics) {
+        state.platformTransportMetrics = {};
+      }
+      const existing = state.platformTransportMetrics.requestBodySize;
+      if (existing === undefined || uploadedBytes > existing) {
+        state.platformTransportMetrics.requestBodySize = uploadedBytes;
+      }
+    }
+    // Preserve the application's Axios callback and its error behavior.
+    if (applicationUploadProgress) {
+      applicationUploadProgress(progress);
+    }
+  };
+  return state;
 }
 
 function completeAxiosTrace(state: FTAxiosAutoTrackState, status: number, headers: Record<string, string>, body?: string): void {
@@ -1219,6 +1249,7 @@ function completeAxiosResource(
   resourceParams.setResponseHeader(JSON.stringify(headers));
   applyIntegrationTransportMetrics(resourceParams, state.transportMetrics);
   applyIntegrationTransportMetrics(resourceParams, responseTransportMetrics);
+  applyPlatformTransportMetrics(resourceParams, state.platformTransportMetrics);
   applyPlatformTransportMetrics(resourceParams, platformTransportMetrics);
   applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
 

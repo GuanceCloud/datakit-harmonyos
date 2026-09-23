@@ -118,6 +118,8 @@ interface FTSDKExtensionHttpState extends HttpAutoTrackState {
   traceEnabled: boolean;
   resourceEnabled: boolean;
   networkErrorHandler?: FTNetworkErrorHandler;
+  /** Bytes observed asynchronously from the NetworkKit HttpRequest instance. */
+  platformTransportMetrics?: FTResourceTransportMetricsInput;
 }
 
 export class FTSDKExtensionBridge {
@@ -143,6 +145,30 @@ export class FTSDKExtensionBridge {
 
   public static normalizeHeaders(headers?: Object | null): Record<string, string> {
     return normalizeObjectHeaders(headers);
+  }
+
+  /**
+   * Records a cumulative `HttpRequest.dataSendProgress.sendSize` value for
+   * exactly one in-flight Resource. The HTTP callback is asynchronous, so the
+   * initial interceptor has already created the Resource state when this runs.
+   */
+  public static recordPlatformRequestBodySize(resourceId: string, size: number): void {
+    if (!resourceId || !Number.isFinite(size) || size < 0) {
+      return;
+    }
+    const state = HttpAutoTrackStateStore.getInstance().get(resourceId) as FTSDKExtensionHttpState | undefined;
+    if (!state) {
+      return;
+    }
+    if (!state.platformTransportMetrics) {
+      state.platformTransportMetrics = {};
+    }
+    const existing = state.platformTransportMetrics.requestBodySize;
+    // NetworkKit sends cumulative progress. Keeping the maximum also tolerates
+    // a platform callback sequence that repeats an earlier progress value.
+    if (existing === undefined || size > existing) {
+      state.platformTransportMetrics.requestBodySize = size;
+    }
   }
 
   public static prepareHttpRequest(
@@ -522,6 +548,7 @@ export class FTSDKExtensionBridge {
       resourceParams,
       mergeResourceTransportMetricsInput(state.transportMetrics, response.transportMetrics)
     );
+    applyPlatformTransportMetrics(resourceParams, state.platformTransportMetrics);
     applyPlatformTransportMetrics(resourceParams, response.platformTransportMetrics);
     applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
 
@@ -593,6 +620,7 @@ export class FTSDKExtensionBridge {
     resourceParams.setResourceStatus(0);
     applyIntegrationTransportMetrics(resourceParams, state.transportMetrics);
     applyIntegrationTransportMetrics(resourceParams, responseTransportMetrics);
+    applyPlatformTransportMetrics(resourceParams, state.platformTransportMetrics);
     applyPlatformTransportMetrics(resourceParams, platformTransportMetrics);
     applyHeaderInferredTransportMetrics(resourceParams, state.headerInferredTransportMetrics);
     if (networkErrorContext) {
