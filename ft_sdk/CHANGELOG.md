@@ -5,19 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.18-alpha02] - 2026-09-24
+- Fixed `startView` reusing an active View with the same name; each call now creates a View, while automatic callbacks deduplicate by `pageId` or `navDestinationId`.
+- Fixed stale View names and properties after foreground return by re-running `FTViewTrackingHandler.resolveHandlerView(...)`.
+- Fixed missing Views on foreground return without a route change by creating a new View after background closure.
+
 ## [0.1.18-alpha01] - 2026-09-22
-- Added Android-aligned Resource transport Fields: request size, negotiated HTTP protocol, and connection reuse. RCP uses exposed platform values where available; RCP, Axios, NetworkKit HTTP Chain, and manual Resource reporting support explicit values with platform-real values taking precedence. Header/body fallback counts UTF-8 and binary bytes conservatively, and leaves unavailable values absent.
-- Fixed automatic Resource request-size precedence across asynchronous Worker delivery: platform-observed request body/header bytes now rederive `resource_request_size` instead of being masked by an earlier integration-provided total.
-- Fixed automatic HTTP Resource byte calculation on HarmonyOS runtimes where `TextEncoder.encodeInto()` can return no byte length during interceptor initialization. UTF-8 string, binary body, and malformed surrogate handling now use an ArkTS implementation.
-- Added Android-aligned Resource start-time network snapshots: `network_available` is always emitted, while validation, bandwidth, cellular signal, and publicly available Wi-Fi signal fields are emitted only when HarmonyOS supplies valid values. Wi-Fi asynchronous reads are guarded by a default-network revision so late callbacks cannot enrich a later network's Resource. Snapshots persist through pending-Resource recovery and are retained when a request completes after a network switch.
-- Added `FTNetworkErrorHandler` for RCP, NetworkKit HTTP, and Axios automatic collection. It can suppress only the Error derived from a no-response local failure while retaining the completed Resource, custom fields, and associations. HTTP 4xx/5xx behavior is unchanged.
-- Added `FTRUMConfig.setNetworkErrorHandler(...)` as the global default for automatic RCP, NetworkKit HTTP, and Axios local-failure filtering. A Session, Client, or interceptor-chain handler overrides it; `networkErrorHandler: null` opts that integration out.
-- Added `foreground_crash_free_duration` and `background_crash_free_duration` nanosecond Fields to crash Errors. Compatible persisted snapshots support process-restart recovery; unavailable or invalid snapshots safely degrade, and a cycle resets only after its Error is stored in the local cache.
-- Aligned newly generated RUM Network Error `error_type` with Android as `network_error`; existing cached Line Protocol retains its original value and is uploaded without migration.
-- Changed upload size caps to batch targets: a first record exceeding a Host-to-Worker or HTTP batch target is sent individually instead of being locally rejected. This applies to all telemetry records, including Errors.
-- Fixed recovered Native Crash and system APP_FREEZE ANR Errors, when a valid predecessor RUM context is available, to retain the predecessor View and Session as Error Tags instead of associating a restarted-process View.
-- Fixed recovery to retain and refresh a cached predecessor View after the Error increment, so its View Error aggregate can be reported alongside the recovered Error.
-- Improved terminal crash handling to wait for pending Action and View counter application before caching the final View snapshot; an unconfirmed flush is logged and handled safely.
+- Added `resource_request_size`, `resource_http_protocol`, and `resource_connection_reuse` to RCP, Axios, NetworkKit, and manual Resources.
+- Fixed `resource_request_size` using earlier estimates instead of platform-observed bytes.
+- Fixed missing request byte counts when `TextEncoder.encodeInto()` returns no length by using a UTF-8 and binary fallback.
+- Added start-time Resource fields `network_available`, `network_validated`, `network_downlink_kbps`, `network_uplink_kbps`, and `network_signal_strength`; revision checks reject stale Wi-Fi reads.
+- Added public `FTNetworkErrorHandler.onExceptionWithFilter(...)` to suppress no-response local-failure Errors while retaining Resources and allowing custom Resource fields.
+- Added `FTRUMConfig.setNetworkErrorHandler(...)` as a global default that integrations can override or disable.
+- Added `foreground_crash_free_duration` and `background_crash_free_duration` (ns) to crash Errors, including restart recovery.
+- Fixed inconsistent `error_type` on new RUM Network Errors; they now use `network_error` without changing cached records.
+- Fixed oversized first records being dropped by batch limits; they now upload individually.
+- Fixed recovered Native Crash and APP_FREEZE ANR Errors referencing the restarted process; they now use the previous View and Session when available.
+- Fixed missing View Error aggregates after crash recovery by retaining and refreshing the previous View.
+- Fixed stale Action and View counters in terminal crash snapshots by waiting for pending updates before caching.
 
 ## [0.1.17] - 2026-09-11
 1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled. Its optional `prefix` supports a plain message prefix and DataKit-compatible allow rules for `message`, `log_source`, and HiLog `tag`/`domain`; log level remains configured through `setLogLevelFilters(...)`, and rules are evaluated before automatic logs enter the SDK queue.

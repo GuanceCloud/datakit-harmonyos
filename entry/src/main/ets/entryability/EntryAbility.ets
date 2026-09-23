@@ -421,8 +421,8 @@ export default class EntryAbility extends UIAbility {
         .setCacheDiscard('discard')
         // FileStore is the primary cache. On its first launch, copy pending
         // SQLite / legacy cache data before the source is reclaimed.
-        .enableFileDataStore()
-        .setNeedTransformOldCache(true)
+        // .enableFileDataStore()
+        // .setNeedTransformOldCache(true)
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(networkRouteTestEnabled ? false : this.runtimeConfig.autoSync === 'true')
