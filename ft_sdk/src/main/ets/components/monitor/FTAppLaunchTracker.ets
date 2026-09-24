@@ -2,6 +2,9 @@ import { systemDateTime } from '@kit.BasicServicesKit';
 import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
+import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
+import { ActionSourceType } from '../rum/enum/ActionSourceType';
+import { resolveAutomaticLaunchAction } from '../rum/handler/FTAutomaticActionHandler';
 import { Utils } from '../utils/Utils';
 
 const TAG = 'FTAppLaunchTracker';
@@ -21,7 +24,8 @@ export interface FTAppLaunchAction {
 }
 
 export interface FTAppLaunchReporter {
-  report(action: FTAppLaunchAction): boolean;
+  /** true when submitted, 'filtered' when intentionally skipped, false when retryable. */
+  report(action: FTAppLaunchAction): boolean | 'filtered';
 }
 
 export interface FTAppLaunchSnapshot {
@@ -35,6 +39,7 @@ export interface FTAppLaunchSnapshot {
   backgroundLaunchPendingUi: boolean;
   rumReady: boolean;
   reported: boolean;
+  finished: boolean;
 }
 
 interface FTAppLaunchPhase {
@@ -53,19 +58,26 @@ class SystemAppLaunchClock implements FTAppLaunchClock {
 }
 
 class RumAppLaunchReporter implements FTAppLaunchReporter {
-  public report(action: FTAppLaunchAction): boolean {
+  public report(action: FTAppLaunchAction): boolean | 'filtered' {
     try {
+      const handler = FTRUMConfigManager.getInstance().getConfig()?.getActionTrackingHandler() ?? null;
+      const resolved = resolveAutomaticLaunchAction(handler, ActionSourceType.LAUNCH_COLD,
+        Constants.ACTION_NAME_LAUNCH_COLD, action.properties);
+      if (resolved === null) {
+        FTInnerLogger.d(TAG, 'Cold launch Action filtered by action tracking handler');
+        return 'filtered';
+      }
       const rumManager = FTRUMInnerManager.getInstance();
       if (!rumManager) {
         FTInnerLogger.w(TAG, 'RUM manager is unavailable; keeping launch result pending');
         return false;
       }
       rumManager.addAction(
-        Constants.ACTION_NAME_LAUNCH_COLD,
+        resolved.name,
         Constants.ACTION_TYPE_LAUNCH_COLD,
         action.durationNs,
         action.startEpochNs,
-        action.properties
+        resolved.properties
       );
       return true;
     } catch (error) {
@@ -96,6 +108,7 @@ export class FTAppLaunchTracker {
   private launchType: FTAppLaunchType | null = null;
   private rumReady: boolean = false;
   private reported: boolean = false;
+  private finished: boolean = false;
   private applicationForegroundObserved: boolean = false;
   private windowForegroundObserved: boolean = false;
   private initialVisibility: FTAppLaunchInitialVisibility = 'unknown';
@@ -108,6 +121,7 @@ export class FTAppLaunchTracker {
    */
   private backgroundLaunchPendingUi: boolean = false;
   private reportSubmittedListeners: Array<() => void> = [];
+  private finishedListeners: Array<() => void> = [];
   private backgroundLaunchDetectedListeners: Array<() => void> = [];
 
   public constructor(
@@ -155,7 +169,7 @@ export class FTAppLaunchTracker {
 
   /** Optional host-provided application-start timestamp when the SDK loads late. */
   public setAppStartTime(uptimeNs: number): void {
-    if (this.reported || uptimeNs <= 0 || this.hasRecordedBoundary()) {
+    if (this.finished || uptimeNs <= 0 || this.hasRecordedBoundary()) {
       return;
     }
     this.appStartUptimeNs = uptimeNs;
@@ -266,7 +280,8 @@ export class FTAppLaunchTracker {
       initialLifecycleRoundComplete: this.initialLifecycleRoundComplete,
       backgroundLaunchPendingUi: this.backgroundLaunchPendingUi,
       rumReady: this.rumReady,
-      reported: this.reported
+      reported: this.reported,
+      finished: this.finished
     };
   }
 
@@ -277,8 +292,10 @@ export class FTAppLaunchTracker {
    * before the launch reaches its terminal boundary.
    */
   public onReportSubmitted(listener: () => void): () => void {
-    if (this.reported) {
-      listener();
+    if (this.finished) {
+      if (this.reported) {
+        listener();
+      }
       return (): void => {};
     }
     this.reportSubmittedListeners.push(listener);
@@ -286,6 +303,21 @@ export class FTAppLaunchTracker {
       const index = this.reportSubmittedListeners.indexOf(listener);
       if (index >= 0) {
         this.reportSubmittedListeners.splice(index, 1);
+      }
+    };
+  }
+
+  /** Fires after submission or intentional filtering, so startup control-plane work can proceed. */
+  public onFinished(listener: () => void): () => void {
+    if (this.finished) {
+      listener();
+      return (): void => {};
+    }
+    this.finishedListeners.push(listener);
+    return (): void => {
+      const index = this.finishedListeners.indexOf(listener);
+      if (index >= 0) {
+        this.finishedListeners.splice(index, 1);
       }
     };
   }
@@ -316,7 +348,7 @@ export class FTAppLaunchTracker {
   }
 
   private resolveBackgroundLaunchIfNeeded(): void {
-    if (this.reported || this.backgroundLaunchPendingUi ||
+    if (this.finished || this.backgroundLaunchPendingUi ||
       this.initialVisibility !== 'background' || !this.initialLifecycleRoundComplete) {
       return;
     }
@@ -329,7 +361,7 @@ export class FTAppLaunchTracker {
   }
 
   private tryReport(): void {
-    if (this.reported) {
+    if (this.finished) {
       return;
     }
     if (!this.rumReady || !this.launchType) {
@@ -340,11 +372,31 @@ export class FTAppLaunchTracker {
     if (!action) {
       return;
     }
-    this.reported = this.reporter.report(action);
+    const result = this.reporter.report(action);
+    if (result !== true && result !== 'filtered') {
+      return;
+    }
+    this.finished = true;
+    this.reported = result === true;
     FTInnerLogger.d(TAG,
-      `Cold launch report submitted=${this.reported}, type=${this.launchType}, durationMs=${action.durationNs / 1_000_000}`);
+      `Cold launch action finished=${this.finished}, submitted=${this.reported}, type=${this.launchType}, durationMs=${action.durationNs / 1_000_000}`);
     if (this.reported) {
       this.notifyReportSubmitted();
+    } else {
+      this.reportSubmittedListeners = [];
+    }
+    this.notifyFinished();
+  }
+
+  private notifyFinished(): void {
+    const listeners = this.finishedListeners.slice();
+    this.finishedListeners = [];
+    for (let index = 0; index < listeners.length; index++) {
+      try {
+        listeners[index]();
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Cold-launch finish listener failed: ${String(error)}`);
+      }
     }
   }
 

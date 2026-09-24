@@ -1362,21 +1362,21 @@ export class FTSDK {
     });
     const launchTracker = FTAppLaunchTracker.getInstance();
     const launchSnapshot = launchTracker.getSnapshot();
-    if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
+    if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.finished) {
       // Remote filtering is control-plane work, not part of cold-start data
       // collection. Preserve the active config until the cold-launch Action is
-      // submitted, except for a background-only process: its launch Action
+      // submitted or filtered, except for a background-only process: its Action
       // waits for a later UI frame, so unblock control-plane work
       // as soon as the no-UI lifecycle round has settled.
       let settled: boolean = false;
-      let removeReportListener: () => void = (): void => {};
+      let removeFinishListener: () => void = (): void => {};
       let removeBackgroundListener: () => void = (): void => {};
       const startAfterLaunch = (): void => {
         if (settled) {
           return;
         }
         settled = true;
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
         FTSDK.remoteDataFilterLaunchUnsubscribe = null;
         if (FTSDK.remoteDataFilterManager !== manager) {
@@ -1384,15 +1384,15 @@ export class FTSDK {
         }
         void manager.start();
       };
-      removeReportListener = launchTracker.onReportSubmitted(startAfterLaunch);
+      removeFinishListener = launchTracker.onFinished(startAfterLaunch);
       removeBackgroundListener = launchTracker.onBackgroundLaunchDetected(startAfterLaunch);
       if (settled) {
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
         return;
       }
       FTSDK.remoteDataFilterLaunchUnsubscribe = (): void => {
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
       };
       return;

@@ -39,6 +39,7 @@ export struct ButtonClickTestPage {
     this.testResults += '   - Button: Button/Login#login_button\n';
     this.testResults += '   - List and tab components append #position:n\n';
     this.testResults += '   - Missing text or id leaves that part empty\n';
+    this.testResults += '   - Button 4 uses HandlerAction: demo_custom_button_action + demo_action_handler\n';
     this.testResults += '4. Check logs for "[ACTION-TRACK]" to see tracking details\n';
     this.testResults += '5. Action data will be uploaded to server as RUM action data\n';
     this.testResults += '\nNote: Make sure FTSDK.initializeUIFeatures() was called in EntryAbility\n';
@@ -56,7 +57,8 @@ export struct ButtonClickTestPage {
     this.testResults += `✅ ${actionInfo}`;
     
     // Expected action name format: ComponentType/text#id
-    const expectedActionName = `${componentType}/${description}${componentId ? `#${componentId}` : ''}`;
+    const expectedActionName = componentId === 'test-button-action-tracking' ?
+      'demo_custom_button_action' : `${componentType}/${description}${componentId ? `#${componentId}` : ''}`;
     this.testResults += `   Expected action name: ${expectedActionName}\n`;
     this.testResults += `   Component type: ${componentType}\n`;
     this.testResults += `   Action type: click\n`;

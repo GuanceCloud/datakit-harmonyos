@@ -12,6 +12,7 @@ import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigati
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
+import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
 import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
 import { FTViewTrackingContext } from '../../../main/ets/components/rum/handler/FTViewTrackingContext';
@@ -287,6 +288,17 @@ class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
 
   resolveHandlerAction(_actionEventWrapper: ActionEventWrapper): null | undefined {
     this.resolvedCount += 1;
+    return undefined;
+  }
+}
+
+class CustomizingActionTrackingHandler implements FTActionTrackingHandler {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | undefined {
+    if (actionEventWrapper.getSource()?.getId() === 'custom_action_view') {
+      const properties: Record<string, object> = {};
+      properties['handler_property'] = new ActionPropertyWrapper('handler_value');
+      return new HandlerAction('custom_action_name', properties);
+    }
     return undefined;
   }
 }
@@ -1075,6 +1087,22 @@ export default function autoTrackDeviceTest() {
         'action,',
         `action_name=${actionName}`,
         `view_name=${viewName}`
+      ]);
+    });
+
+    it('handlerActionCustomizesClickNameAndProperties', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new CustomizingActionTrackingHandler()));
+      await startViewForAction('custom_action_view_page');
+
+      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'custom_action_view', 1007));
+      await assertActionStarted('custom_action_name');
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        'action_name=custom_action_name',
+        'handler_property=',
+        'view_name=custom_action_view_page'
       ]);
     });
   });

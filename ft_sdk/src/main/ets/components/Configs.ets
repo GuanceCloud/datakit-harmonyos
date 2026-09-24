@@ -378,7 +378,9 @@ export class FTRUMConfig {
 
   /**
    * Set action tracking handler
-   * Allows customization of which actions should be tracked and how
+   * Handles automatic clicks and cold/hot launch Actions. Return HandlerAction
+   * to customize the name and properties, null to filter, or undefined to
+   * preserve default collection. Manual Actions bypass the handler.
    * Aligned with Android SDK: FTRUMConfig.setActionTrackingHandler(FTActionTrackingHandler)
    * 
    * @param handler Action tracking handler, or null to use default behavior

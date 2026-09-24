@@ -11,8 +11,11 @@ import {
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTAppStartCounter } from '../../../main/ets/components/monitor/FTAppStartCounter';
+import { FTAppLaunchTracker } from '../../../main/ets/components/monitor/FTAppLaunchTracker';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
+import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
+import { ActionSourceType } from '../../../main/ets/components/rum/enum/ActionSourceType';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import { FTAbilityLifecycleListener } from '../../../main/ets/components/monitor/FTAbilityLifecycleListener';
 import {
@@ -176,13 +179,34 @@ class DeviceLaunchStageContext {
   }
 }
 
-/** A rejecting automatic Action handler must not affect SDK-owned launch Actions. */
 class RejectAllAutomaticActionsHandler implements FTActionTrackingHandler {
   public invocationCount: number = 0;
 
   public resolveHandlerAction(_actionEventWrapper: ActionEventWrapper): null {
     this.invocationCount++;
     return null;
+  }
+}
+
+class CustomLaunchActionHandler implements FTActionTrackingHandler {
+  public coldCount: number = 0;
+  public hotCount: number = 0;
+
+  resolveHandlerAction(event: ActionEventWrapper): HandlerAction | undefined {
+    if (event.getSourceType() === ActionSourceType.LAUNCH_COLD) {
+      this.coldCount++;
+      const properties: Record<string, object> = {};
+      properties['handler_source'] = new String('cold');
+      properties['app_launch_type'] = new String('tampered');
+      return new HandlerAction('custom_cold_launch', properties);
+    }
+    if (event.getSourceType() === ActionSourceType.LAUNCH_HOT) {
+      this.hotCount++;
+      const properties: Record<string, object> = {};
+      properties['handler_source'] = new String('hot');
+      return new HandlerAction('custom_hot_launch', properties);
+    }
+    return undefined;
   }
 }
 
@@ -325,7 +349,7 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(runtime.anrManager.startMonitoringCount).assertEqual(2);
     });
 
-    it('foregroundColdLaunchIgnoreActionHandler', 0, async () => {
+    it('foregroundColdLaunchCanBeFilteredByActionHandler', 0, async () => {
       const actionHandler = new RejectAllAutomaticActionsHandler();
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig()
@@ -346,14 +370,68 @@ export default function ftSDKLifecycleDeviceTest() {
       await WaitUtils.delay(5);
       FTSDK.recordAppFirstFrame();
 
+      await WaitUtils.delay(300);
+      const records = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(records.some(record => record.getDataString().includes('action_type=launch_cold'))).assertFalse();
+      expect(actionHandler.invocationCount).assertEqual(1);
+      expect(FTAppLaunchTracker.getInstance().getSnapshot().finished).assertTrue();
+      expect(FTAppLaunchTracker.getInstance().getSnapshot().reported).assertFalse();
+    });
+
+    it('foregroundColdLaunchHandlerCustomizesNameAndPreservesSdkFields', 0, async () => {
+      const actionHandler = new CustomLaunchActionHandler();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true)
+        .setActionTrackingHandler(actionHandler));
+
+      const applicationContext = new DeviceLaunchApplicationContext();
+      FTSDK.recordAppApplicationInit(new DeviceLaunchStageContext(applicationContext));
+      await WaitUtils.delay(30);
+      applicationContext.emitForeground();
+      FTSDK.recordAppFirstUIAbilityCreate();
+      FTSDK.recordAppLaunchWindowForeground();
+      await WaitUtils.delay(5);
+      FTSDK.recordAppFirstFrame();
+
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
         'action_type=launch_cold',
+        'action_name=custom_cold_launch',
+        'handler_source=',
         'app_launch_type="foreground"'
       ]);
       expect(record !== null).assertTrue();
-      // FTActionTrackingHandler only handles automatic input Actions. It must
-      // neither receive nor filter the SDK-owned launch_cold Action.
-      expect(actionHandler.invocationCount).assertEqual(0);
+      expect(actionHandler.coldCount).assertEqual(1);
+      expect(FTAppLaunchTracker.getInstance().getSnapshot().reported).assertTrue();
+    });
+
+    it('customColdLaunchUsesErrorSampledStagingWhenSessionRequiresIt', 0, async () => {
+      const actionHandler = new CustomLaunchActionHandler();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true)
+        .setSessionSamplingRate(0)
+        .setSessionOnErrorSamplingRate(100)
+        .setActionTrackingHandler(actionHandler));
+
+      const applicationContext = new DeviceLaunchApplicationContext();
+      FTSDK.recordAppApplicationInit(new DeviceLaunchStageContext(applicationContext));
+      await WaitUtils.delay(30);
+      applicationContext.emitForeground();
+      FTSDK.recordAppFirstUIAbilityCreate();
+      FTSDK.recordAppLaunchWindowForeground();
+      await WaitUtils.delay(5);
+      FTSDK.recordAppFirstFrame();
+
+      const staged = await DBAssert.waitForRawSyncRecordContaining('rum_app_error_sampled', [
+        'action_type=launch_cold',
+        'action_name=custom_cold_launch'
+      ]);
+      expect(staged !== null).assertTrue();
+      const normalRecords = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(normalRecords.some(record => record.getDataString().includes('action_type=launch_cold'))).assertFalse();
     });
 
     it('hotStartNotPersistColdLaunchTypeField', 0, async () => {
@@ -369,6 +447,41 @@ export default function ftSDKLifecycleDeviceTest() {
       ]);
       expect(record !== null).assertTrue();
       expect(record!.getDataString().includes('app_launch_type')).assertFalse();
+    });
+
+    it('hotLaunchHandlerCustomizesNameAndProperties', 0, async () => {
+      const actionHandler = new CustomLaunchActionHandler();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true)
+        .setActionTrackingHandler(actionHandler));
+
+      FTAppStartCounter.getInstance().hotStart(1_000_000, Date.now() * 1_000_000);
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action_type=launch_hot',
+        'action_name=custom_hot_launch',
+        'handler_source='
+      ]);
+      expect(record !== null).assertTrue();
+      expect(actionHandler.hotCount).assertEqual(1);
+    });
+
+    it('hotLaunchHandlerCanFilterAction', 0, async () => {
+      const actionHandler = new RejectAllAutomaticActionsHandler();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true)
+        .setActionTrackingHandler(actionHandler));
+
+      FTAppStartCounter.getInstance().hotStart(1_000_000, Date.now() * 1_000_000);
+      await WaitUtils.delay(300);
+
+      const records = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(records.some(record => record.getDataString().includes('action_type=launch_hot'))).assertFalse();
+      expect(actionHandler.invocationCount).assertEqual(1);
     });
 
     it('multipleUiAbilitiesKeepOneCrashFreeApplicationTimeline', 0, async () => {

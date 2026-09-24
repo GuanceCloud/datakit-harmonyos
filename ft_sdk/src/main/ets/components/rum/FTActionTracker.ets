@@ -5,7 +5,9 @@ import { Constants } from '../Constants';
 import { FTRUMConfig } from '../Configs';
 import { FTRUMInnerManager } from './FTRUMInnerManager';
 import { ActionEventWrapper } from './bean/ActionEventWrapper';
+import { HandlerAction } from './bean/HandlerAction';
 import { ActionSourceType } from './enum/ActionSourceType';
+import { resolveAutomaticActionHandler } from './handler/FTAutomaticActionHandler';
 
 const TAG = "FTActionTracker";
 
@@ -251,32 +253,27 @@ export class FTActionTracker {
       }
 
 
-      // Check whether this Action should be filtered.
-      const handler = this.rumConfig.getActionTrackingHandler();
-      if (handler) {
-        const actionEventWrapper = new ActionEventWrapper(node, ActionSourceType.CLICK_VIEW, null);
-        const handlerResult = handler.resolveHandlerAction(actionEventWrapper);
-
-        // Only an explicit null filters the Action. Every other result uses the
-        // original automatic collection flow below without a simplified path.
-        if (handlerResult === null) {
-          return;
-        }
+      const actionEventWrapper = new ActionEventWrapper(node, ActionSourceType.CLICK_VIEW, null);
+      const handlerResult = resolveAutomaticActionHandler(this.rumConfig.getActionTrackingHandler(),
+        actionEventWrapper);
+      if (handlerResult === null) {
+        return;
       }
 
-      // No handler, or a non-matching handler result: use the original complete
-      // automatic collection behavior.
+      // Keep the original automatic Action lifecycle for both default and
+      // customized results; only the name and properties may change.
       // willClick event is only triggered when component has onClick callback
       // So we can track all components that trigger willClick (aligned with user requirement)
 
       // Build action name (similar to Android's getViewDesc)
-      const actionName = this.buildActionName(nodeType, nodeId, node);
+      const actionName = handlerResult instanceof HandlerAction ? handlerResult.getActionName() :
+        this.buildActionName(nodeType, nodeId, node);
 
 
       // Collect customProperty from node (aligned with Android: support for custom properties via customProperty)
       // Android: property is passed via FTActionTrackingHandler or extra parameter
       // HarmonyOS: collect from customProperty to support user-defined properties for click actions
-      const property: Record<string, object> = {};
+      let property: Record<string, object> = {};
       try {
         interface CustomPropertyGetter { getCustomProperty(key: string): Object }
         const maybe: CustomPropertyGetter = node as CustomPropertyGetter;
@@ -339,6 +336,12 @@ export class FTActionTracker {
       } catch (e) {
         // Ignore errors when collecting customProperty
         FTInnerLogger.w(TAG, `[ACTION-TRACK] Error collecting customProperty: ${e}`);
+      }
+
+      if (handlerResult instanceof HandlerAction) {
+        // A custom result replaces component-derived properties, matching the
+        // previous HarmonyOS handler behavior and Android's HandlerAction path.
+        property = handlerResult.getProperty() || {};
       }
 
       // Track click action using startAction (same as Android implementation)

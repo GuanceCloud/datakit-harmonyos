@@ -16,6 +16,7 @@ import {
   ErrorMonitorType,
   ActionEventWrapper,
   FTActionTrackingHandler,
+  HandlerAction,
   FTInTakeUrlHandler,
   FTLoggerConfig,
   FTRemoteConfigFetchResult,
@@ -116,12 +117,10 @@ class DemoViewTrackingHandler implements FTViewTrackingHandler {
 }
 
 /**
- * Example of automatic Action filtering. Returning null skips a matching
- * Action; returning undefined continues through the original automatic Action
- * collection path.
+ * Example of automatic Action customization and filtering.
  */
 class DemoActionTrackingHandler implements FTActionTrackingHandler {
-  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | null | undefined {
     const source = actionEventWrapper.getSource();
     const nodeId = source?.getId() ?? '';
     const nodeType = source?.getNodeType() ?? 'UnknownComponent';
@@ -129,6 +128,12 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
     if (this.shouldFilterAction(actionName, nodeId)) {
       DemoLogger.i(LOG_TAG, `Automatic Action filtered: name=${actionName}, id=${nodeId}`);
       return null;
+    }
+
+    if (nodeId === 'test-button-action-tracking') {
+      const properties: Record<string, object> = {};
+      properties['demo_action_handler'] = new String('customized');
+      return new HandlerAction('demo_custom_button_action', properties);
     }
 
     return undefined;
