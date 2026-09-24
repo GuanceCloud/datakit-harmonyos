@@ -792,6 +792,63 @@ export default function configUnitTest() {
       expect(Number.isNaN(new FTLoggerConfig().setSamplingRate(Number.NaN).getSamplingRate())).assertTrue();
     });
 
+    it('percentageSamplingRatesShouldUseNewUnitsAndKeepLegacyCompatibility', 0, () => {
+      const rum = new FTRUMConfig()
+        .setSamplingRate(1)
+        .setSessionSamplingRate(0.1)
+        .setSessionErrorSampleRate(1)
+        .setSessionOnErrorSamplingRate(1);
+      expect(rum.getSessionSamplingRate()).assertEqual(0.1);
+      expect(rum.getSamplingRate()).assertEqual(0.001);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(1);
+      expect(rum.getSessionErrorSampleRate()).assertEqual(0.01);
+
+      const log = new FTLoggerConfig().setSamplingRate(1).setLogSamplingRate(20);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(log.getSamplingRate()).assertEqual(0.2);
+
+      const trace = new FTTraceConfig().setSamplingRate(1).setTraceSamplingRate(99.9);
+      expect(trace.getTraceSamplingRate()).assertEqual(99.9);
+      expect(trace.getSamplingRate()).assertEqual(0.999);
+
+      // A legacy assignment after a new assignment cannot override the new
+      // field in the same source.
+      rum.setSamplingRate(0.5).setSessionErrorSampleRate(0.5);
+      log.setSamplingRate(0.5);
+      trace.setSamplingRate(0.5);
+      expect(rum.getSessionSamplingRate()).assertEqual(0.1);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(1);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(trace.getTraceSamplingRate()).assertEqual(99.9);
+    });
+
+    it('percentageSamplingRatesShouldRejectInvalidValuesWithoutChangingState', 0, () => {
+      const rum = new FTRUMConfig().setSessionSamplingRate(20).setSessionOnErrorSamplingRate(20);
+      const log = new FTLoggerConfig().setLogSamplingRate(20);
+      const trace = new FTTraceConfig().setTraceSamplingRate(20);
+      const invalidRates = [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 100.1];
+
+      for (const invalidRate of invalidRates) {
+        let rumRejected = false;
+        let errorRumRejected = false;
+        let logRejected = false;
+        let traceRejected = false;
+        try { rum.setSessionSamplingRate(invalidRate); } catch (_) { rumRejected = true; }
+        try { rum.setSessionOnErrorSamplingRate(invalidRate); } catch (_) { errorRumRejected = true; }
+        try { log.setLogSamplingRate(invalidRate); } catch (_) { logRejected = true; }
+        try { trace.setTraceSamplingRate(invalidRate); } catch (_) { traceRejected = true; }
+        expect(rumRejected).assertTrue();
+        expect(errorRumRejected).assertTrue();
+        expect(logRejected).assertTrue();
+        expect(traceRejected).assertTrue();
+      }
+
+      expect(rum.getSessionSamplingRate()).assertEqual(20);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(20);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(trace.getTraceSamplingRate()).assertEqual(20);
+    });
+
     it('rumConfigShouldKeepSwitches', 0, () => {
       const config = new FTRUMConfig()
         .setRumAppId(TEST_FAKE_RUM_ID)

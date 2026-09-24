@@ -67,10 +67,24 @@ function getRuntimeUploadEndpoint(config: FTSDKConfig): RuntimeUploadEndpoint | 
   return runtimeUploadEndpointOverrides.get(config) ?? null;
 }
 
+/**
+ * Converts the public percentage contract to the SDK's existing internal
+ * probability contract. This is intentionally the only conversion performed
+ * at the configuration boundary.
+ */
+function percentageToSamplingProbability(rate: number, name: string): number {
+  if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+    throw new RangeError(`${name} must be a finite number between 0 and 100`);
+  }
+  return rate / 100;
+}
+
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
   private sessionErrorSampleRate: number = 0.0; // Error sampling rate, range 0 to 1, default 0.0
+  private sessionSamplingRate: number | null = null;
+  private sessionOnErrorSamplingRate: number | null = null;
   private rumAppId: string = "";
   private enableTrackAppCrash: boolean = false;
   private enableTrackAppUIBlock: boolean = false;
@@ -103,20 +117,46 @@ export class FTRUMConfig {
   private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
   // Method definitions
+  /**
+   * @deprecated Use getSessionSamplingRate(). This compatibility getter
+   * returns the effective rate in the legacy [0,1] probability unit.
+   */
   public getSamplingRate(): number {
-    return this.samplingRate;
+    return this.sessionSamplingRate ?? this.samplingRate;
   }
 
+  /**
+   * @deprecated Use setSessionSamplingRate(). This compatibility setter
+   * accepts the legacy [0,1] probability unit.
+   */
   public setSamplingRate(samplingRate: number = 1.0): FTRUMConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective session sampling rate as a percentage in [0,100]. */
+  public getSessionSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /**
+   * Set the session sampling rate as a percentage in [0,100]. Decimals are
+   * supported, so 0.1 represents 0.1% sampling.
+   */
+  public setSessionSamplingRate(samplingRate: number): FTRUMConfig {
+    this.sessionSamplingRate = percentageToSamplingProbability(samplingRate, 'sessionSamplingRate');
     return this;
   }
 
   /**
    * Get error sampling rate
    */
+  /**
+   * @deprecated Use getSessionOnErrorSamplingRate(). This compatibility
+   * getter returns the effective rate in the legacy [0,1] probability unit.
+   */
   public getSessionErrorSampleRate(): number {
-    return this.sessionErrorSampleRate;
+    return this.sessionOnErrorSamplingRate ?? this.sessionErrorSampleRate;
   }
 
   /**
@@ -126,8 +166,30 @@ export class FTRUMConfig {
    * Range [0,1], 0 means no collection, 1 means full collection.
    * Default is 0.0, aligned with Android SDK.
    */
+  /**
+   * @deprecated Use setSessionOnErrorSamplingRate(). This compatibility
+   * setter accepts the legacy [0,1] probability unit.
+   */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));
+    return this;
+  }
+
+  /** Get the effective error-session sampling rate as a percentage in [0,100]. */
+  public getSessionOnErrorSamplingRate(): number {
+    return this.getSessionErrorSampleRate() * 100;
+  }
+
+  /**
+   * Set the error-session supplemental sampling rate as a percentage in
+   * [0,100]. The default remains 0%, so unsampled sessions are not retained
+   * after an error unless this is explicitly configured.
+   */
+  public setSessionOnErrorSamplingRate(samplingRate: number): FTRUMConfig {
+    this.sessionOnErrorSamplingRate = percentageToSamplingProbability(
+      samplingRate,
+      'sessionOnErrorSamplingRate'
+    );
     return this;
   }
 
@@ -480,6 +542,7 @@ export class FTLoggerConfig {
    * Sampling rate, [0,1]
    */
   private samplingRate: number = 1;
+  private logSamplingRate: number | null = null;
   /**
    * Whether to link with RUM data
    */
@@ -524,17 +587,30 @@ export class FTLoggerConfig {
   private printCustomLogToConsole: boolean = false;
 
   /**
-   * Get sampling rate
+   * @deprecated Use getLogSamplingRate(). This compatibility getter returns
+   * the effective rate in the legacy [0,1] probability unit.
    */
   public getSamplingRate(): number {
-    return this.samplingRate;
+    return this.logSamplingRate ?? this.samplingRate;
   }
 
   /**
-   * Set sampling rate
+   * @deprecated Use setLogSamplingRate(). This compatibility setter accepts
+   * the legacy [0,1] probability unit.
    */
-  setSamplingRate(samplingRate: number = 1.0): FTLoggerConfig {
+  public setSamplingRate(samplingRate: number = 1.0): FTLoggerConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective log sampling rate as a percentage in [0,100]. */
+  public getLogSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /** Set the log sampling rate as a percentage in [0,100]. */
+  public setLogSamplingRate(samplingRate: number): FTLoggerConfig {
+    this.logSamplingRate = percentageToSamplingProbability(samplingRate, 'logSamplingRate');
     return this;
   }
 
@@ -1521,6 +1597,7 @@ export class FTTraceConfig {
    * Sampling rate, [0,1]
    */
   private samplingRate: number = 1;
+  private traceSamplingRate: number | null = null;
   /**
    * Trace type for link tracking
    */
@@ -1564,17 +1641,30 @@ export class FTTraceConfig {
   ];
 
   /**
-   * Get sampling rate
+   * @deprecated Use getTraceSamplingRate(). This compatibility getter returns
+   * the effective rate in the legacy [0,1] probability unit.
    */
-  getSamplingRate(): number {
-    return this.samplingRate;
+  public getSamplingRate(): number {
+    return this.traceSamplingRate ?? this.samplingRate;
   }
 
   /**
-   * Set sampling rate
+   * @deprecated Use setTraceSamplingRate(). This compatibility setter accepts
+   * the legacy [0,1] probability unit.
    */
-  setSamplingRate(samplingRate: number = 1.0): FTTraceConfig {
+  public setSamplingRate(samplingRate: number = 1.0): FTTraceConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective trace sampling rate as a percentage in [0,100]. */
+  public getTraceSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /** Set the trace sampling rate as a percentage in [0,100]. */
+  public setTraceSamplingRate(samplingRate: number): FTTraceConfig {
+    this.traceSamplingRate = percentageToSamplingProbability(samplingRate, 'traceSamplingRate');
     return this;
   }
 

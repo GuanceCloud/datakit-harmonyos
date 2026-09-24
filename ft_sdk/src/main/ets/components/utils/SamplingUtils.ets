@@ -45,21 +45,19 @@ export class SamplingUtils {
       return true;
     }
 
-    const randomNumber = SamplingUtils.generateRandomNumber();
-    const threshold = sampleRate * 100;
-    const enabled = randomNumber <= threshold;
-    return enabled;
+    // Use a continuous value so percentages such as 0.1% retain their
+    // intended probability instead of being rounded to one of 101 buckets.
+    return Math.random() < sampleRate;
   }
 
   /**
-   * Generate random number for sampling (0-100)
+   * Generate a random number for compatibility with existing internal callers.
    * Generate random number for sampling
    * 
-   * @returns Random number between 0 and 100
+   * @returns Random number between 0 (inclusive) and 1 (exclusive)
    */
   public static generateRandomNumber(): number {
-    // Use HarmonyOS Math.random() to generate random number
-    return Math.floor(Math.random() * 101); // 0-100 inclusive
+    return Math.random();
   }
 
   /**
