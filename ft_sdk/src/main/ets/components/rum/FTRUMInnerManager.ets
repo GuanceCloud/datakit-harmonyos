@@ -1604,8 +1604,11 @@ export class FTRUMInnerManager {
   }
 
   private createCompletedActionDTO(actionBean: ActionBean): SDKRumCompletedActionDTO {
+    const collectType = this.checkSessionWillCollect(actionBean.getSessionId());
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
+      customDataType: this.getRumCustomDataType(collectType),
+      shouldCollect: collectType !== CollectType.DROP,
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
       uuid: `action-${actionBean.getId()}`,
       time: actionBean.getStartTime(),
@@ -1995,7 +1998,7 @@ export class FTRUMInnerManager {
         tagsMap,
         fieldsMap,
         callback,
-        null,
+        this.checkSessionWillCollect(viewBean.getSessionId()),
         `view-${viewBean.getId()}-${viewBean.getDataUpdateTime()}-${viewBean.getViewUpdateTime()}`
       );
     } catch (error) {
@@ -2847,6 +2850,7 @@ export class FTRUMInnerManager {
       const actionId = Utils.generateUUID();
       const actualStartTime = startTime > 0 ? startTime : Utils.getCurrentNanoTime();
       const actualDuration = duration > 0 ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
+      const collectType = this.checkSessionWillCollect(this.sessionId);
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
         actualProperty = property;
@@ -2854,6 +2858,8 @@ export class FTRUMInnerManager {
       this.increaseActionCountInMemory(viewId);
       const payload: SDKRumCompletedActionDTO = {
         dataType: DataType.RUM_APP.toString(),
+        customDataType: this.getRumCustomDataType(collectType),
+        shouldCollect: collectType !== CollectType.DROP,
         measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
         uuid: Utils.generateUUID(),
         time: actualStartTime,
@@ -3210,7 +3216,7 @@ export class FTRUMInnerManager {
     return record;
   }
 
-  private getResourceCustomDataType(collectType: CollectType): string | undefined {
+  private getRumCustomDataType(collectType: CollectType): string | undefined {
     return collectType === CollectType.SAMPLING ? 'rum_app_error_sampled' : undefined;
   }
 
@@ -3761,7 +3767,7 @@ export class FTRUMInnerManager {
           property: this.propertyToRecord(effectiveProperty),
           deviceTags: errorDeviceData.tags,
           time: actualDateline,
-	          customDataType: this.getResourceCustomDataType(collectType),
+	          customDataType: this.getRumCustomDataType(collectType),
 	          uuid: draftUuid,
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
 	        }, 'rum.error');
@@ -3928,7 +3934,7 @@ export class FTRUMInnerManager {
         // lifecycle has already been stopped on the Host.
         awaitStopCommand: this.resourceStoppedIds.has(resourceId),
         shouldCollect: collectType !== CollectType.DROP,
-        customDataType: this.getResourceCustomDataType(collectType),
+        customDataType: this.getRumCustomDataType(collectType),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.add');
       this.markResourceContentSubmitted(resourceId);
@@ -3963,7 +3969,7 @@ export class FTRUMInnerManager {
         params: resourceParams,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
-        customDataType: this.getResourceCustomDataType(collectType),
+        customDataType: this.getRumCustomDataType(collectType),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.content');
       this.markResourceContentSubmitted(resourceId);

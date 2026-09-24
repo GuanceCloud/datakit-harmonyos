@@ -326,8 +326,12 @@ export interface SDKRumErrorCommandBatchDTO {
 }
 
 export interface SDKRumCompletedActionDTO {
+  /** Base Line Protocol category; the local queue uses customDataType when set. */
   dataType: string;
+  /** Error-sampled sessions stage here until an error opens the upload window. */
   customDataType?: string;
+  /** False for sessions rejected by both normal and error sampling. */
+  shouldCollect?: boolean;
   measurement: string;
   uuid: string;
   time: number;

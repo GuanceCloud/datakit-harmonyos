@@ -602,6 +602,73 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
+    it('errorSampledSessionShouldStageActionViewAndResourceTogether', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 1);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.SAMPLING);
+
+      const viewName = 'error_sampled_lifecycle_view';
+      const actionName = 'error_sampled_lifecycle_action';
+      const aggregatedActionName = 'error_sampled_aggregate_action';
+      const resourceId = 'error_sampled_lifecycle_resource';
+      const resourceUrl = 'https://example.com/error-sampled-lifecycle';
+      const params = new ResourceParams();
+      params.setUrl(resourceUrl);
+      params.setResourceMethod('GET');
+      params.setResourceStatus(200);
+      const netStatus = new NetStatusBean();
+      netStatus.setHoleRequestTime(120000000);
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().addAction(actionName, 'click');
+      await WaitUtils.delay(300);
+      FTRUMGlobalManager.getInstance().startAction(aggregatedActionName, 'click');
+      FTRUMGlobalManager.getInstance().startResource(resourceId);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
+      FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const stagedType = 'rum_app_error_sampled';
+      const action = await DBAssert.waitForRawSyncRecordContaining(stagedType,
+        ['action,', `action_name=${actionName}`], 5000);
+      const aggregatedAction = await DBAssert.waitForRawSyncRecordContaining(stagedType,
+        ['action,', `action_name=${aggregatedActionName}`], 5000);
+      const view = await DBAssert.waitForRawSyncRecordContaining(stagedType,
+        ['view,', `view_name=${viewName}`], 5000);
+      const resource = await DBAssert.waitForRawSyncRecordContaining(stagedType,
+        ['resource,', `resource_url=${resourceUrl}`], 5000);
+      expect(action !== null).assertTrue();
+      expect(aggregatedAction !== null).assertTrue();
+      expect(view !== null).assertTrue();
+      expect(resource !== null).assertTrue();
+
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        const line = row.getDataString();
+        expect(line.includes(`action_name=${actionName}`)).assertFalse();
+        expect(line.includes(`action_name=${aggregatedActionName}`)).assertFalse();
+        expect(line.includes(`view_name=${viewName}`)).assertFalse();
+        expect(line.includes(`resource_url=${resourceUrl}`)).assertFalse();
+      }
+    });
+
+    it('droppedSessionShouldNotStageCompletedAction', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 0);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.DROP);
+
+      const actionName = 'dropped_lifecycle_action';
+      FTRUMGlobalManager.getInstance().addAction(actionName, 'click');
+      await waitForRumAggregation();
+
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      const stagedRows = await DBAssert.queryRawSyncData('rum_app_error_sampled', 100);
+      for (const row of normalRows.concat(stagedRows)) {
+        expect(row.getDataString().includes(`action_name=${actionName}`)).assertFalse();
+      }
+    });
+
     it('jsErrorShouldUploadAndDelete', 0, async () => {
       const errorMessage = 'real_collected_js_error';
       const errorStack = 'Error: real_collected_js_error\n  at DataSyncTest';

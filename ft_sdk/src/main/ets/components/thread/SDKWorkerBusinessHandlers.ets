@@ -2136,6 +2136,12 @@ function appendCompletedActionDraft(
 
   state.eventSequence++;
   const uuid = action.uuid && action.uuid.length > 0 ? action.uuid : generateWorkerUuid();
+  if (action.shouldCollect === false) {
+    if (action.countViewAction === true && action.viewId && action.viewId.length > 0) {
+      appendViewActionCounterDelta(state, action.viewId);
+    }
+    return;
+  }
   const lineContext = batchLineContext || state.lineContext;
   const tags: SDKStringRecord = {};
   if (lineContext) {
