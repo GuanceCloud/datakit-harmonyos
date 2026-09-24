@@ -1,4 +1,8 @@
-import { ENTRY_RUNTIME_KEYS, resolveEntryRuntimeConfig } from '../utils/EntryRuntimeConfig';
+import {
+  ENTRY_RUNTIME_KEYS,
+  ENTRY_RUNTIME_LEGACY_SAMPLING_KEYS,
+  resolveEntryRuntimeConfig
+} from '../utils/EntryRuntimeConfig';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
@@ -310,6 +314,12 @@ export default class EntryAbility extends UIAbility {
       const value = want.parameters?.[key];
       if (value !== undefined && value !== null) incoming[key] = String(value);
     }
+    for (const key of ENTRY_RUNTIME_LEGACY_SAMPLING_KEYS) {
+      const stored = String(await store.get(key, ''));
+      if (stored.length > 0) saved[key] = stored;
+      const value = want.parameters?.[key];
+      if (value !== undefined && value !== null) incoming[key] = String(value);
+    }
     const config = resolveEntryRuntimeConfig(incoming, saved);
     const sources: string[] = [];
     let changed = false;
@@ -460,7 +470,7 @@ export default class EntryAbility extends UIAbility {
 
       // Initialize log configuration
       const logConfig = new FTLoggerConfig()
-        .setSamplingRate(Number(this.runtimeConfig.logSamplingRate))  // Shared persisted sampling configuration
+        .setLogSamplingRate(Number(this.runtimeConfig.logSamplingRate))
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true, LOG_FILTER_TEST_RULE)
         // .setLogCacheLimitCount(20000)
@@ -481,8 +491,8 @@ export default class EntryAbility extends UIAbility {
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
         .setEnableTrackAppCrash(true)  // JS and native crash monitoring
-        .setSamplingRate(Number(this.runtimeConfig.rumSamplingRate))
-        .setSessionErrorSampleRate(Number(this.runtimeConfig.errorSamplingRate))
+        .setSessionSamplingRate(Number(this.runtimeConfig.sessionSamplingRate))
+        .setSessionOnErrorSamplingRate(Number(this.runtimeConfig.sessionOnErrorSamplingRate))
         .setEnableTraceUserAction(true)
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
@@ -510,7 +520,7 @@ export default class EntryAbility extends UIAbility {
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()
-        .setSamplingRate(Number(this.runtimeConfig.traceSamplingRate))
+        .setTraceSamplingRate(Number(this.runtimeConfig.traceSamplingRate))
         .setEnableAutoTrace(true)
         .setEnableLinkRUMData(true)
         .setTraceType(TraceType.DDTRACE);

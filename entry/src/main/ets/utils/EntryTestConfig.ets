@@ -38,9 +38,9 @@ export function validateEntryTestConfig(args: Record<string, string>, config: Re
     throw new Error('Uploading requires a valid saved endpoint or explicit datakitUrl / datawayUrl + clientToken');
   }
   if (e2e && (config.autoSync !== 'false' || config.localDataFilterEnabled !== 'false' ||
-    config.remoteConfigTestEnabled !== 'false' || config.logSamplingRate !== '1' ||
-    config.rumSamplingRate !== '1' || config.errorSamplingRate !== '1' ||
-    config.traceSamplingRate !== '1')) {
-    throw new Error('Upload E2E requires autoSync=false, sampling rates=1 and local/remote configuration filters disabled');
+    config.remoteConfigTestEnabled !== 'false' || config.logSamplingRate !== '100' ||
+    config.sessionSamplingRate !== '100' || config.sessionOnErrorSamplingRate !== '0' ||
+    config.traceSamplingRate !== '100')) {
+    throw new Error('Upload E2E requires autoSync=false, default sampling rates and local/remote configuration filters disabled');
   }
 }

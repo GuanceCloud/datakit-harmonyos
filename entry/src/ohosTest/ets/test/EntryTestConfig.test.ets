@@ -26,14 +26,19 @@ export default function entryTestConfigTest() {
       expect(test.entryUploadE2EEnabled === undefined).assertTrue();
       expect(test['class'] === undefined).assertTrue();
       expect(test.autoSync === undefined).assertTrue();
+      expect(resolveEntryRuntimeConfig(test, saved).sessionSamplingRate).assertEqual('25');
     });
-    it('noTestArgumentsPreserveSavedBehavior', 0, () => {
+    it('legacyPersistedSamplingRatesShouldMigrateOnceToPercentages', 0, () => {
       const saved: Record<string, string> = { 'appId': 'saved-app', 'datakitUrl': 'https://saved.example.com',
         'autoSync': 'true', 'localDataFilterEnabled': 'true', 'remoteConfigTestEnabled': 'true',
         'logSamplingRate': '0', 'rumSamplingRate': '0.25', 'errorSamplingRate': '0.5', 'traceSamplingRate': '0.75' };
       const before = JSON.stringify(saved);
       const config = resolveEntryRuntimeConfig(entryLaunchParameters({}), saved);
-      for (const key of Object.keys(saved)) expect(config[key]).assertEqual(saved[key]);
+      expect(config.logSamplingRate).assertEqual('0');
+      expect(config.sessionSamplingRate).assertEqual('25');
+      expect(config.sessionOnErrorSamplingRate).assertEqual('50');
+      expect(config.traceSamplingRate).assertEqual('75');
+      expect(config.samplingRateConfigVersion).assertEqual('2');
       expect(JSON.stringify(saved)).assertEqual(before);
       expect(Object.keys(entryLaunchParameters({})).length).assertEqual(0);
     });
@@ -44,6 +49,25 @@ export default function entryTestConfigTest() {
       expect(JSON.stringify(second)).assertEqual(JSON.stringify(first));
       expect(second.autoSync).assertEqual('false');
       expect(second.logSamplingRate).assertEqual('0');
+      expect(second.sessionOnErrorSamplingRate).assertEqual('25');
+    });
+    it('newSamplingArgumentsShouldUsePercentagesWhileLegacyValuesRemainProbabilities', 0, () => {
+      const legacy = resolveEntryRuntimeConfig({}, {
+        'logSamplingRate': '1', 'traceSamplingRate': '1', 'rumSamplingRate': '1', 'errorSamplingRate': '1'
+      });
+      expect(legacy.logSamplingRate).assertEqual('100');
+      expect(legacy.traceSamplingRate).assertEqual('100');
+      expect(legacy.sessionSamplingRate).assertEqual('100');
+      expect(legacy.sessionOnErrorSamplingRate).assertEqual('100');
+
+      const current = resolveEntryRuntimeConfig({
+        'logSamplingRate': '1', 'traceSamplingRate': '1',
+        'sessionSamplingRate': '1', 'sessionOnErrorSamplingRate': '0.1'
+      }, {});
+      expect(current.logSamplingRate).assertEqual('1');
+      expect(current.traceSamplingRate).assertEqual('1');
+      expect(current.sessionSamplingRate).assertEqual('1');
+      expect(current.sessionOnErrorSamplingRate).assertEqual('0.1');
     });
     it('explicitDatakitClearsSavedDatawayAndToken', 0, () => {
       const config = resolveEntryRuntimeConfig({ 'datakitUrl': 'https://new.example.com' }, {
@@ -90,9 +114,11 @@ export default function entryTestConfigTest() {
     });
     it('rejectsInvalidValuesForBothEntrypoints', 0, () => {
       assertInvalid({ 'rumSamplingRate': '-1' });
-      assertInvalid({ 'logSamplingRate': '1.1' });
+      assertInvalid({ 'logSamplingRate': '100.1' });
       assertInvalid({ 'errorSamplingRate': 'NaN' });
       assertInvalid({ 'traceSamplingRate': '' });
+      assertInvalid({ 'sessionSamplingRate': '-0.1' });
+      assertInvalid({ 'sessionOnErrorSamplingRate': 'Infinity' });
       assertInvalid({ 'autoSync': 'maybe' });
       assertInvalid({ 'fileDataStoreShadowTestEnabled': 'maybe' });
       assertInvalid({ 'datakitUrl': 'http://one.example.com', 'datawayUrl': 'http://two.example.com' });
