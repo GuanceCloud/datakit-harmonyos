@@ -337,6 +337,9 @@ export class FTRUMInnerManager {
   
   // Current active state
   private activeView: ActiveViewBean | null = null;
+  /** Launch Actions use their own View without replacing the foreground page. */
+  private launchView: ActiveViewBean | null = null;
+  private launchViewReady: Promise<void> = Promise.resolve();
   private activeAction: ActiveActionBean | null = null;
   
   // Resource management
@@ -2280,6 +2283,8 @@ export class FTRUMInnerManager {
     this.sampleRate = 1.0;
     this.sessionErrorSampleRate = 0.0;
     this.activeView = null;
+    this.launchView = null;
+    this.launchViewReady = Promise.resolve();
     this.activeAction = null;
     this.resourceBeanMap.clear();
     this.viewList = [];
@@ -2587,6 +2592,8 @@ export class FTRUMInnerManager {
       
       // Refresh session
       this.checkSessionRefresh(false);
+      // Android closes the synthetic launch View when a real page starts.
+      await this.closeLaunchView();
       
       // Re-check previousViewName after checkSessionRefresh (in case activeView was modified)
       // But only if we don't have a valid previousViewName yet
@@ -2699,6 +2706,8 @@ export class FTRUMInnerManager {
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
+      // A background transition can occur without an active page View.
+      await this.closeLaunchView(undefined, shouldGenerateSummary);
       if (!this.activeView) {
         FTInnerLogger.w(TAG, "stopView ignored: no active view");
         return;
@@ -2832,6 +2841,40 @@ export class FTRUMInnerManager {
   /**
    * Add action (directly completed action)
    */
+  private isLaunchActionType(actionType: string): boolean {
+    return actionType === Constants.ACTION_TYPE_LAUNCH_COLD ||
+      actionType === Constants.ACTION_TYPE_LAUNCH_HOT;
+  }
+
+  private ensureLaunchView(startTime: number): ActiveViewBean {
+    if (this.launchView === null || this.launchView.isClose()) {
+      const view = new ActiveViewBean(Constants.VIEW_NAME_APPLICATION_LAUNCH,
+        Constants.VIEW_NAME_ROOT, -1, this.sessionId);
+      view.setStartTime(startTime);
+      view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
+      view.setCollectType(this.checkSessionWillCollect(this.sessionId));
+      this.launchView = view;
+      // Synthetic Views do not start device-metrics monitoring.
+      this.launchViewReady = this.initView(view);
+    }
+    return this.launchView;
+  }
+
+  private async closeLaunchView(duration?: number, shouldGenerateSummary: boolean = true): Promise<void> {
+    const view = this.launchView;
+    if (view === null || view.isClose()) {
+      return;
+    }
+    const ready = this.launchViewReady;
+    if (duration === undefined) {
+      view.close();
+    } else {
+      view.closeWithTimeSpent(duration);
+    }
+    await ready;
+    await this.closeView(view, shouldGenerateSummary);
+  }
+
   public addAction(
     actionName: string,
     actionType: string,
@@ -2840,16 +2883,17 @@ export class FTRUMInnerManager {
     property: Record<string, object> = {}
   ): void {
     try {
-      const viewId = this.activeView?.getId() || "";
-      const viewName = this.activeView?.getViewName() || "";
-      const viewReferrer = this.activeView?.getViewReferrer() || "";
-
       // Refresh session
       this.checkSessionRefresh(true);
 
       const actionId = Utils.generateUUID();
       const actualStartTime = startTime > 0 ? startTime : Utils.getCurrentNanoTime();
       const actualDuration = duration > 0 ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
+      const isLaunchAction = this.isLaunchActionType(actionType);
+      const view = isLaunchAction ? this.ensureLaunchView(actualStartTime) : this.activeView;
+      const viewId = view?.getId() || "";
+      const viewName = view?.getViewName() || "";
+      const viewReferrer = view?.getViewReferrer() || "";
       const collectType = this.checkSessionWillCollect(this.sessionId);
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
@@ -2885,6 +2929,9 @@ export class FTRUMInnerManager {
         payload,
         `rum.addAction:${actionName}`
       );
+      if (isLaunchAction && this.activeView !== null && !this.activeView.isClose()) {
+        void this.closeLaunchView(actualDuration);
+      }
       this.scheduleRumCounterFlush();
       
 
@@ -4152,6 +4199,7 @@ export class FTRUMInnerManager {
       
       // Refresh view if needed (aligned with Android)
       if (checkRefreshView) {
+        await this.closeLaunchView();
         if (this.activeView && !this.activeView.isClose()) {
           this.activeView.close();
           // closeView will use activeView's session ID (which may have been updated above)
@@ -4278,12 +4326,13 @@ export class FTRUMInnerManager {
   /**
    * Initialize view
    */
-  private initView(activeViewBean: ActiveViewBean): void {
+  private initView(activeViewBean: ActiveViewBean): Promise<void> {
     const viewBean = activeViewBean.convertToViewBean();
     
     if (this.context) {
-      this.initViewAsync(this.context, viewBean);
+      return this.initViewAsync(this.context, viewBean);
     }
+    return Promise.resolve();
   }
 
   /**
@@ -4867,6 +4916,8 @@ export class FTRUMInnerManager {
   private increaseActionCountInMemory(viewId: string): void {
     if (this.activeView && this.activeView.getId() === viewId) {
       this.activeView.increaseActionCount();
+    } else if (this.launchView && this.launchView.getId() === viewId) {
+      this.launchView.increaseActionCount();
     }
   }
   
@@ -5097,8 +5148,11 @@ export class FTRUMInnerManager {
         this.activeView.close();
         await this.closeView(this.activeView);
       }
+      await this.closeLaunchView();
       this.activeAction = null;
       this.activeView = null;
+      this.launchView = null;
+      this.launchViewReady = Promise.resolve();
       
       // Clear resources
       this.resourceBeanMap.clear();

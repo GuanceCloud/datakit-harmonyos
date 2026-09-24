@@ -4,12 +4,14 @@ import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
+import { Constants } from '../../../main/ets/components/Constants';
 import {
   FTSDKAnrManager,
   FTSDKRuntime
 } from '../../../main/ets/components/internal/runtime/FTSDKRuntime';
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import { FTAppStartCounter } from '../../../main/ets/components/monitor/FTAppStartCounter';
 import { FTAppLaunchTracker } from '../../../main/ets/components/monitor/FTAppLaunchTracker';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
@@ -376,6 +378,7 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(actionHandler.invocationCount).assertEqual(1);
       expect(FTAppLaunchTracker.getInstance().getSnapshot().finished).assertTrue();
       expect(FTAppLaunchTracker.getInstance().getSnapshot().reported).assertFalse();
+      expect(await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH, 300)).assertEqual(null);
     });
 
     it('foregroundColdLaunchHandlerCustomizesNameAndPreservesSdkFields', 0, async () => {
@@ -399,9 +402,20 @@ export default function ftSDKLifecycleDeviceTest() {
         'action_type=launch_cold',
         'action_name=custom_cold_launch',
         'handler_source=',
-        'app_launch_type="foreground"'
+        'app_launch_type="foreground"',
+        `view_name=${Constants.VIEW_NAME_APPLICATION_LAUNCH}`
       ]);
       expect(record !== null).assertTrue();
+      const launchView = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH);
+      expect(launchView !== null).assertTrue();
+      expect(record!.getDataString().includes(`view_id=${launchView!.getId()}`)).assertTrue();
+      expect(launchView!.getViewReferrer()).assertEqual(Constants.VIEW_NAME_ROOT);
+      await FTRUMGlobalManager.getInstance().startView('first_foreground_page');
+      const closedOnFirstPage = await WaitUtils.waitUntil(async () => {
+        const views = await DBAssert.queryViews(100);
+        return views.some(view => view.getId() === launchView!.getId() && view.getIsClose());
+      }, 5000);
+      expect(closedOnFirstPage).assertTrue();
       expect(actionHandler.coldCount).assertEqual(1);
       expect(FTAppLaunchTracker.getInstance().getSnapshot().reported).assertTrue();
     });
@@ -457,14 +471,28 @@ export default function ftSDKLifecycleDeviceTest() {
         .setEnableTraceUserAction(true)
         .setActionTrackingHandler(actionHandler));
 
+      await FTRUMGlobalManager.getInstance().startView('foreground_page');
+      const foregroundViewId = FTRUMInnerManager.getInstance().getActiveView()!.getId();
       FTAppStartCounter.getInstance().hotStart(1_000_000, Date.now() * 1_000_000);
 
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
         'action_type=launch_hot',
         'action_name=custom_hot_launch',
-        'handler_source='
+        'handler_source=',
+        `view_name=${Constants.VIEW_NAME_APPLICATION_LAUNCH}`
       ]);
       expect(record !== null).assertTrue();
+      const launchView = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH);
+      expect(launchView !== null).assertTrue();
+      expect(launchView!.getId() === foregroundViewId).assertFalse();
+      expect(record!.getDataString().includes(`view_id=${launchView!.getId()}`)).assertTrue();
+      expect(FTRUMInnerManager.getInstance().getActiveView()!.getId()).assertEqual(foregroundViewId);
+      const launchViewClosed = await WaitUtils.waitUntil(async () => {
+        const views = await DBAssert.queryViews(100);
+        return views.some(view => view.getId() === launchView!.getId() && view.getIsClose() &&
+          view.getTimeSpent() === 1_000_000);
+      }, 5000);
+      expect(launchViewClosed).assertTrue();
       expect(actionHandler.hotCount).assertEqual(1);
     });
 

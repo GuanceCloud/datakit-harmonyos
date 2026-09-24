@@ -173,6 +173,12 @@ export class ActiveViewBean {
       this.timeSpent = calculatedTimeSpent;
     }
   }
+
+  /** Close a synthetic launch View using the measured launch duration. */
+  public closeWithTimeSpent(duration: number): void {
+    this.isClosed = true;
+    this.timeSpent = Math.max(0, duration);
+  }
   
   /**
    * Check if has replay
@@ -477,10 +483,10 @@ export class ActiveViewBean {
     
     // Set timeSpent: use stored value if closed, otherwise calculate current duration
     // Aligned with Android: if closed, use stored timeSpent; otherwise calculate on-the-fly
-    if (this.isClosed && this.timeSpent > 0) {
+    if (this.isClosed) {
       viewBean.setTimeSpent(this.timeSpent);
     } else {
-      // If not closed or timeSpent not set, calculate current duration
+      // An open View uses its current duration.
       viewBean.setTimeSpent(this.getDuration());
     }
     

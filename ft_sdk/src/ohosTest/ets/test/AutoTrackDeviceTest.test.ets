@@ -293,10 +293,14 @@ class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
 }
 
 class CustomizingActionTrackingHandler implements FTActionTrackingHandler {
+  public observedExtra: Record<string, object> | null = null;
+
   resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | undefined {
     if (actionEventWrapper.getSource()?.getId() === 'custom_action_view') {
+      this.observedExtra = actionEventWrapper.getExtra();
       const properties: Record<string, object> = {};
       properties['handler_property'] = new ActionPropertyWrapper('handler_value');
+      properties['shared_property'] = new ActionPropertyWrapper('handler_wins');
       return new HandlerAction('custom_action_name', properties);
     }
     return undefined;
@@ -1091,17 +1095,28 @@ export default function autoTrackDeviceTest() {
     });
 
     it('handlerActionCustomizesClickNameAndProperties', 0, async () => {
-      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, new CustomizingActionTrackingHandler()));
+      const handler = new CustomizingActionTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, handler));
       await startViewForAction('custom_action_view_page');
 
-      await uiContext.observer.emitWillClick(new FakeFrameNode('Button', 'custom_action_view', 1007));
+      const node = new FakeFrameNode('Button', 'custom_action_view', 1007);
+      const automaticProperties: Record<string, object> = {};
+      automaticProperties['automatic_only'] = new ActionPropertyWrapper('retained');
+      automaticProperties['shared_property'] = new ActionPropertyWrapper('automatic_loses');
+      node.setCustomProperty('action_property', automaticProperties);
+      await uiContext.observer.emitWillClick(node);
+      expect(handler.observedExtra !== null).assertTrue();
+      expect(handler.observedExtra!['automatic_only'] !== undefined).assertTrue();
+      expect(handler.observedExtra!['shared_property'] !== undefined).assertTrue();
       await assertActionStarted('custom_action_name');
       await closeCurrentViewAndWaitForRum();
 
       await flushAndAssertPayload(collector, [
         'action,',
         'action_name=custom_action_name',
-        'handler_property=',
+        'handler_property=handler_value',
+        'automatic_only=retained',
+        'shared_property=handler_wins',
         'view_name=custom_action_view_page'
       ]);
     });

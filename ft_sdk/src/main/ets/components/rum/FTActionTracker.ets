@@ -253,22 +253,10 @@ export class FTActionTracker {
       }
 
 
-      const actionEventWrapper = new ActionEventWrapper(node, ActionSourceType.CLICK_VIEW, null);
-      const handlerResult = resolveAutomaticActionHandler(this.rumConfig.getActionTrackingHandler(),
-        actionEventWrapper);
-      if (handlerResult === null) {
-        return;
-      }
-
       // Keep the original automatic Action lifecycle for both default and
       // customized results; only the name and properties may change.
       // willClick event is only triggered when component has onClick callback
       // So we can track all components that trigger willClick (aligned with user requirement)
-
-      // Build action name (similar to Android's getViewDesc)
-      const actionName = handlerResult instanceof HandlerAction ? handlerResult.getActionName() :
-        this.buildActionName(nodeType, nodeId, node);
-
 
       // Collect customProperty from node (aligned with Android: support for custom properties via customProperty)
       // Android: property is passed via FTActionTrackingHandler or extra parameter
@@ -338,10 +326,35 @@ export class FTActionTracker {
         FTInnerLogger.w(TAG, `[ACTION-TRACK] Error collecting customProperty: ${e}`);
       }
 
+      // Android passes the automatic properties to the handler before merging
+      // its result into the Action. Give the handler an independent snapshot.
+      const handlerExtra: Record<string, object> = {};
+      const propertyKeys = Object.keys(property);
+      for (let i = 0; i < propertyKeys.length; i++) {
+        const key = propertyKeys[i];
+        handlerExtra[key] = property[key];
+      }
+      const actionEventWrapper = new ActionEventWrapper(node, ActionSourceType.CLICK_VIEW,
+        propertyKeys.length > 0 ? handlerExtra : null);
+      const handlerResult = resolveAutomaticActionHandler(this.rumConfig.getActionTrackingHandler(),
+        actionEventWrapper);
+      if (handlerResult === null) {
+        return;
+      }
+
+      const actionName = handlerResult instanceof HandlerAction ? handlerResult.getActionName() :
+        this.buildActionName(nodeType, nodeId, node);
       if (handlerResult instanceof HandlerAction) {
-        // A custom result replaces component-derived properties, matching the
-        // previous HarmonyOS handler behavior and Android's HandlerAction path.
-        property = handlerResult.getProperty() || {};
+        // Match Android's mergeProperties(automatic, handler): the handler wins
+        // on collisions while unrelated automatic properties remain attached.
+        const customProperties = handlerResult.getProperty();
+        if (customProperties !== null) {
+          const customKeys = Object.keys(customProperties);
+          for (let i = 0; i < customKeys.length; i++) {
+            const key = customKeys[i];
+            property[key] = customProperties[key];
+          }
+        }
       }
 
       // Track click action using startAction (same as Android implementation)
