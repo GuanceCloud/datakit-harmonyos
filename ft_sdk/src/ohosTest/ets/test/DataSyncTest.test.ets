@@ -643,6 +643,16 @@ export default function dataSyncTest() {
       expect(view !== null).assertTrue();
       expect(resource !== null).assertTrue();
 
+      // Android keeps the View Line Protocol timestamp at its start while
+      // staging an error-sampled View at its snapshot time. Resource uses its
+      // start time for both the Line Protocol and the staging row.
+      const viewLine = view!.getDataString();
+      const viewEventTime = Number(viewLine.substring(viewLine.lastIndexOf(' ') + 1));
+      expect(view!.getTime() > viewEventTime).assertTrue();
+      const resourceLine = resource!.getDataString();
+      const resourceEventTime = Number(resourceLine.substring(resourceLine.lastIndexOf(' ') + 1));
+      expect(resource!.getTime()).assertEqual(resourceEventTime);
+
       const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
       for (const row of normalRows) {
         const line = row.getDataString();
@@ -651,6 +661,29 @@ export default function dataSyncTest() {
         expect(line.includes(`view_name=${viewName}`)).assertFalse();
         expect(line.includes(`resource_url=${resourceUrl}`)).assertFalse();
       }
+    });
+
+    it('errorSampledViewUsesLastErrorTimeOnlyForStaging', 0, async () => {
+      const viewStartTime = Date.now() * 1000000 - 2000000000;
+      const errorTime = viewStartTime + 1000000000;
+      const viewName = `sampled_error_view_${Date.now()}`;
+      const tags = new Map<string, string>();
+      tags.set(Constants.KEY_RUM_SESSION_ID, 'sampled-error-view-session');
+      tags.set(Constants.KEY_RUM_VIEW_ID, viewName);
+      tags.set(Constants.KEY_RUM_VIEW_NAME, viewName);
+      const fields = new Map<string, string>();
+      fields.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, 'false');
+      fields.set(Constants.KEY_SESSION_ERROR_TIMESTAMP, errorTime.toString());
+
+      FTTrackInner.getInstance().rum(viewStartTime, Constants.FT_MEASUREMENT_RUM_VIEW,
+        tags, fields, null, CollectType.SAMPLING);
+
+      const record = await DBAssert.waitForRawSyncRecordContaining('rum_app_error_sampled',
+        ['view,', `view_name=${viewName}`], 5000);
+      expect(record !== null).assertTrue();
+      expect(record!.getTime()).assertEqual(errorTime);
+      const line = record!.getDataString();
+      expect(Number(line.substring(line.lastIndexOf(' ') + 1))).assertEqual(viewStartTime);
     });
 
     it('droppedSessionShouldNotStageCompletedAction', 0, async () => {

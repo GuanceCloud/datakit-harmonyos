@@ -178,6 +178,8 @@ export interface SDKRumEventDTO {
   eventType?: string;
   name?: string;
   time: number;
+  /** Cache-row time; the Line Protocol timestamp remains `time`. */
+  storageTime?: number;
   dataType?: string;
   customDataType?: string;
   measurement?: string;

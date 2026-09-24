@@ -721,6 +721,7 @@ function finalizeRumEvent(event: SDKRumEventDTO): SDKRumEventDTO {
     eventType,
     name,
     time: event.time,
+    storageTime: event.storageTime,
     dataType: event.dataType,
     customDataType: event.customDataType,
     measurement,
@@ -966,7 +967,8 @@ function createRumDraft(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): SD
       prepared.integerCompatible === true
     ),
     uuid: event.uuid || '',
-    time: event.time
+    time: event.storageTime !== undefined && Number.isFinite(event.storageTime) && event.storageTime > 0 ?
+      event.storageTime : event.time
   };
 }
 
@@ -1299,6 +1301,10 @@ function processRumResourceCommand(
   }
 
   const resource = getOrCreateRumResourceState(resourceId, command, state);
+  // Recovery callbacks may arrive without a start command in this Worker.
+  if (resource.startTime <= 0 && command.startTime && command.startTime > 0) {
+    resource.startTime = command.startTime;
+  }
   if (command.draftUuid && command.draftUuid.length > 0) {
     resource.draftUuid = command.draftUuid;
   }
@@ -1746,7 +1752,8 @@ function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEven
   return {
     eventType: 'resource.complete',
     name: resource.url || resource.resourceId,
-    time: resource.eventTime > 0 ? resource.eventTime : resource.endTime,
+    time: resource.startTime > 0 ? resource.startTime :
+      (resource.eventTime > 0 ? resource.eventTime : resource.endTime),
     dataType: 'rum_app',
     customDataType: resource.customDataType,
     measurement: Constants.FT_MEASUREMENT_RUM_RESOURCE,

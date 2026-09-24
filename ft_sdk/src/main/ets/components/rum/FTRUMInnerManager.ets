@@ -3034,6 +3034,9 @@ export class FTRUMInnerManager {
             command.context = pending.context;
             command.draftUuid = pending.draftUuid;
             command.errorDraftUuid = pending.errorDraftUuid;
+            if (pending.startTime > 0) {
+              command.startTime = pending.startTime;
+            }
           }
           this.enqueueResourceWorkerCommand(command, traceBaseName);
         }

@@ -263,6 +263,8 @@ class FTTrackInner {
           lineContext,
           !contextSynced
         );
+      this.setErrorSampledViewStorageTime(rumEvent, dataType, customDataType, measurement,
+        fields.get(Constants.KEY_SESSION_ERROR_TIMESTAMP));
       this.postRumWorkerDraftEvent(
         source,
         dataType,
@@ -319,6 +321,8 @@ class FTTrackInner {
           lineContext,
           !contextSynced
         );
+      this.setErrorSampledViewStorageTime(rumEvent, dataType, customDataType, measurement,
+        fields[Constants.KEY_SESSION_ERROR_TIMESTAMP]);
       this.postRumWorkerDraftEvent(
         source,
         dataType,
@@ -334,6 +338,24 @@ class FTTrackInner {
         callBack.onComplete();
       }
     }
+  }
+
+  private setErrorSampledViewStorageTime(
+    event: SDKRumEventDTO,
+    dataType: DataType,
+    customDataType: string | undefined,
+    measurement: string,
+    errorTimestamp: string | undefined
+  ): void {
+    if (dataType !== DataType.RUM_APP || customDataType !== 'rum_app_error_sampled' ||
+      measurement !== Constants.FT_MEASUREMENT_RUM_VIEW) {
+      return;
+    }
+    // Android uses the last Error time (or this snapshot's time) only for the
+    // error-sampled View cache row; the View event itself stays at its start.
+    const parsedErrorTime = Number(errorTimestamp);
+    event.storageTime = Number.isFinite(parsedErrorTime) && parsedErrorTime > 0 ?
+      parsedErrorTime : Utils.getCurrentNanoTime();
   }
 
   private postRumWorkerDraftEvent(
@@ -941,7 +963,8 @@ class FTTrackInner {
         dataType: dataType.toString(),
         customDataType: event.customDataType,
         uuid,
-        time: prepared.time,
+        time: event.storageTime !== undefined && Number.isFinite(event.storageTime) && event.storageTime > 0 ?
+          event.storageTime : prepared.time,
         dataString: SyncDataHelper.convertToLineProtocolLine(
           prepared.measurement,
           this.stringRecordToMap(prepared.tags),

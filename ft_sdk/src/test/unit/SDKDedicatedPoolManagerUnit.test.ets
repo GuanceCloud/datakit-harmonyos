@@ -561,6 +561,39 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(draft['dataString']).includes('duration=42i')).assertTrue();
     });
 
+    it('errorSampledViewKeepsEventTimeButStagesAtSnapshotOrErrorTime', 0, async () => {
+      const tags = new Object() as SDKStringRecord;
+      tags['session_id'] = 'sampled-session';
+      tags['view_id'] = 'sampled-view';
+      const fields = new Object() as SDKStringRecord;
+      fields['is_active'] = 'true';
+      const errorSampledView: SDKRumEventDTO = {
+        time: 100, storageTime: 300, dataType: 'rum_app', customDataType: 'rum_app_error_sampled',
+        measurement: 'view', uuid: 'sampled-view-uuid', tags, fields
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'error-sampled-view-storage-time', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND, priority: 7, createdAt: Date.now(),
+        payload: errorSampledView as Object as SDKWorkerPayload
+      });
+      expect(response.ok).assertTrue();
+      const draft = getPayloadArray(response.payload, 'syncDrafts')[0] as Record<string, object>;
+      expect(Number(draft['time'])).assertEqual(300);
+      expect(String(draft['dataString']).trim().endsWith(' 100')).assertTrue();
+
+      const ordinaryView: SDKRumEventDTO = {
+        time: 200, dataType: 'rum_app', measurement: 'view', uuid: 'ordinary-view-uuid', tags, fields
+      };
+      const ordinaryResponse = await executeWorkerCommandForUnit({
+        id: 'ordinary-view-storage-time', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_COMMAND, priority: 7, createdAt: Date.now(),
+        payload: ordinaryView as Object as SDKWorkerPayload
+      });
+      const ordinaryDraft = getPayloadArray(ordinaryResponse.payload, 'syncDrafts')[0] as Record<string, object>;
+      expect(Number(ordinaryDraft['time'])).assertEqual(200);
+      expect(String(ordinaryDraft['dataString']).trim().endsWith(' 200')).assertTrue();
+    });
+
     it('rumWorkerDerivesAndSortsEvents', 0, async () => {
       await executeWorkerCommandForUnit({
         id: 'rum-raw-context',
@@ -1304,6 +1337,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('custom_resource="normalized"')).assertTrue();
       expect(line.includes('resource_dns=12i')).assertTrue();
       expect(line.includes('duration=50i')).assertTrue();
+      expect(Number((drafts[0] as Record<string, object>)['time'])).assertEqual(10);
+      expect(line.trim().endsWith(' 10')).assertTrue();
       const snapshot = await getRumWorkerSnapshotForUnit('rum-resource-command-state-key-snapshot');
       expect(getPayloadString(snapshot.payload, 'rumResourceStateKeyCount')).assertEqual('0');
       const counterFlush = await executeWorkerCommandForUnit({
@@ -1525,6 +1560,58 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       });
       expect(httpResponse.ok).assertTrue();
       expect(getPayloadArray(httpResponse.payload, 'syncDrafts').length).assertEqual(2);
+    });
+
+    it('resourceRecoveredWithoutStartCommandUsesRestoredStartTime', 0, async () => {
+      const context: SDKRumResourceContextDTO = {
+        sessionId: 'recovered-session', viewId: 'recovered-view', viewName: 'RecoveredView', viewReferrer: '',
+        actionId: 'original-action', actionName: 'request'
+      };
+      const params: SDKRumResourceParamsDTO = {
+        url: 'https://example.com/recovered', requestHeader: '', responseHeader: '', responseConnection: '',
+        responseContentType: '', responseContentEncoding: '', responseContentLength: 0,
+        resourceMethod: 'GET', responseBody: '', resourceStatus: 200, resourceType: 'network',
+        requestErrorStack: '', requestErrorMsg: '', property: new Object() as SDKPropertyRecord
+      };
+      const netStatus = new Object() as SDKRumResourceNetStatusDTO;
+      const batch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [
+          { commandType: 'setContent', resourceId: 'recovered-resource', context, params, eventTime: 200 },
+          { commandType: 'setNetState', resourceId: 'recovered-resource', context, netStatus, eventTime: 300,
+            startTime: 100 },
+          { commandType: 'stop', resourceId: 'recovered-resource', context, endTime: 400 }
+        ]
+      };
+      const response = await executeWorkerCommandForUnit({
+        id: 'recovered-resource-start-time', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      expect(response.ok).assertTrue();
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(1);
+      const draft = drafts[0] as Record<string, object>;
+      expect(Number(draft['time'])).assertEqual(100);
+      const line = String(draft['dataString']);
+      expect(line.trim().endsWith(' 100')).assertTrue();
+      expect(line.includes('action_id=original-action')).assertTrue();
+
+      const missingStartBatch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'add', resourceId: 'resource-without-start', context, params, netStatus,
+          eventTime: 500
+        }]
+      };
+      const missingStartResponse = await executeWorkerCommandForUnit({
+        id: 'resource-without-start-time', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+        payload: missingStartBatch as Object as SDKWorkerPayload
+      });
+      const fallbackDraft = getPayloadArray(missingStartResponse.payload, 'syncDrafts')[0] as Record<string, object>;
+      expect(Number(fallbackDraft['time'])).assertEqual(500);
+      expect(String(fallbackDraft['dataString']).trim().endsWith(' 500')).assertTrue();
     });
 
     it('resourceCompletionKeepsStopPropertiesWhenAddArrivesFirst', 0, () => {
@@ -1829,7 +1916,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           expect(event.tags?.['resource_id']).assertEqual('late-resource-draft');
           expect(event.tags?.['action_id']).assertEqual('action-first');
           expect(event.customDataType).assertEqual('rum_app_error_sampled');
-          expect(event.time).assertEqual(20);
+          expect(event.time).assertEqual(event.measurement === 'resource' ? 10 : 20);
         }
         expect(getPayloadArray(rawResponse.payload, 'completedResourceIds')[0]).assertEqual('late-resource');
         expect(state.rumResources.size).assertEqual(0);
