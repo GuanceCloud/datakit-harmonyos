@@ -85,6 +85,8 @@ export class FTRUMConfig {
   private sessionErrorSampleRate: number = 0.0; // Error sampling rate, range 0 to 1, default 0.0
   private sessionSamplingRate: number | null = null;
   private sessionOnErrorSamplingRate: number | null = null;
+  private remoteSessionSamplingRate: number | null = null;
+  private remoteSessionOnErrorSamplingRate: number | null = null;
   private rumAppId: string = "";
   private enableTrackAppCrash: boolean = false;
   private enableTrackAppUIBlock: boolean = false;
@@ -122,7 +124,7 @@ export class FTRUMConfig {
    * returns the effective rate in the legacy [0,1] probability unit.
    */
   public getSamplingRate(): number {
-    return this.sessionSamplingRate ?? this.samplingRate;
+    return this.remoteSessionSamplingRate ?? this.sessionSamplingRate ?? this.samplingRate;
   }
 
   /**
@@ -148,6 +150,12 @@ export class FTRUMConfig {
     return this;
   }
 
+  /** @internal Applies an already-normalized remote session probability. */
+  public setRemoteSessionSamplingRateInternal(samplingRate: number | null): FTRUMConfig {
+    this.remoteSessionSamplingRate = samplingRate;
+    return this;
+  }
+
   /**
    * Get error sampling rate
    */
@@ -156,7 +164,8 @@ export class FTRUMConfig {
    * getter returns the effective rate in the legacy [0,1] probability unit.
    */
   public getSessionErrorSampleRate(): number {
-    return this.sessionOnErrorSamplingRate ?? this.sessionErrorSampleRate;
+    return this.remoteSessionOnErrorSamplingRate ??
+      this.sessionOnErrorSamplingRate ?? this.sessionErrorSampleRate;
   }
 
   /**
@@ -190,6 +199,12 @@ export class FTRUMConfig {
       samplingRate,
       'sessionOnErrorSamplingRate'
     );
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote error-session probability. */
+  public setRemoteSessionOnErrorSamplingRateInternal(samplingRate: number | null): FTRUMConfig {
+    this.remoteSessionOnErrorSamplingRate = samplingRate;
     return this;
   }
 
@@ -543,6 +558,7 @@ export class FTLoggerConfig {
    */
   private samplingRate: number = 1;
   private logSamplingRate: number | null = null;
+  private remoteLogSamplingRate: number | null = null;
   /**
    * Whether to link with RUM data
    */
@@ -591,7 +607,7 @@ export class FTLoggerConfig {
    * the effective rate in the legacy [0,1] probability unit.
    */
   public getSamplingRate(): number {
-    return this.logSamplingRate ?? this.samplingRate;
+    return this.remoteLogSamplingRate ?? this.logSamplingRate ?? this.samplingRate;
   }
 
   /**
@@ -611,6 +627,12 @@ export class FTLoggerConfig {
   /** Set the log sampling rate as a percentage in [0,100]. */
   public setLogSamplingRate(samplingRate: number): FTLoggerConfig {
     this.logSamplingRate = percentageToSamplingProbability(samplingRate, 'logSamplingRate');
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote log probability. */
+  public setRemoteLogSamplingRateInternal(samplingRate: number | null): FTLoggerConfig {
+    this.remoteLogSamplingRate = samplingRate;
     return this;
   }
 
@@ -1598,6 +1620,7 @@ export class FTTraceConfig {
    */
   private samplingRate: number = 1;
   private traceSamplingRate: number | null = null;
+  private remoteTraceSamplingRate: number | null = null;
   /**
    * Trace type for link tracking
    */
@@ -1645,7 +1668,7 @@ export class FTTraceConfig {
    * the effective rate in the legacy [0,1] probability unit.
    */
   public getSamplingRate(): number {
-    return this.traceSamplingRate ?? this.samplingRate;
+    return this.remoteTraceSamplingRate ?? this.traceSamplingRate ?? this.samplingRate;
   }
 
   /**
@@ -1665,6 +1688,12 @@ export class FTTraceConfig {
   /** Set the trace sampling rate as a percentage in [0,100]. */
   public setTraceSamplingRate(samplingRate: number): FTTraceConfig {
     this.traceSamplingRate = percentageToSamplingProbability(samplingRate, 'traceSamplingRate');
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote trace probability. */
+  public setRemoteTraceSamplingRateInternal(samplingRate: number | null): FTTraceConfig {
+    this.remoteTraceSamplingRate = samplingRate;
     return this;
   }
 

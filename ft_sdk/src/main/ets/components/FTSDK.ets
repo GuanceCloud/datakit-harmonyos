@@ -1303,25 +1303,27 @@ export class FTSDK {
       if (bean.getLogEnableConsoleLog() !== null) {
         logConfig.setEnableConsoleLog(bean.getLogEnableConsoleLog()!);
       }
-      if (bean.getLogSampleRate() !== null) {
-        logConfig.setSamplingRate(bean.getLogSampleRate()!);
+      if (bean.shouldApplyLogSamplingRate()) {
+        logConfig.setRemoteLogSamplingRateInternal(bean.getEffectiveLogSamplingRateProbability());
       }
       FTTrackInner.getInstance().initLogConfig(logConfig);
     }
 
     const traceConfig = FTTraceConfigManager.getInstance().getConfig();
-    if (traceConfig !== null && bean.getTraceSampleRate() !== null) {
-      traceConfig.setSamplingRate(bean.getTraceSampleRate()!);
+    if (traceConfig !== null && bean.shouldApplyTraceSamplingRate()) {
+      traceConfig.setRemoteTraceSamplingRateInternal(bean.getEffectiveTraceSamplingRateProbability());
     }
 
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
     if (rumConfig !== null && rumConfig.getRumAppId().length > 0 &&
-      (bean.getRumSampleRate() !== null || bean.getRumSessionOnErrorSampleRate() !== null)) {
-      if (bean.getRumSampleRate() !== null) {
-        rumConfig.setSamplingRate(bean.getRumSampleRate()!);
+      (bean.shouldApplySessionSamplingRate() || bean.shouldApplySessionOnErrorSamplingRate())) {
+      if (bean.shouldApplySessionSamplingRate()) {
+        rumConfig.setRemoteSessionSamplingRateInternal(bean.getEffectiveSessionSamplingRateProbability());
       }
-      if (bean.getRumSessionOnErrorSampleRate() !== null) {
-        rumConfig.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+      if (bean.shouldApplySessionOnErrorSamplingRate()) {
+        rumConfig.setRemoteSessionOnErrorSamplingRateInternal(
+          bean.getEffectiveSessionOnErrorSamplingRateProbability()
+        );
       }
       FTRUMInnerManager.getInstance().setSamplingRates(
         rumConfig.getSamplingRate(),
