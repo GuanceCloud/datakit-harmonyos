@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18-alpha02] - 2026-09-24
+- No extension API or runtime behavior changes.
+
 ## [0.1.18-alpha01] - 2026-09-22
 - Added `networkErrorHandler` support to `FTHttpInterceptorChainOptions` for NetworkKit interceptor-chain automatic collection. It can suppress only the Network Error derived from a no-response local failure while retaining the Resource; HTTP 4xx/5xx behavior is unchanged. A chain-level handler overrides the core SDK default, and `null` opts the chain out of that default.
 - Added platform upload-progress collection for Resources tracked through `applyFTHttpTrack(...)` and Axios chain integration. NetworkKit `dataSendProgress.sendSize` and Axios upload progress are recorded as actual request-body bytes, retain the maximum cumulative value, and take precedence over integration and header/body fallback values. Application Axios upload callbacks continue to run.

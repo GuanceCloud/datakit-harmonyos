@@ -135,13 +135,20 @@ export default class EntryAbility extends UIAbility {
 
     const rumConfig = new FTRUMConfig()
       .setRumAppId('YOUR_RUM_APP_ID')
+      .setSessionSamplingRate(100)
+      .setSessionOnErrorSamplingRate(0)
       .setEnableTraceUserView(true)
       .setEnableTraceUserAction(true)
       .setEnableTraceUserResource(true)
       .setEnableTrackAppCrash(true)
 
-    const loggerConfig = new FTLoggerConfig().setEnableCustomLog(true)
-    const traceConfig = new FTTraceConfig().setEnableAutoTrace(true).setTraceType(TraceType.DDTRACE)
+    const loggerConfig = new FTLoggerConfig()
+      .setLogSamplingRate(100)
+      .setEnableCustomLog(true)
+    const traceConfig = new FTTraceConfig()
+      .setTraceSamplingRate(100)
+      .setEnableAutoTrace(true)
+      .setTraceType(TraceType.DDTRACE)
 
     FTSDK.installRUMConfig(rumConfig)
     FTSDK.installLogConfig(loggerConfig)
@@ -245,30 +252,42 @@ the normalized final route segment. When `trackingType` is `ROUTER`, use
 `NAVIGATION`, use `navigationInfo` to filter by `from`, `to`, `operation`, or
 the destination `param`, `navigationId`, and `navDestinationId`.
 
-## Automatic Action Filtering
+## Automatic Action Handler
 
 When automatic Action tracking is enabled, configure
-`FTRUMConfig.setActionTrackingHandler(...)` to filter click Actions.
-The handler is called for each automatically tracked user operation. Return
-`null` to skip collection; return `undefined` to continue through the SDK's
-original automatic Action collection path, including name, properties,
-position, and View association.
+`FTRUMConfig.setActionTrackingHandler(...)` for automatic clicks and cold/hot
+launch Actions. Return `HandlerAction` to customize the name and properties,
+`null` to skip collection, or `undefined` to retain the SDK's default Action.
+Launch events have a `null` source; distinguish them with `getSourceType()`.
+Manual `addAction` and `startAction` calls do not invoke this handler. The SDK
+retains launch type, duration, and cold-launch phase fields when a launch name
+or properties are customized. For clicks, `HandlerAction` properties override
+same-named component properties while retaining the others; return `undefined`
+to keep all defaults.
 
 ```ts
 import {
   ActionEventWrapper,
+  ActionSourceType,
   FTActionTrackingHandler,
-  FTRUMConfig
+  FTRUMConfig,
+  HandlerAction
 } from '@guancecloud/ft_sdk/Index'
 
 const actionHandler: FTActionTrackingHandler = {
-  resolveHandlerAction: (event: ActionEventWrapper): null | undefined => {
+  resolveHandlerAction: (event: ActionEventWrapper): HandlerAction | null | undefined => {
+    if (event.getSourceType() === ActionSourceType.LAUNCH_COLD) {
+      const properties: Record<string, object> = {}
+      properties['channel'] = new String('startup')
+      return new HandlerAction('custom_cold_launch', properties)
+    }
+
     // Do not collect clicks from this component.
     if (event.getSource()?.getId() === 'ignore_action_view') {
       return null
     }
 
-    // Continue through the original automatic Action collection path.
+    // Keep the default click or hot-launch Action.
     return undefined
   }
 }
@@ -318,6 +337,24 @@ FTSDK.setDatakitUrl('https://datakit.example.com')
 ```
 
 Call `FTSDK.updateRemoteConfig()` for a manual interval-respecting refresh. `FTSDK.setEnableAccessDeviceID(...)` updates the runtime `device_uuid` selection between a system identifier (when available) and the SDK privacy UUID.
+
+## Percentage Sampling Configuration
+
+New HarmonyOS sampling APIs use a `number` in `[0,100]`: `0.1` means 0.1%
+and `1` means 1%. Use `FTRUMConfig.setSessionSamplingRate(...)`,
+`setSessionOnErrorSamplingRate(...)`, `FTLoggerConfig.setLogSamplingRate(...)`,
+and `FTTraceConfig.setTraceSamplingRate(...)`. Normal RUM, Log, and Trace
+sampling default to `100`; error-session supplemental sampling defaults to
+`0`. The legacy `setSamplingRate(...)` and
+`setSessionErrorSampleRate(...)` methods remain deprecated compatibility APIs
+with their original `[0,1]` unit, so old `1` remains 100%.
+
+Remote configuration follows the same convention with
+`sessionSamplingRate`, `sessionOnErrorSamplingRate`, `logSamplingRate`, and
+`traceSamplingRate`. Valid new keys take priority over the legacy
+`rumSampleRate`, `rumSessionOnErrorSampleRate`, `logSampleRate`, and
+`traceSampleRate` keys. See [Sampling Rates](ft_sdk/README.md#sampling-rates)
+for invalid-value behavior, cache/hot-update semantics, and migration details.
 
 ## Local Data Filtering
 
