@@ -1639,7 +1639,7 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
     resource.resourceDownloadTimeStart = dnsTime + tcpTime + sslTime + ttfbTime;
   }
   const loadTime = readPositiveNumber(normalized, 'resourceLoad');
-  if (loadTime > 0) {
+  if (loadTime >= 0) {
     resource.resourceLoad = loadTime;
   }
 
@@ -1681,7 +1681,7 @@ function applyResourceNetStatus(resource: SDKRumWorkerResourceState, netStatus: 
     resource.resourceDownloadTime = netStatus.downloadTime;
     resource.resourceDownloadTimeStart = netStatus.downloadStartTime;
   }
-  if (netStatus.holeRequestTime > 0) {
+  if (netStatus.holeRequestTime >= 0) {
     resource.resourceLoad = netStatus.holeRequestTime;
   } else if (resource.endTime > 0 && resource.startTime > 0) {
     resource.resourceLoad = resource.endTime - resource.startTime;
@@ -1875,7 +1875,8 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   if (resource.resourceSize > 0) {
     fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resource.resourceSize);
   }
-  if (resource.resourceLoad > 0) {
+  // A request completed within one clock tick has a valid zero duration.
+  if (resource.resourceLoad >= 0) {
     fields[Constants.KEY_RUM_RESOURCE_DURATION] = String(resource.resourceLoad);
   }
   if (resource.resourceDNS > 0) {

@@ -113,7 +113,15 @@ export class SyncDataHelper {
 
   appendGlobalContextByKeyValue(key: string, value: string): void {
     if (key && value) {
-      this.dynamicBaseTags.set(key, this.applyDataModifier(key, value));
+      const normalizedValue = this.applyDataModifier(key, value);
+      this.dynamicBaseTags.set(key, normalizedValue);
+      if (key === Constants.KEY_SDK_PACKAGE_INFO) {
+        // Log and RUM tags copied this SDK-owned value during initialization.
+        // Keep those copies in sync when the Hvigor plugin version changes.
+        this.basePublicTags.set(key, normalizedValue);
+        this.logTags.set(key, normalizedValue);
+        this.rumTags.set(key, normalizedValue);
+      }
     }
   }
 

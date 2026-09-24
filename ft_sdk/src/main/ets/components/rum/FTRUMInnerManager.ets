@@ -5423,11 +5423,11 @@ export class FTRUMInnerManager {
     const fields: Record<string, string> = {};
     
     // Core performance metrics (aligned with Android: FTRUMInnerManager.putRUMResourcePerformance)
-    // Only add timing fields if value > 0 (matching Android behavior)
+    // A completed request can have zero duration when the clock resolution is coarse.
     if (resourceBean.resourceSize > 0) {
       fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resourceBean.resourceSize);
     }
-    if (resourceBean.resourceLoad > 0) {
+    if (resourceBean.resourceLoad >= 0) {
       fields[Constants.KEY_RUM_RESOURCE_DURATION] = String(resourceBean.resourceLoad);
     }
     if (resourceBean.resourceDNS > 0) {
