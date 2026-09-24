@@ -9,6 +9,7 @@ import { FTRUMConfig } from '../../main/ets/components/Configs';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
+import { FTResourceTransportMetricsInput } from '../../main/ets/components/network/FTHttpAutoTrackShared';
 import { TestReset } from '../helpers/TestReset';
 
 const FT_AXIOS_AUTOTRACK_CONTEXT_KEY = '__ftAxiosAutoTrackState';
@@ -22,13 +23,13 @@ class IgnoredAxiosResourceUrlHandler extends FTInTakeUrlHandler {
 interface StoredAxiosAutoTrackState {
   resourceEnabled: boolean;
   networkErrorHandler?: FTNetworkErrorHandler;
-  platformTransportMetrics?: {
-    requestBodySize?: number;
-  };
-  headerInferredTransportMetrics?: {
-    requestHeaderSize?: number;
-    requestBodySize?: number;
-  };
+  platformTransportMetrics?: FTResourceTransportMetricsInput;
+  headerInferredTransportMetrics?: FTResourceTransportMetricsInput;
+}
+
+interface FakeAxiosUploadProgress {
+  loaded?: number;
+  total?: number;
 }
 
 class AxiosGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
@@ -98,7 +99,7 @@ class FakeAxiosRequestConfig implements FTAxiosRequestConfigTarget {
   method?: string;
   headers?: Object;
   context?: Object;
-  onUploadProgress?: (progress: { loaded?: number; total?: number }) => void;
+  onUploadProgress?: (progress: FakeAxiosUploadProgress) => void;
 
   constructor(context: Record<string, Object>) {
     this.url = 'https://example.com/api';
@@ -297,7 +298,7 @@ export default function httpAutoTrackAxiosUnitTest() {
       const context: Record<string, Object> = {};
       const config = new FakeAxiosRequestConfig(context);
       let applicationUploadedBytes = -1;
-      config.onUploadProgress = (progress: { loaded?: number; total?: number }): void => {
+      config.onUploadProgress = (progress: FakeAxiosUploadProgress): void => {
         applicationUploadedBytes = progress.loaded || 0;
       };
       const preparedConfig = target.requestManager.fulfilled!(config) as FTAxiosRequestConfigTarget;
@@ -321,8 +322,8 @@ export default function httpAutoTrackAxiosUnitTest() {
         enableTraceInterceptor: false,
         enableResourceInterceptor: false
       });
-      const globalState = getContext(createPreparedConfig(globalTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
-        as StoredAxiosAutoTrackState;
+      const globalState =
+        getContext(createPreparedConfig(globalTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
       expect(globalState.networkErrorHandler === globalHandler).assertTrue();
 
       const explicitTarget = new FakeAxiosTarget();
@@ -331,8 +332,8 @@ export default function httpAutoTrackAxiosUnitTest() {
         enableResourceInterceptor: false,
         networkErrorHandler: explicitHandler
       });
-      const explicitState = getContext(createPreparedConfig(explicitTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
-        as StoredAxiosAutoTrackState;
+      const explicitState =
+        getContext(createPreparedConfig(explicitTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
       expect(explicitState.networkErrorHandler === explicitHandler).assertTrue();
 
       const disabledTarget = new FakeAxiosTarget();
@@ -341,8 +342,8 @@ export default function httpAutoTrackAxiosUnitTest() {
         enableResourceInterceptor: false,
         networkErrorHandler: null
       });
-      const disabledState = getContext(createPreparedConfig(disabledTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY]
-        as StoredAxiosAutoTrackState;
+      const disabledState =
+        getContext(createPreparedConfig(disabledTarget))[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
       expect(disabledState.networkErrorHandler === undefined).assertTrue();
     });
   });

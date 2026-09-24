@@ -1313,7 +1313,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         priority: 7,
         createdAt: Date.now()
       });
-      const counterDeltas = getPayloadArray(counterFlush.payload, 'deltas');
+      const counterDeltas = getPayloadArray(response.payload, 'deltas');
+      expect(getPayloadArray(counterFlush.payload, 'deltas').length).assertEqual(0);
       let actionPendingDelta = 0;
       let actionResourceDelta = 0;
       for (let i = 0; i < counterDeltas.length; i++) {
@@ -1350,23 +1351,24 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
         downloadStartTime: 0, holeRequestTime: 10, resourceHostIP: ''
       };
+      const onlineBatch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'start', resourceId: 'network-snapshot-online', context: startOnlineContext, startTime: 10
+        }, {
+          commandType: 'setContent', resourceId: 'network-snapshot-online', context: laterOfflineContext,
+          params, eventTime: 20
+        }, {
+          commandType: 'setNetState', resourceId: 'network-snapshot-online', context: laterOfflineContext,
+          netStatus, eventTime: 30
+        }, {
+          commandType: 'stop', resourceId: 'network-snapshot-online', context: laterOfflineContext, endTime: 40
+        }]
+      };
       const onlineResponse = await executeWorkerCommandForUnit({
         id: 'resource-network-snapshot-online', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
-        payload: {
-          lineContext: createRumWorkerLineContext(),
-          commands: [{
-            commandType: 'start', resourceId: 'network-snapshot-online', context: startOnlineContext, startTime: 10
-          }, {
-            commandType: 'setContent', resourceId: 'network-snapshot-online', context: laterOfflineContext,
-            params, eventTime: 20
-          }, {
-            commandType: 'setNetState', resourceId: 'network-snapshot-online', context: laterOfflineContext,
-            netStatus, eventTime: 30
-          }, {
-            commandType: 'stop', resourceId: 'network-snapshot-online', context: laterOfflineContext, endTime: 40
-          }]
-        } as Object as SDKWorkerPayload
+        payload: onlineBatch as Object as SDKWorkerPayload
       });
       const onlineDrafts = getPayloadArray(onlineResponse.payload, 'syncDrafts');
       expect(onlineDrafts.length).assertEqual(1);
@@ -1388,23 +1390,24 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         actionId: 'online-action', actionName: 'later',
         networkSnapshot: { available: true, validated: true, downlinkKbps: 1, uplinkKbps: 1, signalStrength: 1 }
       };
+      const offlineBatch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'start', resourceId: 'network-snapshot-offline', context: offlineStartContext, startTime: 50
+        }, {
+          commandType: 'setContent', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
+          params, eventTime: 60
+        }, {
+          commandType: 'setNetState', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
+          netStatus, eventTime: 70
+        }, {
+          commandType: 'stop', resourceId: 'network-snapshot-offline', context: laterOnlineContext, endTime: 80
+        }]
+      };
       const offlineResponse = await executeWorkerCommandForUnit({
         id: 'resource-network-snapshot-offline', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
-        payload: {
-          lineContext: createRumWorkerLineContext(),
-          commands: [{
-            commandType: 'start', resourceId: 'network-snapshot-offline', context: offlineStartContext, startTime: 50
-          }, {
-            commandType: 'setContent', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
-            params, eventTime: 60
-          }, {
-            commandType: 'setNetState', resourceId: 'network-snapshot-offline', context: laterOnlineContext,
-            netStatus, eventTime: 70
-          }, {
-            commandType: 'stop', resourceId: 'network-snapshot-offline', context: laterOnlineContext, endTime: 80
-          }]
-        } as Object as SDKWorkerPayload
+        payload: offlineBatch as Object as SDKWorkerPayload
       });
       const offlineDrafts = getPayloadArray(offlineResponse.payload, 'syncDrafts');
       expect(offlineDrafts.length).assertEqual(1);
@@ -1500,24 +1503,25 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         suppressNetworkError: true,
         property: new Object() as SDKPropertyRecord
       };
+      const httpBatch: SDKRumResourceCommandBatchDTO = {
+        lineContext: createRumWorkerLineContext(),
+        commands: [{
+          commandType: 'start', resourceId: 'http-error-resource', context, startTime: 50
+        }, {
+          commandType: 'setContent', resourceId: 'http-error-resource', context, params: httpErrorParams, eventTime: 60
+        }, {
+          commandType: 'setNetState', resourceId: 'http-error-resource', context, netStatus, eventTime: 70
+        }, {
+          commandType: 'stop', resourceId: 'http-error-resource', context, endTime: 80
+        }]
+      };
       const httpResponse = await executeWorkerCommandForUnit({
         id: 'rum-http-resource-must-still-error',
         pool: SDKDedicatedPoolType.EVENT_CONSUMER,
         command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
         priority: 7,
         createdAt: Date.now(),
-        payload: {
-          lineContext: createRumWorkerLineContext(),
-          commands: [{
-            commandType: 'start', resourceId: 'http-error-resource', context, startTime: 50
-          }, {
-            commandType: 'setContent', resourceId: 'http-error-resource', context, params: httpErrorParams, eventTime: 60
-          }, {
-            commandType: 'setNetState', resourceId: 'http-error-resource', context, netStatus, eventTime: 70
-          }, {
-            commandType: 'stop', resourceId: 'http-error-resource', context, endTime: 80
-          }]
-        } as Object as SDKWorkerPayload
+        payload: httpBatch as Object as SDKWorkerPayload
       });
       expect(httpResponse.ok).assertTrue();
       expect(getPayloadArray(httpResponse.payload, 'syncDrafts').length).assertEqual(2);
@@ -1608,10 +1612,13 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       for (let index = 0; index < statuses.length; index++) {
         const status = statuses[index];
         const id = `status-contract-${index}`;
+        const dynamicTags = new Object() as SDKStringRecord;
+        dynamicTags['resource_status'] = '599';
+        dynamicTags['resource_status_group'] = '5xx';
         const context: SDKRumResourceContextDTO = {
           sessionId: 'status-session', viewId: 'status-view', viewName: 'StatusView', viewReferrer: 'root',
           actionId: 'status-action', actionName: 'request', rumAppId: 'gc_app_harmonyos_demo',
-          dynamicTags: { resource_status: '599', resource_status_group: '5xx' }
+          dynamicTags
         };
         const params: SDKRumResourceParamsDTO = {
           url: 'https://example.com/api/users/123/profile?from=status-test',
@@ -1624,7 +1631,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         const netStatus: SDKRumResourceNetStatusDTO = {
           dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0, sslTime: 0, sslStartTime: 0,
           ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
-          downloadStartTime: 0, holeRequestTime: 100, resourceHostIP: ''
+          downloadStartTime: 0, holeRequestTime: index === 7 ? 0 : 100, resourceHostIP: ''
         };
         const start: SDKRumResourceCommandDTO = {
           commandType: 'start', resourceId: id, draftUuid: id, errorDraftUuid: `${id}-error`, context, startTime: 10
@@ -1636,7 +1643,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           commandType: 'setNetState', resourceId: id, context, netStatus, eventTime: 30
         };
         const stop: SDKRumResourceCommandDTO = {
-          commandType: 'stop', resourceId: id, context, endTime: 110
+          commandType: 'stop', resourceId: id, context, endTime: index === 7 ? 10 : 110
         };
         const batch: SDKRumResourceCommandBatchDTO = {
           lineContext: createRumWorkerLineContext(), commands: [stop, network, content, content, start, start]
@@ -1655,6 +1662,9 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           expect(line.includes('resource_url_path=/api/users/123/profile,')).assertTrue();
           expect(/resource_url_path_group=\/api\/users\/\?\/profile[, ]/.test(line)).assertTrue();
           expect(line.includes(`resource_id=${id},`)).assertTrue();
+          if (index === 7 && line.startsWith('resource,')) {
+            expect(line.includes('duration=0i')).assertTrue();
+          }
           if (status === 0) {
             expect(line.includes('resource_status_group=')).assertFalse();
           } else {
@@ -1671,8 +1681,9 @@ export default function sdkDedicatedPoolManagerUnitTest() {
           id: `${id}-flush`, pool: SDKDedicatedPoolType.EVENT_CONSUMER,
           command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH, priority: 7, createdAt: Date.now()
         });
-        expect(getPayloadString(flush.payload, 'needsRumDataGenerate')).assertEqual('true');
-        const deltas = getPayloadArray(flush.payload, 'deltas');
+        expect(getPayloadString(response.payload, 'needsRumDataGenerate')).assertEqual('true');
+        expect(getPayloadArray(flush.payload, 'deltas').length).assertEqual(0);
+        const deltas = getPayloadArray(response.payload, 'deltas');
         expect(deltas.length).assertEqual(2);
         const delta = deltas[0] as Record<string, object>;
         expect(String(delta['viewId'])).assertEqual('status-view');
@@ -1969,8 +1980,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String((restartedDrafts[0] as Record<string, Object>)['uuid'])).assertEqual('restart-resource-draft');
       expect(String((originalDrafts[0] as Record<string, Object>)['dataString'])).assertEqual(
         String((restartedDrafts[0] as Record<string, Object>)['dataString']));
-      expect(originalDeltas.length).assertEqual(1);
-      expect(restartedDeltas.length).assertEqual(1);
+      expect(originalDeltas.length).assertEqual(2);
+      expect(restartedDeltas.length).assertEqual(2);
       expect(JSON.stringify(originalDeltas)).assertEqual(JSON.stringify(restartedDeltas));
       // Resource completion must carry its counter mutation in the same
       // response. A subsequent periodic flush therefore has nothing left.
@@ -2031,13 +2042,18 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const checkpointCompletedIds = getPayloadArray(checkpointCompletion.payload, 'completedResourceIds');
       const checkpointDeltas = getPayloadArray(checkpointCompletion.payload, 'deltas');
       const checkpointViewDelta = checkpointDeltas[0] as Record<string, Object>;
+      const checkpointActionDelta = checkpointDeltas[1] as Record<string, Object>;
 
       expect(stateOnlyDeltas.length).assertEqual(0);
       expect(checkpointDrafts.length).assertEqual(1);
       expect(String(checkpointCompletedIds[0])).assertEqual('restart-resource');
-      expect(checkpointDeltas.length).assertEqual(1);
+      expect(checkpointDeltas.length).assertEqual(2);
       expect(Number(checkpointViewDelta['viewResourceDelta'])).assertEqual(1);
-      expect(Number(checkpointViewDelta['viewPendingDelta'])).assertEqual(-1);
+      // The Host releases durable pending Resource references after persisting
+      // the completed draft; the Worker must not decrement them here.
+      expect(Number(checkpointViewDelta['viewPendingDelta'])).assertEqual(0);
+      expect(Number(checkpointActionDelta['actionResourceDelta'])).assertEqual(1);
+      expect(Number(checkpointActionDelta['actionPendingDelta'])).assertEqual(0);
       expect(getPayloadArray(checkpointFlush.payload, 'deltas').length).assertEqual(0);
       expect(checkpointRestoredState.rumResources.size).assertEqual(0);
     });
@@ -3348,7 +3364,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(result.bodyBytes > DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
       expect(result.bodyLimitReached).assertTrue();
       expect(result.transportLimitReached).assertFalse();
-      expect(result.roundHasMoreData).assertFalse();
+      // A full page keeps the next round eligible in case another row exists.
+      expect(result.roundHasMoreData).assertTrue();
       expect((httpExecutor.lastRequest as SDKUploadHttpRequestDTO).body.length > DATA_UPLOAD_BODY_TARGET_BYTES).assertTrue();
     });
 

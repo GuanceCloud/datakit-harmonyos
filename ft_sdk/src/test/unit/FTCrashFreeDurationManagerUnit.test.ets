@@ -2,6 +2,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   FTCrashFreeClock,
   FTCrashFreeDurationManager,
+  FTCrashFreeSnapshot,
   FTCrashFreeStorage
 } from '../../main/ets/components/monitor/FTCrashFreeDurationManager';
 import {
@@ -10,6 +11,13 @@ import {
 } from '../../main/ets/components/rum/FTRUMInnerManager';
 import { Constants } from '../../main/ets/components/Constants';
 import { AppState, ErrorType, RUMEnumUtils } from '../../main/ets/components/rum/enum/RUMEnums';
+
+interface CrashFreePersistedEnvelopeTestFixture {
+  version: number;
+  current: FTCrashFreeSnapshot | null;
+  pending: FTCrashFreeSnapshot | null;
+  reportedNativeCrashIds: string[];
+}
 
 class FixedCrashFreeClock implements FTCrashFreeClock {
   public uptimeNs: number = 100;
@@ -112,7 +120,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       nativeForegroundClock.uptimeNs = 200;
       nativeForegroundClock.wallClockMs = 1000100;
       const nativeForegroundStorage = new MemoryCrashFreeStorage();
-      nativeForegroundStorage.value = JSON.stringify({
+      const nativeForegroundEnvelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 30,
@@ -126,7 +134,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
         },
         pending: null,
         reportedNativeCrashIds: []
-      });
+      };
+      nativeForegroundStorage.value = JSON.stringify(nativeForegroundEnvelope);
       const nativeForegroundManager = new FTCrashFreeDurationManager(nativeForegroundClock);
       await nativeForegroundManager.initializeWithStorage(nativeForegroundStorage, AppState.RUN);
       const foregroundNative = await nativeForegroundManager.prepareCrashFreeDuration(
@@ -141,7 +150,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       nativeBackgroundClock.uptimeNs = 200;
       nativeBackgroundClock.wallClockMs = 1000100;
       const nativeBackgroundStorage = new MemoryCrashFreeStorage();
-      nativeBackgroundStorage.value = JSON.stringify({
+      const nativeBackgroundEnvelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 30,
@@ -155,7 +164,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
         },
         pending: null,
         reportedNativeCrashIds: []
-      });
+      };
+      nativeBackgroundStorage.value = JSON.stringify(nativeBackgroundEnvelope);
       const nativeBackgroundManager = new FTCrashFreeDurationManager(nativeBackgroundClock);
       await nativeBackgroundManager.initializeWithStorage(nativeBackgroundStorage, AppState.RUN);
       const backgroundNative = await nativeBackgroundManager.prepareCrashFreeDuration(
@@ -253,7 +263,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       clock.uptimeNs = 200;
       clock.wallClockMs = 1000100;
       const storage = new MemoryCrashFreeStorage();
-      storage.value = JSON.stringify({
+      const envelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 30,
@@ -267,7 +277,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
         },
         pending: null,
         reportedNativeCrashIds: []
-      });
+      };
+      storage.value = JSON.stringify(envelope);
       const manager = new FTCrashFreeDurationManager(clock);
       await manager.initializeWithStorage(storage, AppState.RUN);
 
@@ -306,7 +317,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       }
 
       const rebootStorage = new MemoryCrashFreeStorage();
-      rebootStorage.value = JSON.stringify({
+      const rebootEnvelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 10,
@@ -320,7 +331,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
         },
         pending: null,
         reportedNativeCrashIds: []
-      });
+      };
+      rebootStorage.value = JSON.stringify(rebootEnvelope);
       const rebootManager = new FTCrashFreeDurationManager(clock);
       await rebootManager.initializeWithStorage(rebootStorage, AppState.RUN);
       const rebootDuration = await rebootManager.prepareCrashFreeDuration(AppState.RUN, true, 1000100);
@@ -406,7 +418,7 @@ export default function ftCrashFreeDurationManagerUnitTest() {
       clock.uptimeNs = 200;
       clock.wallClockMs = 1000100;
       const storage = new MemoryCrashFreeStorage();
-      storage.value = JSON.stringify({
+      const envelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 0,
@@ -420,7 +432,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
         },
         pending: null,
         reportedNativeCrashIds: []
-      });
+      };
+      storage.value = JSON.stringify(envelope);
       const manager = new FTCrashFreeDurationManager(clock);
       await manager.initializeWithStorage(storage, AppState.RUN);
 
@@ -450,10 +463,11 @@ export default function ftCrashFreeDurationManagerUnitTest() {
 
     it('selectsTheNewestPredecessorMatchingEachRecoveredCrashTime', 0, async () => {
       const clock = new FixedCrashFreeClock();
-      clock.uptimeNs = 500;
+      // Keep the simulated boot marker aligned with the persisted snapshots.
+      clock.uptimeNs = 400000500;
       clock.wallClockMs = 1000400;
       const storage = new MemoryCrashFreeStorage();
-      storage.value = JSON.stringify({
+      const envelope: CrashFreePersistedEnvelopeTestFixture = {
         version: 1,
         current: {
           foregroundNs: 30,
@@ -476,7 +490,8 @@ export default function ftCrashFreeDurationManagerUnitTest() {
           runId: 'older-process'
         },
         reportedNativeCrashIds: []
-      });
+      };
+      storage.value = JSON.stringify(envelope);
       const manager = new FTCrashFreeDurationManager(clock);
       await manager.initializeWithStorage(storage, AppState.RUN);
 

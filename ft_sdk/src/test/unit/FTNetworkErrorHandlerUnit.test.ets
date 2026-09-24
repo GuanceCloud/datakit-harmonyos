@@ -10,6 +10,12 @@ import {
   sanitizeFTNetworkResourceFields
 } from '../../main/ets/components/network/FTNetworkErrorHandler';
 
+interface TestNetworkFailure {
+  name: string;
+  message: string;
+  code: string;
+}
+
 class FilteringNetworkErrorHandler implements FTNetworkErrorHandler {
   public calls: number = 0;
   public lastContext: FTNetworkErrorContext | null = null;
@@ -31,7 +37,7 @@ class ThrowingNetworkErrorHandler implements FTNetworkErrorHandler {
 export default function ftNetworkErrorHandlerUnitTest() {
   describe('FTNetworkErrorHandlerUnit', () => {
     it('handlerShouldReceiveOriginalFailureAndFilterDns', 0, () => {
-      const rawFailure: object = {
+      const rawFailure: TestNetworkFailure = {
         name: 'NetworkError',
         message: 'DNS lookup failed: ENOTFOUND',
         code: 'ENOTFOUND'
@@ -68,11 +74,10 @@ export default function ftNetworkErrorHandlerUnitTest() {
     });
 
     it('protectedResourceFieldsShouldBeDiscarded', 0, () => {
-      const fields: FTNetworkResourceFields = {
-        resource_id: 'attempted-override',
-        view_id: 'attempted-view-override',
-        handler_reason: 'timeout'
-      };
+      const fields: FTNetworkResourceFields = {};
+      fields['resource_id'] = 'attempted-override';
+      fields['view_id'] = 'attempted-view-override';
+      fields['handler_reason'] = 'timeout';
 
       const sanitized = sanitizeFTNetworkResourceFields(fields);
 

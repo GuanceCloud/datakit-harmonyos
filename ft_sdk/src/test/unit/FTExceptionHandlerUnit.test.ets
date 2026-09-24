@@ -377,7 +377,7 @@ export default function ftExceptionHandlerUnitTest() {
       runtime.runScheduled();
 
       expect(runtime.rumManager.addErrorCount).assertEqual(1);
-      expect(runtime.rumManager.stopViewCount).assertEqual(1);
+      expect(runtime.rumManager.stopViewCount).assertEqual(0);
       expect(runtime.flushCount).assertEqual(1);
       expect(runtime.unregisterCount).assertEqual(1);
       expect(runtime.scheduledDelayHistory.includes(10)).assertTrue();
@@ -388,7 +388,7 @@ export default function ftExceptionHandlerUnitTest() {
       expect(runtime.rumManager.lastErrorType.length > 0).assertTrue();
     });
 
-    it('crashShouldFlushAfterAddError', 0, async () => {
+    it('crashShouldFlushAfterAddErrorWithoutStoppingView', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
       handler.initConfig(createCrashConfig());
       await flushPromises();
@@ -397,12 +397,12 @@ export default function ftExceptionHandlerUnitTest() {
       await triggerCrashAndDrain(runtime);
 
       expect(runtime.rumManager.addErrorCount).assertEqual(1);
-      expect(runtime.rumManager.stopViewCount).assertEqual(1);
+      expect(runtime.rumManager.stopViewCount).assertEqual(0);
       expect(runtime.flushCount).assertEqual(1);
       expect(context.terminateCount).assertEqual(1);
     });
 
-    it('crashShouldFlushWhenStopViewFails', 0, async () => {
+    it('crashShouldFlushWithoutCallingStopView', 0, async () => {
       const handler = FTExceptionHandler.getInstance();
       runtime.rumManager.stopViewReject = true;
       handler.initConfig(createCrashConfig());
@@ -411,7 +411,7 @@ export default function ftExceptionHandlerUnitTest() {
       const context = runtime.rumManager.context as FakeTerminateContext;
       await triggerCrashAndDrain(runtime);
 
-      expect(runtime.rumManager.stopViewCount).assertEqual(1);
+      expect(runtime.rumManager.stopViewCount).assertEqual(0);
       expect(runtime.flushCount).assertEqual(1);
       expect(context.terminateCount).assertEqual(1);
     });

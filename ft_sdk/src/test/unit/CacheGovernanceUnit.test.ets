@@ -49,6 +49,8 @@ export default function cacheGovernanceUnitTest() {
       const body = '缓存';
       const envelope = JSON.parse(FTCacheFiles.encode(body)) as FTCacheEnvelope;
       expect(FTCacheFiles.bytes(body)).assertEqual(6);
+      expect(FTCacheFiles.bytes('A你😀')).assertEqual(8);
+      expect(FTCacheFiles.bytes('\uD800')).assertEqual(3);
       expect(envelope.version).assertEqual(1);
       expect(envelope.body).assertEqual(body);
       expect(envelope.checksum).assertEqual(FTCacheFiles.checksum(body));

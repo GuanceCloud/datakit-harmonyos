@@ -199,10 +199,8 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(getKnownRequestBodyByteSize(new Uint8Array(5), normalized)).assertEqual(5);
       expect(getKnownRequestBodyByteSize(new Map<string, string>(), normalized)).assertEqual(undefined);
 
-      const streamHeaders = buildHeaderValuesForFinalRequest(
-        { 'Content-Length': '7' } as Object,
-        { 'Content-Length': '7' }
-      );
+      const streamRawHeaders: Record<string, string> = { 'Content-Length': '7' };
+      const streamHeaders = buildHeaderValuesForFinalRequest(streamRawHeaders, streamRawHeaders);
       expect(getKnownRequestBodyByteSize(new Map<string, string>(), streamHeaders)).assertEqual(7);
       const inferred = createHeaderInferredTransportMetrics(rawHeaders, finalHeaders, '');
       expect(inferred.requestHeaderSize).assertEqual(57);

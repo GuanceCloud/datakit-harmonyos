@@ -543,7 +543,7 @@ export default function httpChainModeDeviceTest() {
         const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
           viewName, resourceStatus: 0, requiredTags: ['trace_id', 'span_id'], requiredFields: ['request_header'] };
         const resourcePoint = RumAttributeAssert.record(resource, resourceAttributes);
-        expect(resourcePoint.tags.has('resource_status')).assertFalse();
+        expect(resourcePoint.tags.get('resource_status')).assertEqual('0');
         expect(resourcePoint.tags.get('span_id')).assertEqual(traceIds[1]);
 
         const errorFragments = ['error,', 'error_source=network', `resource_id=${resource!.getUuid()}`];

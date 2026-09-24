@@ -175,7 +175,7 @@ export default function remoteDataFilterUnitTest() {
     it('shouldTreatNumericPullIntervalAsNanoseconds', 0, async () => {
       const client = new FakeRemoteDataFilterHttpClient({
         code: 200,
-        body: JSON.stringify({
+        body: stringifyRemoteDataFilter({
           filters: { logging: [] },
           pull_interval: 10_000_000_000
         })
