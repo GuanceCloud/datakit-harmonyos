@@ -105,6 +105,7 @@ export class Constants {
   static readonly KEY_RUM_VIEW_ERROR_COUNT = "view_error_count";
   static readonly KEY_RUM_VIEW_RESOURCE_COUNT = "view_resource_count";
   static readonly KEY_RUM_VIEW_LONG_TASK_COUNT = "view_long_task_count";
+  static readonly KEY_RUM_VIEW_LONG_TASK_RATE = "view_long_task_rate";
   
   /**
    * RUM action related keys
@@ -533,6 +534,7 @@ export class Constants {
   /** Internal Action/View persistence metadata; never included in RUM attributes. */
   static readonly KEY_RUM_COLLECT_TYPE = "collect_type";
   static readonly KEY_RUM_VIEW_MONOTONIC_START = "_sdk_view_monotonic_start_ns";
+  static readonly KEY_RUM_VIEW_LONG_TASK_DURATION = "_sdk_view_long_task_duration_ns";
   /**
    * Cold start, action_type
    */

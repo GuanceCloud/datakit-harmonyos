@@ -221,6 +221,19 @@ export class ViewBean {
   public getLongTaskCount(): number { return this.longTaskCount; }
   public setLongTaskCount(longTaskCount: number): void { this.longTaskCount = longTaskCount; }
 
+  public setLongTaskDuration(duration: number): void {
+    this.extraAttr.set(Constants.KEY_RUM_VIEW_LONG_TASK_DURATION, { value: String(duration) } as MonitorValue);
+  }
+
+  public getLongTaskDuration(): number {
+    const stored = this.extraAttr.get(Constants.KEY_RUM_VIEW_LONG_TASK_DURATION);
+    if (stored && typeof stored === 'object') {
+      const duration = Number((stored as MonitorValue).value);
+      return Number.isFinite(duration) ? Math.max(0, duration) : 0;
+    }
+    return 0;
+  }
+
   public getViewLoadTime(): number { return this.viewLoadTime; }
   public setViewLoadTime(viewLoadTime: number): void { this.viewLoadTime = viewLoadTime; }
 

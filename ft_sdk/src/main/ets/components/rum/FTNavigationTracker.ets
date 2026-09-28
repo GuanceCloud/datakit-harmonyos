@@ -13,6 +13,7 @@ const TAG = 'FTNavigationTracker';
 export class FTNavigationTracker {
   private static instance: FTNavigationTracker | null = null;
   private uiObserver: UIObserver | null = null;
+  private observedUIContext: UIContext | null = null;
   private rumConfig: FTRUMConfig | null = null;
   private automaticViewEventQueue: Promise<void> = Promise.resolve();
   private readonly navDestinationSwitchCallback = (info: uiObserver.NavDestinationSwitchInfo): Promise<void> => {
@@ -62,9 +63,6 @@ export class FTNavigationTracker {
   }
 
   public init(uiContext: UIContext, rumConfig: FTRUMConfig): void {
-    if (this.inited) {
-      return;
-    }
     this.rumConfig = rumConfig;
     
     // Check if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks.onActivityResumed)
@@ -78,7 +76,42 @@ export class FTNavigationTracker {
       return;
     }
 
+    if (this.inited) {
+      if (this.observedUIContext === uiContext) {
+        return;
+      }
+      const previous = this.uiObserver;
+      if (previous && previous !== observer) {
+        try {
+          previous.off('navDestinationSwitch', this.navDestinationSwitchCallback);
+          previous.off('routerPageUpdate', this.routerPageUpdateCallback);
+        } catch (error) {
+          FTInnerLogger.w(TAG, `Unable to remove previous window observer: ${error}`);
+        }
+      }
+      this.uiObserver = observer;
+      this.observedUIContext = uiContext;
+      this.routerShowObserved = false;
+      this.automaticViewEventQueue = this.automaticViewEventQueue.then(async () => {
+        await this.startAutomaticView('', null, '');
+        this.lastVisibleContext = null;
+        this.startingPageKey = '';
+        this.pageCreateStartTimeMap.clear();
+        this.pageResumeStartTimeMap.clear();
+        this.pendingRouterHandlerViews.clear();
+        await this.restoreVisibleRouterPage(uiContext);
+      }).catch((error: Error) => {
+        FTInnerLogger.w(TAG, `Window View recovery failed: ${error}`);
+      });
+      if (previous !== observer) {
+        observer.on('navDestinationSwitch', this.navDestinationSwitchCallback);
+        observer.on('routerPageUpdate', this.routerPageUpdateCallback);
+      }
+      return;
+    }
+
     this.uiObserver = observer;
+    this.observedUIContext = uiContext;
     observer.on('navDestinationSwitch', this.navDestinationSwitchCallback);
     observer.on('routerPageUpdate', this.routerPageUpdateCallback);
 
@@ -98,6 +131,7 @@ export class FTNavigationTracker {
   public destroy(): void {
     const observer = this.uiObserver;
     this.uiObserver = null;
+    this.observedUIContext = null;
     this.rumConfig = null;
     if (observer) {
       try {
@@ -516,7 +550,8 @@ export class FTNavigationTracker {
   private async startAutomaticView(routeName: string, handlerView: HandlerView | null, pageKey: string): Promise<void> {
     const rum = FTRUMGlobalManager.getInstance();
     try {
-      if (this.currentViewName.length > 0) {
+      if (this.currentViewName.length > 0 &&
+        FTRUMInnerManager.getInstance().getActiveView()?.getId() === this.currentViewId) {
         await rum.stopView();
       }
     } catch (e) {

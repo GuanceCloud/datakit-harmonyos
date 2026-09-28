@@ -49,6 +49,7 @@ enum FTDBTaskPoolCommand {
   MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
+  SET_VIEW_LONG_TASK_DURATION = 'setViewLongTaskDuration',
   INSERT_RUM_ACTION = 'insertRumAction',
   CLOSE_RUM_ACTION = 'closeRumAction',
   QUERY_SUM_ACTION = 'querySumAction',
@@ -856,6 +857,16 @@ export class FTDBTaskPoolExecutor {
       viewId
     });
     return response.view ? ViewBean.fromJSON(response.view) : null;
+  }
+
+  public static async setViewLongTaskDuration(context: Context, viewId: string, duration: number): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.SET_VIEW_LONG_TASK_DURATION,
+      viewId,
+      duration,
+      now: Date.now()
+    });
+    return response.value === true;
   }
 
   public static async cleanCloseActionData(context: Context, ids: string[]): Promise<number> {

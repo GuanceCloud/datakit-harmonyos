@@ -20,6 +20,7 @@ interface ActiveViewBeanJSON {
     errorCount: number;
     resourceCount: number;
     longTaskCount: number;
+    longTaskDuration: number;
     pendingResourceCount: number;
     property: Record<string, object>;
     tags: Record<string, string>;
@@ -50,6 +51,7 @@ export class ActiveViewBean {
   private errorCount: number = 0;
   private resourceCount: number = 0;
   private longTaskCount: number = 0;
+  private longTaskDuration: number = 0;
   private pendingResourceCount: number = 0;
   
   // Last error time (nanoseconds) - aligned with Android
@@ -295,6 +297,16 @@ export class ActiveViewBean {
   public increaseLongTaskCount(): void {
     this.longTaskCount++;
   }
+
+  public addLongTaskDuration(duration: number): void {
+    if (duration > 0) {
+      this.longTaskDuration += duration;
+    }
+  }
+
+  public getLongTaskDuration(): number {
+    return this.longTaskDuration;
+  }
   
   /**
    * Get pending resource count
@@ -416,6 +428,7 @@ export class ActiveViewBean {
     viewBean.setErrorCount(this.errorCount);
     viewBean.setResourceCount(this.resourceCount);
     viewBean.setLongTaskCount(this.longTaskCount);
+    viewBean.setLongTaskDuration(this.longTaskDuration);
     viewBean.setLastErrorTime(this.lastErrorTime); // Aligned with Android: bean.lastErrorTime = this.lastErrorTime;
     viewBean.setProperty(this.property);
     viewBean.setTags(this.tags);
@@ -491,6 +504,7 @@ export class ActiveViewBean {
       errorCount: this.errorCount,
       resourceCount: this.resourceCount,
       longTaskCount: this.longTaskCount,
+      longTaskDuration: this.longTaskDuration,
       pendingResourceCount: this.pendingResourceCount,
       property: this.property,
       tags: this.tags,

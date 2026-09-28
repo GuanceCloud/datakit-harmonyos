@@ -71,6 +71,7 @@ export class FTAbilityLifecycleListener {
   // for platforms that only provide UIAbility lifecycle callbacks, so one of
   // several UIAbilities going background cannot classify the whole process.
   private foregroundAbilities: Set<UIAbility> = new Set();
+  private windowStages: Map<UIAbility, window.WindowStage> = new Map();
   // A quick return to the foreground must not resume a View before the
   // background callback has finished closing it.
   private pendingViewStop: Promise<void> = Promise.resolve();
@@ -151,6 +152,7 @@ export class FTAbilityLifecycleListener {
           FTSDK.recordAppFirstUIAbilityCreate();
         },
         onWindowStageCreate: (ability: UIAbility, windowStage: window.WindowStage) => {
+          this.windowStages.set(ability, windowStage);
           FTInnerLogger.d(TAG, `onWindowStageCreate: UIAbility lifecycle event`);
           this.registerLaunchWindowStateListener(windowStage);
           try {
@@ -160,6 +162,7 @@ export class FTAbilityLifecycleListener {
           }
         },
         onWindowStageActive: (ability: UIAbility, windowStage: window.WindowStage) => {
+          this.windowStages.set(ability, windowStage);
           FTInnerLogger.d(TAG, `onWindowStageActive: UIAbility lifecycle event`);
           FTUIBlockManager.getInstance().setAppInForeground(true);
           try {
@@ -171,19 +174,25 @@ export class FTAbilityLifecycleListener {
           }
         },
         onWindowStageDestroy: (ability: UIAbility, windowStage: window.WindowStage) => {
+          this.windowStages.delete(ability);
           FTInnerLogger.d(TAG, `onWindowStageDestroy: UIAbility lifecycle event`);
-          FTMonitorManager.getInstance().setAppInForeground(false);
-          FTUIBlockManager.getInstance().setAppInForeground(false);
-          FTSDK.cleanupUIFeatures();
-          // Stop view when window stage is destroyed
-          this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
+          if (this.foregroundAbilities.size === 0) {
+            FTMonitorManager.getInstance().setAppInForeground(false);
+            FTUIBlockManager.getInstance().setAppInForeground(false);
+            FTSDK.cleanupUIFeatures();
+            this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
+          }
         },
         onAbilityForeground: (ability: UIAbility) => {
+          const wasBackground = this.foregroundAbilities.size === 0;
           this.foregroundAbilities.add(ability);
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
-          FTSDK.recordAppLaunchApplicationForeground();
-          this.resumeViewOnForeground(ability);
+          if (wasBackground) {
+            FTSDK.recordAppLaunchApplicationForeground();
+            this.resumeViewOnForeground(ability);
+          }
+          this.bindForegroundWindow(ability);
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -243,28 +252,29 @@ export class FTAbilityLifecycleListener {
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
           this.foregroundAbilities.delete(ability);
-          FTMonitorManager.getInstance().setAppInForeground(false);
-          FTUIBlockManager.getInstance().setAppInForeground(false);
           if (this.foregroundAbilities.size === 0) {
+            FTMonitorManager.getInstance().setAppInForeground(false);
+            FTUIBlockManager.getInstance().setAppInForeground(false);
             FTSDK.recordAppLaunchApplicationBackground();
+            this.flushDbLaneOnLifecycleChange("onAbilityBackground");
+            this.scheduleSleepCheck();
+          } else {
+            this.bindAnyForegroundWindow();
           }
-          // Stop view when ability goes to background (aligned with Android onActivityPaused)
-          this.flushDbLaneOnLifecycleChange("onAbilityBackground");
-          
-          // Schedule check for long time sleep (10 seconds)
-          // Similar to Android's LifeCircleTraceCallback.onEnterBackground()
-          this.scheduleSleepCheck();
         },
         onAbilityDestroy: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
           this.foregroundAbilities.delete(ability);
-          FTMonitorManager.getInstance().setAppInForeground(false);
-          FTUIBlockManager.getInstance().setAppInForeground(false);
           if (this.foregroundAbilities.size === 0) {
+            FTMonitorManager.getInstance().setAppInForeground(false);
+            FTUIBlockManager.getInstance().setAppInForeground(false);
             FTSDK.recordAppLaunchApplicationBackground();
+            FTSDK.cleanupUIFeatures();
+            this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
+          } else {
+            this.bindAnyForegroundWindow();
           }
-          // Stop view when ability is destroyed (aligned with Android onDestroy)
-          this.flushDbLaneOnLifecycleChange("onAbilityDestroy");
+          this.windowStages.delete(ability);
         }
       };
 
@@ -402,6 +412,7 @@ export class FTAbilityLifecycleListener {
       this.startTimeNanoTime = 0;
       this.startClockTimeNano = 0;
       this.foregroundAbilities.clear();
+      this.windowStages.clear();
       
       FTInnerLogger.i(TAG, "UIAbility lifecycle listener unregistered successfully");
 
@@ -423,6 +434,25 @@ export class FTAbilityLifecycleListener {
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Error calling stopView in ${context}: ${String(error)}`);
+    }
+  }
+
+  private bindForegroundWindow(ability: UIAbility): void {
+    const stage = this.windowStages.get(ability);
+    if (!stage) {
+      return;
+    }
+    try {
+      FTSDK.onWindowStageCreate(stage.getMainWindowSync());
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Unable to bind foreground window for View tracking: ${String(error)}`);
+    }
+  }
+
+  private bindAnyForegroundWindow(): void {
+    for (const ability of this.foregroundAbilities) {
+      this.bindForegroundWindow(ability);
+      return;
     }
   }
 

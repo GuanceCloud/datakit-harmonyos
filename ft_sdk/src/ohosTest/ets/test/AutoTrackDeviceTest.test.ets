@@ -690,6 +690,28 @@ export default function autoTrackDeviceTest() {
       expect(second?.getId() === first?.getId()).assertFalse();
     });
 
+    it('switchingUiContextRebindsTheVisibleRouterView', 0, async () => {
+      const rumConfig = buildRumConfig(true, false);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'first-page');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('First');
+
+      const secondContext = new FakeUIContext();
+      secondContext.currentRouterName = 'pages/Second';
+      FTNavigationTracker.getInstance().init(secondContext as Object as UIContext, rumConfig);
+      const rebound = await WaitUtils.waitUntil(async () =>
+        FTRUMInnerManager.getInstance().getActiveView()?.getViewName() === 'Second', 5000);
+      expect(rebound).assertTrue();
+      expect(first?.isClose()).assertTrue();
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+      expect(secondContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(1);
+
+      const currentId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'old-window');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '').assertEqual(currentId);
+    });
+
     it('foregroundResumeCreatesNewViewForSameRouterPage', 0, async () => {
       const routeName = 'pages/Index';
       const tracker = FTNavigationTracker.getInstance();

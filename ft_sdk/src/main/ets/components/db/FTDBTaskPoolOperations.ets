@@ -57,6 +57,7 @@ enum FTDBTaskPoolCommand {
   MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
+  SET_VIEW_LONG_TASK_DURATION = 'setViewLongTaskDuration',
   INSERT_RUM_ACTION = 'insertRumAction',
   CLOSE_RUM_ACTION = 'closeRumAction',
   QUERY_SUM_ACTION = 'querySumAction',
@@ -534,6 +535,13 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
         return okResponse(undefined, await updateViewUpdateTimeInTaskPool(
           rdbStore,
           request.viewId || '',
+          request.now || 0
+        ));
+      case FTDBTaskPoolCommand.SET_VIEW_LONG_TASK_DURATION:
+        return okResponse(undefined, await setViewLongTaskDurationInTaskPool(
+          rdbStore,
+          request.viewId || '',
+          request.duration || 0,
           request.now || 0
         ));
       case FTDBTaskPoolCommand.INSERT_RUM_ACTION:
@@ -2548,6 +2556,64 @@ async function updateViewUpdateTimeInTaskPool(
     `WHERE ${FTSQL.RUM_COLUMN_ID} = '${escapeSqlString(viewId)}'`;
   await rdbStore.executeSql(updateSql);
   return true;
+}
+
+async function setViewLongTaskDurationInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  viewId: string,
+  duration: number,
+  now: number
+): Promise<boolean> {
+  if (!viewId || duration <= 0) {
+    return false;
+  }
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ID, viewId);
+  rdbStore.beginTransaction();
+  try {
+    const resultSet = await rdbStore.query(predicates, [
+      FTSQL.RUM_COLUMN_EXTRA_ATTR,
+      FTSQL.RUM_VIEW_UPDATE_TIME,
+      FTSQL.RUM_DATA_UPDATE_TIME,
+      FTSQL.RUM_DATA_UPLOAD_TIME
+    ]);
+    let attr: Record<string, object> = {};
+    let updateTime = 0;
+    let dataUpdateTime = 0;
+    let uploadTime = 0;
+    let found = false;
+    try {
+      if (resultSet.goToFirstRow()) {
+        found = true;
+        attr = parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
+        updateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME));
+        dataUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME));
+        uploadTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME));
+      }
+    } finally {
+      resultSet.close();
+    }
+    if (!found) {
+      rdbStore.commit();
+      return false;
+    }
+    const stored = attr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] as Record<string, string>;
+    const previous = stored ? Number(stored['value']) : 0;
+    const total = Math.max(Number.isFinite(previous) ? previous : 0, duration);
+    const durationAttr: Record<string, string> = {};
+    durationAttr['value'] = String(total);
+    attr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] = durationAttr;
+    const values = {} as relationalStore.ValuesBucket;
+    values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = JSON.stringify(attr);
+    values[FTSQL.RUM_VIEW_UPDATE_TIME] = updateTime + 1;
+    values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(now, dataUpdateTime + 1, uploadTime + 1);
+    await rdbStore.update(values, predicates);
+    rdbStore.commit();
+    return true;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function insertRumActionInTaskPool(

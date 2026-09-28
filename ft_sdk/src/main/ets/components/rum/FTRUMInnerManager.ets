@@ -343,6 +343,8 @@ export class FTRUMInnerManager {
   private syntheticViews: Map<string, ActiveViewBean> = new Map();
   private syntheticViewReady: Map<string, Promise<void>> = new Map();
   private syntheticCloseBarrier: Promise<void> = Promise.resolve();
+  private viewInitializationReady: Map<string, Promise<void>> = new Map();
+  private longTaskDurationUpdates: Map<string, Promise<void>> = new Map();
   private appState: AppState = AppState.RUN;
   private activeAction: ActiveActionBean | null = null;
   
@@ -1870,6 +1872,12 @@ export class FTRUMInnerManager {
       const timeSpent = viewBean.getIsClose() ? viewBean.getTimeSpent() : viewBean.getCurrentDuration();
       fieldsMap.set(Constants.KEY_RUM_VIEW_TIME_SPENT, timeSpent.toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_COUNT, viewBean.getLongTaskCount().toString());
+      const currentView = this.findCurrentViewById(viewBean.getId());
+      const longTaskDuration = currentView ? currentView.getLongTaskDuration() : viewBean.getLongTaskDuration();
+      if (timeSpent > 0 && longTaskDuration > 0) {
+        fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_RATE,
+          Math.min(longTaskDuration / timeSpent, 1).toString());
+      }
       fieldsMap.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, (!viewBean.getIsClose()).toString());
       fieldsMap.set(Constants.KEY_SDK_VIEW_UPDATE_TIME, viewBean.getViewUpdateTime().toString());
       
@@ -2882,7 +2890,7 @@ export class FTRUMInnerManager {
     this.appState = AppState.BACKGROUND;
     this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(() =>
       this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND));
-    if (this.context) {
+    if (this.context && FTRUMConfigManager.getInstance().isRumEnable()) {
       this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
     }
   }
@@ -2907,6 +2915,21 @@ export class FTRUMInnerManager {
       return this.launchView;
     }
     return this.ensureSyntheticView(Constants.VIEW_NAME_ROOT_FALLBACK);
+  }
+
+  private findCurrentViewById(viewId: string): ActiveViewBean | null {
+    if (this.activeView?.getId() === viewId) {
+      return this.activeView;
+    }
+    if (this.launchView?.getId() === viewId) {
+      return this.launchView;
+    }
+    for (const view of this.syntheticViews.values()) {
+      if (view.getId() === viewId) {
+        return view;
+      }
+    }
+    return null;
   }
 
   private ensureLaunchView(startTime: number): ActiveViewBean {
@@ -4384,10 +4407,9 @@ export class FTRUMInnerManager {
     activeViewBean.setCollectType(this.checkSessionWillCollect(activeViewBean.getSessionId()));
     const viewBean = activeViewBean.convertToViewBean();
     
-    if (this.context) {
-      return this.initViewAsync(this.context, viewBean);
-    }
-    return Promise.resolve();
+    const ready = this.context ? this.initViewAsync(this.context, viewBean) : Promise.resolve();
+    this.viewInitializationReady.set(activeViewBean.getId(), ready);
+    return ready;
   }
 
   /**
@@ -4417,6 +4439,8 @@ export class FTRUMInnerManager {
    */
   private async closeView(activeViewBean: ActiveViewBean, shouldGenerateSummary: boolean = true): Promise<void> {
     try {
+      await (this.viewInitializationReady.get(activeViewBean.getId()) || Promise.resolve());
+      await (this.longTaskDurationUpdates.get(activeViewBean.getId()) || Promise.resolve());
       // Capture the final View-scoped sample before stopping its monitor.
       await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
       FTMonitorManager.getInstance().removeMonitor(activeViewBean.getId());
@@ -4462,6 +4486,8 @@ export class FTRUMInnerManager {
         this.generateRumData();
         FTInnerLogger.d(TAG, `closeView scheduled generateRumData: ${activeViewBean.getViewName()}`);
       }
+      this.viewInitializationReady.delete(activeViewBean.getId());
+      this.longTaskDurationUpdates.delete(activeViewBean.getId());
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error closing view: ${error}`);
@@ -5226,6 +5252,8 @@ export class FTRUMInnerManager {
       this.syntheticViews.clear();
       this.syntheticViewReady.clear();
       this.syntheticCloseBarrier = Promise.resolve();
+      this.viewInitializationReady.clear();
+      this.longTaskDurationUpdates.clear();
       this.appState = AppState.RUN;
       
       // Clear resources
@@ -5403,20 +5431,19 @@ export class FTRUMInnerManager {
       
       // Increase long task count
       // increaseLongTaskCount() will update database if activeAction/activeView exists
-      this.increaseLongTaskCount();
+      const viewId = allTags[Constants.KEY_RUM_VIEW_ID] || '';
+      this.increaseLongTaskCount(viewId, duration);
       
       // Also update database directly using actionId/viewId from tags (only if action/view is closed)
       // This ensures counts are updated even for automatically closed actions
       // Note: If activeAction/activeView exists, increaseLongTaskCount() already updated the database,
       // so we only need to update if action/view is closed (not in memory)
       const actionId = allTags[Constants.KEY_RUM_ACTION_ID];
-      const viewId = allTags[Constants.KEY_RUM_VIEW_ID];
-      
       if (this.context && (actionId || viewId)) {
         const isActionActive: boolean = !!(actionId && actionId.length > 0 && this.activeAction &&
-          this.activeAction.getId() === actionId);
-        const isViewActive: boolean = !!(viewId && viewId.length > 0 && this.activeView &&
-          this.activeView.getId() === viewId);
+          !this.activeAction.isActionClose() && this.activeAction.getId() === actionId);
+        const currentView = this.findCurrentViewById(viewId);
+        const isViewActive: boolean = currentView !== null && !currentView.isClose();
         if (!isActionActive || !isViewActive) {
           if (!isActionActive && actionId && actionId.length > 0) {
             this.submitRumCounterUpdateTask({
@@ -5441,21 +5468,34 @@ export class FTRUMInnerManager {
    * Increase long task count for current session
    * Aligned with Android: updates both memory and database
    */
-  private increaseLongTaskCount(): void {
+  private increaseLongTaskCount(viewId: string, duration: number): void {
     try {
-      if (this.activeView) {
-        const viewId = this.activeView.getId();
+      const view = this.findCurrentViewById(viewId);
+      if (view && !view.isClose()) {
         // Update memory count
-        this.activeView.increaseLongTaskCount();
+        view.increaseLongTaskCount();
+        view.addLongTaskDuration(duration);
         // Update database count (aligned with Android SDK)
         if (this.context) {
           this.submitRumCounterUpdateTask({
             updateType: 'long_task.view',
             viewId
           });
+          const context = this.context;
+          const totalDuration = view.getLongTaskDuration();
+          const previous = this.longTaskDurationUpdates.get(viewId) || Promise.resolve();
+          const ready = this.viewInitializationReady.get(viewId) || Promise.resolve();
+          const update = previous.then(async () => {
+            await ready;
+            await FTDBTaskPoolExecutor.setViewLongTaskDuration(context, viewId, totalDuration);
+            this.generateRumData();
+          }).catch((error: Error) => {
+            FTInnerLogger.w(TAG, `Unable to persist View Long Task duration: ${error}`);
+          });
+          this.longTaskDurationUpdates.set(viewId, update);
         }
       }
-      if (this.activeAction) {
+      if (this.activeAction && !this.activeAction.isActionClose()) {
         const actionId = this.activeAction.getId();
         // Update memory count
         this.activeAction.increaseLongTaskCount();

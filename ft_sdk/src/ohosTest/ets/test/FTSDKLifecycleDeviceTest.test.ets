@@ -569,5 +569,41 @@ export default function ftSDKLifecycleDeviceTest() {
         Utils.init(originalAbilityContext);
       }
     });
+
+    it('backgroundingOneOfTwoAbilitiesKeepsTheActiveViewOpen', 0, async () => {
+      const originalAbilityContext = Utils.getAbilityContext();
+      const applicationContext = new DeviceMultiAbilityApplicationContext();
+      const stageContext = new DeviceMultiAbilityStageContext(applicationContext);
+      const listener = FTAbilityLifecycleListener.getInstance();
+      const firstAbility = new Object();
+      const secondAbility = new Object();
+
+      try {
+        FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+        FTSDK.installRUMConfig(new FTRUMConfig()
+          .setRumAppId(TEST_FAKE_RUM_ID)
+          .setEnableTraceUserView(true));
+        listener.unregister();
+        Utils.init(stageContext as Object as common.UIAbilityContext);
+        listener.register();
+
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(secondAbility);
+        await FTRUMGlobalManager.getInstance().startView('two_ability_view');
+        const view = FTRUMInnerManager.getInstance().getActiveView();
+        expect(view?.isClose()).assertFalse();
+
+        applicationContext.lifecycleCallback?.onAbilityBackground?.(firstAbility);
+        await WaitUtils.delay(150);
+        expect(view?.isClose()).assertFalse();
+
+        applicationContext.lifecycleCallback?.onAbilityBackground?.(secondAbility);
+        const closed = await WaitUtils.waitUntil(async () => view?.isClose() === true, 5000);
+        expect(closed).assertTrue();
+      } finally {
+        listener.unregister();
+        Utils.init(originalAbilityContext);
+      }
+    });
   });
 }

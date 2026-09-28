@@ -21,6 +21,7 @@ export class FTRumFileStore {
     return ['cleanupExpiredRumView', 'cleanupExpiredRumAction', 'upsertRumView', 'updateRumView',
       'closeRumView', 'updateViewUploadTime', 'increaseViewAction', 'getRumPendingResource',
       'forceClearRumPendingResource', 'getActionInfo', 'applyRumCounterDeltas', 'updateViewUpdateTime',
+      'setViewLongTaskDuration',
       'insertRumAction', 'closeRumAction', 'querySumAction', 'getActionCounts', 'querySumView',
       'queryRumViewById', 'cleanCloseActionData', 'cleanCloseViewData', 'closeAllActionAndView',
       'exportRumState', 'acknowledgeView'].includes(command);
@@ -90,6 +91,22 @@ export class FTRumFileStore {
           else if (request.command === 'updateViewUpdateTime') { view.dataUpdateTime = now; }
           else { view.actionCount++; }
           if (request.command !== 'increaseViewAction') { view.viewUpdateTime++; }
+          this.put(changes, 'view', view.id, view);
+        }
+        break;
+      case 'setViewLongTaskDuration':
+        response.value = view !== null;
+        if (view) {
+          const extraAttr = view.extraAttr || {};
+          const stored = extraAttr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] as Record<string, string>;
+          const previous = stored ? Number(stored['value']) : 0;
+          const duration = Math.max(Number.isFinite(previous) ? previous : 0, request.duration || 0);
+          const durationAttr: Record<string, string> = {};
+          durationAttr['value'] = String(duration);
+          extraAttr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] = durationAttr;
+          view.extraAttr = extraAttr;
+          view.viewUpdateTime++;
+          view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
           this.put(changes, 'view', view.id, view);
         }
         break;

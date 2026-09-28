@@ -1079,14 +1079,29 @@ export class FTSDK {
   public static onWindowStageActive(mainWindow?: window.Window): void {
     FTSDK.recordAppLaunchWindowForeground();
     FTSDK.uiFeatureInitRetryCount = 0;
+    if (mainWindow) {
+      FTSDK.rebindNavigationTracking(mainWindow);
+      return;
+    }
     getFTSDKRuntime().setMainWindow(mainWindow);
     FTSDK.tryInitializeUIFeaturesInternal();
   }
 
   /** Register Router/Navigation observers before the first loadContent page is shown. */
   public static onWindowStageCreate(mainWindow: window.Window): void {
+    FTSDK.rebindNavigationTracking(mainWindow);
+  }
+
+  /** Bind View observation to the currently visible UIAbility window. */
+  private static rebindNavigationTracking(mainWindow: window.Window): void {
     getFTSDKRuntime().setMainWindow(mainWindow);
     FTSDK.tryInitializeUIFeaturesInternal();
+    if (FTSDK.uiFeaturesInitialized && FTSDK.rumConfig?.isEnableTraceUserView()) {
+      const uiContext = getFTSDKRuntime().getUIContext();
+      if (uiContext) {
+        getFTSDKRuntime().initNavigationTracker(uiContext, FTSDK.rumConfig);
+      }
+    }
   }
 
   /**

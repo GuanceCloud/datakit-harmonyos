@@ -1299,6 +1299,21 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
+    it('viewLongTaskRateIsReportedAndClamped', 0, async () => {
+      const viewName = 'long_task_rate_view';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().addLongTask('long_task_rate_event', 10 * 1000000000);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const view = await DBAssert.waitForViewNamed(viewName, 5000);
+      expect(view?.getLongTaskDuration()).assertEqual(10 * 1000000000);
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_name=${viewName}`, 'view_long_task_rate=1'], 5000);
+      expect(record !== null).assertTrue();
+    });
+
     it('configShouldAffectUpload', 0, async () => {
       const logPrefix = 'config_payload_log';
       await SdkTestLifecycle.resetRuntimeState();

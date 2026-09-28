@@ -97,5 +97,14 @@ export default function samplingUnitTest() {
       restored.setMonotonicStartTime(Number.MAX_SAFE_INTEGER);
       expect(restored.getCurrentDuration()).assertEqual(12345);
     });
+
+    it('viewLongTaskDurationShouldRoundTripThroughStoredAttributes', 0, () => {
+      const view = new ActiveViewBean('Index', 'root', 0, 'long-task-session');
+      view.addLongTaskDuration(250000000);
+      const stored = view.convertToViewBean();
+      const restored = new ViewBean('restored', 'Index', stored.getStartTime());
+      restored.setAttrJsonString(stored.getAttrJsonString());
+      expect(restored.getLongTaskDuration()).assertEqual(250000000);
+    });
   });
 }
