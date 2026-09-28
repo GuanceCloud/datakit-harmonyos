@@ -75,5 +75,27 @@ export default function samplingUnitTest() {
       expect(restoredAction.getCollectType()).assertEqual(CollectType.SAMPLING);
       expect(Object.keys(restoredAction.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
     });
+
+    it('viewDurationShouldUseMonotonicClockAndRemainUncapped', 0, () => {
+      const fiveHoursNs = 5 * 60 * 60 * 1000000000;
+      const view = new ActiveViewBean('LongView', 'root', 0, 'duration-session');
+      view.setStartTime(view.getStartTime() - fiveHoursNs);
+      view.close();
+      const stored = view.convertToViewBean();
+      expect(stored.getTimeSpent() >= fiveHoursNs).assertTrue();
+    });
+
+    it('persistedViewDurationShouldSurviveRestartAndInvalidClockOrigin', 0, () => {
+      const view = new ActiveViewBean('Index', 'root', 0, 'duration-session');
+      const stored = view.convertToViewBean();
+      stored.setMonotonicStartTime(123456789);
+      const restored = new ViewBean('restored', 'Index', stored.getStartTime());
+      restored.setAttrJsonString(stored.getAttrJsonString());
+      expect(restored.getMonotonicStartTime()).assertEqual(123456789);
+
+      restored.setTimeSpent(12345);
+      restored.setMonotonicStartTime(Number.MAX_SAFE_INTEGER);
+      expect(restored.getCurrentDuration()).assertEqual(12345);
+    });
   });
 }

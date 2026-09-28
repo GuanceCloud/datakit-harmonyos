@@ -2,7 +2,6 @@ import { ViewBean } from '../../db/bean/ViewBean';
 import { Utils } from '../../utils/Utils';
 import { Constants } from '../../Constants';
 import { CollectType } from '../enum/RUMEnums';
-import { FTInnerLogger } from '../../log/FTLogger';
 
 /**
  * JSON representation interface for ActiveViewBean
@@ -37,6 +36,7 @@ export class ActiveViewBean {
   private viewReferrer: string;
   private sessionId: string;
   private startTime: number;
+  private startTimeNanoForDuration: number;
   private loadTime: number;
   private isClosed: boolean = false;
   private hasReplay: boolean = false;
@@ -64,6 +64,7 @@ export class ActiveViewBean {
     this.viewReferrer = viewReferrer || Constants.VIEW_NAME_ROOT;
     this.sessionId = sessionId || "";
     this.startTime = Utils.getCurrentNanoTime(); // Nanosecond timestamp 
+    this.startTimeNanoForDuration = Utils.getMonotonicNanoTime();
     this.loadTime = loadTime || -1;
   }
   
@@ -127,6 +128,7 @@ export class ActiveViewBean {
    * Set start time
    */
   public setStartTime(startTime: number): void {
+    this.startTimeNanoForDuration += startTime - this.startTime;
     this.startTime = startTime;
   }
   
@@ -157,22 +159,7 @@ export class ActiveViewBean {
    */
   public close(): void {
     this.isClosed = true;
-    // Calculate timeSpent when closing (aligned with Android: timeSpent = Utils.getCurrentNanoTime() - startTime)
-    const currentTime = Utils.getCurrentNanoTime();
-    const calculatedTimeSpent = currentTime - this.startTime;
-    
-    // Safety check: cap timeSpent to prevent abnormal values (e.g., when app is killed and restarted)
-    // Maximum reasonable time_spent: 4 hours (14400000000000 nanoseconds)
-    const MAX_TIME_SPENT_NS = 14400000000000; // 4 hours in nanoseconds
-    if (calculatedTimeSpent > MAX_TIME_SPENT_NS || calculatedTimeSpent < 0) {
-      // Log warning for debugging
-      FTInnerLogger.w("ActiveViewBean", `[FT-VIEW-TEST] Abnormal timeSpent detected in close(): calculated=${calculatedTimeSpent}ns, startTime=${this.startTime}, currentTime=${currentTime}, capping to ${MAX_TIME_SPENT_NS}ns`);
-      // Cap to maximum value
-      this.timeSpent = Math.min(calculatedTimeSpent, MAX_TIME_SPENT_NS);
-      this.timeSpent = Math.max(this.timeSpent, 0);
-    } else {
-      this.timeSpent = calculatedTimeSpent;
-    }
+    this.timeSpent = this.getDuration();
   }
 
   /** Close a synthetic launch View using the measured launch duration. */
@@ -395,17 +382,7 @@ export class ActiveViewBean {
    * Aligned with Android: returns duration in nanoseconds
    */
   public getDuration(): number {
-    // Calculate duration using nanosecond timestamps (aligned with Android)
-    const calculatedDuration = Utils.getCurrentNanoTime() - this.startTime;
-    
-    // Safety check: cap duration to prevent abnormal values (e.g., when app is killed and restarted)
-    // Maximum reasonable duration: 4 hours (14400000000000 nanoseconds)
-    const MAX_DURATION_NS = 14400000000000; // 4 hours in nanoseconds
-    if (calculatedDuration > MAX_DURATION_NS || calculatedDuration < 0) {
-      // Return capped value instead of abnormal value
-      return Math.min(calculatedDuration, MAX_DURATION_NS);
-    }
-    return calculatedDuration;
+    return Math.max(0, Utils.getMonotonicNanoTime() - this.startTimeNanoForDuration);
   }
   
   /**
@@ -432,6 +409,7 @@ export class ActiveViewBean {
     viewBean.setViewReferrer(this.viewReferrer);
     viewBean.setSessionId(this.sessionId);
     viewBean.setCollectType(this.collectType);
+    viewBean.setMonotonicStartTime(this.startTimeNanoForDuration);
     viewBean.setViewLoadTime(this.loadTime);
     viewBean.setIsClose(this.isClosed);
     viewBean.setActionCount(this.actionCount);

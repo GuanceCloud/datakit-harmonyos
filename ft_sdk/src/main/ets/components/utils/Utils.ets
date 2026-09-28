@@ -388,6 +388,11 @@ export class Utils {
     }
   }
 
+  /** Monotonic nanoseconds since boot, excluding time spent asleep. */
+  public static getMonotonicNanoTime(): number {
+    return systemDateTime.getUptime(systemDateTime.TimeType.ACTIVE, true);
+  }
+
   /**
    * Format timestamp
    * @param timestamp Timestamp

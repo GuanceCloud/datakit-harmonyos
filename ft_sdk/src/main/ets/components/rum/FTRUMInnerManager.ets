@@ -1863,21 +1863,7 @@ export class FTRUMInnerManager {
       fieldsMap.set(Constants.KEY_RUM_VIEW_ACTION_COUNT, viewBean.getActionCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_RESOURCE_COUNT, viewBean.getResourceCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_ERROR_COUNT, viewBean.getErrorCount().toString());
-      // Calculate time_spent with safety check to prevent abnormal values
-      // Maximum reasonable time_spent: 4 hours (14400000000000 nanoseconds)
-      const MAX_TIME_SPENT_NS = 14400000000000; // 4 hours in nanoseconds
-      let timeSpent: number;
-      if (viewBean.getIsClose()) {
-        timeSpent = viewBean.getTimeSpent();
-      } else {
-        timeSpent = Utils.getCurrentNanoTime() - viewBean.getStartTime();
-      }
-      // Cap time_spent to prevent abnormal values (e.g., when app is killed and restarted)
-      if (timeSpent > MAX_TIME_SPENT_NS || timeSpent < 0) {
-        FTInnerLogger.w(TAG, `Abnormal view time_spent detected: ${timeSpent}ns, capping to ${MAX_TIME_SPENT_NS}ns`);
-        timeSpent = Math.min(timeSpent, MAX_TIME_SPENT_NS);
-        timeSpent = Math.max(timeSpent, 0);
-      }
+      const timeSpent = viewBean.getIsClose() ? viewBean.getTimeSpent() : viewBean.getCurrentDuration();
       fieldsMap.set(Constants.KEY_RUM_VIEW_TIME_SPENT, timeSpent.toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_COUNT, viewBean.getLongTaskCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, (!viewBean.getIsClose()).toString());

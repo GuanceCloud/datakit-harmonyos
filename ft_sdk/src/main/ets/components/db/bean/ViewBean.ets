@@ -177,6 +177,32 @@ export class ViewBean {
 
   public getStartTime(): number { return this.startTime; }
 
+  public setMonotonicStartTime(startTime: number): void {
+    this.extraAttr.set(Constants.KEY_RUM_VIEW_MONOTONIC_START, { value: String(startTime) } as MonitorValue);
+  }
+
+  public getMonotonicStartTime(): number {
+    const stored = this.extraAttr.get(Constants.KEY_RUM_VIEW_MONOTONIC_START);
+    if (stored && typeof stored === 'object') {
+      const value = (stored as MonitorValue).value;
+      const startTime = Number(value);
+      return Number.isFinite(startTime) ? startTime : 0;
+    }
+    return 0;
+  }
+
+  /** Use the persisted duration if the monotonic origin is unavailable (for example after a reboot). */
+  public getCurrentDuration(): number {
+    const startTime = this.getMonotonicStartTime();
+    if (startTime > 0) {
+      const now = Utils.getMonotonicNanoTime();
+      if (now >= startTime) {
+        return now - startTime;
+      }
+    }
+    return Math.max(0, this.timeSpent);
+  }
+
   public getIsClose(): boolean { return this.isClose; }
   public setIsClose(isClose: boolean): void { this.isClose = isClose; }
 
@@ -370,8 +396,7 @@ export class ViewBean {
    */
   public close(): void {
     this.isClose = true;
-    // Aligned with Android: timeSpent uses nanoseconds
-    this.timeSpent = Utils.getCurrentNanoTime() - this.startTime;
+    this.timeSpent = this.getCurrentDuration();
     this.dataUpdateTime = Date.now();
   }
 
@@ -441,8 +466,7 @@ export class ViewBean {
    */
   public calculateTimeSpent(): void {
     if (!this.isClose) {
-      // Aligned with Android: timeSpent uses nanoseconds
-      this.timeSpent = Utils.getCurrentNanoTime() - this.startTime;
+      this.timeSpent = this.getCurrentDuration();
       this.dataUpdateTime = Date.now();
     }
   }

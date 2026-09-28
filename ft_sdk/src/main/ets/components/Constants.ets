@@ -530,6 +530,7 @@ export class Constants {
   static readonly KEY_RUM_TAGS = "tags";
   /** Internal Action/View persistence metadata; never included in RUM attributes. */
   static readonly KEY_RUM_COLLECT_TYPE = "collect_type";
+  static readonly KEY_RUM_VIEW_MONOTONIC_START = "_sdk_view_monotonic_start_ns";
   /**
    * Cold start, action_type
    */
