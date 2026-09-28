@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `stopView` replacing properties set by `startView`; ending a View now merges new properties and overrides matching keys.
 - Fixed View durations changing with wall-clock adjustments and being limited to four hours; duration now uses a persisted monotonic clock origin.
 - Fixed background and no-page RUM events inheriting a closed View. They now use `BackgroundView` or `RootView`; `BackgroundView` stays open after returning to the foreground without a page and closes when a page starts or another background period begins.
+- Fixed `ApplicationLaunch` staying open after backgrounding without a page and attributing later events to the wrong View; it now closes on background.
+- Fixed Router Views staying active after their page hides without a successor; they now close on page hide, while a back press alone keeps the View open.
 - Fixed multi-Ability lifecycle callbacks stopping an active View and refreshed automatic Router tracking when the active window changes.
 - Added `view_long_task_rate` to View records when Long Tasks occur.
 
