@@ -172,6 +172,9 @@ export class FTAbilityLifecycleListener {
             FTInnerLogger.w(TAG, `Failed to cache MainWindow on window stage active: ${String(error)}`);
             FTSDK.onWindowStageActive();
           }
+          if (this.foregroundAbilities.has(ability)) {
+            this.resumeViewOnForeground(ability);
+          }
         },
         onWindowStageDestroy: (ability: UIAbility, windowStage: window.WindowStage) => {
           this.windowStages.delete(ability);
@@ -190,9 +193,11 @@ export class FTAbilityLifecycleListener {
           FTUIBlockManager.getInstance().setAppInForeground(true);
           if (wasBackground) {
             FTSDK.recordAppLaunchApplicationForeground();
-            this.resumeViewOnForeground(ability);
           }
           this.bindForegroundWindow(ability);
+          if (wasBackground) {
+            this.resumeViewOnForeground(ability);
+          }
           
           // Clear sleep check timer if app returns to foreground
           if (this.sleepCheckTimer !== null) {
@@ -462,7 +467,8 @@ export class FTAbilityLifecycleListener {
       // The ability may have returned to the background while its previous
       // View was closing. Only the current foreground transition can resume it.
       if (this.isRegistered && this.foregroundAbilities.has(ability) && FTSDK.isViewTrackingEnabled()) {
-        await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+        await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground(() =>
+          this.isRegistered && this.foregroundAbilities.has(ability) && FTSDK.isViewTrackingEnabled());
       }
     } catch (error) {
       FTInnerLogger.e(TAG, `Error resuming View in onAbilityForeground: ${String(error)}`);

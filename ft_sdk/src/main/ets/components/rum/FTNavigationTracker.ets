@@ -401,8 +401,8 @@ export class FTNavigationTracker {
     }
   }
 
-  private async restoreVisibleRouterPage(uiContext: UIContext): Promise<void> {
-    if (!this.inited || this.routerShowObserved || this.currentRouteName.length > 0) {
+  private async restoreVisibleRouterPage(uiContext: UIContext, onForeground: boolean = false): Promise<void> {
+    if (!this.inited || (!onForeground && (this.routerShowObserved || this.currentRouteName.length > 0))) {
       return;
     }
     try {
@@ -581,16 +581,39 @@ export class FTNavigationTracker {
     }
   }
 
-  /** Resume the last tracked page after a lifecycle stop without a route change. */
-  public async resumeAutomaticViewOnForeground(): Promise<void> {
+  /** Resume the visible page after a lifecycle stop without a route change. */
+  public resumeAutomaticViewOnForeground(shouldResume?: () => boolean): Promise<void> {
+    // A WindowStage rebind and Router callbacks also use this queue. Resume
+    // only after them, so an old window cannot recreate a stale page View.
+    this.automaticViewEventQueue = this.automaticViewEventQueue.then(() => {
+      if (!shouldResume || shouldResume()) {
+        return this.resumeAutomaticViewOnForegroundInternal();
+      }
+      return Promise.resolve();
+    }).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Foreground View recovery failed: ${error}`);
+    });
+    return this.automaticViewEventQueue;
+  }
+
+  private async resumeAutomaticViewOnForegroundInternal(): Promise<void> {
     if (!this.inited || !this.rumConfig?.isEnableTraceUserView() ||
-      !this.lastVisibleContext || this.foregroundResumeInProgress || this.startingPageKey.length > 0) {
+      this.foregroundResumeInProgress || this.startingPageKey.length > 0) {
       return;
     }
     const activeView = FTRUMInnerManager.getInstance().getActiveView();
     // A manual View may have replaced the automatic one. Leave it to its owner.
     if (activeView && (!activeView.isClose() ||
       (this.currentViewId.length > 0 && activeView.getId() !== this.currentViewId))) {
+      return;
+    }
+    if (!this.lastVisibleContext) {
+      // An observer may have been attached after the page was shown, or its
+      // context may have been released with a destroyed WindowStage. Router
+      // does not replay that page's state=2 event when the app resumes.
+      if (this.observedUIContext) {
+        await this.restoreVisibleRouterPage(this.observedUIContext, true);
+      }
       return;
     }
     this.foregroundResumeInProgress = true;

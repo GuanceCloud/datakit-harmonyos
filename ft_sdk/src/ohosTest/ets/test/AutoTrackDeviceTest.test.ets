@@ -746,6 +746,50 @@ export default function autoTrackDeviceTest() {
       expect(FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '').assertEqual(resumedId);
     });
 
+    it('repeatedForegroundResumeRecoversVisibleRouterPageWithoutCachedContext', 0, async () => {
+      const tracker = FTNavigationTracker.getInstance();
+      const manager = FTRUMInnerManager.getInstance();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      // The first observer recovery has already run before this route appears,
+      // and Router will not replay state=2 on a foreground transition.
+      await WaitUtils.delay(150);
+      uiContext.currentRouterName = 'pages/Index';
+
+      let previousId = '';
+      for (let i = 0; i < 3; i++) {
+        manager.onAppBackground();
+        await FTRUMGlobalManager.getInstance().stopView();
+        const background = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+        expect(background !== null).assertTrue();
+
+        manager.onAppForeground();
+        await tracker.resumeAutomaticViewOnForeground();
+        const current = manager.getActiveView();
+        expect(current?.getViewName()).assertEqual('Index');
+        expect(current?.isClose() ?? true).assertFalse();
+        expect(current?.getId() === previousId).assertFalse();
+        previousId = current?.getId() ?? '';
+      }
+    });
+
+    it('foregroundResumeWaitsForWindowRebindBeforeRestoringPage', 0, async () => {
+      const rumConfig = buildRumConfig(true, false);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'first-page');
+      await FTRUMGlobalManager.getInstance().stopView();
+
+      const secondContext = new FakeUIContext();
+      secondContext.currentRouterName = 'pages/Second';
+      const tracker = FTNavigationTracker.getInstance();
+      tracker.init(secondContext as Object as UIContext, rumConfig);
+      await tracker.resumeAutomaticViewOnForeground();
+
+      const active = FTRUMInnerManager.getInstance().getActiveView();
+      expect(active?.getViewName()).assertEqual('Second');
+      expect(active?.isClose() ?? true).assertFalse();
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+    });
+
     it('foregroundResumeReevaluatesViewHandler', 0, async () => {
       const handler = new MutableViewTrackingHandler();
       const rumConfig = buildRumConfig(true, false)
