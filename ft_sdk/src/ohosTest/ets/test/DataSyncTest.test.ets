@@ -25,6 +25,7 @@ import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManage
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
 import { FTCrashFreeDurationManager } from '../../../main/ets/components/monitor/FTCrashFreeDurationManager';
 import { DbInternalTestAccess } from '../../../main/ets/components/internal/testaccess/DbInternalTestAccess';
+import { Utils } from '../../../main/ets/components/utils/Utils';
 import { DBAssert } from './helpers/DBAssert';
 import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
@@ -432,6 +433,27 @@ export default function dataSyncTest() {
       manager.attachRUMRelative(resumedTags, false);
       expect(resumedTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual('page_after_fallback');
       expect(resumedTags[Constants.KEY_RUM_VIEW_ID] === backgroundTags[Constants.KEY_RUM_VIEW_ID]).assertFalse();
+    });
+
+    it('backgroundClosesLaunchViewWithoutAnActivePage', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.addAction('launch_without_page', Constants.ACTION_TYPE_LAUNCH_COLD,
+        1_000_000, Utils.getCurrentNanoTime());
+      const launch = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH, 5000);
+      expect(launch !== null).assertTrue();
+      expect(launch?.getIsClose()).assertFalse();
+
+      manager.onAppBackground();
+      const launchClosed = await WaitUtils.waitUntil(async () =>
+        (await DBAssert.queryViews(100)).some(view => view.getId() === launch?.getId() && view.getIsClose()), 5000);
+      expect(launchClosed).assertTrue();
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${launch?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+
+      manager.onAppForeground();
+      const foregroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(foregroundTags, false);
+      expect(foregroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
     });
 
     it('reenteringBackgroundWithoutAPageStartsANewBackgroundView', 0, async () => {

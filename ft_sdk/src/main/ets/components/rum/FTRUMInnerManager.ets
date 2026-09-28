@@ -2901,8 +2901,13 @@ export class FTRUMInnerManager {
       return;
     }
     this.appState = AppState.BACKGROUND;
-    this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(() =>
-      this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND));
+    // ApplicationLaunch is stored separately from the other synthetic Views.
+    // Close it here even when automatic page tracking is disabled.
+    const launchClose = this.closeLaunchView();
+    this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async () => {
+      await launchClose;
+      await this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND);
+    });
     if (this.context && FTRUMConfigManager.getInstance().isRumEnable()) {
       this.restartBackgroundView();
     }
