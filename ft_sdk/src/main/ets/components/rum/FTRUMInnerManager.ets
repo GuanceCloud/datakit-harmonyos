@@ -2733,7 +2733,11 @@ export class FTRUMInnerManager {
       
       // Set properties
       if (property && this.hasProperties(property)) {
-        this.activeView.setProperty(property);
+        const keys = Object.keys(property);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
+          this.activeView.addProperty(key, property[key]);
+        }
       }
       
       // Update tags

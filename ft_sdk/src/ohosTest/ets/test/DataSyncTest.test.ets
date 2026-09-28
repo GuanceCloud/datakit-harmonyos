@@ -375,6 +375,26 @@ export default function dataSyncTest() {
       expect(line.includes('view_property_custom_view_property')).assertFalse();
     });
 
+    it('stopViewMergesPropertiesAndOverridesMatchingKeys', 0, async () => {
+      const viewName = 'merged_stop_view_properties';
+      const startProperties = buildActionProperty('start_only', 'start-value');
+      startProperties['shared_key'] = wrapActionProperty('old-value') as object;
+      const stopProperties = buildActionProperty('stop_only', 'stop-value');
+      stopProperties['shared_key'] = wrapActionProperty('new-value') as object;
+
+      await FTRUMGlobalManager.getInstance().startView(viewName, startProperties);
+      await FTRUMGlobalManager.getInstance().stopView(stopProperties);
+      await waitForRumAggregation();
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_name=${viewName}`, 'is_active=false', 'start_only', 'stop_only', 'new-value'], 5000);
+      expect(record !== null).assertTrue();
+      const line = record?.getDataString() ?? '';
+      expect(line.includes('start-value')).assertTrue();
+      expect(line.includes('stop-value')).assertTrue();
+      expect(line.includes('old-value')).assertFalse();
+    });
+
     it('logUpdateShouldUpload', 0, async () => {
       const logContent = '----logUpdateDataTest----';
 
