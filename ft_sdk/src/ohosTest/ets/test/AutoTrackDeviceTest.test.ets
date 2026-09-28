@@ -227,6 +227,13 @@ class FakeUIObserver {
     }
   }
 
+  async emitNavDestinationReturnToNavBar(fromName: string): Promise<void> {
+    const info = new FakeNavDestinationSwitchInfo(new FakeNavDestinationInfo(fromName, fromName), 'navBar');
+    for (const callback of this.navDestinationSwitchCallbacks.slice()) {
+      await callback(info as Object as uiObserver.NavDestinationSwitchInfo);
+    }
+  }
+
   async emitWillClick(node: FakeFrameNode): Promise<void> {
     for (const callback of this.willClickCallbacks.slice()) {
       await callback(new EmptyClickEvent(), node as Object as FrameNode);
@@ -835,6 +842,62 @@ export default function autoTrackDeviceTest() {
       expect(active?.getViewName()).assertEqual('Second');
       expect(active?.isClose() ?? true).assertFalse();
       expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+    });
+
+    it('sameWindowForegroundRestoresTheVisibleNavigationDestination', 0, async () => {
+      const routeName = 'pages/NavigationWebSwitchVerificationPage';
+      const destinationName = 'NativeNavigationDestination';
+      const rumConfig = buildRumConfig(true, false);
+      uiContext.currentRouterName = routeName;
+      initializeAutoTrack(context, uiContext, rumConfig);
+      const tracker = FTNavigationTracker.getInstance();
+      tracker.init(uiContext as Object as UIContext, rumConfig, 42);
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      await uiContext.observer.emitNavDestinationSwitch('navBar', destinationName, 'native-page');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual(destinationName);
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      const reboundContext = new FakeUIContext();
+      reboundContext.currentRouterName = routeName;
+      tracker.init(reboundContext as Object as UIContext, rumConfig, 42);
+      await tracker.resumeAutomaticViewOnForeground();
+
+      const resumed = FTRUMInnerManager.getInstance().getActiveView();
+      expect(resumed?.getViewName()).assertEqual(destinationName);
+      expect(resumed?.isClose() ?? true).assertFalse();
+      expect(resumed?.getId() === first?.getId()).assertFalse();
+      expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(0);
+
+      // A repeated host Router show must not replace the visible destination.
+      await reboundContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(resumed?.getId());
+    });
+
+    it('returningToNavBarStartsANewRouterHostView', 0, async () => {
+      const routeName = 'pages/NavigationWebSwitchVerificationPage';
+      const destinationName = 'NativeNavigationDestination';
+      uiContext.currentRouterName = routeName;
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      const firstHost = FTRUMInnerManager.getInstance().getActiveView();
+      await uiContext.observer.emitNavDestinationSwitch('navBar', destinationName, 'native-page');
+      const destination = FTRUMInnerManager.getInstance().getActiveView();
+      expect(destination?.getViewName()).assertEqual(destinationName);
+
+      await uiContext.observer.emitNavDestinationReturnToNavBar(destinationName);
+      const returnedHost = FTRUMInnerManager.getInstance().getActiveView();
+      expect(destination?.isClose()).assertTrue();
+      expect(returnedHost?.getViewName()).assertEqual('NavigationWebSwitchVerificationPage');
+      expect(returnedHost?.getViewReferrer()).assertEqual(destinationName);
+      expect(returnedHost?.isClose() ?? true).assertFalse();
+      expect(returnedHost?.getId() === firstHost?.getId()).assertFalse();
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      const resumedHost = FTRUMInnerManager.getInstance().getActiveView();
+      expect(resumedHost?.getViewName()).assertEqual('NavigationWebSwitchVerificationPage');
+      expect(resumedHost?.getId() === returnedHost?.getId()).assertFalse();
     });
 
     it('foregroundResumeReevaluatesViewHandler', 0, async () => {
