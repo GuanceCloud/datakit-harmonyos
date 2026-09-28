@@ -395,6 +395,36 @@ export default function dataSyncTest() {
       expect(line.includes('old-value')).assertFalse();
     });
 
+    it('eventsWithoutAnActivePageUseSyntheticViews', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      await FTRUMGlobalManager.getInstance().startView('closed_page_before_fallback');
+      const previous = await DBAssert.waitForViewNamed('closed_page_before_fallback', 5000);
+      expect(previous !== null).assertTrue();
+      await FTRUMGlobalManager.getInstance().stopView();
+
+      const rootTags: Record<string, string> = {};
+      manager.attachRUMRelative(rootTags, false);
+      expect(rootTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      expect(rootTags[Constants.KEY_RUM_VIEW_ID] === previous?.getId()).assertFalse();
+      const root = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_ROOT_FALLBACK, 5000);
+      expect(root?.getId()).assertEqual(rootTags[Constants.KEY_RUM_VIEW_ID]);
+
+      manager.onAppBackground();
+      const backgroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(backgroundTags, false);
+      expect(backgroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_BACKGROUND);
+      expect(backgroundTags[Constants.KEY_RUM_VIEW_ID] === previous?.getId()).assertFalse();
+      const background = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+      expect(background?.getId()).assertEqual(backgroundTags[Constants.KEY_RUM_VIEW_ID]);
+
+      manager.onAppForeground();
+      await FTRUMGlobalManager.getInstance().startView('page_after_fallback');
+      const resumedTags: Record<string, string> = {};
+      manager.attachRUMRelative(resumedTags, false);
+      expect(resumedTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual('page_after_fallback');
+      expect(resumedTags[Constants.KEY_RUM_VIEW_ID] === backgroundTags[Constants.KEY_RUM_VIEW_ID]).assertFalse();
+    });
+
     it('logUpdateShouldUpload', 0, async () => {
       const logContent = '----logUpdateDataTest----';
 

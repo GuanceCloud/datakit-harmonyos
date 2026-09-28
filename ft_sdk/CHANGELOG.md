@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed an expiring Session assigning its previous View to the new Session and sampling decision before closing it.
 - Fixed `stopView` replacing properties set by `startView`; ending a View now merges new properties and overrides matching keys.
 - Fixed View durations changing with wall-clock adjustments and being limited to four hours; duration now uses a persisted monotonic clock origin.
+- Fixed background and no-page RUM events inheriting a closed View; they now use `BackgroundView` or `RootView` records until a page becomes active.
 
 ## [0.1.18-alpha02] - 2026-09-24
 - Fixed `setActionTrackingHandler` for automatic click and cold/hot launch Actions: `HandlerAction` customizes the Action, `null` suppresses it, and `undefined` keeps SDK defaults. For clicks, handler properties override only same-named component properties; suppressing a cold-launch Action still completes startup lifecycle and remote data-filter initialization.

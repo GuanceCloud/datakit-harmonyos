@@ -75,6 +75,8 @@ export class Constants {
   static readonly VIEW_NAME_ROOT = "root";
   /** Synthetic View used by cold and hot launch Actions, matching Android. */
   static readonly VIEW_NAME_APPLICATION_LAUNCH = "ApplicationLaunch";
+  static readonly VIEW_NAME_BACKGROUND = "BackgroundView";
+  static readonly VIEW_NAME_ROOT_FALLBACK = "RootView";
   
   /**
    * RUM measurement types

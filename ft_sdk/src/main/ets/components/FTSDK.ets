@@ -154,6 +154,7 @@ export class FTSDK {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationForeground();
     FTSDK.updateCrashFreeAppState(AppState.RUN);
+    FTRUMInnerManager.getInstance().onAppForeground();
   }
 
   /** Internal lifecycle bridge for application foreground/background state. */
@@ -161,6 +162,7 @@ export class FTSDK {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationBackground();
     FTSDK.updateCrashFreeAppState(AppState.BACKGROUND);
+    FTRUMInnerManager.getInstance().onAppBackground();
   }
 
   private static updateCrashFreeAppState(state: AppState): void {
