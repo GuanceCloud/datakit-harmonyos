@@ -3,6 +3,7 @@ import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecuto
 import { ViewBeanJSON } from './bean/ViewBean';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { Constants } from '../Constants';
+import { parseCollectType } from '../rum/enum/RUMEnums';
 
 export interface FTRumStoreAccess {
   read(kind: string, id: string): string | null;
@@ -270,7 +271,9 @@ export class FTRumFileStore {
     for (const key of Object.keys(source)) {
       if (key === Constants.KEY_RUM_PROPERTY) { view.property = source[key] as Record<string, object>; }
       else if (key === Constants.KEY_RUM_TAGS) { view.tags = source[key] as Record<string, string>; }
-      else { extra[key] = source[key]; }
+      else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+        view.collectType = parseCollectType(String(source[key]));
+      } else { extra[key] = source[key]; }
     }
     view.extraAttr = extra;
   }

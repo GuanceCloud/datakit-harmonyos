@@ -3,6 +3,8 @@
  */
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
+import { Constants } from '../../Constants';
+import { CollectType, parseCollectType } from '../../rum/enum/RUMEnums';
 
 export interface ActionBeanJSON {
   id: string;
@@ -20,6 +22,7 @@ export interface ActionBeanJSON {
   actionName: string;
   actionType: string;
   extraAttr: Record<string, object>;
+  collectType?: CollectType | null;
 }
 
 /**
@@ -71,6 +74,9 @@ export class ActionBean {
    * Session ID
    */
   private sessionId: string = "";
+
+  /** Sampling decision captured when this Action was created. */
+  private collectType: CollectType | null = null;
 
   /**
    * View name
@@ -144,6 +150,9 @@ export class ActionBean {
   public getSessionId(): string { return this.sessionId; }
   public setSessionId(sessionId: string): void { this.sessionId = sessionId; }
 
+  public getCollectType(): CollectType | null { return this.collectType; }
+  public setCollectType(collectType: CollectType | null): void { this.collectType = collectType; }
+
   public getViewName(): string { return this.viewName; }
   public setViewName(viewName: string): void { this.viewName = viewName; }
 
@@ -190,10 +199,13 @@ export class ActionBean {
    */
   public getAttrJsonString(): string {
     try {
-      const extraAttrObj: Record<string, object> = {};
+      const extraAttrObj: Record<string, object | string> = {};
       this.extraAttr.forEach((value, key) => {
         extraAttrObj[key] = value;
       });
+      if (this.collectType !== null) {
+        extraAttrObj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
+      }
       return JSON.stringify(extraAttrObj);
     } catch (error) {
       return "{}";
@@ -209,10 +221,15 @@ export class ActionBean {
       if (StringUtils.isNotEmpty(jsonString)) {
         const obj = JSON.parse(jsonString) as Record<string, object>;
         this.extraAttr.clear();
+        this.collectType = null;
         const keys = ActionBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
-          this.extraAttr.set(key, obj[key] as object);
+          if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+            this.collectType = parseCollectType(String(obj[key]));
+          } else {
+            this.extraAttr.set(key, obj[key] as object);
+          }
         }
       }
     } catch (error) {
@@ -330,7 +347,8 @@ export class ActionBean {
       viewReferrer: this.viewReferrer,
       actionName: this.actionName,
       actionType: this.actionType,
-      extraAttr: extraAttrObj
+      extraAttr: extraAttrObj,
+      collectType: this.collectType
     };
   }
 
@@ -348,6 +366,7 @@ export class ActionBean {
     actionBean.resourceCount = json.resourceCount || 0;
     actionBean.pendingResource = json.pendingResource || 0;
     actionBean.sessionId = json.sessionId || "";
+    actionBean.collectType = json.collectType ? parseCollectType(json.collectType) : null;
     actionBean.viewName = json.viewName || "";
     actionBean.viewId = json.viewId || "";
     actionBean.viewReferrer = json.viewReferrer || "";
@@ -377,6 +396,7 @@ export class ActionBean {
     cloned.resourceCount = this.resourceCount;
     cloned.pendingResource = this.pendingResource;
     cloned.sessionId = this.sessionId;
+    cloned.collectType = this.collectType;
     cloned.viewName = this.viewName;
     cloned.viewId = this.viewId;
     cloned.viewReferrer = this.viewReferrer;

@@ -7,6 +7,7 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
+import { CollectType, parseCollectType } from '../rum/enum/RUMEnums';
 import {
   SDKRumResourceContextDTO,
   SDKRumResourceNetworkSnapshotDTO,
@@ -283,6 +284,12 @@ interface FTDBTaskPoolViewAttrParts {
   extraAttr: Record<string, object>;
   property: Record<string, object>;
   tags: Record<string, string>;
+  collectType: CollectType | null;
+}
+
+interface FTDBTaskPoolActionAttrParts {
+  extraAttr: Record<string, object>;
+  collectType: CollectType | null;
 }
 
 enum FTDBTaskPoolCacheCategory {
@@ -1785,7 +1792,7 @@ function emptyStringRecord(): Record<string, string> {
 }
 
 function stringifyViewExtraAttr(view: ViewBeanJSON): string {
-  const obj: Record<string, object> = {};
+  const obj: Record<string, object | string> = {};
   const extraAttr = view.extraAttr ? view.extraAttr : emptyObjectRecord();
   const keys = Object.keys(extraAttr);
   for (let i = 0; i < keys.length; i++) {
@@ -1796,11 +1803,22 @@ function stringifyViewExtraAttr(view: ViewBeanJSON): string {
   const tags = view.tags ? view.tags : emptyStringRecord();
   obj[Constants.KEY_RUM_PROPERTY] = property as Object as Record<string, object>;
   obj[Constants.KEY_RUM_TAGS] = tags as Object as Record<string, object>;
+  if (view.collectType) {
+    obj[Constants.KEY_RUM_COLLECT_TYPE] = view.collectType;
+  }
   return JSON.stringify(obj);
 }
 
 function stringifyActionExtraAttr(actionBean: ActionBeanJSON): string {
-  return JSON.stringify(actionBean.extraAttr ? actionBean.extraAttr : emptyObjectRecord());
+  const obj: Record<string, object | string> = {};
+  const extraAttr = actionBean.extraAttr ? actionBean.extraAttr : emptyObjectRecord();
+  for (const key of Object.keys(extraAttr)) {
+    obj[key] = extraAttr[key];
+  }
+  if (actionBean.collectType) {
+    obj[Constants.KEY_RUM_COLLECT_TYPE] = actionBean.collectType;
+  }
+  return JSON.stringify(obj);
 }
 
 function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
@@ -1808,6 +1826,7 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   const extraAttr: Record<string, object> = {};
   const property: Record<string, object> = {};
   const tags: Record<string, string> = {};
+  let collectType: CollectType | null = null;
   const keys = Object.keys(parsed);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
@@ -1826,6 +1845,8 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
         const tagKey = tagKeys[j];
         tags[tagKey] = String(tagsValue[tagKey]);
       }
+    } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+      collectType = parseCollectType(String(value));
     } else {
       extraAttr[key] = value;
     }
@@ -1833,8 +1854,23 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   return {
     extraAttr,
     property,
-    tags
+    tags,
+    collectType
   };
+}
+
+function splitActionExtraAttr(jsonString: string): FTDBTaskPoolActionAttrParts {
+  const parsed = parseJsonRecord(jsonString);
+  const extraAttr: Record<string, object> = {};
+  let collectType: CollectType | null = null;
+  for (const key of Object.keys(parsed)) {
+    if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+      collectType = parseCollectType(String(parsed[key]));
+    } else {
+      extraAttr[key] = parsed[key];
+    }
+  }
+  return { extraAttr, collectType };
 }
 
 function toViewValues(view: ViewBeanJSON, includeId: boolean): relationalStore.ValuesBucket {
@@ -1903,12 +1939,14 @@ function readViewFromResultSet(resultSet: relationalStore.ResultSet): ViewBeanJS
     viewUpdateTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME)),
     extraAttr: attr.extraAttr,
     property: attr.property,
-    tags: attr.tags
+    tags: attr.tags,
+    collectType: attr.collectType
   };
 }
 
 function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBeanJSON {
   const startTimeStr = resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_START_TIME));
+  const attr = splitActionExtraAttr(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
   return {
     id: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ID)),
     startTime: startTimeStr ? Number.parseInt(startTimeStr, 10) : 0,
@@ -1924,7 +1962,8 @@ function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBe
     viewReferrer: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_VIEW_REFERRER)),
     actionName: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_NAME)),
     actionType: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_TYPE)),
-    extraAttr: parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)))
+    extraAttr: attr.extraAttr,
+    collectType: attr.collectType
   };
 }
 

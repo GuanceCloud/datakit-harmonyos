@@ -8,7 +8,9 @@ import { FTCacheLedger } from '../../../main/ets/components/db/FTCacheLedger';
 import { FTDBConfig } from '../../../main/ets/components/db/FTDBConfig';
 import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { SyncDataJSON } from '../../../main/ets/components/db/bean/SyncData';
-import { ViewBeanJSON } from '../../../main/ets/components/db/bean/ViewBean';
+import { ViewBean, ViewBeanJSON } from '../../../main/ets/components/db/bean/ViewBean';
+import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
+import { CollectType } from '../../../main/ets/components/rum/enum/RUMEnums';
 import { DataType } from '../../../main/ets/components/enum/Enums';
 import { DATA_UPLOAD_TRANSPORT_TARGET_BYTES } from '../../../main/ets/components/thread/workers/DataUploadLimits';
 import { DBAssert } from './helpers/DBAssert';
@@ -213,6 +215,32 @@ export default function ftCacheFileStoreDeviceTest() {
       expect(current !== null && current !== undefined).assertTrue();
       expect((await store.execute({ command: 'acknowledgeView', view: current! })).value).assertTrue();
       expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
+    });
+
+    it('restoresActionAndViewSamplingAfterFileCacheRestart', 0, async () => {
+      const settings = cacheSettings('file', 1024 * 1024);
+      const store = new FTCacheFileStore(context, settings, SQLITE_SUCCESS);
+      const view = rumView('sampled-file-view');
+      view.collectType = CollectType.SAMPLING;
+      await store.execute({ command: 'upsertRumView', view });
+
+      const action = new ActionBean('sampled-file-action', 'tap', 'click', 1);
+      action.setSessionId(view.sessionId);
+      action.setViewInfo(view.viewName, view.id, 'root');
+      action.setCollectType(CollectType.SAMPLING);
+      await store.execute({ command: 'insertRumAction', actionBean: action.toJSON(), now: 10 });
+      await store.execute({ command: 'closeRumAction', actionId: action.getId(), duration: 100 });
+      const closingView = new ViewBean(view.id, view.viewName, view.startTime);
+      closingView.setCollectType(CollectType.SAMPLING);
+      await store.execute({ command: 'closeRumView', viewId: view.id,
+        attr: closingView.getAttrJsonString(), now: 20 });
+
+      const recovered = new FTCacheFileStore(context, settings, SQLITE_SUCCESS);
+      await recovered.recover();
+      const views = (await recovered.execute({ command: 'querySumView', limit: 10 })).views || [];
+      const actions = (await recovered.execute({ command: 'querySumAction', limit: 10 })).actions || [];
+      expect(views.find(item => item.id === view.id)?.collectType).assertEqual(CollectType.SAMPLING);
+      expect(actions.find(item => item.id === action.getId())?.collectType).assertEqual(CollectType.SAMPLING);
     });
   });
 }

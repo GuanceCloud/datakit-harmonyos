@@ -24,6 +24,7 @@ interface ActiveViewBeanJSON {
     pendingResourceCount: number;
     property: Record<string, object>;
     tags: Record<string, string>;
+    collectType: CollectType;
 }
 
 /**
@@ -430,6 +431,7 @@ export class ActiveViewBean {
     const viewBean = new ViewBean(this.id, this.viewName, this.startTime);
     viewBean.setViewReferrer(this.viewReferrer);
     viewBean.setSessionId(this.sessionId);
+    viewBean.setCollectType(this.collectType);
     viewBean.setViewLoadTime(this.loadTime);
     viewBean.setIsClose(this.isClosed);
     viewBean.setActionCount(this.actionCount);
@@ -513,7 +515,8 @@ export class ActiveViewBean {
       longTaskCount: this.longTaskCount,
       pendingResourceCount: this.pendingResourceCount,
       property: this.property,
-      tags: this.tags
+      tags: this.tags,
+      collectType: this.collectType
     };
     return result;
   }

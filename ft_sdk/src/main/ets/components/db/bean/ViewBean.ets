@@ -5,6 +5,7 @@
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
 import { Constants } from '../../Constants';
+import { CollectType, parseCollectType } from '../../rum/enum/RUMEnums';
 
 /**
  * ViewBean JSON interface
@@ -29,6 +30,7 @@ export interface ViewBeanJSON {
   extraAttr: Record<string, object>;
   property?: Record<string, object>;
   tags?: Record<string, string>;
+  collectType?: CollectType | null;
 }
 
 /**
@@ -72,6 +74,9 @@ export class ViewBean {
    * Session ID
    */
   private sessionId: string = "";
+
+  /** Sampling decision captured when this View was created. */
+  private collectType: CollectType | null = null;
 
   /**
    * Action count
@@ -177,6 +182,9 @@ export class ViewBean {
 
   public getSessionId(): string { return this.sessionId; }
   public setSessionId(sessionId: string): void { this.sessionId = sessionId; }
+
+  public getCollectType(): CollectType | null { return this.collectType; }
+  public setCollectType(collectType: CollectType | null): void { this.collectType = collectType; }
 
   public getActionCount(): number { return this.actionCount; }
   public setActionCount(actionCount: number): void { this.actionCount = actionCount; }
@@ -305,12 +313,15 @@ export class ViewBean {
    */
   public getAttrJsonString(): string {
     try {
-      const obj: Record<string, object> = {};
+      const obj: Record<string, object | string> = {};
       this.extraAttr.forEach((value, key) => {
         obj[key] = value;
       });
       obj[Constants.KEY_RUM_PROPERTY] = this.property;
       obj[Constants.KEY_RUM_TAGS] = this.tags;
+      if (this.collectType !== null) {
+        obj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
+      }
       return JSON.stringify(obj);
     } catch (error) {
       return "{}";
@@ -328,6 +339,7 @@ export class ViewBean {
         this.extraAttr.clear();
         this.property = {};
         this.tags = {};
+        this.collectType = null;
         const keys = ViewBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
@@ -341,6 +353,8 @@ export class ViewBean {
               const tagKey = tagKeys[j];
               this.tags[tagKey] = String(tagsObj[tagKey]);
             }
+          } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+            this.collectType = parseCollectType(String(value));
           } else {
             this.extraAttr.set(key, value);
           }
@@ -505,7 +519,8 @@ export class ViewBean {
       viewUpdateTime: this.viewUpdateTime,
       extraAttr: extraAttrObj,
       property: this.property,
-      tags: this.tags
+      tags: this.tags,
+      collectType: this.collectType
     };
   }
 
@@ -519,6 +534,7 @@ export class ViewBean {
     viewBean.viewReferrer = json.viewReferrer || "";
     viewBean.isClose = json.isClose || false;
     viewBean.sessionId = json.sessionId || "";
+    viewBean.collectType = json.collectType ? parseCollectType(json.collectType) : null;
     viewBean.actionCount = json.actionCount || 0;
     viewBean.errorCount = json.errorCount || 0;
     viewBean.longTaskCount = json.longTaskCount || 0;
@@ -557,6 +573,7 @@ export class ViewBean {
     cloned.viewReferrer = this.viewReferrer;
     cloned.isClose = this.isClose;
     cloned.sessionId = this.sessionId;
+    cloned.collectType = this.collectType;
     cloned.actionCount = this.actionCount;
     cloned.errorCount = this.errorCount;
     cloned.longTaskCount = this.longTaskCount;

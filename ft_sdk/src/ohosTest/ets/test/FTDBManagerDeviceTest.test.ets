@@ -10,6 +10,8 @@ import {
 } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
+import { CollectType } from '../../../main/ets/components/rum/enum/RUMEnums';
+import { Constants } from '../../../main/ets/components/Constants';
 import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
@@ -244,6 +246,33 @@ export default function ftDBManagerDeviceTest() {
       unavailableViewAction.setViewInfo('missing', 'missing-view', '');
       expect(await FTDBTaskPoolExecutor.insertRumAction(context, unavailableViewAction)).assertFalse();
       expect(await FTDBTaskPoolExecutor.getActionInfo(context, unavailableViewAction.getId())).assertNull();
+    });
+
+    it('persistsActionAndViewSamplingAcrossCloseAndQuery', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('sampled-view', 'Index', TEST_NOW_NS);
+      view.setSessionId('previous-session');
+      view.setCollectType(CollectType.SAMPLING);
+      expect(await FTDBTaskPoolExecutor.upsertRumView(context, view)).assertTrue();
+
+      const action = new ActionBean('sampled-action', 'tap', 'click', TEST_NOW_NS);
+      action.setSessionId('previous-session');
+      action.setViewInfo(view.getViewName(), view.getId(), 'root');
+      action.setCollectType(CollectType.SAMPLING);
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, action)).assertTrue();
+      expect((await FTDBTaskPoolExecutor.closeRumAction(context, action.getId(), 100)).wasClosed).assertTrue();
+      expect(await FTDBTaskPoolExecutor.closeRumView(context, view.getId(), 0, 100,
+        view.getAttrJsonString())).assertTrue();
+
+      const restoredView = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(restoredView !== null).assertTrue();
+      expect(restoredView!.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(Object.keys(restoredView!.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
+      const actions = await FTDBTaskPoolExecutor.querySumAction(context, 20);
+      const restoredAction = actions.find(item => item.getId() === action.getId());
+      expect(restoredAction !== undefined).assertTrue();
+      expect(restoredAction!.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(Object.keys(restoredAction!.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
     });
 
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {

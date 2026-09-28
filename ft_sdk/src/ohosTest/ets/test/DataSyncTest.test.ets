@@ -663,6 +663,59 @@ export default function dataSyncTest() {
       }
     });
 
+    it('actionAndViewKeepCreationSamplingAfterSessionRateChanges', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 1);
+      const viewName = 'sampling_decision_view';
+      const actionName = 'sampling_decision_action';
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().startAction(actionName, 'click');
+      await WaitUtils.delay(300);
+      manager.setSamplingRates(1, 0);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.ALL);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const sampledType = 'rum_app_error_sampled';
+      expect(await DBAssert.waitForRawSyncRecordContaining(sampledType,
+        ['view,', `view_name=${viewName}`], 5000) !== null).assertTrue();
+      expect(await DBAssert.waitForRawSyncRecordContaining(sampledType,
+        ['action,', `action_name=${actionName}`], 5000) !== null).assertTrue();
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        const line = row.getDataString();
+        expect(line.includes(`view_name=${viewName}`)).assertFalse();
+        expect(line.includes(`action_name=${actionName}`)).assertFalse();
+      }
+    });
+
+    it('expiredSessionKeepsPredecessorViewInItsOriginalSession', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      const oldViewName = 'expired_sampled_view';
+      const newViewName = 'renewed_normal_view';
+      manager.setSamplingRates(0, 1);
+      await FTRUMGlobalManager.getInstance().startView(oldViewName);
+      const oldSessionId = manager.getSessionId();
+      const oldViewId = manager.getActiveView()!.getId();
+
+      manager.setSamplingRates(1, 0);
+      manager.expireSessionForTest();
+      await FTRUMGlobalManager.getInstance().startView(newViewName);
+      expect(manager.getSessionId() === oldSessionId).assertFalse();
+      expect(manager.getActiveView()!.getSessionId()).assertEqual(manager.getSessionId());
+      await waitForRumAggregation();
+
+      const oldRecord = await DBAssert.waitForRawSyncRecordContaining('rum_app_error_sampled',
+        ['view,', `view_id=${oldViewId}`, `session_id=${oldSessionId}`, 'is_active=false'], 5000);
+      expect(oldRecord !== null).assertTrue();
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        expect(row.getDataString().includes(`view_id=${oldViewId}`)).assertFalse();
+      }
+      await FTRUMGlobalManager.getInstance().stopView();
+    });
+
     it('errorSampledViewUsesLastErrorTimeOnlyForStaging', 0, async () => {
       const viewStartTime = Date.now() * 1000000 - 2000000000;
       const errorTime = viewStartTime + 1000000000;

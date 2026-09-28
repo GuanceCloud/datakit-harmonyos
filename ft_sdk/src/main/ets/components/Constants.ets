@@ -528,6 +528,8 @@ export class Constants {
    * Line protocol data tags, temporary storage for dynamic tags
    */
   static readonly KEY_RUM_TAGS = "tags";
+  /** Internal Action/View persistence metadata; never included in RUM attributes. */
+  static readonly KEY_RUM_COLLECT_TYPE = "collect_type";
   /**
    * Cold start, action_type
    */

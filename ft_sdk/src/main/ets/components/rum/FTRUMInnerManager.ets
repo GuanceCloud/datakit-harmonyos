@@ -1607,7 +1607,7 @@ export class FTRUMInnerManager {
   }
 
   private createCompletedActionDTO(actionBean: ActionBean): SDKRumCompletedActionDTO {
-    const collectType = this.checkSessionWillCollect(actionBean.getSessionId());
+    const collectType = this.getPersistedCollectType(actionBean.getCollectType(), actionBean.getSessionId());
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
       customDataType: this.getRumCustomDataType(collectType),
@@ -2001,7 +2001,7 @@ export class FTRUMInnerManager {
         tagsMap,
         fieldsMap,
         callback,
-        this.checkSessionWillCollect(viewBean.getSessionId()),
+        this.getPersistedCollectType(viewBean.getCollectType(), viewBean.getSessionId()),
         `view-${viewBean.getId()}-${viewBean.getDataUpdateTime()}-${viewBean.getViewUpdateTime()}`
       );
     } catch (error) {
@@ -2555,6 +2555,12 @@ export class FTRUMInnerManager {
     return this.sessionId;
   }
 
+  /** Internal device-test seam for crossing the Session boundary without waiting for expiry. */
+  public expireSessionForTest(): void {
+    this.lastSessionTime = 0;
+    this.lastUserActiveTime = 0;
+  }
+
   /**
    * Get Context
    * @returns Context or null if not initialized
@@ -2591,7 +2597,7 @@ export class FTRUMInnerManager {
       this.updateViewList(viewName);
       
       // Refresh session
-      this.checkSessionRefresh(false);
+      await this.checkSessionRefresh(false);
       // Android closes the synthetic launch View when a real page starts.
       await this.closeLaunchView();
       
@@ -4157,7 +4163,7 @@ export class FTRUMInnerManager {
    * 
    * @param checkRefreshView Whether to refresh view when session is refreshed (aligned with Android)
    */
-  private checkSessionRefresh(checkRefreshView: boolean): void {
+  private checkSessionRefresh(checkRefreshView: boolean): Promise<void> {
     // Use Promise-based lock to ensure thread-safe session refresh
     // Prevents race condition where multiple threads generate different sessionIds simultaneously
     this.sessionRefreshLock = this.sessionRefreshLock.then(() => {
@@ -4165,6 +4171,7 @@ export class FTRUMInnerManager {
     }).catch((error: Error) => {
       FTInnerLogger.e(TAG, `[FT-SESSION-REFRESH] Error in sessionRefreshLock: ${error}`);
     });
+    return this.sessionRefreshLock;
   }
 
   /**
@@ -4178,7 +4185,6 @@ export class FTRUMInnerManager {
     
     if (longTimeSession || longResting) {
       this.lastSessionTime = now;
-      const oldSessionId = this.sessionId;
       this.sessionId = Utils.generateUUID();
       
       FTInnerLogger.d(TAG, `Session Track -> New SessionId: ${this.sessionId}, longTimeSessionReset: ${longTimeSession}`);
@@ -4186,27 +4192,12 @@ export class FTRUMInnerManager {
       // Recalculate sampling rate
       this.checkSessionKeep(this.sessionId, this.sampleRate, this.sessionErrorSampleRate);
       
-      // Update activeView's session ID in memory if it exists and is not closed
-      // This ensures that when the view is closed later, it uses the new session ID
-      // This is critical when checkRefreshView is false (e.g., from timer)
-      // IMPORTANT: We do NOT modify existing data in database (preserve historical data)
-      if (this.activeView && !this.activeView.isClose()) {
-        const currentViewSessionId = this.activeView.getSessionId();
-        if (currentViewSessionId === oldSessionId) {
-          // Update the session ID of activeView in memory
-          // When this view is closed later, convertToViewBean() will use the new session ID
-          this.activeView.setSessionId(this.sessionId);
-          FTInnerLogger.d(TAG, `Updated activeView session ID in memory: ${oldSessionId} -> ${this.sessionId}, viewId: ${this.activeView.getId()}, viewName: ${this.activeView.getViewName()}`);
-        }
-      }
-      
       // Refresh view if needed (aligned with Android)
       if (checkRefreshView) {
         await this.closeLaunchView();
         if (this.activeView && !this.activeView.isClose()) {
           this.activeView.close();
-          // closeView will use activeView's session ID (which may have been updated above)
-          // If view was already in database with old session ID, closeView will update it with new session ID
+          // Close the predecessor with its original Session and sampling decision.
           await this.closeView(this.activeView);
           
           const viewName = this.activeView.getViewName();
@@ -4330,6 +4321,7 @@ export class FTRUMInnerManager {
    * Initialize view
    */
   private initView(activeViewBean: ActiveViewBean): Promise<void> {
+    activeViewBean.setCollectType(this.checkSessionWillCollect(activeViewBean.getSessionId()));
     const viewBean = activeViewBean.convertToViewBean();
     
     if (this.context) {
@@ -4423,6 +4415,7 @@ export class FTRUMInnerManager {
    * - addAction: Directly enters FT_SYNC_DATA_FLAT_TABLE_NAME
    */
   private initAction(activeActionBean: ActiveActionBean, isAddAction: boolean): void {
+    activeActionBean.setCollectType(this.checkSessionWillCollect(activeActionBean.getSessionId()));
     const actionBean = activeActionBean.convertToActionBean();
     const actionName = activeActionBean.getActionName();
     
@@ -5104,6 +5097,18 @@ export class FTRUMInnerManager {
     
     // Session is not in any filter list, collect normally
     return CollectType.ALL;
+  }
+
+  /** Legacy rows without a saved decision can only be classified while their Session is known. */
+  private getPersistedCollectType(collectType: CollectType | null, sessionId: string): CollectType {
+    if (collectType !== null) {
+      return collectType;
+    }
+    if (sessionId === this.sessionId || this.notCollectArr.includes(sessionId) ||
+      this.notSessionErrorCollectArr.includes(sessionId)) {
+      return this.checkSessionWillCollect(sessionId);
+    }
+    return CollectType.DROP;
   }
   
   /**

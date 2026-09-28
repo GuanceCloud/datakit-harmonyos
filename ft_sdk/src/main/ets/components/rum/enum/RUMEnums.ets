@@ -72,6 +72,13 @@ export enum CollectType {
   DROP = "drop"
 }
 
+export function parseCollectType(value: string | undefined): CollectType | null {
+  if (value === CollectType.ALL || value === CollectType.SAMPLING || value === CollectType.DROP) {
+    return value as CollectType;
+  }
+  return null;
+}
+
 /**
  * Session state enum
  */
