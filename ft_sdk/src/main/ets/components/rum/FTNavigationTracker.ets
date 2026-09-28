@@ -318,32 +318,37 @@ export class FTNavigationTracker {
       return; // Don't start view yet, wait for state=2 (page shown)
     }
     
-    // Showing a hidden page again begins another View lifecycle.
+    // ABOUT_TO_DISAPPEAR precedes removal. Keep this page's identity until
+    // ON_PAGE_HIDE so its own callback can close the View.
     if (info.state === 1) {
       if (this.isCurrentRouterPageHiding(pageKey, toName, info)) {
-        this.currentPageKey = '';
         this.pageResumeStartTimeMap.set('_pending_resume', Utils.getCurrentNanoTime());
       }
       return;
     }
     
-    // Handle state=3 or state=4 (page being hidden/removed) - record resume start time for returning pages
-    // When current page is being hidden, the next page to show is likely a returning page
-    // Record resume start time at this point to measure from pushBack to page shown
-    if (info.state === 3 || info.state === 4) {
-      // Check if this is the current active page being hidden
+    // ON_BACK_PRESS may be handled without hiding the page.
+    if (info.state === 4) {
+      return;
+    }
+
+    if (info.state === 3) {
       if (this.isCurrentRouterPageHiding(pageKey, toName, info)) {
+        const viewId = this.currentViewId;
         this.currentPageKey = '';
-        // Current page is being hidden, likely due to pushBack
-        // Try to determine the next page that will be shown (returning page)
-        // We can infer from the navigation stack: when pushing back, the previous page in the stack will be shown
-        // Since we don't have direct access to navigation stack, we'll use a simpler approach:
-        // Record a global resume start time, and when state=2 is received for a returning page, use this time
         const resumeStartTime = Utils.getCurrentNanoTime();
-        // Store with a special key that will be matched in state=2
-        // We'll use currentViewName as the key, since the next page shown will likely be the returning page
-        // But we don't know which page yet, so we'll use a temporary marker
         this.pageResumeStartTimeMap.set('_pending_resume', resumeStartTime);
+        this.currentRouteName = '';
+        this.currentViewName = '';
+        this.currentViewId = '';
+        this.lastVisibleContext = null;
+        if (viewId.length > 0 && FTRUMInnerManager.getInstance().getActiveView()?.getId() === viewId) {
+          try {
+            await FTRUMGlobalManager.getInstance().stopView();
+          } catch (error) {
+            FTInnerLogger.w(TAG, `Failed to stop hidden Router View: ${error}`);
+          }
+        }
       }
       return;
     }

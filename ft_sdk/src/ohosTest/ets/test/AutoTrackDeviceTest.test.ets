@@ -610,6 +610,37 @@ export default function autoTrackDeviceTest() {
       ]);
     });
 
+    it('routerHideClosesViewWithoutWaitingForAnotherPage', 0, async () => {
+      const route = 'pages/Index';
+      const pageId = 'hidden-index';
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      await uiContext.observer.emitRouterPageUpdate(route, 2, pageId);
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('Index');
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Other', 3, 'other-page');
+      await uiContext.observer.emitRouterPageUpdate(route, 4, pageId);
+      await uiContext.observer.emitRouterPageUpdate(route, 1, pageId);
+      expect(first?.isClose()).assertFalse();
+
+      await uiContext.observer.emitRouterPageUpdate(route, 3, pageId);
+      expect(first?.isClose()).assertTrue();
+      const closed = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${first?.getId()}`, 'is_active=false'], 8000);
+      expect(closed !== null).assertTrue();
+      const fallbackTags: Record<string, string> = {};
+      FTRUMInnerManager.getInstance().attachRUMRelative(fallbackTags, false);
+      expect(fallbackTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(first?.getId());
+
+      await uiContext.observer.emitRouterPageUpdate(route, 2, pageId);
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(second?.getViewName()).assertEqual('Index');
+      expect(second?.isClose()).assertFalse();
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
     it('explicitSameNameStartViewCreatesNewView', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
       const rum = FTRUMGlobalManager.getInstance();
