@@ -2882,6 +2882,19 @@ export class FTRUMInnerManager {
     }
   }
 
+  private restartBackgroundView(): void {
+    const previous = this.syntheticViews.get(Constants.VIEW_NAME_BACKGROUND);
+    if (previous && !previous.isClose()) {
+      previous.close();
+      const ready = this.syntheticViewReady.get(Constants.VIEW_NAME_BACKGROUND) || Promise.resolve();
+      this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async () => {
+        await ready;
+        await this.closeView(previous);
+      });
+    }
+    this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
+  }
+
   /** Application lifecycle signal; repeated callbacks from Ability and application observers are idempotent. */
   public onAppBackground(): void {
     if (this.appState === AppState.BACKGROUND) {
@@ -2891,7 +2904,7 @@ export class FTRUMInnerManager {
     this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(() =>
       this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND));
     if (this.context && FTRUMConfigManager.getInstance().isRumEnable()) {
-      this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
+      this.restartBackgroundView();
     }
   }
 
@@ -2900,7 +2913,8 @@ export class FTRUMInnerManager {
       return;
     }
     this.appState = AppState.RUN;
-    this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(() => this.closeSyntheticViews());
+    // Android keeps BackgroundView until the next real View starts. A return
+    // without an active page must not report the background View prematurely.
   }
 
   private resolveEventView(state?: AppState): ActiveViewBean {

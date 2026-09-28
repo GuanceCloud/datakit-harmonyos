@@ -418,11 +418,53 @@ export default function dataSyncTest() {
       expect(background?.getId()).assertEqual(backgroundTags[Constants.KEY_RUM_VIEW_ID]);
 
       manager.onAppForeground();
+      await waitForRumAggregation();
+      const noPageForegroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(noPageForegroundTags, false);
+      expect(noPageForegroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      const backgroundAfterForeground = (await DBAssert.queryViews(100))
+        .find(view => view.getId() === background?.getId());
+      expect(backgroundAfterForeground?.getIsClose()).assertFalse();
       await FTRUMGlobalManager.getInstance().startView('page_after_fallback');
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${background?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
       const resumedTags: Record<string, string> = {};
       manager.attachRUMRelative(resumedTags, false);
       expect(resumedTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual('page_after_fallback');
       expect(resumedTags[Constants.KEY_RUM_VIEW_ID] === backgroundTags[Constants.KEY_RUM_VIEW_ID]).assertFalse();
+    });
+
+    it('reenteringBackgroundWithoutAPageStartsANewBackgroundView', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.onAppBackground();
+      const first = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+      expect(first !== null).assertTrue();
+      manager.onAppBackground();
+      const sameBackground = (await DBAssert.queryViews(100))
+        .filter(view => view.getViewName() === Constants.VIEW_NAME_BACKGROUND);
+      expect(sameBackground.length).assertEqual(1);
+
+      manager.onAppForeground();
+      await waitForRumAggregation();
+      const stillOpen = (await DBAssert.queryViews(100)).find(view => view.getId() === first?.getId());
+      expect(stillOpen?.getIsClose()).assertFalse();
+
+      manager.onAppBackground();
+      const secondCreated = await WaitUtils.waitUntil(async () =>
+        (await DBAssert.queryViews(100)).some(view =>
+          view.getViewName() === Constants.VIEW_NAME_BACKGROUND && view.getId() !== first?.getId() &&
+          !view.getIsClose()), 5000);
+      expect(secondCreated).assertTrue();
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${first?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+
+      manager.onAppForeground();
+      const second = (await DBAssert.queryViews(100)).find(view =>
+        view.getViewName() === Constants.VIEW_NAME_BACKGROUND && view.getId() !== first?.getId());
+      expect(second?.getIsClose()).assertFalse();
+      await FTRUMGlobalManager.getInstance().startView('page_after_second_background');
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${second?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
     });
 
     it('logUpdateShouldUpload', 0, async () => {
