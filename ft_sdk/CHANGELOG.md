@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.18-alpha03] - 2026-09-30
+- Fixed Navigation Views resuming as their outer Router page after a foreground return, and restored the Router page View when a NavDestination returns to `navBar`.
 - Fixed Action and View records from a previous process being reported as ordinary RUM data after an error-sampled Session. Their sampling decision is now persisted with each record and retained during restart recovery.
 - Fixed an expiring Session assigning its previous View to the new Session and sampling decision before closing it.
 - Fixed `stopView` replacing properties set by `startView`; ending a View now merges new properties and overrides matching keys.
