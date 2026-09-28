@@ -12,6 +12,7 @@ import {
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
+import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
 import { FTAppStartCounter } from '../../../main/ets/components/monitor/FTAppStartCounter';
 import { FTAppLaunchTracker } from '../../../main/ets/components/monitor/FTAppLaunchTracker';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
@@ -589,6 +590,8 @@ export default function ftSDKLifecycleDeviceTest() {
 
         applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
         applicationContext.lifecycleCallback?.onAbilityForeground?.(secondAbility);
+        // Let the automatic foreground recovery finish before starting a manual View.
+        await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
         await FTRUMGlobalManager.getInstance().startView('two_ability_view');
         const view = FTRUMInnerManager.getInstance().getActiveView();
         expect(view?.isClose()).assertFalse();

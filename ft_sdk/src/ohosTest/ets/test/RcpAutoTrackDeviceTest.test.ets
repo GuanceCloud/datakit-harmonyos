@@ -4,6 +4,7 @@ import { rcp } from '@kit.RemoteCommunicationKit';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig, FTTraceConfig, FTLoggerConfig } from '../../../main/ets/components/Configs';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
 import { ErrorMonitorType } from '../../../main/ets/components/rum/enum/ErrorMonitorType';
 import { TraceType } from '../../../main/ets/components/trace/TraceType';
@@ -24,6 +25,7 @@ import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { WaitUtils } from './helpers/WaitUtils';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
+import { NoNavigationTestRuntime } from './helpers/NoNavigationTestRuntime';
 
 const TEST_FAKE_RUM_ID = 'rumId';
 const TEST_HOST = 'http://127.0.0.1:9529';
@@ -409,9 +411,11 @@ export default function rcpAutoTrackDeviceTest() {
 
     beforeEach(async () => {
       await SdkTestLifecycle.resetRuntimeState();
+      SdkInternalTestAccess.setRuntime(new NoNavigationTestRuntime());
       collector = new MockCollector(200, '');
       collector.start();
       await installRcpSdk();
+      await FTRUMGlobalManager.getInstance().stopView();
       await DBAssert.resetAll();
       collector.clearRequests();
     });
@@ -422,6 +426,7 @@ export default function rcpAutoTrackDeviceTest() {
         async () => { await SdkTestLifecycle.resetRuntimeState(); },
         async () => { await DBAssert.cleanupAll(); }
       ]);
+      SdkInternalTestAccess.resetRuntime();
     });
 
     it('rcpConfigShouldUploadResource', 0, async () => {

@@ -194,6 +194,24 @@ export class DBAssert {
     return found ? matched : null;
   }
 
+  static async waitForRawSyncRecordWithMeasurement(
+    typeValue: string, measurement: string, fragments: string[], timeoutMs: number = 5000
+  ): Promise<SyncData | null> {
+    let matched: SyncData | null = null;
+    const found = await WaitUtils.waitUntil(async () => {
+      const records = await DBAssert.queryRawSyncData(typeValue, 100);
+      for (const record of records) {
+        const line = record.getDataString();
+        if (line.startsWith(`${measurement},`) && DBAssert.containsAll(line, fragments)) {
+          matched = record;
+          return true;
+        }
+      }
+      return false;
+    }, timeoutMs);
+    return found ? matched : null;
+  }
+
   static async waitForNoSyncRecordContaining(type: DataType, fragments: string[], timeoutMs: number = 5000): Promise<boolean> {
     return await WaitUtils.waitUntil(async () => {
       const records = await DBAssert.querySyncData([type], 100);

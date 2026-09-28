@@ -7,8 +7,11 @@ import { Constants } from '../../../main/ets/components/Constants';
 import { FTDBTaskPoolExecutor } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
+import { CollectType } from '../../../main/ets/components/rum/enum/RUMEnums';
 import { FTActionTracker } from '../../../main/ets/components/rum/FTActionTracker';
 import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
+import { DefaultFTSDKRuntime } from '../../../main/ets/components/internal/runtime/FTSDKRuntime';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
@@ -400,12 +403,22 @@ function buildRumConfig(
 }
 
 function initializeAutoTrack(context: Context, uiContext: FakeUIContext, rumConfig: FTRUMConfig): void {
+  SdkInternalTestAccess.setRuntime(new AutoTrackTestRuntime(uiContext));
   FTSDK.install(buildSdkConfig(), context);
   FTSDK.installRUMConfig(rumConfig);
-  FTActionTracker.getInstance().destroy();
-  FTNavigationTracker.getInstance().destroy();
-  FTActionTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
-  FTNavigationTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
+}
+
+class AutoTrackTestRuntime extends DefaultFTSDKRuntime {
+  private readonly fakeUIContext: UIContext;
+
+  constructor(uiContext: FakeUIContext) {
+    super();
+    this.fakeUIContext = uiContext as Object as UIContext;
+  }
+
+  getUIContext(): UIContext {
+    return this.fakeUIContext;
+  }
 }
 
 function containsAll(value: string, fragments: string[]): boolean {
@@ -474,6 +487,7 @@ export default function autoTrackDeviceTest() {
         async () => { await SdkTestLifecycle.resetRuntimeState(); },
         async () => { await DBAssert.cleanupAll(); }
       ]);
+      SdkInternalTestAccess.resetRuntime();
     });
 
     it('autoTrackDestroyRemoveOnlySdkCallbacks', 0, async () => {
@@ -559,7 +573,9 @@ export default function autoTrackDeviceTest() {
     });
 
     it('rerunSerializesPredecessorIndexWithoutNewPageEvent', 0, async () => {
-      const predecessor = new ViewBean('Index', 'root', Utils.getCurrentNanoTime());
+      const predecessor = new ViewBean('predecessor-index-view', 'Index', Utils.getCurrentNanoTime());
+      predecessor.setSessionId(Utils.generateUUID());
+      predecessor.setCollectType(CollectType.ALL);
       await FTDBTaskPoolExecutor.upsertRumView(context, predecessor);
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
 
@@ -1211,9 +1227,9 @@ export default function autoTrackDeviceTest() {
       await flushAndAssertPayload(collector, [
         'action,',
         'action_name=custom_action_name',
-        'handler_property=handler_value',
-        'automatic_only=retained',
-        'shared_property=handler_wins',
+        'handler_property="handler_value"',
+        'automatic_only="retained"',
+        'shared_property="handler_wins"',
         'view_name=custom_action_view_page'
       ]);
     });

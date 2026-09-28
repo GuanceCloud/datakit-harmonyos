@@ -11,6 +11,7 @@ import { FTSDKConfig, FTLoggerConfig, FTRUMConfig, FTTraceConfig } from '../../.
 import { Constants } from '../../../main/ets/components/Constants';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
+import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
 import FTTrackInner from '../../../main/ets/components/FTTrackInner';
 import { FTLogger } from '../../../main/ets/components/log/FTLogger';
 import { Status } from '../../../main/ets/components/bean/Status';
@@ -271,6 +272,11 @@ export default function dataSyncTest() {
 
       installTestSdk(context);
 
+      // These tests exercise explicit RUM events. Exclude the runner's own Index
+      // page and its delayed Router observer callbacks from each test database.
+      FTNavigationTracker.getInstance().destroy();
+      await FTRUMGlobalManager.getInstance().stopView();
+
       await DBAssert.resetAll();
       collector.clearRequests();
     });
@@ -437,6 +443,8 @@ export default function dataSyncTest() {
 
     it('backgroundClosesLaunchViewWithoutAnActivePage', 0, async () => {
       const manager = FTRUMInnerManager.getInstance();
+      // The test runner may already have an automatically tracked Index page.
+      await FTRUMGlobalManager.getInstance().stopView();
       manager.addAction('launch_without_page', Constants.ACTION_TYPE_LAUNCH_COLD,
         1_000_000, Utils.getCurrentNanoTime());
       const launch = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH, 5000);
@@ -744,14 +752,14 @@ export default function dataSyncTest() {
       await waitForRumAggregation();
 
       const stagedType = 'rum_app_error_sampled';
-      const action = await DBAssert.waitForRawSyncRecordContaining(stagedType,
-        ['action,', `action_name=${actionName}`], 5000);
-      const aggregatedAction = await DBAssert.waitForRawSyncRecordContaining(stagedType,
-        ['action,', `action_name=${aggregatedActionName}`], 5000);
-      const view = await DBAssert.waitForRawSyncRecordContaining(stagedType,
-        ['view,', `view_name=${viewName}`], 5000);
-      const resource = await DBAssert.waitForRawSyncRecordContaining(stagedType,
-        ['resource,', `resource_url=${resourceUrl}`], 5000);
+      const action = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'action', [`action_name=${actionName}`], 5000);
+      const aggregatedAction = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'action', [`action_name=${aggregatedActionName}`], 5000);
+      const view = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'view', [`view_name=${viewName}`], 5000);
+      const resource = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'resource', [`resource_url=${resourceUrl}`], 5000);
       expect(action !== null).assertTrue();
       expect(aggregatedAction !== null).assertTrue();
       expect(view !== null).assertTrue();
@@ -762,7 +770,10 @@ export default function dataSyncTest() {
       // start time for both the Line Protocol and the staging row.
       const viewLine = view!.getDataString();
       const viewEventTime = Number(viewLine.substring(viewLine.lastIndexOf(' ') + 1));
-      expect(view!.getTime() > viewEventTime).assertTrue();
+      if (!(view!.getTime() > viewEventTime)) {
+        throw new Error(`Sampled View storage time ${view!.getTime()} must follow event time ${viewEventTime}; ` +
+          `line=${viewLine}`);
+      }
       const resourceLine = resource!.getDataString();
       const resourceEventTime = Number(resourceLine.substring(resourceLine.lastIndexOf(' ') + 1));
       expect(resource!.getTime()).assertEqual(resourceEventTime);
@@ -1367,11 +1378,10 @@ export default function dataSyncTest() {
       const viewName = 'long_task_rate_view';
       await FTRUMGlobalManager.getInstance().startView(viewName);
       FTRUMGlobalManager.getInstance().addLongTask('long_task_rate_event', 10 * 1000000000);
+      const activeView = FTRUMInnerManager.getInstance().getActiveView();
+      expect(activeView?.getLongTaskDuration()).assertEqual(10 * 1000000000);
       await FTRUMGlobalManager.getInstance().stopView();
       await waitForRumAggregation();
-
-      const view = await DBAssert.waitForViewNamed(viewName, 5000);
-      expect(view?.getLongTaskDuration()).assertEqual(10 * 1000000000);
 
       const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
         ['view,', `view_name=${viewName}`, 'view_long_task_rate=1'], 5000);
