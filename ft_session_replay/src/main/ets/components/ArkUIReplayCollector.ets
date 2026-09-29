@@ -43,6 +43,19 @@ interface ReplayInsets {
 }
 
 /**
+ * Window-space clipping rectangle used only while collecting a snapshot.
+ * Android Replay wireframes are flat and have no clip-path field, so the
+ * collector must reduce each native node to its visible rectangle before it
+ * serializes the existing wireframe protocol.
+ */
+interface ReplayClipRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
  * One binary image discovered during a Full Snapshot. A recorder must persist
  * it before serializing its matching image wireframe, then replace `token`
  * with the content-addressed backend resource id.
@@ -51,6 +64,34 @@ export interface CapturedReplayImageResource {
   token: string;
   bytes: Uint8Array;
   mimeType: string;
+}
+
+/**
+ * A deliberately small, FrameNode-only read captured on the UI thread.
+ *
+ * It contains no Replay wireframe, JSON text, decoded image, or protocol
+ * record.  Inspector values are retained as opaque snapshots and are parsed
+ * only by `materializeLightSnapshot` after the UI callback has returned.
+ */
+export interface ArkUIReplayLightNode {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  componentId: string;
+  nodeType: string;
+  inspectorInfo: Object | null;
+  shouldCaptureAsText: boolean;
+  isRoot: boolean;
+  usedTransformedPosition: boolean;
+}
+
+/** Immutable-by-convention handoff payload from the ArkUI read phase. */
+export interface ArkUIReplayLightSnapshot {
+  timestamp: number;
+  vpToPxScale: number;
+  nodes: Array<ArkUIReplayLightNode>;
 }
 
 /**
@@ -124,11 +165,24 @@ export class ArkUIReplayCollector {
     vpToPxScale: number = 1,
     timestamp: number = Date.now()
   ): SessionReplayRecord {
+    return this.materializeLightSnapshot(this.captureLightSnapshot(uiContext, rootId, vpToPxScale, timestamp));
+  }
+
+  /**
+   * UI-thread phase: reads only public FrameNode geometry/state and returns a
+   * cheap handoff object.  Do not add JSON, resource, or filesystem work here.
+   */
+  public captureLightSnapshot(
+    uiContext: UIContext,
+    rootId: string,
+    vpToPxScale: number = 1,
+    timestamp: number = Date.now()
+  ): ArkUIReplayLightSnapshot {
     const root = uiContext.getFrameNodeById(rootId);
     if (root === null) {
       throw new Error(`Session Replay root was not found: ${rootId}`);
     }
-    return this.captureFrameNode(root, vpToPxScale, timestamp);
+    return this.captureFrameNodeLight(root, vpToPxScale, timestamp);
   }
 
   public captureFrameNode(
@@ -136,15 +190,54 @@ export class ArkUIReplayCollector {
     vpToPxScale: number = 1,
     timestamp: number = Date.now()
   ): SessionReplayRecord {
+    return this.materializeLightSnapshot(this.captureFrameNodeLight(root, vpToPxScale, timestamp));
+  }
+
+  /** Same UI-only phase for callers that already hold the root FrameNode. */
+  public captureFrameNodeLight(
+    root: FrameNode,
+    vpToPxScale: number = 1,
+    timestamp: number = Date.now()
+  ): ArkUIReplayLightSnapshot {
     this.assertRenderableRoot(root);
     const scale = Number.isFinite(vpToPxScale) && vpToPxScale > 0 ? vpToPxScale : 1;
+    const nodes: Array<ArkUIReplayLightNode> = [];
+    this.appendLightPreOrder(root, scale, nodes, true);
+    return { timestamp, vpToPxScale: scale, nodes };
+  }
+
+  /**
+   * Worker/queue phase: parses Inspector data, applies privacy policies,
+   * creates wireframes and resolves image bytes.  This method intentionally
+   * accepts no FrameNode so callers cannot accidentally traverse ArkUI here.
+   */
+  public materializeLightSnapshot(snapshot: ArkUIReplayLightSnapshot): SessionReplayRecord {
     const wireframes: Array<ReplayWireframe> = [];
     this.pendingImageResources = [];
     this.parsedInspectorCache.clear();
-    this.appendPreOrder(root, scale, wireframes, true);
+    for (let index = 0; index < snapshot.nodes.length; index++) {
+      const node = snapshot.nodes[index];
+      const inspector = this.serializeInspectorInfo(node.inspectorInfo);
+      const wireframe = this.createWireframe(
+        node.id,
+        node.x,
+        node.y,
+        node.width,
+        node.height,
+        node.componentId,
+        node.nodeType,
+        inspector,
+        node.shouldCaptureAsText,
+        node.isRoot,
+        snapshot.vpToPxScale
+      );
+      this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
+      this.appendCommonVisualProperties(wireframe, inspector);
+      wireframes.push(wireframe);
+    }
     const data: FullSnapshotData = { wireframes };
     return {
-      timestamp,
+      timestamp: snapshot.timestamp,
       type: ReplayRecordType.FULL_SNAPSHOT,
       data
     };
@@ -173,11 +266,12 @@ export class ArkUIReplayCollector {
     }
   }
 
-  private appendPreOrder(
+  private appendLightPreOrder(
     node: FrameNode,
     vpToPxScale: number,
-    output: Array<ReplayWireframe>,
-    isRoot: boolean
+    output: Array<ArkUIReplayLightNode>,
+    isRoot: boolean,
+    ancestorClip: ReplayClipRect | null | undefined = undefined
   ): void {
     if (output.length >= this.maxNodes) {
       return;
@@ -192,29 +286,63 @@ export class ArkUIReplayCollector {
     let y = 0;
     let width = 0;
     let height = 0;
+    let usedTransformedPosition = false;
     try {
-      // Android records all geometry in density-normalized coordinates. FrameNode
-      // positions already use vp, while measured sizes use physical px.
-      const position = node.getPositionToWindow();
+      // Scroll offsets and drawing translations are applied after layout. Use
+      // the transformed window position so a scrolled child is captured where
+      // it is actually painted, not where it was originally laid out.
+      const position = node.getPositionToWindowWithTransform();
       x = this.roundReplayMetric(position.x);
       y = this.roundReplayMetric(position.y);
-    } catch (_) { }
+      usedTransformedPosition = true;
+    } catch (_) {
+      try {
+        // Keep compatibility with an older ArkUI runtime that does not expose
+        // the transformed query. The clip pass below still prevents overflow.
+        const position = node.getPositionToWindow();
+        x = this.roundReplayMetric(position.x);
+        y = this.roundReplayMetric(position.y);
+      } catch (_) { }
+    }
     try {
       const size = node.getMeasuredSize();
       width = Math.max(0, this.roundReplayMetric(size.width / vpToPxScale));
       height = Math.max(0, this.roundReplayMetric(size.height / vpToPxScale));
     } catch (_) { }
 
-    const componentId = this.readComponentId(node);
-    const nodeType = this.readNodeType(node);
-    const inspector = this.readInspector(node);
-    const id = this.toProtocolId(nodeId);
-    const wireframe = this.createWireframe(
-      id, x, y, width, height, componentId, nodeType, inspector,
-      this.shouldCaptureAsText(node, nodeType), isRoot, vpToPxScale
-    );
-    this.appendCommonVisualProperties(wireframe, inspector);
-    output.push(wireframe);
+    const bounds = this.createClipRect(x, y, width, height);
+    const visibleBounds = this.intersectClipRects(ancestorClip, bounds);
+    const clipsDescendants = isRoot || this.isClipToFrame(node);
+    const childClip = clipsDescendants
+      ? this.intersectClipRects(ancestorClip, bounds)
+      : ancestorClip;
+
+    // The Replay player accepts only flat geometry. Do not emit an offscreen
+    // native node; for a partially visible node, serialize its visible bounds
+    // rather than inventing a protocol field the player cannot render.
+    if (visibleBounds !== null) {
+      const nodeType = this.readNodeType(node);
+      output.push({
+        id: this.toProtocolId(nodeId),
+        x: visibleBounds.left,
+        y: visibleBounds.top,
+        width: visibleBounds.right - visibleBounds.left,
+        height: visibleBounds.bottom - visibleBounds.top,
+        componentId: this.readComponentId(node),
+        nodeType,
+        inspectorInfo: this.readInspectorInfo(node),
+        shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
+        isRoot,
+        usedTransformedPosition
+      });
+    }
+
+    // A clipping container outside its inherited viewport cannot have visible
+    // descendants. A non-clipping container still traverses its children: a
+    // child may apply a transform that brings it back into the visible region.
+    if (childClip === null) {
+      return;
+    }
 
     let child: FrameNode | null = null;
     try {
@@ -223,12 +351,72 @@ export class ArkUIReplayCollector {
       return;
     }
     while (child !== null && output.length < this.maxNodes) {
-      this.appendPreOrder(child, vpToPxScale, output, false);
+      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip);
       try {
         child = child.getNextSibling();
       } catch (_) {
         return;
       }
+    }
+  }
+
+  private createClipRect(x: number, y: number, width: number, height: number): ReplayClipRect {
+    return {
+      left: x,
+      top: y,
+      right: x + Math.max(0, width),
+      bottom: y + Math.max(0, height)
+    };
+  }
+
+  /**
+   * `undefined` means no clipping ancestor yet; `null` represents an empty
+   * visible region. Keeping those states distinct avoids accidentally reviving
+   * descendants that have already been clipped by a parent Scroll/List.
+   */
+  private intersectClipRects(
+    ancestor: ReplayClipRect | null | undefined,
+    current: ReplayClipRect
+  ): ReplayClipRect | null {
+    if (ancestor === null || current.right <= current.left || current.bottom <= current.top) {
+      return null;
+    }
+    if (ancestor === undefined) {
+      return current;
+    }
+    const left = Math.max(ancestor.left, current.left);
+    const top = Math.max(ancestor.top, current.top);
+    const right = Math.min(ancestor.right, current.right);
+    const bottom = Math.min(ancestor.bottom, current.bottom);
+    if (right <= left || bottom <= top) {
+      return null;
+    }
+    return { left, top, right, bottom };
+  }
+
+  private isClipToFrame(node: FrameNode): boolean {
+    try {
+      return node.isClipToFrame();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * The transformed window query already includes native translation (notably
+   * a Scroll's content offset). Preserve scale/rotation metadata, but remove
+   * translateX/Y so the Replay player does not apply the same movement twice.
+   */
+  private removeBakedPositionTranslation(wireframe: ReplayWireframe, usedTransformedPosition: boolean): void {
+    if (!usedTransformedPosition || wireframe.type === 'placeholder' || wireframe.shapeStyle === undefined ||
+      wireframe.shapeStyle.transform === undefined) {
+      return;
+    }
+    const transform = wireframe.shapeStyle.transform;
+    transform.translateX = undefined;
+    transform.translateY = undefined;
+    if (transform.scaleX === undefined && transform.scaleY === undefined && transform.rotate === undefined) {
+      wireframe.shapeStyle.transform = undefined;
     }
   }
 
@@ -683,9 +871,26 @@ export class ArkUIReplayCollector {
     return '•'.repeat(Math.min(64, length));
   }
 
-  private readInspector(node: FrameNode): string | null {
+  /** Reads the native Inspector object but deliberately does not serialize it on UI. */
+  private readInspectorInfo(node: FrameNode): Object | null {
     try {
-      const serialized = JSON.stringify(node.getInspectorInfo());
+      const inspector = node.getInspectorInfo();
+      return inspector === undefined || inspector === null ? null : inspector;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Runs in the processing queue.  The serialized value is used only as a
+   * transient parser input; unknown Inspector fields never enter a wireframe.
+   */
+  private serializeInspectorInfo(inspectorInfo: Object | null): string | null {
+    if (inspectorInfo === null) {
+      return null;
+    }
+    try {
+      const serialized = JSON.stringify(inspectorInfo);
       if (serialized.length === 0 || serialized.length > MAX_INSPECTOR_BYTES) {
         return null;
       }

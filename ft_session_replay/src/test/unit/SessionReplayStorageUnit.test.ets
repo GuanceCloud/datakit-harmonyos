@@ -2,7 +2,7 @@ import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry
 import { Context } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { describe, beforeEach, afterEach, expect, it } from '@ohos/hypium';
-import { ReplayRecordType, SessionReplayContext, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
+import { ReplayMetaData, ReplayRecordType, SessionReplayContext, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { SessionReplayResourceStore } from '../../main/ets/components/SessionReplayResourceStore';
 import { SessionReplaySegmentStore } from '../../main/ets/components/SessionReplaySegmentStore';
 
@@ -36,7 +36,8 @@ function replayContext(): SessionReplayContext {
 }
 
 function replayRecord(): SessionReplayRecord {
-  return { timestamp: 1700000000000, type: ReplayRecordType.META, data: { width: 100, height: 200 } };
+  const data: ReplayMetaData = { width: 100, height: 200 };
+  return { timestamp: 1700000000000, type: ReplayRecordType.META, data };
 }
 
 export default function sessionReplayStorageUnitTest() {
@@ -66,6 +67,14 @@ export default function sessionReplayStorageUnitTest() {
       expect(store.list().length).assertEqual(1);
     });
 
+    it('keeps batches from UI and Worker store instances in one directory', 0, () => {
+      const uiStore = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 10);
+      const workerStore = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 10);
+      expect(uiStore.append(replayContext(), [replayRecord()])).assertTrue();
+      expect(workerStore.append(replayContext(), [replayRecord()])).assertTrue();
+      expect(uiStore.list().length).assertEqual(2);
+    });
+
     it('creates resource data and metadata directories before persisting bytes', 0, () => {
       const store = new SessionReplayResourceStore(testRoot, 1024 * 1024, 'resources_regression');
       const root = store.getRoot();
@@ -79,6 +88,17 @@ export default function sessionReplayStorageUnitTest() {
       expect(exists(`${root}/data`)).assertTrue();
       expect(exists(`${root}/pending`)).assertTrue();
       expect(store.list().length).assertEqual(1);
+    });
+
+    it('retains resources referenced after an upload snapshot', 0, () => {
+      const store = new SessionReplayResourceStore(testRoot, 1024 * 1024);
+      const bytes = new Uint8Array([1, 2, 3]);
+      expect(store.put(replayContext(), bytes, 'image/png') !== null).assertTrue();
+      const id = store.list()[0].id;
+      const uploadEpoch = store.getTouchEpoch();
+      expect(store.wasTouchedAfter([id], uploadEpoch)).assertFalse();
+      expect(store.put(replayContext(), bytes, 'image/png') !== null).assertTrue();
+      expect(store.wasTouchedAfter([id], uploadEpoch)).assertTrue();
     });
   });
 }

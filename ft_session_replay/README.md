@@ -41,10 +41,16 @@ starting Replay; call `start()` only after the user grants consent. The sample
 page exposes the same behavior through **Enable/Disable Session Replay** and
 disables all capture actions while Replay is off.
 
-Once a sampled RUM View starts, the registered ArkUI root is structurally
-polled every 500 ms by default. Unchanged trees do not emit records; changes
-produce Android Incremental Snapshot records (`type:11`, `source:0`). Change
-the bounded cadence with `setSnapshotIntervalMs(100..10000)`.
+Once a sampled RUM View starts, call `replay.notifyPageChanged()` after a
+visible layout or state change. The callback reads a detached, lightweight
+`FrameNode` snapshot; a `ThreadWorker` materializes wireframes, calculates
+diffs, serializes records, and writes durable batches in queue order. Unchanged
+trees emit no records. `setSnapshotIntervalMs(16..10000)` controls the default
+64 ms change debounce. A Full Snapshot resynchronizes after a later change
+signal at the default 30-second interval; adjust it with
+`setFullSnapshotIntervalMs(5000..300000)`. Use `notifyScroll()` or
+`notifyTransition()` to defer collection until motion settles; adjust the
+quiet period with `setMotionQuietPeriodMs(50..5000)`.
 
 For lifecycle signals that ArkUI delivers to the application, report them
 without constructing RUM identifiers yourself: `recordFocus(hasFocus)`,
@@ -61,8 +67,12 @@ bounded to 10 MiB by default and evicts oldest complete segments before writing
 new data. Use `setStorageMaxBytes()` and `setMaxRecordsPerSegment()` to tune
 the bounds. Private-app storage is durable but not encrypted by this POC.
 
-Call `await replay.flush()` to upload the durable segments. By default, the
-uploader reuses the installed core SDK's DataKit or Dataway intake configuration
+Call `await replay.flush()` to wait for accepted batches to reach disk, then
+upload their assets and segments. A separate upload `ThreadWorker` performs
+network requests without occupying the snapshot/write Worker. Acknowledged
+segment deletions return to the write queue, and assets referenced during an
+upload remain available for retry. By default, the uploader reuses the
+installed core SDK's DataKit or Dataway intake configuration
 and sends `v1/write/rum/replay` with Android's `multipart/form-data` contract:
 newline-delimited record envelopes are deflate-compressed into the `segment`
 file part and include `start`, `end`, `records_count`, RUM linkage, environment,
@@ -108,8 +118,10 @@ that content with `replay.queueResource(context, bytes, mimeType)`. The method
 returns a SHA-256 file name suitable for the record reference. Identical bytes
 are retained once in `filesDir/ft_session_replay/resources/data`; pending
 metadata is scoped by the RUM App ID and `wgt_id`, matching Android's backend
-routing. The current conservative ArkUI collector emits masked placeholder
-wireframes and therefore does not queue image bytes itself.
+routing. The ArkUI collector emits Android-compatible `shape`, `text`, and
+`image` wireframes. It queues image bytes only from a data URI or an explicit
+`registerImageAsset(imageIdOrSource, bytes, mimeType)` call; it does not read
+arbitrary bundle, file, or network-image pixels from `FrameNode`.
 
 `flush()` first performs Android-compatible resource processing: it posts
 `{app_id, files, tags}` to `v1/check/rum/replay_assets`, removes assets the
@@ -130,9 +142,10 @@ The generated JSON is compatible with Android's Replay record envelope:
 }
 ```
 
-`type: 10` is Android's Full Snapshot record type. The POC uses only
-`placeholder` wireframes, and never reads Inspector data, text values, input
-values, or image bytes.
+`type: 10` is Android's Full Snapshot record type. The collector serializes a
+whitelist of visual Inspector attributes, then discards Inspector data. Text
+and input content follow the configured privacy policy; image bytes require an
+explicit public data URI or registration.
 
 ## Manual verification
 

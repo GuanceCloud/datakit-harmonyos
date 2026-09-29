@@ -46,7 +46,12 @@ export {
   createAndroidReplayMobileSegment,
   serializeAndroidReplayMobileSegment
 } from './src/main/ets/components/SessionReplayProtocol';
-export { ArkUIReplayCollector, CapturedReplayImageResource } from './src/main/ets/components/ArkUIReplayCollector';
+export {
+  ArkUIReplayCollector,
+  ArkUIReplayLightNode,
+  ArkUIReplayLightSnapshot,
+  CapturedReplayImageResource
+} from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
 export { FTSessionReplay } from './src/main/ets/components/FTSessionReplay';

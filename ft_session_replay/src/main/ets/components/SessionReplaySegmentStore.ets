@@ -30,12 +30,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private readonly maxRecordsPerSegment: number;
   private sequence: number = 0;
   private lastWriteError: string = '';
+  private lastAppendedIds: Array<string> = [];
 
   constructor(
     filesDir: string,
     maxBytes: number,
     maxRecordsPerSegment: number,
-    directoryName: string = 'segments'
+    directoryName: string = 'segments',
+    recoverOnInit: boolean = true
   ) {
     if (filesDir.trim().length === 0) {
       throw new Error('Session Replay storage requires a non-empty filesDir');
@@ -52,10 +54,11 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     // SDK supports as well as on newer runtimes.
     this.ensureDirectory(this.replayRoot);
     this.ensureDirectory(this.root);
-    this.recover();
+    if (recoverOnInit) this.recover();
   }
 
   public append(context: SessionReplayContext, records: Array<SessionReplayRecord>): boolean {
+    this.lastAppendedIds = [];
     if (records.length === 0) {
       return true;
     }
@@ -74,6 +77,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
           return false;
         }
         this.atomicWrite(`${this.root}/${segment.id}.json`, body);
+        this.lastAppendedIds.push(segment.id);
       }
       return true;
     } catch (error) {
@@ -85,6 +89,15 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   /** Exposes the latest append failure without leaking application content. */
   public getLastWriteError(): string | null {
     return this.lastWriteError.length === 0 ? null : this.lastWriteError;
+  }
+
+  public getLastAppendedIds(): Array<string> {
+    return this.lastAppendedIds.slice();
+  }
+
+  /** Enumerates candidate batches without parsing their contents. */
+  public listIds(): Array<string> {
+    return this.segmentFileNames().map((name: string): string => name.substring(0, name.length - '.json'.length));
   }
 
   /** Reopens valid segments after process restart and removes interrupted writes. */
@@ -176,9 +189,15 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     return this.root;
   }
 
+  public getFilesDir(): string {
+    return this.replayRoot.substring(0, this.replayRoot.length - '/ft_session_replay'.length);
+  }
+
   private createSegment(context: SessionReplayContext, records: Array<SessionReplayRecord>): SessionReplayStoredSegment {
     const createdAt = Date.now();
-    const id = `${createdAt.toString().padStart(13, '0')}-${(++this.sequence).toString().padStart(6, '0')}`;
+    // More than one store instance can write this directory (UI and Replay
+    // Worker). A per-instance random suffix prevents their counters colliding.
+    const id = `${createdAt.toString().padStart(13, '0')}-${(++this.sequence).toString().padStart(6, '0')}-${Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0')}`;
     const storedContext: SessionReplayContext = {
       applicationId: context.applicationId,
       sessionId: context.sessionId,
@@ -293,7 +312,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private isSafeSegmentId(id: string): boolean {
-    return /^\d{13}-\d{6}$/.test(id);
+    return /^\d{13}-\d{6}(?:-[0-9a-f]{8})?$/.test(id);
   }
 
   private latestRecordTimestamp(segment: SessionReplayStoredSegment): number {

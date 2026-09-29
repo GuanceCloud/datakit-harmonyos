@@ -40,6 +40,15 @@ interface SessionReplayUploadTarget {
   env: string;
 }
 
+export interface SessionReplayUploadRoute {
+  datakitUrl: string;
+  datawayUrl: string;
+  clientToken: string;
+  env: string;
+  uploadUrl: string;
+  appVersion: string;
+}
+
 interface SessionReplayMultipartPayload {
   boundary: string;
   body: ArrayBuffer;
@@ -140,15 +149,24 @@ export function createSessionReplayUploadFields(
 export class SessionReplayUploader {
   private readonly store: SessionReplaySegmentStore;
   private readonly config: FTSessionReplayConfig;
+  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null;
+  private readonly route: SessionReplayUploadRoute | null;
 
-  constructor(store: SessionReplaySegmentStore, config: FTSessionReplayConfig) {
+  constructor(
+    store: SessionReplaySegmentStore,
+    config: FTSessionReplayConfig,
+    removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null = null,
+    route: SessionReplayUploadRoute | null = null
+  ) {
     this.store = store;
     this.config = config;
+    this.removeAcknowledged = removeAcknowledged;
+    this.route = route;
   }
 
-  public async uploadPending(): Promise<SessionReplayUploadResult> {
+  public async uploadPending(readySegments?: Array<SessionReplayStoredSegment>): Promise<SessionReplayUploadResult> {
     const target = this.resolveTarget();
-    const pending = this.store.list();
+    const pending = readySegments ?? this.store.list();
     if (pending.length === 0) {
       return this.result(true, 200, 'No pending Session Replay segments.', 0, 0);
     }
@@ -156,7 +174,7 @@ export class SessionReplayUploader {
       return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, true, true);
     }
 
-    const appVersion = this.getAppVersion();
+    const appVersion = this.route?.appVersion ?? this.getAppVersion();
     let attemptedSegments = 0;
     let uploadedSegments = 0;
     for (let index = 0; index < pending.length; index++) {
@@ -167,7 +185,9 @@ export class SessionReplayUploader {
         return this.result(false, status.code, status.message, attemptedSegments, uploadedSegments,
           isRetryableReplayUploadStatus(status.code));
       }
-      if (!this.store.remove([segment.id])) {
+      const removed = this.removeAcknowledged === null ? this.store.remove([segment.id]) :
+        await this.removeAcknowledged([segment.id]);
+      if (!removed) {
         return this.result(false, 0, 'Replay endpoint acknowledged a segment but local deletion failed.',
           attemptedSegments, uploadedSegments, true);
       }
@@ -177,6 +197,11 @@ export class SessionReplayUploader {
   }
 
   private resolveTarget(): SessionReplayUploadTarget | null {
+    if (this.route !== null) {
+      const url = this.route.uploadUrl.length > 0 ? this.route.uploadUrl : createAndroidReplayUploadUrl(
+        this.route.datakitUrl, this.route.datawayUrl, this.route.clientToken);
+      return url.length === 0 ? null : { url, env: this.route.env };
+    }
     const installedConfig = FTSDK.getSDKConfig();
     const env = installedConfig === null ? 'prod' : installedConfig.getEnv();
     const override = this.config.getUploadUrl();

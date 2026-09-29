@@ -1,6 +1,12 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "sourceOption": {
+      "workers": [
+        "./src/main/ets/components/workers/SessionReplayWorker.ets",
+        "./src/main/ets/components/workers/SessionReplayUploadWorker.ets"
+      ]
+    },
     "arkOptions": {
       "byteCodeHar": true
     }

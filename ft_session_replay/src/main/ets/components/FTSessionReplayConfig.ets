@@ -31,7 +31,15 @@ export class FTSessionReplayConfig {
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
-  private snapshotIntervalMs: number = 500;
+  // Debounce for a coalesced UI-change signal. This is not a polling period:
+  // no FrameNode capture occurs until a page/root change is reported.
+  private snapshotIntervalMs: number = 64;
+  // Mirrors Android Replay's sparse checkpoint approach: normal traffic is
+  // Incremental Snapshot records; a Full Snapshot is a periodic resync only.
+  private fullSnapshotIntervalMs: number = 30_000;
+  // During scrolling, animations and page transitions retain only the final
+  // settled frame instead of serializing every intermediate frame.
+  private motionQuietPeriodMs: number = 400;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
   // Android-like background draining cadence. Zero opts out and leaves flush()
@@ -119,20 +127,46 @@ export class FTSessionReplayConfig {
   }
 
   /**
-   * Controls the bounded structural polling cadence for a visible ArkUI root.
-   * The collector emits an Incremental Snapshot only when its wireframe tree
-   * changes, so unchanged intervals do not create protocol records.
+   * Controls the debounce applied to coalesced UI-change notifications. It is
+   * retained under its original name for source compatibility; it no longer
+   * starts a periodic full-tree collector.
    */
   public setSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;
     }
-    this.snapshotIntervalMs = Math.max(100, Math.min(10000, Math.floor(intervalMs)));
+    this.snapshotIntervalMs = Math.max(16, Math.min(10000, Math.floor(intervalMs)));
     return this;
   }
 
   public getSnapshotIntervalMs(): number {
     return this.snapshotIntervalMs;
+  }
+
+  /** Sets the low-frequency Full Snapshot resynchronization interval. */
+  public setFullSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
+    if (!Number.isFinite(intervalMs)) {
+      return this;
+    }
+    this.fullSnapshotIntervalMs = Math.max(5_000, Math.min(300_000, Math.floor(intervalMs)));
+    return this;
+  }
+
+  public getFullSnapshotIntervalMs(): number {
+    return this.fullSnapshotIntervalMs;
+  }
+
+  /** Sets the quiet window before collecting a frame after motion settles. */
+  public setMotionQuietPeriodMs(intervalMs: number): FTSessionReplayConfig {
+    if (!Number.isFinite(intervalMs)) {
+      return this;
+    }
+    this.motionQuietPeriodMs = Math.max(50, Math.min(5_000, Math.floor(intervalMs)));
+    return this;
+  }
+
+  public getMotionQuietPeriodMs(): number {
+    return this.motionQuietPeriodMs;
   }
 
   /** Bounds all retained on-device Replay segments. Default: 10 MiB. */

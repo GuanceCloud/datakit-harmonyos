@@ -4,7 +4,7 @@ import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
 import { ANDROID_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
-import { isRetryableReplayUploadStatus } from './SessionReplayUploader';
+import { isRetryableReplayUploadStatus, SessionReplayUploadRoute } from './SessionReplayUploader';
 
 const CONNECT_TIMEOUT_MS = 60_000;
 const READ_TIMEOUT_MS = 60_000;
@@ -62,9 +62,17 @@ interface ResourceCheckResponseBody {
  */
 export class SessionReplayResourceUploader {
   private readonly store: SessionReplayResourceStore;
+  private readonly route: SessionReplayUploadRoute | null;
+  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null;
 
-  constructor(store: SessionReplayResourceStore) {
+  constructor(
+    store: SessionReplayResourceStore,
+    route: SessionReplayUploadRoute | null = null,
+    removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null = null
+  ) {
     this.store = store;
+    this.route = route;
+    this.removeAcknowledged = removeAcknowledged;
   }
 
   public async uploadPending(): Promise<SessionReplayResourceUploadResult> {
@@ -97,7 +105,8 @@ export class SessionReplayResourceUploader {
           missing.push(resource);
         }
       }
-      if (existing.length > 0 && !this.store.remove(existing.map((resource: SessionReplayStoredResource): string => resource.id))) {
+      if (existing.length > 0 && !await this.removeResources(
+        existing.map((resource: SessionReplayStoredResource): string => resource.id))) {
         return this.result(false, 0, 'Session Replay resource check succeeded but local cleanup failed.', attempted, uploaded, true);
       }
       if (missing.length === 0) {
@@ -109,7 +118,7 @@ export class SessionReplayResourceUploader {
         return this.result(false, status.code, status.message, attempted, uploaded,
           isRetryableReplayUploadStatus(status.code));
       }
-      if (!this.store.remove(missing.map((resource: SessionReplayStoredResource): string => resource.id))) {
+      if (!await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id))) {
         return this.result(false, 0, 'Session Replay resource endpoint acknowledged data but local cleanup failed.',
           attempted, uploaded, true);
       }
@@ -119,13 +128,13 @@ export class SessionReplayResourceUploader {
   }
 
   private resolveTarget(): ResourceUploadTarget | null {
-    const installedConfig = FTSDK.getSDKConfig();
-    if (installedConfig === null) {
+    const installedConfig = this.route === null ? FTSDK.getSDKConfig() : null;
+    if (installedConfig === null && this.route === null) {
       return null;
     }
-    const datakitUrl = installedConfig.getDatakitUrl();
-    const datawayUrl = installedConfig.getDatawayUrl();
-    const clientToken = installedConfig.getClientToken();
+    const datakitUrl = this.route?.datakitUrl ?? installedConfig!.getDatakitUrl();
+    const datawayUrl = this.route?.datawayUrl ?? installedConfig!.getDatawayUrl();
+    const clientToken = this.route?.clientToken ?? installedConfig!.getClientToken();
     const checkUrl = createAndroidReplayResourceUrl(
       datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assetCheck, false
     );
@@ -133,6 +142,10 @@ export class SessionReplayResourceUploader {
       datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assets, true
     );
     return checkUrl.length === 0 || uploadUrl.length === 0 ? null : { checkUrl, uploadUrl };
+  }
+
+  private async removeResources(ids: Array<string>): Promise<boolean> {
+    return this.removeAcknowledged === null ? this.store.remove(ids) : await this.removeAcknowledged(ids);
   }
 
   private groupByRoute(resources: Array<SessionReplayStoredResource>): Array<ResourceGroup> {

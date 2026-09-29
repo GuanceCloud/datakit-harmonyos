@@ -12,11 +12,23 @@ import {
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from '@guancecloud/ft_sdk';
-import { ArkUIReplayCollector, CapturedReplayImageResource } from './ArkUIReplayCollector';
+import {
+  ArkUIReplayCollector,
+  ArkUIReplayLightSnapshot,
+  CapturedReplayImageResource
+} from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
+import {
+  ReplayWorkerCommit,
+  ReplayWorkerResult,
+  ReplayStoreKind,
+  ReplayViewport,
+  REPLAY_STALE_QUEUE_REASON,
+  SessionReplayWorkQueue
+} from './SessionReplayWorkQueue';
 import {
   createReplayEnvelope,
   FullSnapshotData,
@@ -44,10 +56,7 @@ interface SessionReplayRootBinding {
 }
 
 /** The normalized bounds of the currently visible native root. */
-interface SessionReplayViewportBounds {
-  width: number;
-  height: number;
-}
+type SessionReplayViewportBounds = ReplayViewport;
 
 interface BrowserReplayRecord {
   timestamp?: number;
@@ -76,6 +85,10 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   // detail was swallowed and the POC incorrectly suggested Replay was off.
   private lastCaptureFailure: string = '';
   private activeContext: SessionReplayContext | null = null;
+  // A page-show callback and RUM's route observer can arrive in either order.
+  // Retain one sampled View-start until the generated page root completes its
+  // first layout, then create the normal Meta/Focus/Full-Snapshot sequence.
+  private pendingViewStartContext: FTSessionReplayRUMContext | null = null;
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
@@ -84,8 +97,16 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   // Zero means active. A positive timestamp retains the Android-compatible
   // two-second grace period after a WebView slot becomes inactive.
   private readonly webSlotInactiveAt: Map<string, number> = new Map();
-  private observationTimer: number = -1;
+  private readonly workQueue: SessionReplayWorkQueue;
+  private readonly pendingViewStarts: Map<string, number> = new Map();
+  private readonly endedViewStarts: Map<string, number> = new Map();
+  // Every root/view transition invalidates detached snapshots already waiting
+  // in the queue. This keeps a page transition from writing a stale frame.
+  private captureGeneration: number = 0;
+  private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
+  private motionUntil: number = 0;
+  private lastFullSnapshotAt: number = 0;
   private observedViewport: SessionReplayViewportBounds | null = null;
   // Kept separately because an IME can reduce the root's layout height or
   // overlay it without a relayout, depending on the app's avoid-mode.
@@ -117,6 +138,16 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     this.errorSampleStore = errorSampleStore;
     this.errorSampleResourcePromoter = errorSampleResourcePromoter;
     this.imageResourceWriter = imageResourceWriter;
+    this.workQueue = new SessionReplayWorkQueue({
+      filesDir: store?.getFilesDir() ?? errorSampleStore?.getFilesDir() ?? '',
+      maxNodes: config.getMaxNodesPerSnapshot(),
+      maxBytes: config.getStorageMaxBytes(),
+      maxRecordsPerSegment: config.getMaxRecordsPerSegment(),
+      fullSnapshotIntervalMs: config.getFullSnapshotIntervalMs(),
+      errorSampleWindowMs: config.getErrorSampleWindowMs(),
+      textPrivacy: config.getTextAndInputPrivacy(),
+      imagePrivacy: config.getImagePrivacy()
+    });
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -131,25 +162,42 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   /** Stops RUM lifecycle capture without changing the core SDK. */
   public stop(): void {
     if (!this.isStarted) {
+      this.workQueue.close();
       return;
     }
     FTSessionReplayBridgeRegistry.unregister(this);
     this.isStarted = false;
     this.rootBinding = null;
     this.activeContext = null;
+    this.pendingViewStartContext = null;
     this.resetViewportObservation();
     this.unbindWindowViewportObserver();
     this.viewMetadata.clear();
     this.recordedRecordsByView.clear();
     this.promotedErrorSessions.clear();
     this.webSlotInactiveAt.clear();
+    this.pendingViewStarts.clear();
     this.stopObservation();
+    this.captureGeneration++;
+    this.workQueue.close();
     this.processor.reset();
     this.sampler.reset();
   }
 
   /** Registers the visible ArkUI root to record when RUM starts or errors a View. */
-  public registerRoot(uiContext: UIContext, rootId: string, vpToPxScale: number = 1): void {
+  public registerRoot(
+    uiContext: UIContext,
+    rootId: string,
+    vpToPxScale: number = 1
+  ): void {
+    const current = this.rootBinding;
+    if (current !== null && current.uiContext === uiContext && current.rootId === rootId &&
+      current.vpToPxScale === vpToPxScale) {
+      this.capturePendingViewStart();
+      return;
+    }
+    this.captureGeneration++;
+    this.workQueue.clear();
     this.unbindWindowViewportObserver();
     const binding: SessionReplayRootBinding = {
       uiContext,
@@ -158,14 +206,19 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     };
     this.rootBinding = binding;
     this.resetViewportObservation();
+    this.lastFullSnapshotAt = 0;
     this.bindWindowViewportObserver(uiContext);
+    this.capturePendingViewStart();
     if (this.activeContext !== null) {
       this.startObservation();
     }
   }
 
   public unregisterRoot(): void {
+    this.captureGeneration++;
+    this.workQueue.clear();
     this.rootBinding = null;
+    this.lastFullSnapshotAt = 0;
     this.resetViewportObservation();
     this.unbindWindowViewportObserver();
     this.stopObservation();
@@ -180,6 +233,32 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return this.lastCaptureFailure.length === 0 ? null : this.lastCaptureFailure;
   }
 
+  /** Waits for all Replay batches accepted before this call to reach disk. */
+  public drainWrites(): Promise<void> {
+    return this.workQueue.drain();
+  }
+
+  public withWriteBarrier(action: () => void): Promise<void> {
+    return this.workQueue.drain(action);
+  }
+
+  public getStorageFilesDir(): string {
+    return this.store?.getFilesDir() ?? this.errorSampleStore?.getFilesDir() ?? '';
+  }
+
+  public listPendingSegmentIds(): Promise<Array<string>> {
+    return this.workQueue.listPendingIds();
+  }
+
+  public removeUploadedSegments(ids: Array<string>): Promise<boolean> {
+    return new Promise<boolean>((resolve: (success: boolean) => void): void => {
+      if (!this.workQueue.enqueueRemove('main', ids, (success: boolean, error: string): void => {
+        if (!success) this.lastCaptureFailure = error;
+        resolve(success);
+      })) resolve(false);
+    });
+  }
+
   /** Returns a copy of the in-memory protocol stream for one RUM View. */
   public getRecordedRecords(context: SessionReplayContext): Array<SessionReplayRecord> {
     const records = this.recordedRecordsByView.get(
@@ -190,11 +269,17 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
 
   /** Registers a binary asset by an ArkUI Image component id or public source string. */
   public registerImageAsset(componentId: string, data: ArrayBuffer | Uint8Array, mimeType: string = 'image/png'): boolean {
-    return this.collector.registerImageAsset(componentId, data, mimeType);
+    const registered = this.collector.registerImageAsset(componentId, data, mimeType);
+    if (registered) {
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+      this.workQueue.registerImageAsset(componentId, bytes, mimeType);
+    }
+    return registered;
   }
 
   public unregisterImageAsset(componentId: string): void {
     this.collector.unregisterImageAsset(componentId);
+    this.workQueue.unregisterImageAsset(componentId);
   }
 
   public captureFullSnapshot(
@@ -292,6 +377,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       records.push(fullSnapshot);
       this.processor.setFullSnapshotBaseline(fullSnapshot);
       this.observedViewport = this.getViewportBounds(fullSnapshot);
+      this.lastFullSnapshotAt = fullSnapshot.timestamp;
     }
     return this.appendActiveProtocolRecords(records, fullSnapshot);
   }
@@ -307,7 +393,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       !Number.isFinite(x) || !Number.isFinite(y)) {
       return null;
     }
-    return this.appendActiveProtocolRecords([
+    const capture = this.appendActiveProtocolRecords([
       this.processor.createPointerRecord(
         pointerEventType,
         Math.floor(pointerId),
@@ -315,6 +401,31 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
         this.normalizePhysicalLength(y)
       )
     ], null);
+    if (pointerEventType === 'move') {
+      this.notifyMotion();
+    } else {
+      this.notifyPageChanged();
+    }
+    return capture;
+  }
+
+  /**
+   * Generated page instrumentation and integration code call this after a
+   * layout/state change. It coalesces many draws into one detached snapshot.
+   */
+  public notifyPageChanged(): void {
+    this.scheduleAutomaticCapture();
+  }
+
+  /** Marks scrolling/animation/transition activity and waits for it to settle. */
+  public notifyMotion(): void {
+    this.motionUntil = Date.now() + this.config.getMotionQuietPeriodMs();
+    this.scheduleAutomaticCapture();
+  }
+
+  /** A navigation boundary keeps the final stable frame but skips intermediates. */
+  public notifyTransition(): void {
+    this.notifyMotion();
   }
 
   /** Converts public physical-pixel viewport and touch inputs into Replay vp units. */
@@ -327,8 +438,11 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public renewRootEpoch(): void {
+    this.captureGeneration++;
+    this.workQueue.clear();
     this.collector.renewRootEpoch();
     this.processor.reset();
+    this.lastFullSnapshotAt = 0;
   }
 
   public getRUMLinkKeys(): Array<string> {
@@ -412,11 +526,14 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       this.isSameReplayContext(this.activeContext, nextContext)) {
       return false;
     }
-    const capture = this.captureFullSnapshotFromRUMContext(resolvedContext);
-    if (capture === null) {
+    const previousContext = this.activeContext;
+    this.captureGeneration++;
+    this.workQueue.clear();
+    this.activeContext = nextContext;
+    if (!this.queueFullSnapshotFromRUMContext(resolvedContext)) {
+      this.activeContext = previousContext;
       return false;
     }
-    this.activeContext = nextContext;
     return true;
   }
 
@@ -458,21 +575,36 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
-    return this.captureViewStartedFromRUMContext(context) !== null;
+    if (this.queueViewStartedFromRUMContext(context)) {
+      this.pendingViewStartContext = null;
+      return true;
+    }
+    this.pendingViewStartContext = context;
+    return false;
   }
 
   public onViewStopped(context: FTSessionReplayRUMContext): void {
     const replayContext = this.toReplayContext(context);
+    if (this.pendingViewStartContext !== null &&
+      this.isSameView(this.toReplayContext(this.pendingViewStartContext), replayContext)) {
+      this.pendingViewStartContext = null;
+    }
     if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
       return;
+    }
+    const viewKey = this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId);
+    if (this.pendingViewStarts.get(viewKey) === this.captureGeneration) {
+      this.endedViewStarts.set(viewKey, this.captureGeneration);
     }
     const record = this.processor.createViewEndRecord(this.toEpochMilliseconds(context.timestamp));
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
-    if (this.appendRecordedRecords(replayContext, capture.records)) {
+    if (this.appendRecordedRecords(replayContext, capture.records, true, true)) {
       this.recordViewMetadata(context, 1);
     }
     this.activeContext = null;
+    this.captureGeneration++;
+    this.workQueue.clear(true);
     this.stopObservation();
     this.processor.reset();
   }
@@ -482,24 +614,24 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return false;
     }
     const replayContext = this.toReplayContext(context);
-    let capture: SessionReplayCapture | null;
-    if (this.activeContext !== null && !this.isSameReplayContext(this.activeContext, replayContext)) {
-      capture = this.captureViewStartedFromRUMContext(context);
+    let accepted: boolean;
+    if (this.activeContext === null || !this.isSameReplayContext(this.activeContext, replayContext)) {
+      accepted = this.queueViewStartedFromRUMContext(context, this.toEpochMilliseconds(context.timestamp));
     } else {
-      capture = this.captureFullSnapshotFromRUMContext(context);
+      accepted = this.queueFullSnapshotFromRUMContext(context, this.toEpochMilliseconds(context.timestamp));
     }
-    if (capture === null) {
+    if (!accepted) {
       return false;
     }
-    if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
-      return true;
-    }
-    return this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
+    return true;
   }
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     this.renewRootEpoch();
     this.activeContext = null;
+    this.captureGeneration++;
+    this.workQueue.clear();
+    this.pendingViewStartContext = null;
     this.stopObservation();
     this.promotedErrorSessions.clear();
     this.webSlotInactiveAt.clear();
@@ -567,50 +699,191 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return data.wireframes.length;
   }
 
-  private captureViewStartedFromRUMContext(context: FTSessionReplayRUMContext): SessionReplayCapture | null {
+  /**
+   * Queues the initial Meta/Focus/Viewport/Full Snapshot sequence. The caller
+   * receives acceptance synchronously, but all Inspector, image, JSON and disk
+   * work happens after the FrameNode-only capture has left the UI callback.
+   */
+  private queueViewStartedFromRUMContext(
+    context: FTSessionReplayRUMContext,
+    promoteErrorAt: number | null = null
+  ): boolean {
     const replayContext = this.toReplayContext(context);
-    const fullCapture = this.captureWithRegisteredRoot(replayContext);
-    if (fullCapture === null) {
-      return null;
+    const lightSnapshot = this.captureLightSnapshotForContext(replayContext);
+    if (lightSnapshot === null) {
+      return false;
     }
-    const viewport = this.getViewportBounds(fullCapture.record);
-    const records = this.processor.createViewStartRecords(
-      fullCapture.record,
-      viewport === null ? undefined : viewport.width,
-      viewport === null ? undefined : viewport.height
-    );
-    const capture = this.createCapture(replayContext, records, fullCapture.record);
-    if (!this.appendRecordedRecords(replayContext, records)) {
-      if (this.lastCaptureFailure.length === 0) {
-        this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
-      }
-      return null;
-    }
-    this.lastCapture = capture;
-    this.lastCaptureFailure = '';
+    this.captureGeneration++;
+    this.workQueue.clear(this.endedViewStarts.size > 0);
+    this.processor.reset();
+    this.resetViewportObservation();
+    this.lastFullSnapshotAt = 0;
     this.activeContext = replayContext;
-    this.observedViewport = viewport;
-    this.recordViewMetadata(context, records.length);
-    this.startObservation();
-    return capture;
+    const generation = this.captureGeneration;
+    const contextSnapshot = this.copyReplayContext(replayContext);
+    this.pendingViewStarts.set(
+      this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId), generation);
+    this.workQueue.enqueue('start', lightSnapshot,
+      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
+        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources, true),
+      (result: ReplayWorkerResult | null, error: string): void =>
+        this.completeWorkerSnapshot('start', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    return true;
   }
 
-  private captureFullSnapshotFromRUMContext(context: FTSessionReplayRUMContext): SessionReplayCapture | null {
-    const replayContext = this.toReplayContext(context);
-    const capture = this.captureWithRegisteredRoot(replayContext);
-    if (capture !== null) {
-      if (!this.appendRecordedRecords(replayContext, capture.records)) {
-        if (this.lastCaptureFailure.length === 0) {
-          this.lastCaptureFailure = 'The Full Snapshot was collected but could not be saved to Session Replay storage.';
-        }
-        return null;
-      }
-      this.processor.setFullSnapshotBaseline(capture.record);
-      this.lastCapture = capture;
-      this.lastCaptureFailure = '';
-      this.recordViewMetadata(context, capture.records.length);
+  /** Retries one View start after automatic root registration reaches layout. */
+  private capturePendingViewStart(): void {
+    const pending = this.pendingViewStartContext;
+    if (pending === null || this.activeContext !== null ||
+      this.sampler.decide(pending.sessionId) === SessionReplaySamplingMode.NONE) {
+      return;
     }
-    return capture;
+    if (this.queueViewStartedFromRUMContext(pending)) {
+      this.pendingViewStartContext = null;
+    }
+  }
+
+  /** Queues an out-of-band Full Snapshot for an Error or Browser context change. */
+  private queueFullSnapshotFromRUMContext(
+    context: FTSessionReplayRUMContext,
+    promoteErrorAt: number | null = null
+  ): boolean {
+    const replayContext = this.toReplayContext(context);
+    const lightSnapshot = this.captureLightSnapshotForContext(replayContext);
+    if (lightSnapshot === null) {
+      return false;
+    }
+    const generation = this.captureGeneration;
+    const contextSnapshot = this.copyReplayContext(replayContext);
+    this.workQueue.enqueue('full', lightSnapshot,
+      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
+        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
+      (result: ReplayWorkerResult | null, error: string): void =>
+        this.completeWorkerSnapshot('full', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    return true;
+  }
+
+  /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
+  private captureLightSnapshotForContext(context: SessionReplayContext): ArkUIReplayLightSnapshot | null {
+    if (!this.isStarted) {
+      this.lastCaptureFailure = 'Session Replay recorder is not started.';
+      return null;
+    }
+    const rootBinding = this.rootBinding;
+    if (rootBinding === null) {
+      this.lastCaptureFailure = 'No ArkUI Replay root is registered for the active page.';
+      return null;
+    }
+    if (context.applicationId.length === 0 || context.sessionId.length === 0 || context.viewId.length === 0) {
+      this.lastCaptureFailure = 'The active RUM View does not have complete application, session, and view identifiers.';
+      return null;
+    }
+    try {
+      return this.collector.captureLightSnapshot(
+        rootBinding.uiContext,
+        rootBinding.rootId,
+        rootBinding.vpToPxScale
+      );
+    } catch (error) {
+      this.lastCaptureFailure = `ArkUI FrameNode snapshot failed: ${String(error)}`;
+      return null;
+    }
+  }
+
+  private prepareWorkerSnapshot(
+    context: SessionReplayContext,
+    generation: number,
+    snapshot: SessionReplayRecord,
+    resources: Array<CapturedReplayImageResource>,
+    allowEndedStart: boolean = false
+  ): ReplayWorkerCommit | null {
+    if (!this.isCurrentCapture(context, generation) &&
+      !(allowEndedStart && this.isEndedStart(context, generation))) return null;
+    this.persistCapturedImageResources(context, snapshot, resources);
+    if (!this.isCurrentCapture(context, generation) &&
+      !(allowEndedStart && this.isEndedStart(context, generation))) return null;
+    const targetStore = this.getStoreForContext(context);
+    const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
+      (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
+    const commit: ReplayWorkerCommit = {
+      context,
+      snapshot,
+      viewport: this.getViewportBounds(snapshot),
+      previousViewport: this.observedViewport,
+      lastFullSnapshotAt: this.lastFullSnapshotAt,
+      storeKind
+    };
+    return commit;
+  }
+
+  private completeWorkerSnapshot(
+    kind: 'start' | 'full' | 'automatic',
+    context: SessionReplayContext,
+    generation: number,
+    result: ReplayWorkerResult | null,
+    error: string,
+    rumContext: FTSessionReplayRUMContext | null,
+    promoteErrorAt: number | null
+  ): void {
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    const endedStart = kind === 'start' && this.isEndedStart(context, generation);
+    if (kind === 'start' && this.pendingViewStarts.get(key) === generation) this.pendingViewStarts.delete(key);
+    if (endedStart) this.endedViewStarts.delete(key);
+    if (!this.isCurrentCapture(context, generation) && !endedStart) {
+      if (result !== null) this.removeWorkerSegments(result);
+      return;
+    }
+    if (result === null || !result.stored) {
+      this.lastCaptureFailure = result === null ? error : result.writeError;
+      if (result !== null) this.removeWorkerSegments(result);
+      if (kind === 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
+        this.lastFullSnapshotAt = 0;
+      }
+      if (kind === 'start' && !endedStart && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
+        this.queueViewStartedFromRUMContext(rumContext, promoteErrorAt);
+      }
+      return;
+    }
+    if (result.records.length === 0) return;
+    const capture = this.createCaptureFromWorker(context, result);
+    this.appendRecordedRecords(context, result.records, false);
+    this.lastCapture = capture;
+    this.lastCaptureFailure = '';
+    if (!endedStart) {
+      this.lastFullSnapshotAt = result.lastFullSnapshotAt;
+      this.observedViewport = result.viewport;
+    }
+    if (kind === 'start' && rumContext !== null) {
+      this.recordViewMetadata(rumContext, result.records.length);
+      if (!endedStart) this.startObservation();
+    } else {
+      this.recordReplayMetadata(context, result.records.length);
+    }
+    if (promoteErrorAt !== null && this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.ERROR) {
+      this.promoteErrorSampledSession(context.sessionId, promoteErrorAt);
+    } else if (result.storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
+      this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
+        (success: boolean, failure: string): void => {
+          if (!success) this.lastCaptureFailure = failure;
+        });
+    }
+  }
+
+  private removeWorkerSegments(result: ReplayWorkerResult): void {
+    this.workQueue.enqueueRemove(result.storeKind, result.segmentIds,
+      (success: boolean, failure: string): void => {
+        if (!success) this.lastCaptureFailure = failure;
+      });
+  }
+
+  private createCaptureFromWorker(context: SessionReplayContext, result: ReplayWorkerResult): SessionReplayCapture {
+    return {
+      envelope: createReplayEnvelope(context, result.records),
+      payload: result.payload,
+      records: result.records.slice(),
+      record: result.records[result.records.length - 1],
+      wireframeCount: result.wireframeCount
+    };
   }
 
   private captureWithRegisteredRoot(context: SessionReplayContext): SessionReplayCapture | null {
@@ -730,7 +1003,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     return `${applicationId}|${sessionId}|${viewId}`;
   }
 
-  private appendRecordedRecords(context: SessionReplayContext, records: Array<SessionReplayRecord>): boolean {
+  private appendRecordedRecords(
+    context: SessionReplayContext,
+    records: Array<SessionReplayRecord>,
+    persist: boolean = true,
+    requiresStart: boolean = false
+  ): boolean {
     if (records.length === 0) {
       return true;
     }
@@ -744,21 +1022,18 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       current.splice(0, overflow);
     }
     this.recordedRecordsByView.set(key, current);
-    const targetStore = this.getStoreForContext(context);
-    if (targetStore === null) {
+    if (!persist) {
       return true;
     }
-    const appended = targetStore.append(context, records);
-    if (!appended) {
-      const writeError = targetStore.getLastWriteError();
-      this.lastCaptureFailure = writeError === null
-        ? 'The Full Snapshot was collected but could not be saved to Session Replay storage.'
-        : writeError;
-    }
-    if (appended && targetStore === this.errorSampleStore) {
-      this.errorSampleStore?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
-    }
-    return appended;
+    const targetStore = this.getStoreForContext(context);
+    const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
+      (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
+    const accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
+      (success: boolean, failure: string): void => {
+        if (!success) this.lastCaptureFailure = failure;
+      }, requiresStart);
+    if (!accepted) this.lastCaptureFailure = 'Session Replay Worker did not accept the record batch.';
+    return accepted;
   }
 
   /** Appends a lifecycle signal only when it belongs to an active sampled View. */
@@ -771,7 +1046,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return null;
     }
     const capture = this.createCapture(activeContext, records, fullSnapshot);
-    if (!this.appendRecordedRecords(activeContext, capture.records)) {
+    if (!this.appendRecordedRecords(activeContext, capture.records, true, true)) {
       return null;
     }
     this.recordReplayMetadata(activeContext, capture.records.length);
@@ -799,18 +1074,19 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (this.errorSampleStore === null || this.store === null) {
       return false;
     }
-    const promoted = this.errorSampleStore.promoteSessionWindow(
-      sessionId,
-      timestamp,
-      this.config.getErrorSampleWindowMs(),
-      this.store
-    );
     const resourcesPromoted = this.errorSampleResourcePromoter === null ||
       this.errorSampleResourcePromoter(sessionId, timestamp);
-    if (promoted && resourcesPromoted) {
-      this.promotedErrorSessions.add(sessionId);
-    }
-    return promoted && resourcesPromoted;
+    if (!resourcesPromoted) return false;
+    this.promotedErrorSessions.add(sessionId);
+    const accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
+      (success: boolean, failure: string): void => {
+        if (!success) {
+          this.lastCaptureFailure = failure;
+          this.promotedErrorSessions.delete(sessionId);
+        }
+      });
+    if (!accepted) this.promotedErrorSessions.delete(sessionId);
+    return accepted;
   }
 
   private startObservation(): void {
@@ -818,13 +1094,16 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
       return;
     }
-    this.observationTimer = setInterval((): void => this.captureActiveViewMutation(), this.config.getSnapshotIntervalMs());
+    // Collection is signal-driven. A View start's Full Snapshot already owns
+    // the baseline; this only asks for a coalesced incremental check after the
+    // page has completed any immediate layout work.
+    this.notifyPageChanged();
   }
 
   private stopObservation(): void {
-    if (this.observationTimer !== -1) {
-      clearInterval(this.observationTimer);
-      this.observationTimer = -1;
+    if (this.mutationCaptureTimer !== -1) {
+      clearTimeout(this.mutationCaptureTimer);
+      this.mutationCaptureTimer = -1;
     }
     if (this.viewportCaptureTimer !== -1) {
       clearTimeout(this.viewportCaptureTimer);
@@ -839,43 +1118,75 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       return;
     }
     try {
-      const fullSnapshot = this.collector.captureFullSnapshot(
+      // This is the only automatic code that runs in an ArkUI callback. It
+      // reads FrameNode into a detached handoff and immediately returns. The
+      // Replay Worker materializes and diffs it, then writes the record batch.
+      const lightSnapshot = this.collector.captureLightSnapshot(
         rootBinding.uiContext,
         rootBinding.rootId,
         rootBinding.vpToPxScale
       );
-      this.persistCapturedImageResources(context, fullSnapshot);
-      const viewport = this.getViewportBounds(fullSnapshot);
-      if (viewport !== null && this.hasViewportChanged(viewport)) {
-        const resize = this.processor.createViewportResizeRecord(
-          viewport.width,
-          viewport.height,
-          fullSnapshot.timestamp
-        );
-        // A resize changes the coordinate space. Follow it with a Full
-        // Snapshot rather than a mutation so all nodes share the new bounds.
-        this.processor.setFullSnapshotBaseline(fullSnapshot);
-        this.observedViewport = viewport;
-        const capture = this.createCapture(context, [resize, fullSnapshot], fullSnapshot);
-        if (this.appendRecordedRecords(context, capture.records)) {
-          this.recordReplayMetadata(context, capture.records.length);
-        }
-        this.lastCapture = capture;
-        return;
-      }
-      const mutation = this.processor.createMutationRecord(fullSnapshot);
-      if (mutation === null) {
-        return;
-      }
-      const capture = this.createCapture(context, [mutation], fullSnapshot);
-      if (this.appendRecordedRecords(context, capture.records)) {
-        this.recordReplayMetadata(context, capture.records.length);
-      }
-      this.lastCapture = capture;
+      const generation = this.captureGeneration;
+      const contextSnapshot = this.copyReplayContext(context);
+      this.workQueue.enqueue('automatic', lightSnapshot,
+        (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
+          this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
+        (result: ReplayWorkerResult | null, error: string): void =>
+          this.completeWorkerSnapshot('automatic', contextSnapshot, generation, result, error, null, null));
     } catch (_error) {
-      // A root can disappear between an ArkUI lifecycle callback and polling.
-      // Keep the current RUM View alive and retry on the next bounded interval.
+      // A root can disappear between an ArkUI lifecycle callback and capture.
+      // The next page-change signal will retry after its layout has settled.
     }
+  }
+
+  /** Coalesces change notifications and drops intermediate motion frames. */
+  private scheduleAutomaticCapture(): void {
+    if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
+      return;
+    }
+    if (this.mutationCaptureTimer !== -1) {
+      clearTimeout(this.mutationCaptureTimer);
+    }
+    const now = Date.now();
+    const motionDelay = Math.max(0, this.motionUntil - now);
+    const delay = Math.max(this.config.getSnapshotIntervalMs(), motionDelay);
+    this.mutationCaptureTimer = setTimeout((): void => {
+      this.mutationCaptureTimer = -1;
+      // A continuous Scroll/animation keeps extending motionUntil. Do not
+      // traverse the root until it becomes stable.
+      if (Date.now() < this.motionUntil) {
+        this.scheduleAutomaticCapture();
+        return;
+      }
+      this.captureActiveViewMutation();
+    }, delay);
+  }
+
+  private isCurrentCapture(context: SessionReplayContext, generation: number): boolean {
+    return this.isStarted && generation === this.captureGeneration && this.activeContext !== null &&
+      this.isSameReplayContext(this.activeContext, context);
+  }
+
+  private isEndedStart(context: SessionReplayContext, generation: number): boolean {
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    return this.endedViewStarts.get(key) === generation;
+  }
+
+  private copyReplayContext(context: SessionReplayContext): SessionReplayContext {
+    const result: SessionReplayContext = {
+      applicationId: context.applicationId,
+      sessionId: context.sessionId,
+      viewId: context.viewId
+    };
+    if (context.globalContext !== undefined) {
+      result.globalContext = {};
+      const keys = Object.keys(context.globalContext);
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index];
+        result.globalContext[key] = context.globalContext[key];
+      }
+    }
+    return result;
   }
 
   /** Reads the root's already normalized viewport dimensions from a snapshot. */
@@ -933,8 +1244,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
             nativeWindow.on('windowSizeChange', this.windowSizeChangeListener);
             nativeWindow.on('keyboardHeightChange', this.keyboardHeightChangeListener);
           } catch (_) {
-            // Root-size polling remains the portable fallback when a host
-            // window does not provide these callbacks.
+            // Compiler-injected root change callbacks remain available when a
+            // host window does not expose viewport events.
           }
         })
         .catch((): void => {
@@ -983,8 +1294,12 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
    * Resource files are queued before the replay segment that references them;
    * `FTSessionReplay.flush()` drains this resource queue first.
    */
-  private persistCapturedImageResources(context: SessionReplayContext, record: SessionReplayRecord): void {
-    const resources = this.collector.takeCapturedImageResources();
+  private persistCapturedImageResources(
+    context: SessionReplayContext,
+    record: SessionReplayRecord,
+    capturedResources?: Array<CapturedReplayImageResource>
+  ): void {
+    const resources = capturedResources ?? this.collector.takeCapturedImageResources();
     if (resources.length === 0) {
       return;
     }
@@ -1040,4 +1355,5 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       wireframeCount: snapshotRecord === null ? 0 : this.getWireframeCount(snapshotRecord)
     };
   }
+
 }

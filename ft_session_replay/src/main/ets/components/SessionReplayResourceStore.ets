@@ -28,8 +28,10 @@ export class SessionReplayResourceStore {
   private readonly dataRoot: string;
   private readonly metadataRoot: string;
   private readonly maxBytes: number;
+  private touchEpoch: number = 0;
+  private readonly lastTouched: Map<string, number> = new Map();
 
-  constructor(filesDir: string, maxBytes: number, directoryName: string = 'resources') {
+  constructor(filesDir: string, maxBytes: number, directoryName: string = 'resources', recoverOnInit: boolean = true) {
     if (filesDir.trim().length === 0) {
       throw new Error('Session Replay resource storage requires a non-empty filesDir');
     }
@@ -45,7 +47,7 @@ export class SessionReplayResourceStore {
     this.ensureDirectory(this.root);
     this.ensureDirectory(this.dataRoot);
     this.ensureDirectory(this.metadataRoot);
-    this.recover();
+    if (recoverOnInit) this.recover();
   }
 
   /** Persists bytes and returns their content-addressed file name, or null on failure. */
@@ -65,6 +67,7 @@ export class SessionReplayResourceStore {
       const id = `${fileName}-${routeKey}`;
       const metadataPath = `${this.metadataRoot}/${id}.json`;
       if (this.exists(metadataPath)) {
+        this.markTouched(fileName);
         return fileName;
       }
       const dataPath = `${this.dataRoot}/${fileName}.bin`;
@@ -84,6 +87,7 @@ export class SessionReplayResourceStore {
         context: this.copyContext(context)
       };
       this.atomicWriteText(metadataPath, JSON.stringify(resource));
+      this.markTouched(fileName);
       return fileName;
     } catch (_error) {
       return null;
@@ -166,6 +170,7 @@ export class SessionReplayResourceStore {
       const fileName = fileNames[index];
       if (!remaining.some((resource: SessionReplayStoredResource): boolean => resource.fileName === fileName)) {
         try { fs.unlinkSync(this.getDataPath(fileName)); } catch (_error) { complete = false; }
+        this.lastTouched.delete(fileName);
       }
     }
     return complete;
@@ -173,6 +178,23 @@ export class SessionReplayResourceStore {
 
   public getRoot(): string {
     return this.root;
+  }
+
+  /** Protects resources referenced after an upload batch took its snapshot. */
+  public getTouchEpoch(): number {
+    return this.touchEpoch;
+  }
+
+  public wasTouchedAfter(ids: Array<string>, epoch: number): boolean {
+    for (let index = 0; index < ids.length; index++) {
+      const fileName = ids[index].substring(0, 64);
+      if ((this.lastTouched.get(fileName) ?? 0) > epoch) return true;
+    }
+    return false;
+  }
+
+  private markTouched(fileName: string): void {
+    this.lastTouched.set(fileName, ++this.touchEpoch);
   }
 
   /** Drops unpromoted resource assets older than an error-sampling cutoff. */

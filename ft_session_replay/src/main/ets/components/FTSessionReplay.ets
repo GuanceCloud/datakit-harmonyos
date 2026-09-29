@@ -1,12 +1,15 @@
 import { UIContext } from '@kit.ArkUI';
+import { bundleManager } from '@kit.AbilityKit';
+import { FTSDK } from '@guancecloud/ft_sdk';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
-import { SessionReplayUploader, SessionReplayUploadResult } from './SessionReplayUploader';
+import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionReplayUploader';
+import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
-import { SessionReplayResourceUploader, SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
+import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -17,21 +20,18 @@ import { SessionReplayResourceUploader, SessionReplayResourceUploadResult } from
  * the core SDK independent from the optional HAR.
  */
 export class FTSessionReplay {
-  private static readonly MAX_UPLOAD_RETRY_DELAY_MS: number = 60_000;
   private static instance: FTSessionReplay | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayPOC | null = null;
+  private retiringRecorder: FTSessionReplayPOC | null = null;
   private storage: SessionReplaySegmentStore | null = null;
   private errorSampleStorage: SessionReplaySegmentStore | null = null;
-  private uploader: SessionReplayUploader | null = null;
+  private uploadQueue: SessionReplayUploadQueue | null = null;
   private resourceStorage: SessionReplayResourceStore | null = null;
   private errorSampleResourceStorage: SessionReplayResourceStore | null = null;
-  private resourceUploader: SessionReplayResourceUploader | null = null;
-  private uploadTimer: number = -1;
-  private uploadInFlight: boolean = false;
+  private uploadPromise: Promise<SessionReplayUploadResult> | null = null;
   private resourceUploadInFlight: boolean = false;
-  private uploadRetryCount: number = 0;
 
   public static getInstance(): FTSessionReplay {
     if (FTSessionReplay.instance === null) {
@@ -90,6 +90,11 @@ export class FTSessionReplay {
       return;
     }
     this.recorder.stop();
+    this.retiringRecorder = this.recorder;
+    const retiring = this.recorder;
+    retiring.drainWrites().then((): void => {
+      if (this.retiringRecorder === retiring) this.retiringRecorder = null;
+    });
     this.recorder = null;
     this.stopUploadSchedule();
   }
@@ -99,7 +104,11 @@ export class FTSessionReplay {
   }
 
   /** Binds the ArkUI root currently eligible for Replay collection. */
-  public registerRoot(uiContext: UIContext, rootId: string, vpToPxScale: number = 1): boolean {
+  public registerRoot(
+    uiContext: UIContext,
+    rootId: string,
+    vpToPxScale: number = 1
+  ): boolean {
     if (this.recorder === null) {
       return false;
     }
@@ -203,8 +212,24 @@ export class FTSessionReplay {
    * Sends durable segments to the Android-compatible Replay intake. Segments
    * are deleted only after HTTP 200; any failure leaves them for a later call.
    */
-  public async flush(): Promise<SessionReplayUploadResult> {
-    if (this.uploader === null) {
+  public flush(): Promise<SessionReplayUploadResult> {
+    if (this.uploadPromise !== null) {
+      return this.uploadPromise;
+    }
+    const task = this.flushPending();
+    this.uploadPromise = task;
+    const clear = (): void => {
+      if (this.uploadPromise === task) {
+        this.uploadPromise = null;
+      }
+    };
+    task.then(clear, clear);
+    return task;
+  }
+
+  private async flushPending(): Promise<SessionReplayUploadResult> {
+    const uploadQueue = this.uploadQueue;
+    if (uploadQueue === null) {
       return {
         success: false,
         code: 0,
@@ -216,37 +241,7 @@ export class FTSessionReplay {
         remainingSegments: 0
       };
     }
-    if (this.uploadInFlight) {
-      return {
-        success: false,
-        code: 0,
-        message: 'A Session Replay upload is already in progress.',
-        retryable: true,
-        endpointBlocked: false,
-        attemptedSegments: 0,
-        uploadedSegments: 0,
-        remainingSegments: this.storage === null ? 0 : this.storage.list().length
-      };
-    }
-    this.uploadInFlight = true;
-    try {
-      const resources = await this.flushResourcesInternal();
-      if (!resources.success) {
-        return {
-          success: false,
-          code: resources.code,
-          message: resources.message,
-          retryable: resources.retryable,
-          endpointBlocked: resources.endpointBlocked,
-          attemptedSegments: 0,
-          uploadedSegments: 0,
-          remainingSegments: this.storage === null ? 0 : this.storage.list().length
-        };
-      }
-      return await this.uploader.uploadPending();
-    } finally {
-      this.uploadInFlight = false;
-    }
+    return uploadQueue.flush();
   }
 
   /** Explicitly drains Replay assets before their record references are uploaded. */
@@ -299,6 +294,26 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveTouch(pointerEventType, pointerId, x, y);
   }
 
+  /**
+   * Signals that the active ArkUI page produced a stable visual/layout change.
+   * It is intentionally a signal rather than a capture call: the recorder
+   * coalesces it and emits an Incremental Snapshot only if the wireframe tree
+   * actually differs.
+   */
+  public notifyPageChanged(): void {
+    this.recorder?.notifyPageChanged();
+  }
+
+  /** Defers collection until a scrolling gesture has settled. */
+  public notifyScroll(): void {
+    this.recorder?.notifyMotion();
+  }
+
+  /** Defers collection until an animation or page transition has settled. */
+  public notifyTransition(): void {
+    this.recorder?.notifyTransition();
+  }
+
   private requireRecorder(): FTSessionReplayPOC {
     if (this.recorder === null) {
       throw new Error('Session Replay is disabled. Call enable() before capturing.');
@@ -307,34 +322,81 @@ export class FTSessionReplay {
   }
 
   private configureStorage(filesDir: string): void {
+    this.uploadQueue?.close();
+    this.uploadQueue = null;
     if (filesDir.trim().length === 0) {
       this.storage = null;
       this.errorSampleStorage = null;
-      this.uploader = null;
       this.resourceStorage = null;
       this.errorSampleResourceStorage = null;
-      this.resourceUploader = null;
       return;
     }
     this.storage = new SessionReplaySegmentStore(
       filesDir,
       this.config.getStorageMaxBytes(),
-      this.config.getMaxRecordsPerSegment()
+      this.config.getMaxRecordsPerSegment(),
+      'segments',
+      false
     );
     this.errorSampleStorage = new SessionReplaySegmentStore(
       filesDir,
       this.config.getStorageMaxBytes(),
       this.config.getMaxRecordsPerSegment(),
-      'error_segments'
+      'error_segments',
+      false
     );
-    this.uploader = new SessionReplayUploader(this.storage, this.config);
-    this.resourceStorage = new SessionReplayResourceStore(filesDir, this.config.getStorageMaxBytes());
+    const segmentStorage = this.storage;
+    this.resourceStorage = new SessionReplayResourceStore(filesDir, this.config.getStorageMaxBytes(), 'resources');
     this.errorSampleResourceStorage = new SessionReplayResourceStore(
       filesDir,
       this.config.getStorageMaxBytes(),
       'error_resources'
     );
-    this.resourceUploader = new SessionReplayResourceUploader(this.resourceStorage);
+    const resourceStorage = this.resourceStorage;
+    this.uploadQueue = new SessionReplayUploadQueue(
+      filesDir, this.config.getStorageMaxBytes(), this.config.getMaxRecordsPerSegment(),
+      async (): Promise<ReplayUploadReady> => {
+        let segmentIds: Array<string> | null = null;
+        const recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          segmentIds = await recorder.listPendingSegmentIds();
+        } else {
+          const retiring = this.retiringRecorder;
+          if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
+        }
+        return { segmentIds, route: this.getUploadRoute(), resourceTouchEpoch: resourceStorage.getTouchEpoch() };
+      },
+      async (id: string): Promise<boolean> => {
+        const recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          return recorder.removeUploadedSegments([id]);
+        }
+        const retiring = this.retiringRecorder;
+        if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
+        return segmentStorage.remove([id]);
+      },
+      (ids: Array<string>, touchEpoch: number): Promise<boolean> => {
+        if (resourceStorage.wasTouchedAfter(ids, touchEpoch)) return Promise.resolve(false);
+        return Promise.resolve(resourceStorage.remove(ids));
+      }
+    );
+  }
+
+  private getUploadRoute(): SessionReplayUploadRoute {
+    const installed = FTSDK.getSDKConfig();
+    let appVersion: string = '';
+    try {
+      appVersion = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION).versionName;
+    } catch (_) { }
+    return {
+      datakitUrl: installed?.getDatakitUrl() ?? '',
+      datawayUrl: installed?.getDatawayUrl() ?? '',
+      clientToken: installed?.getClientToken() ?? '',
+      env: installed?.getEnv() ?? 'prod',
+      uploadUrl: this.config.getUploadUrl(),
+      appVersion
+    };
   }
 
   private promoteErrorSampleResources(sessionId: string, timestamp: number): boolean {
@@ -350,7 +412,7 @@ export class FTSessionReplay {
   }
 
   private async flushResourcesInternal(): Promise<SessionReplayResourceUploadResult> {
-    if (this.resourceUploader === null) {
+    if (this.uploadQueue === null) {
       return {
         success: true,
         code: 200,
@@ -371,71 +433,22 @@ export class FTSessionReplay {
         endpointBlocked: false,
         attemptedResources: 0,
         uploadedResources: 0,
-        remainingResources: this.resourceStorage === null ? 0 : this.resourceStorage.list().length
+        remainingResources: 0
       };
     }
     this.resourceUploadInFlight = true;
     try {
-      return await this.resourceUploader.uploadPending();
+      return await this.uploadQueue.flushResources();
     } finally {
       this.resourceUploadInFlight = false;
     }
   }
 
   private startUploadSchedule(): void {
-    this.stopUploadSchedule();
-    this.uploadRetryCount = 0;
-    if (this.uploader === null || this.config.getUploadIntervalMs() <= 0) {
-      return;
-    }
-    this.scheduleNextUpload(this.config.getUploadIntervalMs());
+    this.uploadQueue?.schedule(this.config.getUploadIntervalMs());
   }
 
   private stopUploadSchedule(): void {
-    if (this.uploadTimer !== -1) {
-      clearTimeout(this.uploadTimer);
-      this.uploadTimer = -1;
-    }
-  }
-
-  private scheduleNextUpload(delayMs: number): void {
-    if (this.uploader === null || this.config.getUploadIntervalMs() <= 0) {
-      return;
-    }
-    this.stopUploadSchedule();
-    this.uploadTimer = setTimeout((): void => {
-      this.uploadTimer = -1;
-      this.flush().then((result: SessionReplayUploadResult): void => {
-        this.scheduleNextUpload(this.nextUploadDelay(result));
-      }).catch((): void => {
-        this.uploadRetryCount++;
-        this.scheduleNextUpload(this.getRetryDelay());
-      });
-    }, Math.max(0, delayMs));
-  }
-
-  private nextUploadDelay(result: SessionReplayUploadResult): number {
-    if (result.success) {
-      this.uploadRetryCount = 0;
-      return this.config.getUploadIntervalMs();
-    }
-    if (result.endpointBlocked) {
-      this.uploadRetryCount = 0;
-      return FTSessionReplay.MAX_UPLOAD_RETRY_DELAY_MS;
-    }
-    if (result.retryable) {
-      this.uploadRetryCount++;
-      return this.getRetryDelay();
-    }
-    this.uploadRetryCount = 0;
-    return this.config.getUploadIntervalMs();
-  }
-
-  private getRetryDelay(): number {
-    const multiplier = Math.pow(2, Math.max(0, this.uploadRetryCount - 1));
-    return Math.min(
-      FTSessionReplay.MAX_UPLOAD_RETRY_DELAY_MS,
-      this.config.getUploadIntervalMs() * multiplier
-    );
+    this.uploadQueue?.schedule(0);
   }
 }
