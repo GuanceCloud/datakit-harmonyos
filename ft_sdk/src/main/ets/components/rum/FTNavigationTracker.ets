@@ -10,6 +10,15 @@ import { FTViewTrackingContext } from './handler/FTViewTrackingContext';
 
 const TAG = 'FTNavigationTracker';
 
+interface InitialRouterPageInfo {
+  context: UIContext;
+  index: number;
+  name: string;
+  path: string;
+  state: number;
+  pageId: string;
+}
+
 export class FTNavigationTracker {
   private static instance: FTNavigationTracker | null = null;
   private uiObserver: UIObserver | null = null;
@@ -71,6 +80,45 @@ export class FTNavigationTracker {
     observer.on('routerPageUpdate', this.routerPageUpdateCallback);
 
     this.inited = true;
+    // The first Router page can be shown before UIContext is available to the
+    // SDK. UIObserver does not replay that event to a late subscriber, so seed
+    // the same View path from the current Router state once subscribed.
+    this.bootstrapCurrentRouterPage(uiContext);
+  }
+
+  private bootstrapCurrentRouterPage(uiContext: UIContext): void {
+    try {
+      const state = uiContext.getRouter().getState();
+      // RouterState.path is the directory on some HarmonyOS releases (for
+      // example "pages"), while name is the page file ("Index"). Rebuild
+      // the route supplied by RouterPageInfo so View naming and app handlers
+      // see the same page on cold start and later navigation.
+      let routeName = state.name;
+      if (state.path.length > 0 && state.name.length > 0 &&
+        state.path !== state.name && !state.path.endsWith(`/${state.name}`)) {
+        routeName = `${state.path}/${state.name}`;
+      } else if (state.path.length > 0) {
+        routeName = state.path;
+      }
+      if (routeName.length === 0) {
+        return;
+      }
+      const pageInfo: InitialRouterPageInfo = {
+        context: uiContext,
+        index: state.index,
+        name: routeName,
+        path: state.path,
+        state: 2,
+        pageId: ''
+      };
+      this.handleSwitchRouter(pageInfo as Object as uiObserver.RouterPageInfo).catch((error: Error): void => {
+        FTInnerLogger.w(TAG, `Initial Router View bootstrap failed: ${error}`);
+      });
+    } catch (error) {
+      // Router state may still be unavailable while a WindowStage is created.
+      // The normal Router observer remains registered for subsequent pages.
+      FTInnerLogger.d(TAG, `Initial Router state unavailable: ${error}`);
+    }
   }
 
   public destroy(): void {
