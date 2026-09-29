@@ -278,6 +278,15 @@ interface FTDBTaskPoolViewAttrParts {
   extraAttr: Record<string, object>;
   property: Record<string, object>;
   tags: Record<string, string>;
+  hasReplay: boolean;
+  recordsCount: number;
+  sampledOnReplayError: boolean;
+}
+
+interface FTDBTaskPoolReplayMarker {
+  value: boolean;
+  recordsCount: number;
+  sampledOnReplayError: boolean;
 }
 
 enum FTDBTaskPoolCacheCategory {
@@ -1779,12 +1788,20 @@ function stringifyViewExtraAttr(view: ViewBeanJSON): string {
   const keys = Object.keys(extraAttr);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
-    obj[key] = extraAttr[key];
+    if (key !== Constants.KEY_HAS_REPLAY) {
+      obj[key] = extraAttr[key];
+    }
   }
   const property = view.property ? view.property : emptyObjectRecord();
   const tags = view.tags ? view.tags : emptyStringRecord();
   obj[Constants.KEY_RUM_PROPERTY] = property as Object as Record<string, object>;
   obj[Constants.KEY_RUM_TAGS] = tags as Object as Record<string, object>;
+  const replayMarker: FTDBTaskPoolReplayMarker = {
+    value: view.hasReplay === true,
+    recordsCount: view.recordsCount === undefined ? 0 : view.recordsCount,
+    sampledOnReplayError: view.sampledOnReplayError === true
+  };
+  obj[Constants.KEY_HAS_REPLAY] = replayMarker;
   return JSON.stringify(obj);
 }
 
@@ -1797,6 +1814,9 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   const extraAttr: Record<string, object> = {};
   const property: Record<string, object> = {};
   const tags: Record<string, string> = {};
+  let hasReplay = false;
+  let recordsCount = 0;
+  let sampledOnReplayError = false;
   const keys = Object.keys(parsed);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
@@ -1815,6 +1835,12 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
         const tagKey = tagKeys[j];
         tags[tagKey] = String(tagsValue[tagKey]);
       }
+    } else if (key === Constants.KEY_HAS_REPLAY && value && typeof value === 'object') {
+      const marker = value as FTDBTaskPoolReplayMarker;
+      hasReplay = marker.value === true;
+      const count = Number(marker.recordsCount);
+      recordsCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+      sampledOnReplayError = marker.sampledOnReplayError === true;
     } else {
       extraAttr[key] = value;
     }
@@ -1822,7 +1848,10 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   return {
     extraAttr,
     property,
-    tags
+    tags,
+    hasReplay,
+    recordsCount,
+    sampledOnReplayError
   };
 }
 
@@ -1890,6 +1919,9 @@ function readViewFromResultSet(resultSet: relationalStore.ResultSet): ViewBeanJS
     dataUpdateTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME)),
     dataUploadTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME)),
     viewUpdateTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME)),
+    hasReplay: attr.hasReplay,
+    recordsCount: attr.recordsCount,
+    sampledOnReplayError: attr.sampledOnReplayError,
     extraAttr: attr.extraAttr,
     property: attr.property,
     tags: attr.tags
