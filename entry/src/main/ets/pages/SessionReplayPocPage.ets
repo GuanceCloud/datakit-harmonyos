@@ -2,34 +2,29 @@ import router from '@ohos.router';
 import { Context } from '@kit.AbilityKit';
 import { AppState, ErrorType, FTRUMGlobalManager, FTSDK } from '@guancecloud/ft_sdk';
 import {
-  FTSessionReplayConfig,
   FTSessionReplay,
   SessionReplayContext,
-  SessionReplayGlobalContext,
-  TouchPrivacy
+  SessionReplayGlobalContext
 } from '@guancecloud/ft_session_replay';
 
 @Entry
 @Component
 struct SessionReplayPocPage {
-  @State result: string = 'Ready to capture a privacy-safe Full Snapshot.';
+  @State result: string = 'Session Replay is off. Tap Enable Session Replay to start recording.';
   @State showMutationProbe: boolean = false;
   @State replayEnabled: boolean = false;
   @State uploadInFlight: boolean = false;
   private bridgeViewActive: boolean = false;
-  private readonly replayConfig: FTSessionReplayConfig =
-    new FTSessionReplayConfig().setMaxNodesPerSnapshot(300).setTouchPrivacy(TouchPrivacy.SHOW);
   private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
   aboutToAppear(): void {
     this.replayEnabled = this.replay.isEnabled();
     if (this.replayEnabled) {
-      this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
+      this.registerPocImageAsset();
     }
   }
 
   aboutToDisappear(): void {
-    this.replay.unregisterRoot();
     if (!this.bridgeViewActive) {
       return;
     }
@@ -56,20 +51,35 @@ struct SessionReplayPocPage {
       }
       return;
     }
-    this.replay.enable(this.replayConfig, this.getFilesDir());
-    this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1));
-    this.replayEnabled = true;
-    this.result = 'Session Replay is enabled. Select a capture action to validate the protocol.';
+    if (!this.requireRUMBridge()) {
+      return;
+    }
+    this.replay.start();
+    this.replayEnabled = this.replay.isEnabled();
+    if (this.replayEnabled) {
+      this.registerPocImageAsset();
+    }
+    this.result = this.replayEnabled
+      ? 'Session Replay started. The page root will attach automatically after layout.'
+      : 'Session Replay could not start.';
   }
 
   private disableReplay(): void {
-    this.replay.unregisterRoot();
     this.replay.disable();
     this.replayEnabled = false;
+    this.result = 'Session Replay stopped. Tap Enable Session Replay to start a new recording.';
   }
 
-  private getFilesDir(): string {
-    return (getContext(this) as Context).filesDir;
+  /** Registers the demo-only image bytes so the image wireframe can reference a durable Replay asset. */
+  private registerPocImageAsset(): void {
+    const context = getContext(this) as Context;
+    context.resourceManager.getMediaContent($r('app.media.startIcon'))
+      .then((bytes: Uint8Array): void => {
+        this.replay.registerImageAsset('session-replay-poc-image', bytes, 'image/png');
+      })
+      .catch((): void => {
+        // The page still records a masked image wireframe if a demo resource cannot be read.
+      });
   }
 
   private requireRUMBridge(): boolean {
@@ -88,9 +98,9 @@ struct SessionReplayPocPage {
         const root = this.getUIContext().getFrameNodeById('session-replay-poc-root');
         const failure = this.replay.getLastCaptureFailure();
         this.result = root === null
-          ? `${source} did not produce a Replay capture because the Replay root is not attached. Return to this page, enable Replay again, and retry.`
+          ? `${source} did not produce a Replay capture because the page root is not available. Return to this page and retry.`
           : failure === null
-            ? `${source} did not produce a Replay capture. Replay is enabled and the root is attached; retry after the page is fully rendered.`
+            ? `${source} did not produce a Replay capture. Automatic root binding or the snapshot may still be pending; retry after the page is fully rendered.`
             : `${source} did not produce a Replay capture: ${failure}`;
         return;
       }
@@ -99,7 +109,7 @@ struct SessionReplayPocPage {
         sessionId: capture.envelope.session_id,
         viewId: capture.envelope.view_id
       }).length;
-      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; durable resources: ${this.replay.getStoredResources().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
     }, 200);
   }
 
@@ -116,7 +126,7 @@ struct SessionReplayPocPage {
         return;
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
-    }, this.replayConfig.getSnapshotIntervalMs() + 200);
+    }, 320);
   }
 
   private showLifecycleSignal(source: string, payload: string | null): void {
@@ -169,6 +179,11 @@ struct SessionReplayPocPage {
           Text('Session Replay Demo')
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
+          Image($r('app.media.startIcon'))
+            .id('session-replay-poc-image')
+            .width(72)
+            .height(72)
+            .objectFit(ImageFit.Contain)
           Text('API 12 FrameNode collection → Android replay envelope')
             .fontSize(14)
             .fontColor('#666666')
@@ -188,7 +203,7 @@ struct SessionReplayPocPage {
             Text('如何开启会话回放')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
-            Text('1. 使用非空 appId 初始化 FTSDK 与 RUM。\n2. 点击下方 Enable Session Replay。\n3. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n4. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
+            Text('1. 使用非空 appId 启动 Demo，然后点击 Enable Session Replay 手动开启。\n2. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n3. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
               .fontSize(14)
               .fontColor('#444444')
             Text('提示：此验证页面将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
@@ -217,24 +232,14 @@ struct SessionReplayPocPage {
               if (!this.requireRUMBridge()) {
                 return;
               }
-              // Bind again immediately before RUM creates the View. This makes
-              // the demo resilient when ArkUI reconstructed its root after the
-              // page's aboutToAppear callback.
-              if (!this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1))) {
-                this.replayEnabled = false;
-                this.result = 'Session Replay is disabled. Relaunch the demo with a non-empty RUM appId, then enable Replay before capturing.';
-                return;
-              }
-              setTimeout(() => {
-                FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
-                  .then(() => {
-                    this.bridgeViewActive = true;
-                    this.showBridgeCapture('RUM View bridge');
-                  })
-                  .catch((error: Error) => {
-                    this.result = `RUM View bridge failed: ${error.message}`;
-                  });
-              }, 16);
+              FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
+                .then(() => {
+                  this.bridgeViewActive = true;
+                  this.showBridgeCapture('RUM View bridge');
+                })
+                .catch((error: Error) => {
+                  this.result = `RUM View bridge failed: ${error.message}`;
+                });
             })
           Button('Capture through RUM Error Bridge')
             .width('90%')
