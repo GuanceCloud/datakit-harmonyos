@@ -84,8 +84,8 @@ jobs:
           assert.equal(pkg.repository.url, 'git+https://github.com/GuanceCloud/datakit-harmonyos.git');
           assert.equal(pkg.repository.directory, 'ft_hvigor_plugin');
           const stable = /^\d+\.\d+\.\d+$/.test(pkg.version);
-          const prerelease = pkg.version.match(/^\d+\.\d+\.\d+-(alpha|beta|rc)\.\d+$/);
-          assert.ok(stable || prerelease, 'Use a stable version or an alpha.N, beta.N, rc.N prerelease');
+          const prerelease = pkg.version.match(/^\d+\.\d+\.\d+-(alpha|beta|rc)(?:\.\d+|\d+)$/);
+          assert.ok(stable || prerelease, 'Use a stable version or an alpha.N / alphaNN, beta.N / betaNN, rc.N / rcNN prerelease');
           const distTag = stable ? 'latest' : prerelease[1];
           if (!tagPush) assert.equal(process.env.INPUT_DIST_TAG, distTag, 'Version and npm tag must match');
           const [major, minor, patch] = require('node:child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
@@ -110,6 +110,7 @@ jobs:
             'CHANGELOG.md', 'LICENSE', 'README.md', 'index.js', 'package.json',
             'hvigorCompile/ft-cold-launch-transform.ts',
             'hvigorCompile/ft-console-log-transform.ts',
+            'hvigorCompile/ft-session-replay-transform.ts',
             'hvigorCompile/ft-source-transform-host.ts'
           ].sort();
           assert.equal(pack.name, '@cloudcare/hvigor-ohos-plugin');

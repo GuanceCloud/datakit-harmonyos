@@ -4,11 +4,13 @@ const path = require('path');
 const { OhosPluginId } = require('@ohos/hvigor-ohos-plugin');
 
 /**
- * Returns the HAP-level Hvigor plugin used to instrument console/HiLog calls
- * and cold-launch lifecycle boundaries before ArkTS compilation.
+ * Returns the HAP-level Hvigor plugin used to instrument console/HiLog calls,
+ * cold-launch lifecycle boundaries, and Session Replay page roots before
+ * ArkTS compilation.
  *
  * This package intentionally contains build tooling only. Applications still
- * need @guancecloud/ft_sdk at runtime to receive the instrumented log calls.
+ * need their matching runtime HARs to receive instrumented calls. The Replay
+ * transform self-disables when @guancecloud/ft_session_replay is absent.
  */
 function ftConsoleLogPlugin() {
   return {
