@@ -1,50 +1,57 @@
 import { describe, expect, it } from '@ohos/hypium';
+import { FTSessionReplayWebDataContext } from '@guancecloud/ft_sdk';
 import {
   ANDROID_REPLAY_ENDPOINTS,
   createAndroidReplayMobileSegment,
   createReplayEnvelope,
+  FullSnapshotData,
   ReplayImageWireframe,
+  ReplayMetaData,
+  ReplayPlaceholderWireframe,
   ReplayRecordType,
   ReplayMutationData,
+  ReplayShapeWireframe,
+  ReplayTextWireframe,
   ReplayViewportData,
+  ReplayWireframe,
   serializeReplayEnvelope,
+  SessionReplayContext,
+  SessionReplayGlobalContext,
   SessionReplayRecord
 } from '../../main/ets/components/SessionReplayProtocol';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/components/SessionReplaySampler';
 import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
-import { FTSessionReplayPOC } from '../../main/ets/components/FTSessionReplayPOC';
+import { FTSessionReplayRecorder } from '../../main/ets/components/FTSessionReplayRecorder';
 import {
   createAndroidReplayUploadUrl,
   createSessionReplayUploadFields,
   isRetryableReplayUploadStatus
 } from '../../main/ets/components/SessionReplayUploader';
+import { SessionReplayStoredSegment } from '../../main/ets/components/SessionReplaySegmentStore';
+
+function fullSnapshotRecord(timestamp: number, wireframes: Array<ReplayWireframe>): SessionReplayRecord {
+  const data: FullSnapshotData = { wireframes };
+  return { timestamp, type: ReplayRecordType.FULL_SNAPSHOT, data };
+}
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
     it('serializes the Android enriched-record envelope', 0, () => {
-      const records: Array<SessionReplayRecord> = [{
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: {
-          wireframes: [{
-            id: 1000000001,
-            x: 0,
-            y: 0,
-            width: 1080,
-            height: 2400,
-            type: 'placeholder',
-            label: 'ArkUI:Column',
-            permanentId: 'session-replay-poc-root'
-          }]
-        }
-      }];
-      const context = {
+      const root: ReplayPlaceholderWireframe = {
+        id: 1000000001, x: 0, y: 0, width: 1080, height: 2400,
+        type: 'placeholder', label: 'ArkUI:Column', permanentId: 'session-replay-poc-root'
+      };
+      const records: Array<SessionReplayRecord> = [fullSnapshotRecord(1700000000000, [root])];
+      const globalContext: SessionReplayGlobalContext = {};
+      globalContext['wgt_id'] = 'demo';
+      globalContext['release'] = 1;
+      const context: SessionReplayContext = {
         applicationId: 'android-compatible-app',
         sessionId: 'session-id',
         viewId: 'view-id',
-        globalContext: { wgt_id: 'demo', release: 1 }
+        globalContext
       };
 
       const envelope = createReplayEnvelope(context, records);
@@ -86,44 +93,35 @@ export default function sessionReplayProtocolUnitTest() {
     });
 
     it('serializes visual shape, text and resource-backed image wireframes', 0, () => {
-      const records: Array<SessionReplayRecord> = [{
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: {
-          wireframes: [
-            {
-              id: 1, x: 0, y: 0, width: 1080, height: 2400, type: 'shape',
-              shapeStyle: {
-                backgroundColor: '#FFFFFFFF',
-                opacity: 1,
-                cornerRadius: 8.5,
-                backgroundGradient: {
-                  kind: 'linear', colors: ['#112233FF', '#445566FF'], stops: [0, 1], angle: 90
-                },
-                shadow: { color: '#00000066', offsetX: 0, offsetY: 2, blurRadius: 8 },
-                transform: { scaleX: 1, scaleY: 1 },
-                visible: true
-              },
-              zIndex: 3
-            },
-            {
-              id: 2, x: 40, y: 80, width: 600, height: 48, type: 'text', text: 'Replay title',
-              textStyle: {
-                family: 'HarmonyOS Sans, sans-serif', size: 20, color: '#1F2937FF', weight: 700,
-                lineHeight: 28, letterSpacing: 0.5, decoration: 'underline'
-              }
-            },
-            {
-              id: 3, x: 40, y: 160, width: 72, height: 72, type: 'image',
-              resourceId: 'a'.repeat(64), mimeType: 'image/png', isEmpty: false,
-              imageStyle: { objectFit: 'contain', tintColor: '#FFFFFFFF' }
-            }
-          ]
+      const shape: ReplayShapeWireframe = {
+        id: 1, x: 0, y: 0, width: 1080, height: 2400, type: 'shape',
+        shapeStyle: {
+          backgroundColor: '#FFFFFFFF', opacity: 1, cornerRadius: 8.5,
+          backgroundGradient: {
+            kind: 'linear', colors: ['#112233FF', '#445566FF'], stops: [0, 1], angle: 90
+          },
+          shadow: { color: '#00000066', offsetX: 0, offsetY: 2, blurRadius: 8 },
+          transform: { scaleX: 1, scaleY: 1 }, visible: true
+        },
+        zIndex: 3
+      };
+      const title: ReplayTextWireframe = {
+        id: 2, x: 40, y: 80, width: 600, height: 48, type: 'text', text: 'Replay title',
+        textStyle: {
+          family: 'HarmonyOS Sans, sans-serif', size: 20, color: '#1F2937FF', weight: 700,
+          lineHeight: 28, letterSpacing: 0.5, decoration: 'underline'
         }
-      }];
-      const payload = serializeReplayEnvelope({
+      };
+      const image: ReplayImageWireframe = {
+        id: 3, x: 40, y: 160, width: 72, height: 72, type: 'image',
+        resourceId: 'a'.repeat(64), mimeType: 'image/png', isEmpty: false,
+        imageStyle: { objectFit: 'contain', tintColor: '#FFFFFFFF' }
+      };
+      const records: Array<SessionReplayRecord> = [fullSnapshotRecord(1700000000000, [shape, title, image])];
+      const context: SessionReplayContext = {
         applicationId: 'visual-app', sessionId: 'visual-session', viewId: 'visual-view'
-      }, records);
+      };
+      const payload = serializeReplayEnvelope(context, records);
       expect(payload.includes('"type":"shape"')).assertTrue();
       expect(payload.includes('"type":"text"')).assertTrue();
       expect(payload.includes('"type":"image"')).assertTrue();
@@ -136,15 +134,17 @@ export default function sessionReplayProtocolUnitTest() {
     });
 
     it('converts the persisted envelope into Studio\'s Android mobile segment', 0, () => {
+      const meta: ReplayMetaData = { width: 100, height: 100 };
       const older: SessionReplayRecord = {
-        timestamp: 1700000000000, type: ReplayRecordType.META, data: { width: 100, height: 100 }
+        timestamp: 1700000000000, type: ReplayRecordType.META, data: meta
       };
-      const newer: SessionReplayRecord = {
-        timestamp: 1700000000100, type: ReplayRecordType.FULL_SNAPSHOT, data: { wireframes: [] }
+      const newer = fullSnapshotRecord(1700000000100, []);
+      const globalContext: SessionReplayGlobalContext = {};
+      globalContext['release'] = 1;
+      const context: SessionReplayContext = {
+        applicationId: 'app-id', sessionId: 'session-id', viewId: 'view-id', globalContext
       };
-      const segment = createAndroidReplayMobileSegment({
-        applicationId: 'app-id', sessionId: 'session-id', viewId: 'view-id', globalContext: { release: 1 }
-      }, [newer, older]);
+      const segment = createAndroidReplayMobileSegment(context, [newer, older]);
       expect(segment.application.id).assertEqual('app-id');
       expect(segment.session.id).assertEqual('session-id');
       expect(segment.view.id).assertEqual('view-id');
@@ -158,21 +158,11 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('uses Android native record types for view lifecycle and mutations', 0, () => {
       const processor = new ReplaySnapshotProcessor();
-      const fullSnapshot: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: {
-          wireframes: [{
-            id: 1,
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100,
-            type: 'placeholder',
-            label: 'ArkUI:Column'
-          }]
-        }
+      const firstRoot: ReplayPlaceholderWireframe = {
+        id: 1, x: 0, y: 0, width: 100, height: 100,
+        type: 'placeholder', label: 'ArkUI:Column'
       };
+      const fullSnapshot = fullSnapshotRecord(1700000000000, [firstRoot]);
       const startRecords = processor.createViewStartRecords(fullSnapshot);
       expect(startRecords[0].type).assertEqual(4);
       expect(startRecords[1].type).assertEqual(6);
@@ -182,21 +172,11 @@ export default function sessionReplayProtocolUnitTest() {
       expect(viewport.width).assertEqual(100);
       expect(viewport.height).assertEqual(100);
 
-      const changedSnapshot: SessionReplayRecord = {
-        timestamp: 1700000000100,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: {
-          wireframes: [{
-            id: 1,
-            x: 10,
-            y: 0,
-            width: 100,
-            height: 100,
-            type: 'placeholder',
-            label: 'ArkUI:Column'
-          }]
-        }
+      const movedRoot: ReplayPlaceholderWireframe = {
+        id: 1, x: 10, y: 0, width: 100, height: 100,
+        type: 'placeholder', label: 'ArkUI:Column'
       };
+      const changedSnapshot = fullSnapshotRecord(1700000000100, [movedRoot]);
       const mutation = processor.createMutationRecord(changedSnapshot);
       expect(mutation !== null).assertTrue();
       expect(mutation?.type).assertEqual(11);
@@ -207,23 +187,17 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('uses typed updates when visual wireframes change', 0, () => {
       const processor = new ReplaySnapshotProcessor();
-      const first: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 7, x: 0, y: 0, width: 100, height: 100, type: 'shape',
-          shapeStyle: { backgroundColor: '#FFFFFFFF' }, zIndex: 1
-        }] }
+      const firstShape: ReplayShapeWireframe = {
+        id: 7, x: 0, y: 0, width: 100, height: 100, type: 'shape',
+        shapeStyle: { backgroundColor: '#FFFFFFFF' }, zIndex: 1
       };
+      const first = fullSnapshotRecord(1700000000000, [firstShape]);
       processor.setFullSnapshotBaseline(first);
-      const second: SessionReplayRecord = {
-        timestamp: 1700000000100,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 7, x: 8, y: 0, width: 100, height: 100, type: 'shape',
-          shapeStyle: { backgroundColor: '#0A59F7FF' }, zIndex: 4
-        }] }
+      const movedShape: ReplayShapeWireframe = {
+        id: 7, x: 8, y: 0, width: 100, height: 100, type: 'shape',
+        shapeStyle: { backgroundColor: '#0A59F7FF' }, zIndex: 4
       };
+      const second = fullSnapshotRecord(1700000000100, [movedShape]);
       const mutation = processor.createMutationRecord(second);
       expect(mutation !== null).assertTrue();
       const mutationData = mutation?.data as ReplayMutationData;
@@ -236,31 +210,25 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('preserves native text insets and alignment in Android wireframes', 0, () => {
       const processor = new ReplaySnapshotProcessor();
-      const first: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
-          textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
-          textPosition: {
-            padding: { top: 12, right: 16, bottom: 12, left: 16 },
-            alignment: { horizontal: 'center', vertical: 'center' }
-          }
-        }] }
+      const centeredText: ReplayTextWireframe = {
+        id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
+        textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
+        textPosition: {
+          padding: { top: 12, right: 16, bottom: 12, left: 16 },
+          alignment: { horizontal: 'center', vertical: 'center' }
+        }
       };
+      const first = fullSnapshotRecord(1700000000000, [centeredText]);
       processor.setFullSnapshotBaseline(first);
-      const second: SessionReplayRecord = {
-        timestamp: 1700000000100,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
-          textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
-          textPosition: {
-            padding: { top: 12, right: 16, bottom: 12, left: 16 },
-            alignment: { horizontal: 'right', vertical: 'center' }
-          }
-        }] }
+      const rightAlignedText: ReplayTextWireframe = {
+        id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
+        textStyle: { family: 'HarmonyOS Sans', size: 18, color: '#112233FF' },
+        textPosition: {
+          padding: { top: 12, right: 16, bottom: 12, left: 16 },
+          alignment: { horizontal: 'right', vertical: 'center' }
+        }
       };
+      const second = fullSnapshotRecord(1700000000100, [rightAlignedText]);
       const mutation = processor.createMutationRecord(second);
       expect(mutation !== null).assertTrue();
       const mutationData = mutation?.data as ReplayMutationData;
@@ -272,22 +240,16 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('replaces a visual wireframe when an optional image resource is removed', 0, () => {
       const processor = new ReplaySnapshotProcessor();
-      const first: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image',
-          resourceId: 'b'.repeat(64), mimeType: 'image/png', isEmpty: false
-        }] }
+      const resourceImage: ReplayImageWireframe = {
+        id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image',
+        resourceId: 'b'.repeat(64), mimeType: 'image/png', isEmpty: false
       };
+      const first = fullSnapshotRecord(1700000000000, [resourceImage]);
       processor.setFullSnapshotBaseline(first);
-      const masked: SessionReplayRecord = {
-        timestamp: 1700000000100,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image', isEmpty: true
-        }] }
+      const maskedImage: ReplayImageWireframe = {
+        id: 9, x: 0, y: 0, width: 100, height: 100, type: 'image', isEmpty: true
       };
+      const masked = fullSnapshotRecord(1700000000100, [maskedImage]);
       const mutation = processor.createMutationRecord(masked);
       expect(mutation !== null).assertTrue();
       const mutationData = mutation?.data as ReplayMutationData;
@@ -299,25 +261,19 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('emits image placement changes as a typed visual mutation', 0, () => {
       const processor = new ReplaySnapshotProcessor();
-      const first: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
-          resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
-          imageStyle: { objectFit: 'contain' }
-        }] }
+      const containedImage: ReplayImageWireframe = {
+        id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
+        resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
+        imageStyle: { objectFit: 'contain' }
       };
+      const first = fullSnapshotRecord(1700000000000, [containedImage]);
       processor.setFullSnapshotBaseline(first);
-      const second: SessionReplayRecord = {
-        timestamp: 1700000000100,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [{
-          id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
-          resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
-          imageStyle: { objectFit: 'cover' }
-        }] }
+      const coveredImage: ReplayImageWireframe = {
+        id: 10, x: 0, y: 0, width: 200, height: 100, type: 'image',
+        resourceId: 'c'.repeat(64), mimeType: 'image/png', isEmpty: false,
+        imageStyle: { objectFit: 'cover' }
       };
+      const second = fullSnapshotRecord(1700000000100, [coveredImage]);
       const mutation = processor.createMutationRecord(second);
       expect(mutation !== null).assertTrue();
       const mutationData = mutation?.data as ReplayMutationData;
@@ -361,48 +317,51 @@ export default function sessionReplayProtocolUnitTest() {
     });
 
     it('forwards Browser records only while the WebView slot is active or in grace period', 0, () => {
-      const recorder = new FTSessionReplayPOC(new FTSessionReplayConfig().setSampleRate(1));
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
       recorder.start();
       expect(recorder.getWebViewOptions()?.privacyLevel).assertEqual('mask');
       const now = Date.now();
-      const context = {
+      const linkContext: SessionReplayGlobalContext = {};
+      linkContext['order_id'] = 'A-1';
+      const context: FTSessionReplayWebDataContext = {
         applicationId: 'browser-app',
         sessionId: 'browser-session',
         viewId: 'browser-view',
         slotId: 'harmony-web-test',
-        linkContext: { order_id: 'A-1' },
-        payload: JSON.stringify({ timestamp: now, type: 10, data: { node: 1 } }),
+        linkContext,
+        payload: `{"timestamp":${now},"type":10,"data":{"node":1}}`,
         timestamp: now
       };
       recorder.onWebReplaySlotActive(context.slotId, true, now);
       expect(recorder.onWebReplayData(context)).assertTrue();
-      const records = recorder.getRecordedRecords({
+      const replayContext: SessionReplayContext = {
         applicationId: context.applicationId,
         sessionId: context.sessionId,
         viewId: context.viewId
-      });
+      };
+      const records = recorder.getRecordedRecords(replayContext);
       expect(records.length).assertEqual(1);
       expect(records[0].slotId).assertEqual('harmony-web-test');
       expect(records[0].timestamp).assertEqual(now);
 
       recorder.onWebReplaySlotActive(context.slotId, false, now);
-      const withinGrace = {
+      const withinGrace: FTSessionReplayWebDataContext = {
         applicationId: context.applicationId,
         sessionId: context.sessionId,
         viewId: context.viewId,
         slotId: context.slotId,
         linkContext: context.linkContext,
-        payload: JSON.stringify({ timestamp: now + 1000, type: 11, data: { source: 0 } }),
+        payload: `{"timestamp":${now + 1000},"type":11,"data":{"source":0}}`,
         timestamp: now + 1000
       };
       expect(recorder.onWebReplayData(withinGrace)).assertTrue();
-      const afterGrace = {
+      const afterGrace: FTSessionReplayWebDataContext = {
         applicationId: context.applicationId,
         sessionId: context.sessionId,
         viewId: context.viewId,
         slotId: context.slotId,
         linkContext: context.linkContext,
-        payload: JSON.stringify({ timestamp: now + 2000, type: 11, data: { source: 0 } }),
+        payload: `{"timestamp":${now + 2000},"type":11,"data":{"source":0}}`,
         timestamp: now + 2000
       };
       expect(recorder.onWebReplayData(afterGrace)).assertFalse();
@@ -410,23 +369,21 @@ export default function sessionReplayProtocolUnitTest() {
     });
 
     it('creates Android-compatible multipart Replay fields and intake URLs', 0, () => {
-      const record: SessionReplayRecord = {
-        timestamp: 1700000000000,
-        type: ReplayRecordType.FULL_SNAPSHOT,
-        data: { wireframes: [] }
+      const record = fullSnapshotRecord(1700000000000, []);
+      const globalContext: SessionReplayGlobalContext = {};
+      globalContext['release'] = 1;
+      globalContext['enabled'] = true;
+      const context: SessionReplayContext = {
+        applicationId: 'app-id', sessionId: 'session-id', viewId: 'view-id', globalContext
       };
-      const fields = createSessionReplayUploadFields({
+      const segment: SessionReplayStoredSegment = {
         version: 1,
         id: '1700000000000-000001',
         createdAt: 1700000000000,
-        context: {
-          applicationId: 'app-id',
-          sessionId: 'session-id',
-          viewId: 'view-id',
-          globalContext: { release: 1, enabled: true }
-        },
+        context,
         records: [record]
-      }, 'prod', '1.2.3');
+      };
+      const fields = createSessionReplayUploadFields(segment, 'prod', '1.2.3');
       expect(fields.fields.get('start')).assertEqual('1700000000000');
       expect(fields.fields.get('end')).assertEqual('1700000000000');
       expect(fields.fields.get('records_count')).assertEqual('1');

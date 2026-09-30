@@ -2,7 +2,7 @@ import { UIContext } from '@kit.ArkUI';
 import { bundleManager } from '@kit.AbilityKit';
 import { FTSDK, FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
-import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
+import { FTSessionReplayRecorder, SessionReplayCapture } from './FTSessionReplayRecorder';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
@@ -16,7 +16,7 @@ import { SessionReplayResourceUploadResult } from './SessionReplayResourceUpload
  *
  * The manager deliberately owns the core bridge registration. Applications can
  * enable Replay once during startup and only bind the currently visible ArkUI
- * root as pages change. This removes the POC-page-only lifecycle while keeping
+ * root as pages change. This removes the demo-page-only lifecycle while keeping
  * the core SDK independent from the optional HAR.
  */
 export class FTSessionReplay {
@@ -27,8 +27,8 @@ export class FTSessionReplay {
   private static autoRootRefreshHandler: (() => void) | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
-  private recorder: FTSessionReplayPOC | null = null;
-  private retiringRecorder: FTSessionReplayPOC | null = null;
+  private recorder: FTSessionReplayRecorder | null = null;
+  private retiringRecorder: FTSessionReplayRecorder | null = null;
   private storage: SessionReplaySegmentStore | null = null;
   private errorSampleStorage: SessionReplaySegmentStore | null = null;
   private uploadQueue: SessionReplayUploadQueue | null = null;
@@ -72,8 +72,8 @@ export class FTSessionReplay {
     const resourceStorage = this.resourceStorage;
     const errorResourceStorage = this.errorSampleResourceStorage;
     const errorWindowMs = this.config.getErrorSampleWindowMs();
-    let recorder: FTSessionReplayPOC | null = null;
-    recorder = new FTSessionReplayPOC(
+    let recorder: FTSessionReplayRecorder | null = null;
+    recorder = new FTSessionReplayRecorder(
       this.config,
       this.storage,
       this.errorSampleStorage,
@@ -195,7 +195,7 @@ export class FTSessionReplay {
   }
 
   private queueRecorderResource(
-    recorder: FTSessionReplayPOC | null,
+    recorder: FTSessionReplayRecorder | null,
     resourceStorage: SessionReplayResourceStore | null,
     errorResourceStorage: SessionReplayResourceStore | null,
     errorWindowMs: number,
@@ -361,7 +361,7 @@ export class FTSessionReplay {
     this.recorder?.notifyTransition();
   }
 
-  private requireRecorder(): FTSessionReplayPOC {
+  private requireRecorder(): FTSessionReplayRecorder {
     if (this.recorder === null) {
       throw new Error('Session Replay is disabled. Call enable() before capturing.');
     }

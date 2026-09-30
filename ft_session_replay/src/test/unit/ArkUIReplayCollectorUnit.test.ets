@@ -3,6 +3,18 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
 import { FullSnapshotData, ReplayWireframe } from '../../main/ets/components/SessionReplayProtocol';
 
+interface ReplayPosition {
+  x: number;
+  y: number;
+}
+
+interface ReplayMeasuredSize {
+  width: number;
+  height: number;
+}
+
+class EmptyInspectorInfo {}
+
 /** Minimal FrameNode-shaped fixture for geometry-only collector coverage. */
 class ReplayFrameNodeFixture {
   private readonly id: number;
@@ -57,15 +69,15 @@ class ReplayFrameNodeFixture {
     return true;
   }
 
-  public getPositionToWindow(): { x: number, y: number } {
+  public getPositionToWindow(): ReplayPosition {
     return { x: this.layoutX, y: this.layoutY };
   }
 
-  public getPositionToWindowWithTransform(): { x: number, y: number } {
+  public getPositionToWindowWithTransform(): ReplayPosition {
     return { x: this.renderedX, y: this.renderedY };
   }
 
-  public getMeasuredSize(): { width: number, height: number } {
+  public getMeasuredSize(): ReplayMeasuredSize {
     return { width: this.width, height: this.height };
   }
 
@@ -78,7 +90,7 @@ class ReplayFrameNodeFixture {
   }
 
   public getInspectorInfo(): Object {
-    return {};
+    return new EmptyInspectorInfo();
   }
 
   public isClipToFrame(): boolean {
@@ -86,12 +98,17 @@ class ReplayFrameNodeFixture {
   }
 
   public getFirstChild(): FrameNode | null {
-    return this.firstChild === null ? null : this.firstChild as unknown as FrameNode;
+    return this.firstChild === null ? null : asFrameNode(this.firstChild);
   }
 
   public getNextSibling(): FrameNode | null {
-    return this.nextSibling === null ? null : this.nextSibling as unknown as FrameNode;
+    return this.nextSibling === null ? null : asFrameNode(this.nextSibling);
   }
+}
+
+/** The fixture supplies only the FrameNode reads exercised by this collector. */
+function asFrameNode(node: ReplayFrameNodeFixture): FrameNode {
+  return node as Object as FrameNode;
 }
 
 function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWireframe | null {
@@ -110,7 +127,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       root.append(new ReplayFrameNodeFixture(2, 0, 20, 0, 20, 80, 30));
       const collector = new ArkUIReplayCollector();
 
-      const light = collector.captureFrameNodeLight(root as unknown as FrameNode, 1, 1234);
+      const light = collector.captureFrameNodeLight(asFrameNode(root), 1, 1234);
       expect(light.timestamp).assertEqual(1234);
       expect(light.nodes.length).assertEqual(2);
       expect(light.nodes[1].nodeType).assertEqual('Column');
@@ -129,7 +146,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       scroll.append(new ReplayFrameNodeFixture(3, 0, 160, 0, 60, 80, 40));
       scroll.append(new ReplayFrameNodeFixture(4, 0, 190, 0, 90, 80, 30));
 
-      const record = new ArkUIReplayCollector().captureFrameNode(root as unknown as FrameNode);
+      const record = new ArkUIReplayCollector().captureFrameNode(asFrameNode(root));
       const data = record.data as FullSnapshotData;
       const partial = findWireframe(data.wireframes, 3);
 
@@ -148,7 +165,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const inner = outer.append(new ReplayFrameNodeFixture(3, 20, 20, 20, 20, 50, 50, true));
       inner.append(new ReplayFrameNodeFixture(4, 0, 0, 0, 0, 100, 100));
 
-      const record = new ArkUIReplayCollector().captureFrameNode(root as unknown as FrameNode);
+      const record = new ArkUIReplayCollector().captureFrameNode(asFrameNode(root));
       const data = record.data as FullSnapshotData;
       const child = findWireframe(data.wireframes, 4);
 

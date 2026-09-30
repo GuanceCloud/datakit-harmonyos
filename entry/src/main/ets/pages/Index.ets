@@ -39,10 +39,10 @@ struct Index {
             .margin({ bottom: 10 })
 
 
-            // Session Replay protocol POC page
+            // Session Replay verification page
             ListItem() {
               Button() {
-                Text("Session Replay POC")
+                Text("Session Replay Demo")
               }.width(CommonConstants.FULL_PERCENT)
               .fontColor(Color.White)
               .height(50)

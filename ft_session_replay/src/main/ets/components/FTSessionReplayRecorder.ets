@@ -40,7 +40,7 @@ import {
   SessionReplayRecord
 } from './SessionReplayProtocol';
 
-/** Result returned by one POC Full Snapshot capture. */
+/** Result returned by one Full Snapshot capture. */
 export interface SessionReplayCapture {
   envelope: SessionReplayEnvelope;
   payload: string;
@@ -65,10 +65,10 @@ interface BrowserReplayRecord {
 }
 
 /**
- * Entry point used to validate ArkUI collection and Android replay serialization
- * before enabling persistence or network uploads.
+ * Recorder for ArkUI and ArkWeb collection, RUM linkage, and durable replay
+ * segments.
  */
-export class FTSessionReplayPOC implements FTSessionReplayBridge {
+export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private static readonly MAX_RECORDS_PER_VIEW: number = 2000;
   private static readonly WEB_REPLAY_INACTIVE_GRACE_MS: number = 2_000;
 
@@ -84,7 +84,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private isStopping: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
   // The bridge must return a useful reason to the host app. Previously this
-  // detail was swallowed and the POC incorrectly suggested Replay was off.
+  // detail was swallowed and the recorder incorrectly suggested Replay was off.
   private lastCaptureFailure: string = '';
   private activeContext: SessionReplayContext | null = null;
   // A page-show callback and RUM's route observer can arrive in either order.
@@ -686,7 +686,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (inactiveAt === undefined || inactiveAt === 0) {
       return true;
     }
-    return timestamp - inactiveAt < FTSessionReplayPOC.WEB_REPLAY_INACTIVE_GRACE_MS;
+    return timestamp - inactiveAt < FTSessionReplayRecorder.WEB_REPLAY_INACTIVE_GRACE_MS;
   }
 
   private parseWebReplayRecord(payload: string, slotId: string): SessionReplayRecord | null {
@@ -1059,7 +1059,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     for (let index = 0; index < records.length; index++) {
       current.push(records[index]);
     }
-    const overflow = current.length - FTSessionReplayPOC.MAX_RECORDS_PER_VIEW;
+    const overflow = current.length - FTSessionReplayRecorder.MAX_RECORDS_PER_VIEW;
     if (overflow > 0) {
       current.splice(0, overflow);
     }

@@ -166,7 +166,7 @@ struct SessionReplayPocPage {
     Column() {
       Scroll() {
         Column({ space: 16 }) {
-          Text('Session Replay POC')
+          Text('Session Replay Demo')
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
           Text('API 12 FrameNode collection → Android replay envelope')
@@ -191,7 +191,7 @@ struct SessionReplayPocPage {
             Text('1. 使用非空 appId 初始化 FTSDK 与 RUM。\n2. 点击下方 Enable Session Replay。\n3. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n4. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
               .fontSize(14)
               .fontColor('#444444')
-            Text('提示：本 POC 为便于验证将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
+            Text('提示：此验证页面将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
               .fontSize(12)
               .fontColor('#9A6700')
           }
@@ -218,7 +218,7 @@ struct SessionReplayPocPage {
                 return;
               }
               // Bind again immediately before RUM creates the View. This makes
-              // the POC resilient when ArkUI reconstructed its root after the
+              // the demo resilient when ArkUI reconstructed its root after the
               // page's aboutToAppear callback.
               if (!this.replay.registerRoot(this.getUIContext(), 'session-replay-poc-root', vp2px(1))) {
                 this.replayEnabled = false;

@@ -1,515 +1,97 @@
-# HarmonyOS Session Replay POC
+# Guance Session Replay for HarmonyOS
 
-This HAR implements an ArkUI-to-Android Session Replay collection path with a
-bounded in-memory diagnostic stream, durable private-file segments, and an
-Android-compatible multipart upload request.
+`@guancecloud/ft_session_replay` records ArkUI pages and supported ArkWeb content alongside RUM Views and Errors from `@guancecloud/ft_sdk`. It stores sampled replay data in the application's private files directory and uploads it through the SDK's configured DataKit or Dataway endpoint.
 
-When `FTSessionReplayPOC.start()` is called, it registers the optional core SDK
-bridge. RUM View starts and Error reports then capture a Full Snapshot using the
-registered ArkUI root and mark their RUM View/Action output with `has_replay`.
-Without a registered bridge, the core SDK invokes a NoOp and preserves its
-existing behavior.
+## Install
 
-For a Replay-enabled RUM View, the core also writes Android-aligned View fields:
-`records_count` and `sampled_on_reply_error`. They describe the accumulated
-Replay records and whether the current session used the error-sampling path.
+Install the Replay HAR in the application's HAP module:
 
-## Application integration
-
-Use the process-wide `FTSessionReplay` entry point from the optional HAR. It
-owns bridge registration; bind the root of the currently visible ArkUI page
-after Replay is enabled.
-
-```ts
-const replay = FTSessionReplay.getInstance();
-replay.init(new FTSessionReplayConfig()
-  .setSampleRate(1)
-  .setSessionReplayOnErrorSampleRate(0), context.filesDir);
-
-// In an ArkUI page that is currently visible:
-replay.registerRoot(this.getUIContext(), 'checkout-root', vp2px(1));
-
-// When this root is no longer visible:
-replay.unregisterRoot();
-
-// Explicit global kill switch:
-replay.disable();
+```sh
+ohpm install @guancecloud/ft_session_replay
 ```
 
-Use `setDelayInit(true)` with `init()` to retain the configuration without
-starting Replay; call `start()` only after the user grants consent. The sample
-page exposes the same behavior through **Enable/Disable Session Replay** and
-disables all capture actions while Replay is off.
+The Replay package is a bytecode HAR and requires HarmonyOS API 12 or later. Enable normalized OHMUrl for the consuming product in the project-level `build-profile.json5`:
 
-Once a sampled RUM View starts, call `replay.notifyPageChanged()` after a
-visible layout or state change. The callback reads a detached, lightweight
-`FrameNode` snapshot; a `ThreadWorker` materializes wireframes, calculates
-diffs, serializes records, and writes durable batches in queue order. Unchanged
-trees emit no records. `setSnapshotIntervalMs(16..10000)` controls the default
-64 ms change debounce. A Full Snapshot resynchronizes after a later change
-signal at the default 30-second interval; adjust it with
-`setFullSnapshotIntervalMs(5000..300000)`. Use `notifyScroll()` or
-`notifyTransition()` to defer collection until motion settles; adjust the
-quiet period with `setMotionQuietPeriodMs(50..5000)`.
-
-For lifecycle signals that ArkUI delivers to the application, report them
-without constructing RUM identifiers yourself: `recordFocus(hasFocus)`,
-`recordViewport(width, height, scale)`, `recordViewportResize(width, height)`,
-and `recordTouch(type, pointerId, x, y)` always target the active sampled RUM
-View. `recordViewportResize` appends Android's resize mutation and, while the
-registered root remains available, a Full Snapshot to reset the incremental
-baseline. Touch coordinates are discarded unless `TouchPrivacy.SHOW` was set;
-the default `HIDE` value records nothing.
-
-When `filesDir` is supplied to `init()` or `enable()`, each capture batch is
-atomically persisted below `filesDir/ft_session_replay/segments`. Storage is
-bounded to 10 MiB by default and evicts oldest complete segments before writing
-new data. Use `setStorageMaxBytes()` and `setMaxRecordsPerSegment()` to tune
-the bounds. Private-app storage is durable but not encrypted by this POC.
-
-Call `await replay.flush()` to wait for accepted batches to reach disk, then
-upload their assets and segments. A separate upload `ThreadWorker` performs
-network requests without occupying the snapshot/write Worker. Acknowledged
-segment deletions return to the write queue, and assets referenced during an
-upload remain available for retry. By default, the uploader reuses the
-installed core SDK's DataKit or Dataway intake configuration
-and sends `v1/write/rum/replay` with Android's `multipart/form-data` contract:
-newline-delimited record envelopes are deflate-compressed into the `segment`
-file part and include `start`, `end`, `records_count`, RUM linkage, environment,
-SDK, and global-context fields. The source is honestly marked `harmonyos`.
-It deletes a local segment only after HTTP `200`; unavailable networking and
-non-200 responses leave every unacknowledged segment on device for retry. For
-a controlled proxy, use `setUploadUrl('https://host/v1/write/rum/replay')`.
-Once Replay is enabled, the regular queue is also drained automatically every
-15 seconds by default. Use `setUploadIntervalMs(1000..300000)` to change the
-interval, or `setUploadIntervalMs(0)` to require explicit `flush()` calls.
-Error-sampled data deliberately does not enter this queue until an error occurs.
-Network failures, timeouts, `429`, and `5xx` responses are retried with an
-exponential delay capped at 60 seconds. A missing endpoint sends no request and
-waits 60 seconds before checking again; a successful `200` resets scheduling to
-the configured base interval. Other client errors retain data but use the normal
-interval, so they remain diagnosable without a tight retry loop.
-
-## ArkWeb Browser Replay integration
-
-`FTWebViewHandler` now exposes the same JavaScript bridge contract as Android
-when this optional HAR is enabled: `getPrivacyLevel()` returns `mask` by
-default, `getCapabilities()` returns `["records"]`, and Browser SDK events
-named `session_replay` enter the regular Replay segment pipeline. Keep
-`FTRUMConfig.setEnableTraceWebView(true)` enabled and configure its
-`allowWebViewHost` list before loading the Browser SDK page; the Browser SDK
-uses that allow-list returned by `getAllowedWebViewHosts()` before sending any
-data to native.
-
-Each `FTWebViewHandler` assigns a stable `harmony-web-*` slot ID. Browser
-records retain their original rrweb `timestamp`, `type`, and `data`, receive
-only that `slotId`, and are enveloped with the configured RUM App ID, current
-RUM session, Browser RUM `view_id`, and only explicitly configured
-`enableLinkRUMKeys(...)` values. A stale WebView slot remains acceptable for
-two seconds after it is cleared, then its records are ignored. For an
-error-sampled session, the native bridge requests
-`DATAFLUX_RUM.takeSubsequentFullSnapshot()` every ten seconds while its latest
-WebView slot remains active.
-
-## Replay resource assets
-
-When a collector creates a Replay record that refers to binary content, queue
-that content with `replay.queueResource(context, bytes, mimeType)`. The method
-returns a SHA-256 file name suitable for the record reference. Identical bytes
-are retained once in `filesDir/ft_session_replay/resources/data`; pending
-metadata is scoped by the RUM App ID and `wgt_id`, matching Android's backend
-routing. The ArkUI collector emits Android-compatible `shape`, `text`, and
-`image` wireframes. It queues image bytes only from a data URI or an explicit
-`registerImageAsset(imageIdOrSource, bytes, mimeType)` call; it does not read
-arbitrary bundle, file, or network-image pixels from `FrameNode`.
-
-`flush()` first performs Android-compatible resource processing: it posts
-`{app_id, files, tags}` to `v1/check/rum/replay_assets`, removes assets the
-server already has, then uploads only missing files as repeated `files`
-multipart parts to `v1/write/rum/replay_assets`. Private assets remain until a
-`200` acknowledgement. Use `flushResources()` when validating this phase by
-itself. Asset uploads use the same scheduled retry cycle as Replay records.
-
-The generated JSON is compatible with Android's Replay record envelope:
-
-```json
+```json5
 {
-  "application_id": "...",
-  "session_id": "...",
-  "view_id": "...",
-  "globalContext": { "wgt_id": "..." },
-  "records": [{ "timestamp": 0, "type": 10, "data": { "wireframes": [] } }]
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "buildOption": {
+          "strictMode": {
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ]
+  }
 }
 ```
 
-`type: 10` is Android's Full Snapshot record type. The collector serializes a
-whitelist of visual Inspector attributes, then discards Inspector data. Text
-and input content follow the configured privacy policy; image bytes require an
-explicit public data URI or registration.
+Replay uses `@guancecloud/ft_sdk` for RUM session, View, Error, and upload context. The optional `@cloudcare/hvigor-ohos-plugin` automates ArkUI page-root registration; without it, applications register the visible root through the Replay API.
 
-## Manual verification
+## Configure and start
 
-1. Run the demo on an API 12 or later device, then select **Session Replay POC**.
-2. Tap **Capture Full Snapshot**. The page reports the number of collected
-   wireframes and displays the serialized payload prefix.
-3. Confirm the payload contains `application_id`, `session_id`, `view_id`, a
-   `records` array, `type:10`, and a `wireframes` array.
-4. Confirm the displayed node labels are only `ArkUI:<component type>` and do
-   not include the page's visible text or any input value.
+After the application's RUM setup is complete, initialize Replay with its configuration and an application-private `filesDir`:
 
-## P2 native record grammar verification
+```ts
+import { FTSessionReplay, FTSessionReplayConfig } from '@guancecloud/ft_session_replay'
 
-1. On the same page, first tap **Capture through RUM View Bridge**. The payload
-   must include records in this order: Meta (`type:4`), Focus (`type:6`), then
-   Full Snapshot (`type:10`).
-2. Tap **Capture Incremental Mutation**. Confirm the result is `type:11` and
-   its data has `source:0` plus one or more `adds`, `removes`, or `updates`.
-3. Navigate away after a bridge capture and inspect the latest bridge payload
-   or RUM-side diagnostic. The closing record uses Android's View End type
-   `7`; it has no payload fields.
-4. Do not expect touch positions under default settings: `TouchPrivacy.HIDE`
-   suppresses them before serialization. Only an explicit `TouchPrivacy.SHOW`
-   configuration enables pointer records (`type:11`, `source:9`).
+function initializeReplay(filesDir: string): void {
+  FTSessionReplay.getInstance().init(
+    new FTSessionReplayConfig().setSampleRate(0.1),
+    filesDir
+  )
+}
+```
 
-## P3 sampling and RUM link verification
+`setSampleRate(0.1)` records approximately 10% of sessions; use a value from `0` to `1`. To wait for consent or remote configuration, add `.setDelayInit(true)` to the Replay configuration and call `FTSessionReplay.getInstance().start()` when recording may begin. Call `disable()` to stop collecting new replay data.
 
-1. Configure `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)` and open
-   the page. The bridge still records the session as error-sampled; with both
-   rates set to `0`, it produces no Replay capture.
-2. Configure `enableLinkRUMKeys(['wgt_id'])`, add `wgt_id` to the RUM global
-   context, then trigger **Capture through RUM View Bridge**. Confirm only
-   `wgt_id` appears in `globalContext`; unconfigured RUM fields and tags must
-   be absent.
-3. Change the configured linked value while staying on the same RUM View and
-   trigger the bridge again. Confirm a new Meta, Focus, Full Snapshot sequence
-   is produced, rather than appending different context values to one batch.
-4. Never configure passwords, tokens, or other secrets as linked keys: selected
-   values are intentionally added to the Replay payload for backend correlation.
+To retain a recent replay only when an error occurs, set the regular sample rate to `0` and configure `setSessionReplayOnErrorSampleRate(rate)`. Error-sampled data is held locally for a one-minute pre-error window and enters the upload queue only after a matching RUM Error.
 
-## P1 bridge verification
+## Page updates
 
-1. Configure a non-empty RUM app ID in the demo and open **Session Replay POC**.
-2. Tap **Capture through RUM View Bridge**. Confirm the displayed envelope has a
-   non-placeholder `application_id`, `session_id`, and `view_id`; record type
-   remains `10`.
-3. Tap **Capture through RUM Error Bridge**. Confirm it again displays a new
-   Full Snapshot without exposing the manual error text in the wireframes.
-4. Using the configured RUM intake or a local capture proxy, inspect the RUM
-   View and any subsequent Action emitted after either capture. Confirm its
-   fields include `has_replay:true`.
-5. Return from the page, revisit a normal demo page, and confirm ordinary RUM
-   events still work. This verifies unregistering the bridge leaves the core
-   SDK on its NoOp path.
+With the Hvigor plugin enabled, pages do not need individual `registerRoot()` calls. The plugin reports page visibility and root layout changes. If a page root already has its own `onAreaChange` or `onTouch` callback, keep that callback and call `FTSessionReplay.getInstance().notifyPageChanged()` or `notifyScroll()` from it when appropriate. Also call `notifyPageChanged()` after visual state changes that do not change the root's size. Use `notifyTransition()` for custom transitions and animations; Replay collects a settled frame after motion.
 
-## P4 RUM View metadata verification
+Without the plugin, give the visible ArkUI root an `.id()`, then call `registerRoot(this.getUIContext(), rootId, vp2px(1))` after it is laid out. Call `unregisterRoot()` when the page is hidden. Do not combine manual root registration with the plugin's automatic registration for the same page.
 
-1. Set `setSampleRate(1)`, configure a RUM app ID, open **Session Replay POC**,
-   and trigger **Capture through RUM View Bridge**. Leave the page so the RUM
-   View is closed and emitted.
-2. Inspect the emitted RUM View through the configured intake, local capture
-   proxy, or Studio event detail. It must include `has_replay:true` and a
-   positive `records_count` (the initial bridge capture produces at least Meta,
-   Focus, and Full Snapshot records).
-3. Set `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`, reopen the
-   POC, trigger **Capture through RUM View Bridge**, then **Capture through RUM
-   Error Bridge**, and leave the page. Confirm the associated RUM View contains
-   `sampled_on_reply_error:true`, a positive `records_count`, and
-   `has_replay:true`.
-4. Repeat with both sample rates set to `0`. The emitted RUM View must omit
-   Replay metadata (`has_replay`, `records_count`, and
-   `sampled_on_reply_error`), confirming that the NoOp/sampling path does not
-   mark unrelated views.
+When `start()` is called after a page is already visible, Replay attaches to the current RUM View and records its first snapshot once the root is available. The session and View IDs stay the same; recording begins at the time Replay is enabled. RUM receives `has_replay` and the record count after capture succeeds.
 
-## P5 global switch verification
+## Privacy and images
 
-1. Open **Session Replay POC**. **Enable Session Replay** must be visible and
-   every capture button must be disabled.
-2. Enable Replay, then verify all capture buttons become available. Trigger a
-   RUM View bridge capture and confirm the usual Android-compatible payload is
-   displayed.
-3. Tap **Disable Session Replay**. The capture buttons must become disabled;
-   attempts to create a new RUM View or Error capture must not be possible from
-   the page, and a subsequently emitted RUM View must not receive new Replay
-   metadata.
-4. Enable Replay again, trigger a RUM View bridge capture, then leave the
-   page. Confirm the closed View contains Replay metadata, proving that the
-   global switch re-registers the optional core bridge correctly.
+The defaults mask all text and images and hide touch coordinates. Change these settings only for data that your application is allowed to record:
 
-## P6 continuous ArkUI observation verification
+```ts
+import {
+  FTSessionReplayConfig,
+  TextAndInputPrivacy,
+  ImagePrivacy,
+  TouchPrivacy
+} from '@guancecloud/ft_session_replay'
 
-1. Enable Replay and trigger **Capture through RUM View Bridge** to establish
-   the initial Meta, Focus, and Full Snapshot baseline.
-2. Do not use **Capture Incremental Mutation**. Instead select **Toggle Layout
-   for Automatic Observation** and wait roughly 700 ms (the default 500 ms
-   polling interval plus UI settling time).
-3. The result must report **Automatic observer captured a structural mutation**.
-   Its JSON must contain `type:11` and `source:0`; the buffered-record count
-   must be at least four (the three start records plus the observed mutation).
-4. Repeat the layout toggle. Each structural change should add one Mutation
-   record, while waiting without changing the page must not raise the buffered
-   count.
-5. Disable Replay, then confirm the automatic-observation button is disabled.
-   This verifies the polling timer is stopped with the global switch.
+const config = new FTSessionReplayConfig()
+  .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+  .setImagePrivacy(ImagePrivacy.MASK_NONE)
+  .setTouchPrivacy(TouchPrivacy.HIDE)
+```
 
-## P7 durable segment verification
+`MASK_SENSITIVE_INPUTS` retains ordinary page text while masking inputs identified as sensitive. `MASK_ALL_INPUTS` masks every input. `TouchPrivacy.SHOW` records pointer positions. Review visible text and image content before relaxing the defaults. `enableLinkRUMKeys([...])` adds only the selected RUM context keys to Replay; do not select secrets or personal data.
 
-1. Enable Replay, trigger **Capture through RUM View Bridge**, then toggle the
-   layout once. The sample result must display a positive **durable segments**
-   count.
-2. Force-stop the application without clearing its data, then start it again.
-   Enable Replay and perform another View bridge capture. The durable-segment
-   count must include the records written before the restart.
-3. Set `setStorageMaxBytes(1024 * 1024)` and repeatedly generate captures.
-   Confirm the app remains usable and older segment files are removed once the
-   private `ft_session_replay/segments` directory reaches its quota.
-4. Verify each retained `*.json` parses to a segment with `version:1`, one
-   `context` object, and a non-empty `records` array. No `*.tmp` file may
-   remain after restarting the app.
+The ArkUI collector can include image bytes from a data URI. For other images, register the bytes with `FTSessionReplay.getInstance().registerImageAsset(componentIdOrSource, bytes, mimeType)` before their next snapshot and unregister them when they are no longer needed. It cannot obtain arbitrary bundle, file, or network image pixels from an ArkUI `FrameNode`.
 
-## P8 Replay intake upload verification
+## Upload and storage
 
-1. Configure the demo SDK with a valid DataKit or Dataway endpoint and a RUM
-   app ID. Alternatively, configure `setUploadUrl()` with a controlled HTTP
-   capture proxy that accepts multipart requests and responds `200`.
-2. Enable Replay, use **Capture through RUM View Bridge**, then use **Upload
-   Durable Replay Segments**. The result must report one or more acknowledged
-   segments and zero (or fewer) durable segments remaining.
-3. Inspect the request in the intake or proxy. It must be `POST` to
-   `v1/write/rum/replay`, use `multipart/form-data`, include a binary `segment`
-   part plus `start`, `end`, `records_count`, `app_id`, `session_id`, `view_id`,
-   `env`, `sdk_name`, and `source:harmonyos`. Inflate the `segment` bytes and
-   confirm it is newline-delimited JSON with Android-compatible Replay
-   envelopes and record types.
-4. Make the endpoint unreachable (or have the proxy return `500`), capture a
-   new segment, and upload. The page must report a failed acknowledgement and
-   retain the same durable segment count. Restore `200` and upload again; the
-   retained segments must then be acknowledged and removed.
+Passing the application's private `filesDir` to `init()` enables durable storage. Replay uses the core SDK's configured DataKit or Dataway endpoint and schedules an upload every 15 seconds by default. Segments remain on the device until the server acknowledges them. The default storage limit is 10 MiB; older segments are removed when that limit is reached. Data in the application's private files directory is not encrypted by this package.
 
-## P9 automatic upload scheduling verification
+Use `await FTSessionReplay.getInstance().flush()` to upload pending data immediately. `setUploadIntervalMs(0)` disables scheduled uploads and leaves uploading to explicit `flush()` calls. `setUploadUrl(url)` overrides the Replay upload endpoint when a separate route is required.
 
-1. Configure a working intake or controlled `200` proxy. Initialize Replay
-   with `setUploadIntervalMs(1000)` for this test, then create a durable
-   segment through the RUM View bridge.
-2. Do not tap **Upload Durable Replay Segments**. Wait up to two seconds and
-   inspect the proxy or intake: it must receive the same Replay multipart
-   request. The durable-segment count must fall after the HTTP `200` response.
-3. Configure `setUploadIntervalMs(0)`, create another segment, and wait at
-   least two seconds. No automatic request may be sent and the segment must
-   remain until the upload button (or `flush()`) is invoked.
-4. Return a non-`200` response while automatic upload is enabled. Confirm the
-   segment remains locally and that a later timer cycle retries it; after a
-   `200` response, it is removed exactly once.
+`disable()` stops new collection immediately and lets accepted snapshots, their image resources, and the final View End finish writing. With scheduled uploads enabled, the SDK then flushes the remaining data and retries failed uploads until the queue is empty. Calling `disable()` again does not cancel this draining. With `setUploadIntervalMs(0)`, call `flush()` explicitly after stopping. Calling `disable()` is sufficient when stopping Replay; do not call `unregisterRoot()` first, because root removal invalidates frames associated with a page transition.
 
-## P10 error-sampled rolling-window verification
+With core SDK diagnostic logging enabled, filter for `FTSessionReplayBridge`. The logs report the attached session/View, first-snapshot result, and both scheduled and manual upload results (`code`, `attemptedSegments`, `uploadedSegments`, `remainingSegments`, and `retryable`). A successful result with zero uploaded segments means the queue was empty, not that a new recording was uploaded. Upload diagnostics do not include endpoint tokens or snapshot contents.
 
-1. Initialize Replay with `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`
-and a working intake. Create a RUM View bridge capture but do not report an
-error. The POC must display a positive **deferred error segments** count and
-no Replay request may reach the intake, even after the automatic upload period.
-The closed View must not contain Replay metadata.
-2. During a new error-sampled View, wait long enough to create several records,
-then trigger **Capture through RUM Error Bridge**. The deferred count must fall
-as its latest one-minute window moves to durable segments. The next explicit or
-scheduled upload must send those segments; the related RUM View must contain
-`has_replay:true`, a positive `records_count`, and
-`sampled_on_reply_error:true`.
-3. Leave an error-sampled View without an error, restart the application, and
-inspect `filesDir/ft_session_replay/error_segments`. It must contain the
-deferred JSON segments while `segments` remains unchanged. After one minute of
-continued error-sampled recording, older complete deferred segments must be
-removed from this directory.
-4. Simulate a failed promotion by filling the normal Replay quota, trigger an
-   error, and confirm the source deferred segments remain. Free space and trigger
-   another error: the retained data must then be promoted and uploaded without
-   silently discarding it.
+ArkWeb Replay uses the active Browser RUM View supplied through the core SDK's WebView bridge. Browser replay records follow the same storage and upload schedule as ArkUI records.
 
-## P11 upload retry and endpoint recovery verification
+## Playback fidelity
 
-1. Set `setUploadIntervalMs(1000)`, retain at least one regular durable
-   segment, and configure the proxy to return `500`. Verify attempts occur at
-   roughly 1, 2, 4, 8 seconds (up to the 60-second cap) and the segment is not
-   removed. Repeat with `429` and with a network-disconnected device.
-2. Restore a `200` response. The next upload must remove the segment; create a
-   second segment and confirm the following scheduled attempt returns to the
-   configured one-second base interval rather than the prior backoff delay.
-3. Start with no DataKit/Dataway URL and no `setUploadUrl()` override. Confirm
-   no HTTP request is made and the durable segment remains. Configure an
-   endpoint at runtime, wait up to 60 seconds, and verify the same queue resumes
-   without restarting the app.
-4. Return `400` from the proxy. Confirm the segment remains for diagnosis but
-   attempts use the normal configured interval instead of the exponential
-   backoff cadence.
-
-## P12 ArkWeb Browser Replay verification
-
-1. In the demo `EntryAbility` (or a test application startup path), initialize
-   Replay with `FTSessionReplay.getInstance().init(new
-   FTSessionReplayConfig().setSampleRate(1), this.context.filesDir)`. Configure
-   a non-empty RUM App ID, enable WebView tracing with
-   `setEnableTraceWebView(true)`, and configure `setAllowWebViewHost([...])`
-   to include the test page host. Then open the demo's **WebView Test** page
-   loading a Browser SDK page with Session Replay enabled. Initializing at app
-   startup is important: the POC page's Enable/Disable control is intentionally
-   scoped to its own ArkUI-root demonstration.
-2. In WebView DevTools or the page's diagnostic console, verify
-   `window.FTWebViewJavascriptBridge.getAllowedWebViewHosts()` returns the
-   configured JSON host list, `getPrivacyLevel()` returns `mask` with the
-   default Replay configuration, and `getCapabilities()` returns
-   `["records"]`. Change the host to one outside the allow-list and confirm
-   the Browser SDK sends neither RUM nor Replay data through the native bridge.
-3. Generate a Browser full snapshot and an interaction. Inspect the controlled
-   Replay intake request after calling `flush()` (or waiting for automatic
-   upload). Inflate its `segment` part and confirm the Browser records keep
-   their rrweb `type`/`data` structure, carry a non-empty `slotId` beginning
-   `harmony-web-`, and are enveloped with the Browser RUM `view_id`, current
-   session ID, and RUM App ID. They must not be converted into ArkUI
-   `wireframes`.
-4. Configure `enableLinkRUMKeys(['order_id'])`, attach that value to Browser
-   RUM data, and generate another Browser Replay record. Confirm only
-   `order_id` is included in the Replay envelope's `globalContext`; an
-   unconfigured Browser tag/field must not appear.
-5. Navigate away from the WebView, then cause the page to emit a delayed
-   `session_replay` message within two seconds and another after more than two
-   seconds. The former may be persisted; the latter must be ignored. Reopen or
-   rebind the WebView and confirm a new active latest slot resumes recording.
-6. Configure `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`. While
-   the WebView is active, observe its page hook or DevTools for
-   `DATAFLUX_RUM.takeSubsequentFullSnapshot()` roughly every ten seconds.
-   Navigate away and confirm those calls stop. Before a RUM Error, Browser
-   Replay remains in `error_segments`; after an Error it promotes and uploads
-   with the same rolling-window behavior documented in P10.
-
-## P13 Replay resource asset verification
-
-1. In a test startup path, initialize Replay with a private `filesDir` and a
-   valid DataKit/Dataway endpoint. Construct the same `SessionReplayContext`
-   used by a recorded View and call `queueResource(context, new Uint8Array([1,
-   2, 3, 4]), 'image/png')` twice. Both calls must return the same 64-character
-   SHA-256 file name, and `getStoredResources()` must contain one pending
-   resource for that `wgt_id` route.
-2. With a controlled proxy, return `200` from
-   `v1/check/rum/replay_assets` with `{"content":{"<hash>":true}}`. Call
-   `flushResources()` and confirm no upload request follows, the pending asset
-   is removed, and its private `resources/data/<hash>.bin` file is deleted when
-   no other route references it.
-3. Queue the asset again. This time return
-   `{"content":{"<hash>":false}}` from the check request, then return `200`
-   from `v1/write/rum/replay_assets`. Confirm the check body contains `app_id`,
-   `files:["<hash>"]`, and `tags` when linked context is configured. Confirm
-   the upload is multipart with `app_id`, serialized `tags`, and a `files` part
-   named exactly by the hash with the original four bytes and MIME type.
-4. Return `500` or disconnect the proxy during either check or upload. The
-   resource metadata and binary file must remain. Restore `200` and wait for
-   the scheduled drain (or call `flushResources()`); the same hash must be
-   checked/uploaded again and then removed exactly once.
-5. Queue the same bytes under a different `wgt_id`. Confirm the local byte file
-   is still deduplicated, but the proxy receives a separate check/upload group
-   with that route's `tags`. This verifies that backend asset routing is not
-   accidentally shared across workspaces.
-
-## P14 error-sampled resource promotion verification
-
-1. Initialize Replay with `setSampleRate(0)` and
-   `setSessionReplayOnErrorSampleRate(1)`. During a sampled RUM View, call
-   `queueResource(...)` with a known byte array and do not report an error.
-   Confirm `getDeferredErrorResources()` contains the asset, while
-   `getStoredResources()` is empty and neither resource endpoint receives a
-   request during the automatic upload cycle.
-2. Trigger a RUM Error for that same application/session/view. Confirm the
-   deferred resource moves to the normal resource queue along with its Replay
-   records, then the next `flush()` or scheduled drain performs the usual
-   existence check and uploads it only when missing.
-3. Queue another error-sampled asset, wait longer than the one-minute error
-   window without reporting an error, and confirm it is removed from
-   `filesDir/ft_session_replay/error_resources`. It must never be uploaded.
-4. Force resource promotion to fail—for example, by exhausting the normal
-   resource quota—then report an error. Confirm the source metadata and bytes
-   remain in `error_resources`. After freeing space and reporting another
-   error, confirm the asset is promoted and uploaded without an unacknowledged
-   copy being deleted.
-
-## P15 Browser RUM Error promotion verification
-
-1. Initialize an ArkWeb Browser SDK page with Replay enabled and configure
-   `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`. Generate Browser
-   Replay records and at least one queued resource, but do not emit a Browser
-   RUM Error. Confirm records/resources remain only in the error-sampled
-   directories and no Replay endpoint request is made.
-2. Emit a Browser RUM Error through the existing WebView RUM bridge (the event
-   name is `rum`, with `measurement:"error"` and the Browser `view_id`).
-   Confirm the same session's deferred Replay records and assets are promoted
-   exactly once, then reach the record/resource endpoints on the next flush or
-   scheduled cycle.
-3. Emit a Browser RUM Error from a different session or after the one-minute
-   window. Confirm it does not promote the original session's deferred assets.
-   Repeating an Error for the same session must be idempotent: it must not
-   duplicate any persisted segment or asset upload.
-
-## P16 Browser RUM link-context rebind verification
-
-1. Initialize Replay with `enableLinkRUMKeys(['tenant_id'])`, open an ArkUI
-   page with a registered root and an active ArkWeb slot, then emit Browser RUM
-   data with `tenant_id: "A"`. Confirm the Replay capture for the native
-   container View contains a Full Snapshot whose `globalContext.tenant_id` is
-   `A`.
-2. Without changing the native RUM View, emit Browser RUM data with
-   `tenant_id: "B"`. Confirm exactly one additional native Full Snapshot is
-   persisted before later mutation records and its `globalContext.tenant_id`
-   is `B`. Earlier records must retain `A`.
-3. Emit additional Browser RUM data with the same `tenant_id: "B"`; no extra
-   context-rebind Full Snapshot should be created. Repeat with an unconfigured
-   field and confirm it is neither written to `globalContext` nor causes a
-   snapshot. Do not configure secrets or personal data as link keys.
-
-## P17 native lifecycle signal verification
-
-1. Configure `TouchPrivacy.SHOW`, enable Replay, register a root, and start a
-   sampled RUM View. In the page's focus, resize/orientation, and touch
-   callbacks call `recordFocus(false)`, `recordViewport(...)`,
-   `recordViewportResize(...)`, and `recordTouch('down', 1, x, y)`.
-   The bundled **Session Replay POC** enables `TouchPrivacy.SHOW` only for
-   testing and exposes **Emit Focus Loss Signal**, **Emit Viewport Resize
-   Signal**, and **Emit Touch Signal** after the RUM View bridge is started.
-2. Inspect the persisted segment. It must include Focus (`type:6`), Viewport
-   (`type:8`), pointer Incremental Snapshot (`type:11`, `source:9`), and a
-   resize Incremental Snapshot (`type:11`, `source:4`). A resize with a live
-   root must be followed by a Full Snapshot (`type:10`).
-3. Repeat with the default `TouchPrivacy.HIDE`: no `source:9` record may be
-   persisted. After stopping the RUM View or disabling Replay, every method
-   must return no capture and must not append a segment.
-
-## P19 native network-error promotion verification
-
-1. Initialize Replay with `setSampleRate(0)` and
-   `setSessionReplayOnErrorSampleRate(1)`, begin a sampled RUM View, generate
-   Replay records, and make an instrumented Resource fail with HTTP `500` (or
-   a transport failure with status `0` and an error stack).
-2. Confirm the Resource's RUM Error and Replay data use the same session and
-   View IDs. The matching deferred Replay records/resources must move to the
-   normal queues and upload on the next explicit or scheduled flush.
-3. Start another RUM View before the first Resource completes, then make that
-   first Resource fail. Confirm it promotes the original session window but
-   does not create a snapshot of the newer page or attach the newer View ID to
-   the original Resource error.
-
-## P20 crash recovery promotion verification
-
-1. Use `setSampleRate(0).setSessionReplayOnErrorSampleRate(1)`, create a
-   deferred Replay segment for a RUM View, then trigger a native crash through
-   the existing demo crash test without clearing application data.
-2. Restart the application. Initialize the optional Replay HAR during startup
-   and wait for the native-crash reporter. Confirm the saved prior session and
-   View IDs promote only their surviving one-minute deferred records/resources
-   and that they upload on the next flush.
-3. Delay Replay initialization until after the crash reporter begins. Confirm
-   initialization still consumes the bounded pending crash timeline; it must
-   not capture the newly opened page as the old View. Repeat after more than
-   one minute and confirm expired deferred data is not promoted.
-
-## Automated protocol coverage
-
-`SessionReplayProtocolUnit.test.ets` covers record grammar and snapshot
-baselines, sampling boundaries, retry classification, global enable/disable,
-and Browser record forwarding including the active-slot two-second grace
-window. Run the HarmonyOS unit-test product on a device or emulator in addition
-to the manual scenarios above.
+ArkUI Replay reconstructs a visual view from component properties rather than screen pixels. Inherited text colors and automatically resized long button labels may currently appear differently in playback.

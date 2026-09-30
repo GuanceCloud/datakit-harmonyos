@@ -1,7 +1,7 @@
 {
   "name": "@guancecloud/ft_session_replay",
-  "version": "0.1.17",
-  "description": "Guance HarmonyOS Session Replay protocol POC.",
+  "version": "0.1.0-alpha01",
+  "description": "Guance HarmonyOS Session Replay SDK.",
   "main": "Index.ets",
   "author": "Guance <lizhao@guance.com> (https://www.guance.com)",
   "repository": "https://github.com/GuanceCloud/datakit-harmonyos.git",

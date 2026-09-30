@@ -1,8 +1,8 @@
 /**
  * Public HarmonyOS Session Replay API.
  *
- * This HAR exposes a process-wide recorder entry point plus protocol and
- * collection primitives. Persistence and upload remain subsequent priorities.
+ * This HAR exposes a process-wide recorder, collection and protocol primitives,
+ * durable storage, and upload support.
  */
 export {
   FTSessionReplayConfig,
@@ -80,4 +80,4 @@ export {
   SessionReplayResourceUploadResult,
   createAndroidReplayResourceUrl
 } from './src/main/ets/components/SessionReplayResourceUploader';
-export { FTSessionReplayPOC, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayPOC';
+export { FTSessionReplayRecorder, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayRecorder';

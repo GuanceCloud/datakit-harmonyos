@@ -19,7 +19,7 @@ export enum TouchPrivacy {
 }
 
 /**
- * POC configuration that preserves Android's public sampling and privacy
+ * Session Replay configuration that preserves Android's sampling and privacy
  * vocabulary. The collector reads only whitelisted visual fields and applies
  * these policies before any text or image bytes are retained or uploaded.
  */
