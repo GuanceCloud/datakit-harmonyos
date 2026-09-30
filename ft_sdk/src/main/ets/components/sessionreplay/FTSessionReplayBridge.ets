@@ -107,16 +107,80 @@ export interface FTSessionReplayBridge {
 /** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
 export class FTSessionReplayBridgeRegistry {
   private static bridge: FTSessionReplayBridge | null = null;
+  private static currentViewProvider: (() => FTSessionReplayRUMContext | null) | null = null;
+  private static metadataChangedCallback:
+    ((context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata) => void) | null = null;
   private static readonly MAX_PENDING_ERROR_TIMELINES: number = 8;
   /** Holds crash recovery notifications until an optional HAR registers. */
   private static pendingErrorTimelines: Array<FTSessionReplayErrorContext> = [];
 
   public static register(bridge: FTSessionReplayBridge): void {
+    if (FTSessionReplayBridgeRegistry.bridge === bridge) {
+      return;
+    }
     FTSessionReplayBridgeRegistry.bridge = bridge;
+    // Resolve now, after the HAR's link keys become available. Remembering an
+    // old View-start event would retain stale identity, timestamps and tags.
+    const provider = FTSessionReplayBridgeRegistry.currentViewProvider;
+    if (provider !== null) {
+      try {
+        const context = provider();
+        if (context !== null) {
+          FTSessionReplayBridgeRegistry.notifyViewStarted(context);
+          FTSessionReplayBridgeRegistry.logDiagnostic(`Attached current RUM View: sessionId=${context.sessionId}, viewId=${context.viewId}`);
+        }
+      } catch (error) {
+        FTSessionReplayBridgeRegistry.logDiagnostic(`Replay current-View callback failed: ${String(error)}`, true);
+      }
+    }
     const pending = FTSessionReplayBridgeRegistry.pendingErrorTimelines.slice();
     FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
     for (let index = 0; index < pending.length; index++) {
       FTSessionReplayBridgeRegistry.notifyErrorTimeline(pending[index]);
+    }
+  }
+
+  /** Core callbacks stay independent of the optional recorder's lifetime. */
+  public static bindRUMCallbacks(
+    currentViewProvider: () => FTSessionReplayRUMContext | null,
+    metadataChangedCallback: (context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata) => void
+  ): void {
+    FTSessionReplayBridgeRegistry.currentViewProvider = currentViewProvider;
+    FTSessionReplayBridgeRegistry.metadataChangedCallback = metadataChangedCallback;
+  }
+
+  public static clearRUMCallbacks(currentViewProvider: () => FTSessionReplayRUMContext | null): void {
+    if (FTSessionReplayBridgeRegistry.currentViewProvider !== currentViewProvider) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.currentViewProvider = null;
+    FTSessionReplayBridgeRegistry.metadataChangedCallback = null;
+    FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
+  }
+
+  /** Accepted capture work is not evidence of Replay; report committed data. */
+  public static notifyViewMetadataChanged(
+    context: FTSessionReplayRUMContext,
+    metadata: FTSessionReplayViewMetadata
+  ): void {
+    const callback = FTSessionReplayBridgeRegistry.metadataChangedCallback;
+    if (callback === null) {
+      return;
+    }
+    try {
+      // A stopped recorder can still finish its already accepted first frame.
+      callback(context, metadata);
+    } catch (error) {
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay metadata update failed: ${String(error)}`, true);
+    }
+  }
+
+  /** Optional HAR diagnostics use the core logger's configured level. */
+  public static logDiagnostic(message: string, warning: boolean = false): void {
+    if (warning) {
+      FTInnerLogger.w(TAG, message);
+    } else {
+      FTInnerLogger.d(TAG, message);
     }
   }
 

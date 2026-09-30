@@ -35,6 +35,7 @@ enum FTDBTaskPoolCommand {
   CLEANUP_EXPIRED_RUM_ACTION = 'cleanupExpiredRumAction',
   UPSERT_RUM_VIEW = 'upsertRumView',
   UPDATE_RUM_VIEW = 'updateRumView',
+  UPDATE_RUM_VIEW_REPLAY = 'updateRumViewReplay',
   CLOSE_RUM_VIEW = 'closeRumView',
   UPDATE_VIEW_UPLOAD_TIME = 'updateViewUploadTime',
   ACKNOWLEDGE_VIEW = 'acknowledgeView',
@@ -177,6 +178,12 @@ export interface FTDBTaskPoolCloseActionResponse {
   hadPendingResource: boolean;
 }
 
+export interface FTDBTaskPoolReplayMetadata {
+  hasReplay: boolean;
+  recordsCount: number;
+  sampledOnError: boolean;
+}
+
 export interface FTDBTaskPoolRequest {
   cache?: FTCacheSettings;
   command: string;
@@ -203,6 +210,8 @@ export interface FTDBTaskPoolRequest {
   view?: ViewBeanJSON;
   actionBean?: ActionBeanJSON;
   viewId?: string;
+  replaySessionId?: string;
+  replayMetadata?: FTDBTaskPoolReplayMetadata;
   actionId?: string;
   loadTime?: number;
   timeSpent?: number;
@@ -619,6 +628,22 @@ export class FTDBTaskPoolExecutor {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.UPDATE_RUM_VIEW,
       view: viewBean.toJSON()
+    });
+    return response.value === true;
+  }
+
+  public static async updateRumViewReplay(
+    context: Context,
+    viewId: string,
+    sessionId: string,
+    metadata: FTDBTaskPoolReplayMetadata
+  ): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.UPDATE_RUM_VIEW_REPLAY,
+      viewId,
+      replaySessionId: sessionId,
+      replayMetadata: metadata,
+      now: Date.now()
     });
     return response.value === true;
   }

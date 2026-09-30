@@ -15,6 +15,7 @@ import {
 import FTTrackInner from '../FTTrackInner';
 import {
   FTDBTaskPoolExecutor,
+  FTDBTaskPoolReplayMetadata,
   FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
@@ -68,7 +69,8 @@ import {
   FTSessionReplayBridgeRegistry,
   FTSessionReplayErrorContext,
   FTSessionReplayRUMContext,
-  FTSessionReplaySessionContext
+  FTSessionReplaySessionContext,
+  FTSessionReplayViewMetadata
 } from '../sessionreplay/FTSessionReplayBridge';
 
 /**
@@ -456,11 +458,19 @@ export class FTRUMInnerManager {
   private preferencesInitialized: boolean = false;
   private preferencesInitPromise: Promise<void> | null = null;
   private rumContextPersistChain: Promise<void> = Promise.resolve();
+  private readonly replayCurrentViewProvider = (): FTSessionReplayRUMContext | null => {
+    const view = this.activeView;
+    if (view === null || view.isClose()) {
+      return null;
+    }
+    return this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+  };
 
 
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
   
   private constructor() {
+    this.bindSessionReplayCallbacks();
     this.initSessionTimer();
     // Note: Session ID is created in field initialization, but checkSessionKeep will be called
     // in initParams() after sampling rates are set from FTRUMConfig
@@ -1941,6 +1951,7 @@ export class FTRUMInnerManager {
   }
 
   private resetInternalState(): void {
+    FTSessionReplayBridgeRegistry.clearRUMCallbacks(this.replayCurrentViewProvider);
     if (this.actionCheckTimer !== null) {
       clearTimeout(this.actionCheckTimer);
       this.actionCheckTimer = null;
@@ -2217,6 +2228,7 @@ export class FTRUMInnerManager {
    * @param config RUM configuration
    */
   public initParams(config: FTRUMConfig): void {
+    this.bindSessionReplayCallbacks();
     // Save config reference
     this.rumConfig = config;
     
@@ -2365,10 +2377,7 @@ export class FTRUMInnerManager {
 
   private notifySessionReplayViewStarted(view: ActiveViewBean): void {
     const context = this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
-    const hasReplay = FTSessionReplayBridgeRegistry.notifyViewStarted(context);
-    if (hasReplay) {
-      view.setHasReplay(true);
-    }
+    FTSessionReplayBridgeRegistry.notifyViewStarted(context);
     this.applySessionReplayViewMetadata(view, context);
   }
 
@@ -2394,9 +2403,7 @@ export class FTRUMInnerManager {
       errorType,
       appState: state.toString()
     };
-    if (FTSessionReplayBridgeRegistry.notifyError(context)) {
-      view.setHasReplay(true);
-    }
+    FTSessionReplayBridgeRegistry.notifyError(context);
     this.applySessionReplayViewMetadata(view, base);
   }
 
@@ -2537,6 +2544,10 @@ export class FTRUMInnerManager {
 
   private applySessionReplayViewMetadata(view: ActiveViewBean, context: FTSessionReplayRUMContext): void {
     const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
+    this.mergeSessionReplayViewMetadata(view, metadata);
+  }
+
+  private mergeSessionReplayViewMetadata(view: ActiveViewBean, metadata: FTSessionReplayViewMetadata): void {
     if (metadata.hasReplay) {
       view.setHasReplay(true);
     }
@@ -2545,6 +2556,48 @@ export class FTRUMInnerManager {
     }
     if (metadata.sampledOnError) {
       view.setSampledOnReplayError(true);
+    }
+  }
+
+  private bindSessionReplayCallbacks(): void {
+    FTSessionReplayBridgeRegistry.bindRUMCallbacks(this.replayCurrentViewProvider,
+      (context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata): void => {
+        this.onSessionReplayMetadataChanged(context, metadata);
+      });
+  }
+
+  private onSessionReplayMetadataChanged(
+    replayContext: FTSessionReplayRUMContext,
+    metadata: FTSessionReplayViewMetadata
+  ): void {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config === null || replayContext.applicationId !== config.getRumAppId() ||
+      replayContext.sessionId.length === 0 || replayContext.viewId.length === 0 ||
+      !metadata.hasReplay || !Number.isFinite(metadata.recordsCount) || metadata.recordsCount <= 0) {
+      return;
+    }
+    const view = this.activeView;
+    if (view !== null && view.getId() === replayContext.viewId && view.getSessionId() === replayContext.sessionId) {
+      this.mergeSessionReplayViewMetadata(view, metadata);
+    }
+    const context = this.context;
+    if (context !== null) {
+      const replayMetadata: FTDBTaskPoolReplayMetadata = {
+        hasReplay: metadata.hasReplay,
+        recordsCount: metadata.recordsCount,
+        sampledOnError: metadata.sampledOnError
+      };
+      // Update only Replay attributes, including when the captured View has
+      // already closed. Full View writes would overwrite atomic RUM counters.
+      FTDBTaskPoolExecutor.updateRumViewReplay(context, replayContext.viewId, replayContext.sessionId, replayMetadata)
+        .then((updated: boolean): void => {
+          if (updated && this.context === context) {
+            this.generateRumData();
+          }
+        })
+        .catch((error: Error): void => {
+          FTInnerLogger.w(TAG, `Failed to persist Replay View metadata: ${error.message}`);
+        });
     }
   }
 
@@ -4894,6 +4947,7 @@ export class FTRUMInnerManager {
    * Shutdown RUM manager
    */
   public async shutdown(): Promise<void> {
+    FTSessionReplayBridgeRegistry.clearRUMCallbacks(this.replayCurrentViewProvider);
     try {
       // Clear timers
       if (this.actionCheckTimer) {
