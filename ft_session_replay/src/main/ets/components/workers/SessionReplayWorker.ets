@@ -32,7 +32,7 @@ port.onmessage = (event: MessageEvents): void => {
       return;
     }
     if (message.phase === 'materialize') {
-      if (isReplaySnapshotExpired(message.queuedAt ?? 0, Date.now())) {
+      if (!message.draining && isReplaySnapshotExpired(message.queuedAt ?? 0, Date.now())) {
         port.postMessage({ id: message.id, phase: 'error', error: REPLAY_STALE_QUEUE_REASON } as ReplayWorkerMessage);
         return;
       }

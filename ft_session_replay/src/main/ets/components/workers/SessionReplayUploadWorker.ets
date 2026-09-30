@@ -24,6 +24,8 @@ let resourceStore: SessionReplayResourceStore | null = null;
 let running: boolean = false;
 let scheduleTimer: number = -1;
 let intervalMs: number = 0;
+let drainOnly: boolean = false;
+let scheduleVersion: number = 0;
 let retryCount: number = 0;
 let nextScheduledId: number = -1;
 let readyResolver: ((ready: ReplayUploadReady) => void) | null = null;
@@ -44,6 +46,8 @@ port.onmessage = (event: MessageEvents): void => {
     }
     if (message.phase === 'schedule') {
       intervalMs = Math.max(0, message.intervalMs ?? 0);
+      drainOnly = message.drainOnly ?? false;
+      scheduleVersion = message.scheduleVersion ?? 0;
       if (intervalMs === 0) {
         for (let index = requests.length - 1; index >= 0; index--) {
           if (requests[index].id < 0) requests.splice(index, 1);
@@ -104,6 +108,7 @@ async function runNext(): Promise<void> {
     scheduleTimer = -1;
   }
   running = true;
+  const requestScheduleVersion = scheduleVersion;
   let result: SessionReplayUploadResult | null = null;
   let resourceResult: SessionReplayResourceUploadResult | null = null;
   try {
@@ -135,9 +140,14 @@ async function runNext(): Promise<void> {
   }
   port.postMessage({
     id: request.id, phase: 'done', result: result ?? undefined,
-    resourceResult: resourceResult ?? undefined
+    resourceResult: resourceResult ?? undefined,
+    scheduleVersion: requestScheduleVersion
   } as ReplayUploadWorkerMessage);
   running = false;
+  if (drainOnly && requestScheduleVersion === scheduleVersion && result?.success === true && result.remainingSegments === 0 &&
+    resourceResult?.success === true && resourceResult.remainingResources === 0) {
+    intervalMs = 0;
+  }
   if (intervalMs > 0 && requests.length === 0) {
     const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(intervalMs, retryCount, result);
     retryCount = schedule.retryCount;

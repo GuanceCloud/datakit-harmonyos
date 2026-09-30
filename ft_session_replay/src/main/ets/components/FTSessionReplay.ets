@@ -1,6 +1,6 @@
 import { UIContext } from '@kit.ArkUI';
 import { bundleManager } from '@kit.AbilityKit';
-import { FTSDK } from '@guancecloud/ft_sdk';
+import { FTSDK, FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayPOC, SessionReplayCapture } from './FTSessionReplayPOC';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
@@ -21,6 +21,10 @@ import { SessionReplayResourceUploadResult } from './SessionReplayResourceUpload
  */
 export class FTSessionReplay {
   private static instance: FTSessionReplay | null = null;
+  // Registered only by the compiler-generated page-root bridge. Keeping the
+  // callback here avoids a core-to-bridge import cycle while allowing delayed
+  // consent/remote-config activation to bind an already visible page.
+  private static autoRootRefreshHandler: (() => void) | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayPOC | null = null;
@@ -38,6 +42,11 @@ export class FTSessionReplay {
       FTSessionReplay.instance = new FTSessionReplay();
     }
     return FTSessionReplay.instance;
+  }
+
+  /** Internal contract for the Hvigor-generated Session Replay root bridge. */
+  public static setAutoRootRefreshHandler(handler: (() => void) | null): void {
+    FTSessionReplay.autoRootRefreshHandler = handler;
   }
 
   /**
@@ -58,17 +67,32 @@ export class FTSessionReplay {
     if (this.recorder !== null) {
       return;
     }
-    const recorder = new FTSessionReplayPOC(
+    // Retiring snapshots keep their original stores even if init() installs a
+    // new configuration before the old Worker has finished its last frame.
+    const resourceStorage = this.resourceStorage;
+    const errorResourceStorage = this.errorSampleResourceStorage;
+    const errorWindowMs = this.config.getErrorSampleWindowMs();
+    let recorder: FTSessionReplayPOC | null = null;
+    recorder = new FTSessionReplayPOC(
       this.config,
       this.storage,
       this.errorSampleStorage,
-      (sessionId: string, timestamp: number): boolean => this.promoteErrorSampleResources(sessionId, timestamp),
+      (sessionId: string, timestamp: number): boolean => {
+        if (resourceStorage === null || errorResourceStorage === null) return false;
+        return errorResourceStorage.promoteSessionWindow(sessionId, timestamp, errorWindowMs, resourceStorage);
+      },
       (context: SessionReplayContext, data: Uint8Array, mimeType: string): string | null =>
-        this.queueResource(context, data, mimeType)
+        this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType)
     );
     recorder.start();
     this.recorder = recorder;
     this.startUploadSchedule();
+    try {
+      FTSessionReplay.autoRootRefreshHandler?.();
+    } catch (_) {
+      // Root instrumentation is optional; never fail explicit Replay startup
+      // because an application page has been reconstructed or disposed.
+    }
   }
 
   /** Convenience form for applications that enable Replay during startup. */
@@ -83,20 +107,32 @@ export class FTSessionReplay {
     this.start();
   }
 
-  /** Stops collection and removes the optional bridge from the core SDK. */
+  /** Stops collection immediately; accepted frames and automatic uploads drain in the background. */
   public disable(): void {
     if (this.recorder === null) {
-      this.stopUploadSchedule();
       return;
     }
-    this.recorder.stop();
-    this.retiringRecorder = this.recorder;
     const retiring = this.recorder;
-    retiring.drainWrites().then((): void => {
-      if (this.retiringRecorder === retiring) this.retiringRecorder = null;
-    });
+    const uploadQueue = this.uploadQueue;
+    const uploadIntervalMs = this.config.getUploadIntervalMs();
+    this.retiringRecorder = retiring;
+    retiring.stop();
     this.recorder = null;
     this.stopUploadSchedule();
+    FTSessionReplayBridgeRegistry.logDiagnostic('Replay collection stopped; draining accepted snapshots.');
+    retiring.drainWrites().then((): void => {
+      if (this.retiringRecorder === retiring) this.retiringRecorder = null;
+      if (uploadQueue === null || uploadQueue !== this.uploadQueue || uploadIntervalMs <= 0) return;
+      if (this.recorder === null) uploadQueue.schedule(uploadIntervalMs, true);
+      // Do not reuse uploadPromise: an earlier flush may have enumerated its
+      // segments before the final snapshot and ViewEnd reached disk.
+      uploadQueue.flush();
+    }).catch((error: Error): void => {
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay snapshot drain failed: ${error.message}`, true);
+      if (uploadQueue !== null && uploadQueue === this.uploadQueue && uploadIntervalMs > 0 && this.recorder === null) {
+        uploadQueue.schedule(uploadIntervalMs, true);
+      }
+    });
   }
 
   public isEnabled(): boolean {
@@ -153,20 +189,31 @@ export class FTSessionReplay {
     data: ArrayBuffer | Uint8Array,
     mimeType: string = 'application/octet-stream'
   ): string | null {
-    if (this.recorder === null || this.resourceStorage === null) {
-      return null;
-    }
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    const sampling = this.recorder.getSamplingMode(context.sessionId);
+    return this.queueRecorderResource(this.recorder, this.resourceStorage, this.errorSampleResourceStorage,
+      this.config.getErrorSampleWindowMs(), context, bytes, mimeType);
+  }
+
+  private queueRecorderResource(
+    recorder: FTSessionReplayPOC | null,
+    resourceStorage: SessionReplayResourceStore | null,
+    errorResourceStorage: SessionReplayResourceStore | null,
+    errorWindowMs: number,
+    context: SessionReplayContext,
+    bytes: Uint8Array,
+    mimeType: string
+  ): string | null {
+    if (recorder === null || resourceStorage === null) return null;
+    const sampling = recorder.getSamplingMode(context.sessionId);
     if (sampling === SessionReplaySamplingMode.NONE) {
       return null;
     }
     const isDeferredErrorSample = sampling === SessionReplaySamplingMode.ERROR &&
-      !this.recorder.isErrorSampledSessionPromoted(context.sessionId);
-    const store = isDeferredErrorSample ? this.errorSampleResourceStorage : this.resourceStorage;
+      !recorder.isErrorSampledSessionPromoted(context.sessionId);
+    const store = isDeferredErrorSample ? errorResourceStorage : resourceStorage;
     const fileName = store === null ? null : store.put(context, bytes, mimeType);
     if (fileName !== null && isDeferredErrorSample) {
-      this.errorSampleResourceStorage?.pruneBefore(Date.now() - this.config.getErrorSampleWindowMs());
+      errorResourceStorage?.pruneBefore(Date.now() - errorWindowMs);
     }
     return fileName;
   }
@@ -397,18 +444,6 @@ export class FTSessionReplay {
       uploadUrl: this.config.getUploadUrl(),
       appVersion
     };
-  }
-
-  private promoteErrorSampleResources(sessionId: string, timestamp: number): boolean {
-    if (this.resourceStorage === null || this.errorSampleResourceStorage === null) {
-      return false;
-    }
-    return this.errorSampleResourceStorage.promoteSessionWindow(
-      sessionId,
-      timestamp,
-      this.config.getErrorSampleWindowMs(),
-      this.resourceStorage
-    );
   }
 
   private async flushResourcesInternal(): Promise<SessionReplayResourceUploadResult> {

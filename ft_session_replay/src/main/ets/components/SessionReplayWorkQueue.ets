@@ -57,6 +57,7 @@ export interface ReplayWorkerMessage {
   commit?: ReplayWorkerCommit;
   result?: ReplayWorkerResult;
   queuedAt?: number;
+  draining?: boolean;
   componentId?: string;
   bytes?: Uint8Array;
   mimeType?: string;
@@ -246,6 +247,7 @@ export class SessionReplayWorkQueue {
   }
 
   public registerImageAsset(componentId: string, bytes: Uint8Array, mimeType: string): void {
+    if (this.closing) return;
     const key = componentId.trim();
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
@@ -256,15 +258,15 @@ export class SessionReplayWorkQueue {
   }
 
   public unregisterImageAsset(componentId: string): void {
+    if (this.closing) return;
     const key = componentId.trim();
     this.registeredImages.delete(key);
     this.imageCommands.push({ componentId: key, bytes: null, mimeType: '' });
     this.dispatch();
   }
 
+  /** Seal new captures, retaining every accepted frame and image until exit. */
   public close(): void {
-    this.clear(false);
-    this.imageCommands.splice(0, this.imageCommands.length);
     this.closing = true;
     this.dispatch();
   }
@@ -396,7 +398,7 @@ export class SessionReplayWorkQueue {
         }
         continue;
       }
-      if (this.isSnapshot(job) && isReplaySnapshotExpired(job.queuedAt, Date.now())) {
+      if (!this.closing && this.isSnapshot(job) && isReplaySnapshotExpired(job.queuedAt, Date.now())) {
         this.completing = true;
         try {
           job.complete?.(null, REPLAY_STALE_QUEUE_REASON);
@@ -412,7 +414,7 @@ export class SessionReplayWorkQueue {
         if (this.isSnapshot(job)) {
           this.thread?.postMessage({
             id: job.id, phase: 'materialize', kind: job.kind,
-            snapshot: job.snapshot, queuedAt: job.queuedAt
+            snapshot: job.snapshot, queuedAt: job.queuedAt, draining: this.closing
           } as ReplayWorkerMessage);
         } else {
           this.thread?.postMessage({
@@ -426,6 +428,8 @@ export class SessionReplayWorkQueue {
       }
       return;
     }
+    // Barriers can be the last queued job; finish closing after resolving them.
+    if (this.closing) this.dispatch();
   }
 
   private onMessage(event: MessageEvents): void {
@@ -448,6 +452,19 @@ export class SessionReplayWorkQueue {
     if (message.phase === 'done') {
       this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? []);
     } else if (message.phase === 'error') {
+      // Stop may race the Worker's age check for the already-dispatched frame.
+      // Retry that immutable handoff once in drain mode; do not read the UI.
+      if (this.closing && this.isSnapshot(job) && message.error === REPLAY_STALE_QUEUE_REASON) {
+        try {
+          this.thread?.postMessage({
+            id: job.id, phase: 'materialize', kind: job.kind,
+            snapshot: job.snapshot, queuedAt: job.queuedAt, draining: true
+          } as ReplayWorkerMessage);
+        } catch (error) {
+          this.finish(null, String(error));
+        }
+        return;
+      }
       this.finish(null, message.error ?? 'Session Replay Worker failed.', false);
     }
   }

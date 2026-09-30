@@ -80,6 +80,8 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   private readonly errorSampleStore: SessionReplaySegmentStore | null;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
+  // Stop seals input immediately while accepted detached snapshots finish.
+  private isStopping: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
   // The bridge must return a useful reason to the host app. Previously this
   // detail was swallowed and the POC incorrectly suggested Replay was off.
@@ -90,6 +92,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   // first layout, then create the normal Meta/Focus/Full-Snapshot sequence.
   private pendingViewStartContext: FTSessionReplayRUMContext | null = null;
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
+  private readonly recordedContextsByView: Map<string, SessionReplayContext> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
   private readonly errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null;
@@ -152,7 +155,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
   public start(): void {
-    if (this.isStarted) {
+    if (this.isStarted || this.isStopping) {
       return;
     }
     this.isStarted = true;
@@ -167,21 +170,34 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     }
     FTSessionReplayBridgeRegistry.unregister(this);
     this.isStarted = false;
-    this.rootBinding = null;
-    this.activeContext = null;
+    this.isStopping = true;
     this.pendingViewStartContext = null;
-    this.resetViewportObservation();
     this.unbindWindowViewportObserver();
-    this.viewMetadata.clear();
-    this.recordedRecordsByView.clear();
-    this.promotedErrorSessions.clear();
-    this.webSlotInactiveAt.clear();
-    this.pendingViewStarts.clear();
     this.stopObservation();
-    this.captureGeneration++;
+    // Do not advance the generation or clear the active context here: an
+    // accepted snapshot may be materializing or committing in the Worker.
+    // Its resources and segment must finish before the final View End.
+    const context = this.activeContext;
+    if (context !== null) {
+      const record = this.processor.createViewEndRecord(Date.now());
+      this.appendRecordedRecords(context, [record], true, true);
+    }
     this.workQueue.close();
-    this.processor.reset();
-    this.sampler.reset();
+    this.workQueue.drain().then((): void => {
+      this.rootBinding = null;
+      this.activeContext = null;
+      this.resetViewportObservation();
+      this.viewMetadata.clear();
+      this.recordedContextsByView.clear();
+      this.recordedRecordsByView.clear();
+      this.promotedErrorSessions.clear();
+      this.webSlotInactiveAt.clear();
+      this.pendingViewStarts.clear();
+      this.endedViewStarts.clear();
+      this.captureGeneration++;
+      this.processor.reset();
+      this.sampler.reset();
+    });
   }
 
   /** Registers the visible ArkUI root to record when RUM starts or errors a View. */
@@ -190,6 +206,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     rootId: string,
     vpToPxScale: number = 1
   ): void {
+    if (this.isStopping) return;
     const current = this.rootBinding;
     if (current !== null && current.uiContext === uiContext && current.rootId === rootId &&
       current.vpToPxScale === vpToPxScale) {
@@ -215,6 +232,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public unregisterRoot(): void {
+    if (this.isStopping) return;
     this.captureGeneration++;
     this.workQueue.clear();
     this.rootBinding = null;
@@ -438,6 +456,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public renewRootEpoch(): void {
+    if (this.isStopping) return;
     this.captureGeneration++;
     this.workQueue.clear();
     this.collector.renewRootEpoch();
@@ -486,7 +505,6 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (!this.appendRecordedRecords(replayContext, capture.records)) {
       return false;
     }
-    this.recordReplayMetadata(replayContext, capture.records.length);
     this.lastCapture = capture;
     return true;
   }
@@ -572,7 +590,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public onViewStarted(context: FTSessionReplayRUMContext): boolean {
-    if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
     if (this.queueViewStartedFromRUMContext(context)) {
@@ -584,6 +602,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public onViewStopped(context: FTSessionReplayRUMContext): void {
+    if (!this.isStarted) return;
     const replayContext = this.toReplayContext(context);
     if (this.pendingViewStartContext !== null &&
       this.isSameView(this.toReplayContext(this.pendingViewStartContext), replayContext)) {
@@ -599,9 +618,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     const record = this.processor.createViewEndRecord(this.toEpochMilliseconds(context.timestamp));
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
-    if (this.appendRecordedRecords(replayContext, capture.records, true, true)) {
-      this.recordViewMetadata(context, 1);
-    }
+    this.appendRecordedRecords(replayContext, capture.records, true, true);
     this.activeContext = null;
     this.captureGeneration++;
     this.workQueue.clear(true);
@@ -610,7 +627,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public onError(context: FTSessionReplayErrorContext): boolean {
-    if (this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
+    if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
     const replayContext = this.toReplayContext(context);
@@ -627,6 +644,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
+    if (!this.isStarted) return;
     this.renewRootEpoch();
     this.activeContext = null;
     this.captureGeneration++;
@@ -835,11 +853,16 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     }
     if (result === null || !result.stored) {
       this.lastCaptureFailure = result === null ? error : result.writeError;
+      if (kind !== 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
+        FTSessionReplayBridgeRegistry.logDiagnostic(
+          `Replay ${kind} snapshot failed: session=${context.sessionId}, view=${context.viewId}, reason=${this.lastCaptureFailure}`,
+          true);
+      }
       if (result !== null) this.removeWorkerSegments(result);
       if (kind === 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
         this.lastFullSnapshotAt = 0;
       }
-      if (kind === 'start' && !endedStart && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
+      if (this.isStarted && kind === 'start' && !endedStart && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
         this.queueViewStartedFromRUMContext(rumContext, promoteErrorAt);
       }
       return;
@@ -852,6 +875,10 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (!endedStart) {
       this.lastFullSnapshotAt = result.lastFullSnapshotAt;
       this.observedViewport = result.viewport;
+    }
+    if (kind === 'start') {
+      FTSessionReplayBridgeRegistry.logDiagnostic(
+        `Replay first frame saved: session=${context.sessionId}, view=${context.viewId}, records=${result.records.length}, segments=${result.segmentIds.length}`);
     }
     if (kind === 'start' && rumContext !== null) {
       this.recordViewMetadata(rumContext, result.records.length);
@@ -993,6 +1020,21 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       recordsCount: (existing === undefined ? 0 : existing.recordsCount) + recordsCount,
       sampledOnError
     });
+    this.recordedContextsByView.set(key, this.copyReplayContext(context));
+    this.notifyReplayMetadata(context);
+  }
+
+  private notifyReplayMetadata(context: SessionReplayContext): void {
+    const rumContext: FTSessionReplayRUMContext = {
+      applicationId: context.applicationId,
+      sessionId: context.sessionId,
+      viewId: context.viewId,
+      viewName: '',
+      viewReferrer: '',
+      linkContext: context.globalContext ?? {},
+      timestamp: Date.now() * 1000000
+    };
+    FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext));
   }
 
   private getViewMetadataKey(context: FTSessionReplayRUMContext): string {
@@ -1030,7 +1072,19 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
       (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
     const accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
       (success: boolean, failure: string): void => {
-        if (!success) this.lastCaptureFailure = failure;
+        if (!success) {
+          this.lastCaptureFailure = failure;
+          return;
+        }
+        this.recordReplayMetadata(context, records.length);
+        // Stop can queue View End before an earlier Error snapshot promotes
+        // the session. Move that already-targeted error batch as well.
+        if (storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
+          this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
+            (promoted: boolean, promotionFailure: string): void => {
+              if (!promoted) this.lastCaptureFailure = promotionFailure;
+            });
+        }
       }, requiresStart);
     if (!accepted) this.lastCaptureFailure = 'Session Replay Worker did not accept the record batch.';
     return accepted;
@@ -1049,7 +1103,6 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
     if (!this.appendRecordedRecords(activeContext, capture.records, true, true)) {
       return null;
     }
-    this.recordReplayMetadata(activeContext, capture.records.length);
     this.lastCapture = capture;
     return capture;
   }
@@ -1083,6 +1136,10 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
         if (!success) {
           this.lastCaptureFailure = failure;
           this.promotedErrorSessions.delete(sessionId);
+        } else {
+          this.recordedContextsByView.forEach((context: SessionReplayContext): void => {
+            if (context.sessionId === sessionId) this.notifyReplayMetadata(context);
+          });
         }
       });
     if (!accepted) this.promotedErrorSessions.delete(sessionId);
@@ -1163,7 +1220,7 @@ export class FTSessionReplayPOC implements FTSessionReplayBridge {
   }
 
   private isCurrentCapture(context: SessionReplayContext, generation: number): boolean {
-    return this.isStarted && generation === this.captureGeneration && this.activeContext !== null &&
+    return (this.isStarted || this.isStopping) && generation === this.captureGeneration && this.activeContext !== null &&
       this.isSameReplayContext(this.activeContext, context);
   }
 
