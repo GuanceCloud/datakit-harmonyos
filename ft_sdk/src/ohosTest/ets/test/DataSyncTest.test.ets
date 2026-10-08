@@ -11,6 +11,7 @@ import { FTSDKConfig, FTLoggerConfig, FTRUMConfig, FTTraceConfig } from '../../.
 import { Constants } from '../../../main/ets/components/Constants';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
+import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
 import FTTrackInner from '../../../main/ets/components/FTTrackInner';
 import { FTLogger } from '../../../main/ets/components/log/FTLogger';
 import { Status } from '../../../main/ets/components/bean/Status';
@@ -23,6 +24,9 @@ import { TraceType } from '../../../main/ets/components/trace/TraceType';
 import { FTTraceHandler } from '../../../main/ets/components/trace/FTTraceHandler';
 import { FTTraceManager } from '../../../main/ets/components/trace/FTTraceManager';
 import { SyncTaskManager } from '../../../main/ets/components/SyncTaskManager';
+import { FTCrashFreeDurationManager } from '../../../main/ets/components/monitor/FTCrashFreeDurationManager';
+import { DbInternalTestAccess } from '../../../main/ets/components/internal/testaccess/DbInternalTestAccess';
+import { Utils } from '../../../main/ets/components/utils/Utils';
 import { DBAssert } from './helpers/DBAssert';
 import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
@@ -41,6 +45,41 @@ const KEY_ERROR_TIMELINE = 'ft.rum.error.timeline';
 
 interface ActionPropertyValue {
   value: string | number | boolean;
+}
+
+class NonCrashErrorCase {
+  public readonly message: string;
+  public readonly errorType: ErrorType;
+  public readonly expectedType: string;
+
+  public constructor(
+    message: string,
+    errorType: ErrorType,
+    expectedType: string
+  ) {
+    this.message = message;
+    this.errorType = errorType;
+    this.expectedType = expectedType;
+  }
+}
+
+class CrashErrorCase {
+  public readonly message: string;
+  public readonly errorType: ErrorType;
+  public readonly expectedType: string;
+  public readonly state: AppState;
+
+  public constructor(
+    message: string,
+    errorType: ErrorType,
+    expectedType: string,
+    state: AppState
+  ) {
+    this.message = message;
+    this.errorType = errorType;
+    this.expectedType = expectedType;
+    this.state = state;
+  }
 }
 
 function buildDefaultSdkConfig(): FTSDKConfig {
@@ -233,6 +272,11 @@ export default function dataSyncTest() {
 
       installTestSdk(context);
 
+      // These tests exercise explicit RUM events. Exclude the runner's own Index
+      // page and its delayed Router observer callbacks from each test database.
+      FTNavigationTracker.getInstance().destroy();
+      await FTRUMGlobalManager.getInstance().stopView();
+
       await DBAssert.resetAll();
       collector.clearRequests();
     });
@@ -336,6 +380,121 @@ export default function dataSyncTest() {
       expect(record !== null).assertTrue();
       expect(line.includes('custom_view_property')).assertTrue();
       expect(line.includes('view_property_custom_view_property')).assertFalse();
+    });
+
+    it('stopViewMergesPropertiesAndOverridesMatchingKeys', 0, async () => {
+      const viewName = 'merged_stop_view_properties';
+      const startProperties = buildActionProperty('start_only', 'start-value');
+      startProperties['shared_key'] = wrapActionProperty('old-value') as object;
+      const stopProperties = buildActionProperty('stop_only', 'stop-value');
+      stopProperties['shared_key'] = wrapActionProperty('new-value') as object;
+
+      await FTRUMGlobalManager.getInstance().startView(viewName, startProperties);
+      await FTRUMGlobalManager.getInstance().stopView(stopProperties);
+      await waitForRumAggregation();
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_name=${viewName}`, 'is_active=false', 'start_only', 'stop_only', 'new-value'], 5000);
+      expect(record !== null).assertTrue();
+      const line = record?.getDataString() ?? '';
+      expect(line.includes('start-value')).assertTrue();
+      expect(line.includes('stop-value')).assertTrue();
+      expect(line.includes('old-value')).assertFalse();
+    });
+
+    it('eventsWithoutAnActivePageUseSyntheticViews', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      await FTRUMGlobalManager.getInstance().startView('closed_page_before_fallback');
+      const previous = await DBAssert.waitForViewNamed('closed_page_before_fallback', 5000);
+      expect(previous !== null).assertTrue();
+      await FTRUMGlobalManager.getInstance().stopView();
+
+      const rootTags: Record<string, string> = {};
+      manager.attachRUMRelative(rootTags, false);
+      expect(rootTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      expect(rootTags[Constants.KEY_RUM_VIEW_ID] === previous?.getId()).assertFalse();
+      const root = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_ROOT_FALLBACK, 5000);
+      expect(root?.getId()).assertEqual(rootTags[Constants.KEY_RUM_VIEW_ID]);
+
+      manager.onAppBackground();
+      const backgroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(backgroundTags, false);
+      expect(backgroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_BACKGROUND);
+      expect(backgroundTags[Constants.KEY_RUM_VIEW_ID] === previous?.getId()).assertFalse();
+      const background = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+      expect(background?.getId()).assertEqual(backgroundTags[Constants.KEY_RUM_VIEW_ID]);
+
+      manager.onAppForeground();
+      await waitForRumAggregation();
+      const noPageForegroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(noPageForegroundTags, false);
+      expect(noPageForegroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      const backgroundAfterForeground = (await DBAssert.queryViews(100))
+        .find(view => view.getId() === background?.getId());
+      expect(backgroundAfterForeground?.getIsClose()).assertFalse();
+      await FTRUMGlobalManager.getInstance().startView('page_after_fallback');
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${background?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+      const resumedTags: Record<string, string> = {};
+      manager.attachRUMRelative(resumedTags, false);
+      expect(resumedTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual('page_after_fallback');
+      expect(resumedTags[Constants.KEY_RUM_VIEW_ID] === backgroundTags[Constants.KEY_RUM_VIEW_ID]).assertFalse();
+    });
+
+    it('backgroundClosesLaunchViewWithoutAnActivePage', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      // The test runner may already have an automatically tracked Index page.
+      await FTRUMGlobalManager.getInstance().stopView();
+      manager.addAction('launch_without_page', Constants.ACTION_TYPE_LAUNCH_COLD,
+        1_000_000, Utils.getCurrentNanoTime());
+      const launch = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_APPLICATION_LAUNCH, 5000);
+      expect(launch !== null).assertTrue();
+      expect(launch?.getIsClose()).assertFalse();
+
+      manager.onAppBackground();
+      const launchClosed = await WaitUtils.waitUntil(async () =>
+        (await DBAssert.queryViews(100)).some(view => view.getId() === launch?.getId() && view.getIsClose()), 5000);
+      expect(launchClosed).assertTrue();
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${launch?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+
+      manager.onAppForeground();
+      const foregroundTags: Record<string, string> = {};
+      manager.attachRUMRelative(foregroundTags, false);
+      expect(foregroundTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+    });
+
+    it('reenteringBackgroundWithoutAPageStartsANewBackgroundView', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.onAppBackground();
+      const first = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+      expect(first !== null).assertTrue();
+      manager.onAppBackground();
+      const sameBackground = (await DBAssert.queryViews(100))
+        .filter(view => view.getViewName() === Constants.VIEW_NAME_BACKGROUND);
+      expect(sameBackground.length).assertEqual(1);
+
+      manager.onAppForeground();
+      await waitForRumAggregation();
+      const stillOpen = (await DBAssert.queryViews(100)).find(view => view.getId() === first?.getId());
+      expect(stillOpen?.getIsClose()).assertFalse();
+
+      manager.onAppBackground();
+      const secondCreated = await WaitUtils.waitUntil(async () =>
+        (await DBAssert.queryViews(100)).some(view =>
+          view.getViewName() === Constants.VIEW_NAME_BACKGROUND && view.getId() !== first?.getId() &&
+          !view.getIsClose()), 5000);
+      expect(secondCreated).assertTrue();
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${first?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+
+      manager.onAppForeground();
+      const second = (await DBAssert.queryViews(100)).find(view =>
+        view.getViewName() === Constants.VIEW_NAME_BACKGROUND && view.getId() !== first?.getId());
+      expect(second?.getIsClose()).assertFalse();
+      await FTRUMGlobalManager.getInstance().startView('page_after_second_background');
+      expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${second?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
     });
 
     it('logUpdateShouldUpload', 0, async () => {
@@ -565,6 +724,162 @@ export default function dataSyncTest() {
       expect(consumed).assertTrue();
     });
 
+    it('errorSampledSessionShouldStageActionViewAndResourceTogether', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 1);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.SAMPLING);
+
+      const viewName = 'error_sampled_lifecycle_view';
+      const actionName = 'error_sampled_lifecycle_action';
+      const aggregatedActionName = 'error_sampled_aggregate_action';
+      const resourceId = 'error_sampled_lifecycle_resource';
+      const resourceUrl = 'https://example.com/error-sampled-lifecycle';
+      const params = new ResourceParams();
+      params.setUrl(resourceUrl);
+      params.setResourceMethod('GET');
+      params.setResourceStatus(200);
+      const netStatus = new NetStatusBean();
+      netStatus.setHoleRequestTime(120000000);
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().addAction(actionName, 'click');
+      await WaitUtils.delay(300);
+      FTRUMGlobalManager.getInstance().startAction(aggregatedActionName, 'click');
+      FTRUMGlobalManager.getInstance().startResource(resourceId);
+      FTRUMGlobalManager.getInstance().stopResource(resourceId);
+      FTRUMGlobalManager.getInstance().addResource(resourceId, params, netStatus);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const stagedType = 'rum_app_error_sampled';
+      const action = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'action', [`action_name=${actionName}`], 5000);
+      const aggregatedAction = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'action', [`action_name=${aggregatedActionName}`], 5000);
+      const view = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'view', [`view_name=${viewName}`], 5000);
+      const resource = await DBAssert.waitForRawSyncRecordWithMeasurement(stagedType,
+        'resource', [`resource_url=${resourceUrl}`], 5000);
+      expect(action !== null).assertTrue();
+      expect(aggregatedAction !== null).assertTrue();
+      expect(view !== null).assertTrue();
+      expect(resource !== null).assertTrue();
+
+      // Android keeps the View Line Protocol timestamp at its start while
+      // staging an error-sampled View at its snapshot time. Resource uses its
+      // start time for both the Line Protocol and the staging row.
+      const viewLine = view!.getDataString();
+      const viewEventTime = Number(viewLine.substring(viewLine.lastIndexOf(' ') + 1));
+      if (!(view!.getTime() > viewEventTime)) {
+        throw new Error(`Sampled View storage time ${view!.getTime()} must follow event time ${viewEventTime}; ` +
+          `line=${viewLine}`);
+      }
+      const resourceLine = resource!.getDataString();
+      const resourceEventTime = Number(resourceLine.substring(resourceLine.lastIndexOf(' ') + 1));
+      expect(resource!.getTime()).assertEqual(resourceEventTime);
+
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        const line = row.getDataString();
+        expect(line.includes(`action_name=${actionName}`)).assertFalse();
+        expect(line.includes(`action_name=${aggregatedActionName}`)).assertFalse();
+        expect(line.includes(`view_name=${viewName}`)).assertFalse();
+        expect(line.includes(`resource_url=${resourceUrl}`)).assertFalse();
+      }
+    });
+
+    it('actionAndViewKeepCreationSamplingAfterSessionRateChanges', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 1);
+      const viewName = 'sampling_decision_view';
+      const actionName = 'sampling_decision_action';
+
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().startAction(actionName, 'click');
+      await WaitUtils.delay(300);
+      manager.setSamplingRates(1, 0);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.ALL);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const sampledType = 'rum_app_error_sampled';
+      expect(await DBAssert.waitForRawSyncRecordContaining(sampledType,
+        ['view,', `view_name=${viewName}`], 5000) !== null).assertTrue();
+      expect(await DBAssert.waitForRawSyncRecordContaining(sampledType,
+        ['action,', `action_name=${actionName}`], 5000) !== null).assertTrue();
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        const line = row.getDataString();
+        expect(line.includes(`view_name=${viewName}`)).assertFalse();
+        expect(line.includes(`action_name=${actionName}`)).assertFalse();
+      }
+    });
+
+    it('expiredSessionKeepsPredecessorViewInItsOriginalSession', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      const oldViewName = 'expired_sampled_view';
+      const newViewName = 'renewed_normal_view';
+      manager.setSamplingRates(0, 1);
+      await FTRUMGlobalManager.getInstance().startView(oldViewName);
+      const oldSessionId = manager.getSessionId();
+      const oldViewId = manager.getActiveView()!.getId();
+
+      manager.setSamplingRates(1, 0);
+      manager.expireSessionForTest();
+      await FTRUMGlobalManager.getInstance().startView(newViewName);
+      expect(manager.getSessionId() === oldSessionId).assertFalse();
+      expect(manager.getActiveView()!.getSessionId()).assertEqual(manager.getSessionId());
+      await waitForRumAggregation();
+
+      const oldRecord = await DBAssert.waitForRawSyncRecordContaining('rum_app_error_sampled',
+        ['view,', `view_id=${oldViewId}`, `session_id=${oldSessionId}`, 'is_active=false'], 5000);
+      expect(oldRecord !== null).assertTrue();
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      for (const row of normalRows) {
+        expect(row.getDataString().includes(`view_id=${oldViewId}`)).assertFalse();
+      }
+      await FTRUMGlobalManager.getInstance().stopView();
+    });
+
+    it('errorSampledViewUsesLastErrorTimeOnlyForStaging', 0, async () => {
+      const viewStartTime = Date.now() * 1000000 - 2000000000;
+      const errorTime = viewStartTime + 1000000000;
+      const viewName = `sampled_error_view_${Date.now()}`;
+      const tags = new Map<string, string>();
+      tags.set(Constants.KEY_RUM_SESSION_ID, 'sampled-error-view-session');
+      tags.set(Constants.KEY_RUM_VIEW_ID, viewName);
+      tags.set(Constants.KEY_RUM_VIEW_NAME, viewName);
+      const fields = new Map<string, string>();
+      fields.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, 'false');
+      fields.set(Constants.KEY_SESSION_ERROR_TIMESTAMP, errorTime.toString());
+
+      FTTrackInner.getInstance().rum(viewStartTime, Constants.FT_MEASUREMENT_RUM_VIEW,
+        tags, fields, null, CollectType.SAMPLING);
+
+      const record = await DBAssert.waitForRawSyncRecordContaining('rum_app_error_sampled',
+        ['view,', `view_name=${viewName}`], 5000);
+      expect(record !== null).assertTrue();
+      expect(record!.getTime()).assertEqual(errorTime);
+      const line = record!.getDataString();
+      expect(Number(line.substring(line.lastIndexOf(' ') + 1))).assertEqual(viewStartTime);
+    });
+
+    it('droppedSessionShouldNotStageCompletedAction', 0, async () => {
+      const manager = FTRUMInnerManager.getInstance();
+      manager.setSamplingRates(0, 0);
+      expect(manager.checkSessionWillCollect(manager.getSessionId())).assertEqual(CollectType.DROP);
+
+      const actionName = 'dropped_lifecycle_action';
+      FTRUMGlobalManager.getInstance().addAction(actionName, 'click');
+      await waitForRumAggregation();
+
+      const normalRows = await DBAssert.querySyncData([DataType.RUM_APP], 100);
+      const stagedRows = await DBAssert.queryRawSyncData('rum_app_error_sampled', 100);
+      for (const row of normalRows.concat(stagedRows)) {
+        expect(row.getDataString().includes(`action_name=${actionName}`)).assertFalse();
+      }
+    });
+
     it('jsErrorShouldUploadAndDelete', 0, async () => {
       const errorMessage = 'real_collected_js_error';
       const errorStack = 'Error: real_collected_js_error\n  at DataSyncTest';
@@ -602,6 +917,130 @@ export default function dataSyncTest() {
       expect(uploaded.length > 0).assertTrue();
       RumAttributeAssert.uploaded(uploaded, errorRecord, attributes);
       expect(consumed).assertTrue();
+    });
+
+    it('crashFreeDurationWaitsForSuccessfulErrorLocalWrite', 0, async () => {
+      const failedMessage = 'crash_free_duration_forced_local_write_failure';
+      const persistedMessage = 'crash_free_duration_local_write_recovered';
+      const crashFreeManager = FTCrashFreeDurationManager.getInstance();
+
+      // Give the process-level clock a visible interval, then fail the exact
+      // write used for the first Crash Error. The DB manager will spool this
+      // record but the Error write callback must not acknowledge the timer.
+      await WaitUtils.delay(250);
+      DbInternalTestAccess.forceNextSyncDataWriteFailure();
+      FTRUMGlobalManager.getInstance().addError(
+        `Error: ${failedMessage}\n  at DataSyncTest`,
+        failedMessage,
+        ErrorType.JS_CRASH,
+        AppState.RUN
+      );
+      await WaitUtils.delay(250);
+      const failedRowWasNotStored = await DBAssert.waitForNoSyncRecordContaining(DataType.RUM_APP, [
+        'error,',
+        failedMessage
+      ], 100);
+      expect(failedRowWasNotStored).assertTrue();
+      const afterFailedWrite = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterFailedWrite !== null).assertTrue();
+      if (afterFailedWrite) {
+        // A reset at the failed write would leave only the latter ~250 ms.
+        // Keeping the pre-failure interval yields at least ~500 ms here.
+        expect(afterFailedWrite.foregroundNs > 400000000).assertTrue();
+      }
+
+      // A following successful Error row is the first acknowledgement and
+      // must start the next crash-free cycle exactly once.
+      FTRUMGlobalManager.getInstance().addError(
+        `Error: ${persistedMessage}\n  at DataSyncTest`,
+        persistedMessage,
+        ErrorType.JS_CRASH,
+        AppState.RUN
+      );
+      const persistedRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'error,',
+        'error_type=js_crash',
+        persistedMessage,
+        'foreground_crash_free_duration=',
+        'background_crash_free_duration='
+      ], 5000);
+      expect(persistedRecord !== null).assertTrue();
+
+      await WaitUtils.delay(30);
+      const afterSuccessfulWrite = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterSuccessfulWrite !== null).assertTrue();
+      if (afterFailedWrite && afterSuccessfulWrite) {
+        expect(afterSuccessfulWrite.foregroundNs < afterFailedWrite.foregroundNs).assertTrue();
+      }
+
+      // No second acknowledgement arrives for the prior failed/spooled Error:
+      // the new interval grows monotonically instead of being cleared again.
+      await WaitUtils.delay(80);
+      const afterRecoverySettles = await crashFreeManager.prepareCrashFreeDuration(AppState.RUN, false);
+      expect(afterRecoverySettles !== null).assertTrue();
+      if (afterSuccessfulWrite && afterRecoverySettles) {
+        expect(afterRecoverySettles.foregroundNs > afterSuccessfulWrite.foregroundNs).assertTrue();
+      }
+
+      // The forced write was spooled; clean it explicitly so it cannot leak
+      // into later device tests.
+      await FTSDK.clearAllData();
+    });
+
+    it('nonCrashErrorsDoNotWriteCrashFreeDurationFields', 0, async () => {
+      const cases: NonCrashErrorCase[] = [
+        new NonCrashErrorCase('crash_free_custom_error', ErrorType.CUSTOM, 'custom'),
+        new NonCrashErrorCase('crash_free_network_error', ErrorType.NETWORK, 'network_error'),
+        new NonCrashErrorCase('crash_free_anr_error', ErrorType.ANR_ERROR, 'anr_error')
+      ];
+
+      for (const testCase of cases) {
+        FTRUMGlobalManager.getInstance().addError(
+          `Error: ${testCase.message}\n  at DataSyncTest`,
+          testCase.message,
+          testCase.errorType,
+          AppState.RUN
+        );
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'error,',
+          `error_type=${testCase.expectedType}`,
+          testCase.message
+        ], 5000);
+        const line = record?.getDataString() ?? '';
+        expect(record !== null).assertTrue();
+        expect(line.includes('foreground_crash_free_duration=')).assertFalse();
+        expect(line.includes('background_crash_free_duration=')).assertFalse();
+      }
+    });
+
+    it('foregroundAndBackgroundJsAndNativeCrashesWriteBothDurationFields', 0, async () => {
+      const cases: CrashErrorCase[] = [
+        new CrashErrorCase('crash_free_js_foreground', ErrorType.JS_CRASH, 'js_crash', AppState.RUN),
+        new CrashErrorCase('crash_free_js_background', ErrorType.JS_CRASH, 'js_crash', AppState.BACKGROUND),
+        new CrashErrorCase('crash_free_native_foreground', ErrorType.NATIVE_CRASH, 'native_crash', AppState.RUN),
+        new CrashErrorCase('crash_free_native_background', ErrorType.NATIVE_CRASH, 'native_crash', AppState.BACKGROUND)
+      ];
+
+      for (const testCase of cases) {
+        FTRUMGlobalManager.getInstance().addError(
+          `Error: ${testCase.message}\n  at DataSyncTest`,
+          testCase.message,
+          testCase.errorType,
+          testCase.state
+        );
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+          'error,',
+          `error_type=${testCase.expectedType}`,
+          `error_situation=${testCase.state.toString()}`,
+          testCase.message,
+          'foreground_crash_free_duration=',
+          'background_crash_free_duration='
+        ], 5000);
+        const line = record?.getDataString() ?? '';
+        expect(record !== null).assertTrue();
+        expect(/foreground_crash_free_duration=\d+i/.test(line)).assertTrue();
+        expect(/background_crash_free_duration=\d+i/.test(line)).assertTrue();
+      }
     });
 
     it('anrErrorShouldUploadAndDelete', 0, async () => {
@@ -810,7 +1249,7 @@ export default function dataSyncTest() {
       ];
       const errorFragments = [
         'error',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -933,6 +1372,20 @@ export default function dataSyncTest() {
       expect(uploaded.length > 0).assertTrue();
       RumAttributeAssert.uploaded(uploaded, longTaskRecord, attributes);
       expect(consumed).assertTrue();
+    });
+
+    it('viewLongTaskRateIsReportedAndClamped', 0, async () => {
+      const viewName = 'long_task_rate_view';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+      FTRUMGlobalManager.getInstance().addLongTask('long_task_rate_event', 10 * 1000000000);
+      const activeView = FTRUMInnerManager.getInstance().getActiveView();
+      expect(activeView?.getLongTaskDuration()).assertEqual(10 * 1000000000);
+      await FTRUMGlobalManager.getInstance().stopView();
+      await waitForRumAggregation();
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_name=${viewName}`, 'view_long_task_rate=1'], 5000);
+      expect(record !== null).assertTrue();
     });
 
     it('configShouldAffectUpload', 0, async () => {

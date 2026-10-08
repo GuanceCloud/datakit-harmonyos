@@ -5,6 +5,7 @@
 import { StringUtils } from '../../utils/StringUtils';
 import { Utils } from '../../utils/Utils';
 import { Constants } from '../../Constants';
+import { CollectType, parseCollectType } from '../../rum/enum/RUMEnums';
 
 /**
  * ViewBean JSON interface
@@ -32,6 +33,7 @@ export interface ViewBeanJSON {
   extraAttr: Record<string, object>;
   property?: Record<string, object>;
   tags?: Record<string, string>;
+  collectType?: CollectType | null;
 }
 
 /**
@@ -86,6 +88,9 @@ export class ViewBean {
    * Session ID
    */
   private sessionId: string = "";
+
+  /** Sampling decision captured when this View was created. */
+  private collectType: CollectType | null = null;
 
   /**
    * Action count
@@ -186,6 +191,32 @@ export class ViewBean {
 
   public getStartTime(): number { return this.startTime; }
 
+  public setMonotonicStartTime(startTime: number): void {
+    this.extraAttr.set(Constants.KEY_RUM_VIEW_MONOTONIC_START, { value: String(startTime) } as MonitorValue);
+  }
+
+  public getMonotonicStartTime(): number {
+    const stored = this.extraAttr.get(Constants.KEY_RUM_VIEW_MONOTONIC_START);
+    if (stored && typeof stored === 'object') {
+      const value = (stored as MonitorValue).value;
+      const startTime = Number(value);
+      return Number.isFinite(startTime) ? startTime : 0;
+    }
+    return 0;
+  }
+
+  /** Use the persisted duration if the monotonic origin is unavailable (for example after a reboot). */
+  public getCurrentDuration(): number {
+    const startTime = this.getMonotonicStartTime();
+    if (startTime > 0) {
+      const now = Utils.getMonotonicNanoTime();
+      if (now >= startTime) {
+        return now - startTime;
+      }
+    }
+    return Math.max(0, this.timeSpent);
+  }
+
   public getIsClose(): boolean { return this.isClose; }
   public setIsClose(isClose: boolean): void { this.isClose = isClose; }
 
@@ -203,6 +234,9 @@ export class ViewBean {
   public getSessionId(): string { return this.sessionId; }
   public setSessionId(sessionId: string): void { this.sessionId = sessionId; }
 
+  public getCollectType(): CollectType | null { return this.collectType; }
+  public setCollectType(collectType: CollectType | null): void { this.collectType = collectType; }
+
   public getActionCount(): number { return this.actionCount; }
   public setActionCount(actionCount: number): void { this.actionCount = actionCount; }
 
@@ -211,6 +245,19 @@ export class ViewBean {
 
   public getLongTaskCount(): number { return this.longTaskCount; }
   public setLongTaskCount(longTaskCount: number): void { this.longTaskCount = longTaskCount; }
+
+  public setLongTaskDuration(duration: number): void {
+    this.extraAttr.set(Constants.KEY_RUM_VIEW_LONG_TASK_DURATION, { value: String(duration) } as MonitorValue);
+  }
+
+  public getLongTaskDuration(): number {
+    const stored = this.extraAttr.get(Constants.KEY_RUM_VIEW_LONG_TASK_DURATION);
+    if (stored && typeof stored === 'object') {
+      const duration = Number((stored as MonitorValue).value);
+      return Number.isFinite(duration) ? Math.max(0, duration) : 0;
+    }
+    return 0;
+  }
 
   public getViewLoadTime(): number { return this.viewLoadTime; }
   public setViewLoadTime(viewLoadTime: number): void { this.viewLoadTime = viewLoadTime; }
@@ -330,7 +377,7 @@ export class ViewBean {
    */
   public getAttrJsonString(): string {
     try {
-      const obj: Record<string, object> = {};
+      const obj: Record<string, object | string> = {};
       this.extraAttr.forEach((value, key) => {
         obj[key] = value;
       });
@@ -342,6 +389,9 @@ export class ViewBean {
         sampledOnReplayError: this.sampledOnReplayError
       };
       obj[Constants.KEY_HAS_REPLAY] = replayMarker;
+      if (this.collectType !== null) {
+        obj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
+      }
       return JSON.stringify(obj);
     } catch (error) {
       return "{}";
@@ -359,6 +409,7 @@ export class ViewBean {
         this.extraAttr.clear();
         this.property = {};
         this.tags = {};
+        this.collectType = null;
         const keys = ViewBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
@@ -377,6 +428,8 @@ export class ViewBean {
             this.hasReplay = replayMarker.value === true;
             this.recordsCount = replayMarker.recordsCount === undefined ? 0 : Math.max(0, Math.floor(replayMarker.recordsCount));
             this.sampledOnReplayError = replayMarker.sampledOnReplayError === true;
+          } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+            this.collectType = parseCollectType(String(value));
           } else {
             this.extraAttr.set(key, value);
           }
@@ -392,8 +445,7 @@ export class ViewBean {
    */
   public close(): void {
     this.isClose = true;
-    // Aligned with Android: timeSpent uses nanoseconds
-    this.timeSpent = Utils.getCurrentNanoTime() - this.startTime;
+    this.timeSpent = this.getCurrentDuration();
     this.dataUpdateTime = Date.now();
   }
 
@@ -463,8 +515,7 @@ export class ViewBean {
    */
   public calculateTimeSpent(): void {
     if (!this.isClose) {
-      // Aligned with Android: timeSpent uses nanoseconds
-      this.timeSpent = Utils.getCurrentNanoTime() - this.startTime;
+      this.timeSpent = this.getCurrentDuration();
       this.dataUpdateTime = Date.now();
     }
   }
@@ -544,7 +595,8 @@ export class ViewBean {
       viewUpdateTime: this.viewUpdateTime,
       extraAttr: extraAttrObj,
       property: this.property,
-      tags: this.tags
+      tags: this.tags,
+      collectType: this.collectType
     };
   }
 
@@ -561,6 +613,7 @@ export class ViewBean {
     viewBean.recordsCount = json.recordsCount === undefined ? 0 : Math.max(0, Math.floor(json.recordsCount));
     viewBean.sampledOnReplayError = json.sampledOnReplayError === true;
     viewBean.sessionId = json.sessionId || "";
+    viewBean.collectType = json.collectType ? parseCollectType(json.collectType) : null;
     viewBean.actionCount = json.actionCount || 0;
     viewBean.errorCount = json.errorCount || 0;
     viewBean.longTaskCount = json.longTaskCount || 0;
@@ -602,6 +655,7 @@ export class ViewBean {
     cloned.recordsCount = this.recordsCount;
     cloned.sampledOnReplayError = this.sampledOnReplayError;
     cloned.sessionId = this.sessionId;
+    cloned.collectType = this.collectType;
     cloned.actionCount = this.actionCount;
     cloned.errorCount = this.errorCount;
     cloned.longTaskCount = this.longTaskCount;

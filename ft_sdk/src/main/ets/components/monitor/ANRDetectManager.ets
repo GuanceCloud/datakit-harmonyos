@@ -1,7 +1,13 @@
 import { hiAppEvent } from '@kit.PerformanceAnalysisKit';
+import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
-import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
+import {
+  FTRUMInnerManager,
+  FTRUMCrashRecoveryContext,
+  hasFTRUMCrashRecoveryContext
+} from '../rum/FTRUMInnerManager';
 import { AppState, ErrorType } from '../rum/enum/RUMEnums';
+import { RunnerCompleteCallBack } from '../rum/callback/RunnerCompleteCallBack';
 import { Utils } from '../utils/Utils';
 import { SDKDedicatedPoolManager } from '../thread/SDKDedicatedPoolManager';
 import {
@@ -41,6 +47,19 @@ const ANR_FRAME_KEYS: string[] = [
 
 interface ErrorPropertyValue {
   value: string | number;
+}
+
+/** Clears a recovered snapshot only after the historical Error is durable. */
+class ANRRecoveryPersistCallback implements RunnerCompleteCallBack {
+  private readonly rumManager: FTRUMInnerManager;
+
+  constructor(rumManager: FTRUMInnerManager) {
+    this.rumManager = rumManager;
+  }
+
+  onComplete(): void {
+    this.rumManager.clearSavedRumContext();
+  }
 }
 
 export interface ANRStats {
@@ -412,18 +431,23 @@ export class ANRDetectManager {
         const costTime = Math.max(0, Date.now() - startedAt);
         this.traceANRLane(
           `[CONSUMED] name=${traceName} result=success cost=${costTime}ms files=${parsed.filesRead} truncated=${
-            parsed.truncatedFiles} action=report-anr-error`
+            parsed.truncatedFiles} action=report-anr-crash`
         );
       })
       .catch((error: Error) => {
         const costTime = Math.max(0, Date.now() - startedAt);
         this.traceANRLane(
-          `[CONSUMED] name=${traceName} result=failed error=${error.message} cost=${costTime}ms action=report-anr-error`
+          `[CONSUMED] name=${traceName} result=failed error=${error.message} cost=${costTime}ms action=report-anr-crash`
         );
         FTInnerLogger.e(TAG, `Failed to record ANR task: name=${traceName}, error=${error.message}`);
       });
   }
 
+  /**
+   * APP_FREEZE is the terminal system fault subscription. The platform ends
+   * the faulting process before the recovery report, so it always represents
+   * a recovered crash rather than Android's legacy live watchdog ANR.
+   */
   private async reportParsedANR(parsed: SDKANRParseResultDTO): Promise<void> {
     if (parsed.missingStack) {
       FTInnerLogger.w(TAG, 'Stack trace not found for ANR event');
@@ -434,16 +458,33 @@ export class ANRDetectManager {
       const value: ErrorPropertyValue = { value: parsed.properties[keys[i]] };
       properties[keys[i]] = value;
     }
-    await FTRUMInnerManager.getInstance().addErrorInternal(
+    // This control property is stripped before Line Protocol serialization.
+    // It selects the persisted pre-crash snapshot for crash-free duration.
+    properties[Constants.KEY_RUM_ERROR_IS_PRE_CRASH] = { value: 'true' } as ErrorPropertyValue;
+    const rumManager = FTRUMInnerManager.getInstance();
+    let recoveryContext: FTRUMCrashRecoveryContext | null = null;
+    try {
+      recoveryContext = await rumManager.getSavedRumContext();
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Unable to load recovered RUM context for ANR: ${error}`);
+    }
+    const recoveryCallback = hasFTRUMCrashRecoveryContext(recoveryContext) ?
+      new ANRRecoveryPersistCallback(rumManager) : null;
+    await rumManager.addErrorInternal(
       parsed.stackTrace,
       parsed.message,
       ErrorType.ANR_CRASH,
       parsed.foreground ? AppState.RUN : AppState.BACKGROUND,
       properties,
-      parsed.dateline
+      parsed.dateline,
+      recoveryCallback,
+      undefined,
+      undefined,
+      recoveryContext
     );
     FTInnerLogger.i(TAG,
-      `ANR event uploaded, freeze_type=${parsed.freezeType || 'unknown'}, foreground=${parsed.foreground}`);
+      `ANR event uploaded, error_type=${ErrorType.ANR_CRASH}, ` +
+      `freeze_type=${parsed.freezeType || 'unknown'}, foreground=${parsed.foreground}`);
   }
 
   private nextANRTaskName(name: string): string {

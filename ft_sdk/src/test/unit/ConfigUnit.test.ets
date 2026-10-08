@@ -52,14 +52,37 @@ import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { HandlerView } from '../../main/ets/components/rum/bean/HandlerView';
-import { FTViewTrackingContext } from '../../main/ets/components/rum/handler/FTViewTrackingContext';
+import {
+  FTViewNavigationTrackingContext,
+  FTViewRouterTrackingContext,
+  FTViewTrackingContext
+} from '../../main/ets/components/rum/handler/FTViewTrackingContext';
 import { FTViewTrackingHandler } from '../../main/ets/components/rum/handler/FTViewTrackingHandler';
 import { FTViewTrackingType } from '../../main/ets/components/rum/enum/FTViewTrackingType';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 const TEST_FAKE_URL = 'http://www.test.url';
 const TEST_FAKE_CLIENT_TOKEN = 'fake_client_token';
 const TEST_FAKE_RUM_ID = 'rumId';
+
+class TestGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
+  }
+}
+
+class TestConfigViewTrackingHandler implements FTViewTrackingHandler {
+  private resolver: (context: FTViewTrackingContext) => HandlerView | null;
+
+  constructor(resolver: (context: FTViewTrackingContext) => HandlerView | null) {
+    this.resolver = resolver;
+  }
+
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    return this.resolver(context);
+  }
+}
 
 class TestConfigRecord implements ConfigRecord {
   private config: FTSDKConfig;
@@ -203,6 +226,8 @@ class FakeFTSDKRuntime implements FTSDKRuntime {
 }
 
 class FakeAbilityContext {
+  filesDir: string = '/tmp/ft-sdk-config-unit/files';
+  databaseDir: string = '/tmp/ft-sdk-config-unit/databases';
 }
 
 class FakeUIContext {
@@ -363,6 +388,20 @@ export default function configUnitTest() {
       expect(manager.shouldFilterResourceUrl('https://ignored.example.com/metrics')).assertTrue();
       expect(manager.shouldFilterResourceUrl('https://api.example.com/orders')).assertFalse();
       expect(handler.calls).assertEqual(2);
+    });
+
+    it('networkErrorHandlerShouldBeStoredAsGlobalAutoTrackDefault', 0, () => {
+      const handler = new TestGlobalNetworkErrorHandler();
+      const config = new FTRUMConfig().setNetworkErrorHandler(handler);
+      const manager = FTRUMConfigManager.getInstance();
+      manager.initWithConfig(config);
+
+      expect(config.getNetworkErrorHandler() === handler).assertTrue();
+      expect(manager.getNetworkErrorHandler() === handler).assertTrue();
+
+      config.setNetworkErrorHandler(null);
+      expect(config.getNetworkErrorHandler() === null).assertTrue();
+      expect(manager.getNetworkErrorHandler() === undefined).assertTrue();
     });
 
     it('runtimeEndpointUpdatesSwitchUploadModes', 0, () => {
@@ -536,14 +575,17 @@ export default function configUnitTest() {
     });
 
     it('rumConfigShouldStoreAutomaticViewTrackingHandlersByType', 0, () => {
-      const routerContext: FTViewTrackingContext = {
+      const routerPageInfo: uiObserver.RouterPageInfo = {
+        context: createFakeContext(),
+        name: 'pages/account/Home',
+        path: 'pages/account/Home',
+        index: 0,
+        state: uiObserver.RouterPageState.ABOUT_TO_APPEAR,
+        pageId: 'home'
+      };
+      const routerContext: FTViewRouterTrackingContext = {
         trackingType: FTViewTrackingType.ROUTER,
-        routerPageInfo: {
-          name: 'pages/account/Home',
-          path: 'pages/account/Home',
-          index: 0,
-          state: 0
-        } as Object as uiObserver.RouterPageInfo,
+        routerPageInfo: routerPageInfo,
         originalViewName: 'pages/account/Home',
         viewName: 'Home',
         originalFromViewName: '',
@@ -551,23 +593,38 @@ export default function configUnitTest() {
         routerPageState: 0
       };
       let receivedContext: FTViewTrackingContext | undefined;
-      const routerHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => {
+      const routerHandler: FTViewTrackingHandler = new TestConfigViewTrackingHandler(
+        (context: FTViewTrackingContext): HandlerView | null => {
           receivedContext = context;
           return context.viewName === 'IgnoredRoute' ? null : new HandlerView(`router_${context.viewName}`);
-        }
-      };
-      const navigationHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => {
+        });
+      const navigationHandler: FTViewTrackingHandler = new TestConfigViewTrackingHandler(
+        (context: FTViewTrackingContext): HandlerView | null => {
           return context.viewName === 'IgnoredDestination' ? null : new HandlerView(`navigation_${context.viewName}`);
-        }
+        });
+      const fromDestination: uiObserver.NavDestinationInfo = {
+        navigationId: 'account',
+        name: 'pages/account/Home',
+        state: uiObserver.NavDestinationState.ON_HIDDEN,
+        index: 0,
+        navDestinationId: 'home'
       };
-      const navigationContext: FTViewTrackingContext = {
+      const toDestination: uiObserver.NavDestinationInfo = {
+        navigationId: 'account',
+        name: 'pages/account/Detail',
+        state: uiObserver.NavDestinationState.ON_SHOWN,
+        index: 1,
+        navDestinationId: 'detail'
+      };
+      const navigationInfo: uiObserver.NavDestinationSwitchInfo = {
+        context: createFakeContext(),
+        from: fromDestination,
+        to: toDestination,
+        operation: NavigationOperation.PUSH
+      };
+      const navigationContext: FTViewNavigationTrackingContext = {
         trackingType: FTViewTrackingType.NAVIGATION,
-        navigationInfo: {
-          from: { name: 'pages/account/Home' },
-          to: { name: 'pages/account/Detail' }
-        } as Object as uiObserver.NavDestinationSwitchInfo,
+        navigationInfo: navigationInfo,
         originalViewName: 'pages/account/Detail',
         viewName: 'Detail',
         originalFromViewName: 'pages/account/Home',
@@ -583,8 +640,8 @@ export default function configUnitTest() {
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.ROUTER)?.resolveHandlerView(routerContext)?.getViewName() ?? '')
         .assertEqual('router_Home');
       expect(receivedContext?.originalViewName ?? '').assertEqual('pages/account/Home');
-      expect(receivedContext?.routerPageState ?? -1).assertEqual(0);
-      const ignoredRouterContext: FTViewTrackingContext = {
+      expect((receivedContext as FTViewRouterTrackingContext | undefined)?.routerPageState ?? -1).assertEqual(0);
+      const ignoredRouterContext: FTViewRouterTrackingContext = {
         trackingType: FTViewTrackingType.ROUTER,
         routerPageInfo: routerContext.routerPageInfo,
         originalViewName: 'pages/account/IgnoredRoute',
@@ -597,7 +654,7 @@ export default function configUnitTest() {
         .assertTrue();
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView(navigationContext)?.getViewName() ?? '')
         .assertEqual('navigation_Detail');
-      const ignoredNavigationContext: FTViewTrackingContext = {
+      const ignoredNavigationContext: FTViewNavigationTrackingContext = {
         trackingType: FTViewTrackingType.NAVIGATION,
         navigationInfo: navigationContext.navigationInfo,
         originalViewName: 'pages/account/IgnoredDestination',
@@ -608,9 +665,8 @@ export default function configUnitTest() {
       expect(rumConfig.getViewTrackingHandler(FTViewTrackingType.NAVIGATION)?.resolveHandlerView(ignoredNavigationContext) === null)
         .assertTrue();
 
-      const allHandler: FTViewTrackingHandler = {
-        resolveHandlerView: (context: FTViewTrackingContext): HandlerView | null => new HandlerView(`all_${context.viewName}`)
-      };
+      const allHandler: FTViewTrackingHandler = new TestConfigViewTrackingHandler(
+        (context: FTViewTrackingContext): HandlerView | null => new HandlerView(`all_${context.viewName}`));
       const allConfig = new FTRUMConfig()
         .setViewTrackingHandler(allHandler, FTViewTrackingType.ALL);
       expect(allConfig.getViewTrackingHandler(FTViewTrackingType.ALL) === allHandler).assertTrue();
@@ -734,6 +790,63 @@ export default function configUnitTest() {
       expect(new FTTraceConfig().setSamplingRate(-1).getSamplingRate()).assertEqual(0);
       expect(new FTTraceConfig().setSamplingRate(2).getSamplingRate()).assertEqual(1);
       expect(Number.isNaN(new FTLoggerConfig().setSamplingRate(Number.NaN).getSamplingRate())).assertTrue();
+    });
+
+    it('percentageSamplingRatesShouldUseNewUnitsAndKeepLegacyCompatibility', 0, () => {
+      const rum = new FTRUMConfig()
+        .setSamplingRate(1)
+        .setSessionSamplingRate(0.1)
+        .setSessionErrorSampleRate(1)
+        .setSessionOnErrorSamplingRate(1);
+      expect(rum.getSessionSamplingRate()).assertEqual(0.1);
+      expect(rum.getSamplingRate()).assertEqual(0.001);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(1);
+      expect(rum.getSessionErrorSampleRate()).assertEqual(0.01);
+
+      const log = new FTLoggerConfig().setSamplingRate(1).setLogSamplingRate(20);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(log.getSamplingRate()).assertEqual(0.2);
+
+      const trace = new FTTraceConfig().setSamplingRate(1).setTraceSamplingRate(99.9);
+      expect(trace.getTraceSamplingRate()).assertEqual(99.9);
+      expect(trace.getSamplingRate()).assertEqual(0.999);
+
+      // A legacy assignment after a new assignment cannot override the new
+      // field in the same source.
+      rum.setSamplingRate(0.5).setSessionErrorSampleRate(0.5);
+      log.setSamplingRate(0.5);
+      trace.setSamplingRate(0.5);
+      expect(rum.getSessionSamplingRate()).assertEqual(0.1);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(1);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(trace.getTraceSamplingRate()).assertEqual(99.9);
+    });
+
+    it('percentageSamplingRatesShouldRejectInvalidValuesWithoutChangingState', 0, () => {
+      const rum = new FTRUMConfig().setSessionSamplingRate(20).setSessionOnErrorSamplingRate(20);
+      const log = new FTLoggerConfig().setLogSamplingRate(20);
+      const trace = new FTTraceConfig().setTraceSamplingRate(20);
+      const invalidRates = [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 100.1];
+
+      for (const invalidRate of invalidRates) {
+        let rumRejected = false;
+        let errorRumRejected = false;
+        let logRejected = false;
+        let traceRejected = false;
+        try { rum.setSessionSamplingRate(invalidRate); } catch (_) { rumRejected = true; }
+        try { rum.setSessionOnErrorSamplingRate(invalidRate); } catch (_) { errorRumRejected = true; }
+        try { log.setLogSamplingRate(invalidRate); } catch (_) { logRejected = true; }
+        try { trace.setTraceSamplingRate(invalidRate); } catch (_) { traceRejected = true; }
+        expect(rumRejected).assertTrue();
+        expect(errorRumRejected).assertTrue();
+        expect(logRejected).assertTrue();
+        expect(traceRejected).assertTrue();
+      }
+
+      expect(rum.getSessionSamplingRate()).assertEqual(20);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(20);
+      expect(log.getLogSamplingRate()).assertEqual(20);
+      expect(trace.getTraceSamplingRate()).assertEqual(20);
     });
 
     it('rumConfigShouldKeepSwitches', 0, () => {

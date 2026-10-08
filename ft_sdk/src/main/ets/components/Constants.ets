@@ -73,6 +73,10 @@ export class Constants {
    * View root name
    */
   static readonly VIEW_NAME_ROOT = "root";
+  /** Synthetic View used by cold and hot launch Actions, matching Android. */
+  static readonly VIEW_NAME_APPLICATION_LAUNCH = "ApplicationLaunch";
+  static readonly VIEW_NAME_BACKGROUND = "BackgroundView";
+  static readonly VIEW_NAME_ROOT_FALLBACK = "RootView";
   
   /**
    * RUM measurement types
@@ -101,6 +105,7 @@ export class Constants {
   static readonly KEY_RUM_VIEW_ERROR_COUNT = "view_error_count";
   static readonly KEY_RUM_VIEW_RESOURCE_COUNT = "view_resource_count";
   static readonly KEY_RUM_VIEW_LONG_TASK_COUNT = "view_long_task_count";
+  static readonly KEY_RUM_VIEW_LONG_TASK_RATE = "view_long_task_rate";
   
   /**
    * RUM action related keys
@@ -129,6 +134,9 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_STATUS = "resource_status";
   static readonly KEY_RUM_RESOURCE_STATUS_GROUP = "resource_status_group";
   static readonly KEY_RUM_RESOURCE_SIZE = "resource_size";
+  static readonly KEY_RUM_RESOURCE_REQUEST_SIZE = "resource_request_size";
+  static readonly KEY_RUM_RESOURCE_HTTP_PROTOCOL = "resource_http_protocol";
+  static readonly KEY_RUM_RESOURCE_CONNECTION_REUSE = "resource_connection_reuse";
   static readonly KEY_RUM_RESOURCE_DURATION = "duration";
   static readonly KEY_RUM_RESOURCE_DNS = "resource_dns";
   static readonly KEY_RUM_RESOURCE_DNS_TIME = "resource_dns_time";
@@ -146,6 +154,12 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_SPAN_ID = "span_id";
   static readonly KEY_RUM_RESOURCE_REQUEST_HEADER = "request_header";
   static readonly KEY_RUM_RESOURCE_RESPONSE_HEADER = "response_header";
+  /** Resource network snapshot fields (aligned with Android). */
+  static readonly KEY_RUM_RESOURCE_NETWORK_AVAILABLE = "network_available";
+  static readonly KEY_RUM_RESOURCE_NETWORK_VALIDATED = "network_validated";
+  static readonly KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS = "network_downlink_kbps";
+  static readonly KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS = "network_uplink_kbps";
+  static readonly KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH = "network_signal_strength";
   
   /**
    * RUM error related keys
@@ -155,6 +169,9 @@ export class Constants {
   static readonly KEY_RUM_ERROR_SITUATION = "error_situation";
   static readonly KEY_RUM_ERROR_MESSAGE = "error_message";
   static readonly KEY_RUM_ERROR_STACK = "error_stack";
+  static readonly KEY_RUM_ERROR_FOREGROUND_CRASH_FREE_DURATION = "foreground_crash_free_duration";
+  static readonly KEY_RUM_ERROR_BACKGROUND_CRASH_FREE_DURATION = "background_crash_free_duration";
+  static readonly KEY_RUM_ERROR_IS_PRE_CRASH = "is_pre_crash";
   
   /**
    * HTTP request and response headers
@@ -516,6 +533,10 @@ export class Constants {
    * Line protocol data tags, temporary storage for dynamic tags
    */
   static readonly KEY_RUM_TAGS = "tags";
+  /** Internal Action/View persistence metadata; never included in RUM attributes. */
+  static readonly KEY_RUM_COLLECT_TYPE = "collect_type";
+  static readonly KEY_RUM_VIEW_MONOTONIC_START = "_sdk_view_monotonic_start_ns";
+  static readonly KEY_RUM_VIEW_LONG_TASK_DURATION = "_sdk_view_long_task_duration_ns";
   /**
    * Cold start, action_type
    */

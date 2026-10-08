@@ -10,6 +10,7 @@ declare module 'libftnativecrash.so' {
     bundleName: string;
     pid: number;
     uid: number;
+    appRunningUniqueId?: string;
     uuid: string;
     exception: string;
     hilogSize: number;

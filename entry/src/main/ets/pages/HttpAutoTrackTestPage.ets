@@ -5,6 +5,7 @@
 import {
   applyFTAxiosTrack,
   createFTRCPTrackConfig,
+  FTNetworkErrorHandler,
   FTSDK,
   FTTraceConfigManager,
 } from '@guancecloud/ft_sdk/Index';
@@ -28,6 +29,7 @@ import {
 } from '../entryability/EntryAbility';
 import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
+import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 import {
   preInitChainClientInfo,
   preInitCompatClientInfo,
@@ -85,6 +87,7 @@ export struct HttpAutoTrackTestPage {
   @State successCount: number = 0;
   @State errorCount: number = 0;
   @State axiosMode: AxiosAutoTrackMode = 'compat';
+  @State localNetworkErrorFilterEnabled: boolean = false;
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
   @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
@@ -96,8 +99,25 @@ export struct HttpAutoTrackTestPage {
   private createRCPSession(baseAddress?: string): rcp.Session {
     return rcp.createSession(createFTRCPTrackConfig({
       baseAddress: baseAddress,
-      requestConfiguration: { transfer: { timeout: { connectMs: 10000, transferMs: 10000 } } }
+      requestConfiguration: { transfer: { timeout: { connectMs: 10000, transferMs: 10000 } } },
+      networkErrorHandler: this.createNetworkErrorHandler(),
+      // resourceTransportMetricsProvider: (_request) => ({
+      //   httpProtocol: 'http/1.1',
+      //   requestBodySize: 1,
+      //   requestHeaderSize: 1,
+      //   connectionReuse: false,
+      // })
     }));
+  }
+
+  private createNetworkErrorHandler(): FTNetworkErrorHandler | null | undefined {
+    // An enabled local filter overrides the FTRUMConfig default. Leaving this
+    // undefined deliberately inherits the app-wide default instead.
+    return this.localNetworkErrorFilterEnabled ? new DemoLocalNetworkErrorFilter() : undefined;
+  }
+
+  private getLocalFailureUrl(source: string): string {
+    return `http://127.0.0.1:1/ft-local-network-failure?source=${source}&time=${Date.now()}`;
   }
 
   private async executeHttpRequest(
@@ -105,7 +125,15 @@ export struct HttpAutoTrackTestPage {
     options: http.HttpRequestOptions = {}
   ): Promise<http.HttpResponse> {
     const request = http.createHttp();
-    applyFTHttpTrack(request);
+    applyFTHttpTrack(request, {
+      networkErrorHandler: this.createNetworkErrorHandler(),
+      // resourceTransportMetricsProvider: (_request) => ({
+      //   httpProtocol: 'http/1.1',
+      //   requestBodySize: 1,
+      //   requestHeaderSize: 1,
+      //   connectionReuse: true,
+      // })
+    });
     try {
       return await request.request(url, options);
     } finally {
@@ -181,12 +209,28 @@ export struct HttpAutoTrackTestPage {
     if (mode === 'chain') {
       // Keep the interceptorChain path for newer @ohos/axios versions that
       // support wiring NetworkKit interceptors directly through request config.
-      axiosConfig.interceptorChain = createFTHttpInterceptorChain();
+      axiosConfig.interceptorChain = createFTHttpInterceptorChain({
+        networkErrorHandler: this.createNetworkErrorHandler(),
+        // resourceTransportMetricsProvider: (_request) => ({
+        //   httpProtocol: 'http/1.1',
+        //   requestBodySize: 1,
+        //   requestHeaderSize: 1,
+        //   connectionReuse: false,
+        // })
+      });
     }
 
     const client = axios.create(axiosConfig);
     if (mode === 'compat') {
-      applyFTAxiosTrack(client);
+      applyFTAxiosTrack(client, {
+        networkErrorHandler: this.createNetworkErrorHandler(),
+        // resourceTransportMetricsProvider: (_request) => ({
+        //   httpProtocol: 'http/1.1',
+        //   requestBodySize: 1,
+        //   requestHeaderSize: 1,
+        //   connectionReuse: false,
+        // })
+      });
     } else if (mode === 'chain') {
       applyFTAxiosChainMethodBridge(client);
     }
@@ -607,6 +651,34 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
+  private recordExpectedLocalFailure(source: string, error: Object): void {
+    this.requestCount++;
+    this.successCount++;
+    const message = (error as BusinessError).message || String(error);
+    const filterState = this.localNetworkErrorFilterEnabled ? 'enabled' : 'disabled';
+    this.addTestResult(`✅ ${source} local failure reached caller (${message}); filter=${filterState}. ` +
+      'Verify one status=0 Resource. With filter enabled, it has network_error_* fields and no linked Error.');
+  }
+
+  /** Requests an unused loopback port so no HTTP response exists. */
+  async testRCPLocalNetworkErrorFilter() {
+    if (!this.isAutoTrackEnabled) {
+      this.addTestResult('⚠️ Auto Track not enabled, skipping RCP local failure test');
+      return;
+    }
+    const session = this.createRCPSession();
+    try {
+      await session.fetch(new rcp.Request(this.getLocalFailureUrl('rcp'), 'GET'));
+      this.requestCount++;
+      this.errorCount++;
+      this.addTestResult('❌ RCP local failure test unexpectedly received an HTTP response');
+    } catch (error) {
+      this.recordExpectedLocalFailure('RCP', error as Object);
+    } finally {
+      session.close();
+    }
+  }
+
   /**
    * Test an RCP request through the Trace interceptor path.
    */
@@ -803,6 +875,26 @@ export struct HttpAutoTrackTestPage {
     }
   }
 
+  /** Uses the same no-response endpoint as the RCP test through NetworkKit. */
+  async testHttpLocalNetworkErrorFilter() {
+    if (!this.isAutoTrackEnabled) {
+      this.addTestResult('⚠️ Auto Track not enabled, skipping HTTP local failure test');
+      return;
+    }
+    try {
+      await this.executeHttpRequest(this.getLocalFailureUrl('http-chain'), {
+        method: http.RequestMethod.GET,
+        connectTimeout: 3000,
+        readTimeout: 3000
+      });
+      this.requestCount++;
+      this.errorCount++;
+      this.addTestResult('❌ HTTP local failure test unexpectedly received an HTTP response');
+    } catch (error) {
+      this.recordExpectedLocalFailure('HTTP chain', error as Object);
+    }
+  }
+
   /**
    * Test a native HTTP request through the Trace interceptor path.
    */
@@ -873,6 +965,22 @@ export struct HttpAutoTrackTestPage {
       this.errorCount++;
       const err = error as BusinessError;
       this.addTestResult(`❌ Concurrent HTTP GET requests failed: ${err.message || String(error)}`);
+    }
+  }
+
+  /** Uses the selected Axios integration mode with the same no-response endpoint. */
+  async testAxiosLocalNetworkErrorFilter(mode: AxiosAutoTrackMode) {
+    if (!this.isAutoTrackEnabled) {
+      this.addTestResult('⚠️ Auto Track not enabled, skipping Axios local failure test');
+      return;
+    }
+    try {
+      await this.executeAxiosRequest(this.getLocalFailureUrl(`axios-${mode}`), 'get', undefined, mode);
+      this.requestCount++;
+      this.errorCount++;
+      this.addTestResult(`❌ Axios ${this.getAxiosModeName()} local failure test unexpectedly received an HTTP response`);
+    } catch (error) {
+      this.recordExpectedLocalFailure(`Axios ${this.getAxiosModeName()}`, error as Object);
     }
   }
 
@@ -962,6 +1070,25 @@ export struct HttpAutoTrackTestPage {
             .width('100%')
             .margin({ bottom: 16 })
 
+          Text('Local network Error filter')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .width('100%')
+            .margin({ bottom: 4 })
+
+          Text('This switch is passed to each newly created RCP, NetworkKit, and Axios integration. It filters only failures with no HTTP response; 4xx/5xx responses remain Errors.')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 8 })
+
+          Button(this.localNetworkErrorFilterEnabled ? 'Local Error Filter: Enabled' : 'Local Error Filter: Disabled')
+            .width('100%')
+            .margin({ bottom: 16 })
+            .backgroundColor(this.localNetworkErrorFilterEnabled ? '#2E7D32' : '#757575')
+            .onClick(() => this.localNetworkErrorFilterEnabled = !this.localNetworkErrorFilterEnabled)
+            .customProperty('test-network-error-filter-toggle-btn', 'Toggle Local Network Error Filter')
+
           Text('RCP: session-level interception')
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
@@ -1000,6 +1127,13 @@ export struct HttpAutoTrackTestPage {
             .margin({ bottom: 10 })
             .onClick(() => this.testRCPErrorRequest())
             .customProperty('test-error-btn', 'Test Error Request (404)')
+
+          Button('Test Local Failure Filter (RCP)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#8E24AA')
+            .onClick(() => this.testRCPLocalNetworkErrorFilter())
+            .customProperty('test-rcp-local-network-error-filter-btn', 'Test Local Failure Filter (RCP)')
 
           Button('Test RCP Trace Request')
             .width('100%')
@@ -1061,6 +1195,13 @@ export struct HttpAutoTrackTestPage {
             .backgroundColor('#1976D2')
             .onClick(() => this.testHttpErrorRequestWithInterceptorChain())
             .customProperty('test-http-error-btn', 'Test HTTP Error Request (404, API 22+)')
+
+          Button('Test Local Failure Filter (HTTP, API 22+)')
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#8E24AA')
+            .onClick(() => this.testHttpLocalNetworkErrorFilter())
+            .customProperty('test-http-local-network-error-filter-btn', 'Test Local Failure Filter (HTTP)')
 
           Button('Test HTTP Trace Request (API 22+)')
             .id('test-http-trace-btn')
@@ -1146,6 +1287,13 @@ export struct HttpAutoTrackTestPage {
             .backgroundColor('#FF9800')
             .onClick(() => this.testAxiosErrorRequest(this.axiosMode))
             .customProperty('test-axios-error-btn', 'Test Axios Error Request (404)')
+
+          Button(`Test Local Failure Filter (Axios ${this.getAxiosModeName()})`)
+            .width('100%')
+            .margin({ bottom: 10 })
+            .backgroundColor('#8E24AA')
+            .onClick(() => this.testAxiosLocalNetworkErrorFilter(this.axiosMode))
+            .customProperty('test-axios-local-network-error-filter-btn', 'Test Local Failure Filter (Axios)')
 
           Button(`Test Axios Trace Request (${this.getAxiosModeName()})`)
             .width('100%')

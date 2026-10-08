@@ -10,40 +10,50 @@ import { FTViewTrackingContext } from './handler/FTViewTrackingContext';
 
 const TAG = 'FTNavigationTracker';
 
-interface InitialRouterPageInfo {
-  context: UIContext;
-  index: number;
-  name: string;
-  path: string;
-  state: number;
-  pageId: string;
-}
-
 export class FTNavigationTracker {
   private static instance: FTNavigationTracker | null = null;
   private uiObserver: UIObserver | null = null;
+  private observedUIContext: UIContext | null = null;
+  private observedWindowId: number | null = null;
   private rumConfig: FTRUMConfig | null = null;
-  private readonly navDestinationSwitchCallback = (info: uiObserver.NavDestinationSwitchInfo): void => {
-    this.handleSwitchNav(info);
+  private automaticViewEventQueue: Promise<void> = Promise.resolve();
+  private readonly navDestinationSwitchCallback = (info: uiObserver.NavDestinationSwitchInfo): Promise<void> => {
+    this.automaticViewEventQueue = this.automaticViewEventQueue.then(() => this.handleSwitchNav(info)).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Navigation View event failed: ${error}`);
+    });
+    return this.automaticViewEventQueue;
   };
-  private readonly routerPageUpdateCallback = (info: uiObserver.RouterPageInfo): void => {
-    this.handleSwitchRouter(info);
+  private readonly routerPageUpdateCallback = (info: uiObserver.RouterPageInfo): Promise<void> => {
+    this.automaticViewEventQueue = this.automaticViewEventQueue.then(() => this.handleSwitchRouter(info)).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Router View event failed: ${error}`);
+    });
+    return this.automaticViewEventQueue;
   };
   // The View name currently reported to RUM. It can differ from the route name
   // when an application configures an automatic View tracking handler.
   private currentViewName: string = '';
-  // The normalized Router/Navigation name for the active automatic View.
-  // A filtered page deliberately leaves this empty so it cannot suppress a
-  // later callback from the other automatic source.
+  private currentViewId: string = '';
+  // Retain the visible source page, not the handler's previous result. Android
+  // resolves its View handler on every Activity/Fragment resume.
+  private lastVisibleContext: FTViewTrackingContext | null = null;
+  private foregroundResumeInProgress: boolean = false;
+  // Names describe a View, but only ArkUI's page IDs identify an instance.
+  // Keep both so two different instances with the same name are reported.
   private currentRouteName: string = '';
-  private lastNavigationSwitchTs: number = 0;
-  private lastRouterShownTs: number = 0;
+  private currentPageKey: string = '';
+  private startingPageKey: string = '';
+  // A NavDestination can cover a Router page without causing another Router
+  // show event when it returns to navBar.
+  private routerHostPageKey: string = '';
+  private routerHostRouteName: string = '';
+  private routerHostIndex: number = -1;
   private inited: boolean = false;
+  private routerShowObserved: boolean = false;
   // Track page creation start time for load time calculation
-  // Map<viewName, startTime in nanoseconds>
+  // Map<page instance key, startTime in nanoseconds>
   private pageCreateStartTimeMap: Map<string, number> = new Map();
   // Track page resume start time for returning pages (when page already exists)
-  // Map<viewName, resumeStartTime in nanoseconds>
+  // Map<page instance key or the pending back-navigation marker, resumeStartTime in nanoseconds>
   // Used when returning to a previous page that was already created
   private pageResumeStartTimeMap: Map<string, number> = new Map();
   // Router state=0 is the creation phase and state=2 is the shown phase. Keep
@@ -58,10 +68,7 @@ export class FTNavigationTracker {
     return FTNavigationTracker.instance;
   }
 
-  public init(uiContext: UIContext, rumConfig: FTRUMConfig): void {
-    if (this.inited) {
-      return;
-    }
+  public init(uiContext: UIContext, rumConfig: FTRUMConfig, windowId?: number): void {
     this.rumConfig = rumConfig;
     
     // Check if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks.onActivityResumed)
@@ -75,55 +82,75 @@ export class FTNavigationTracker {
       return;
     }
 
+    if (this.inited) {
+      if (this.observedUIContext === uiContext) {
+        if (windowId !== undefined) {
+          this.observedWindowId = windowId;
+        }
+        return;
+      }
+      const sameWindow = windowId !== undefined && this.observedWindowId === windowId;
+      const previous = this.uiObserver;
+      if (previous && previous !== observer) {
+        try {
+          previous.off('navDestinationSwitch', this.navDestinationSwitchCallback);
+          previous.off('routerPageUpdate', this.routerPageUpdateCallback);
+        } catch (error) {
+          FTInnerLogger.w(TAG, `Unable to remove previous window observer: ${error}`);
+        }
+      }
+      this.uiObserver = observer;
+      this.observedUIContext = uiContext;
+      this.observedWindowId = windowId ?? null;
+      if (previous !== observer) {
+        observer.on('navDestinationSwitch', this.navDestinationSwitchCallback);
+        observer.on('routerPageUpdate', this.routerPageUpdateCallback);
+      }
+      if (sameWindow) {
+        // Window.getUIContext() can return a new wrapper on foreground. Keep
+        // the visible NavDestination; Router.getState() only names its host.
+        return;
+      }
+      this.routerShowObserved = false;
+      this.automaticViewEventQueue = this.automaticViewEventQueue.then(async () => {
+        await this.startAutomaticView('', null, '');
+        this.lastVisibleContext = null;
+        this.clearRouterHost();
+        this.startingPageKey = '';
+        this.pageCreateStartTimeMap.clear();
+        this.pageResumeStartTimeMap.clear();
+        this.pendingRouterHandlerViews.clear();
+        await this.restoreVisibleRouterPage(uiContext);
+      }).catch((error: Error) => {
+        FTInnerLogger.w(TAG, `Window View recovery failed: ${error}`);
+      });
+      return;
+    }
+
     this.uiObserver = observer;
+    this.observedUIContext = uiContext;
+    this.observedWindowId = windowId ?? null;
     observer.on('navDestinationSwitch', this.navDestinationSwitchCallback);
     observer.on('routerPageUpdate', this.routerPageUpdateCallback);
 
     this.inited = true;
-    // The first Router page can be shown before UIContext is available to the
-    // SDK. UIObserver does not replay that event to a late subscriber, so seed
-    // the same View path from the current Router state once subscribed.
-    this.bootstrapCurrentRouterPage(uiContext);
-  }
-
-  private bootstrapCurrentRouterPage(uiContext: UIContext): void {
-    try {
-      const state = uiContext.getRouter().getState();
-      // RouterState.path is the directory on some HarmonyOS releases (for
-      // example "pages"), while name is the page file ("Index"). Rebuild
-      // the route supplied by RouterPageInfo so View naming and app handlers
-      // see the same page on cold start and later navigation.
-      let routeName = state.name;
-      if (state.path.length > 0 && state.name.length > 0 &&
-        state.path !== state.name && !state.path.endsWith(`/${state.name}`)) {
-        routeName = `${state.path}/${state.name}`;
-      } else if (state.path.length > 0) {
-        routeName = state.path;
+    // UIContext may become available only after loadContent has already shown
+    // the first page. In that case the observer cannot replay its state=2 event.
+    setTimeout(() => {
+      if (this.uiObserver === observer) {
+        this.automaticViewEventQueue = this.automaticViewEventQueue.then(() =>
+          this.restoreVisibleRouterPage(uiContext)).catch((error: Error) => {
+          FTInnerLogger.w(TAG, `Router View recovery failed: ${error}`);
+        });
       }
-      if (routeName.length === 0) {
-        return;
-      }
-      const pageInfo: InitialRouterPageInfo = {
-        context: uiContext,
-        index: state.index,
-        name: routeName,
-        path: state.path,
-        state: 2,
-        pageId: ''
-      };
-      this.handleSwitchRouter(pageInfo as Object as uiObserver.RouterPageInfo).catch((error: Error): void => {
-        FTInnerLogger.w(TAG, `Initial Router View bootstrap failed: ${error}`);
-      });
-    } catch (error) {
-      // Router state may still be unavailable while a WindowStage is created.
-      // The normal Router observer remains registered for subsequent pages.
-      FTInnerLogger.d(TAG, `Initial Router state unavailable: ${error}`);
-    }
+    }, 100);
   }
 
   public destroy(): void {
     const observer = this.uiObserver;
     this.uiObserver = null;
+    this.observedUIContext = null;
+    this.observedWindowId = null;
     this.rumConfig = null;
     if (observer) {
       try {
@@ -138,10 +165,16 @@ export class FTNavigationTracker {
       }
     }
     this.currentViewName = '';
+    this.currentViewId = '';
+    this.lastVisibleContext = null;
+    this.foregroundResumeInProgress = false;
     this.currentRouteName = '';
-    this.lastNavigationSwitchTs = 0;
-    this.lastRouterShownTs = 0;
+    this.currentPageKey = '';
+    this.startingPageKey = '';
+    this.clearRouterHost();
+    this.automaticViewEventQueue = Promise.resolve();
     this.inited = false;
+    this.routerShowObserved = false;
     this.pageCreateStartTimeMap.clear();
     this.pageResumeStartTimeMap.clear();
     this.pendingRouterHandlerViews.clear();
@@ -160,36 +193,38 @@ export class FTNavigationTracker {
     const toName: string = this.normalizeViewName(toNameRaw);
 
     if (!toName || toName.length === 0) {
-      await this.startAutomaticView('', null);
+      this.lastVisibleContext = null;
+      await this.startAutomaticView('', null, '');
+      if (info.to === 'navBar' && this.observedUIContext) {
+        // Returning to Navigation's home does not replay Router state=2.
+        await this.restoreVisibleRouterPage(this.observedUIContext, true);
+      }
       return;
     }
 
-    const handlerView = this.resolveNavigationHandlerView(toName, toNameRaw, info);
+    this.rememberCurrentRouterHost();
+    const pageKey = this.getNavigationPageKey(info, toNameRaw);
+    const trackingContext = this.createNavigationTrackingContext(toName, toNameRaw, info);
+    if (this.isCurrentAutomaticPage(pageKey, toName)) {
+      return;
+    }
+    const handlerView = this.resolveAutomaticViewHandler(FTViewTrackingType.NAVIGATION, toName,
+      trackingContext, 'Navigation');
     if (handlerView === null) {
-      await this.startAutomaticView(toName, null);
+      this.lastVisibleContext = trackingContext;
+      await this.startAutomaticView(toName, null, pageKey);
       return;
     }
 
-    if (this.currentRouteName === toName) {
-      return;
+    this.startingPageKey = pageKey;
+    this.lastVisibleContext = trackingContext;
+    try {
+      await this.startAutomaticView(toName, handlerView, pageKey);
+    } finally {
+      if (this.startingPageKey === pageKey) {
+        this.startingPageKey = '';
+      }
     }
-
-    const now = Date.now();
-    // Merge duplicate Navigation callbacks only. Router lifecycle callbacks
-    // use an independent debounce window and must not be suppressed here.
-    if (now - this.lastNavigationSwitchTs < 80) {
-      return;
-    }
-    this.lastNavigationSwitchTs = now;
-
-    // A Navigation destination does not expose a Router state=0 creation
-    // callback. Preserve the existing resume-to-shown load-time measurement
-    // for a subsequent Router state=2 notification.
-    if (!this.pageCreateStartTimeMap.get(toName)) {
-      this.pageResumeStartTimeMap.set(toName, Utils.getCurrentNanoTime());
-    }
-
-    await this.startAutomaticView(toName, handlerView);
   }
 
   private getNavName(item: uiObserver.NavDestinationInfo | "navBar" | undefined): string {
@@ -204,10 +239,110 @@ export class FTNavigationTracker {
     return typeof nameCandidate === 'string' ? nameCandidate : '';
   }
 
+  private getNavigationPageKey(info: uiObserver.NavDestinationSwitchInfo, routeName: string): string {
+    const destination: uiObserver.NavDestinationInfo | 'navBar' | undefined = info.to;
+    if (destination && typeof destination !== 'string') {
+      if (destination.navDestinationId) {
+        return `navigation:${destination.navDestinationId}`;
+      }
+      return `navigation:${String(destination.navigationId)}:${destination.index}:${routeName}`;
+    }
+    return `navigation:${routeName}`;
+  }
+
+  private getRouterPageKey(info: uiObserver.RouterPageInfo, routeName: string): string {
+    if (info.pageId) {
+      return `router:${info.pageId}`;
+    }
+    // RouterState has no pageId when the first page is reconstructed.
+    return `router:provisional:${info.path}:${info.index}:${routeName}`;
+  }
+
+  private clearRouterHost(): void {
+    this.routerHostPageKey = '';
+    this.routerHostRouteName = '';
+    this.routerHostIndex = -1;
+  }
+
+  private rememberRouterHost(pageKey: string, routeName: string, index: number): void {
+    this.routerHostPageKey = pageKey;
+    this.routerHostRouteName = routeName;
+    this.routerHostIndex = index;
+  }
+
+  private rememberCurrentRouterHost(): void {
+    if (this.routerHostPageKey.length > 0 || !this.observedUIContext) {
+      return;
+    }
+    try {
+      const state = this.observedUIContext.getRouter().getState();
+      if (!state?.name) {
+        return;
+      }
+      const routeName = this.normalizeViewName(state.name);
+      const pageInfo = {
+        name: state.name,
+        path: state.path,
+        index: state.index,
+        pageId: ''
+      } as uiObserver.RouterPageInfo;
+      this.rememberRouterHost(this.getRouterPageKey(pageInfo, routeName), routeName, state.index);
+    } catch (error) {
+      FTInnerLogger.d(TAG, `Router host unavailable for Navigation: ${String(error)}`);
+    }
+  }
+
+  private isCurrentRouterHost(pageKey: string, routeName: string, index: number): boolean {
+    if (this.routerHostPageKey.length === 0 || this.routerHostRouteName !== routeName ||
+      this.routerHostIndex !== index) {
+      return false;
+    }
+    return this.routerHostPageKey === pageKey || this.routerHostPageKey.startsWith('router:provisional:') ||
+      pageKey.startsWith('router:provisional:');
+  }
+
+  private isCurrentAutomaticPage(pageKey: string, routeName: string,
+    routerInfo?: uiObserver.RouterPageInfo, hadCreationEvent: boolean = false): boolean {
+    if (this.startingPageKey === pageKey) {
+      return true;
+    }
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    if (!activeView || activeView.isClose()) {
+      return false;
+    }
+    if (this.currentPageKey === pageKey) {
+      return true;
+    }
+    // Adopt the real pageId after an already-visible Router page was backfilled.
+    const previousContext = this.lastVisibleContext;
+    if (routerInfo && !hadCreationEvent && previousContext?.trackingType === FTViewTrackingType.ROUTER &&
+      pageKey.startsWith('router:') && !pageKey.startsWith('router:provisional:') &&
+      this.currentPageKey.startsWith('router:provisional:') &&
+      this.currentRouteName === routeName && previousContext.routerPageInfo.index === routerInfo.index) {
+      this.currentPageKey = pageKey;
+      this.lastVisibleContext = this.createRouterTrackingContext(routeName, routerInfo.name, routerInfo);
+      return true;
+    }
+    return false;
+  }
+
+  private isCurrentRouterPageHiding(pageKey: string, routeName: string, info: uiObserver.RouterPageInfo): boolean {
+    if (this.currentPageKey === pageKey) {
+      return true;
+    }
+    const context = this.lastVisibleContext;
+    return this.currentPageKey.startsWith('router:provisional:') &&
+      context?.trackingType === FTViewTrackingType.ROUTER && this.currentRouteName === routeName &&
+      context.routerPageInfo.index === info.index;
+  }
+
   private async handleSwitchRouter(info: uiObserver.RouterPageInfo): Promise<void> {
     // Check if view tracking is enabled (aligned with Android: FTActivityLifecycleCallbacks.onActivityResumed)
     if (!this.rumConfig || !this.rumConfig.isEnableTraceUserView()) {
       return;
+    }
+    if (info.state === 2) {
+      this.routerShowObserved = true;
     }
     
     const toNameRaw: string = info.name ? info.name : '';
@@ -215,7 +350,8 @@ export class FTNavigationTracker {
 
     if (!toName || toName.length === 0) {
       if (info.state === 2) {
-        await this.startAutomaticView('', null);
+        this.lastVisibleContext = null;
+        await this.startAutomaticView('', null, '');
       }
       return;
     }
@@ -225,50 +361,63 @@ export class FTNavigationTracker {
     toName = this.normalizeViewName(toName);
     if (!toName || toName.length === 0) {
       if (info.state === 2) {
-        await this.startAutomaticView('', null);
+        this.lastVisibleContext = null;
+        await this.startAutomaticView('', null, '');
       }
       return;
     }
+
+    const pageKey = this.getRouterPageKey(info, toName);
 
     // Handle state=0 (page created) - determine whether this Router page is
     // tracked, then record its creation time only for Views that will be sent.
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentPreAttached records start time
     if (info.state === 0) {
       const handlerView = this.resolveRouterHandlerView(toName, toNameRaw, info);
-      this.pendingRouterHandlerViews.set(toName, handlerView);
+      this.pendingRouterHandlerViews.set(pageKey, handlerView);
       if (handlerView === null) {
-        this.pageCreateStartTimeMap.delete(toName);
-        this.pageResumeStartTimeMap.delete(toName);
+        this.pageCreateStartTimeMap.delete(pageKey);
+        this.pageResumeStartTimeMap.delete(pageKey);
         return;
       }
       const createStartTime = Utils.getCurrentNanoTime();
-      this.pageCreateStartTimeMap.set(toName, createStartTime);
+      this.pageCreateStartTimeMap.set(pageKey, createStartTime);
       // Clear any existing resume start time (page is being created, not resumed)
-      this.pageResumeStartTimeMap.delete(toName);
+      this.pageResumeStartTimeMap.delete(pageKey);
       return; // Don't start view yet, wait for state=2 (page shown)
     }
     
-    // Handle state=1 (page hidden) - no action needed
+    // ABOUT_TO_DISAPPEAR precedes removal. Keep this page's identity until
+    // ON_PAGE_HIDE so its own callback can close the View.
     if (info.state === 1) {
+      if (this.isCurrentRouterPageHiding(pageKey, toName, info)) {
+        this.pageResumeStartTimeMap.set('_pending_resume', Utils.getCurrentNanoTime());
+      }
       return;
     }
     
-    // Handle state=3 or state=4 (page being hidden/removed) - record resume start time for returning pages
-    // When current page is being hidden, the next page to show is likely a returning page
-    // Record resume start time at this point to measure from pushBack to page shown
-    if (info.state === 3 || info.state === 4) {
-      // Check if this is the current active page being hidden
-      if (toName === this.currentRouteName) {
-        // Current page is being hidden, likely due to pushBack
-        // Try to determine the next page that will be shown (returning page)
-        // We can infer from the navigation stack: when pushing back, the previous page in the stack will be shown
-        // Since we don't have direct access to navigation stack, we'll use a simpler approach:
-        // Record a global resume start time, and when state=2 is received for a returning page, use this time
+    // ON_BACK_PRESS may be handled without hiding the page.
+    if (info.state === 4) {
+      return;
+    }
+
+    if (info.state === 3) {
+      if (this.isCurrentRouterPageHiding(pageKey, toName, info)) {
+        const viewId = this.currentViewId;
+        this.currentPageKey = '';
         const resumeStartTime = Utils.getCurrentNanoTime();
-        // Store with a special key that will be matched in state=2
-        // We'll use currentViewName as the key, since the next page shown will likely be the returning page
-        // But we don't know which page yet, so we'll use a temporary marker
         this.pageResumeStartTimeMap.set('_pending_resume', resumeStartTime);
+        this.currentRouteName = '';
+        this.currentViewName = '';
+        this.currentViewId = '';
+        this.lastVisibleContext = null;
+        if (viewId.length > 0 && FTRUMInnerManager.getInstance().getActiveView()?.getId() === viewId) {
+          try {
+            await FTRUMGlobalManager.getInstance().stopView();
+          } catch (error) {
+            FTInnerLogger.w(TAG, `Failed to stop hidden Router View: ${error}`);
+          }
+        }
       }
       return;
     }
@@ -276,10 +425,36 @@ export class FTNavigationTracker {
     // Handle state=2 (page shown) - calculate load time and start view
     // Aligned with Android: FTFragmentLifecycleHelper.onFragmentCreated calculates duration and calls onCreateView
     if (info.state === 2) {
+      const trackingContext = this.createRouterTrackingContext(toName, toNameRaw, info);
+      const hadCreationEvent = this.pendingRouterHandlerViews.has(pageKey);
+      if (this.lastVisibleContext?.trackingType === FTViewTrackingType.NAVIGATION &&
+        this.isCurrentRouterHost(pageKey, toName, info.index)) {
+        // The host Router page can report state=2 again on foreground even
+        // while its NavDestination is still the visible page.
+        this.pendingRouterHandlerViews.delete(pageKey);
+        this.pageCreateStartTimeMap.delete(pageKey);
+        return;
+      }
+      this.rememberRouterHost(pageKey, toName, info.index);
+      if (this.startingPageKey === pageKey) {
+        return;
+      }
+      if (this.isCurrentAutomaticPage(pageKey, toName, info, hadCreationEvent)) {
+        if (hadCreationEvent) {
+          this.pendingRouterHandlerViews.delete(pageKey);
+          if (FTRUMInnerManager.getInstance().getActiveView()?.getId() === this.currentViewId) {
+            this.recordRouterViewLoadTime(pageKey, this.currentViewName, false, true);
+          } else {
+            this.pageCreateStartTimeMap.delete(pageKey);
+            this.pageResumeStartTimeMap.delete(pageKey);
+          }
+        }
+        return;
+      }
       let handlerView: HandlerView | null;
-      if (this.pendingRouterHandlerViews.has(toName)) {
-        handlerView = this.pendingRouterHandlerViews.get(toName) ?? null;
-        this.pendingRouterHandlerViews.delete(toName);
+      if (hadCreationEvent) {
+        handlerView = this.pendingRouterHandlerViews.get(pageKey) ?? null;
+        this.pendingRouterHandlerViews.delete(pageKey);
       } else {
         // A Router page may be restored without emitting state=0. Resolve it
         // at display time in that case, matching Android's resume behavior.
@@ -287,32 +462,51 @@ export class FTNavigationTracker {
       }
 
       if (handlerView === null) {
-        this.pageCreateStartTimeMap.delete(toName);
-        this.pageResumeStartTimeMap.delete(toName);
-        await this.startAutomaticView(toName, null);
+        this.lastVisibleContext = trackingContext;
+        this.pageCreateStartTimeMap.delete(pageKey);
+        this.pageResumeStartTimeMap.delete(pageKey);
+        await this.startAutomaticView(toName, null, pageKey);
         return;
       }
 
-      // A Navigation callback may already have started the same automatic
-      // View. Keep that View and attach this Router lifecycle's load time to
-      // it when timing data is available.
-      if (this.currentRouteName === toName) {
-        this.recordRouterViewLoadTime(toName, this.currentViewName, false);
-        return;
+      this.recordRouterViewLoadTime(pageKey, handlerView.getViewName(), true, false);
+
+      this.startingPageKey = pageKey;
+      this.lastVisibleContext = trackingContext;
+      try {
+        await this.startAutomaticView(toName, handlerView, pageKey);
+      } finally {
+        if (this.startingPageKey === pageKey) {
+          this.startingPageKey = '';
+        }
       }
-
-      const now = Date.now();
-      if (now - this.lastRouterShownTs < 80) {
-        this.pageCreateStartTimeMap.delete(toName);
-        this.pageResumeStartTimeMap.delete(toName);
-        return;
-      }
-      this.lastRouterShownTs = now;
-
-      this.recordRouterViewLoadTime(toName, handlerView.getViewName(), true);
-
-      await this.startAutomaticView(toName, handlerView);
       return;
+    }
+  }
+
+  private async restoreVisibleRouterPage(uiContext: UIContext, onForeground: boolean = false): Promise<void> {
+    if (!this.inited || (!onForeground && (this.routerShowObserved || this.currentRouteName.length > 0))) {
+      return;
+    }
+    try {
+      const state = uiContext.getRouter().getState();
+      if (!state || !state.name || state.name.length === 0) {
+        return;
+      }
+      // getState supplies the current page but no RouterPageInfo event. Its
+      // name is the page file (Index); path can be only the directory (pages).
+      // Supply both to the same filtering/naming path used by state=2.
+      const pageInfo = {
+        context: uiContext,
+        index: state.index,
+        name: state.name,
+        path: state.path,
+        state: 2,
+        pageId: ''
+      } as uiObserver.RouterPageInfo;
+      await this.handleSwitchRouter(pageInfo);
+    } catch (error) {
+      FTInnerLogger.d(TAG, `Current Router page is not available for View recovery: ${String(error)}`);
     }
   }
 
@@ -325,7 +519,16 @@ export class FTNavigationTracker {
     originalRouteName: string,
     routerPageInfo: uiObserver.RouterPageInfo
   ): HandlerView | null {
-    const context: FTViewTrackingContext = {
+    const context = this.createRouterTrackingContext(routeName, originalRouteName, routerPageInfo);
+    return this.resolveAutomaticViewHandler(FTViewTrackingType.ROUTER, routeName, context, 'Router');
+  }
+
+  private createRouterTrackingContext(
+    routeName: string,
+    originalRouteName: string,
+    routerPageInfo: uiObserver.RouterPageInfo
+  ): FTViewTrackingContext {
+    return {
       trackingType: FTViewTrackingType.ROUTER,
       routerPageInfo,
       originalViewName: originalRouteName,
@@ -334,21 +537,20 @@ export class FTNavigationTracker {
       fromViewName: '',
       routerPageState: routerPageInfo.state
     };
-    return this.resolveAutomaticViewHandler(FTViewTrackingType.ROUTER, routeName, context, 'Router');
   }
 
   /**
    * Uses the configured Navigation handler when present. Without a handler,
    * keep the existing automatic behavior and collect the normalized name.
    */
-  private resolveNavigationHandlerView(
+  private createNavigationTrackingContext(
     destinationName: string,
     originalDestinationName: string,
     navigationInfo: uiObserver.NavDestinationSwitchInfo
-  ): HandlerView | null {
+  ): FTViewTrackingContext {
     const originalFromName = this.getNavName(navigationInfo.from);
     const fromName = this.normalizeViewName(originalFromName);
-    const context: FTViewTrackingContext = {
+    return {
       trackingType: FTViewTrackingType.NAVIGATION,
       navigationInfo,
       originalViewName: originalDestinationName,
@@ -356,7 +558,6 @@ export class FTNavigationTracker {
       originalFromViewName: originalFromName,
       fromViewName: fromName
     };
-    return this.resolveAutomaticViewHandler(FTViewTrackingType.NAVIGATION, destinationName, context, 'Navigation');
   }
 
   /**
@@ -391,21 +592,18 @@ export class FTNavigationTracker {
     return handlerView;
   }
 
-  /**
-   * Records the load time from Router lifecycle callbacks. If a Navigation
-   * callback has already started the same View, `viewName` is that active
-   * View's name instead of the Router handler's prospective name.
-   */
-  private recordRouterViewLoadTime(routeName: string, viewName: string, allowFallback: boolean): void {
-    const createStartTime = this.pageCreateStartTimeMap.get(routeName);
+  /** Record Router load time by page instance, even for same-named pages. */
+  private recordRouterViewLoadTime(pageKey: string, viewName: string, allowFallback: boolean,
+    updateActiveView: boolean): void {
+    const createStartTime = this.pageCreateStartTimeMap.get(pageKey);
     if (createStartTime !== undefined) {
       const loadTime = Utils.getCurrentNanoTime() - createStartTime;
-      this.pageCreateStartTimeMap.delete(routeName);
-      FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(viewName, loadTime);
+      this.pageCreateStartTimeMap.delete(pageKey);
+      FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(viewName, loadTime, updateActiveView);
       return;
     }
 
-    let resumeStartTime = this.pageResumeStartTimeMap.get(routeName);
+    let resumeStartTime = this.pageResumeStartTimeMap.get(pageKey);
     if (resumeStartTime === undefined) {
       const pendingResumeTime = this.pageResumeStartTimeMap.get('_pending_resume');
       if (pendingResumeTime !== undefined) {
@@ -421,10 +619,10 @@ export class FTNavigationTracker {
       resumeStartTime = Utils.getCurrentNanoTime();
     }
 
-    this.pageResumeStartTimeMap.delete(routeName);
+    this.pageResumeStartTimeMap.delete(pageKey);
     const loadTime = Utils.getCurrentNanoTime() - resumeStartTime;
     const resumeKey = `${viewName}_resume`;
-    FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(resumeKey, loadTime);
+    FTRUMInnerManager.getInstance().recordViewLoadTimeInternal(resumeKey, loadTime, updateActiveView);
   }
 
   /**
@@ -432,10 +630,11 @@ export class FTNavigationTracker {
    * destination. A null HandlerView closes the prior tracked View and
    * deliberately starts no replacement View.
    */
-  private async startAutomaticView(routeName: string, handlerView: HandlerView | null): Promise<void> {
+  private async startAutomaticView(routeName: string, handlerView: HandlerView | null, pageKey: string): Promise<void> {
     const rum = FTRUMGlobalManager.getInstance();
     try {
-      if (this.currentViewName.length > 0) {
+      if (this.currentViewName.length > 0 &&
+        FTRUMInnerManager.getInstance().getActiveView()?.getId() === this.currentViewId) {
         await rum.stopView();
       }
     } catch (e) {
@@ -443,7 +642,10 @@ export class FTNavigationTracker {
     }
 
     this.currentViewName = '';
+    this.currentViewId = '';
     this.currentRouteName = '';
+    this.currentPageKey = '';
+    this.pageResumeStartTimeMap.delete('_pending_resume');
 
     if (handlerView === null) {
       FTInnerLogger.d(TAG, `automatic View filtered: ${routeName}`);
@@ -451,12 +653,90 @@ export class FTNavigationTracker {
     }
 
     try {
-      await rum.startView(handlerView.getViewName(), handlerView.getProperty() ?? {});
+      const property = this.copyViewProperty(handlerView.getProperty());
+      await rum.startView(handlerView.getViewName(), property);
       this.currentViewName = handlerView.getViewName();
+      this.currentViewId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
       this.currentRouteName = routeName;
+      this.currentPageKey = pageKey;
     } catch (e) {
       FTInnerLogger.w(TAG, `startView failed: ${e}`);
     }
+  }
+
+  /** Resume the visible page after a lifecycle stop without a route change. */
+  public resumeAutomaticViewOnForeground(shouldResume?: () => boolean): Promise<void> {
+    // A WindowStage rebind and Router callbacks also use this queue. Resume
+    // only after them, so an old window cannot recreate a stale page View.
+    this.automaticViewEventQueue = this.automaticViewEventQueue.then(() => {
+      if (!shouldResume || shouldResume()) {
+        return this.resumeAutomaticViewOnForegroundInternal();
+      }
+      return Promise.resolve();
+    }).catch((error: Error) => {
+      FTInnerLogger.w(TAG, `Foreground View recovery failed: ${error}`);
+    });
+    return this.automaticViewEventQueue;
+  }
+
+  private async resumeAutomaticViewOnForegroundInternal(): Promise<void> {
+    if (!this.inited || !this.rumConfig?.isEnableTraceUserView() ||
+      this.foregroundResumeInProgress || this.startingPageKey.length > 0) {
+      return;
+    }
+    const activeView = FTRUMInnerManager.getInstance().getActiveView();
+    // A manual View may have replaced the automatic one. Leave it to its owner.
+    if (activeView && (!activeView.isClose() ||
+      (this.currentViewId.length > 0 && activeView.getId() !== this.currentViewId))) {
+      return;
+    }
+    if (!this.lastVisibleContext) {
+      // An observer may have been attached after the page was shown, or its
+      // context may have been released with a destroyed WindowStage. Router
+      // does not replay that page's state=2 event when the app resumes.
+      if (this.observedUIContext) {
+        await this.restoreVisibleRouterPage(this.observedUIContext, true);
+      }
+      return;
+    }
+    this.foregroundResumeInProgress = true;
+    try {
+      const context = this.lastVisibleContext;
+      const source = context.trackingType === FTViewTrackingType.ROUTER ? 'Router' : 'Navigation';
+      const handlerView = this.resolveAutomaticViewHandler(context.trackingType, context.viewName, context, source);
+      if (handlerView === null) {
+        this.currentViewName = '';
+        this.currentViewId = '';
+        this.currentRouteName = '';
+        this.currentPageKey = '';
+        return;
+      }
+      await FTRUMGlobalManager.getInstance().startView(handlerView.getViewName(),
+        this.copyViewProperty(handlerView.getProperty()));
+      this.currentViewName = handlerView.getViewName();
+      this.currentViewId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
+      this.currentRouteName = context.viewName;
+      this.currentPageKey = context.trackingType === FTViewTrackingType.ROUTER
+        ? this.getRouterPageKey(context.routerPageInfo, context.viewName)
+        : this.getNavigationPageKey(context.navigationInfo, context.originalViewName);
+      this.pageResumeStartTimeMap.delete('_pending_resume');
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Failed to resume automatic View: ${error}`);
+    } finally {
+      this.foregroundResumeInProgress = false;
+    }
+  }
+
+  private copyViewProperty(property: Record<string, object> | null): Record<string, object> {
+    const copy: Record<string, object> = {};
+    if (property) {
+      const keys = Object.keys(property);
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        copy[key] = property[key];
+      }
+    }
+    return copy;
   }
 
   /**

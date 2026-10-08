@@ -17,11 +17,21 @@ import {
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 class IgnoredResourceUrlHandler extends FTInTakeUrlHandler {
   public isInTakeUrl(url: string): boolean {
     return url.includes('/ignored-resource');
+  }
+}
+
+class ExtensionGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  public invocationCount: number = 0;
+
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    this.invocationCount++;
+    return false;
   }
 }
 
@@ -138,10 +148,11 @@ export default function ftSDKExtensionBridgeUnitTest() {
         .setEnableTraceUserResource(true)
         .setResourceUrlHandler(new IgnoredResourceUrlHandler()));
 
+      const requestHeaders: Record<string, Object> = {};
       const request: FTSDKExtensionRequestInput = {
         url: 'https://example.com/ignored-resource',
         method: 'GET',
-        headers: {}
+        headers: requestHeaders
       };
       const prepared = FTSDKExtensionBridge.prepareHttpRequest(request, {
         enableTraceInterceptor: false,
@@ -150,13 +161,97 @@ export default function ftSDKExtensionBridgeUnitTest() {
 
       expect(prepared.resourceEnabled).assertFalse();
       expect(prepared.traceEnabled).assertFalse();
+      const responseHeaders: Record<string, Object> = {};
       expect(FTSDKExtensionBridge.completeHttpResponse({
         url: request.url,
         method: prepared.method,
         requestHeaders: prepared.headers,
-        responseHeaders: {},
+        responseHeaders: responseHeaders,
         statusCode: 200
       })).assertTrue();
+    });
+
+    it('httpPrepareShouldInvokeTransportMetricsProviderAfterHeadersFinalize', 0, () => {
+      let providerResourceId = '';
+      let providerMethod = '';
+      const requestHeaders: Record<string, Object> = {};
+      const request = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'https://example.com/metrics-provider',
+        method: 'post',
+        headers: requestHeaders,
+        transportMetrics: { requestSize: 123, connectionReuse: false }
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: false,
+        resourceTransportMetricsProvider: (preparedRequest) => {
+          providerResourceId = preparedRequest.headers['X-FT-Resource-ID'];
+          providerMethod = preparedRequest.method;
+          return { httpProtocol: 'http/1.1' };
+        }
+      });
+
+      expect(providerResourceId).assertEqual(request.uniqueId);
+      expect(providerMethod).assertEqual('POST');
+      const responseHeaders: Record<string, Object> = {};
+      expect(FTSDKExtensionBridge.completeHttpResponse({
+        url: request.url,
+        method: request.method,
+        requestHeaders: request.headers,
+        responseHeaders: responseHeaders,
+        statusCode: 204
+      })).assertTrue();
+    });
+
+    it('httpOptionsShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
+      const globalHandler = new ExtensionGlobalNetworkErrorHandler();
+      const explicitHandler = new ExtensionGlobalNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setNetworkErrorHandler(globalHandler));
+
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({}).networkErrorHandler === globalHandler).assertTrue();
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({
+        networkErrorHandler: explicitHandler
+      }).networkErrorHandler === explicitHandler).assertTrue();
+      expect(FTSDKExtensionBridge.resolveAutoTrackOptions({
+        networkErrorHandler: null
+      }).networkErrorHandler === null).assertTrue();
+
+      const disabledRequestHeaders: Record<string, Object> = {};
+      const disabledRequest = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'http://example.com/network-handler-disabled',
+        method: 'GET',
+        headers: disabledRequestHeaders
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: null
+      });
+      FTSDKExtensionBridge.completeHttpError({
+        url: disabledRequest.url,
+        method: disabledRequest.method,
+        requestHeaders: disabledRequest.headers,
+        statusCode: 0,
+        errorMessage: 'Connection refused'
+      });
+      expect(globalHandler.invocationCount).assertEqual(0);
+
+      const defaultRequestHeaders: Record<string, Object> = {};
+      const defaultRequest = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'http://example.com/network-handler-default',
+        method: 'GET',
+        headers: defaultRequestHeaders
+      }, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+      FTSDKExtensionBridge.completeHttpError({
+        url: defaultRequest.url,
+        method: defaultRequest.method,
+        requestHeaders: defaultRequest.headers,
+        statusCode: 0,
+        errorMessage: 'Connection refused'
+      });
+      expect(globalHandler.invocationCount).assertEqual(1);
     });
 
     it('httpPrepareShouldPassTraceIds', 0, () => {

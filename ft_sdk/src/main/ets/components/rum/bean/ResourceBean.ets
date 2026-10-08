@@ -1,5 +1,9 @@
 import { Utils } from '../../utils/Utils';
 import { FTInnerLogger } from '../../log/FTLogger';
+import {
+  ResourceTransportMetrics,
+  ResourceTransportMetricsSnapshot
+} from './ResourceTransportMetrics';
 
 /**
  * URL parsing result interface
@@ -28,6 +32,7 @@ interface ResourceBeanJSON {
     responseConnection: string;
     responseContentType: string;
     responseContentEncoding: string;
+    transportMetrics: ResourceTransportMetricsSnapshot;
     
     // Link tracing
     traceId: string;
@@ -36,6 +41,7 @@ interface ResourceBeanJSON {
     // Error information
     errorStack: string;
     errorMsg: string;
+    suppressNetworkError: boolean;
     
     // Status and performance
     resourceStatus: number;
@@ -109,6 +115,8 @@ export class ResourceBean {
   public responseConnection: string = "";
   public responseContentType: string = "";
   public responseContentEncoding: string = "";
+  /** Resource request transport metadata, separate from response resourceSize. */
+  private readonly transportMetrics: ResourceTransportMetrics = new ResourceTransportMetrics();
   
   // Link tracing information
   public traceId: string = "";
@@ -117,6 +125,8 @@ export class ResourceBean {
   // Error information
   public errorStack: string = "";
   public errorMsg: string = "";
+  /** Retains the Resource while suppressing its derived local network Error. */
+  public suppressNetworkError: boolean = false;
   
   // Status and performance metrics
   public resourceStatus: number = 0;
@@ -241,6 +251,54 @@ export class ResourceBean {
    */
   public setResourceSize(size: number): void {
     this.resourceSize = size;
+  }
+
+  public setRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'integration');
+  }
+
+  public setRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'integration');
+  }
+
+  public setRequestSize(size: number): void {
+    this.transportMetrics.setRequestSize(size, 'integration');
+  }
+
+  public setHttpProtocol(protocol: string): void {
+    this.transportMetrics.setHttpProtocol(protocol, 'integration');
+  }
+
+  public setConnectionReuse(connectionReuse: boolean): void {
+    this.transportMetrics.setConnectionReuse(connectionReuse, 'integration');
+  }
+
+  public setPlatformRequestBodySize(size: number): void {
+    this.transportMetrics.setRequestBodySize(size, 'platform');
+  }
+
+  public setPlatformRequestHeaderSize(size: number): void {
+    this.transportMetrics.setRequestHeaderSize(size, 'platform');
+  }
+
+  public setPlatformRequestSize(size: number): void {
+    this.transportMetrics.setRequestSize(size, 'platform');
+  }
+
+  public setPlatformHttpProtocol(protocol: string): void {
+    this.transportMetrics.setHttpProtocol(protocol, 'platform');
+  }
+
+  public setPlatformConnectionReuse(connectionReuse: boolean): void {
+    this.transportMetrics.setConnectionReuse(connectionReuse, 'platform');
+  }
+
+  public getTransportMetrics(): ResourceTransportMetricsSnapshot {
+    return this.transportMetrics.snapshot();
+  }
+
+  public mergeTransportMetrics(metrics?: ResourceTransportMetricsSnapshot): void {
+    this.transportMetrics.merge(metrics);
   }
   
   /**
@@ -425,6 +483,7 @@ export class ResourceBean {
       responseConnection: this.responseConnection,
       responseContentType: this.responseContentType,
       responseContentEncoding: this.responseContentEncoding,
+      transportMetrics: this.transportMetrics.snapshot(),
       
       // Link tracing
       traceId: this.traceId,
@@ -477,6 +536,7 @@ export class ResourceBean {
       
       // Others
       hasSessionReplay: this.hasSessionReplay,
+      suppressNetworkError: this.suppressNetworkError,
       property: this.property,
       tags: this.tags,
       

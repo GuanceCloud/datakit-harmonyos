@@ -148,6 +148,12 @@ class FakeAxiosResponse implements FTAxiosResponseTarget<string> {
   }
 }
 
+class FakeAxiosThrowingHeaders {
+  toJSON(): Object {
+    throw new Error('Axios response headers cannot be serialized');
+  }
+}
+
 class FakeAxiosPerformanceTiming implements FTNetworkPerformanceTiming {
   dnsTiming: number = 10;
   tcpTiming: number = 30;
@@ -741,7 +747,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -818,7 +824,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -1038,7 +1044,7 @@ export default function resourceAutoTrackDeviceTest() {
         'error,',
         `resource_url=${resourceUrl}`,
         `action_name=${actionName}`,
-        'error_type=network'
+        'error_type=network_error'
       ], 5000);
 
       expect(actionRecord !== null).assertTrue();
@@ -1348,7 +1354,7 @@ export default function resourceAutoTrackDeviceTest() {
       ];
       const errorFragments = [
         'error,',
-        'error_type=network',
+        'error_type=network_error',
         'error_source=network',
         `resource_url=${resourceUrl}`,
         'resource_status=0',
@@ -1384,6 +1390,75 @@ export default function resourceAutoTrackDeviceTest() {
 
       expect(resourceUploaded.length > 0).assertTrue();
       expect(errorUploaded.length > 0).assertTrue();
+      expect(resourceConsumed).assertTrue();
+      expect(errorConsumed).assertTrue();
+    });
+
+    it('axiosHttpErrorShouldPreserveStatusWhenResponseMetadataIsInvalid', 0, async () => {
+      const viewName = 'axios_http_error_response_view';
+      const resourceUrl = 'http://device.test/axios-http-error-response';
+      await FTRUMGlobalManager.getInstance().startView(viewName);
+
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      });
+
+      const requestConfig = new FakeAxiosRequestConfig(resourceUrl, 'get');
+      const preparedConfig =
+        target.requestManager.fulfilled!(requestConfig) as FTAxiosRequestConfigTarget;
+      const response = new FakeAxiosResponse(preparedConfig, 404, 'not found');
+      response.headers = new FakeAxiosThrowingHeaders();
+      const axiosError = new FakeAxiosError(preparedConfig, 'Request failed with status code 404', 'AxiosError: 404');
+      axiosError.response = response;
+
+      let rejected = false;
+      try {
+        await target.responseManager.rejected!(axiosError as Object);
+      } catch (_error) {
+        rejected = true;
+      }
+      await WaitUtils.delay(5);
+
+      expect(rejected).assertTrue();
+      const resourceFragments = [
+        'resource,',
+        `resource_url=${resourceUrl}`,
+        'resource_method=GET',
+        'resource_status=404',
+        `view_name=${viewName}`
+      ];
+      const errorFragments = [
+        'error,',
+        'error_source=network',
+        `resource_url=${resourceUrl}`,
+        'resource_status=404',
+        `view_name=${viewName}`
+      ];
+      const resourceRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments, 5000);
+      const errorRecord = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments, 5000);
+
+      expect(resourceRecord !== null).assertTrue();
+      expect(errorRecord !== null).assertTrue();
+      const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        viewName, resourceStatus: 404 };
+      const errorAttributes: RumAttributeExpectation = { measurement: 'error', appId: TEST_FAKE_RUM_ID,
+        viewName };
+      RumAttributeAssert.record(resourceRecord, resourceAttributes);
+      RumAttributeAssert.record(errorRecord, errorAttributes);
+
+      collector.clearRequests();
+      FTSDK.flushSyncData();
+      const resourceUploaded = await collector.waitForPayloadContaining(resourceFragments, 5000);
+      const errorUploaded = await collector.waitForPayloadContaining(errorFragments, 5000);
+      RumAttributeAssert.uploaded(resourceUploaded, resourceRecord, resourceAttributes);
+      RumAttributeAssert.uploaded(errorUploaded, errorRecord, errorAttributes);
+      const resourceConsumed =
+        await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, resourceRecord?.getUuid() ?? '', 5000);
+      const errorConsumed =
+        await DBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, errorRecord?.getUuid() ?? '', 5000);
+
       expect(resourceConsumed).assertTrue();
       expect(errorConsumed).assertTrue();
     });

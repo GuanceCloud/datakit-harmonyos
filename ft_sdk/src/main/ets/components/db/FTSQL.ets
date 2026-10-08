@@ -79,6 +79,8 @@ export const PENDING_RESOURCE_COLUMN_VIEW_REFERRER: string = "view_referrer";
 export const PENDING_RESOURCE_COLUMN_ACTION_NAME: string = "action_name";
 export const PENDING_RESOURCE_COLUMN_RUM_APP_ID: string = "rum_app_id";
 export const PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS: string = "dynamic_tags";
+/** JSON-encoded start-time network state; not a tag and not user extra_attr. */
+export const PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT: string = "network_snapshot";
 export const PENDING_RESOURCE_COLUMN_DRAFT_UUID: string = "draft_uuid";
 export const PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID: string = "error_draft_uuid";
 export const PENDING_RESOURCE_COLUMN_START_TIME: string = "start_time";
@@ -158,6 +160,7 @@ export const FT_TABLE_PENDING_RUM_RESOURCE_CREATE: string =
     ${PENDING_RESOURCE_COLUMN_ACTION_NAME} TEXT,
     ${PENDING_RESOURCE_COLUMN_RUM_APP_ID} TEXT,
     ${PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS} TEXT,
+    ${PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT} TEXT,
     ${PENDING_RESOURCE_COLUMN_DRAFT_UUID} TEXT,
     ${PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID} TEXT,
     ${PENDING_RESOURCE_COLUMN_START_TIME} BIGINT,

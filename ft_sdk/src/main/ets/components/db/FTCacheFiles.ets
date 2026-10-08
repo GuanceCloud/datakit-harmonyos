@@ -23,14 +23,18 @@ interface FTCacheJournal {
   changes: FTCacheMutation[];
 }
 
+interface FTCacheUtf8Stats {
+  length: number;
+  hash: number;
+}
+
 /** File primitives used only on TaskPool, while the cache directory lock is held. */
 export class FTCacheFiles {
-  static readonly MAX_RECORD_BYTES: number = 256 * 1024;
   /**
    * Bounds retained corrupt-record evidence only. This is deliberately not a
    * capacity-admission reserve: normal writes may use the configured limit.
    */
-  static readonly MAX_QUARANTINE_BYTES: number = FTCacheFiles.MAX_RECORD_BYTES * 2;
+  static readonly MAX_QUARANTINE_BYTES: number = 512 * 1024;
 
   static exists(path: string): boolean {
     try { return fs.accessSync(path); } catch (_) { return false; }
@@ -41,14 +45,60 @@ export class FTCacheFiles {
   }
 
   static bytes(text: string): number {
-    return util.TextEncoder.create('utf-8').encodeInto(text).byteLength;
+    const encoded = util.TextEncoder.create('utf-8').encodeInto(text);
+    return encoded.byteLength > 0 || text.length === 0
+      ? encoded.byteLength : FTCacheFiles.utf8Stats(text).length;
   }
 
   static checksum(text: string): string {
+    const encoded = util.TextEncoder.create('utf-8').encodeInto(text);
+    if (encoded.byteLength === 0 && text.length > 0) {
+      return (FTCacheFiles.utf8Stats(text).hash >>> 0).toString(16);
+    }
     let hash = 2166136261;
-    const bytes = util.TextEncoder.create('utf-8').encodeInto(text);
-    for (let i = 0; i < bytes.length; i++) { hash = Math.imul(hash ^ bytes[i], 16777619); }
+    for (let i = 0; i < encoded.length; i++) {
+      hash = Math.imul(hash ^ encoded[i], 16777619);
+    }
     return (hash >>> 0).toString(16);
+  }
+
+  private static utf8Stats(text: string): FTCacheUtf8Stats {
+    let length = 0;
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+      let codePoint = text.charCodeAt(i);
+      if (codePoint >= 0xd800 && codePoint <= 0xdbff && i + 1 < text.length) {
+        const low = text.charCodeAt(i + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (low - 0xdc00);
+          i++;
+        } else {
+          codePoint = 0xfffd;
+        }
+      } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        codePoint = 0xfffd;
+      }
+      if (codePoint <= 0x7f) {
+        hash = Math.imul(hash ^ codePoint, 16777619);
+        length += 1;
+      } else if (codePoint <= 0x7ff) {
+        hash = Math.imul(hash ^ (0xc0 | (codePoint >> 6)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 2;
+      } else if (codePoint <= 0xffff) {
+        hash = Math.imul(hash ^ (0xe0 | (codePoint >> 12)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 6) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 3;
+      } else {
+        hash = Math.imul(hash ^ (0xf0 | (codePoint >> 18)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 12) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 6) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 4;
+      }
+    }
+    return { length, hash };
   }
 
   static encode(body: string): string {

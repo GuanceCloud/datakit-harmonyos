@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.18-alpha03] - 2026-09-30
+- Fixed Navigation Views resuming as their outer Router page after a foreground return, and restored the Router page View when a NavDestination returns to `navBar`.
+- Fixed Action and View records from a previous process being reported as ordinary RUM data after an error-sampled Session. Their sampling decision is now persisted with each record and retained during restart recovery.
+- Fixed an expiring Session assigning its previous View to the new Session and sampling decision before closing it.
+- Fixed `stopView` replacing properties set by `startView`; ending a View now merges new properties and overrides matching keys.
+- Fixed View durations changing with wall-clock adjustments and being limited to four hours; duration now uses a persisted monotonic clock origin.
+- Fixed background and no-page RUM events inheriting a closed View. They now use `BackgroundView` or `RootView`; `BackgroundView` stays open after returning to the foreground without a page and closes when a page starts or another background period begins.
+- Fixed `ApplicationLaunch` staying open after backgrounding without a page and attributing later events to the wrong View; it now closes on background.
+- Fixed Router Views staying active after their page hides without a successor; they now close on page hide, while a back press alone keeps the View open.
+- Fixed multi-Ability lifecycle callbacks stopping an active View and refreshed automatic Router tracking when the active window changes.
+- Added `view_long_task_rate` to View records when Long Tasks occur.
+
+## [0.1.18-alpha02] - 2026-09-24
+- Fixed `setActionTrackingHandler` for automatic click and cold/hot launch Actions: `HandlerAction` customizes the Action, `null` suppresses it, and `undefined` keeps SDK defaults. For clicks, handler properties override only same-named component properties; suppressing a cold-launch Action still completes startup lifecycle and remote data-filter initialization.
+- Fixed cold/hot launch Action attribution to a dedicated `ApplicationLaunch` View instead of the foreground page View.
+- Added percentage sampling for RUM sessions, error-session supplemental sampling, Logs, and Trace through the `sessionSamplingRate`, `sessionOnErrorSamplingRate`, `logSamplingRate`, and `traceSamplingRate` local APIs and remote keys. Rates accept finite decimals in `[0,100]` (`0.1` means 0.1%); normal sampling defaults to `100` and error-session supplemental sampling to `0`. Valid new remote keys take precedence, including explicit `0`; invalid updates retain the previous valid setting, and cached and hot updates are supported. The Demo migrates saved `[0,1]` preferences without changing their effective sampling. Session Replay sampling is not exposed by this SDK.
+- Deprecated the legacy `[0,1]` `setSamplingRate` / `getSamplingRate` methods, RUM `setSessionErrorSampleRate` / `getSessionErrorSampleRate`, and remote keys `rumSampleRate`, `rumSessionOnErrorSampleRate`, `logSampleRate`, and `traceSampleRate`. They remain available with their original units, defaults, and behavior (`1` means 100%); use the corresponding percentage APIs and keys for new integrations (`1` means 1%).
+- Fixed Action and View records from an active session being reported as ordinary RUM data after that session failed normal sampling. They now wait for error-triggered reporting when error-session sampling accepts the session, or are discarded when it rejects the session.
+- Fixed error-sampled View records aging out based on when the View began. Their local retention time now follows the latest Error, or the View snapshot time if no Error has occurred; the reported View time remains its start time.
+- Fixed Resource records using submission or completion time as their reported timestamp. When a Resource start time is available, including for a pending Resource recovered after restart, that start time is now used for both the reported timestamp and the local cache entry.
+- Fixed RUM Resources omitting `duration` when a request starts and finishes within one clock tick; both direct collection and Worker processing now retain the valid `duration=0` value.
+- Fixed new Log and RUM records missing or reporting an outdated `sdk_pkg_info.track` when the Hvigor compiler plugin registers or updates its version after SDK initialization; refreshed package information now reaches the tags copied into those records.
+- Fixed `startView` reusing an active View with the same name; each call now creates a View, while automatic callbacks deduplicate by `pageId` or `navDestinationId`.
+- Fixed stale View names and properties after foreground return by re-running `FTViewTrackingHandler.resolveHandlerView(...)`.
+- Fixed missing Views on foreground return without a route change by creating a new View after background closure.
+
+## [0.1.18-alpha01] - 2026-09-22
+- Added Resource transport fields `resource_request_size`, `resource_http_protocol`, and `resource_connection_reuse` to RCP, Axios, NetworkKit HTTP Chain, and manual reporting. RCP uses exposed platform values where available; explicit values are also supported. Platform-observed request body and header bytes take precedence over an earlier integration estimate, even when they arrive later through the Worker, while unavailable values remain absent.
+- Fixed missing request byte counts on HarmonyOS runtimes where `TextEncoder.encodeInto()` returns no byte length during automatic HTTP interception. An ArkTS fallback now counts UTF-8 strings, including malformed surrogate replacement, and binary bodies instead of dropping the size.
+- Added Resource start-time network snapshots. `network_available` is always recorded; validation, bandwidth, cellular signal, and publicly available Wi-Fi signal fields are recorded only when HarmonyOS supplies valid values. A default-network revision prevents late Wi-Fi callbacks from attaching data from an earlier network, and the snapshot survives pending-Resource recovery or a network switch before request completion.
+- Added `FTNetworkErrorHandler.onExceptionWithFilter(...)` for automatically collected RCP, NetworkKit HTTP, and Axios requests. It can suppress the Error generated by a local failure without an HTTP response while retaining the Resource, its custom fields, and associations; HTTP 4xx/5xx responses are unaffected.
+- Added `FTRUMConfig.setNetworkErrorHandler(...)` as the default local-failure handler for automatic RCP, NetworkKit HTTP, and Axios collection. A Session, Client, or interceptor-chain handler can override it, and `networkErrorHandler: null` disables it for that integration.
+- Added `foreground_crash_free_duration` and `background_crash_free_duration` nanosecond fields to crash Errors. Persisted state supports process-restart recovery; invalid or unavailable state degrades safely, and a cycle resets only after its Error is stored in the local cache.
+- Fixed newly generated RUM Network Errors using an inconsistent `error_type`; they now use `network_error`. Already cached Line Protocol keeps its original value and uploads without migration.
+- Changed upload size caps into batch targets: when the first telemetry record exceeds a Host-to-Worker or HTTP batch target, it is uploaded individually instead of being dropped. This includes Error records.
+- Fixed recovered Native Crash and system APP_FREEZE ANR Errors being associated with a restarted-process View. When a valid predecessor context exists, the Error now retains the previous View and Session tags.
+- Fixed crash recovery losing the previous View's Error aggregate by retaining the cached predecessor View and refreshing it after the Error count increases, so the aggregate can be reported alongside the recovered Error.
+- Improved terminal crash handling to wait for pending Action and View counter updates before caching the final View snapshot; an unconfirmed flush is logged and handled safely.
+
 ## [0.1.17] - 2026-09-11
 1. Added `setEnableConsoleLog(...)` and `@cloudcare/hvigor-ohos-plugin` support for automatically collecting `console.*` and `hilog.*` logs. Both the plugin and logging configuration must be enabled. Its optional `prefix` supports a plain message prefix and DataKit-compatible allow rules for `message`, `log_source`, and HiLog `tag`/`domain`; log level remains configured through `setLogLevelFilters(...)`, and rules are evaluated before automatic logs enter the SDK queue.
 2. Added compiler-plugin-based cold-launch tracking that automatically reports process startup, AbilityStage initialization, first UIAbility creation, and first-frame timing without manual lifecycle calls.

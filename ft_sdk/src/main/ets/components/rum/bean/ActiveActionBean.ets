@@ -1,5 +1,6 @@
 import { ActionBean } from '../../db/bean/ActionBean';
 import { Utils } from '../../utils/Utils';
+import { CollectType } from '../enum/RUMEnums';
 
 /**
  * JSON representation interface for ActiveActionBean
@@ -23,6 +24,7 @@ interface ActiveActionBeanJSON {
     pendingResourceCount: number;
     property: Record<string, object>;
     tags: Record<string, string>;
+    collectType: CollectType;
 }
 
 /**
@@ -48,6 +50,7 @@ export class ActiveActionBean {
   private hasReplay: boolean = false;
   private property: Record<string, object> = {};
   private tags: Record<string, string> = {};
+  private collectType: CollectType = CollectType.ALL;
   
   // RUM statistics counters
   private errorCount: number = 0;
@@ -122,6 +125,14 @@ export class ActiveActionBean {
    */
   public setSessionId(sessionId: string): void {
     this.sessionId = sessionId || "";
+  }
+
+  public getCollectType(): CollectType {
+    return this.collectType;
+  }
+
+  public setCollectType(collectType: CollectType): void {
+    this.collectType = collectType;
   }
   
   /**
@@ -385,6 +396,7 @@ export class ActiveActionBean {
   public convertToActionBean(): ActionBean {
     const actionBean = new ActionBean(this.id, this.actionName, this.actionType, this.startTime);
     actionBean.setSessionId(this.sessionId);
+    actionBean.setCollectType(this.collectType);
     actionBean.setViewId(this.viewId);
     actionBean.setViewName(this.viewName);
     actionBean.setViewReferrer(this.viewReferrer);
@@ -432,7 +444,8 @@ export class ActiveActionBean {
       longTaskCount: this.longTaskCount,
       pendingResourceCount: this.pendingResourceCount,
       property: this.property,
-      tags: this.tags
+      tags: this.tags,
+      collectType: this.collectType
     };
     return result;
   }

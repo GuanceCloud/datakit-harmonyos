@@ -21,16 +21,20 @@ interface RemoteConfigTestContent {
   syncSleepTime?: number;
   rumSampleRate?: number;
   rumSessionOnErrorSampleRate?: number;
+  sessionSamplingRate?: number;
+  sessionOnErrorSamplingRate?: number;
   rumEnableTraceUserAction?: boolean;
   rumEnableResourceHostIP?: boolean;
   rumEnableTrackAppUIBlock?: boolean;
   rumBlockDurationMs?: number;
   rumAllowWebViewHost?: string[];
   logSampleRate?: number;
+  logSamplingRate?: number;
   logLevelFilters?: string[];
   logEnableCustomLog?: boolean;
   logEnableConsoleLog?: boolean;
   traceSampleRate?: number;
+  traceSamplingRate?: number;
   traceEnableAutoTrace?: boolean;
   traceType?: string;
   unsupportedServerKey?: string;
@@ -273,6 +277,108 @@ export default function remoteConfigUnitTest() {
       expect(traceConfig.getSamplingRate()).assertEqual(0.3);
       expect(traceConfig.isEnableAutoTrace()).assertTrue();
       expect(traceConfig.getTraceType()).assertEqual(TraceType.TRACEPARENT);
+    });
+
+    it('newRemoteSamplingRatesShouldWinAndKeepExplicitZero', 0, () => {
+      const storage = new MemoryRemoteConfigStorage();
+      storage.save(stringifyRemoteConfig({
+        content: {
+          rumSampleRate: 0.2,
+          sessionSamplingRate: 0,
+          rumSessionOnErrorSampleRate: 0.2,
+          sessionOnErrorSamplingRate: 0.1,
+          logSampleRate: 0.5,
+          logSamplingRate: 1,
+          traceSampleRate: 0.1,
+          traceSamplingRate: 99.9
+        }
+      }), 1);
+      const manager = new FTRemoteConfigManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        0,
+        storage,
+        null
+      );
+      manager.initFromLocalCache();
+
+      const rum = new FTRUMConfig()
+        .setSessionSamplingRate(20)
+        .setSessionOnErrorSamplingRate(20);
+      const log = new FTLoggerConfig().setLogSamplingRate(20);
+      const trace = new FTTraceConfig().setTraceSamplingRate(20);
+      manager.mergeRUMConfigFromCache(rum);
+      manager.mergeLogConfigFromCache(log);
+      manager.mergeTraceConfigFromCache(trace);
+
+      expect(rum.getSessionSamplingRate()).assertEqual(0);
+      expect(rum.getSessionOnErrorSamplingRate()).assertEqual(0.1);
+      expect(log.getLogSamplingRate()).assertEqual(1);
+      expect(trace.getTraceSamplingRate()).assertEqual(99.9);
+      expect(rum.getSamplingRate()).assertEqual(0);
+      expect(rum.getSessionErrorSampleRate()).assertEqual(0.001);
+      expect(log.getSamplingRate()).assertEqual(0.01);
+      expect(trace.getSamplingRate()).assertEqual(0.999);
+    });
+
+    it('invalidNewRemoteSamplingRateShouldKeepPreviousValueAndCacheIt', 0, async () => {
+      const storage = new MemoryRemoteConfigStorage();
+      const client = new FakeRemoteConfigHttpClient({
+        code: 200,
+        body: stringifyRemoteConfig({ content: { sessionSamplingRate: 20 } })
+      });
+      const manager = new FTRemoteConfigManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        0,
+        storage,
+        null,
+        client,
+        () => 10,
+        (value: string) => value
+      );
+      const rum = new FTRUMConfig().setSessionSamplingRate(50);
+
+      await manager.initFromRemote('rum-app-id');
+      manager.mergeRUMConfigFromCache(rum);
+      expect(rum.getSessionSamplingRate()).assertEqual(20);
+
+      client.response = {
+        code: 200,
+        body: stringifyRemoteConfig({
+          content: { sessionSamplingRate: 101, rumSampleRate: 0.1 }
+        })
+      };
+      await manager.updateRemoteConfig(0);
+      manager.mergeRUMConfigFromCache(rum);
+      expect(rum.getSessionSamplingRate()).assertEqual(20);
+      expect(storage.loadConfig()!.indexOf('"sessionSamplingRate":20') >= 0).assertTrue();
+
+      const restored = new FTRemoteConfigManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        0,
+        storage,
+        null
+      );
+      restored.initFromLocalCache();
+      const restoredRum = new FTRUMConfig().setSessionSamplingRate(50);
+      restored.mergeRUMConfigFromCache(restoredRum);
+      expect(restoredRum.getSessionSamplingRate()).assertEqual(20);
+    });
+
+    it('invalidNewRemoteSamplingRateShouldNotUseOldKeyWithoutPriorValue', 0, () => {
+      const storage = new MemoryRemoteConfigStorage();
+      storage.save(stringifyRemoteConfig({
+        content: { sessionSamplingRate: 101, rumSampleRate: 0.1 }
+      }), 1);
+      const manager = new FTRemoteConfigManager(
+        FTSDKConfig.builder('http://datakit.local'),
+        0,
+        storage,
+        null
+      );
+      manager.initFromLocalCache();
+      const rum = new FTRUMConfig().setSessionSamplingRate(50);
+      manager.mergeRUMConfigFromCache(rum);
+      expect(rum.getSessionSamplingRate()).assertEqual(50);
     });
 
     it('syncTaskHotUpdateSupportedUploadValues', 0, () => {

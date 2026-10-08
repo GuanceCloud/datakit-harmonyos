@@ -83,13 +83,20 @@ export default class EntryAbility extends UIAbility {
 
     const rumConfig = new FTRUMConfig()
       .setRumAppId('YOUR_RUM_APP_ID')
+      .setSessionSamplingRate(100)
+      .setSessionOnErrorSamplingRate(0)
       .setEnableTraceUserView(true)
       .setEnableTraceUserAction(true)
       .setEnableTraceUserResource(true)
       .setEnableTrackAppCrash(true)
 
-    const loggerConfig = new FTLoggerConfig().setEnableCustomLog(true)
-    const traceConfig = new FTTraceConfig().setEnableAutoTrace(true).setTraceType(TraceType.DDTRACE)
+    const loggerConfig = new FTLoggerConfig()
+      .setLogSamplingRate(100)
+      .setEnableCustomLog(true)
+    const traceConfig = new FTTraceConfig()
+      .setTraceSamplingRate(100)
+      .setEnableAutoTrace(true)
+      .setTraceType(TraceType.DDTRACE)
 
     FTSDK.installRUMConfig(rumConfig)
     FTSDK.installLogConfig(loggerConfig)
@@ -103,6 +110,95 @@ export default class EntryAbility extends UIAbility {
 Native network auto-tracking reports `resource_status=0` when no HTTP response is received (for example, timeout or connection failure). The final Resource and its associated Network Error retain this value. Zero has no `resource_status_group`; real HTTP responses retain their status and existing `2xx`/`4xx`/`5xx` grouping. The full URL path remains in `resource_url_path`; only `resource_url_path_group` normalizes numeric segments.
 
 Following the existing SDK contract, a collected Resource generates one linked Network Error for HTTP status >=400, or for status 0 with a non-empty error stack. A manually supplied status 0 without an error stack does not alone create an Error. Auto-tracking supplies the failure message and stack (or the available platform failure description), and links both records through `resource_id`.
+
+### Resource transport fields
+
+Resource records can also report request size, negotiated HTTP protocol, and
+connection reuse as Fields. RCP platform values take precedence; RCP, Axios,
+and NetworkKit HTTP Chain integrations can supply explicit values when the
+platform does not expose them. See
+[Resource transport metrics](RESOURCE_TRANSPORT_METRICS.md) for API examples,
+priority rules, byte-counting semantics, and HarmonyOS platform limitations.
+
+### Filter local Network Errors
+
+`FTNetworkErrorHandler` can suppress only the Error derived from a local
+transport failure. It is called only when the request has no HTTP response, so
+HTTP 4xx and 5xx Resources keep their existing Error behavior.
+
+```ts
+import {
+  FTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkErrorKind,
+  FTNetworkResourceFields
+} from '@guancecloud/ft_sdk/Index'
+
+class LocalFailureFilter implements FTNetworkErrorHandler {
+  onExceptionWithFilter(
+    context: FTNetworkErrorContext,
+    resourceFields: FTNetworkResourceFields
+  ): boolean {
+    resourceFields['network_failure_kind'] = context.kind
+    resourceFields['network_failure_code'] = String(context.errorCode || '')
+    return context.kind === FTNetworkErrorKind.TIMEOUT ||
+      context.kind === FTNetworkErrorKind.CANCELED
+  }
+}
+
+const networkErrorHandler = new LocalFailureFilter()
+```
+
+Configure it once on `FTRUMConfig` to make it the default for automatic RCP,
+Axios, and NetworkKit HTTP collection. This mirrors Android's global
+`setOkHttpResourceContentHandler(...)` configuration while applying to all
+HarmonyOS automatic network integrations:
+
+```ts
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setEnableTraceUserResource(true)
+  .setNetworkErrorHandler(networkErrorHandler)
+
+FTSDK.installRUMConfig(rumConfig)
+```
+
+An individual automatic collection entry point can override that default:
+
+```ts
+// RCP
+const session = rcp.createSession(createFTRCPTrackConfig({ networkErrorHandler }))
+
+// Axios compatibility interceptor
+applyFTAxiosTrack(axiosClient, { networkErrorHandler })
+
+// NetworkKit HTTP interceptor chain (from @guancecloud/ft_sdk_ext)
+applyFTHttpTrack(httpRequest, { networkErrorHandler })
+// or: createFTHttpInterceptorChain({ networkErrorHandler })
+```
+
+An explicit handler has priority over the `FTRUMConfig` default. Pass
+`networkErrorHandler: null` on a Session, Axios Client, or NetworkKit chain to
+keep the global default configured for the app but opt that integration out.
+
+The context includes the URL, method, source (`rcp`, `http_chain`, or `axios`),
+original failure value, optional platform error code, message, stack, and a
+portable kind: `dns`, `timeout`, `canceled`, `certificate`, `connection`, or
+`unknown`. Returning `true` keeps the Resource lifecycle intact, including its
+duration, status `0`, error details, and callback fields, then suppresses only
+the linked `network_error`. It never changes the business request result or
+replaces its thrown error.
+
+Returning `false`, omitting the handler, or throwing from the handler retains
+the default behavior. A callback exception is logged in a controlled manner and
+is treated as `false`. Callback fields pass through the normal `DataModifier`
+flow, but SDK-owned Resource, session, view, and action keys are ignored.
+
+The **HTTP Interceptor Test** demo page has a Local Error Filter switch and
+RCP, NetworkKit, and Axios actions that use an unused loopback port. With the
+switch on, verify one status-0 Resource with `demo_network_error_*` fields and
+no linked Error; with it off, verify the linked Error returns. Existing 404
+actions must keep their Resource and Error in either mode.
 
 ### Filter automatically tracked Resources
 
@@ -271,30 +367,42 @@ the normalized final route segment. When `trackingType` is `ROUTER`, use
 `NAVIGATION`, use `navigationInfo` to filter by `from`, `to`, `operation`, or
 the destination `param`, `navigationId`, and `navDestinationId`.
 
-## Automatic Action Filtering
+## Automatic Action Handler
 
 When automatic Action tracking is enabled, configure
-`FTRUMConfig.setActionTrackingHandler(...)` to filter click Actions.
-The handler is called for each automatically tracked user operation. Return
-`null` to skip collection; return `undefined` to continue through the SDK's
-original automatic Action collection path, including name, properties,
-position, and View association.
+`FTRUMConfig.setActionTrackingHandler(...)` for automatic clicks and cold/hot
+launch Actions. Return `HandlerAction` to customize the name and properties,
+`null` to skip collection, or `undefined` to retain the SDK's default Action.
+Launch events have a `null` source; distinguish them with `getSourceType()`.
+Manual `addAction` and `startAction` calls do not invoke this handler. The SDK
+retains launch type, duration, and cold-launch phase fields when a launch name
+or properties are customized. For clicks, `HandlerAction` properties override
+same-named component properties while retaining the others; return `undefined`
+to keep all defaults.
 
 ```ts
 import {
   ActionEventWrapper,
+  ActionSourceType,
   FTActionTrackingHandler,
-  FTRUMConfig
+  FTRUMConfig,
+  HandlerAction
 } from '@guancecloud/ft_sdk/Index'
 
 const actionHandler: FTActionTrackingHandler = {
-  resolveHandlerAction: (event: ActionEventWrapper): null | undefined => {
+  resolveHandlerAction: (event: ActionEventWrapper): HandlerAction | null | undefined => {
+    if (event.getSourceType() === ActionSourceType.LAUNCH_COLD) {
+      const properties: Record<string, object> = {}
+      properties['channel'] = new String('startup')
+      return new HandlerAction('custom_cold_launch', properties)
+    }
+
     // Do not collect clicks from this component.
     if (event.getSource()?.getId() === 'ignore_action_view') {
       return null
     }
 
-    // Continue through the original automatic Action collection path.
+    // Keep the default click or hot-launch Action.
     return undefined
   }
 }
@@ -356,6 +464,45 @@ Writes and upload commits use checksummed envelopes, fsync, rename and a forward
 
 Upload selection retains only page-sized candidate metadata plus the selected payloads; it does not load or rewrite the entire queue for an ACK. A record exceeding the configured upload-page byte limit is moved to the bounded quarantine and counted as rejected so it cannot block later valid records. Expired/orphaned upload leases are reclaimed. Directory enumeration and checksummed record scanning are still linear in the number of cached files; benchmark device latency separately from payload-memory bounds.
 
+## Sampling Rates
+
+> Availability: these percentage APIs are present in this source branch and
+> are not yet tied to a published OHPM version. Use the release notes of the
+> package you install to confirm availability.
+
+Sampling configuration now uses a percentage `number` at its public boundary.
+Every new value is a finite number in `[0, 100]`; decimal values are supported,
+so `0.1` means **0.1%**, and `1` means **1%**. `NaN`, infinity, negative
+values, and values over `100` are rejected with `RangeError` without changing
+the previous configuration. Conversion to the SDK's internal `[0,1]`
+probability happens once inside the configuration API.
+
+| Capability | New setter / getter | Default |
+| --- | --- | --- |
+| RUM session | `setSessionSamplingRate` / `getSessionSamplingRate` | `100` |
+| RUM session retained after an error | `setSessionOnErrorSamplingRate` / `getSessionOnErrorSamplingRate` | `0` |
+| Log | `setLogSamplingRate` / `getLogSamplingRate` | `100` |
+| Trace | `setTraceSamplingRate` / `getTraceSamplingRate` | `100` |
+
+```ts
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_RUM_APP_ID')
+  .setSessionSamplingRate(20)          // 20%
+  .setSessionOnErrorSamplingRate(0.1)  // 0.1%; only for a normally unsampled session
+
+const loggerConfig = new FTLoggerConfig().setLogSamplingRate(99.9)
+const traceConfig = new FTTraceConfig().setTraceSamplingRate(1)
+```
+
+`setSamplingRate` / `getSamplingRate` on RUM, Log, and Trace, plus
+`setSessionErrorSampleRate` / `getSessionErrorSampleRate` on RUM, remain
+available but are deprecated. They retain their original `[0,1]` probability
+unit, defaults, and behavior: old `1` still means 100%. Do not select a unit
+by value; migrate the method name as well. When both local forms are set, the
+new percentage method wins regardless of call order. HarmonyOS does not expose
+a Session Replay sampling configuration, so this SDK does not introduce Replay
+or error-Replay placeholder APIs.
+
 ## Remote Configuration and Runtime Endpoint
 
 Remote configuration is opt-in. After RUM is installed, the SDK fetches `v1/env_variable` using the RUM app ID, caches a valid response, and applies the Android-compatible fields on the next initialization or, where supported, immediately. The default refresh interval is 12 hours.
@@ -374,6 +521,32 @@ FTSDK.setDatakitUrl('https://datakit.example.com')
 ```
 
 Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. Switching to a valid runtime endpoint also refreshes remote configuration immediately; an in-flight response from the old endpoint is ignored. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
+
+### Remote sampling keys
+
+Remote responses use the same percentage contract as the local APIs. The
+following new keys take precedence over their deprecated `[0,1]` counterparts:
+
+| New key (`[0,100]`) | Deprecated key (`[0,1]`) |
+| --- | --- |
+| `sessionSamplingRate` | `rumSampleRate` |
+| `sessionOnErrorSamplingRate` | `rumSessionOnErrorSampleRate` |
+| `logSamplingRate` | `logSampleRate` |
+| `traceSamplingRate` | `traceSampleRate` |
+
+For a period of old/new client coexistence, the control plane may double-write
+equivalent values, such as `logSampleRate: 0.2` and
+`logSamplingRate: 20`. A valid new key, including an explicit `0`, wins. If a
+new key is present but invalid, the SDK does **not** fall back to the old key
+from that response: it keeps the previous valid remote value when one exists,
+or retains the effective local value when none exists. That safeguard also
+applies to callback-modified remote configurations and cached startup data.
+
+If both keys are absent in a later valid response, the remote override is
+removed and the local setting becomes effective again. A valid remote sampling
+value overrides both local API forms. The protocol continues to use only the
+four HarmonyOS-supported RUM/Log/Trace keys above; Replay keys are not
+implemented by this SDK.
 
 ## Update the Reporting Endpoint at Runtime
 
@@ -476,7 +649,24 @@ Use `DataModifier` for global key-based rules; it is the lower-overhead option. 
 ## Requirements
 
 - HarmonyOS application project with `ohpm` support
-- Network permission for data reporting
+- The `ft_sdk` HAR declares these normal permissions in its own `module.json5`:
+
+  ```json5
+  {
+    "module": {
+      "requestPermissions": [
+        { "name": "ohos.permission.INTERNET" },
+        { "name": "ohos.permission.GET_WIFI_INFO" },
+        { "name": "ohos.permission.GET_NETWORK_INFO" }
+      ]
+    }
+  }
+  ```
+
+  `INTERNET` uploads SDK data. `GET_NETWORK_INFO` supports network availability
+  and transport-type collection, while `GET_WIFI_INFO` supports Wi-Fi signal
+  collection. A consuming HAP does not need to duplicate these declarations;
+  they are introduced by the `ft_sdk` HAR.
 - Verify compatibility against your target HarmonyOS API level before release
 
 ## Notes

@@ -1,4 +1,8 @@
-import { ENTRY_RUNTIME_KEYS, resolveEntryRuntimeConfig } from '../utils/EntryRuntimeConfig';
+import {
+  ENTRY_RUNTIME_KEYS,
+  ENTRY_RUNTIME_LEGACY_SAMPLING_KEYS,
+  resolveEntryRuntimeConfig
+} from '../utils/EntryRuntimeConfig';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
@@ -12,6 +16,7 @@ import {
   ErrorMonitorType,
   ActionEventWrapper,
   FTActionTrackingHandler,
+  HandlerAction,
   FTInTakeUrlHandler,
   FTLoggerConfig,
   FTRemoteConfigFetchResult,
@@ -40,6 +45,7 @@ import {
 } from '@guancecloud/ft_session_replay';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
+import { DemoGlobalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
@@ -118,12 +124,10 @@ class DemoViewTrackingHandler implements FTViewTrackingHandler {
 }
 
 /**
- * Example of automatic Action filtering. Returning null skips a matching
- * Action; returning undefined continues through the original automatic Action
- * collection path.
+ * Example of automatic Action customization and filtering.
  */
 class DemoActionTrackingHandler implements FTActionTrackingHandler {
-  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): null | undefined {
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | null | undefined {
     const source = actionEventWrapper.getSource();
     const nodeId = source?.getId() ?? '';
     const nodeType = source?.getNodeType() ?? 'UnknownComponent';
@@ -131,6 +135,12 @@ class DemoActionTrackingHandler implements FTActionTrackingHandler {
     if (this.shouldFilterAction(actionName, nodeId)) {
       DemoLogger.i(LOG_TAG, `Automatic Action filtered: name=${actionName}, id=${nodeId}`);
       return null;
+    }
+
+    if (nodeId === 'test-button-action-tracking') {
+      const properties: Record<string, object> = {};
+      properties['demo_action_handler'] = new String('customized');
+      return new HandlerAction('demo_custom_button_action', properties);
     }
 
     return undefined;
@@ -316,6 +326,12 @@ export default class EntryAbility extends UIAbility {
       const value = want.parameters?.[key];
       if (value !== undefined && value !== null) incoming[key] = String(value);
     }
+    for (const key of ENTRY_RUNTIME_LEGACY_SAMPLING_KEYS) {
+      const stored = String(await store.get(key, ''));
+      if (stored.length > 0) saved[key] = stored;
+      const value = want.parameters?.[key];
+      if (value !== undefined && value !== null) incoming[key] = String(value);
+    }
     const config = resolveEntryRuntimeConfig(incoming, saved);
     const sources: string[] = [];
     let changed = false;
@@ -427,8 +443,8 @@ export default class EntryAbility extends UIAbility {
         .setCacheDiscard('discard')
         // FileStore is the primary cache. On its first launch, copy pending
         // SQLite / legacy cache data before the source is reclaimed.
-        .enableFileDataStore()
-        .setNeedTransformOldCache(true)
+        // .enableFileDataStore()
+        // .setNeedTransformOldCache(true)
         // Upload defaults are explicit in the demo so the active SDK behavior
         // can be read directly here. `autoSync` remains launch-configurable.
         .setAutoSync(networkRouteTestEnabled ? false : this.runtimeConfig.autoSync === 'true')
@@ -466,7 +482,7 @@ export default class EntryAbility extends UIAbility {
 
       // Initialize log configuration
       const logConfig = new FTLoggerConfig()
-        .setSamplingRate(Number(this.runtimeConfig.logSamplingRate))  // Shared persisted sampling configuration
+        .setLogSamplingRate(Number(this.runtimeConfig.logSamplingRate))
         .setEnableCustomLog(true)
         .setEnableConsoleLog(true, LOG_FILTER_TEST_RULE)
         // .setLogCacheLimitCount(20000)
@@ -487,8 +503,8 @@ export default class EntryAbility extends UIAbility {
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
         .setEnableTrackAppCrash(true)  // JS and native crash monitoring
-        .setSamplingRate(Number(this.runtimeConfig.rumSamplingRate))
-        .setSessionErrorSampleRate(Number(this.runtimeConfig.errorSamplingRate))
+        .setSessionSamplingRate(Number(this.runtimeConfig.sessionSamplingRate))
+        .setSessionOnErrorSamplingRate(Number(this.runtimeConfig.sessionOnErrorSamplingRate))
         .setEnableTraceUserAction(true)
         .setEnableTraceUserView(true)
         .setEnableTraceUserResource(true)
@@ -497,6 +513,7 @@ export default class EntryAbility extends UIAbility {
         .setViewTrackingHandler(new DemoViewTrackingHandler(), FTViewTrackingType.ALL)
         .setActionTrackingHandler(new DemoActionTrackingHandler())
         .setResourceUrlHandler(new DemoResourceUrlHandler())
+        .setNetworkErrorHandler(new DemoGlobalNetworkErrorFilter())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
@@ -531,7 +548,7 @@ export default class EntryAbility extends UIAbility {
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()
-        .setSamplingRate(Number(this.runtimeConfig.traceSamplingRate))
+        .setTraceSamplingRate(Number(this.runtimeConfig.traceSamplingRate))
         .setEnableAutoTrace(true)
         .setEnableLinkRUMData(true)
         .setTraceType(TraceType.DDTRACE);

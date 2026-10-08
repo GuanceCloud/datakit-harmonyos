@@ -4,16 +4,24 @@ import { FrameNode, UIContext, UIObserver, uiObserver } from '@kit.ArkUI';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
+import { FTDBTaskPoolExecutor } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
+import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
+import { CollectType } from '../../../main/ets/components/rum/enum/RUMEnums';
 import { FTActionTracker } from '../../../main/ets/components/rum/FTActionTracker';
 import { FTNavigationTracker } from '../../../main/ets/components/rum/FTNavigationTracker';
+import { DefaultFTSDKRuntime } from '../../../main/ets/components/internal/runtime/FTSDKRuntime';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
 import { ActionEventWrapper } from '../../../main/ets/components/rum/bean/ActionEventWrapper';
+import { HandlerAction } from '../../../main/ets/components/rum/bean/HandlerAction';
 import { HandlerView } from '../../../main/ets/components/rum/bean/HandlerView';
 import { FTActionTrackingHandler } from '../../../main/ets/components/rum/handler/FTActionTrackingHandler';
 import { FTViewTrackingContext } from '../../../main/ets/components/rum/handler/FTViewTrackingContext';
 import { FTViewTrackingHandler } from '../../../main/ets/components/rum/handler/FTViewTrackingHandler';
 import { FTViewTrackingType } from '../../../main/ets/components/rum/enum/FTViewTrackingType';
+import { Utils } from '../../../main/ets/components/utils/Utils';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -29,18 +37,28 @@ type WillClickCallback = (event: Object, node?: FrameNode) => void | Promise<voi
 class FakeRouterPageInfo {
   name: string;
   state: number;
+  pageId: string;
+  index: number;
+  path: string;
 
-  constructor(name: string, state: number) {
+  constructor(name: string, state: number, pageId: string, index: number) {
     this.name = name;
     this.state = state;
+    this.pageId = pageId;
+    this.index = index;
+    this.path = name;
   }
 }
 
 class FakeNavDestinationInfo {
   name: string;
+  navDestinationId: string;
+  navigationId: string = 'test-navigation';
+  index: number = 1;
 
-  constructor(name: string) {
+  constructor(name: string, navDestinationId: string) {
     this.name = name;
+    this.navDestinationId = navDestinationId;
   }
 }
 
@@ -194,15 +212,23 @@ class FakeUIObserver {
     return this.willClickCallbacks.length > 0;
   }
 
-  async emitRouterPageUpdate(name: string, state: number): Promise<void> {
-    const info = new FakeRouterPageInfo(name, state);
+  async emitRouterPageUpdate(name: string, state: number, pageId: string = name, index: number = 1): Promise<void> {
+    const info = new FakeRouterPageInfo(name, state, pageId, index);
     for (const callback of this.routerPageUpdateCallbacks.slice()) {
       await callback(info as Object as uiObserver.RouterPageInfo);
     }
   }
 
-  async emitNavDestinationSwitch(fromName: string, toName: string): Promise<void> {
-    const info = new FakeNavDestinationSwitchInfo(new FakeNavDestinationInfo(fromName), new FakeNavDestinationInfo(toName));
+  async emitNavDestinationSwitch(fromName: string, toName: string, toId: string = toName): Promise<void> {
+    const info = new FakeNavDestinationSwitchInfo(new FakeNavDestinationInfo(fromName, fromName),
+      new FakeNavDestinationInfo(toName, toId));
+    for (const callback of this.navDestinationSwitchCallbacks.slice()) {
+      await callback(info as Object as uiObserver.NavDestinationSwitchInfo);
+    }
+  }
+
+  async emitNavDestinationReturnToNavBar(fromName: string): Promise<void> {
+    const info = new FakeNavDestinationSwitchInfo(new FakeNavDestinationInfo(fromName, fromName), 'navBar');
     for (const callback of this.navDestinationSwitchCallbacks.slice()) {
       await callback(info as Object as uiObserver.NavDestinationSwitchInfo);
     }
@@ -217,38 +243,41 @@ class FakeUIObserver {
 
 class FakeUIContext {
   observer: FakeUIObserver = new FakeUIObserver();
-  router: FakeRouter = new FakeRouter();
+  currentRouterName: string = '';
 
   getUIObserver(): UIObserver {
     return this.observer as Object as UIObserver;
   }
 
-  getRouter(): FakeRouter {
-    return this.router;
+  getRouter(): Object {
+    return new FakeRouter(this.currentRouterName);
+  }
+}
+
+class FakeRouterState {
+  index: number = 1;
+  name: string;
+  path: string;
+
+  constructor(path: string) {
+    // HarmonyOS RouterState separates the directory path from the page name.
+    // For pages/Index, getState() can return path='pages', name='Index'.
+    const lastSeparator = path.lastIndexOf('/');
+    this.path = lastSeparator >= 0 ? path.substring(0, lastSeparator) : '';
+    this.name = path.substring(lastSeparator + 1);
   }
 }
 
 class FakeRouter {
-  private path: string = '';
+  private path: string;
 
-  setPath(path: string): void {
+  constructor(path: string) {
     this.path = path;
   }
 
   getState(): FakeRouterState {
-    const lastSeparator = this.path.lastIndexOf('/');
-    return {
-      index: this.path.length > 0 ? 1 : 0,
-      name: this.path.length > 0 ? this.path.substring(lastSeparator + 1) : '',
-      path: lastSeparator >= 0 ? this.path.substring(0, lastSeparator) : ''
-    };
+    return new FakeRouterState(this.path);
   }
-}
-
-interface FakeRouterState {
-  index: number;
-  name: string;
-  path: string;
 }
 
 class FilteringActionTrackingHandler implements FTActionTrackingHandler {
@@ -269,6 +298,21 @@ class PassThroughActionTrackingHandler implements FTActionTrackingHandler {
 
   resolveHandlerAction(_actionEventWrapper: ActionEventWrapper): null | undefined {
     this.resolvedCount += 1;
+    return undefined;
+  }
+}
+
+class CustomizingActionTrackingHandler implements FTActionTrackingHandler {
+  public observedExtra: Record<string, object> | null = null;
+
+  resolveHandlerAction(actionEventWrapper: ActionEventWrapper): HandlerAction | undefined {
+    if (actionEventWrapper.getSource()?.getId() === 'custom_action_view') {
+      this.observedExtra = actionEventWrapper.getExtra();
+      const properties: Record<string, object> = {};
+      properties['handler_property'] = new ActionPropertyWrapper('handler_value');
+      properties['shared_property'] = new ActionPropertyWrapper('handler_wins');
+      return new HandlerAction('custom_action_name', properties);
+    }
     return undefined;
   }
 }
@@ -300,6 +344,22 @@ class FilteringNavigationTrackingHandler implements FTViewTrackingHandler {
     const property: Record<string, object> = {};
     property['view_handler_source'] = new ActionPropertyWrapper('navigation');
     return new HandlerView(`custom_navigation_${destinationName}`, property);
+  }
+}
+
+class MutableViewTrackingHandler implements FTViewTrackingHandler {
+  public role: string = 'guest';
+  public enabled: boolean = true;
+  public resolvedCount: number = 0;
+
+  resolveHandlerView(context: FTViewTrackingContext): HandlerView | null {
+    this.resolvedCount++;
+    if (!this.enabled) {
+      return null;
+    }
+    const property: Record<string, object> = {};
+    property['user_type'] = new ActionPropertyWrapper(this.role);
+    return new HandlerView(`${context.viewName}_${this.role}`, property);
   }
 }
 
@@ -350,12 +410,22 @@ function buildRumConfig(
 }
 
 function initializeAutoTrack(context: Context, uiContext: FakeUIContext, rumConfig: FTRUMConfig): void {
+  SdkInternalTestAccess.setRuntime(new AutoTrackTestRuntime(uiContext));
   FTSDK.install(buildSdkConfig(), context);
   FTSDK.installRUMConfig(rumConfig);
-  FTActionTracker.getInstance().destroy();
-  FTNavigationTracker.getInstance().destroy();
-  FTActionTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
-  FTNavigationTracker.getInstance().init(uiContext as Object as UIContext, rumConfig);
+}
+
+class AutoTrackTestRuntime extends DefaultFTSDKRuntime {
+  private readonly fakeUIContext: UIContext;
+
+  constructor(uiContext: FakeUIContext) {
+    super();
+    this.fakeUIContext = uiContext as Object as UIContext;
+  }
+
+  getUIContext(): UIContext {
+    return this.fakeUIContext;
+  }
 }
 
 function containsAll(value: string, fragments: string[]): boolean {
@@ -424,10 +494,11 @@ export default function autoTrackDeviceTest() {
         async () => { await SdkTestLifecycle.resetRuntimeState(); },
         async () => { await DBAssert.cleanupAll(); }
       ]);
+      SdkInternalTestAccess.resetRuntime();
     });
 
     it('startsCurrentRouterViewWhenInitialShownEventWasMissed', 0, async () => {
-      uiContext.router.setPath('pages/Index');
+      uiContext.currentRouterName = 'pages/Index';
       initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
 
       const view = await DBAssert.waitForViewNamed('Index', 5000);
@@ -497,6 +568,47 @@ export default function autoTrackDeviceTest() {
       expect(navigationHandler.resolvedDestinationNames.length).assertEqual(1);
     });
 
+    it('lateObserverRestoresAlreadyShownIndexView', 0, async () => {
+      uiContext.currentRouterName = 'pages/Index';
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      const view = await DBAssert.waitForViewNamed('Index', 8000);
+      expect(view !== null).assertTrue();
+      expect(view?.getIsClose()).assertFalse();
+      const firstId = view?.getId() ?? '';
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Index', 2);
+      const activeView = FTRUMInnerManager.getInstance().getActiveView();
+      expect(activeView?.getId()).assertEqual(firstId);
+    });
+
+    it('backfilledIndexDoesNotSuppressNewSameNamedPage', 0, async () => {
+      uiContext.currentRouterName = 'pages/Index';
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      expect((await DBAssert.waitForViewNamed('Index', 8000)) !== null).assertTrue();
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Index', 0, 'second-index', 2);
+      await uiContext.observer.emitRouterPageUpdate('pages/Index', 2, 'second-index', 2);
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.isClose()).assertTrue();
+      expect(second?.getViewName()).assertEqual('Index');
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('rerunSerializesPredecessorIndexWithoutNewPageEvent', 0, async () => {
+      const predecessor = new ViewBean('predecessor-index-view', 'Index', Utils.getCurrentNanoTime());
+      predecessor.setSessionId(Utils.generateUUID());
+      predecessor.setCollectType(CollectType.ALL);
+      await FTDBTaskPoolExecutor.upsertRumView(context, predecessor);
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      const persisted = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${predecessor.getId()}`, 'is_active=false'], 8000);
+      expect(persisted !== null).assertTrue();
+      expect(FTRUMInnerManager.getInstance().getActiveView()).assertNull();
+    });
+
     it('actionReinitResetsObserversAndDebounce', 0, async () => {
       const handler = new FilteringActionTrackingHandler();
       const rumConfig = buildRumConfig(false, true, handler);
@@ -536,6 +648,318 @@ export default function autoTrackDeviceTest() {
         `view_name=${normalizedViewName}`,
         'loading_time='
       ]);
+    });
+
+    it('routerHideClosesViewWithoutWaitingForAnotherPage', 0, async () => {
+      const route = 'pages/Index';
+      const pageId = 'hidden-index';
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      await uiContext.observer.emitRouterPageUpdate(route, 2, pageId);
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('Index');
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Other', 3, 'other-page');
+      await uiContext.observer.emitRouterPageUpdate(route, 4, pageId);
+      await uiContext.observer.emitRouterPageUpdate(route, 1, pageId);
+      expect(first?.isClose()).assertFalse();
+
+      await uiContext.observer.emitRouterPageUpdate(route, 3, pageId);
+      expect(first?.isClose()).assertTrue();
+      const closed = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['view,', `view_id=${first?.getId()}`, 'is_active=false'], 8000);
+      expect(closed !== null).assertTrue();
+      const fallbackTags: Record<string, string> = {};
+      FTRUMInnerManager.getInstance().attachRUMRelative(fallbackTags, false);
+      expect(fallbackTags[Constants.KEY_RUM_VIEW_NAME]).assertEqual(Constants.VIEW_NAME_ROOT_FALLBACK);
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(first?.getId());
+
+      await uiContext.observer.emitRouterPageUpdate(route, 2, pageId);
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(second?.getViewName()).assertEqual('Index');
+      expect(second?.isClose()).assertFalse();
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('explicitSameNameStartViewCreatesNewView', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      const rum = FTRUMGlobalManager.getInstance();
+      await rum.startView('RepeatedPage');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first !== null).assertTrue();
+
+      await rum.startView('RepeatedPage');
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.isClose()).assertTrue();
+      expect(second?.getViewName()).assertEqual('RepeatedPage');
+      expect(second?.isClose()).assertFalse();
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('sameNamedRouterInstancesCreateSeparateViews', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      const route = 'pages/Index';
+      await uiContext.observer.emitRouterPageUpdate(route, 0, 'router-first');
+      await uiContext.observer.emitRouterPageUpdate(route, 2, 'router-first');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('Index');
+      const firstLoadTime = first?.getLoadTime() ?? 0;
+
+      await uiContext.observer.emitRouterPageUpdate(route, 2, 'router-first');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(first?.getId());
+
+      // Two distinct page IDs can be shown within the old 80 ms debounce window.
+      await uiContext.observer.emitRouterPageUpdate(route, 0, 'router-second');
+      await uiContext.observer.emitRouterPageUpdate(route, 2, 'router-second');
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.isClose()).assertTrue();
+      expect(first?.getLoadTime()).assertEqual(firstLoadTime);
+      expect(second?.getViewName()).assertEqual('Index');
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('manualSameNameViewSurvivesDuplicateRouterCallback', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      const route = 'pages/Index';
+      await uiContext.observer.emitRouterPageUpdate(route, 2, 'router-index');
+      const automatic = FTRUMInnerManager.getInstance().getActiveView();
+
+      await FTRUMGlobalManager.getInstance().startView('Index');
+      const manual = FTRUMInnerManager.getInstance().getActiveView();
+      expect(manual?.getId() === automatic?.getId()).assertFalse();
+
+      await uiContext.observer.emitRouterPageUpdate(route, 2, 'router-index');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(manual?.getId());
+    });
+
+    it('sameNamedNavigationInstancesCreateSeparateViews', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      const route = 'pages/Details';
+      await uiContext.observer.emitNavDestinationSwitch('pages/Index', route, 'navigation-first');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('Details');
+
+      await uiContext.observer.emitNavDestinationSwitch('pages/Index', route, 'navigation-first');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(first?.getId());
+
+      await uiContext.observer.emitNavDestinationSwitch(route, route, 'navigation-second');
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.isClose()).assertTrue();
+      expect(second?.getViewName()).assertEqual('Details');
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('sameNamedRouterAndNavigationPagesCreateSeparateViews', 0, async () => {
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      await uiContext.observer.emitNavDestinationSwitch('pages/Source', 'pages/Details', 'nav-details');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Details', 2, 'router-details');
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.isClose()).assertTrue();
+      expect(second?.getViewName()).assertEqual('Details');
+      expect(second?.getId() === first?.getId()).assertFalse();
+    });
+
+    it('switchingUiContextRebindsTheVisibleRouterView', 0, async () => {
+      const rumConfig = buildRumConfig(true, false);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'first-page');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('First');
+
+      const secondContext = new FakeUIContext();
+      secondContext.currentRouterName = 'pages/Second';
+      FTNavigationTracker.getInstance().init(secondContext as Object as UIContext, rumConfig);
+      const rebound = await WaitUtils.waitUntil(async () =>
+        FTRUMInnerManager.getInstance().getActiveView()?.getViewName() === 'Second', 5000);
+      expect(rebound).assertTrue();
+      expect(first?.isClose()).assertTrue();
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+      expect(secondContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(1);
+
+      const currentId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'old-window');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '').assertEqual(currentId);
+    });
+
+    it('foregroundResumeCreatesNewViewForSameRouterPage', 0, async () => {
+      const routeName = 'pages/Index';
+      const tracker = FTNavigationTracker.getInstance();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      await uiContext.observer.emitRouterPageUpdate(routeName, 0);
+      await WaitUtils.delay(120);
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2);
+      const first = await DBAssert.waitForViewNamed('Index', 5000);
+      expect(first !== null).assertTrue();
+      const firstId = first?.getId() ?? '';
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      await flushAndAssertPayload(collector, ['view,', 'view_name=Index', 'is_active=false']);
+
+      // Returning to the same page need not produce another Router callback.
+      await Promise.all([tracker.resumeAutomaticViewOnForeground(), tracker.resumeAutomaticViewOnForeground()]);
+      const resumed = FTRUMInnerManager.getInstance().getActiveView();
+      expect(resumed !== null).assertTrue();
+      expect(resumed?.getViewName() ?? '').assertEqual('Index');
+      expect(resumed?.isClose() ?? true).assertFalse();
+      expect(resumed?.getId() === firstId).assertFalse();
+      const resumedId = resumed?.getId() ?? '';
+
+      const persisted = await WaitUtils.waitUntil(async () => {
+        const views = await DBAssert.queryViews(20);
+        return views.some(view => view.getId() === resumedId && !view.getIsClose());
+      }, 5000);
+      expect(persisted).assertTrue();
+
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2);
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '').assertEqual(resumedId);
+    });
+
+    it('repeatedForegroundResumeRecoversVisibleRouterPageWithoutCachedContext', 0, async () => {
+      const tracker = FTNavigationTracker.getInstance();
+      const manager = FTRUMInnerManager.getInstance();
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      // The first observer recovery has already run before this route appears,
+      // and Router will not replay state=2 on a foreground transition.
+      await WaitUtils.delay(150);
+      uiContext.currentRouterName = 'pages/Index';
+
+      let previousId = '';
+      for (let i = 0; i < 3; i++) {
+        manager.onAppBackground();
+        await FTRUMGlobalManager.getInstance().stopView();
+        const background = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+        expect(background !== null).assertTrue();
+
+        manager.onAppForeground();
+        await tracker.resumeAutomaticViewOnForeground();
+        const current = manager.getActiveView();
+        expect(current?.getViewName()).assertEqual('Index');
+        expect(current?.isClose() ?? true).assertFalse();
+        expect(current?.getId() === previousId).assertFalse();
+        previousId = current?.getId() ?? '';
+      }
+    });
+
+    it('foregroundResumeWaitsForWindowRebindBeforeRestoringPage', 0, async () => {
+      const rumConfig = buildRumConfig(true, false);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitRouterPageUpdate('pages/First', 2, 'first-page');
+      await FTRUMGlobalManager.getInstance().stopView();
+
+      const secondContext = new FakeUIContext();
+      secondContext.currentRouterName = 'pages/Second';
+      const tracker = FTNavigationTracker.getInstance();
+      tracker.init(secondContext as Object as UIContext, rumConfig);
+      await tracker.resumeAutomaticViewOnForeground();
+
+      const active = FTRUMInnerManager.getInstance().getActiveView();
+      expect(active?.getViewName()).assertEqual('Second');
+      expect(active?.isClose() ?? true).assertFalse();
+      expect(uiContext.observer.getRouterPageUpdateCallbackCount()).assertEqual(0);
+    });
+
+    it('sameWindowForegroundRestoresTheVisibleNavigationDestination', 0, async () => {
+      const routeName = 'pages/NavigationWebSwitchVerificationPage';
+      const destinationName = 'NativeNavigationDestination';
+      const rumConfig = buildRumConfig(true, false);
+      uiContext.currentRouterName = routeName;
+      initializeAutoTrack(context, uiContext, rumConfig);
+      const tracker = FTNavigationTracker.getInstance();
+      tracker.init(uiContext as Object as UIContext, rumConfig, 42);
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      await uiContext.observer.emitNavDestinationSwitch('navBar', destinationName, 'native-page');
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual(destinationName);
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      const reboundContext = new FakeUIContext();
+      reboundContext.currentRouterName = routeName;
+      tracker.init(reboundContext as Object as UIContext, rumConfig, 42);
+      await tracker.resumeAutomaticViewOnForeground();
+
+      const resumed = FTRUMInnerManager.getInstance().getActiveView();
+      expect(resumed?.getViewName()).assertEqual(destinationName);
+      expect(resumed?.isClose() ?? true).assertFalse();
+      expect(resumed?.getId() === first?.getId()).assertFalse();
+      expect(uiContext.observer.getNavDestinationSwitchCallbackCount()).assertEqual(0);
+
+      // A repeated host Router show must not replace the visible destination.
+      await reboundContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getId()).assertEqual(resumed?.getId());
+    });
+
+    it('returningToNavBarStartsANewRouterHostView', 0, async () => {
+      const routeName = 'pages/NavigationWebSwitchVerificationPage';
+      const destinationName = 'NativeNavigationDestination';
+      uiContext.currentRouterName = routeName;
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+      await uiContext.observer.emitRouterPageUpdate(routeName, 2, 'host-page');
+      const firstHost = FTRUMInnerManager.getInstance().getActiveView();
+      await uiContext.observer.emitNavDestinationSwitch('navBar', destinationName, 'native-page');
+      const destination = FTRUMInnerManager.getInstance().getActiveView();
+      expect(destination?.getViewName()).assertEqual(destinationName);
+
+      await uiContext.observer.emitNavDestinationReturnToNavBar(destinationName);
+      const returnedHost = FTRUMInnerManager.getInstance().getActiveView();
+      expect(destination?.isClose()).assertTrue();
+      expect(returnedHost?.getViewName()).assertEqual('NavigationWebSwitchVerificationPage');
+      expect(returnedHost?.getViewReferrer()).assertEqual(destinationName);
+      expect(returnedHost?.isClose() ?? true).assertFalse();
+      expect(returnedHost?.getId() === firstHost?.getId()).assertFalse();
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      const resumedHost = FTRUMInnerManager.getInstance().getActiveView();
+      expect(resumedHost?.getViewName()).assertEqual('NavigationWebSwitchVerificationPage');
+      expect(resumedHost?.getId() === returnedHost?.getId()).assertFalse();
+    });
+
+    it('foregroundResumeReevaluatesViewHandler', 0, async () => {
+      const handler = new MutableViewTrackingHandler();
+      const rumConfig = buildRumConfig(true, false)
+        .setViewTrackingHandler(handler, FTViewTrackingType.ROUTER);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitRouterPageUpdate('pages/Index', 2);
+
+      const first = FTRUMInnerManager.getInstance().getActiveView();
+      expect(first?.getViewName()).assertEqual('Index_guest');
+      const firstId = first?.getId() ?? '';
+      await FTRUMGlobalManager.getInstance().stopView();
+
+      handler.role = 'member';
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      const second = FTRUMInnerManager.getInstance().getActiveView();
+      expect(second?.getViewName()).assertEqual('Index_member');
+      expect(second?.getId() === firstId).assertFalse();
+      const userType = second?.getProperty()['user_type'] as ActionPropertyWrapper;
+      expect(userType.value).assertEqual('member');
+
+      await FTRUMGlobalManager.getInstance().stopView();
+      handler.enabled = false;
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      const afterFilter = FTRUMInnerManager.getInstance().getActiveView();
+      expect(afterFilter?.getId()).assertEqual(second?.getId());
+      expect(afterFilter?.isClose()).assertTrue();
+      expect(handler.resolvedCount).assertEqual(3);
+    });
+
+    it('foregroundResumeReevaluatesInitiallyFilteredNavigationView', 0, async () => {
+      const handler = new MutableViewTrackingHandler();
+      handler.role = 'member';
+      handler.enabled = false;
+      const rumConfig = buildRumConfig(true, false)
+        .setViewTrackingHandler(handler, FTViewTrackingType.NAVIGATION);
+      initializeAutoTrack(context, uiContext, rumConfig);
+      await uiContext.observer.emitNavDestinationSwitch('pages/Index', 'pages/Settings');
+      expect(FTRUMInnerManager.getInstance().getActiveView()).assertNull();
+
+      handler.enabled = true;
+      await FTNavigationTracker.getInstance().resumeAutomaticViewOnForeground();
+      expect(FTRUMInnerManager.getInstance().getActiveView()?.getViewName()).assertEqual('Settings_member');
+      expect(handler.resolvedCount).assertEqual(2);
     });
 
     it('routerPageDisabledShouldWriteNothing', 0, async () => {
@@ -860,6 +1284,33 @@ export default function autoTrackDeviceTest() {
         'action,',
         `action_name=${actionName}`,
         `view_name=${viewName}`
+      ]);
+    });
+
+    it('handlerActionCustomizesClickNameAndProperties', 0, async () => {
+      const handler = new CustomizingActionTrackingHandler();
+      initializeAutoTrack(context, uiContext, buildRumConfig(false, true, handler));
+      await startViewForAction('custom_action_view_page');
+
+      const node = new FakeFrameNode('Button', 'custom_action_view', 1007);
+      const automaticProperties: Record<string, object> = {};
+      automaticProperties['automatic_only'] = new ActionPropertyWrapper('retained');
+      automaticProperties['shared_property'] = new ActionPropertyWrapper('automatic_loses');
+      node.setCustomProperty('action_property', automaticProperties);
+      await uiContext.observer.emitWillClick(node);
+      expect(handler.observedExtra !== null).assertTrue();
+      expect(handler.observedExtra!['automatic_only'] !== undefined).assertTrue();
+      expect(handler.observedExtra!['shared_property'] !== undefined).assertTrue();
+      await assertActionStarted('custom_action_name');
+      await closeCurrentViewAndWaitForRum();
+
+      await flushAndAssertPayload(collector, [
+        'action,',
+        'action_name=custom_action_name',
+        'handler_property="handler_value"',
+        'automatic_only="retained"',
+        'shared_property="handler_wins"',
+        'view_name=custom_action_view_page'
       ]);
     });
   });

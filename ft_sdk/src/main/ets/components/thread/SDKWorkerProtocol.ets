@@ -108,6 +108,37 @@ export type SDKStringRecord = Record<string, string>;
 export type SDKNumberRecord = Record<string, number>;
 export type SDKPropertyRecord = Record<string, object>;
 
+/** Transport metric provenance is retained across asynchronous Resource commands. */
+export type SDKRumResourceMetricSource = 'header' | 'integration' | 'platform';
+
+export interface SDKRumResourceTransportMetricsDTO {
+  requestBodySize: number;
+  requestBodySizeSource?: SDKRumResourceMetricSource;
+  requestHeaderSize: number;
+  requestHeaderSizeSource?: SDKRumResourceMetricSource;
+  requestSize: number;
+  requestSizeSource?: SDKRumResourceMetricSource;
+  /** Preserves whether requestSize is a body/header calculation, not a direct measurement. */
+  requestSizeIsDerived?: boolean;
+  httpProtocol: string;
+  httpProtocolSource?: SDKRumResourceMetricSource;
+  connectionReuse?: boolean;
+  connectionReuseSource?: SDKRumResourceMetricSource;
+}
+
+/**
+ * A point-in-time view of the default network captured when a Resource starts.
+ * Optional values deliberately remain absent when HarmonyOS cannot provide a
+ * trustworthy value; callers must never substitute a synthetic zero.
+ */
+export interface SDKRumResourceNetworkSnapshotDTO {
+  available: boolean;
+  validated?: boolean;
+  downlinkKbps?: number;
+  uplinkKbps?: number;
+  signalStrength?: number;
+}
+
 export interface SDKLogDTO {
   measurement: string;
   content: string;
@@ -147,6 +178,8 @@ export interface SDKRumEventDTO {
   eventType?: string;
   name?: string;
   time: number;
+  /** Cache-row time; the Line Protocol timestamp remains `time`. */
+  storageTime?: number;
   dataType?: string;
   customDataType?: string;
   measurement?: string;
@@ -189,6 +222,8 @@ export interface SDKWorkerResponseCreditDTO {
 export interface SDKRumResourceContextDTO {
   /** User and network attributes captured with the initiating event. */
   dynamicTags?: SDKStringRecord;
+  /** Immutable default-network snapshot captured by startResource. */
+  networkSnapshot?: SDKRumResourceNetworkSnapshotDTO;
   sessionId: string;
   viewId: string;
   viewName: string;
@@ -213,6 +248,9 @@ export interface SDKRumResourceParamsDTO {
   resourceType: string;
   requestErrorStack: string;
   requestErrorMsg: string;
+  /** Suppresses only the local network_error derived from a status-0 Resource. */
+  suppressNetworkError?: boolean;
+  transportMetrics?: SDKRumResourceTransportMetricsDTO;
   property: SDKPropertyRecord;
   traceId?: string;
   spanId?: string;
@@ -233,6 +271,7 @@ export interface SDKRumResourceNetStatusDTO {
   downloadStartTime: number;
   holeRequestTime: number;
   resourceHostIP: string;
+  transportMetrics?: SDKRumResourceTransportMetricsDTO;
 }
 
 export interface SDKRumResourceCommandDTO {
@@ -289,8 +328,12 @@ export interface SDKRumErrorCommandBatchDTO {
 }
 
 export interface SDKRumCompletedActionDTO {
+  /** Base Line Protocol category; the local queue uses customDataType when set. */
   dataType: string;
+  /** Error-sampled sessions stage here until an error opens the upload window. */
   customDataType?: string;
+  /** False for sessions rejected by both normal and error sampling. */
+  shouldCollect?: boolean;
   measurement: string;
   uuid: string;
   time: number;
@@ -556,7 +599,6 @@ export interface SDKUploadPreparePageResultDTO {
   bodyLength: number;
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
   transportLimitReached: boolean;
   bodyPreview: string;
   /** False only when no acceptable row can be sent in this round. */
@@ -597,7 +639,6 @@ export interface SDKUploadExecutePageResultDTO {
   bodyLength: number;
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
   transportLimitReached: boolean;
   bodyPreview: string;
   shouldUpload: boolean;

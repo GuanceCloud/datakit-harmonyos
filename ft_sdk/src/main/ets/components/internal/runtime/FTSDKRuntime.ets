@@ -83,7 +83,17 @@ export class DefaultFTSDKRuntime implements FTSDKRuntime {
   }
 
   initNavigationTracker(uiContext: UIContext, config: FTRUMConfig): void {
-    FTNavigationTracker.getInstance().init(uiContext, config);
+    let windowId: number | undefined;
+    // The same Window can return a different UIContext wrapper after resume.
+    // Its stable ID lets View tracking retain the visible NavDestination.
+    if (Utils.getUIContext() === uiContext) {
+      try {
+        windowId = Utils.getMainWindow()?.getWindowProperties().id;
+      } catch (_error) {
+        // The tracker can still fall back to UIContext identity.
+      }
+    }
+    FTNavigationTracker.getInstance().init(uiContext, config, windowId);
   }
 
   destroyNavigationTracker(): void {

@@ -153,11 +153,13 @@ export class FTRemoteConfigManager {
     if (bean === null) {
       return;
     }
-    if (bean.getRumSampleRate() !== null) {
-      config.setSamplingRate(bean.getRumSampleRate()!);
+    if (bean.shouldApplySessionSamplingRate()) {
+      config.setRemoteSessionSamplingRateInternal(bean.getEffectiveSessionSamplingRateProbability());
     }
-    if (bean.getRumSessionOnErrorSampleRate() !== null) {
-      config.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+    if (bean.shouldApplySessionOnErrorSamplingRate()) {
+      config.setRemoteSessionOnErrorSamplingRateInternal(
+        bean.getEffectiveSessionOnErrorSamplingRateProbability()
+      );
     }
     if (bean.getRumEnableTraceUserAction() !== null) {
       config.setEnableTraceUserAction(bean.getRumEnableTraceUserAction()!);
@@ -194,8 +196,8 @@ export class FTRemoteConfigManager {
     if (bean === null) {
       return;
     }
-    if (bean.getLogSampleRate() !== null) {
-      config.setSamplingRate(bean.getLogSampleRate()!);
+    if (bean.shouldApplyLogSamplingRate()) {
+      config.setRemoteLogSamplingRateInternal(bean.getEffectiveLogSamplingRateProbability());
     }
     if (bean.getLogLevelFilters() !== null) {
       config.setLogLevelFilters(bean.getLogLevelFilters()!);
@@ -214,8 +216,8 @@ export class FTRemoteConfigManager {
     if (bean === null) {
       return;
     }
-    if (bean.getTraceSampleRate() !== null) {
-      config.setSamplingRate(bean.getTraceSampleRate()!);
+    if (bean.shouldApplyTraceSamplingRate()) {
+      config.setRemoteTraceSamplingRateInternal(bean.getEffectiveTraceSamplingRateProbability());
     }
     if (bean.getTraceEnableAutoTrace() !== null) {
       config.setEnableAutoTrace(bean.getTraceEnableAutoTrace()!);
@@ -278,6 +280,7 @@ export class FTRemoteConfigManager {
           bean = overridden;
         }
       }
+      bean.preservePreviousValidSamplingRates(this.remoteConfig);
       const serialized = bean.toJsonString();
       if (serialized.length === 0) {
         this.saveFetchTime(now);

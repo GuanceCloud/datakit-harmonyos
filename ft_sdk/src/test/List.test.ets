@@ -12,7 +12,10 @@ import cacheGovernanceUnitTest from './unit/CacheGovernanceUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
+import ftNetworkErrorHandlerUnitTest from './unit/FTNetworkErrorHandlerUnit.test';
+import ftNetworkListenerUnitTest from './unit/FTNetworkListenerUnit.test';
 import ftAppLaunchTrackerUnitTest from './unit/FTAppLaunchTrackerUnit.test';
+import ftCrashFreeDurationManagerUnitTest from './unit/FTCrashFreeDurationManagerUnit.test';
 import ftDataFilterUnitTest from './unit/FTDataFilterUnit.test';
 import ftDBSpoolUnitTest from './unit/FTDBSpoolUnit.test';
 import ftSDKExtensionBridgeUnitTest from './unit/FTSDKExtensionBridgeUnit.test';
@@ -36,6 +39,7 @@ export default function testsuite() {
   // User-facing config defaults, boundaries, and installed behavior.
   configUnitTest();
   ftAppLaunchTrackerUnitTest();
+  ftCrashFreeDurationManagerUnitTest();
 
   // Data formatting, trace, HTTP, extension and auto-track protocol guards.
   lineProtocolEscapeTest();
@@ -56,6 +60,8 @@ export default function testsuite() {
   sdkDedicatedPoolManagerUnitTest();
   sdkWorkerRetryPolicyUnitTest();
   ftExceptionHandlerUnitTest();
+  ftNetworkErrorHandlerUnitTest();
+  ftNetworkListenerUnitTest();
   ftDBSpoolUnitTest();
   cachePolicyUnitTest();
   cacheGovernanceUnitTest();

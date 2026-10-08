@@ -7,7 +7,12 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
-import { SDKRumResourceContextDTO, SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
+import { CollectType, parseCollectType } from '../rum/enum/RUMEnums';
+import {
+  SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
+  SDKUploadRowDTO
+} from '../thread/SDKWorkerProtocol';
 import { FTCacheCoordinator } from './FTCacheCoordinator';
 import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse,
   FTDBTaskPoolReplayMetadata } from './FTDBTaskPoolExecutor';
@@ -54,6 +59,7 @@ enum FTDBTaskPoolCommand {
   MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
+  SET_VIEW_LONG_TASK_DURATION = 'setViewLongTaskDuration',
   INSERT_RUM_ACTION = 'insertRumAction',
   CLOSE_RUM_ACTION = 'closeRumAction',
   QUERY_SUM_ACTION = 'querySumAction',
@@ -217,6 +223,7 @@ interface FTDBTaskPoolRequest {
   attr?: string;
   newSessionId?: string;
   dateTime?: number;
+  keepClosedView?: boolean;
   force?: boolean;
   target?: string;
   ids?: string[];
@@ -285,12 +292,18 @@ interface FTDBTaskPoolViewAttrParts {
   hasReplay: boolean;
   recordsCount: number;
   sampledOnReplayError: boolean;
+  collectType: CollectType | null;
 }
 
 interface FTDBTaskPoolReplayMarker {
   value: boolean;
   recordsCount: number;
   sampledOnReplayError: boolean;
+}
+
+interface FTDBTaskPoolActionAttrParts {
+  extraAttr: Record<string, object>;
+  collectType: CollectType | null;
 }
 
 enum FTDBTaskPoolCacheCategory {
@@ -479,7 +492,11 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
           request.dateTime || 0
         ));
       case FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW:
-        return okResponse(undefined, await acknowledgeViewInTaskPool(rdbStore, request.view));
+        return okResponse(undefined, await acknowledgeViewInTaskPool(
+          rdbStore,
+          request.view,
+          request.keepClosedView === true
+        ));
       case FTDBTaskPoolCommand.INCREASE_VIEW_ACTION:
         return okCountResponse(await increaseViewActionInTaskPool(rdbStore, request.viewId || ''));
       case FTDBTaskPoolCommand.GET_RUM_PENDING_RESOURCE:
@@ -535,8 +552,16 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
           request.viewId || '',
           request.now || 0
         ));
+      case FTDBTaskPoolCommand.SET_VIEW_LONG_TASK_DURATION:
+        return okResponse(undefined, await setViewLongTaskDurationInTaskPool(
+          rdbStore,
+          request.viewId || '',
+          request.duration || 0,
+          request.now || 0
+        ));
       case FTDBTaskPoolCommand.INSERT_RUM_ACTION:
-        return okResponse(undefined, request.actionBean ? await insertRumActionInTaskPool(rdbStore, request.actionBean) : false);
+        return okResponse(undefined, request.actionBean ?
+          await insertRumActionInTaskPool(rdbStore, request.actionBean, request.now || Date.now()) : false);
       case FTDBTaskPoolCommand.CLOSE_RUM_ACTION:
         return {
           ok: true,
@@ -925,20 +950,21 @@ async function queryUploadDataInTaskPool(
         row.customDataType = storedType;
       }
       const rowBytes = estimateUploadTransportRowBytes(row);
-      if (rowBytes > maxBytes) {
-        // This row can never cross the Host-to-Worker transport boundary.
-        // Keep it cached, but do not let it block later uploadable rows.
-        result.hasMore = true;
-        result.byteLimitReached = true;
-        continue;
-      }
-      if (result.byteCount + rowBytes > maxBytes) {
+      const exceedsBatchTarget = result.byteCount + rowBytes > maxBytes;
+      if (exceedsBatchTarget && result.rows.length > 0) {
         result.hasMore = true;
         result.byteLimitReached = true;
         break;
       }
       result.rows.push(row);
       result.byteCount += rowBytes;
+      if (exceedsBatchTarget) {
+        // The target bounds normal pages only. Preserve Android's semantics:
+        // an individually large Error still crosses Host-to-Worker alone.
+        result.hasMore = true;
+        result.byteLimitReached = true;
+        break;
+      }
     }
   } finally {
     resultSet.close();
@@ -1789,7 +1815,7 @@ function emptyStringRecord(): Record<string, string> {
 }
 
 function stringifyViewExtraAttr(view: ViewBeanJSON): string {
-  const obj: Record<string, object> = {};
+  const obj: Record<string, object | string> = {};
   const extraAttr = view.extraAttr ? view.extraAttr : emptyObjectRecord();
   const keys = Object.keys(extraAttr);
   for (let i = 0; i < keys.length; i++) {
@@ -1808,11 +1834,22 @@ function stringifyViewExtraAttr(view: ViewBeanJSON): string {
     sampledOnReplayError: view.sampledOnReplayError === true
   };
   obj[Constants.KEY_HAS_REPLAY] = replayMarker;
+  if (view.collectType) {
+    obj[Constants.KEY_RUM_COLLECT_TYPE] = view.collectType;
+  }
   return JSON.stringify(obj);
 }
 
 function stringifyActionExtraAttr(actionBean: ActionBeanJSON): string {
-  return JSON.stringify(actionBean.extraAttr ? actionBean.extraAttr : emptyObjectRecord());
+  const obj: Record<string, object | string> = {};
+  const extraAttr = actionBean.extraAttr ? actionBean.extraAttr : emptyObjectRecord();
+  for (const key of Object.keys(extraAttr)) {
+    obj[key] = extraAttr[key];
+  }
+  if (actionBean.collectType) {
+    obj[Constants.KEY_RUM_COLLECT_TYPE] = actionBean.collectType;
+  }
+  return JSON.stringify(obj);
 }
 
 function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
@@ -1823,6 +1860,7 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   let hasReplay = false;
   let recordsCount = 0;
   let sampledOnReplayError = false;
+  let collectType: CollectType | null = null;
   const keys = Object.keys(parsed);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
@@ -1847,6 +1885,8 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
       const count = Number(marker.recordsCount);
       recordsCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
       sampledOnReplayError = marker.sampledOnReplayError === true;
+    } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+      collectType = parseCollectType(String(value));
     } else {
       extraAttr[key] = value;
     }
@@ -1857,8 +1897,23 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
     tags,
     hasReplay,
     recordsCount,
-    sampledOnReplayError
+    sampledOnReplayError,
+    collectType
   };
+}
+
+function splitActionExtraAttr(jsonString: string): FTDBTaskPoolActionAttrParts {
+  const parsed = parseJsonRecord(jsonString);
+  const extraAttr: Record<string, object> = {};
+  let collectType: CollectType | null = null;
+  for (const key of Object.keys(parsed)) {
+    if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+      collectType = parseCollectType(String(parsed[key]));
+    } else {
+      extraAttr[key] = parsed[key];
+    }
+  }
+  return { extraAttr, collectType };
 }
 
 function toViewValues(view: ViewBeanJSON, includeId: boolean): relationalStore.ValuesBucket {
@@ -1930,12 +1985,14 @@ function readViewFromResultSet(resultSet: relationalStore.ResultSet): ViewBeanJS
     sampledOnReplayError: attr.sampledOnReplayError,
     extraAttr: attr.extraAttr,
     property: attr.property,
-    tags: attr.tags
+    tags: attr.tags,
+    collectType: attr.collectType
   };
 }
 
 function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBeanJSON {
   const startTimeStr = resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_START_TIME));
+  const attr = splitActionExtraAttr(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
   return {
     id: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ID)),
     startTime: startTimeStr ? Number.parseInt(startTimeStr, 10) : 0,
@@ -1951,7 +2008,8 @@ function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBe
     viewReferrer: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_VIEW_REFERRER)),
     actionName: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_NAME)),
     actionType: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_TYPE)),
-    extraAttr: parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)))
+    extraAttr: attr.extraAttr,
+    collectType: attr.collectType
   };
 }
 
@@ -2089,7 +2147,8 @@ async function updateViewUploadTimeInTaskPool(
 // snapshot, and delete it in the same transaction after successful persistence.
 async function acknowledgeViewInTaskPool(
   rdbStore: relationalStore.RdbStore,
-  view: ViewBeanJSON | undefined
+  view: ViewBeanJSON | undefined,
+  keepClosedView: boolean = false
 ): Promise<boolean> {
   if (!view || view.id.length === 0) return false;
   const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
@@ -2110,7 +2169,7 @@ async function acknowledgeViewInTaskPool(
   rdbStore.beginTransaction();
   try {
     const updated = await rdbStore.update(values, predicates);
-    if (updated > 0 && view.isClose && view.pendingResource <= 0) {
+    if (updated > 0 && view.isClose && view.pendingResource <= 0 && !keepClosedView) {
       const closed = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
       closed.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
       await rdbStore.delete(closed);
@@ -2218,6 +2277,8 @@ function pendingResourceValues(resource: FTDBTaskPoolPendingRumResourceDTO): rel
   values[FTSQL.PENDING_RESOURCE_COLUMN_ACTION_NAME] = context.actionName || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID] = context.rumAppId || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS] = JSON.stringify(context.dynamicTags || {});
+  values[FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT] = context.networkSnapshot ?
+    JSON.stringify(context.networkSnapshot) : '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_DRAFT_UUID] = resource.draftUuid || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_ERROR_DRAFT_UUID] = resource.errorDraftUuid || '';
   values[FTSQL.PENDING_RESOURCE_COLUMN_START_TIME] = resource.startTime;
@@ -2233,6 +2294,52 @@ function parsePendingResourceDynamicTags(value: string): Record<string, string> 
     tags[keys[i]] = String(parsed[keys[i]]);
   }
   return tags;
+}
+
+function parsePendingResourceNetworkSnapshot(value: string): SDKRumResourceNetworkSnapshotDTO | undefined {
+  const parsed = parseJsonRecord(value);
+  const available = parsed['available'];
+  // Historical pending rows did not retain the start snapshot. Preserve that
+  // fact by omitting all new fields rather than manufacturing unavailable.
+  if (typeof available !== 'boolean') {
+    return undefined;
+  }
+  const snapshot: SDKRumResourceNetworkSnapshotDTO = { available };
+  if (!available) {
+    return snapshot;
+  }
+  const validated = parsed['validated'];
+  if (typeof validated === 'boolean') {
+    snapshot.validated = validated;
+  }
+  const downlinkKbps = getPendingResourceNetworkMetric(parsed['downlinkKbps'], false);
+  if (downlinkKbps !== undefined) {
+    snapshot.downlinkKbps = downlinkKbps;
+  }
+  const uplinkKbps = getPendingResourceNetworkMetric(parsed['uplinkKbps'], false);
+  if (uplinkKbps !== undefined) {
+    snapshot.uplinkKbps = uplinkKbps;
+  }
+  const signalStrength = getPendingResourceNetworkMetric(parsed['signalStrength'], true);
+  if (signalStrength !== undefined) {
+    snapshot.signalStrength = signalStrength;
+  }
+  return snapshot;
+}
+
+function getPendingResourceNetworkMetric(value: object | undefined, allowsZero: boolean): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return undefined;
+  }
+  if (allowsZero ? value >= 0 : value > 0) {
+    return value;
+  }
+  return undefined;
+}
+
+function getPendingResourceColumnString(resultSet: relationalStore.ResultSet, columnName: string): string {
+  const index = resultSet.getColumnIndex(columnName);
+  return index >= 0 ? resultSet.getString(index) : '';
 }
 
 function readPendingRumResourceFromResultSet(
@@ -2260,6 +2367,9 @@ function readPendingRumResourceFromResultSet(
       rumAppId: resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_RUM_APP_ID)),
       dynamicTags: parsePendingResourceDynamicTags(
         resultSet.getString(resultSet.getColumnIndex(FTSQL.PENDING_RESOURCE_COLUMN_DYNAMIC_TAGS))
+      ),
+      networkSnapshot: parsePendingResourceNetworkSnapshot(
+        getPendingResourceColumnString(resultSet, FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT)
       )
     }
   };
@@ -2531,9 +2641,68 @@ async function updateViewUpdateTimeInTaskPool(
   return true;
 }
 
+async function setViewLongTaskDurationInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  viewId: string,
+  duration: number,
+  now: number
+): Promise<boolean> {
+  if (!viewId || duration <= 0) {
+    return false;
+  }
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ID, viewId);
+  rdbStore.beginTransaction();
+  try {
+    const resultSet = await rdbStore.query(predicates, [
+      FTSQL.RUM_COLUMN_EXTRA_ATTR,
+      FTSQL.RUM_VIEW_UPDATE_TIME,
+      FTSQL.RUM_DATA_UPDATE_TIME,
+      FTSQL.RUM_DATA_UPLOAD_TIME
+    ]);
+    let attr: Record<string, object> = {};
+    let updateTime = 0;
+    let dataUpdateTime = 0;
+    let uploadTime = 0;
+    let found = false;
+    try {
+      if (resultSet.goToFirstRow()) {
+        found = true;
+        attr = parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
+        updateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME));
+        dataUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME));
+        uploadTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME));
+      }
+    } finally {
+      resultSet.close();
+    }
+    if (!found) {
+      rdbStore.commit();
+      return false;
+    }
+    const stored = attr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] as Record<string, string>;
+    const previous = stored ? Number(stored['value']) : 0;
+    const total = Math.max(Number.isFinite(previous) ? previous : 0, duration);
+    const durationAttr: Record<string, string> = {};
+    durationAttr['value'] = String(total);
+    attr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] = durationAttr;
+    const values = {} as relationalStore.ValuesBucket;
+    values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = JSON.stringify(attr);
+    values[FTSQL.RUM_VIEW_UPDATE_TIME] = updateTime + 1;
+    values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(now, dataUpdateTime + 1, uploadTime + 1);
+    await rdbStore.update(values, predicates);
+    rdbStore.commit();
+    return true;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
+}
+
 async function insertRumActionInTaskPool(
   rdbStore: relationalStore.RdbStore,
-  actionBean: ActionBeanJSON
+  actionBean: ActionBeanJSON,
+  now: number
 ): Promise<boolean> {
   if (!actionBean.id || actionBean.id.length === 0) {
     return false;
@@ -2544,8 +2713,67 @@ async function insertRumActionInTaskPool(
   const values = toActionValues(actionBean);
   const pending = await countPendingRumResourcesForActionInTaskPool(rdbStore, actionBean.id);
   values[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = Math.max(actionBean.pendingResource, pending);
-  const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
-  return Number(rowId) > 0;
+  rdbStore.beginTransaction();
+  try {
+    const rowId = await rdbStore.insert(FTSQL.FT_TABLE_ACTION, values);
+    if (Number(rowId) <= 0) {
+      rdbStore.rollBack();
+      return false;
+    }
+
+    // startAction is durable before close/recovery can publish it.  Update
+    // the related View in this same transaction so a native process death
+    // cannot leave an Action row visible with view_action_count still zero.
+    // Actions without a View (for example cold launch) retain their existing
+    // standalone storage behavior.
+    if (actionBean.viewId && actionBean.viewId.length > 0) {
+      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+      predicates.equalTo(FTSQL.RUM_COLUMN_ID, actionBean.viewId);
+      const resultSet = await rdbStore.query(predicates, [
+        FTSQL.RUM_COLUMN_ACTION_COUNT,
+        FTSQL.RUM_VIEW_UPDATE_TIME,
+        FTSQL.RUM_DATA_UPDATE_TIME,
+        FTSQL.RUM_DATA_UPLOAD_TIME
+      ]);
+      let actionCount = 0;
+      let viewUpdateTime = 0;
+      let dataUpdateTime = 0;
+      let dataUploadTime = 0;
+      let hasView = false;
+      try {
+        if (resultSet.goToFirstRow()) {
+          hasView = true;
+          actionCount = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_COUNT));
+          viewUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME));
+          dataUpdateTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME));
+          dataUploadTime = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME));
+        }
+      } finally {
+        resultSet.close();
+      }
+      if (!hasView) {
+        rdbStore.rollBack();
+        return false;
+      }
+
+      const viewValues = {} as relationalStore.ValuesBucket;
+      viewValues[FTSQL.RUM_COLUMN_ACTION_COUNT] = actionCount + 1;
+      viewValues[FTSQL.RUM_VIEW_UPDATE_TIME] = viewUpdateTime + 1;
+      // querySumView uses data_update_time to decide whether a closed View
+      // must be emitted again. Keep it strictly ahead of a prior snapshot,
+      // even when the Action and upload happen in the same wall-clock ms.
+      viewValues[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(now, dataUpdateTime + 1, dataUploadTime + 1);
+      const updated = await rdbStore.update(viewValues, predicates);
+      if (updated !== 1) {
+        throw new Error(`Action View update failed: ${actionBean.viewId}`);
+      }
+    }
+    rdbStore.commit();
+    return true;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
+  }
 }
 
 async function closeRumActionInTaskPool(

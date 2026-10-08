@@ -50,6 +50,7 @@ FTWebViewHandler
 FT_SDK_EXTENSION_CONTRACT_VERSION
 HAR_VERSION
 HeaderHandler
+HandlerAction
 HandlerView
 HttpRequestData
 HttpResponseData

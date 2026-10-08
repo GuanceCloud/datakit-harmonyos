@@ -7,7 +7,7 @@
  */
 export enum ErrorType {
   JS = "js",
-  NETWORK = "network",
+  NETWORK = "network_error",
   CONSOLE = "console",
   JS_CRASH = "js_crash",
   NATIVE_CRASH = "native_crash",
@@ -70,6 +70,13 @@ export enum CollectType {
   ALL = "all",
   SAMPLING = "sampling", 
   DROP = "drop"
+}
+
+export function parseCollectType(value: string | undefined): CollectType | null {
+  if (value === CollectType.ALL || value === CollectType.SAMPLING || value === CollectType.DROP) {
+    return value as CollectType;
+  }
+  return null;
 }
 
 /**
@@ -209,14 +216,20 @@ export class RUMEnumUtils {
       case "js":
       case "javascript":
         return ErrorType.JS;
+      case "network_error":
+      // Accept the legacy value used by earlier HarmonyOS SDK versions.
       case "network":
         return ErrorType.NETWORK;
       case "console":
         return ErrorType.CONSOLE;
       case "js_crash":
         return ErrorType.JS_CRASH;
+      case "native_crash":
+        return ErrorType.NATIVE_CRASH;
       case "anr_crash":
         return ErrorType.ANR_CRASH;
+      case "anr_error":
+        return ErrorType.ANR_ERROR;
       default:
         return ErrorType.CUSTOM;
     }
@@ -317,8 +330,21 @@ export class RUMEnumUtils {
       ErrorType.JS_CRASH,
       ErrorType.NATIVE_CRASH,
       ErrorType.ANR_CRASH,
+      ErrorType.ANR_ERROR,
       ErrorType.CUSTOM
     ];
+  }
+
+  /**
+   * Crash-free duration belongs only to Error types representing a process
+   * crash/freeze. Custom, network and ordinary ANR error reports are errors,
+   * but must not reset the crash-free interval.
+   */
+  static isCrashErrorType(type: string | ErrorType): boolean {
+    const value = String(type).toLowerCase();
+    return value === ErrorType.JS_CRASH ||
+      value === ErrorType.NATIVE_CRASH ||
+      value === ErrorType.ANR_CRASH;
   }
   
   /**

@@ -5,6 +5,8 @@ import { SyncInternalTestAccess } from '../../../../main/ets/components/internal
 import { TelemetryInternalTestAccess } from '../../../../main/ets/components/internal/testaccess/TelemetryInternalTestAccess';
 import { SyncTaskManager } from '../../../../main/ets/components/SyncTaskManager';
 import { FTRUMInnerManager } from '../../../../main/ets/components/rum/FTRUMInnerManager';
+import { FTActionTracker } from '../../../../main/ets/components/rum/FTActionTracker';
+import { FTNavigationTracker } from '../../../../main/ets/components/rum/FTNavigationTracker';
 import { SDKDedicatedPoolManager } from '../../../../main/ets/components/thread/SDKDedicatedPoolManager';
 import { WaitUtils } from './WaitUtils';
 
@@ -26,6 +28,9 @@ export class SdkTestLifecycle {
 
   static async resetRuntimeState(timeoutMs: number = 2000): Promise<void> {
     await SdkTestLifecycle.waitForUploadIdle(timeoutMs);
+
+    FTActionTracker.getInstance().destroy();
+    FTNavigationTracker.getInstance().destroy();
 
     try {
       // shutdown() closes views asynchronously; finish it before replacing singletons.

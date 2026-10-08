@@ -13,7 +13,7 @@ This is a Hvigor tool package, so declare it in the project-level `hvigor/hvigor
 ```json5
 {
   "dependencies": {
-    "@cloudcare/hvigor-ohos-plugin": "^0.1.1"
+    "@cloudcare/hvigor-ohos-plugin": "latest"
   }
 }
 ```

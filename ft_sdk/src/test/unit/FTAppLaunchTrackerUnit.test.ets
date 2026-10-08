@@ -28,6 +28,15 @@ class RecordingLaunchReporter implements FTAppLaunchReporter {
   }
 }
 
+class FilteringLaunchReporter implements FTAppLaunchReporter {
+  public callCount: number = 0;
+
+  public report(_action: FTAppLaunchAction): 'filtered' {
+    this.callCount++;
+    return 'filtered';
+  }
+}
+
 function propertyText(action: FTAppLaunchAction, key: string): string {
   return String(action.properties[key]);
 }
@@ -100,6 +109,29 @@ export default function ftAppLaunchTrackerUnitTest() {
         completionCount++;
       });
       expect(completionCount).assertEqual(2);
+    });
+
+    it('filteredLaunchFinishesWithoutReportingOrRetrying', 0, () => {
+      const reporter = new FilteringLaunchReporter();
+      const tracker = new FTAppLaunchTracker(new FixedLaunchClock(), reporter, 100, 900);
+      let finishedCount = 0;
+      let submittedCount = 0;
+      tracker.onFinished((): void => { finishedCount++; });
+      tracker.onReportSubmitted((): void => { submittedCount++; });
+
+      tracker.recordApplicationInit(120);
+      tracker.recordFirstUIAbilityCreated(150);
+      tracker.markRumReady(true);
+      tracker.recordFirstFrame(200);
+      tracker.recordFirstFrame(210);
+
+      expect(reporter.callCount).assertEqual(1);
+      expect(tracker.getSnapshot().finished).assertTrue();
+      expect(tracker.getSnapshot().reported).assertFalse();
+      expect(finishedCount).assertEqual(1);
+      expect(submittedCount).assertEqual(0);
+      tracker.onFinished((): void => { finishedCount++; });
+      expect(finishedCount).assertEqual(2);
     });
 
     it('backgroundLaunchWaitsForFirstFrame', 0, () => {

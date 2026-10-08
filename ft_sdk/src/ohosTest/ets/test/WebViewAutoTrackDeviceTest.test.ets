@@ -6,10 +6,12 @@ import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTWebViewHandler } from '../../../main/ets/components/web/FTWebViewHandler';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
+import { NoNavigationTestRuntime } from './helpers/NoNavigationTestRuntime';
 import { WaitUtils } from './helpers/WaitUtils';
 
 const TEST_FAKE_RUM_ID = 'rumId';
@@ -171,7 +173,7 @@ class WebViewResourceTags {
 
 class WebViewNetworkErrorTags extends WebViewResourceTags {
   error_source: string = 'network';
-  error_type: string = 'network';
+  error_type: string = 'network_error';
 
   constructor(viewId: string, viewName: string, resourceUrl: string, resourceStatus: string) {
     super(viewId, viewName, resourceUrl, resourceStatus);
@@ -249,6 +251,7 @@ export default function webViewAutoTrackDeviceTest() {
 
     beforeEach(async () => {
       await SdkTestLifecycle.resetRuntimeState();
+      SdkInternalTestAccess.setRuntime(new NoNavigationTestRuntime());
       context = await DBAssert.getAppContext();
       collector = new MockCollector(200, '');
       collector.start();
@@ -260,6 +263,8 @@ export default function webViewAutoTrackDeviceTest() {
         .setEnv(EnvType.GRAY), context);
       FTSDK.installRUMConfig(rumConfig);
 
+      await FTRUMGlobalManager.getInstance().stopView();
+
       await DBAssert.resetAll();
       collector.clearRequests();
     });
@@ -270,6 +275,7 @@ export default function webViewAutoTrackDeviceTest() {
         async () => { await SdkTestLifecycle.resetRuntimeState(); },
         async () => { await DBAssert.cleanupAll(); }
       ]);
+      SdkInternalTestAccess.resetRuntime();
     });
 
     it('webViewHandlerShouldGateBridge', 0, () => {

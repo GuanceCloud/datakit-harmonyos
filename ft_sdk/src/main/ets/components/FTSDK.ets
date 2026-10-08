@@ -42,8 +42,10 @@ import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
 import { FTAppLaunchTracker } from "./monitor/FTAppLaunchTracker";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
+import { FTCrashFreeDurationManager } from "./monitor/FTCrashFreeDurationManager";
 import { FTUIBlockManager } from "./monitor/FTUIBlockManager";
 import { Utils } from "./utils/Utils";
+import { AppState } from './rum/enum/RUMEnums';
 import { FTRemoteConfigManager } from './remote/FTRemoteConfigManager';
 import { FTRemoteDataFilterManager } from './remote/FTRemoteDataFilterManager';
 import { RemoteConfigBean } from './remote/RemoteConfigBean';
@@ -151,12 +153,22 @@ export class FTSDK {
   public static recordAppLaunchApplicationForeground(): void {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationForeground();
+    FTSDK.updateCrashFreeAppState(AppState.RUN);
+    FTRUMInnerManager.getInstance().onAppForeground();
   }
 
   /** Internal lifecycle bridge for application foreground/background state. */
   public static recordAppLaunchApplicationBackground(): void {
     FTSDK.recordInitialLifecycleSignal();
     FTAppLaunchTracker.getInstance().recordApplicationBackground();
+    FTSDK.updateCrashFreeAppState(AppState.BACKGROUND);
+    FTRUMInnerManager.getInstance().onAppBackground();
+  }
+
+  private static updateCrashFreeAppState(state: AppState): void {
+    FTCrashFreeDurationManager.getInstance().transition(state).catch((error: Error): void => {
+      FTInnerLogger.w(TAG, `Unable to update crash-free app state: ${error.message}`);
+    });
   }
 
   /** Internal lifecycle bridge for WindowStage SHOWN/ACTIVE. */
@@ -195,6 +207,7 @@ export class FTSDK {
     FTSDK.cachedPACKAGE_UUID = null;
     FTSDK.nativeCrashVersion = null;
     FTSDK.hvigorPluginVersion = null;
+    FTCrashFreeDurationManager.resetInstanceInternal();
   }
 
   private static resetInitializationSeparatorState(): void {
@@ -526,6 +539,7 @@ export class FTSDK {
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
       FTRUMInnerManager.getInstance().initContext(context);
+      FTCrashFreeDurationManager.getInstance().initialize(context, AppState.RUN);
       this.refreshRandomDeviceUUIDContext(config);
       FTSDK.initRemoteDataFilters(config);
     } else {
@@ -790,6 +804,9 @@ export class FTSDK {
 
   static shutDown() {
     FTUIBlockManager.getInstance().release();
+    FTCrashFreeDurationManager.getInstance().shutdown().catch((error: Error): void => {
+      FTInnerLogger.w(TAG, `Unable to persist crash-free duration at shutdown: ${error.message}`);
+    });
     FTInnerLogger.setCrashLogCollectionEnabled(false);
     if (FTSDK.remoteConfigManager !== null) {
       FTSDK.remoteConfigManager.close();
@@ -1062,8 +1079,29 @@ export class FTSDK {
   public static onWindowStageActive(mainWindow?: window.Window): void {
     FTSDK.recordAppLaunchWindowForeground();
     FTSDK.uiFeatureInitRetryCount = 0;
+    if (mainWindow) {
+      FTSDK.rebindNavigationTracking(mainWindow);
+      return;
+    }
     getFTSDKRuntime().setMainWindow(mainWindow);
     FTSDK.tryInitializeUIFeaturesInternal();
+  }
+
+  /** Register Router/Navigation observers before the first loadContent page is shown. */
+  public static onWindowStageCreate(mainWindow: window.Window): void {
+    FTSDK.rebindNavigationTracking(mainWindow);
+  }
+
+  /** Bind View observation to the currently visible UIAbility window. */
+  private static rebindNavigationTracking(mainWindow: window.Window): void {
+    getFTSDKRuntime().setMainWindow(mainWindow);
+    FTSDK.tryInitializeUIFeaturesInternal();
+    if (FTSDK.uiFeaturesInitialized && FTSDK.rumConfig?.isEnableTraceUserView()) {
+      const uiContext = getFTSDKRuntime().getUIContext();
+      if (uiContext) {
+        getFTSDKRuntime().initNavigationTracker(uiContext, FTSDK.rumConfig);
+      }
+    }
   }
 
   /**
@@ -1290,25 +1328,27 @@ export class FTSDK {
       if (bean.getLogEnableConsoleLog() !== null) {
         logConfig.setEnableConsoleLog(bean.getLogEnableConsoleLog()!);
       }
-      if (bean.getLogSampleRate() !== null) {
-        logConfig.setSamplingRate(bean.getLogSampleRate()!);
+      if (bean.shouldApplyLogSamplingRate()) {
+        logConfig.setRemoteLogSamplingRateInternal(bean.getEffectiveLogSamplingRateProbability());
       }
       FTTrackInner.getInstance().initLogConfig(logConfig);
     }
 
     const traceConfig = FTTraceConfigManager.getInstance().getConfig();
-    if (traceConfig !== null && bean.getTraceSampleRate() !== null) {
-      traceConfig.setSamplingRate(bean.getTraceSampleRate()!);
+    if (traceConfig !== null && bean.shouldApplyTraceSamplingRate()) {
+      traceConfig.setRemoteTraceSamplingRateInternal(bean.getEffectiveTraceSamplingRateProbability());
     }
 
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
     if (rumConfig !== null && rumConfig.getRumAppId().length > 0 &&
-      (bean.getRumSampleRate() !== null || bean.getRumSessionOnErrorSampleRate() !== null)) {
-      if (bean.getRumSampleRate() !== null) {
-        rumConfig.setSamplingRate(bean.getRumSampleRate()!);
+      (bean.shouldApplySessionSamplingRate() || bean.shouldApplySessionOnErrorSamplingRate())) {
+      if (bean.shouldApplySessionSamplingRate()) {
+        rumConfig.setRemoteSessionSamplingRateInternal(bean.getEffectiveSessionSamplingRateProbability());
       }
-      if (bean.getRumSessionOnErrorSampleRate() !== null) {
-        rumConfig.setSessionErrorSampleRate(bean.getRumSessionOnErrorSampleRate()!);
+      if (bean.shouldApplySessionOnErrorSamplingRate()) {
+        rumConfig.setRemoteSessionOnErrorSamplingRateInternal(
+          bean.getEffectiveSessionOnErrorSamplingRateProbability()
+        );
       }
       FTRUMInnerManager.getInstance().setSamplingRates(
         rumConfig.getSamplingRate(),
@@ -1347,21 +1387,21 @@ export class FTSDK {
     });
     const launchTracker = FTAppLaunchTracker.getInstance();
     const launchSnapshot = launchTracker.getSnapshot();
-    if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.reported) {
+    if (launchSnapshot.applicationInitUptimeNs > 0 && !launchSnapshot.finished) {
       // Remote filtering is control-plane work, not part of cold-start data
       // collection. Preserve the active config until the cold-launch Action is
-      // submitted, except for a background-only process: its launch Action
+      // submitted or filtered, except for a background-only process: its Action
       // waits for a later UI frame, so unblock control-plane work
       // as soon as the no-UI lifecycle round has settled.
       let settled: boolean = false;
-      let removeReportListener: () => void = (): void => {};
+      let removeFinishListener: () => void = (): void => {};
       let removeBackgroundListener: () => void = (): void => {};
       const startAfterLaunch = (): void => {
         if (settled) {
           return;
         }
         settled = true;
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
         FTSDK.remoteDataFilterLaunchUnsubscribe = null;
         if (FTSDK.remoteDataFilterManager !== manager) {
@@ -1369,15 +1409,15 @@ export class FTSDK {
         }
         void manager.start();
       };
-      removeReportListener = launchTracker.onReportSubmitted(startAfterLaunch);
+      removeFinishListener = launchTracker.onFinished(startAfterLaunch);
       removeBackgroundListener = launchTracker.onBackgroundLaunchDetected(startAfterLaunch);
       if (settled) {
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
         return;
       }
       FTSDK.remoteDataFilterLaunchUnsubscribe = (): void => {
-        removeReportListener();
+        removeFinishListener();
         removeBackgroundListener();
       };
       return;

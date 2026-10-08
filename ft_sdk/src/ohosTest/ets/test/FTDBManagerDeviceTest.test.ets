@@ -5,16 +5,23 @@ import {
   FTDBTaskPoolExecutor,
   FTDBTaskPoolCachePolicySnapshot,
   FTDBTaskPoolWriteOptions,
-  FTDBTaskPoolPendingRumResourceDTO
+  FTDBTaskPoolPendingRumResourceDTO,
+  FTDBTaskPoolRumCounterDeltaDTO
 } from '../../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBean } from '../../../main/ets/components/db/bean/ViewBean';
 import { ActionBean } from '../../../main/ets/components/db/bean/ActionBean';
+import { CollectType } from '../../../main/ets/components/rum/enum/RUMEnums';
+import { Constants } from '../../../main/ets/components/Constants';
 import { DatabaseHelper } from '../../../main/ets/components/db/base/DatabaseHelper';
 import { DataBaseCallBack } from '../../../main/ets/components/db/base/DataBaseCallBack';
 import { SyncData } from '../../../main/ets/components/db/bean/SyncData';
 import { CacheDiscard, DataType } from '../../../main/ets/components/enum/Enums';
 import * as FTSQL from '../../../main/ets/components/db/FTSQL';
-import { SDKRumResourceContextDTO, SDKStringRecord } from '../../../main/ets/components/thread/SDKWorkerProtocol';
+import {
+  SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
+  SDKStringRecord
+} from '../../../main/ets/components/thread/SDKWorkerProtocol';
 import { DBAssert } from './helpers/DBAssert';
 
 const TEST_NOW_NS = 1700000000000;
@@ -40,6 +47,7 @@ function createRumSyncData(label: string, time: number = TEST_NOW_NS): SyncData 
 class SchemaProbeCallback implements DataBaseCallBack {
   public hasViewMigrationColumns: boolean = false;
   public hasSyncDataFlatTable: boolean = false;
+  public hasPendingResourceNetworkSnapshotColumn: boolean = false;
 
   async run(rdbStore: relationalStore.RdbStore): Promise<void> {
     const viewResult = await rdbStore.querySql(
@@ -54,11 +62,25 @@ class SchemaProbeCallback implements DataBaseCallBack {
     );
     this.hasSyncDataFlatTable = syncResult.goToFirstRow();
     syncResult.close();
+
+    const pendingResourceResult = await rdbStore.querySql(
+      `SELECT ${FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT} ` +
+      `FROM ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE} LIMIT 1`
+    );
+    this.hasPendingResourceNetworkSnapshotColumn = true;
+    pendingResourceResult.close();
   }
 }
 
 class PendingResourceContextFixture implements SDKRumResourceContextDTO {
   dynamicTags?: SDKStringRecord;
+  networkSnapshot: SDKRumResourceNetworkSnapshotDTO = {
+    available: true,
+    validated: true,
+    downlinkKbps: 1200,
+    uplinkKbps: 600,
+    signalStrength: 3
+  };
   sessionId: string = 'pending-resource-session';
   viewId: string = '';
   viewName: string = '';
@@ -140,6 +162,32 @@ export default function ftDBManagerDeviceTest() {
         .some(view => view.getId() === closed.getId())).assertFalse();
     });
 
+    it('recoveredClosedViewCanBeRefreshedAfterItsFirstDurableSnapshot', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('recovered-crash-view', 'recovered-crash-view', TEST_NOW_NS);
+      view.setIsClose(true);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+
+      // The first predecessor-process View record is durable, but recovery
+      // must retain its aggregate row until the historical Error is counted.
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, view, true)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId()) !== null).assertTrue();
+      const delta: FTDBTaskPoolRumCounterDeltaDTO = {
+        viewId: view.getId(), actionId: '', viewActionDelta: 0, viewErrorDelta: 1,
+        viewLongTaskDelta: 0, viewResourceDelta: 0, viewPendingDelta: 0,
+        viewUpdateTimeDelta: 1, actionErrorDelta: 0, actionLongTaskDelta: 0,
+        actionResourceDelta: 0, actionPendingDelta: 0
+      };
+      expect(await FTDBTaskPoolExecutor.applyRumCounterDeltas(context, [delta])).assertEqual(1);
+      const refreshed = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(refreshed !== null).assertTrue();
+      expect(refreshed!.getErrorCount()).assertEqual(1);
+      expect((await FTDBTaskPoolExecutor.querySumView(context, 20))
+        .some(item => item.getId() === view.getId())).assertTrue();
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, refreshed!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
     it('viewAckKeepsNewerAndUnrelatedData', 0, async () => {
       const context = await DBAssert.getAppContext();
       const old = new ViewBean('delayed-counter-view', 'delayed-counter-view', TEST_NOW_NS);
@@ -176,6 +224,57 @@ export default function ftDBManagerDeviceTest() {
       expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
     });
 
+    it('insertsActionAndOwningViewCountInOneTransaction', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('atomic-action-view', 'atomic-action-view', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      const action = new ActionBean('atomic-action', 'atomic action', 'click', TEST_NOW_NS);
+      action.setViewInfo(view.getViewName(), view.getId(), '');
+
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, action)).assertTrue();
+      const persistedView = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(persistedView !== null).assertTrue();
+      expect(persistedView!.getActionCount()).assertEqual(1);
+      expect(persistedView!.getViewUpdateTime()).assertEqual(view.getViewUpdateTime() + 1);
+      const persistedAction = await FTDBTaskPoolExecutor.getActionInfo(context, action.getId());
+      expect(persistedAction !== null).assertTrue();
+      expect(persistedAction!.startTime).assertEqual(TEST_NOW_NS);
+
+      // A View-qualified Action cannot be accepted alone. This prevents a
+      // restart/retry from creating the mismatch this transaction fixes.
+      const unavailableViewAction = new ActionBean('missing-view-action', 'missing view', 'click', TEST_NOW_NS);
+      unavailableViewAction.setViewInfo('missing', 'missing-view', '');
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, unavailableViewAction)).assertFalse();
+      expect(await FTDBTaskPoolExecutor.getActionInfo(context, unavailableViewAction.getId())).assertNull();
+    });
+
+    it('persistsActionAndViewSamplingAcrossCloseAndQuery', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('sampled-view', 'Index', TEST_NOW_NS);
+      view.setSessionId('previous-session');
+      view.setCollectType(CollectType.SAMPLING);
+      expect(await FTDBTaskPoolExecutor.upsertRumView(context, view)).assertTrue();
+
+      const action = new ActionBean('sampled-action', 'tap', 'click', TEST_NOW_NS);
+      action.setSessionId('previous-session');
+      action.setViewInfo(view.getViewName(), view.getId(), 'root');
+      action.setCollectType(CollectType.SAMPLING);
+      expect(await FTDBTaskPoolExecutor.insertRumAction(context, action)).assertTrue();
+      expect((await FTDBTaskPoolExecutor.closeRumAction(context, action.getId(), 100)).wasClosed).assertTrue();
+      expect(await FTDBTaskPoolExecutor.closeRumView(context, view.getId(), 0, 100,
+        view.getAttrJsonString())).assertTrue();
+
+      const restoredView = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(restoredView !== null).assertTrue();
+      expect(restoredView!.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(Object.keys(restoredView!.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
+      const actions = await FTDBTaskPoolExecutor.querySumAction(context, 20);
+      const restoredAction = actions.find(item => item.getId() === action.getId());
+      expect(restoredAction !== undefined).assertTrue();
+      expect(restoredAction!.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(Object.keys(restoredAction!.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
+    });
+
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {
       const context = await DBAssert.getAppContext();
       const actionId = 'pending-resource-action';
@@ -197,6 +296,11 @@ export default function ftDBManagerDeviceTest() {
       expect(restored !== null).assertTrue();
       expect(restored!.context.actionId).assertEqual(actionId);
       expect(restored!.draftUuid).assertEqual('pending-resource-one-draft');
+      expect(restored!.context.networkSnapshot?.available).assertTrue();
+      expect(restored!.context.networkSnapshot?.validated).assertTrue();
+      expect(restored!.context.networkSnapshot?.downlinkKbps).assertEqual(1200);
+      expect(restored!.context.networkSnapshot?.uplinkKbps).assertEqual(600);
+      expect(restored!.context.networkSnapshot?.signalStrength).assertEqual(3);
 
       const waitingClose = await FTDBTaskPoolExecutor.closeRumAction(context, actionId, 100);
       expect(waitingClose.wasClosed).assertFalse();
@@ -314,6 +418,7 @@ export default function ftDBManagerDeviceTest() {
 
       expect(callback.hasViewMigrationColumns).assertTrue();
       expect(callback.hasSyncDataFlatTable).assertTrue();
+      expect(callback.hasPendingResourceNetworkSnapshotColumn).assertTrue();
     });
 
     it('errorSampledShouldMigrateExpire', 0, async () => {

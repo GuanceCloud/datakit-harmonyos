@@ -50,6 +50,7 @@ enum FTDBTaskPoolCommand {
   MARK_RUM_ACTION_CLOSE_REQUESTED = 'markRumActionCloseRequested',
   APPLY_RUM_COUNTER_DELTAS = 'applyRumCounterDeltas',
   UPDATE_VIEW_UPDATE_TIME = 'updateViewUpdateTime',
+  SET_VIEW_LONG_TASK_DURATION = 'setViewLongTaskDuration',
   INSERT_RUM_ACTION = 'insertRumAction',
   CLOSE_RUM_ACTION = 'closeRumAction',
   QUERY_SUM_ACTION = 'querySumAction',
@@ -218,6 +219,7 @@ export interface FTDBTaskPoolRequest {
   attr?: string;
   newSessionId?: string;
   dateTime?: number;
+  keepClosedView?: boolean;
   force?: boolean;
   target?: string;
   ids?: string[];
@@ -677,10 +679,15 @@ export class FTDBTaskPoolExecutor {
     return response.value === true;
   }
 
-  public static async acknowledgeView(context: Context, view: ViewBean): Promise<boolean> {
+  public static async acknowledgeView(
+    context: Context,
+    view: ViewBean,
+    keepClosedView: boolean = false
+  ): Promise<boolean> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.ACKNOWLEDGE_VIEW,
-      view: view.toJSON()
+      view: view.toJSON(),
+      keepClosedView
     });
     return response.value === true;
   }
@@ -810,7 +817,11 @@ export class FTDBTaskPoolExecutor {
   public static async insertRumAction(context: Context, actionBean: ActionBean): Promise<boolean> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.INSERT_RUM_ACTION,
-      actionBean: actionBean.toJSON()
+      actionBean: actionBean.toJSON(),
+      // The Action row and its View aggregate are committed together.  Keep
+      // this timestamp on the request so all cache backends advance the View
+      // version with the same write.
+      now: Date.now()
     });
     return response.value === true;
   }
@@ -871,6 +882,16 @@ export class FTDBTaskPoolExecutor {
       viewId
     });
     return response.view ? ViewBean.fromJSON(response.view) : null;
+  }
+
+  public static async setViewLongTaskDuration(context: Context, viewId: string, duration: number): Promise<boolean> {
+    const response = await FTDBTaskPoolExecutor.execute(context, {
+      command: FTDBTaskPoolCommand.SET_VIEW_LONG_TASK_DURATION,
+      viewId,
+      duration,
+      now: Date.now()
+    });
+    return response.value === true;
   }
 
   public static async cleanCloseActionData(context: Context, ids: string[]): Promise<number> {

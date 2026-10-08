@@ -120,6 +120,7 @@ export class RumAttributeAssert {
         RumAttributeAssert.requireValues(point, ['resource_id', 'resource_url', 'resource_url_host',
           'resource_url_path', 'resource_url_path_group', 'resource_method', 'resource_type'], true);
         RumAttributeAssert.numericFields(point, ['duration']);
+        RumAttributeAssert.validateResourceNetworkSnapshot(point);
         // Status 0 explicitly represents no HTTP response and has no HTTP group.
         RumAttributeAssert.requireValues(point, ['resource_status'], true);
         if (expected.resourceStatus !== undefined) {
@@ -150,6 +151,54 @@ export class RumAttributeAssert {
       RumAttributeAssert.check(typeof value === 'number' && Number.isFinite(value) && value >= 0,
         point, `invalid numeric field ${key}`);
     }
+  }
+
+  /**
+   * All native Resource producers share the same startResource context. Keep
+   * this contract in the common device assertion so manual, RCP, Axios and
+   * HTTP-chain tests all verify the final DB row and uploaded Line Protocol.
+   */
+  private static validateResourceNetworkSnapshot(point: RumAttributePoint): void {
+    const available = point.fields.get('network_available');
+    RumAttributeAssert.check(typeof available === 'boolean', point,
+      'missing/invalid boolean network_available field');
+    const optionalKeys = [
+      'network_validated', 'network_downlink_kbps', 'network_uplink_kbps', 'network_signal_strength'
+    ];
+    for (const key of optionalKeys) {
+      RumAttributeAssert.check(!point.tags.has(key), point, `${key} is in the wrong tag section`);
+    }
+    RumAttributeAssert.check(!point.tags.has('network_available'), point,
+      'network_available is in the wrong tag section');
+    if (!available) {
+      for (const key of optionalKeys) {
+        RumAttributeAssert.check(!point.fields.has(key), point,
+          `${key} must be absent while network_available=false`);
+      }
+      return;
+    }
+    const validated = point.fields.get('network_validated');
+    if (validated !== undefined) {
+      RumAttributeAssert.check(typeof validated === 'boolean', point,
+        'network_validated must be boolean when present');
+    }
+    RumAttributeAssert.validateOptionalNetworkMetric(point, 'network_downlink_kbps', false);
+    RumAttributeAssert.validateOptionalNetworkMetric(point, 'network_uplink_kbps', false);
+    RumAttributeAssert.validateOptionalNetworkMetric(point, 'network_signal_strength', true);
+  }
+
+  private static validateOptionalNetworkMetric(
+    point: RumAttributePoint,
+    key: string,
+    allowsZero: boolean
+  ): void {
+    const value = point.fields.get(key);
+    if (value === undefined) {
+      return;
+    }
+    RumAttributeAssert.check(typeof value === 'number' && Number.isInteger(value) &&
+      (allowsZero ? value >= 0 : value > 0), point,
+    `${key} must be a ${allowsZero ? 'non-negative' : 'positive'} integer when present`);
   }
 
   private static requireValues(point: RumAttributePoint, keys: string[], tag: boolean): void {

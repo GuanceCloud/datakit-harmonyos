@@ -3,6 +3,7 @@ import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecuto
 import { ViewBeanJSON } from './bean/ViewBean';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { Constants } from '../Constants';
+import { parseCollectType } from '../rum/enum/RUMEnums';
 
 export interface FTRumStoreAccess {
   read(kind: string, id: string): string | null;
@@ -20,6 +21,7 @@ export class FTRumFileStore {
     return ['cleanupExpiredRumView', 'cleanupExpiredRumAction', 'upsertRumView', 'updateRumView',
       'closeRumView', 'updateRumViewReplay', 'updateViewUploadTime', 'increaseViewAction', 'getRumPendingResource',
       'forceClearRumPendingResource', 'getActionInfo', 'applyRumCounterDeltas', 'updateViewUpdateTime',
+      'setViewLongTaskDuration',
       'insertRumAction', 'closeRumAction', 'querySumAction', 'getActionCounts', 'querySumView',
       'queryRumViewById', 'cleanCloseActionData', 'cleanCloseViewData', 'closeAllActionAndView',
       'exportRumState', 'acknowledgeView'].includes(command);
@@ -37,10 +39,30 @@ export class FTRumFileStore {
         response.value = !!request.view && (request.command === 'upsertRumView' || !!this.view(request.view!.id));
         if (response.value && request.view) { this.put(changes, 'view', request.view.id, request.view); }
         break;
-      case 'insertRumAction':
-        response.value = !!request.actionBean && !this.action(request.actionBean!.id);
-        if (response.value && request.actionBean) { this.put(changes, 'action', request.actionBean.id, request.actionBean); }
+      case 'insertRumAction': {
+        const actionBean = request.actionBean;
+        const actionView = actionBean && actionBean.viewId ? this.view(actionBean.viewId) : null;
+        response.value = !!actionBean && !this.action(actionBean!.id);
+        // Match SQLite's all-or-nothing contract: an Action that names a
+        // View is not durable unless that View's action count advances too.
+        if (response.value && actionBean && actionBean.viewId && !actionView) {
+          response.value = false;
+        }
+        if (response.value && actionBean) {
+          this.put(changes, 'action', actionBean.id, actionBean);
+          if (actionView) {
+            actionView.actionCount++;
+            actionView.viewUpdateTime++;
+            actionView.dataUpdateTime = Math.max(
+              now,
+              actionView.dataUpdateTime + 1,
+              actionView.dataUploadTime + 1
+            );
+            this.put(changes, 'view', actionView.id, actionView);
+          }
+        }
         break;
+      }
       case 'closeRumView':
         response.value = view !== null;
         if (view) {
@@ -91,8 +113,24 @@ export class FTRumFileStore {
           this.put(changes, 'view', view.id, view);
         }
         break;
+      case 'setViewLongTaskDuration':
+        response.value = view !== null;
+        if (view) {
+          const extraAttr = view.extraAttr || {};
+          const stored = extraAttr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] as Record<string, string>;
+          const previous = stored ? Number(stored['value']) : 0;
+          const duration = Math.max(Number.isFinite(previous) ? previous : 0, request.duration || 0);
+          const durationAttr: Record<string, string> = {};
+          durationAttr['value'] = String(duration);
+          extraAttr[Constants.KEY_RUM_VIEW_LONG_TASK_DURATION] = durationAttr;
+          view.extraAttr = extraAttr;
+          view.viewUpdateTime++;
+          view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
+          this.put(changes, 'view', view.id, view);
+        }
+        break;
       case 'acknowledgeView':
-        response.value = this.acknowledgeView(request.view, changes);
+        response.value = this.acknowledgeView(request.view, changes, request.keepClosedView === true);
         break;
       case 'getActionInfo': response.actionInfo = action ? { startTime: action.startTime } : null; break;
       case 'getActionCounts':
@@ -234,11 +272,15 @@ export class FTRumFileStore {
   // Keep the acknowledgement conditional so a delayed upload completion cannot
   // overwrite or delete a newer View aggregate. This matches the SQLite
   // acknowledgement predicates and updates both fields atomically in one commit.
-  private acknowledgeView(snapshot: ViewBeanJSON | undefined, changes: FTCacheMutation[]): boolean {
+  private acknowledgeView(
+    snapshot: ViewBeanJSON | undefined,
+    changes: FTCacheMutation[],
+    keepClosedView: boolean = false
+  ): boolean {
     if (!snapshot || snapshot.id.length === 0) { return false; }
     const current = this.view(snapshot.id);
     if (!current || !this.matchesAcknowledgedView(current, snapshot)) { return false; }
-    if (current.isClose && current.pendingResource <= 0) {
+    if (current.isClose && current.pendingResource <= 0 && !keepClosedView) {
       changes.push({ path: this.access.path('view', current.id), body: null });
       return true;
     }
@@ -272,7 +314,9 @@ export class FTRumFileStore {
         view.recordsCount = Math.max(view.recordsCount || 0, Number.isFinite(count) ? Math.floor(count) : 0);
         view.sampledOnReplayError = view.sampledOnReplayError === true || marker.sampledOnReplayError === true;
       }
-      else { extra[key] = source[key]; }
+      else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+        view.collectType = parseCollectType(String(source[key]));
+      } else { extra[key] = source[key]; }
     }
     view.extraAttr = extra;
   }

@@ -10,12 +10,45 @@ import {
 import { FTRUMConfig } from '../../main/ets/components/Configs';
 import { FTInTakeUrlHandler } from '../../main/ets/components/http/FTInTakeUrlHandler';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
+import { FTNetworkErrorContext, FTNetworkErrorHandler, FTNetworkResourceFields } from '../../main/ets/components/network/FTNetworkErrorHandler';
 import { TestReset } from '../helpers/TestReset';
 
 class IgnoredRcpResourceUrlHandler extends FTInTakeUrlHandler {
   public isInTakeUrl(url: string): boolean {
     return url.includes('/ignored-resource');
   }
+}
+
+class RcpGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
+  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+    return false;
+  }
+}
+
+class RecordingRcpNetworkErrorHandler implements FTNetworkErrorHandler {
+  callCount: number = 0;
+  lastContext: FTNetworkErrorContext | undefined;
+  private readonly suppressNetworkError: boolean;
+  private readonly throwsError: boolean;
+
+  constructor(suppressNetworkError: boolean, throwsError: boolean = false) {
+    this.suppressNetworkError = suppressNetworkError;
+    this.throwsError = throwsError;
+  }
+
+  onExceptionWithFilter(context: FTNetworkErrorContext, resourceFields: FTNetworkResourceFields): boolean {
+    this.callCount++;
+    this.lastContext = context;
+    resourceFields['test_rcp_network_error_handler'] = true;
+    if (this.throwsError) {
+      throw new Error('RCP network error handler failed');
+    }
+    return this.suppressNetworkError;
+  }
+}
+
+interface RcpResourceInterceptorTestAccess {
+  networkErrorHandler?: FTNetworkErrorHandler;
 }
 
 class CustomRcpInterceptor implements rcp.Interceptor {
@@ -27,6 +60,40 @@ class CustomRcpInterceptor implements rcp.Interceptor {
 interface RcpTraceTestAccess {
   isEnabled: boolean;
   traceInterceptor: FTTraceInterceptor;
+}
+
+class TestRcpUrl {
+  href: string;
+
+  constructor(href: string) {
+    this.href = href;
+  }
+}
+
+class TestRcpRequest {
+  readonly id: string;
+  url: TestRcpUrl;
+  method: string;
+  headers: rcp.RequestHeaders;
+
+  constructor(url: string, method: string, headers: rcp.RequestHeaders = {}) {
+    this.id = url;
+    this.url = new TestRcpUrl(url);
+    this.method = method;
+    this.headers = headers;
+  }
+}
+
+class TestRcpSession {
+  close(): void {}
+}
+
+function createTestRcpRequest(url: string, method: string, headers: rcp.RequestHeaders = {}): rcp.Request {
+  return new TestRcpRequest(url, method, headers) as Object as rcp.Request;
+}
+
+function createTestRcpSession(): rcp.Session {
+  return new TestRcpSession() as Object as rcp.Session;
 }
 
 class ThrowingTraceInterceptor implements FTTraceInterceptor {
@@ -47,10 +114,13 @@ class ThrowingTraceInterceptor implements FTTraceInterceptor {
 }
 
 class SingleDispatchResponse implements rcp.Response {
-  readonly statusCode: number = 201;
+  readonly statusCode: number;
   readonly headers: rcp.ResponseHeaders = {};
   readonly request: rcp.Request;
-  constructor(request: rcp.Request) { this.request = request; }
+  constructor(request: rcp.Request, statusCode: number = 201) {
+    this.request = request;
+    this.statusCode = statusCode;
+  }
   toString(): string | null { return '{}'; }
   toJSON(): object | null;
   toJSON(options: json.ParseOptions): object | null;
@@ -103,11 +173,11 @@ export default function httpAutoTrackRcpConfigUnitTest() {
         const access = interceptor as Object as RcpTraceTestAccess;
         access.isEnabled = true;
         access.traceInterceptor = trace;
-        const request = new rcp.Request('https://example.com/orders', 'POST', {
+        const request = createTestRcpRequest('https://example.com/orders', 'POST', {
           'X-FT-Resource-ID': `dispatch-${phase}`,
           'x-datadog-trace-id': '123', 'x-datadog-parent-id': '456'
         });
-        const session = rcp.createSession();
+        const session = createTestRcpSession();
         const context: rcp.RequestContext = { request, session };
         const response = new SingleDispatchResponse(request);
         const failure = phase === 'transport' ? new Error('Timeout was reached') : null;
@@ -134,8 +204,8 @@ export default function httpAutoTrackRcpConfigUnitTest() {
         .setResourceUrlHandler(new IgnoredRcpResourceUrlHandler()));
 
       const interceptor = new RCPResourceInterceptor();
-      const request = new rcp.Request('https://example.com/ignored-resource', 'GET');
-      const session = rcp.createSession();
+      const request = createTestRcpRequest('https://example.com/ignored-resource', 'GET');
+      const session = createTestRcpSession();
       const context: rcp.RequestContext = { request, session };
       const response = new SingleDispatchResponse(request);
       const next = new SingleDispatchHandler(response, null);
@@ -148,34 +218,138 @@ export default function httpAutoTrackRcpConfigUnitTest() {
       }
     });
 
+    it('rcpStatusZeroResponseShouldInvokeHandlerAndPreserveResponse', 0, async () => {
+      const handler = new RecordingRcpNetworkErrorHandler(true);
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true)
+        .setNetworkErrorHandler(handler));
+      const interceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      }).interceptors ?? [];
+      const interceptor = interceptors[0] as RCPResourceInterceptor;
+      const request = createTestRcpRequest('https://example.com/status-zero', 'GET');
+      const session = createTestRcpSession();
+      const context: rcp.RequestContext = { request, session };
+      const response = new SingleDispatchResponse(request, 0);
+      const next = new SingleDispatchHandler(response, null);
+      try {
+        const actual = await interceptor.intercept(context, next);
+        expect(actual === response).assertTrue();
+        expect(next.calls).assertEqual(1);
+        expect(handler.callCount).assertEqual(1);
+        expect(handler.lastContext !== undefined).assertTrue();
+        expect(handler.lastContext!.source).assertEqual('rcp');
+        expect(handler.lastContext!.message.includes('without an HTTP response')).assertTrue();
+      } finally {
+        session.close();
+      }
+    });
+
+    it('rcpStatusZeroResponseHandlerFailureShouldNotChangeResponse', 0, async () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true));
+
+      const handler = new RecordingRcpNetworkErrorHandler(false, true);
+      const interceptor = new RCPResourceInterceptor(handler);
+      const request = createTestRcpRequest('https://example.com/status-zero-handler-failure', 'GET');
+      const session = createTestRcpSession();
+      const context: rcp.RequestContext = { request, session };
+      const response = new SingleDispatchResponse(request, 0);
+      try {
+        const actual = await interceptor.intercept(context, new SingleDispatchHandler(response, null));
+        expect(actual === response).assertTrue();
+        expect(handler.callCount).assertEqual(1);
+      } finally {
+        session.close();
+      }
+    });
+
+    it('rcpHttpErrorResponsesShouldNotInvokeLocalNetworkErrorHandler', 0, async () => {
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setEnableTraceUserResource(true));
+
+      const handler = new RecordingRcpNetworkErrorHandler(true);
+      const interceptor = new RCPResourceInterceptor(handler);
+      for (const statusCode of [404, 500]) {
+        const request = createTestRcpRequest(`https://example.com/http-${statusCode}`, 'GET');
+        const session = createTestRcpSession();
+        const context: rcp.RequestContext = { request, session };
+        const response = new SingleDispatchResponse(request, statusCode);
+        try {
+          const actual = await interceptor.intercept(context, new SingleDispatchHandler(response, null));
+          expect(actual === response).assertTrue();
+        } finally {
+          session.close();
+        }
+      }
+      expect(handler.callCount).assertEqual(0);
+    });
+
     it('rcpConfigShouldCreateInterceptors', 0, () => {
+      const networkErrorHandler = new RcpGlobalNetworkErrorHandler();
       const both = createFTRCPTrackConfig({
         enableTraceInterceptor: true,
-        enableResourceInterceptor: true
+        enableResourceInterceptor: true,
+        networkErrorHandler
       });
-      expect((both.interceptors ?? []).length).assertEqual(2);
-      expect((both.interceptors ?? [])[0] instanceof RCPTraceInterceptor).assertTrue();
-      expect((both.interceptors ?? [])[1] instanceof RCPResourceInterceptor).assertTrue();
+      const bothInterceptors = both.interceptors ?? [];
+      expect(bothInterceptors.length).assertEqual(2);
+      expect(bothInterceptors[0] !== bothInterceptors[1]).assertTrue();
+      expect((bothInterceptors[1] as Object as RcpResourceInterceptorTestAccess).networkErrorHandler ===
+        networkErrorHandler).assertTrue();
 
       const traceOnly = createFTRCPTrackConfig({
         enableTraceInterceptor: true,
         enableResourceInterceptor: false
       });
       expect((traceOnly.interceptors ?? []).length).assertEqual(1);
-      expect((traceOnly.interceptors ?? [])[0] instanceof RCPTraceInterceptor).assertTrue();
 
       const resourceOnly = createFTRCPTrackConfig({
         enableTraceInterceptor: false,
-        enableResourceInterceptor: true
+        enableResourceInterceptor: true,
+        networkErrorHandler
       });
-      expect((resourceOnly.interceptors ?? []).length).assertEqual(1);
-      expect((resourceOnly.interceptors ?? [])[0] instanceof RCPResourceInterceptor).assertTrue();
+      const resourceInterceptors = resourceOnly.interceptors ?? [];
+      expect(resourceInterceptors.length).assertEqual(1);
+      expect((resourceInterceptors[0] as Object as RcpResourceInterceptorTestAccess).networkErrorHandler ===
+        networkErrorHandler).assertTrue();
 
       const disabled = createFTRCPTrackConfig({
         enableTraceInterceptor: false,
         enableResourceInterceptor: false
       });
       expect((disabled.interceptors ?? []).length).assertEqual(0);
+    });
+
+    it('rcpConfigShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
+      const globalHandler = new RcpGlobalNetworkErrorHandler();
+      const explicitHandler = new RcpGlobalNetworkErrorHandler();
+      FTRUMConfigManager.getInstance().initWithConfig(new FTRUMConfig()
+        .setNetworkErrorHandler(globalHandler));
+
+      const globalInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true
+      }).interceptors ?? [];
+      const globalResource = globalInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(globalResource.networkErrorHandler === globalHandler).assertTrue();
+
+      const explicitInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: explicitHandler
+      }).interceptors ?? [];
+      const explicitResource = explicitInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(explicitResource.networkErrorHandler === explicitHandler).assertTrue();
+
+      const disabledInterceptors = createFTRCPTrackConfig({
+        enableTraceInterceptor: false,
+        enableResourceInterceptor: true,
+        networkErrorHandler: null
+      }).interceptors ?? [];
+      const disabledResource = disabledInterceptors[0] as Object as RcpResourceInterceptorTestAccess;
+      expect(disabledResource.networkErrorHandler === undefined).assertTrue();
     });
 
     it('rcpConfigShouldAppendCustom', 0, () => {
@@ -194,7 +368,6 @@ export default function httpAutoTrackRcpConfigUnitTest() {
       expect(config.baseAddress).assertEqual('https://example.com');
       expect(config.headers!['X-Test']).assertEqual('keep');
       expect(interceptors.length).assertEqual(2);
-      expect(interceptors[0] instanceof RCPResourceInterceptor).assertTrue();
       expect(interceptors[1] === customInterceptor).assertTrue();
     });
 

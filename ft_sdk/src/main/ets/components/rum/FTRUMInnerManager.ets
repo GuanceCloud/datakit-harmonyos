@@ -4,6 +4,7 @@ import { ResourceBean } from './bean/ResourceBean';
 import { UserData } from './bean/UserData';
 import { ResourceParams } from './bean/ResourceParams';
 import { NetStatusBean } from './bean/NetStatusBean';
+import { ResourceTransportMetricsSnapshot } from './bean/ResourceTransportMetrics';
 import { ViewBean } from '../db/bean/ViewBean';
 import { ActionBean } from '../db/bean/ActionBean';
 import {
@@ -11,6 +12,7 @@ import {
   ErrorSource, 
   AppState, 
   CollectType,
+  RUMEnumUtils,
 } from './enum/RUMEnums';
 import FTTrackInner from '../FTTrackInner';
 import {
@@ -38,6 +40,7 @@ import {
   SDKRumResourceContextDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
+  SDKRumResourceTransportMetricsDTO,
   SDKRumCounterUpdateBatchDTO,
   SDKRumCounterUpdateDTO,
   SDKPropertyRecord,
@@ -50,6 +53,7 @@ import {
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
 import { DeviceUtils } from '../utils/DeviceUtils';
+import { FTNetworkListener } from '../utils/FTNetworkListener';
 import { Constants } from '../Constants';
 import { FTMonitorManager } from './FTMonitorManager';
 import { ErrorMonitorType } from './enum/ErrorMonitorType';
@@ -72,6 +76,7 @@ import {
   FTSessionReplaySessionContext,
   FTSessionReplayViewMetadata
 } from '../sessionreplay/FTSessionReplayBridge';
+import { FTCrashFreeDuration, FTCrashFreeDurationManager } from '../monitor/FTCrashFreeDurationManager';
 
 /**
  * Property wrapper interface for error properties
@@ -121,6 +126,9 @@ interface ResourceTags {
  * Resource-specific fields for line protocol
  */
 interface ResourceFields {
+  resource_request_size?: string;
+  resource_http_protocol?: string;
+  resource_connection_reuse?: string;
   resource_dns?: string;
   resource_tcp?: string;
   resource_ssl?: string;
@@ -195,11 +203,37 @@ interface TimeDuration {
 /**
  * RUM context for crash recovery
  */
-interface RUMContext {
-    viewId: string;
-    viewName: string;
-    viewReferrer: string;
-    sessionId: string;
+export interface FTRUMCrashRecoveryContext {
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  sessionId: string;
+}
+
+/** A recovery association is valid only when it identifies both its View and Session. */
+export function hasFTRUMCrashRecoveryContext(
+  context: FTRUMCrashRecoveryContext | null | undefined
+): boolean {
+  return context !== null && context !== undefined && context.viewId.length > 0 && context.sessionId.length > 0;
+}
+
+/**
+ * Historical crashes are associated with the predecessor process. The data is
+ * written as Tags so Error page correlation and aggregation can consume it.
+ */
+export function applyFTRUMCrashRecoveryContext(
+  tags: Record<string, string>,
+  context: FTRUMCrashRecoveryContext | null | undefined
+): boolean {
+  if (!hasFTRUMCrashRecoveryContext(context)) {
+    return false;
+  }
+  const recovered = context as FTRUMCrashRecoveryContext;
+  tags[Constants.KEY_RUM_SESSION_ID] = recovered.sessionId;
+  tags[Constants.KEY_RUM_VIEW_ID] = recovered.viewId;
+  tags[Constants.KEY_RUM_VIEW_NAME] = recovered.viewName;
+  tags[Constants.KEY_RUM_VIEW_REFERRER] = recovered.viewReferrer;
+  return true;
 }
 
 interface SDKRumCounterMailboxPayload {
@@ -241,6 +275,11 @@ interface RumSemanticJournalEntry {
   hostApplied: boolean;
   commitBarrier: boolean;
   semanticCommitted: boolean;
+}
+
+interface RumSemanticApplyWaiter {
+  timeoutId: number;
+  resolve: (applied: boolean) => void;
 }
 
 interface RumResourceDraftIds {
@@ -306,6 +345,15 @@ export class FTRUMInnerManager {
   
   // Current active state
   private activeView: ActiveViewBean | null = null;
+  /** Launch Actions use their own View without replacing the foreground page. */
+  private launchView: ActiveViewBean | null = null;
+  private launchViewReady: Promise<void> = Promise.resolve();
+  private syntheticViews: Map<string, ActiveViewBean> = new Map();
+  private syntheticViewReady: Map<string, Promise<void>> = new Map();
+  private syntheticCloseBarrier: Promise<void> = Promise.resolve();
+  private viewInitializationReady: Map<string, Promise<void>> = new Map();
+  private longTaskDurationUpdates: Map<string, Promise<void>> = new Map();
+  private appState: AppState = AppState.RUN;
   private activeAction: ActiveActionBean | null = null;
   
   // Resource management
@@ -372,6 +420,8 @@ export class FTRUMInnerManager {
    */
   private rumSemanticJournalHead: number = 0;
   private rumSemanticJournalByRequestId: Map<string, RumSemanticJournalEntry> = new Map();
+  /** Crash finalization waits for a counter-flush response after its DB delta is applied. */
+  private rumSemanticApplyWaiters: Map<string, RumSemanticApplyWaiter[]> = new Map();
   private rumSemanticSequence: number = 0;
   private committedRumSemanticResponseIds: Map<string, boolean> = new Map();
   private committedRumSemanticResponseOrder: string[] = [];
@@ -443,6 +493,8 @@ export class FTRUMInnerManager {
   // Promise-based lock to ensure thread-safe view operations (startView/stopView)
   // Prevents race condition where multiple threads modify activeView simultaneously
   private viewOperationLock: Promise<void> = Promise.resolve();
+  // Keep first-process View inserts behind the predecessor-process closure.
+  private startupViewRecovery: Promise<void> = Promise.resolve();
 
   // Promise-based lock to ensure thread-safe session refresh
   // Prevents race condition where multiple threads generate different sessionIds simultaneously
@@ -465,6 +517,12 @@ export class FTRUMInnerManager {
     }
     return this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
   };
+  /**
+   * A recovered crash reports against a View from the predecessor process.
+   * Keep that closed aggregate until its final Error counter and replacement
+   * View snapshot have crossed the durable cache boundary.
+   */
+  private protectedCrashRecoveryViewIds: Set<string> = new Set<string>();
 
 
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
@@ -528,12 +586,69 @@ export class FTRUMInnerManager {
       // de-duplication marker rather than restoring an old journal entry.
       this.rememberCommittedRumSemanticResponse(requestId);
     }
+    this.resolveRumSemanticApplyWaiters(requestId, true);
   }
 
   /** A failed/lost transport attempt must not permanently pin a retained aggregate. */
   public markRumSemanticHostFailed(requestId: string): void {
     const entry = this.rumSemanticJournalByRequestId.get(requestId);
     if (entry) { this.releaseCompletedActionAttempt(entry); }
+    this.resolveRumSemanticApplyWaiters(requestId, false);
+  }
+
+  /** Wait for the Host to commit the DB effects represented by one Worker response. */
+  private waitForRumSemanticHostApply(requestId: string, timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        this.resolveRumSemanticApplyWaiter(requestId, resolve, false);
+      }, Math.max(1, timeoutMs)) as number;
+      const waiters = this.rumSemanticApplyWaiters.get(requestId) || [];
+      waiters.push({ timeoutId, resolve });
+      this.rumSemanticApplyWaiters.set(requestId, waiters);
+    });
+  }
+
+  private resolveRumSemanticApplyWaiter(
+    requestId: string,
+    target: (applied: boolean) => void,
+    applied: boolean
+  ): void {
+    const waiters = this.rumSemanticApplyWaiters.get(requestId);
+    if (!waiters) {
+      return;
+    }
+    for (let i = 0; i < waiters.length; i++) {
+      const waiter = waiters[i];
+      if (waiter.resolve !== target) {
+        continue;
+      }
+      waiters.splice(i, 1);
+      clearTimeout(waiter.timeoutId);
+      if (waiters.length === 0) {
+        this.rumSemanticApplyWaiters.delete(requestId);
+      }
+      target(applied);
+      return;
+    }
+  }
+
+  private resolveRumSemanticApplyWaiters(requestId: string, applied: boolean): void {
+    const waiters = this.rumSemanticApplyWaiters.get(requestId);
+    if (!waiters || waiters.length === 0) {
+      return;
+    }
+    this.rumSemanticApplyWaiters.delete(requestId);
+    for (let i = 0; i < waiters.length; i++) {
+      clearTimeout(waiters[i].timeoutId);
+      waiters[i].resolve(applied);
+    }
+  }
+
+  private cancelRumSemanticApplyWaiters(): void {
+    const requestIds = Array.from(this.rumSemanticApplyWaiters.keys());
+    for (let i = 0; i < requestIds.length; i++) {
+      this.resolveRumSemanticApplyWaiters(requestIds[i], false);
+    }
   }
 
   private releaseCompletedActionAttempt(entry: RumSemanticJournalEntry): void {
@@ -1224,6 +1339,40 @@ export class FTRUMInnerManager {
     this.registerRumSemanticRequest(workerRequest);
   }
 
+  /**
+   * A crash cannot wait for the normal one-second aggregation timer. Force all
+   * queued counter deltas through the Event Worker and wait until its Host-side
+   * database application has completed.
+   */
+  private async flushRumCountersForCrash(): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+    if (this.rumCounterFlushTimer !== null) {
+      clearTimeout(this.rumCounterFlushTimer);
+      this.rumCounterFlushTimer = null;
+    }
+    this.flushRumCounterUpdateBatch('rum.crash.counter', true);
+
+    const traceName = this.nextRumEventTaskName('rum.crash.counter.flush');
+    const workerRequest: SDKWorkerRequest = {
+      id: `${SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH}:${traceName}:${Date.now()}`,
+      pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+      command: SDKWorkerCommand.EVENT_RUM_COUNTER_FLUSH,
+      priority: SDKTaskPriority.HIGH,
+      createdAt: Date.now()
+    };
+    const waitForApply = this.waitForRumSemanticHostApply(workerRequest.id, 2000);
+    const postResult = SDKDedicatedPoolManager.getInstance().postCommandWithRetryPolicy(workerRequest);
+    if (!postResult.posted) {
+      this.resolveRumSemanticApplyWaiters(workerRequest.id, false);
+      FTInnerLogger.w(TAG, 'Crash counter flush could not be posted before View finalization');
+      return false;
+    }
+    this.registerRumSemanticRequest(workerRequest);
+    return await waitForApply;
+  }
+
   private scheduleRumCounterFlush(delayMs: number = 1000): void {
     if (!this.context) {
       return;
@@ -1480,8 +1629,11 @@ export class FTRUMInnerManager {
   }
 
   private createCompletedActionDTO(actionBean: ActionBean): SDKRumCompletedActionDTO {
+    const collectType = this.getPersistedCollectType(actionBean.getCollectType(), actionBean.getSessionId());
     const payload: SDKRumCompletedActionDTO = {
       dataType: DataType.RUM_APP.toString(),
+      customDataType: this.getRumCustomDataType(collectType),
+      shouldCollect: collectType !== CollectType.DROP,
       measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
       uuid: `action-${actionBean.getId()}`,
       time: actionBean.getStartTime(),
@@ -1690,7 +1842,7 @@ export class FTRUMInnerManager {
    * Insert view data 
    * Call FTTrackInner.rum() to store and sync data
    */
-  private insertView(viewBean: ViewBean): void {
+  private insertView(viewBean: ViewBean, persistedCallback: RunnerCompleteCallBack | null = null): void {
     try {
       // Build tags and fields
       const tagsMap = new Map<string, string>();
@@ -1734,23 +1886,15 @@ export class FTRUMInnerManager {
       fieldsMap.set(Constants.KEY_RUM_VIEW_ACTION_COUNT, viewBean.getActionCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_RESOURCE_COUNT, viewBean.getResourceCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_ERROR_COUNT, viewBean.getErrorCount().toString());
-      // Calculate time_spent with safety check to prevent abnormal values
-      // Maximum reasonable time_spent: 4 hours (14400000000000 nanoseconds)
-      const MAX_TIME_SPENT_NS = 14400000000000; // 4 hours in nanoseconds
-      let timeSpent: number;
-      if (viewBean.getIsClose()) {
-        timeSpent = viewBean.getTimeSpent();
-      } else {
-        timeSpent = Utils.getCurrentNanoTime() - viewBean.getStartTime();
-      }
-      // Cap time_spent to prevent abnormal values (e.g., when app is killed and restarted)
-      if (timeSpent > MAX_TIME_SPENT_NS || timeSpent < 0) {
-        FTInnerLogger.w(TAG, `Abnormal view time_spent detected: ${timeSpent}ns, capping to ${MAX_TIME_SPENT_NS}ns`);
-        timeSpent = Math.min(timeSpent, MAX_TIME_SPENT_NS);
-        timeSpent = Math.max(timeSpent, 0);
-      }
+      const timeSpent = viewBean.getIsClose() ? viewBean.getTimeSpent() : viewBean.getCurrentDuration();
       fieldsMap.set(Constants.KEY_RUM_VIEW_TIME_SPENT, timeSpent.toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_COUNT, viewBean.getLongTaskCount().toString());
+      const currentView = this.findCurrentViewById(viewBean.getId());
+      const longTaskDuration = currentView ? currentView.getLongTaskDuration() : viewBean.getLongTaskDuration();
+      if (timeSpent > 0 && longTaskDuration > 0) {
+        fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_RATE,
+          Math.min(longTaskDuration / timeSpent, 1).toString());
+      }
       fieldsMap.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, (!viewBean.getIsClose()).toString());
       fieldsMap.set(Constants.KEY_SDK_VIEW_UPDATE_TIME, viewBean.getViewUpdateTime().toString());
       if (viewBean.isHasReplay()) {
@@ -1864,6 +2008,9 @@ export class FTRUMInnerManager {
           if (self.context) {
             self.acknowledgePersistedViewAfterComplete(self.context, this.snapshot);
           }
+          if (persistedCallback) {
+            persistedCallback.onComplete();
+          }
         }
       }
       
@@ -1878,12 +2025,136 @@ export class FTRUMInnerManager {
         tagsMap,
         fieldsMap,
         callback,
-        null,
+        this.getPersistedCollectType(viewBean.getCollectType(), viewBean.getSessionId()),
         `view-${viewBean.getId()}-${viewBean.getDataUpdateTime()}-${viewBean.getViewUpdateTime()}`
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error in insertView: ${error}`);
       // Remove from both sets if insert failed, so it can be retried
+    }
+  }
+
+  /**
+   * Stores one exact View snapshot and waits until its Line Protocol draft is
+   * durable in the local cache. This is intentionally used only by terminal
+   * crash paths; normal View collection remains debounced and batched.
+   */
+  private async persistCrashViewSnapshot(viewBean: ViewBean): Promise<boolean> {
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (persisted: boolean): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(persisted);
+      };
+      const timeoutId = setTimeout(() => {
+        finish(false);
+      }, 2000) as number;
+      class CrashViewPersistCallback implements RunnerCompleteCallBack {
+        onComplete(): void {
+          finish(true);
+        }
+      }
+      this.insertView(viewBean, new CrashViewPersistCallback());
+    });
+  }
+
+  private async persistCrashViewById(viewId: string): Promise<boolean> {
+    if (!this.context || viewId.length === 0) {
+      return false;
+    }
+    const viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, viewId);
+    if (!viewBean) {
+      FTInnerLogger.w(TAG, `Crash View snapshot unavailable: viewId=${viewId}`);
+      return false;
+    }
+    return await this.persistCrashViewSnapshot(viewBean);
+  }
+
+  /** Closes a predecessor-process View before re-emitting its updated counters. */
+  private async persistRecoveredCrashView(
+    recoveryContext: FTRUMCrashRecoveryContext,
+    crashTime: number
+  ): Promise<boolean> {
+    if (!this.context) {
+      return false;
+    }
+    let viewBean = await FTDBTaskPoolExecutor.queryRumViewById(this.context, recoveryContext.viewId);
+    if (!viewBean) {
+      FTInnerLogger.w(TAG, `Recovered crash View was already cleaned: viewId=${recoveryContext.viewId}`);
+      return false;
+    }
+    if (!viewBean.getIsClose()) {
+      const closeTime = crashTime > 0 ? crashTime : Utils.getCurrentNanoTime();
+      const timeSpent = Math.max(0, closeTime - viewBean.getStartTime());
+      await FTDBTaskPoolExecutor.closeRumView(
+        this.context,
+        viewBean.getId(),
+        viewBean.getViewLoadTime(),
+        timeSpent,
+        viewBean.getAttrJsonString(),
+        viewBean.getSessionId()
+      );
+      await FTDBTaskPoolExecutor.updateViewUpdateTime(this.context, viewBean.getId());
+      const closedView = await FTDBTaskPoolExecutor.queryRumViewById(this.context, recoveryContext.viewId);
+      if (!closedView) {
+        return false;
+      }
+      viewBean = closedView;
+    }
+    return await this.persistCrashViewSnapshot(viewBean);
+  }
+
+  /**
+   * Terminal errors need a durable ordering that ordinary RUM events do not:
+   * Error draft -> counters -> closed View draft -> process termination. A
+   * recovered crash never closes the new process View; it refreshes only its
+   * predecessor-process View.
+   */
+  private async finalizeCrashViewAfterError(
+    isPreCrash: boolean,
+    recoveryContext: FTRUMCrashRecoveryContext | null,
+    crashTime: number
+  ): Promise<void> {
+    const countersApplied = await this.flushRumCountersForCrash();
+    if (!countersApplied) {
+      FTInnerLogger.w(TAG, 'Crash View finalization continued without a confirmed counter flush');
+    }
+
+    if (isPreCrash) {
+      if (recoveryContext !== null) {
+        const persisted = await this.persistRecoveredCrashView(recoveryContext, crashTime);
+        if (!persisted) {
+          FTInnerLogger.w(TAG, `Recovered crash View was not persisted: viewId=${recoveryContext.viewId}`);
+        } else if (this.context) {
+          // insertView schedules its acknowledgement before resolving the
+          // crash-persist callback. The DB lane serializes this cleanup after
+          // that acknowledgement, so the re-emitted aggregate is durable
+          // before its predecessor row is finally discarded.
+          try {
+            await FTDBTaskPoolExecutor.cleanCloseViewData(this.context, [recoveryContext.viewId]);
+          } catch (error) {
+            FTInnerLogger.w(TAG, `Recovered crash View cleanup deferred: viewId=${recoveryContext.viewId}, error=${error}`);
+          }
+        }
+      }
+      return;
+    }
+
+    const currentView = this.activeView;
+    if (!currentView) {
+      return;
+    }
+    const viewId = currentView.getId();
+    if (!currentView.isClose()) {
+      await this.stopView({}, false);
+    }
+    const persisted = await this.persistCrashViewById(viewId);
+    if (!persisted) {
+      FTInnerLogger.w(TAG, `Crash View was not persisted before termination: viewId=${viewId}`);
     }
   }
 
@@ -1911,7 +2182,11 @@ export class FTRUMInnerManager {
 
   private async acknowledgePersistedViewAfterComplete(context: Context, snapshot: ViewBean): Promise<void> {
     try {
-      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot);
+      // Capture this before awaiting: the recovered Error callback clears the
+      // persisted context immediately after its replacement View draft is
+      // cached, while this acknowledgement may still be queued behind it.
+      const keepClosedView = this.protectedCrashRecoveryViewIds.has(snapshot.getId());
+      const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot, keepClosedView);
       if (!success) {
         // The database contains a newer state. Ensure it is serialized even if
         // its earlier generation request overlapped the previous summary pass.
@@ -2014,6 +2289,7 @@ export class FTRUMInnerManager {
     this.rumSemanticJournal = [];
     this.rumSemanticJournalHead = 0;
     this.rumSemanticJournalByRequestId.clear();
+    this.cancelRumSemanticApplyWaiters();
     this.rumSemanticSequence = 0;
     this.committedRumSemanticResponseIds.clear();
     this.committedRumSemanticResponseOrder = [];
@@ -2032,6 +2308,8 @@ export class FTRUMInnerManager {
     this.sampleRate = 1.0;
     this.sessionErrorSampleRate = 0.0;
     this.activeView = null;
+    this.launchView = null;
+    this.launchViewReady = Promise.resolve();
     this.activeAction = null;
     this.resourceBeanMap.clear();
     this.viewList = [];
@@ -2053,6 +2331,7 @@ export class FTRUMInnerManager {
     this.preferencesInitialized = false;
     this.preferencesInitPromise = null;
     this.rumContextPersistChain = Promise.resolve();
+    this.protectedCrashRecoveryViewIds.clear();
   }
   
   /**
@@ -2122,7 +2401,7 @@ export class FTRUMInnerManager {
     const viewName = this.activeView?.getViewName() || '';
     const viewReferrer = this.activeView?.getViewReferrer() || '';
     const sessionId = this.sessionId;
-    const snapshot: RUMContext = { viewId, viewName, viewReferrer, sessionId };
+    const snapshot: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
 
     if (!this.preferencesStore && this.preferencesInitPromise) {
       await this.preferencesInitPromise;
@@ -2153,8 +2432,8 @@ export class FTRUMInnerManager {
    * Get saved RUM context from preferences (for crash recovery)
    * Returns an object with viewId, viewName, viewReferrer, and sessionId
    */
-  public async getSavedRumContext(): Promise<RUMContext> {
-    const defaultContext: RUMContext = {
+  public async getSavedRumContext(): Promise<FTRUMCrashRecoveryContext> {
+    const defaultContext: FTRUMCrashRecoveryContext = {
       viewId: '',
       viewName: '',
       viewReferrer: '',
@@ -2176,7 +2455,13 @@ export class FTRUMInnerManager {
       const sessionId = await this.preferencesStore.get(FTRUMInnerManager.KEY_SESSION_ID, '') as string;
 
       FTInnerLogger.i(TAG, `Retrieved saved RUM context: viewId=${viewId}, viewName=${viewName}, sessionId=${sessionId}`);
-      const result: RUMContext = { viewId, viewName, viewReferrer, sessionId };
+      const result: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
+      // This API is reached only after a Native Crash/APP_FREEZE record was
+      // accepted for recovery. Keep its predecessor View until the Error
+      // counter and refreshed View snapshot are durable.
+      if (hasFTRUMCrashRecoveryContext(result)) {
+        this.protectedCrashRecoveryViewIds.add(result.viewId);
+      }
       return result;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2216,6 +2501,7 @@ export class FTRUMInnerManager {
       await store.delete(FTRUMInnerManager.KEY_VIEW_REFERRER);
       await store.delete(FTRUMInnerManager.KEY_SESSION_ID);
       await store.flush();
+      this.protectedCrashRecoveryViewIds.clear();
       FTInnerLogger.d(TAG, "Saved RUM context cleared");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2251,7 +2537,7 @@ export class FTRUMInnerManager {
     // Close all existing actions and views (aligned with Android)
     // This is done asynchronously to avoid blocking initialization
     if (this.context) {
-      this.closeAllActionAndViewAsync(this.context);
+      this.startupViewRecovery = this.closeAllActionAndViewAsync(this.context);
     }
     
   }
@@ -2260,6 +2546,10 @@ export class FTRUMInnerManager {
     try {
       await FTDBTaskPoolExecutor.closeAllActionAndView(context);
       FTInnerLogger.d(TAG, "Closed all existing actions and views");
+      // A forced rerun may not have delivered a lifecycle stop. The closed
+      // predecessor View must be serialized even if the user does nothing in
+      // this process and no later event requests a RUM summary.
+      this.generateRumData();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `Failed to close all actions and views: ${errorMessage}`);
@@ -2289,6 +2579,12 @@ export class FTRUMInnerManager {
    */
   public getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** Internal device-test seam for crossing the Session boundary without waiting for expiry. */
+  public expireSessionForTest(): void {
+    this.lastSessionTime = 0;
+    this.lastUserActiveTime = 0;
   }
 
   /**
@@ -2441,21 +2737,22 @@ export class FTRUMInnerManager {
   }
 
   /**
-   * Native crash recovery may run before a new RUM View exists. Its property
-   * contains the persisted prior-session linkage; send that exact timeline to
-   * Replay before normal RUM sampling examines the newly-created session.
+   * Native crash recovery may run before a new RUM View exists. Send its
+   * persisted prior-session linkage to Replay before normal RUM sampling
+   * examines the newly-created session.
    */
   private notifySessionReplayPersistedCrashError(
     property: Record<string, object> | null,
     timestamp: number,
     errorType: string,
-    state: AppState
+    state: AppState,
+    recoveryContext: FTRUMCrashRecoveryContext | null = null
   ): void {
     if (property === null || this.readSessionReplayProperty(property, Constants.KEY_NATIVE_CRASH) !== 'true') {
       return;
     }
-    const sessionId = this.readSessionReplayProperty(property, Constants.KEY_RUM_SESSION_ID);
-    const viewId = this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_ID);
+    const sessionId = recoveryContext?.sessionId ?? this.readSessionReplayProperty(property, Constants.KEY_RUM_SESSION_ID);
+    const viewId = recoveryContext?.viewId ?? this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_ID);
     if (sessionId.length === 0 || viewId.length === 0 || viewId === 'unknown' || viewId === 'error') {
       return;
     }
@@ -2468,8 +2765,8 @@ export class FTRUMInnerManager {
       applicationId,
       sessionId,
       viewId,
-      viewName: this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_NAME),
-      viewReferrer: this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_REFERRER),
+      viewName: recoveryContext?.viewName ?? this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_NAME),
+      viewReferrer: recoveryContext?.viewReferrer ?? this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_REFERRER),
       linkContext: this.createSessionReplayResourceLinkContextForStoredView(),
       timestamp,
       errorType,
@@ -2620,6 +2917,7 @@ export class FTRUMInnerManager {
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
+      await this.startupViewRecovery;
       // Save previous view name before updating viewList (for referrer calculation)
       // This ensures we can use the previous active view as referrer even if viewList is empty
       // Note: Even if activeView is closed (isClose()=true), we should still use its viewName as previousViewName
@@ -2639,7 +2937,11 @@ export class FTRUMInnerManager {
       this.updateViewList(viewName);
       
       // Refresh session
-      this.checkSessionRefresh(false);
+      await this.checkSessionRefresh(false);
+      // Android closes the synthetic launch View when a real page starts.
+      await this.closeLaunchView();
+      await this.syntheticCloseBarrier;
+      await this.closeSyntheticViews();
       
       // Re-check previousViewName after checkSessionRefresh (in case activeView was modified)
       // But only if we don't have a valid previousViewName yet
@@ -2654,14 +2956,7 @@ export class FTRUMInnerManager {
       
       // Close current active view
       // Aligned with Android: if activeView exists and is not closed, close it before starting new view
-      // Also check if the new viewName is the same as current active view (prevent duplicate startView calls)
       if (this.activeView && !this.activeView.isClose()) {
-        // If starting the same view again, skip to prevent duplicate view creation
-        if (this.activeView.getViewName() === viewName) {
-          FTInnerLogger.d(TAG, ` startView skipped duplicate view: ${viewName}`);
-          return;
-        }
-        
         // A View change closes the Action to new events, but an already-started
         // Resource still owns its durable Action reference and must be allowed
         // to write its final counters before this Action is generated.
@@ -2753,11 +3048,16 @@ export class FTRUMInnerManager {
   /**
    * Stop view
    */
-  public async stopView(property: Record<string, object> = {}): Promise<void> {
+  public async stopView(
+    property: Record<string, object> = {},
+    shouldGenerateSummary: boolean = true
+  ): Promise<void> {
     // Use Promise-based lock to ensure thread-safe view operations
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
+      // A background transition can occur without an active page View.
+      await this.closeLaunchView(undefined, shouldGenerateSummary);
       if (!this.activeView) {
         FTInnerLogger.w(TAG, "stopView ignored: no active view");
         return;
@@ -2777,7 +3077,11 @@ export class FTRUMInnerManager {
       
       // Set properties
       if (property && this.hasProperties(property)) {
-        this.activeView.setProperty(property);
+        const keys = Object.keys(property);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
+          this.activeView.addProperty(key, property[key]);
+        }
       }
       
       // Update tags
@@ -2789,7 +3093,7 @@ export class FTRUMInnerManager {
       
       // Store view name before closing
       const viewName = this.activeView.getViewName();
-      await this.closeView(this.activeView);
+      await this.closeView(this.activeView, shouldGenerateSummary);
       FTInnerLogger.d(TAG, `stopView success: ${viewName}`);
       
       } catch (error) {
@@ -2804,7 +3108,7 @@ export class FTRUMInnerManager {
     });
     await this.viewOperationLock;
   }
-  
+
   /**
    * Update current view load time
    * @param duration Load time in nanoseconds
@@ -2841,10 +3145,11 @@ export class FTRUMInnerManager {
       }
       
       this.lastActionTime = currentTime;
-      const viewId = this.activeView?.getId() || "";
-      const viewName = this.activeView?.getViewName() || "";
-      const viewReferrer = this.activeView?.getViewReferrer() || "";
-      const hasReplay = this.activeView?.isHasReplay() || false;
+      const view = this.resolveEventView();
+      const viewId = view.getId();
+      const viewName = view.getViewName();
+      const viewReferrer = view.getViewReferrer();
+      const hasReplay = view.isHasReplay();
       
       // Refresh session
       this.checkSessionRefresh(true);
@@ -2892,6 +3197,134 @@ export class FTRUMInnerManager {
   /**
    * Add action (directly completed action)
    */
+  private isLaunchActionType(actionType: string): boolean {
+    return actionType === Constants.ACTION_TYPE_LAUNCH_COLD ||
+      actionType === Constants.ACTION_TYPE_LAUNCH_HOT;
+  }
+
+  private ensureSyntheticView(viewName: string): ActiveViewBean {
+    const existing = this.syntheticViews.get(viewName);
+    if (existing && !existing.isClose() && existing.getSessionId() === this.sessionId) {
+      return existing;
+    }
+    const view = new ActiveViewBean(viewName, Constants.VIEW_NAME_ROOT, -1, this.sessionId);
+    view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
+    view.setCollectType(this.checkSessionWillCollect(this.sessionId));
+    this.syntheticViews.set(viewName, view);
+    this.syntheticViewReady.set(viewName, this.initView(view));
+    return view;
+  }
+
+  private async closeSyntheticViews(exceptName: string = ''): Promise<void> {
+    for (const name of this.syntheticViews.keys()) {
+      const view = this.syntheticViews.get(name);
+      if (!view || name === exceptName || view.isClose()) {
+        continue;
+      }
+      view.close();
+      await (this.syntheticViewReady.get(name) || Promise.resolve());
+      await this.closeView(view);
+    }
+  }
+
+  private restartBackgroundView(): void {
+    const previous = this.syntheticViews.get(Constants.VIEW_NAME_BACKGROUND);
+    if (previous && !previous.isClose()) {
+      previous.close();
+      const ready = this.syntheticViewReady.get(Constants.VIEW_NAME_BACKGROUND) || Promise.resolve();
+      this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async () => {
+        await ready;
+        await this.closeView(previous);
+      });
+    }
+    this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
+  }
+
+  /** Application lifecycle signal; repeated callbacks from Ability and application observers are idempotent. */
+  public onAppBackground(): void {
+    if (this.appState === AppState.BACKGROUND) {
+      return;
+    }
+    this.appState = AppState.BACKGROUND;
+    // ApplicationLaunch is stored separately from the other synthetic Views.
+    // Close it here even when automatic page tracking is disabled.
+    const launchClose = this.closeLaunchView();
+    this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async () => {
+      await launchClose;
+      await this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND);
+    });
+    if (this.context && FTRUMConfigManager.getInstance().isRumEnable()) {
+      this.restartBackgroundView();
+    }
+  }
+
+  public onAppForeground(): void {
+    if (this.appState !== AppState.BACKGROUND) {
+      return;
+    }
+    this.appState = AppState.RUN;
+    // Android keeps BackgroundView until the next real View starts. A return
+    // without an active page must not report the background View prematurely.
+  }
+
+  private resolveEventView(state?: AppState): ActiveViewBean {
+    const effectiveState = state === AppState.BACKGROUND ? state : this.appState;
+    if (effectiveState !== AppState.BACKGROUND && this.activeView && !this.activeView.isClose()) {
+      return this.activeView;
+    }
+    if (effectiveState === AppState.BACKGROUND) {
+      return this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
+    }
+    if (this.launchView && !this.launchView.isClose()) {
+      return this.launchView;
+    }
+    return this.ensureSyntheticView(Constants.VIEW_NAME_ROOT_FALLBACK);
+  }
+
+  private findCurrentViewById(viewId: string): ActiveViewBean | null {
+    if (this.activeView?.getId() === viewId) {
+      return this.activeView;
+    }
+    if (this.launchView?.getId() === viewId) {
+      return this.launchView;
+    }
+    for (const view of this.syntheticViews.values()) {
+      if (view.getId() === viewId) {
+        return view;
+      }
+    }
+    return null;
+  }
+
+  private ensureLaunchView(startTime: number): ActiveViewBean {
+    if (this.launchView === null || this.launchView.isClose()) {
+      const view = new ActiveViewBean(Constants.VIEW_NAME_APPLICATION_LAUNCH,
+        Constants.VIEW_NAME_ROOT, -1, this.sessionId);
+      view.setStartTime(startTime);
+      view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
+      view.setCollectType(this.checkSessionWillCollect(this.sessionId));
+      this.launchView = view;
+      // Synthetic Views do not start device-metrics monitoring.
+      this.launchViewReady = this.initView(view);
+    }
+    return this.launchView;
+  }
+
+  private async closeLaunchView(duration?: number, shouldGenerateSummary: boolean = true): Promise<void> {
+    const view = this.launchView;
+    if (view === null || view.isClose()) {
+      return;
+    }
+    const ready = this.launchViewReady;
+    if (duration === undefined) {
+      view.close();
+    } else {
+      view.closeWithTimeSpent(duration);
+    }
+    await ready;
+    await this.closeView(view, shouldGenerateSummary);
+  }
+
   public addAction(
     actionName: string,
     actionType: string,
@@ -2900,17 +3333,19 @@ export class FTRUMInnerManager {
     property: Record<string, object> = {}
   ): void {
     try {
-      const viewId = this.activeView?.getId() || "";
-      const viewName = this.activeView?.getViewName() || "";
-      const viewReferrer = this.activeView?.getViewReferrer() || "";
-      const hasReplay = this.activeView?.isHasReplay() || false;
-
       // Refresh session
       this.checkSessionRefresh(true);
 
       const actionId = Utils.generateUUID();
       const actualStartTime = startTime > 0 ? startTime : Utils.getCurrentNanoTime();
       const actualDuration = duration > 0 ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
+      const isLaunchAction = this.isLaunchActionType(actionType);
+      const view = isLaunchAction ? this.ensureLaunchView(actualStartTime) : this.resolveEventView();
+      const viewId = view.getId();
+      const viewName = view.getViewName();
+      const viewReferrer = view.getViewReferrer();
+      const collectType = this.checkSessionWillCollect(this.sessionId);
+      const hasReplay = view.isHasReplay();
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
         actualProperty = property;
@@ -2918,6 +3353,8 @@ export class FTRUMInnerManager {
       this.increaseActionCountInMemory(viewId);
       const payload: SDKRumCompletedActionDTO = {
         dataType: DataType.RUM_APP.toString(),
+        customDataType: this.getRumCustomDataType(collectType),
+        shouldCollect: collectType !== CollectType.DROP,
         measurement: Constants.FT_MEASUREMENT_RUM_ACTION,
         uuid: Utils.generateUUID(),
         time: actualStartTime,
@@ -2944,6 +3381,9 @@ export class FTRUMInnerManager {
         payload,
         `rum.addAction:${actionName}`
       );
+      if (isLaunchAction && this.activeView !== null && !this.activeView.isClose()) {
+        void this.closeLaunchView(actualDuration);
+      }
       this.scheduleRumCounterFlush();
       
 
@@ -2967,7 +3407,8 @@ export class FTRUMInnerManager {
     }
   }
 
-  private createCurrentResourceContext(fallbackActionId: string = ''): SDKRumResourceContextDTO {
+  private createCurrentResourceContext(fallbackActionId: string = '', state?: AppState): SDKRumResourceContextDTO {
+    const view = this.resolveEventView(state);
     let actionId = fallbackActionId || '';
     let actionName = '';
     if (this.activeAction && !this.activeAction.isActionClose()) {
@@ -2976,13 +3417,32 @@ export class FTRUMInnerManager {
     }
     return {
       sessionId: this.sessionId,
-      viewId: this.activeView?.getId() || '',
-      viewName: this.activeView?.getViewName() || '',
-      viewReferrer: this.activeView?.getViewReferrer() || '',
+      viewId: view.getId(),
+      viewName: view.getViewName(),
+      viewReferrer: view.getViewReferrer(),
       actionId,
       actionName,
       rumAppId: this.getSemanticRumAppId(),
-      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags()
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
+      // The listener owns all platform I/O. Resource creation only copies its
+      // cached value, so a request never observes its completion-time network.
+      networkSnapshot: FTNetworkListener.getInstance().getResourceNetworkSnapshot()
+    };
+  }
+
+  private createCrashRecoveryResourceContext(
+    recoveryContext: FTRUMCrashRecoveryContext
+  ): SDKRumResourceContextDTO {
+    return {
+      sessionId: recoveryContext.sessionId,
+      viewId: recoveryContext.viewId,
+      viewName: recoveryContext.viewName,
+      viewReferrer: recoveryContext.viewReferrer,
+      actionId: '',
+      actionName: '',
+      rumAppId: this.getSemanticRumAppId(),
+      dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
+      networkSnapshot: FTNetworkListener.getInstance().getResourceNetworkSnapshot()
     };
   }
 
@@ -3027,6 +3487,9 @@ export class FTRUMInnerManager {
             command.context = pending.context;
             command.draftUuid = pending.draftUuid;
             command.errorDraftUuid = pending.errorDraftUuid;
+            if (pending.startTime > 0) {
+              command.startTime = pending.startTime;
+            }
           }
           this.enqueueResourceWorkerCommand(command, traceBaseName);
         }
@@ -3156,6 +3619,24 @@ export class FTRUMInnerManager {
     }
   }
 
+  private createResourceTransportMetricsDTO(
+    metrics: ResourceTransportMetricsSnapshot
+  ): SDKRumResourceTransportMetricsDTO {
+    return {
+      requestBodySize: metrics.requestBodySize,
+      requestBodySizeSource: metrics.requestBodySizeSource,
+      requestHeaderSize: metrics.requestHeaderSize,
+      requestHeaderSizeSource: metrics.requestHeaderSizeSource,
+      requestSize: metrics.requestSize,
+      requestSizeSource: metrics.requestSizeSource,
+      requestSizeIsDerived: metrics.requestSizeIsDerived,
+      httpProtocol: metrics.httpProtocol,
+      httpProtocolSource: metrics.httpProtocolSource,
+      connectionReuse: metrics.connectionReuse,
+      connectionReuseSource: metrics.connectionReuseSource
+    };
+  }
+
   private createResourceParamsDTO(resourceId: string, params: ResourceParams): SDKRumResourceParamsDTO {
     const traceContext = FTTraceManager.getInstance().getTraceContext(resourceId);
     const traceConfigManager = FTTraceConfigManager.getInstance();
@@ -3179,6 +3660,8 @@ export class FTRUMInnerManager {
       resourceType: params.resourceType || 'network',
       requestErrorStack: params.requestErrorStack || '',
       requestErrorMsg: params.requestErrorMsg || '',
+      suppressNetworkError: params.suppressNetworkError === true,
+      transportMetrics: this.createResourceTransportMetricsDTO(params.getTransportMetrics()),
       property: this.resourcePropertyToRecord(params.property),
       traceId,
       spanId
@@ -3218,7 +3701,8 @@ export class FTRUMInnerManager {
       downloadTime: netStatusBean.getDownloadTime(),
       downloadStartTime: netStatusBean.getDownloadTimeStart(),
       holeRequestTime: netStatusBean.getHoleRequestTime(),
-      resourceHostIP: netStatusBean.getResourceHostIP()
+      resourceHostIP: netStatusBean.getResourceHostIP(),
+      transportMetrics: this.createResourceTransportMetricsDTO(netStatusBean.getTransportMetrics())
     };
   }
 
@@ -3235,7 +3719,7 @@ export class FTRUMInnerManager {
     return record;
   }
 
-  private getResourceCustomDataType(collectType: CollectType): string | undefined {
+  private getRumCustomDataType(collectType: CollectType): string | undefined {
     return collectType === CollectType.SAMPLING ? 'rum_app_error_sampled' : undefined;
   }
 
@@ -3469,6 +3953,91 @@ export class FTRUMInnerManager {
     return record;
   }
 
+  private isCrashFreeDurationError(errorType: string): boolean {
+    return RUMEnumUtils.isCrashErrorType(errorType);
+  }
+
+  private async prepareCrashFreeDuration(
+    errorType: string,
+    state: AppState,
+    property: Record<string, object> | null,
+    nativeCrashRecoveryId?: string
+  ): Promise<FTCrashFreeDuration | null | undefined> {
+    if (!this.isCrashFreeDurationError(errorType)) {
+      return undefined;
+    }
+    const isPreCrash = this.readCrashPropertyText(property, IS_PRE_CRASH) === 'true';
+    const crashWallClockMs = this.readCrashPropertyNumber(property, Constants.KEY_TIMESTAMP);
+    // The HarmonyOS `uuid` value is a crash fingerprint: separate crashes at
+    // the same C++ stack share it. Native recovery supplies the per-process
+    // event id separately so duplicate suppression cannot hide a later crash.
+    const nativeCrashId = nativeCrashRecoveryId && nativeCrashRecoveryId.length > 0 ?
+      nativeCrashRecoveryId : this.readCrashPropertyText(property, Constants.KEY_UUID);
+    return await FTCrashFreeDurationManager.getInstance().prepareCrashFreeDuration(
+      state,
+      isPreCrash,
+      crashWallClockMs,
+      nativeCrashId
+    );
+  }
+
+  private appendCrashFreeDurationFields(
+    property: Record<string, object> | null,
+    duration: FTCrashFreeDuration
+  ): Record<string, object> {
+    const merged: Record<string, object> = {};
+    if (property !== null) {
+      const keys = FTRUMInnerManager.getObjectKeys(property);
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index];
+        merged[key] = property[key];
+      }
+    }
+    merged[Constants.KEY_RUM_ERROR_FOREGROUND_CRASH_FREE_DURATION] =
+      this.createCrashDurationProperty(duration.foregroundNs);
+    merged[Constants.KEY_RUM_ERROR_BACKGROUND_CRASH_FREE_DURATION] =
+      this.createCrashDurationProperty(duration.backgroundNs);
+    return merged;
+  }
+
+  /** `is_pre_crash` controls recovery only and must not become an Error field. */
+  private stripCrashRecoveryProperty(property: Record<string, object> | null): Record<string, object> | null {
+    if (property === null || property[IS_PRE_CRASH] === undefined) {
+      return property;
+    }
+    const result: Record<string, object> = {};
+    const keys = FTRUMInnerManager.getObjectKeys(property);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
+      if (key !== IS_PRE_CRASH) {
+        result[key] = property[key];
+      }
+    }
+    return result;
+  }
+
+  private createCrashDurationProperty(value: number): object {
+    const wrapper = new Object() as PropertyWrapper;
+    wrapper.value = Math.max(0, Math.floor(value));
+    return wrapper as object;
+  }
+
+  private readCrashPropertyText(property: Record<string, object> | null, key: string): string {
+    if (property === null || property[key] === undefined || property[key] === null) {
+      return '';
+    }
+    const value = property[key] as PropertyWrapper;
+    if (value && value.value !== undefined && value.value !== null) {
+      return String(value.value);
+    }
+    return String(property[key]);
+  }
+
+  private readCrashPropertyNumber(property: Record<string, object> | null, key: string): number {
+    const numericValue = Number.parseFloat(this.readCrashPropertyText(property, key));
+    return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : 0;
+  }
+
   /** Strip ArkTS class prototypes at the Worker transfer boundary only. */
   private toRumPropertyTransferValue(value: object): object {
     try {
@@ -3611,13 +4180,18 @@ export class FTRUMInnerManager {
     state: AppState, 
     property?: Record<string, object> | null, 
     dateline?: number,
-    callBack?: RunnerCompleteCallBack | null
+    callBack?: RunnerCompleteCallBack | null,
+    draftUuid?: string,
+    nativeCrashRecoveryId?: string,
+    recoveryContext?: FTRUMCrashRecoveryContext | null
   ): Promise<void> {
     const actualDateline = dateline !== undefined ? dateline : Utils.getCurrentNanoTime();
     const actualProperty = property !== undefined ? property : null;
     const actualCallBack = callBack !== undefined ? callBack : null;
+    const validRecoveryContext: FTRUMCrashRecoveryContext | null =
+      hasFTRUMCrashRecoveryContext(recoveryContext) ? recoveryContext as FTRUMCrashRecoveryContext : null;
     try {
-      this.notifySessionReplayPersistedCrashError(actualProperty, actualDateline, errorType, state);
+      this.notifySessionReplayPersistedCrashError(actualProperty, actualDateline, errorType, state, validRecoveryContext);
       // Refresh session
       this.checkSessionRefresh(true);
       const collectType = this.checkSessionWillCollect(this.sessionId);
@@ -3649,8 +4223,23 @@ export class FTRUMInnerManager {
         }
         effectiveProperty = mergedProperty;
       }
+
+      const crashFreeDuration = await this.prepareCrashFreeDuration(
+        errorType,
+        state,
+        effectiveProperty,
+        nativeCrashRecoveryId
+      );
+      // A native crash id is acknowledged only after its Error data is stored.
+      // Suppress an already-acknowledged crash file before it reaches counters.
+      if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType)) {
+        return;
+      }
+      if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
+        effectiveProperty = this.appendCrashFreeDurationFields(effectiveProperty, crashFreeDuration);
+      }
       
-	      if (actualProperty == null || String((actualProperty as Record<string, object>)[IS_PRE_CRASH]) !== "true") {
+	      if (crashFreeDuration === undefined || crashFreeDuration === null || !crashFreeDuration.isPreCrash) {
 	        // Exclude the scenario of reporting the last native crash error
 	        // Set error time line for error sampling (aligned with Android)
         // This enables collection of data within 1 minute before and after the error
@@ -3666,10 +4255,15 @@ export class FTRUMInnerManager {
 	        }
 	      }
 
+      if (validRecoveryContext === null && !crashFreeDuration?.isPreCrash) {
         this.notifySessionReplayError(this.activeView, actualDateline, errorType, state);
+      }
 
-	      if (actualCallBack === null) {
-	        const context = this.createCurrentResourceContext();
+      effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
+
+	      if (actualCallBack === null && crashFreeDuration === undefined) {
+	        const context = validRecoveryContext !== null ?
+	          this.createCrashRecoveryResourceContext(validRecoveryContext) : this.createCurrentResourceContext('', state);
 	        this.increaseErrorMemoryCount(context);
 	        this.submitErrorWorkerCommand({
 	          context,
@@ -3681,7 +4275,8 @@ export class FTRUMInnerManager {
           property: this.propertyToRecord(effectiveProperty),
           deviceTags: errorDeviceData.tags,
           time: actualDateline,
-	          customDataType: this.getResourceCustomDataType(collectType),
+	          customDataType: this.getRumCustomDataType(collectType),
+	          uuid: draftUuid,
 	          counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
 	        }, 'rum.error');
 	        this.scheduleRumCounterFlush();
@@ -3703,8 +4298,13 @@ export class FTRUMInnerManager {
         allTags[key] = dynamicTags[key];
       }
       
-      // Layer 3: RUM association
-      this.attachRUMRelative(allTags,true)
+      // Historical crashes are correlated to their predecessor View and must
+      // never inherit a View or Action created after process restart.
+      if (validRecoveryContext !== null) {
+        applyFTRUMCrashRecoveryContext(allTags, validRecoveryContext);
+      } else {
+        this.attachRUMRelative(allTags, true, state);
+      }
 
       const errorDeviceTagKeys = Object.keys(errorDeviceData.tags);
       for (let i = 0; i < errorDeviceTagKeys.length; i++) {
@@ -3756,9 +4356,33 @@ export class FTRUMInnerManager {
       class ErrorCallback implements RunnerCompleteCallBack {
         onComplete(): void {
           self.increaseError(allTags);
-          if (actualCallBack != null) {
-            self.stopViewAfterErrorCallback(actualCallBack);
+          const completeError = (): void => {
+            if (actualCallBack != null) {
+              if (crashFreeDuration === undefined || crashFreeDuration === null) {
+                actualCallBack.onComplete();
+                return;
+              }
+              const isPreCrash = crashFreeDuration !== undefined && crashFreeDuration !== null &&
+                crashFreeDuration.isPreCrash;
+              self.finalizeCrashViewAfterError(isPreCrash, validRecoveryContext, actualDateline)
+                .catch((error: Error): void => {
+                  FTInnerLogger.e(TAG, `Crash View finalization failed: ${error.message}`);
+                })
+                .then((): void => {
+                  actualCallBack.onComplete();
+                });
+            }
+          };
+          if (crashFreeDuration !== undefined && crashFreeDuration !== null) {
+            FTCrashFreeDurationManager.getInstance().confirmCrashReported(crashFreeDuration)
+              .then(completeError)
+              .catch((error: Error): void => {
+                FTInnerLogger.w(TAG, `Unable to confirm crash-free duration reset: ${error.message}`);
+                completeError();
+              });
+            return;
           }
+          completeError();
         }
       }
       const callback = new ErrorCallback();
@@ -3769,11 +4393,14 @@ export class FTRUMInnerManager {
         allTags,
         allFields,
         callback,
-        collectType
+        collectType,
+        draftUuid
       );
     } catch (error) {
       FTInnerLogger.e(TAG, `Error adding error: ${error}`);
-      if (actualCallBack != null) {
+      // Crash callbacks acknowledge recovery state. They must never run from
+      // an in-memory failure path because no Error row was persisted.
+      if (actualCallBack != null && !this.isCrashFreeDurationError(errorType)) {
         actualCallBack.onComplete();
       }
     }
@@ -3815,7 +4442,7 @@ export class FTRUMInnerManager {
         // lifecycle has already been stopped on the Host.
         awaitStopCommand: this.resourceStoppedIds.has(resourceId),
         shouldCollect: collectType !== CollectType.DROP,
-        customDataType: this.getResourceCustomDataType(collectType),
+        customDataType: this.getRumCustomDataType(collectType),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.add');
       this.markResourceContentSubmitted(resourceId);
@@ -3850,7 +4477,7 @@ export class FTRUMInnerManager {
         params: resourceParams,
         eventTime: Utils.getCurrentNanoTime(),
         shouldCollect: collectType !== CollectType.DROP,
-        customDataType: this.getResourceCustomDataType(collectType),
+        customDataType: this.getRumCustomDataType(collectType),
         counterFlushMaxEvents: FTRUMInnerManager.RUM_COUNTER_FLUSH_MAX_EVENTS
       }, 'rum.resource.content');
       this.markResourceContentSubmitted(resourceId);
@@ -3937,8 +4564,9 @@ export class FTRUMInnerManager {
    * 
    * @param viewName View name
    * @param loadTime Load time in nanoseconds
+   * @param updateActiveView Whether this timing belongs to the current View
    */
-  public recordViewLoadTimeInternal(viewName: string, loadTime: number): void {
+  public recordViewLoadTimeInternal(viewName: string, loadTime: number, updateActiveView: boolean = true): void {
     if (viewName && viewName.length > 0 && loadTime > 0) {
       this.preActivityDuration.set(viewName, loadTime);
       
@@ -3946,7 +4574,7 @@ export class FTRUMInnerManager {
       // This handles load-time records that arrive after a manual startView call.
       // Also handles the case where startView is called multiple times (e.g., navigation tracker + manual call)
       // Keep the latest automatic-tracking load time when a matching view already exists.
-      if (this.activeView && this.activeView.getViewName() === viewName) {
+      if (updateActiveView && this.activeView && this.activeView.getViewName() === viewName) {
         // Always update loadTime if activeView exists, even if it's not -1
         // This ensures loadTime is preserved even if startView is called multiple times
         this.activeView.setLoadTime(loadTime);
@@ -3987,7 +4615,7 @@ export class FTRUMInnerManager {
    * 
    * @param checkRefreshView Whether to refresh view when session is refreshed (aligned with Android)
    */
-  private checkSessionRefresh(checkRefreshView: boolean): void {
+  private checkSessionRefresh(checkRefreshView: boolean): Promise<void> {
     // Use Promise-based lock to ensure thread-safe session refresh
     // Prevents race condition where multiple threads generate different sessionIds simultaneously
     this.sessionRefreshLock = this.sessionRefreshLock.then(() => {
@@ -3995,6 +4623,7 @@ export class FTRUMInnerManager {
     }).catch((error: Error) => {
       FTInnerLogger.e(TAG, `[FT-SESSION-REFRESH] Error in sessionRefreshLock: ${error}`);
     });
+    return this.sessionRefreshLock;
   }
 
   /**
@@ -4007,8 +4636,10 @@ export class FTRUMInnerManager {
     const longTimeSession = now - this.lastSessionTime > FTRUMInnerManager.SESSION_EXPIRE_TIME;
     
     if (longTimeSession || longResting) {
-      this.lastSessionTime = now;
       const oldSessionId = this.sessionId;
+      await this.syntheticCloseBarrier;
+      await this.closeSyntheticViews();
+      this.lastSessionTime = now;
       this.sessionId = Utils.generateUUID();
       this.notifySessionReplaySessionRenewed(oldSessionId, this.sessionId);
       
@@ -4017,27 +4648,13 @@ export class FTRUMInnerManager {
       // Recalculate sampling rate
       this.checkSessionKeep(this.sessionId, this.sampleRate, this.sessionErrorSampleRate);
       
-      // Update activeView's session ID in memory if it exists and is not closed
-      // This ensures that when the view is closed later, it uses the new session ID
-      // This is critical when checkRefreshView is false (e.g., from timer)
-      // IMPORTANT: We do NOT modify existing data in database (preserve historical data)
-      if (this.activeView && !this.activeView.isClose()) {
-        const currentViewSessionId = this.activeView.getSessionId();
-        if (currentViewSessionId === oldSessionId) {
-          // Update the session ID of activeView in memory
-          // When this view is closed later, convertToViewBean() will use the new session ID
-          this.activeView.setSessionId(this.sessionId);
-          FTInnerLogger.d(TAG, `Updated activeView session ID in memory: ${oldSessionId} -> ${this.sessionId}, viewId: ${this.activeView.getId()}, viewName: ${this.activeView.getViewName()}`);
-        }
-      }
-      
       // Refresh view if needed (aligned with Android)
       if (checkRefreshView) {
+        await this.closeLaunchView();
         if (this.activeView && !this.activeView.isClose()) {
           this.notifySessionReplayViewStopped(this.activeView);
           this.activeView.close();
-          // closeView will use activeView's session ID (which may have been updated above)
-          // If view was already in database with old session ID, closeView will update it with new session ID
+          // Close the predecessor with its original Session and sampling decision.
           await this.closeView(this.activeView);
           
           const viewName = this.activeView.getViewName();
@@ -4161,12 +4778,13 @@ export class FTRUMInnerManager {
   /**
    * Initialize view
    */
-  private initView(activeViewBean: ActiveViewBean): void {
+  private initView(activeViewBean: ActiveViewBean): Promise<void> {
+    activeViewBean.setCollectType(this.checkSessionWillCollect(activeViewBean.getSessionId()));
     const viewBean = activeViewBean.convertToViewBean();
     
-    if (this.context) {
-      this.initViewAsync(this.context, viewBean);
-    }
+    const ready = this.context ? this.initViewAsync(this.context, viewBean) : Promise.resolve();
+    this.viewInitializationReady.set(activeViewBean.getId(), ready);
+    return ready;
   }
 
   /**
@@ -4194,8 +4812,10 @@ export class FTRUMInnerManager {
   /**
    * Close view
    */
-  private async closeView(activeViewBean: ActiveViewBean): Promise<void> {
+  private async closeView(activeViewBean: ActiveViewBean, shouldGenerateSummary: boolean = true): Promise<void> {
     try {
+      await (this.viewInitializationReady.get(activeViewBean.getId()) || Promise.resolve());
+      await (this.longTaskDurationUpdates.get(activeViewBean.getId()) || Promise.resolve());
       // Capture the final View-scoped sample before stopping its monitor.
       await FTMonitorManager.getInstance().attachMonitorData(activeViewBean);
       FTMonitorManager.getInstance().removeMonitor(activeViewBean.getId());
@@ -4233,12 +4853,16 @@ export class FTRUMInnerManager {
         }
       }
       
-      // Generate RUM data (aligned with Android)
-      // This will call generateViewSum() which queries from database with latest view_update_time
-      // Note: Android also calls generateRumData() immediately without waiting for database write
-      // The 100ms debounce in generateRumData() gives time for database writes to complete
-      this.generateRumData();
-      FTInnerLogger.d(TAG, `closeView scheduled generateRumData: ${activeViewBean.getViewName()}`);
+      if (shouldGenerateSummary) {
+        // Generate RUM data (aligned with Android)
+        // This will call generateViewSum() which queries from database with latest view_update_time
+        // Note: Android also calls generateRumData() immediately without waiting for database write
+        // The 100ms debounce in generateRumData() gives time for database writes to complete
+        this.generateRumData();
+        FTInnerLogger.d(TAG, `closeView scheduled generateRumData: ${activeViewBean.getViewName()}`);
+      }
+      this.viewInitializationReady.delete(activeViewBean.getId());
+      this.longTaskDurationUpdates.delete(activeViewBean.getId());
       
     } catch (error) {
       FTInnerLogger.e(TAG, `Error closing view: ${error}`);
@@ -4252,6 +4876,7 @@ export class FTRUMInnerManager {
    * - addAction: Directly enters FT_SYNC_DATA_FLAT_TABLE_NAME
    */
   private initAction(activeActionBean: ActiveActionBean, isAddAction: boolean): void {
+    activeActionBean.setCollectType(this.checkSessionWillCollect(activeActionBean.getSessionId()));
     const actionBean = activeActionBean.convertToActionBean();
     const actionName = activeActionBean.getActionName();
     
@@ -4260,9 +4885,9 @@ export class FTRUMInnerManager {
       this.increaseActionCount(actionBean.getViewId());
       this.submitCompletedActionWorkerInput(actionBean, `rum.addAction:${actionName}`);
     } else {
-      // Increase action count
-      this.increaseActionCount(actionBean.getViewId());
-      // startAction: First stores to FT_TABLE_ACTION, then enters FT_SYNC_DATA_FLAT_TABLE_NAME after closing
+      // startAction atomically stores the Action and increments the persisted
+      // View aggregate.  Do not enqueue the old independent counter update:
+      // a C++ crash could otherwise persist the Action before that update.
       if (this.context) {
         this.insertRumActionAsync(this.context, actionBean, actionName);
       } else {
@@ -4283,6 +4908,10 @@ export class FTRUMInnerManager {
       const result = await insertion;
       if (!result) {
         FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-INIT-5] startAction insertion failed: ${actionName}`);
+      } else {
+        // The RDB transaction is authoritative. Mirror its committed count
+        // in the active View only after both Action and aggregate succeeded.
+        this.increaseActionCountInMemory(actionBean.getViewId());
       }
     } finally {
       if (this.pendingActionInsertions.get(actionId) === insertion) {
@@ -4444,7 +5073,7 @@ export class FTRUMInnerManager {
    * @param tags Tags to attach RUM information to
    * @param isUserAction Whether this is a user action
    */
-  public attachRUMRelative(tags: Record<string, string>, isUserAction: boolean): void {
+  public attachRUMRelative(tags: Record<string, string>, isUserAction: boolean, state?: AppState): void {
     // Associate current view and action
     // Aligned with Android SDK: only set actionId if activeAction exists and is not closed
     // Android SDK logic: if (withAction) { if (activeAction != null && !activeAction.isClose()) { ... } }
@@ -4455,11 +5084,10 @@ export class FTRUMInnerManager {
       }
     }
     
-    if (this.activeView) {
-      tags[Constants.KEY_RUM_VIEW_ID] = this.activeView.getId();
-      tags[Constants.KEY_RUM_VIEW_NAME] = this.activeView.getViewName();
-      tags[Constants.KEY_RUM_VIEW_REFERRER] = this.activeView.getViewReferrer();
-    }
+    const view = this.resolveEventView(state);
+    tags[Constants.KEY_RUM_VIEW_ID] = view.getId();
+    tags[Constants.KEY_RUM_VIEW_NAME] = view.getViewName();
+    tags[Constants.KEY_RUM_VIEW_REFERRER] = view.getViewReferrer();
     
     tags[Constants.KEY_RUM_SESSION_ID] = this.sessionId;
   }
@@ -4469,9 +5097,10 @@ export class FTRUMInnerManager {
    */
   private attachRUMRelativeForResource(resourceBean: ResourceBean): void {
     const sessionId = this.sessionId;
-    const viewId = this.activeView?.getId() || "";
-    const viewName = this.activeView?.getViewName() || "";
-    const viewReferrer = this.activeView?.getViewReferrer() || "";
+    const view = this.resolveEventView();
+    const viewId = view.getId();
+    const viewName = view.getViewName();
+    const viewReferrer = view.getViewReferrer();
     
     // Aligned with Android SDK: only set actionId if activeAction exists and is not closed
     // Android SDK logic: if (activeAction != null && !activeAction.isClose()) { bean.actionId = getActionId(); }
@@ -4487,7 +5116,7 @@ export class FTRUMInnerManager {
     }
     
     resourceBean.setRUMContext(sessionId, viewId, viewName, viewReferrer, actionId, actionName);
-    resourceBean.hasSessionReplay = this.activeView?.isHasReplay() || false;
+    resourceBean.hasSessionReplay = view.isHasReplay();
   }
   
   
@@ -4692,7 +5321,8 @@ export class FTRUMInnerManager {
       // Aligned with Android SDK: generate error data for HTTP error status codes (>= 400)
       // Android logic: if (bean.resourceStatus >= HttpsURLConnection.HTTP_BAD_REQUEST || (bean.resourceStatus == 0 && !Utils.isNullOrEmpty(bean.errorStack)))
       const resourceStatus = resourceBean.resourceStatus;
-      if (resourceStatus >= 400 || (resourceStatus === 0 && resourceBean.errorStack && resourceBean.errorStack.length > 0)) {
+      if (resourceStatus >= 400 || (resourceStatus === 0 && resourceBean.errorStack &&
+        resourceBean.errorStack.length > 0 && !resourceBean.suppressNetworkError)) {
         FTInnerLogger.d(TAG, `<FT-RESOURCE-ERROR> Generating error data for resource ${resourceId}, status=${resourceStatus}`);
         // Build resourceTags for error callback (to increase error count)
         const resourceTagsForError: Record<string, string> = {};
@@ -4744,6 +5374,8 @@ export class FTRUMInnerManager {
   private increaseActionCountInMemory(viewId: string): void {
     if (this.activeView && this.activeView.getId() === viewId) {
       this.activeView.increaseActionCount();
+    } else if (this.launchView && this.launchView.getId() === viewId) {
+      this.launchView.increaseActionCount();
     }
   }
   
@@ -4763,10 +5395,10 @@ export class FTRUMInnerManager {
     
     // Update memory count if activeAction/activeView exists
     // This updates the in-memory count for immediate use
-    if (this.activeView) {
+    if (this.activeView && this.activeView.getId() === viewId) {
       this.activeView.increaseErrorCount();
     }
-    if (this.activeAction) {
+    if (this.activeAction && this.activeAction.getId() === actionId) {
       this.activeAction.increaseErrorCount();
     }
     
@@ -4928,6 +5560,18 @@ export class FTRUMInnerManager {
     // Session is not in any filter list, collect normally
     return CollectType.ALL;
   }
+
+  /** Legacy rows without a saved decision can only be classified while their Session is known. */
+  private getPersistedCollectType(collectType: CollectType | null, sessionId: string): CollectType {
+    if (collectType !== null) {
+      return collectType;
+    }
+    if (sessionId === this.sessionId || this.notCollectArr.includes(sessionId) ||
+      this.notSessionErrorCollectArr.includes(sessionId)) {
+      return this.checkSessionWillCollect(sessionId);
+    }
+    return CollectType.DROP;
+  }
   
   /**
    * Get current active view
@@ -4976,8 +5620,19 @@ export class FTRUMInnerManager {
         this.activeView.close();
         await this.closeView(this.activeView);
       }
+      await this.closeLaunchView();
+      await this.syntheticCloseBarrier;
+      await this.closeSyntheticViews();
       this.activeAction = null;
       this.activeView = null;
+      this.launchView = null;
+      this.launchViewReady = Promise.resolve();
+      this.syntheticViews.clear();
+      this.syntheticViewReady.clear();
+      this.syntheticCloseBarrier = Promise.resolve();
+      this.viewInitializationReady.clear();
+      this.longTaskDurationUpdates.clear();
+      this.appState = AppState.RUN;
       
       // Clear resources
       this.resourceBeanMap.clear();
@@ -5042,6 +5697,7 @@ export class FTRUMInnerManager {
       this.rumSemanticJournal = [];
       this.rumSemanticJournalHead = 0;
       this.rumSemanticJournalByRequestId.clear();
+      this.cancelRumSemanticApplyWaiters();
       this.committedRumSemanticResponseIds.clear();
       this.committedRumSemanticResponseOrder = [];
       this.committedRumSemanticResponseOrderHead = 0;
@@ -5056,6 +5712,7 @@ export class FTRUMInnerManager {
       this.rumConfig = null;
       this.preferencesStore = null;
       this.preferencesInitialized = false;
+      this.protectedCrashRecoveryViewIds.clear();
     } catch (error) {
       FTInnerLogger.e(TAG, `Error during shutdown: ${error}`);
     }
@@ -5074,18 +5731,6 @@ export class FTRUMInnerManager {
       return false;
     }
   }
-
-  private async stopViewAfterErrorCallback(callBack: RunnerCompleteCallBack): Promise<void> {
-    try {
-      await this.stopView();
-      FTInnerLogger.i(TAG, "View stopped after error, calling crash callback");
-      callBack.onComplete();
-    } catch (error) {
-      FTInnerLogger.e(TAG, `Failed to stop view after error: ${error}`);
-      callBack.onComplete();
-    }
-  }
-
 
   /**
    * Add long task
@@ -5164,20 +5809,19 @@ export class FTRUMInnerManager {
       
       // Increase long task count
       // increaseLongTaskCount() will update database if activeAction/activeView exists
-      this.increaseLongTaskCount();
+      const viewId = allTags[Constants.KEY_RUM_VIEW_ID] || '';
+      this.increaseLongTaskCount(viewId, duration);
       
       // Also update database directly using actionId/viewId from tags (only if action/view is closed)
       // This ensures counts are updated even for automatically closed actions
       // Note: If activeAction/activeView exists, increaseLongTaskCount() already updated the database,
       // so we only need to update if action/view is closed (not in memory)
       const actionId = allTags[Constants.KEY_RUM_ACTION_ID];
-      const viewId = allTags[Constants.KEY_RUM_VIEW_ID];
-      
       if (this.context && (actionId || viewId)) {
         const isActionActive: boolean = !!(actionId && actionId.length > 0 && this.activeAction &&
-          this.activeAction.getId() === actionId);
-        const isViewActive: boolean = !!(viewId && viewId.length > 0 && this.activeView &&
-          this.activeView.getId() === viewId);
+          !this.activeAction.isActionClose() && this.activeAction.getId() === actionId);
+        const currentView = this.findCurrentViewById(viewId);
+        const isViewActive: boolean = currentView !== null && !currentView.isClose();
         if (!isActionActive || !isViewActive) {
           if (!isActionActive && actionId && actionId.length > 0) {
             this.submitRumCounterUpdateTask({
@@ -5202,21 +5846,34 @@ export class FTRUMInnerManager {
    * Increase long task count for current session
    * Aligned with Android: updates both memory and database
    */
-  private increaseLongTaskCount(): void {
+  private increaseLongTaskCount(viewId: string, duration: number): void {
     try {
-      if (this.activeView) {
-        const viewId = this.activeView.getId();
+      const view = this.findCurrentViewById(viewId);
+      if (view && !view.isClose()) {
         // Update memory count
-        this.activeView.increaseLongTaskCount();
+        view.increaseLongTaskCount();
+        view.addLongTaskDuration(duration);
         // Update database count (aligned with Android SDK)
         if (this.context) {
           this.submitRumCounterUpdateTask({
             updateType: 'long_task.view',
             viewId
           });
+          const context = this.context;
+          const totalDuration = view.getLongTaskDuration();
+          const previous = this.longTaskDurationUpdates.get(viewId) || Promise.resolve();
+          const ready = this.viewInitializationReady.get(viewId) || Promise.resolve();
+          const update = previous.then(async () => {
+            await ready;
+            await FTDBTaskPoolExecutor.setViewLongTaskDuration(context, viewId, totalDuration);
+            this.generateRumData();
+          }).catch((error: Error) => {
+            FTInnerLogger.w(TAG, `Unable to persist View Long Task duration: ${error}`);
+          });
+          this.longTaskDurationUpdates.set(viewId, update);
         }
       }
-      if (this.activeAction) {
+      if (this.activeAction && !this.activeAction.isActionClose()) {
         const actionId = this.activeAction.getId();
         // Update memory count
         this.activeAction.increaseLongTaskCount();
@@ -5318,11 +5975,11 @@ export class FTRUMInnerManager {
     const fields: Record<string, string> = {};
     
     // Core performance metrics (aligned with Android: FTRUMInnerManager.putRUMResourcePerformance)
-    // Only add timing fields if value > 0 (matching Android behavior)
+    // A completed request can have zero duration when the clock resolution is coarse.
     if (resourceBean.resourceSize > 0) {
       fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resourceBean.resourceSize);
     }
-    if (resourceBean.resourceLoad > 0) {
+    if (resourceBean.resourceLoad >= 0) {
       fields[Constants.KEY_RUM_RESOURCE_DURATION] = String(resourceBean.resourceLoad);
     }
     if (resourceBean.resourceDNS > 0) {
@@ -5414,6 +6071,17 @@ export class FTRUMInnerManager {
           }
         }
       }
+    }
+
+    const transportMetrics = resourceBean.getTransportMetrics();
+    if (transportMetrics.requestSize > 0) {
+      fields[Constants.KEY_RUM_RESOURCE_REQUEST_SIZE] = String(transportMetrics.requestSize);
+    }
+    if (transportMetrics.httpProtocol.length > 0) {
+      fields[Constants.KEY_RUM_RESOURCE_HTTP_PROTOCOL] = transportMetrics.httpProtocol;
+    }
+    if (transportMetrics.connectionReuse !== undefined) {
+      fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(transportMetrics.connectionReuse);
     }
     
     return fields;

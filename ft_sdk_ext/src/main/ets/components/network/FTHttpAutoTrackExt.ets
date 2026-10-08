@@ -3,7 +3,9 @@ import {
   FTSDKExtensionBridge,
   FTSDKExtensionAutoTrackOptions,
   FTSDKExtensionResolvedAutoTrackOptions,
-  FTSDKExtensionResponseInput
+  FTSDKExtensionResponseInput,
+  FTNetworkErrorHandler,
+  FTResourceTransportMetricsProvider
 } from '@guancecloud/ft_sdk/Index';
 
 const TAG = 'FTHttpAutoTrackExt';
@@ -15,6 +17,12 @@ interface FTAxiosRequestConfigTarget {
   headers?: Object;
   data?: Object | string | ArrayBuffer;
   context?: Object;
+  onUploadProgress?: (progress: FTAxiosUploadProgressTarget) => void;
+}
+
+interface FTAxiosUploadProgressTarget {
+  loaded?: number;
+  total?: number;
 }
 
 interface FTAxiosInterceptorManager<T> {
@@ -63,13 +71,17 @@ class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
   performanceTiming?: http.PerformanceTiming;
   errorMessage?: string;
   errorStack?: string;
+  transportError?: Object | string | number | boolean | null;
+  errorCode?: string | number;
 
   constructor(
     request: http.HttpRequestContext,
     response: http.HttpResponse,
     statusCode: number,
     errorMessage?: string,
-    errorStack?: string
+    errorStack?: string,
+    transportError?: Object | string | number | boolean | null,
+    errorCode?: string | number
   ) {
     this.url = request.url;
     this.requestHeaders = request.header;
@@ -79,6 +91,47 @@ class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
     this.performanceTiming = response.performanceTiming;
     this.errorMessage = errorMessage;
     this.errorStack = errorStack;
+    this.transportError = transportError;
+    this.errorCode = errorCode;
+  }
+}
+
+/**
+ * The NetworkKit chain callback does not expose its HttpRequest instance, but
+ * applyFTHttpTrack has it before the request starts. Bind its cumulative
+ * platform upload event to the Resource ID produced by INITIAL_REQUEST.
+ */
+class NetworkKitRequestMetricCollector {
+  private resourceId?: string;
+  private readonly httpRequest: http.HttpRequest;
+  private readonly progressListener: (progress: http.DataSendProgressInfo) => void;
+
+  constructor(httpRequest: http.HttpRequest) {
+    this.httpRequest = httpRequest;
+    this.progressListener = (progress: http.DataSendProgressInfo): void => {
+      const resourceId = this.resourceId;
+      if (!resourceId || !progress || !Number.isFinite(progress.sendSize) || progress.sendSize < 0) {
+        return;
+      }
+      FTSDKExtensionBridge.recordPlatformRequestBodySize(resourceId, progress.sendSize);
+    };
+    try {
+      this.httpRequest.on('dataSendProgress', this.progressListener);
+    } catch (error) {
+      FTSDKExtensionBridge.logError(TAG, `[HTTP-Resource] Failed to subscribe platform upload progress: ${error}`);
+    }
+  }
+
+  public bindResource(resourceId: string): void {
+    this.resourceId = resourceId;
+  }
+
+  public dispose(): void {
+    try {
+      this.httpRequest.off('dataSendProgress', this.progressListener);
+    } catch (error) {
+      FTSDKExtensionBridge.logError(TAG, `[HTTP-Resource] Failed to unsubscribe platform upload progress: ${error}`);
+    }
   }
 }
 
@@ -126,14 +179,27 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
 
   private readonly traceEnabled: boolean;
   private readonly resourceEnabled: boolean;
+  private readonly networkErrorHandler: FTNetworkErrorHandler | null | undefined;
+  private readonly resourceTransportMetricsProvider: FTResourceTransportMetricsProvider | undefined;
+  private readonly platformMetricCollector?: NetworkKitRequestMetricCollector;
 
-  constructor(traceEnabled?: boolean, resourceEnabled?: boolean) {
+  constructor(
+    traceEnabled?: boolean,
+    resourceEnabled?: boolean,
+    networkErrorHandler?: FTNetworkErrorHandler | null,
+    resourceTransportMetricsProvider?: FTResourceTransportMetricsProvider,
+    platformMetricCollector?: NetworkKitRequestMetricCollector
+  ) {
     const resolvedOptions = FTSDKExtensionBridge.resolveAutoTrackOptions({
       enableTraceInterceptor: traceEnabled,
-      enableResourceInterceptor: resourceEnabled
+      enableResourceInterceptor: resourceEnabled,
+      resourceTransportMetricsProvider: resourceTransportMetricsProvider
     });
     this.traceEnabled = resolvedOptions.enableTraceInterceptor;
     this.resourceEnabled = resolvedOptions.enableResourceInterceptor;
+    this.networkErrorHandler = networkErrorHandler;
+    this.resourceTransportMetricsProvider = resourceTransportMetricsProvider;
+    this.platformMetricCollector = platformMetricCollector;
   }
 
   async interceptorHandle(reqContext: http.HttpRequestContext, _rspContext: http.HttpResponse): Promise<boolean> {
@@ -155,10 +221,13 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
         },
         {
           enableTraceInterceptor: this.traceEnabled,
-          enableResourceInterceptor: this.resourceEnabled
+          enableResourceInterceptor: this.resourceEnabled,
+          networkErrorHandler: this.networkErrorHandler,
+          resourceTransportMetricsProvider: this.resourceTransportMetricsProvider
         }
       );
       applyNormalizedHeadersToHttpContext(reqContext, preparedRequest.headers);
+      this.platformMetricCollector?.bindResource(preparedRequest.resourceId);
     } catch (error) {
       FTSDKExtensionBridge.logError(TAG, `[HTTP-Initial] Failed to process interceptor: ${error}`);
     }
@@ -172,56 +241,75 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor {
  */
 export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
   interceptorType: http.InterceptorType = http.InterceptorType.FINAL_RESPONSE;
+  private readonly platformMetricCollector?: NetworkKitRequestMetricCollector;
 
-  constructor(_traceEnabled?: boolean, _resourceEnabled?: boolean) {
+  constructor(
+    _traceEnabled?: boolean,
+    _resourceEnabled?: boolean,
+    platformMetricCollector?: NetworkKitRequestMetricCollector
+  ) {
+    this.platformMetricCollector = platformMetricCollector;
   }
 
   async interceptorHandle(reqContext: http.HttpRequestContext, rspContext: http.HttpResponse): Promise<boolean> {
+    const statusCode = rspContext.responseCode || 0;
     try {
       // console.info('ft-lizhao-http', JSON.stringify(rspContext.performanceTiming));
       // NetworkKit also invokes FINAL_RESPONSE for transport failures, with
       // responseCode=0. The normal response path has no error stack and would
       // produce a Resource without the corresponding network Error.
-      if (!rspContext.responseCode) {
+      if (!statusCode) {
         const error = new Error('NetworkKit request failed without an HTTP response');
         FTSDKExtensionBridge.completeHttpError(
-          new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack)
+          new NetworkKitResponseInput(reqContext, rspContext, 0, error.message, error.stack, undefined, 0)
         );
         return true;
       }
       FTSDKExtensionBridge.completeHttpResponse(
-        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0)
+        new NetworkKitResponseInput(reqContext, rspContext, statusCode)
       );
     } catch (error) {
-      FTSDKExtensionBridge.completeHttpError(
-        new NetworkKitResponseInput(reqContext, rspContext, rspContext.responseCode || 0, String(error))
-      );
+      // Once NetworkKit provides an HTTP status, a telemetry processing
+      // failure must not reclassify that response as a status-0 transport
+      // error. The bridge already makes response metadata best-effort.
+      FTSDKExtensionBridge.logError(TAG,
+        `[HTTP-Final] Failed to process response with status=${statusCode}: ${error}`);
+    } finally {
+      this.platformMetricCollector?.dispose();
     }
     return true;
   }
 }
 
-function createFTHttpInterceptors(options: FTSDKExtensionResolvedAutoTrackOptions): http.HttpInterceptor[] {
+function createFTHttpInterceptors(
+  options: FTSDKExtensionResolvedAutoTrackOptions,
+  platformMetricCollector?: NetworkKitRequestMetricCollector
+): http.HttpInterceptor[] {
   const interceptors: http.HttpInterceptor[] = [];
   if (options.enableTraceInterceptor || options.enableResourceInterceptor) {
     interceptors.push(new HttpInitialRequestInterceptor(
       options.enableTraceInterceptor,
-      options.enableResourceInterceptor
+      options.enableResourceInterceptor,
+      options.networkErrorHandler,
+      options.resourceTransportMetricsProvider,
+      platformMetricCollector
     ));
     interceptors.push(new HttpFinalResponseInterceptor(
       options.enableTraceInterceptor,
-      options.enableResourceInterceptor
+      options.enableResourceInterceptor,
+      platformMetricCollector
     ));
   }
   return interceptors;
 }
 
-export function createFTHttpInterceptorChain(
-  options: FTHttpInterceptorChainOptions = {}
+function createFTHttpInterceptorChainInternal(
+  options: FTHttpInterceptorChainOptions,
+  platformMetricCollector?: NetworkKitRequestMetricCollector
 ): http.HttpInterceptorChain {
   const chain = new http.HttpInterceptorChain();
   const resolvedOptions = FTSDKExtensionBridge.resolveAutoTrackOptions(options);
-  const interceptors = createFTHttpInterceptors(resolvedOptions);
+  const interceptors = createFTHttpInterceptors(resolvedOptions, platformMetricCollector);
 
   if (options.interceptors && options.interceptors.length > 0) {
     for (let i = 0; i < options.interceptors.length; i++) {
@@ -242,6 +330,12 @@ export function createFTHttpInterceptorChain(
   return chain;
 }
 
+export function createFTHttpInterceptorChain(
+  options: FTHttpInterceptorChainOptions = {}
+): http.HttpInterceptorChain {
+  return createFTHttpInterceptorChainInternal(options);
+}
+
 export function applyFTAxiosChainMethodBridge(axiosTarget: Object): number {
   const target = axiosTarget as FTAxiosInterceptorTarget;
   return target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
@@ -253,6 +347,16 @@ export function applyFTAxiosChainMethodBridge(axiosTarget: Object): number {
         body: config.data
       });
       config.headers = preparedRequest.headers as Object;
+      const applicationUploadProgress = config.onUploadProgress;
+      config.onUploadProgress = (progress: FTAxiosUploadProgressTarget): void => {
+        const uploadedBytes = progress ? progress.loaded : undefined;
+        if (uploadedBytes !== undefined && Number.isFinite(uploadedBytes) && uploadedBytes >= 0) {
+          FTSDKExtensionBridge.recordPlatformRequestBodySize(preparedRequest.resourceId, uploadedBytes);
+        }
+        if (applicationUploadProgress) {
+          applicationUploadProgress(progress);
+        }
+      };
     } catch (error) {
       FTSDKExtensionBridge.logError(TAG, `[Axios-Chain] Failed to prepare request: ${error}`);
     }
@@ -279,6 +383,7 @@ export function applyFTHttpTrack(
   httpRequest: http.HttpRequest,
   options: FTHttpInterceptorChainOptions = {}
 ): http.HttpInterceptorChain {
-  const chain = createFTHttpInterceptorChain(options);
+  const platformMetricCollector = new NetworkKitRequestMetricCollector(httpRequest);
+  const chain = createFTHttpInterceptorChainInternal(options, platformMetricCollector);
   return applyFTHttpTrackToChain(chain, httpRequest);
 }

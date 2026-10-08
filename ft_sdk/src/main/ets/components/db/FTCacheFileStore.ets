@@ -90,6 +90,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     const startedAt = Date.now();
     FTCacheFiles.recover(this.root);
     await this.repairProjection();
+    const restoredOversizeRows = await this.restoreOversizeRows();
     const expiredLeases: FTCacheMutation[] = [];
     for (const id of this.list('lease')) {
       const body = this.read('lease', id);
@@ -101,7 +102,39 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     if (expiredLeases.length > 0) { this.commitDirect(expiredLeases); }
     FTCacheFileStore.recoveredRoots.add(this.root);
     this.lastRecoveryMs = Math.max(0, Date.now() - startedAt);
-    FTInnerLogger.i(TAG, `Recovered FileStore cache: root=${this.root}, expiredLeases=${expiredLeases.length}, cost=${this.lastRecoveryMs}ms`);
+    FTInnerLogger.i(TAG, `Recovered FileStore cache: root=${this.root}, expiredLeases=${expiredLeases.length}, ` +
+      `restoredOversize=${restoredOversizeRows}, cost=${this.lastRecoveryMs}ms`);
+  }
+
+  /**
+   * Versions before single-record upload support placed records larger than
+   * the old transport target in quarantine. Move only those known entries
+   * back through the normal journal so an SDK upgrade can upload them.
+   */
+  private async restoreOversizeRows(): Promise<number> {
+    const changes: FTCacheMutation[] = [];
+    let restored = 0;
+    const quarantine = `${this.root}/quarantine`;
+    for (const name of FTCacheFiles.fileNames(quarantine).sort()) {
+      if (!name.startsWith('oversize-')) { continue; }
+      let body: string | null = null;
+      try {
+        body = FTCacheFiles.read(`${quarantine}/${name}`);
+        if (body === null) { continue; }
+        const row = JSON.parse(body) as SyncDataJSON;
+        if (!row.uuid || !row.dataString) { continue; }
+        const syncPath = this.path('sync', row.uuid);
+        if (!FTCacheFiles.exists(syncPath)) {
+          changes.push({ path: syncPath, body });
+          restored++;
+        }
+        changes.push({ path: `${quarantine}/${name}`, body: null });
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Cannot restore quarantined oversized row: ${name}, error=${String(error)}`);
+      }
+    }
+    if (changes.length === 0 || !await this.commit(changes)) { return 0; }
+    return restored;
   }
 
   status(): FTCacheStatus {
@@ -354,9 +387,8 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         if (!existing && !await this.admitCount(row, request, pendingLog, pendingRum)) { response.result.dropped++; continue; }
         row.id = existing ? existing.id : nextId;
         const body = JSON.stringify(row);
-        if (FTCacheFiles.bytes(FTCacheFiles.encode(body)) > FTCacheFiles.MAX_RECORD_BYTES) {
-          response.result.dropped++; this.increment('rejected', 1); continue;
-        }
+        // Normal records are governed by the configured cache capacity in commit().
+        // Do not impose an additional per-record limit: native tombstones are preserved in full.
         if (!existing) { nextId++; needsNextId = true; }
         changes.push({ path: this.path('sync', row.uuid), body });
         pendingRows.push(row); plannedUuids.add(row.uuid);
@@ -450,15 +482,12 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     const maxBytes = Math.max(1024, request.maxBytes || 1024 * 1024);
     const candidates: FTUploadCandidate[] = [];
     let matching = 0;
-    // Only page-sized metadata is retained. Payload memory is bounded by maxBytes + one record.
+    // Only page-sized metadata is retained. A single record may exceed the
+    // normal batch target and must remain eligible for upload.
     for (const id of this.list('sync')) {
       const row = this.sync(id);
       if (!row || !this.matches(row, request.dataTypes || [])) { continue; }
       const bytes = this.uploadBytes(row);
-      if (bytes + 1 > maxBytes) {
-        if (!this.leased(row)) { this.quarantineOversized(row); }
-        continue;
-      }
       matching++;
       candidates.push({ uuid: row.uuid, id: row.id, time: row.time, bytes });
       candidates.sort((a: FTUploadCandidate, b: FTUploadCandidate) => a.time - b.time || a.id - b.id);
@@ -469,11 +498,13 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     let bytes = 1; let clipped = false;
     for (const candidate of candidates) {
       if (uploadRows.length >= limit) { break; }
-      if (bytes + candidate.bytes > maxBytes) { clipped = true; break; }
+      const exceedsBatchTarget = bytes + candidate.bytes > maxBytes;
+      if (exceedsBatchTarget && uploadRows.length > 0) { clipped = true; break; }
       const row = this.sync(candidate.uuid); if (!row) { continue; }
       uploadRows.push({ id: row.id, uuid: row.uuid, dataType: String(row.dataType), dataString: row.dataString,
         time: row.time, customDataType: row.customDataTypeString });
       selected.push(row); bytes += candidate.bytes;
+      if (exceedsBatchTarget) { clipped = true; break; }
     }
     await this.leaseRows(selected);
     return { ok: true, uploadRows, hasMore: matching > uploadRows.length,
@@ -485,19 +516,6 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       dataString: row.dataString, time: row.time, customDataType: row.customDataTypeString };
     // Include JSON escaping and the array separator; the page adds the remaining bracket byte.
     return FTCacheFiles.bytes(JSON.stringify(dto)) + 1;
-  }
-
-  private quarantineOversized(row: SyncDataJSON): void {
-    const quarantine = `${this.root}/quarantine`;
-    while (FTCacheFiles.size(quarantine) > FTCacheFiles.MAX_QUARANTINE_BYTES) {
-      const names = FTCacheFiles.fileNames(quarantine).sort();
-      if (names.length === 0) { break; }
-      FTCacheFiles.remove(`${quarantine}/${names[0]}`);
-    }
-    fs.renameSync(this.path('sync', row.uuid), `${quarantine}/oversize-${Date.now()}-${encodeURIComponent(row.uuid)}.json`);
-    FTCacheFiles.syncDirectory(quarantine); FTCacheFiles.syncDirectory(`${this.root}/sync`);
-    this.ledger.invalidate();
-    this.increment('rejected', 1);
   }
 
   private async uploadCommit(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
@@ -522,7 +540,6 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       this.protectedUuids.add(row.uuid);
       row.id = this.sync(row.uuid)?.id || nextId++;
       const body = JSON.stringify(row);
-      if (FTCacheFiles.bytes(FTCacheFiles.encode(body)) > FTCacheFiles.MAX_RECORD_BYTES) { throw new Error('CACHE_REINSERT_TOO_LARGE'); }
       const deletion = changes.find((c: FTCacheMutation) => c.path === this.path('sync', row.uuid));
       if (deletion) { deletion.body = body; } else { changes.push({ path: this.path('sync', row.uuid), body }); }
       replacements.push(row);

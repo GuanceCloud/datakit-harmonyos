@@ -48,7 +48,7 @@ import {
 } from '@guancecloud/ft_sdk_ext/Index'
 ```
 
-`FTHttpInterceptorChainOptions` describes the optional trace/resource switches and additional NetworkKit interceptors accepted by `createFTHttpInterceptorChain` and `applyFTHttpTrack`.
+`FTHttpInterceptorChainOptions` describes the optional trace/resource switches and additional NetworkKit interceptors accepted by `createFTHttpInterceptorChain` and `applyFTHttpTrack`. Its `networkErrorHandler` option uses the core SDK's local Network Error filter contract: return `true` only to suppress the Error derived from a no-response local failure; the Resource and HTTP 4xx/5xx behavior remain unchanged.
 
 ## Quick Start
 
@@ -72,6 +72,8 @@ const interceptorChain = createFTHttpInterceptorChain({
 
 - HarmonyOS project using NetworkKit interceptor-chain APIs
 - This package is an addition to the core SDK, not a replacement for it
+- `ft_sdk_ext` declares no permissions. Its `ft_sdk` dependency declares the
+  core normal permissions, so a consuming HAP does not need to duplicate them.
 
 ## Documentation
 

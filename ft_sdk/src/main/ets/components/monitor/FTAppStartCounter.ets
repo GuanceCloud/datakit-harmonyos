@@ -17,6 +17,8 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { Constants } from '../Constants';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { FTSDK } from '../FTSDK';
+import { ActionSourceType } from '../rum/enum/ActionSourceType';
+import { resolveAutomaticLaunchAction } from '../rum/handler/FTAutomaticActionHandler';
 
 const TAG = "FTAppStartCounter";
 
@@ -64,6 +66,13 @@ export class FTAppStartCounter {
       FTInnerLogger.w(TAG, "RUM or action tracking is disabled, skipping hot start upload");
       return;
     }
+
+    const resolved = resolveAutomaticLaunchAction(config.getActionTrackingHandler(), ActionSourceType.LAUNCH_HOT,
+      Constants.ACTION_NAME_LAUNCH_HOT, {});
+    if (resolved === null) {
+      FTInnerLogger.d(TAG, 'Hot launch Action filtered by action tracking handler');
+      return;
+    }
     
     // Upload hot start as an Action
     // Similar to Android's FTAutoTrack.putRUMLaunchPerformance(false, hotStartDuration, startTime)
@@ -74,11 +83,11 @@ export class FTAppStartCounter {
       // Directly call innerManager.addAction with startTime parameter
       // This matches Android's implementation: addAction(actionName, actionType, duration, startTime, property)
       innerManager.addAction(
-        Constants.ACTION_NAME_LAUNCH_HOT,
+        resolved.name,
         Constants.ACTION_TYPE_LAUNCH_HOT,
         hotStartDuration,
         startTime,  // Use provided startTime instead of currentTime
-        {}
+        resolved.properties
       );
     } else {
       FTInnerLogger.e(TAG, "FTRUMInnerManager is not available, cannot upload hot start data");

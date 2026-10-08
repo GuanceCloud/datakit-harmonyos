@@ -11,6 +11,7 @@ import { FTActionTrackingHandler } from "./rum/handler/FTActionTrackingHandler";
 import { FTViewTrackingHandler } from "./rum/handler/FTViewTrackingHandler";
 import { FTViewTrackingType } from "./rum/enum/FTViewTrackingType";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
+import { FTNetworkErrorHandler } from './network/FTNetworkErrorHandler';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
@@ -66,10 +67,26 @@ function getRuntimeUploadEndpoint(config: FTSDKConfig): RuntimeUploadEndpoint | 
   return runtimeUploadEndpointOverrides.get(config) ?? null;
 }
 
+/**
+ * Converts the public percentage contract to the SDK's existing internal
+ * probability contract. This is intentionally the only conversion performed
+ * at the configuration boundary.
+ */
+function percentageToSamplingProbability(rate: number, name: string): number {
+  if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+    throw new RangeError(`${name} must be a finite number between 0 and 100`);
+  }
+  return rate / 100;
+}
+
 export class FTRUMConfig {
   // Property definitions
   private samplingRate: number = 1.0; // Sampling rate, range 0 to 1
   private sessionErrorSampleRate: number = 0.0; // Error sampling rate, range 0 to 1, default 0.0
+  private sessionSamplingRate: number | null = null;
+  private sessionOnErrorSamplingRate: number | null = null;
+  private remoteSessionSamplingRate: number | null = null;
+  private remoteSessionOnErrorSamplingRate: number | null = null;
   private rumAppId: string = "";
   private enableTrackAppCrash: boolean = false;
   private enableTrackAppUIBlock: boolean = false;
@@ -92,6 +109,9 @@ export class FTRUMConfig {
   // private extraLogCatWithNativeCrash: ExtraLogCatSetting | null = null;
   // private extraLogCatWithANR: ExtraLogCatSetting | null = null;
   private intTakeUrlHandler: FTInTakeUrlHandler | null = null;
+  // Default handler for automatically collected local network failures. A
+  // client/session/chain-level handler takes precedence over this value.
+  private networkErrorHandler: FTNetworkErrorHandler | null = null;
   private actionTrackingHandler: FTActionTrackingHandler | null = null;
   private viewRouterTrackingHandler: FTViewTrackingHandler | null = null;
   private viewNavigationTrackingHandler: FTViewTrackingHandler | null = null;
@@ -99,20 +119,53 @@ export class FTRUMConfig {
   private rumCacheDiscardStrategy: RUMCacheDiscard = RUMCacheDiscard.DISCARD;
 
   // Method definitions
+  /**
+   * @deprecated Use getSessionSamplingRate(). This compatibility getter
+   * returns the effective rate in the legacy [0,1] probability unit.
+   */
   public getSamplingRate(): number {
-    return this.samplingRate;
+    return this.remoteSessionSamplingRate ?? this.sessionSamplingRate ?? this.samplingRate;
   }
 
+  /**
+   * @deprecated Use setSessionSamplingRate(). This compatibility setter
+   * accepts the legacy [0,1] probability unit.
+   */
   public setSamplingRate(samplingRate: number = 1.0): FTRUMConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective session sampling rate as a percentage in [0,100]. */
+  public getSessionSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /**
+   * Set the session sampling rate as a percentage in [0,100]. Decimals are
+   * supported, so 0.1 represents 0.1% sampling.
+   */
+  public setSessionSamplingRate(samplingRate: number): FTRUMConfig {
+    this.sessionSamplingRate = percentageToSamplingProbability(samplingRate, 'sessionSamplingRate');
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote session probability. */
+  public setRemoteSessionSamplingRateInternal(samplingRate: number | null): FTRUMConfig {
+    this.remoteSessionSamplingRate = samplingRate;
     return this;
   }
 
   /**
    * Get error sampling rate
    */
+  /**
+   * @deprecated Use getSessionOnErrorSamplingRate(). This compatibility
+   * getter returns the effective rate in the legacy [0,1] probability unit.
+   */
   public getSessionErrorSampleRate(): number {
-    return this.sessionErrorSampleRate;
+    return this.remoteSessionOnErrorSamplingRate ??
+      this.sessionOnErrorSamplingRate ?? this.sessionErrorSampleRate;
   }
 
   /**
@@ -122,8 +175,36 @@ export class FTRUMConfig {
    * Range [0,1], 0 means no collection, 1 means full collection.
    * Default is 0.0, aligned with Android SDK.
    */
+  /**
+   * @deprecated Use setSessionOnErrorSamplingRate(). This compatibility
+   * setter accepts the legacy [0,1] probability unit.
+   */
   public setSessionErrorSampleRate(sessionErrorSampleRate: number = 0.0): FTRUMConfig {
     this.sessionErrorSampleRate = Math.min(1.0, Math.max(0, sessionErrorSampleRate));
+    return this;
+  }
+
+  /** Get the effective error-session sampling rate as a percentage in [0,100]. */
+  public getSessionOnErrorSamplingRate(): number {
+    return this.getSessionErrorSampleRate() * 100;
+  }
+
+  /**
+   * Set the error-session supplemental sampling rate as a percentage in
+   * [0,100]. The default remains 0%, so unsampled sessions are not retained
+   * after an error unless this is explicitly configured.
+   */
+  public setSessionOnErrorSamplingRate(samplingRate: number): FTRUMConfig {
+    this.sessionOnErrorSamplingRate = percentageToSamplingProbability(
+      samplingRate,
+      'sessionOnErrorSamplingRate'
+    );
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote error-session probability. */
+  public setRemoteSessionOnErrorSamplingRateInternal(samplingRate: number | null): FTRUMConfig {
+    this.remoteSessionOnErrorSamplingRate = samplingRate;
     return this;
   }
 
@@ -297,7 +378,9 @@ export class FTRUMConfig {
 
   /**
    * Set action tracking handler
-   * Allows customization of which actions should be tracked and how
+   * Handles automatic clicks and cold/hot launch Actions. Return HandlerAction
+   * to customize the name and properties, null to filter, or undefined to
+   * preserve default collection. Manual Actions bypass the handler.
    * Aligned with Android SDK: FTRUMConfig.setActionTrackingHandler(FTActionTrackingHandler)
    * 
    * @param handler Action tracking handler, or null to use default behavior
@@ -403,6 +486,22 @@ export class FTRUMConfig {
   }
 
   /**
+   * Sets the default local Network Error handler for automatic RCP, NetworkKit
+   * HTTP, and Axios Resource collection. It is used only when that individual
+   * Session, client, or interceptor chain does not provide its own handler.
+   * Pass null to clear the default.
+   */
+  public setNetworkErrorHandler(handler: FTNetworkErrorHandler | null): FTRUMConfig {
+    this.networkErrorHandler = handler;
+    return this;
+  }
+
+  /** Returns the global default local Network Error handler, if configured. */
+  public getNetworkErrorHandler(): FTNetworkErrorHandler | null {
+    return this.networkErrorHandler;
+  }
+
+  /**
    * Set device metrics collection types and optionally the sampling frequency.
    */
   public setDeviceMetricsMonitorType(
@@ -460,6 +559,8 @@ export class FTLoggerConfig {
    * Sampling rate, [0,1]
    */
   private samplingRate: number = 1;
+  private logSamplingRate: number | null = null;
+  private remoteLogSamplingRate: number | null = null;
   /**
    * Whether to link with RUM data
    */
@@ -504,17 +605,36 @@ export class FTLoggerConfig {
   private printCustomLogToConsole: boolean = false;
 
   /**
-   * Get sampling rate
+   * @deprecated Use getLogSamplingRate(). This compatibility getter returns
+   * the effective rate in the legacy [0,1] probability unit.
    */
   public getSamplingRate(): number {
-    return this.samplingRate;
+    return this.remoteLogSamplingRate ?? this.logSamplingRate ?? this.samplingRate;
   }
 
   /**
-   * Set sampling rate
+   * @deprecated Use setLogSamplingRate(). This compatibility setter accepts
+   * the legacy [0,1] probability unit.
    */
-  setSamplingRate(samplingRate: number = 1.0): FTLoggerConfig {
+  public setSamplingRate(samplingRate: number = 1.0): FTLoggerConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective log sampling rate as a percentage in [0,100]. */
+  public getLogSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /** Set the log sampling rate as a percentage in [0,100]. */
+  public setLogSamplingRate(samplingRate: number): FTLoggerConfig {
+    this.logSamplingRate = percentageToSamplingProbability(samplingRate, 'logSamplingRate');
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote log probability. */
+  public setRemoteLogSamplingRateInternal(samplingRate: number | null): FTLoggerConfig {
+    this.remoteLogSamplingRate = samplingRate;
     return this;
   }
 
@@ -1501,6 +1621,8 @@ export class FTTraceConfig {
    * Sampling rate, [0,1]
    */
   private samplingRate: number = 1;
+  private traceSamplingRate: number | null = null;
+  private remoteTraceSamplingRate: number | null = null;
   /**
    * Trace type for link tracking
    */
@@ -1544,17 +1666,36 @@ export class FTTraceConfig {
   ];
 
   /**
-   * Get sampling rate
+   * @deprecated Use getTraceSamplingRate(). This compatibility getter returns
+   * the effective rate in the legacy [0,1] probability unit.
    */
-  getSamplingRate(): number {
-    return this.samplingRate;
+  public getSamplingRate(): number {
+    return this.remoteTraceSamplingRate ?? this.traceSamplingRate ?? this.samplingRate;
   }
 
   /**
-   * Set sampling rate
+   * @deprecated Use setTraceSamplingRate(). This compatibility setter accepts
+   * the legacy [0,1] probability unit.
    */
-  setSamplingRate(samplingRate: number = 1.0): FTTraceConfig {
+  public setSamplingRate(samplingRate: number = 1.0): FTTraceConfig {
     this.samplingRate = Math.min(1.0, Math.max(0, samplingRate));
+    return this;
+  }
+
+  /** Get the effective trace sampling rate as a percentage in [0,100]. */
+  public getTraceSamplingRate(): number {
+    return this.getSamplingRate() * 100;
+  }
+
+  /** Set the trace sampling rate as a percentage in [0,100]. */
+  public setTraceSamplingRate(samplingRate: number): FTTraceConfig {
+    this.traceSamplingRate = percentageToSamplingProbability(samplingRate, 'traceSamplingRate');
+    return this;
+  }
+
+  /** @internal Applies an already-normalized remote trace probability. */
+  public setRemoteTraceSamplingRateInternal(samplingRate: number | null): FTTraceConfig {
+    this.remoteTraceSamplingRate = samplingRate;
     return this;
   }
 

@@ -19,8 +19,10 @@ import {
   SDKRumResourceCommandBatchDTO,
   SDKRumResourceCommandDTO,
   SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
+  SDKRumResourceTransportMetricsDTO,
   SDKStringRecord,
   SDKSyncDataDraftDTO,
   SDKUploadCheckpointDTO,
@@ -50,8 +52,9 @@ import {
 } from './SDKWorkerProtocol';
 import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
+import { ErrorType } from '../rum/enum/RUMEnums';
 import {
-  DATA_UPLOAD_MAX_BODY_BYTES,
+  DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
   DATA_UPLOAD_MAX_PAGE_SIZE,
   DATA_UPLOAD_MAX_RETRY_COUNT
@@ -270,10 +273,22 @@ interface SDKRumWorkerResourceState {
   resourceStatus: number;
   resourceStatusGroup: string;
   resourceSize: number;
+  requestBodySize: number;
+  requestBodySizeSource?: string;
+  requestHeaderSize: number;
+  requestHeaderSizeSource?: string;
+  requestSize: number;
+  requestSizeSource?: string;
+  requestSizeIsDerived: boolean;
+  httpProtocol: string;
+  httpProtocolSource?: string;
+  connectionReuse?: boolean;
+  connectionReuseSource?: string;
   resourceType: string;
   responseBody: string;
   requestErrorStack: string;
   requestErrorMsg: string;
+  suppressNetworkError: boolean;
   traceId: string;
   spanId: string;
   resourceHostIP: string;
@@ -706,6 +721,7 @@ function finalizeRumEvent(event: SDKRumEventDTO): SDKRumEventDTO {
     eventType,
     name,
     time: event.time,
+    storageTime: event.storageTime,
     dataType: event.dataType,
     customDataType: event.customDataType,
     measurement,
@@ -951,7 +967,8 @@ function createRumDraft(event: SDKRumEventDTO, state: SDKWorkerRuntimeState): SD
       prepared.integerCompatible === true
     ),
     uuid: event.uuid || '',
-    time: event.time
+    time: event.storageTime !== undefined && Number.isFinite(event.storageTime) && event.storageTime > 0 ?
+      event.storageTime : event.time
   };
 }
 
@@ -1284,6 +1301,10 @@ function processRumResourceCommand(
   }
 
   const resource = getOrCreateRumResourceState(resourceId, command, state);
+  // Recovery callbacks may arrive without a start command in this Worker.
+  if (resource.startTime <= 0 && command.startTime && command.startTime > 0) {
+    resource.startTime = command.startTime;
+  }
   if (command.draftUuid && command.draftUuid.length > 0) {
     resource.draftUuid = command.draftUuid;
   }
@@ -1383,10 +1404,16 @@ function getOrCreateRumResourceState(
     resourceStatus: 0,
     resourceStatusGroup: '',
     resourceSize: -1,
+    requestBodySize: -1,
+    requestHeaderSize: -1,
+    requestSize: -1,
+    requestSizeIsDerived: false,
+    httpProtocol: '',
     resourceType: 'network',
     responseBody: '',
     requestErrorStack: '',
     requestErrorMsg: '',
+    suppressNetworkError: false,
     traceId: '',
     spanId: '',
     resourceHostIP: '',
@@ -1428,6 +1455,7 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   // addResource without a preceding startResource), preventing a late
   // completion from being rebound to a newer action.
   resource.context.dynamicTags = resource.context.dynamicTags || context.dynamicTags;
+  resource.context.networkSnapshot = resource.context.networkSnapshot || context.networkSnapshot;
   resource.context.sessionId = resource.context.sessionId || context.sessionId;
   resource.context.viewId = resource.context.viewId || context.viewId;
   resource.context.viewName = resource.context.viewName || context.viewName;
@@ -1454,6 +1482,8 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   resource.responseBody = params.responseBody || '';
   resource.requestErrorStack = params.requestErrorStack || '';
   resource.requestErrorMsg = params.requestErrorMsg || '';
+  resource.suppressNetworkError = params.suppressNetworkError === true;
+  mergeResourceTransportMetrics(resource, params.transportMetrics);
   resource.resourceSize = params.responseContentLength || 0;
   if (resource.resourceSize <= 0) {
     resource.resourceSize = (resource.responseBody ? resource.responseBody.length : 0) + resource.responseHeader.length;
@@ -1472,6 +1502,85 @@ function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRum
   mergeStringRecords(resource.contentProperties, normalizeRumPropertyRecord(property));
   applyResourcePropertyMetrics(resource, property);
   resource.contentSet = true;
+}
+
+function resourceTransportSourceRank(source?: string): number {
+  if (source === 'platform') {
+    return 3;
+  }
+  if (source === 'integration') {
+    return 2;
+  }
+  if (source === 'header') {
+    return 1;
+  }
+  return 0;
+}
+
+function isKnownResourceRequestSize(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Every Resource command is keyed by resourceId. Merge each transport metric
+ * independently so a later timing/status callback cannot overwrite a stronger
+ * value collected by the request/response interceptor for another source.
+ */
+function mergeResourceTransportMetrics(
+  resource: SDKRumWorkerResourceState,
+  metrics?: SDKRumResourceTransportMetricsDTO
+): void {
+  if (!metrics) {
+    return;
+  }
+  if (metrics.requestBodySizeSource && isKnownResourceRequestSize(metrics.requestBodySize) &&
+    resourceTransportSourceRank(metrics.requestBodySizeSource) >= resourceTransportSourceRank(resource.requestBodySizeSource)) {
+    resource.requestBodySize = metrics.requestBodySize;
+    resource.requestBodySizeSource = metrics.requestBodySizeSource;
+  }
+  if (metrics.requestHeaderSizeSource && isKnownResourceRequestSize(metrics.requestHeaderSize) &&
+    resourceTransportSourceRank(metrics.requestHeaderSizeSource) >= resourceTransportSourceRank(resource.requestHeaderSizeSource)) {
+    resource.requestHeaderSize = metrics.requestHeaderSize;
+    resource.requestHeaderSizeSource = metrics.requestHeaderSizeSource;
+  }
+  if (metrics.requestSizeSource && metrics.requestSizeIsDerived !== true && isKnownResourceRequestSize(metrics.requestSize) &&
+    resourceTransportSourceRank(metrics.requestSizeSource) >= resourceTransportSourceRank(resource.requestSizeSource)) {
+    resource.requestSize = metrics.requestSize;
+    resource.requestSizeSource = metrics.requestSizeSource;
+    resource.requestSizeIsDerived = false;
+  }
+  if (metrics.httpProtocolSource && metrics.httpProtocol && metrics.httpProtocol.trim().length > 0 &&
+    resourceTransportSourceRank(metrics.httpProtocolSource) >= resourceTransportSourceRank(resource.httpProtocolSource)) {
+    resource.httpProtocol = metrics.httpProtocol.trim();
+    resource.httpProtocolSource = metrics.httpProtocolSource;
+  }
+  if (metrics.connectionReuseSource && metrics.connectionReuse !== undefined &&
+    resourceTransportSourceRank(metrics.connectionReuseSource) >= resourceTransportSourceRank(resource.connectionReuseSource)) {
+    resource.connectionReuse = metrics.connectionReuse;
+    resource.connectionReuseSource = metrics.connectionReuseSource;
+  }
+  deriveResourceRequestSize(resource);
+}
+
+function deriveResourceRequestSize(resource: SDKRumWorkerResourceState): void {
+  if (!isKnownResourceRequestSize(resource.requestBodySize) || !isKnownResourceRequestSize(resource.requestHeaderSize) ||
+    !resource.requestBodySizeSource || !resource.requestHeaderSizeSource) {
+    return;
+  }
+  const componentSource = resourceTransportSourceRank(resource.requestBodySizeSource) >=
+    resourceTransportSourceRank(resource.requestHeaderSizeSource)
+    ? resource.requestBodySizeSource
+    : resource.requestHeaderSizeSource;
+  // Preserve an explicit total only when it has equal or stronger provenance
+  // than both components. Higher-ranked platform body/header values must be
+  // allowed to replace an earlier integration total after worker handoff.
+  if (resource.requestSizeSource && !resource.requestSizeIsDerived &&
+    resourceTransportSourceRank(resource.requestSizeSource) >= resourceTransportSourceRank(componentSource)) {
+    return;
+  }
+  resource.requestSize = resource.requestBodySize + resource.requestHeaderSize;
+  resource.requestSizeSource = componentSource;
+  resource.requestSizeIsDerived = true;
 }
 
 function recordResourceLifecycleProperties(
@@ -1536,7 +1645,7 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
     resource.resourceDownloadTimeStart = dnsTime + tcpTime + sslTime + ttfbTime;
   }
   const loadTime = readPositiveNumber(normalized, 'resourceLoad');
-  if (loadTime > 0) {
+  if (loadTime >= 0) {
     resource.resourceLoad = loadTime;
   }
 
@@ -1551,6 +1660,7 @@ function applyResourcePropertyMetrics(resource: SDKRumWorkerResourceState, prope
 }
 
 function applyResourceNetStatus(resource: SDKRumWorkerResourceState, netStatus: SDKRumResourceNetStatusDTO): void {
+  mergeResourceTransportMetrics(resource, netStatus.transportMetrics);
   if (netStatus.dnsTime > 0) {
     resource.resourceDNS = netStatus.dnsTime;
     resource.resourceDNSStart = netStatus.dnsStartTime;
@@ -1577,7 +1687,7 @@ function applyResourceNetStatus(resource: SDKRumWorkerResourceState, netStatus: 
     resource.resourceDownloadTime = netStatus.downloadTime;
     resource.resourceDownloadTimeStart = netStatus.downloadStartTime;
   }
-  if (netStatus.holeRequestTime > 0) {
+  if (netStatus.holeRequestTime >= 0) {
     resource.resourceLoad = netStatus.holeRequestTime;
   } else if (resource.endTime > 0 && resource.startTime > 0) {
     resource.resourceLoad = resource.endTime - resource.startTime;
@@ -1642,7 +1752,8 @@ function createResourceRumEvent(resource: SDKRumWorkerResourceState): SDKRumEven
   return {
     eventType: 'resource.complete',
     name: resource.url || resource.resourceId,
-    time: resource.eventTime > 0 ? resource.eventTime : resource.endTime,
+    time: resource.startTime > 0 ? resource.startTime :
+      (resource.eventTime > 0 ? resource.eventTime : resource.endTime),
     dataType: 'rum_app',
     customDataType: resource.customDataType,
     measurement: Constants.FT_MEASUREMENT_RUM_RESOURCE,
@@ -1662,7 +1773,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
   const tags: SDKStringRecord = {};
   mergeStringRecords(tags, resource.context.dynamicTags || {});
   tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
-  tags[Constants.KEY_RUM_ERROR_TYPE] = 'network';
+  tags[Constants.KEY_RUM_ERROR_TYPE] = String(ErrorType.NETWORK);
   tags[Constants.KEY_RUM_ERROR_SOURCE] = 'network';
   tags[Constants.KEY_RUM_ERROR_SITUATION] = 'run';
   tags[Constants.KEY_RUM_ACTION_ID] = resource.context.actionId;
@@ -1767,10 +1878,12 @@ function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecor
 
 function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const fields: SDKStringRecord = {};
+  appendResourceNetworkSnapshot(fields, resource.context.networkSnapshot);
   if (resource.resourceSize > 0) {
     fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resource.resourceSize);
   }
-  if (resource.resourceLoad > 0) {
+  // A request completed within one clock tick has a valid zero duration.
+  if (resource.resourceLoad >= 0) {
     fields[Constants.KEY_RUM_RESOURCE_DURATION] = String(resource.resourceLoad);
   }
   if (resource.resourceDNS > 0) {
@@ -1811,7 +1924,53 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
     fields[Constants.KEY_RUM_RESOURCE_RESPONSE_HEADER] = resource.responseHeader;
   }
   mergeStringRecords(fields, resource.properties);
+  // These are Resource Fields, never Tags. Add them after custom properties
+  // so callers cannot weaken a platform/integration transport observation by
+  // supplying a same-named generic property.
+  if (resource.requestSize > 0) {
+    fields[Constants.KEY_RUM_RESOURCE_REQUEST_SIZE] = String(resource.requestSize);
+  }
+  if (resource.httpProtocol.length > 0) {
+    fields[Constants.KEY_RUM_RESOURCE_HTTP_PROTOCOL] = resource.httpProtocol;
+  }
+  if (resource.connectionReuse !== undefined) {
+    fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(resource.connectionReuse);
+  }
   return fields;
+}
+
+function appendResourceNetworkSnapshot(
+  fields: SDKStringRecord,
+  snapshot: SDKRumResourceNetworkSnapshotDTO | undefined
+): void {
+  if (!snapshot) {
+    return;
+  }
+  fields[Constants.KEY_RUM_RESOURCE_NETWORK_AVAILABLE] = String(snapshot.available);
+  // An unavailable network has no meaningful capability, bandwidth, or signal
+  // values. Defend this invariant again in the Worker for recovered commands.
+  if (!snapshot.available) {
+    return;
+  }
+  if (snapshot.validated !== undefined) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_VALIDATED] = String(snapshot.validated);
+  }
+  if (isValidResourceNetworkMetric(snapshot.downlinkKbps, false)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS] = String(snapshot.downlinkKbps);
+  }
+  if (isValidResourceNetworkMetric(snapshot.uplinkKbps, false)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS] = String(snapshot.uplinkKbps);
+  }
+  if (isValidResourceNetworkMetric(snapshot.signalStrength, true)) {
+    fields[Constants.KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH] = String(snapshot.signalStrength);
+  }
+}
+
+function isValidResourceNetworkMetric(value: number | undefined, allowsZero: boolean): boolean {
+  if (value === undefined || !Number.isInteger(value)) {
+    return false;
+  }
+  return allowsZero ? value >= 0 : value > 0;
 }
 
 function applyResourceCompleteDelta(state: SDKWorkerRuntimeState, viewId: string, actionId: string): void {
@@ -1837,6 +1996,12 @@ function applyRumErrorDelta(state: SDKWorkerRuntimeState, viewId: string, action
   const delta = getOrCreateRumCounterDelta(state, viewId || '', actionId || '');
   delta.viewErrorDelta += viewId && viewId.length > 0 ? 1 : 0;
   delta.actionErrorDelta += actionId && actionId.length > 0 ? 1 : 0;
+  if (viewId && viewId.length > 0) {
+    // A View summary is a persisted aggregate. Error-only changes must make
+    // the associated View eligible for a newer snapshot as well.
+    delta.viewUpdateTimeDelta += 1;
+    state.rumCounterNeedsRumDataGenerate = true;
+  }
   state.rumCounterNeedsActionCloseCheck = true;
   state.rumCounterPendingEventCount++;
 }
@@ -1892,7 +2057,7 @@ function isResourceMetricProperty(key: string): boolean {
 
 function isWorkerResourceError(resource: SDKRumWorkerResourceState): boolean {
   return resource.resourceStatus >= 400 ||
-    (resource.resourceStatus === 0 && resource.requestErrorStack.length > 0);
+    (resource.resourceStatus === 0 && resource.requestErrorStack.length > 0 && !resource.suppressNetworkError);
 }
 
 function handleRumCompletedAction(
@@ -1978,6 +2143,12 @@ function appendCompletedActionDraft(
 
   state.eventSequence++;
   const uuid = action.uuid && action.uuid.length > 0 ? action.uuid : generateWorkerUuid();
+  if (action.shouldCollect === false) {
+    if (action.countViewAction === true && action.viewId && action.viewId.length > 0) {
+      appendViewActionCounterDelta(state, action.viewId);
+    }
+    return;
+  }
   const lineContext = batchLineContext || state.lineContext;
   const tags: SDKStringRecord = {};
   if (lineContext) {
@@ -2147,6 +2318,10 @@ function applyRumCounterUpdate(
     const delta = getOrCreateRumCounterDelta(state, viewId, actionId);
     delta.viewErrorDelta += viewId.length > 0 ? count : 0;
     delta.actionErrorDelta += actionId.length > 0 ? count : 0;
+    if (viewId.length > 0) {
+      delta.viewUpdateTimeDelta += count;
+      state.rumCounterNeedsRumDataGenerate = true;
+    }
     state.rumCounterNeedsActionCloseCheck = true;
     state.rumCounterPendingEventCount += count;
   } else if (updateType === 'resource.complete') {
@@ -2715,11 +2890,9 @@ function prepareUploadRows(
       packageId = provisionalPackageId;
       if (bodySelection.rows.length > 0 && bodySelection.rows.length !== candidateRows.length) {
         const bodyLimitReached = bodySelection.bodyLimitReached;
-        const oversizedRows = bodySelection.oversizedRows;
         packageId = createUploadPackageId(dataType, bodySelection.rows.length, state);
         bodySelection = selectUploadRowsForBody(bodySelection.rows, packageId);
         bodySelection.bodyLimitReached = bodyLimitReached || bodySelection.bodyLimitReached;
-        bodySelection.oversizedRows += oversizedRows;
       }
     } else {
       bodySelection = selectUploadRowsForBody(candidateRows, packageId);
@@ -2787,7 +2960,7 @@ function handleUploadPreparePage(
     state
   );
   const body = prepared.bodySelection.lines.join('\n');
-  const hasMoreData = prepared.deferredRows > 0 || prepared.bodySelection.oversizedRows > 0;
+  const hasMoreData = prepared.deferredRows > 0;
   if (hasMoreData) {
     state.uploadRoundHasMoreData = true;
   }
@@ -2805,7 +2978,6 @@ function handleUploadPreparePage(
     bodyLength: body.length,
     bodyBytes: prepared.bodySelection.bodyBytes,
     bodyLimitReached: prepared.bodySelection.bodyLimitReached,
-    oversizedRows: prepared.bodySelection.oversizedRows,
     transportLimitReached: payload.transportLimitReached === true,
     bodyPreview: body,
     shouldExecute: prepared.rows.length > 0,
@@ -2863,7 +3035,6 @@ async function handleUploadExecutePage(
       bodyLength: 0,
       bodyBytes: 0,
       bodyLimitReached: preparedRows.bodySelection.bodyLimitReached,
-      oversizedRows: preparedRows.bodySelection.oversizedRows,
       transportLimitReached: payload.transportLimitReached === true,
       bodyPreview: '',
       shouldUpload: false,
@@ -2984,7 +3155,6 @@ async function handleUploadExecutePage(
     bodyLength: body.length,
     bodyBytes: bodySelection.bodyBytes,
     bodyLimitReached: bodySelection.bodyLimitReached,
-    oversizedRows: bodySelection.oversizedRows,
     transportLimitReached: payload.transportLimitReached === true,
     // This value is emitted by the UPLOAD BODY PREVIEW diagnostic. Keep every
     // byte of the prepared request body so the log can be compared directly
@@ -3374,7 +3544,6 @@ interface SDKUploadBodySelection {
   lines: string[];
   bodyBytes: number;
   bodyLimitReached: boolean;
-  oversizedRows: number;
 }
 
 function createEmptyUploadBodySelection(): SDKUploadBodySelection {
@@ -3383,7 +3552,6 @@ function createEmptyUploadBodySelection(): SDKUploadBodySelection {
     lines: [],
     bodyBytes: 0,
     bodyLimitReached: false,
-    oversizedRows: 0
   };
 }
 
@@ -3463,22 +3631,22 @@ function selectUploadRowsForBody(rows: SDKUploadRowDTO[], packageId: string): SD
       continue;
     }
     const lineBytes = getUploadUtf8ByteLength(line);
-    if (lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
-      result.bodyLimitReached = true;
-      // Never delete a row merely because a local limit rejected it. Keep it
-      // cached and continue scanning this page so it cannot block a later
-      // uploadable cold-launch record.
-      result.oversizedRows++;
-      continue;
-    }
     const separatorBytes = result.lines.length > 0 ? 1 : 0;
-    if (result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_MAX_BODY_BYTES) {
+    const exceedsBatchTarget = result.bodyBytes + separatorBytes + lineBytes > DATA_UPLOAD_BODY_TARGET_BYTES;
+    if (exceedsBatchTarget && result.lines.length > 0) {
       result.bodyLimitReached = true;
       break;
     }
     result.rows.push(row);
     result.lines.push(line);
     result.bodyBytes += separatorBytes + lineBytes;
+    if (exceedsBatchTarget) {
+      // A large Error is sent alone rather than being retained forever by a
+      // local request-size gate. The target still prevents normal batches
+      // from growing without bound.
+      result.bodyLimitReached = true;
+      break;
+    }
   }
   return result;
 }

@@ -239,5 +239,19 @@ export default function ftDBSpoolDeviceTest() {
       expect(retried.rejectedRecords).assertEqual(0);
       expect(retried.pendingBytes <= testCapacity).assertTrue();
     });
+
+    it('replaysLargeCrashRecordWithinSpoolCapacity', 0, async () => {
+      const row = createLogSyncData('large-native-crash', TEST_NOW_NS + 40);
+      row.setDataString(`df_rum_harmonyos_error,sdk_data_id=${row.getUuid()} error="${'m'.repeat(600 * 1024)}" ${TEST_NOW_NS + 40}`);
+      const paths = createPaths(spoolManager);
+
+      const appended = await FTDBSpoolTaskPoolExecutor.append(paths, 'device.large-native-crash', 0, [row.toJSON()]);
+      const replay = await FTDBSpoolTaskPoolExecutor.prepareReplay(paths, 0, 1);
+
+      expect(appended.appendedRecords).assertEqual(1);
+      expect(appended.rejectedRecords).assertEqual(0);
+      expect(replay.records.length).assertEqual(1);
+      expect(replay.records[0].data.dataString.length).assertEqual(row.getDataString().length);
+    });
   });
 }

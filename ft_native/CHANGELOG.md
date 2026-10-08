@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3-alpha01] - 2026-09-22
+- Exposed `app_running_unique_id` in Native Crash callback data, allowing crash recovery to distinguish separate process runs that share the same crash stack UUID.
+
 ## [0.1.2] - 2026-09-11
 - Streamlined native crash-monitoring diagnostics by moving verbose normal-path NAPI, signal-handler, and crash-parser logs to Debug and removing redundant lifecycle logs. No native crash-collection API or behavior changed.
 
