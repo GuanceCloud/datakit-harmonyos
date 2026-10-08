@@ -14,7 +14,8 @@ import {
   SDKUploadRowDTO
 } from '../thread/SDKWorkerProtocol';
 import { FTCacheCoordinator } from './FTCacheCoordinator';
-import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse } from './FTDBTaskPoolExecutor';
+import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse,
+  FTDBTaskPoolReplayMetadata } from './FTDBTaskPoolExecutor';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -43,6 +44,7 @@ enum FTDBTaskPoolCommand {
   CLEANUP_EXPIRED_RUM_ACTION = 'cleanupExpiredRumAction',
   UPSERT_RUM_VIEW = 'upsertRumView',
   UPDATE_RUM_VIEW = 'updateRumView',
+  UPDATE_RUM_VIEW_REPLAY = 'updateRumViewReplay',
   CLOSE_RUM_VIEW = 'closeRumView',
   UPDATE_VIEW_UPLOAD_TIME = 'updateViewUploadTime',
   ACKNOWLEDGE_VIEW = 'acknowledgeView',
@@ -213,6 +215,8 @@ interface FTDBTaskPoolRequest {
   view?: ViewBeanJSON;
   actionBean?: ActionBeanJSON;
   viewId?: string;
+  replaySessionId?: string;
+  replayMetadata?: FTDBTaskPoolReplayMetadata;
   actionId?: string;
   loadTime?: number;
   timeSpent?: number;
@@ -286,11 +290,20 @@ interface FTDBTaskPoolViewAttrParts {
   property: Record<string, object>;
   tags: Record<string, string>;
   collectType: CollectType | null;
+  hasReplay: boolean;
+  recordsCount: number;
+  sampledOnReplayError: boolean;
 }
 
 interface FTDBTaskPoolActionAttrParts {
   extraAttr: Record<string, object>;
   collectType: CollectType | null;
+}
+
+interface FTDBTaskPoolReplayMarker {
+  value: boolean;
+  recordsCount: number;
+  sampledOnReplayError: boolean;
 }
 
 enum FTDBTaskPoolCacheCategory {
@@ -460,6 +473,8 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
         return okResponse(undefined, request.view ? await upsertRumViewInTaskPool(rdbStore, request.view) : false);
       case FTDBTaskPoolCommand.UPDATE_RUM_VIEW:
         return okResponse(undefined, request.view ? await updateRumViewInTaskPool(rdbStore, request.view) : false);
+      case FTDBTaskPoolCommand.UPDATE_RUM_VIEW_REPLAY:
+        return okResponse(undefined, await updateRumViewReplayInTaskPool(rdbStore, request));
       case FTDBTaskPoolCommand.CLOSE_RUM_VIEW:
         return okResponse(undefined, await closeRumViewInTaskPool(
           rdbStore,
@@ -1805,7 +1820,9 @@ function stringifyViewExtraAttr(view: ViewBeanJSON): string {
   const keys = Object.keys(extraAttr);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
-    obj[key] = extraAttr[key];
+    if (key !== Constants.KEY_HAS_REPLAY) {
+      obj[key] = extraAttr[key];
+    }
   }
   const property = view.property ? view.property : emptyObjectRecord();
   const tags = view.tags ? view.tags : emptyStringRecord();
@@ -1814,6 +1831,12 @@ function stringifyViewExtraAttr(view: ViewBeanJSON): string {
   if (view.collectType) {
     obj[Constants.KEY_RUM_COLLECT_TYPE] = view.collectType;
   }
+  const replayMarker: FTDBTaskPoolReplayMarker = {
+    value: view.hasReplay === true,
+    recordsCount: view.recordsCount === undefined ? 0 : view.recordsCount,
+    sampledOnReplayError: view.sampledOnReplayError === true
+  };
+  obj[Constants.KEY_HAS_REPLAY] = replayMarker;
   return JSON.stringify(obj);
 }
 
@@ -1835,6 +1858,9 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
   const property: Record<string, object> = {};
   const tags: Record<string, string> = {};
   let collectType: CollectType | null = null;
+  let hasReplay = false;
+  let recordsCount = 0;
+  let sampledOnReplayError = false;
   const keys = Object.keys(parsed);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
@@ -1855,6 +1881,12 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
       }
     } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
       collectType = parseCollectType(String(value));
+    } else if (key === Constants.KEY_HAS_REPLAY && value && typeof value === 'object') {
+      const marker = value as FTDBTaskPoolReplayMarker;
+      hasReplay = marker.value === true;
+      const count = Number(marker.recordsCount);
+      recordsCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+      sampledOnReplayError = marker.sampledOnReplayError === true;
     } else {
       extraAttr[key] = value;
     }
@@ -1863,7 +1895,10 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
     extraAttr,
     property,
     tags,
-    collectType
+    collectType,
+    hasReplay,
+    recordsCount,
+    sampledOnReplayError
   };
 }
 
@@ -1945,6 +1980,9 @@ function readViewFromResultSet(resultSet: relationalStore.ResultSet): ViewBeanJS
     dataUpdateTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPDATE_TIME)),
     dataUploadTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_DATA_UPLOAD_TIME)),
     viewUpdateTime: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_VIEW_UPDATE_TIME)),
+    hasReplay: attr.hasReplay,
+    recordsCount: attr.recordsCount,
+    sampledOnReplayError: attr.sampledOnReplayError,
     extraAttr: attr.extraAttr,
     property: attr.property,
     tags: attr.tags,
@@ -2021,13 +2059,58 @@ async function closeRumViewInTaskPool(
   values[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
   values[FTSQL.RUM_COLUMN_VIEW_LOAD_TIME] = loadTime;
   values[FTSQL.RUM_COLUMN_VIEW_TIME_SPENT] = timeSpent;
-  values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = attr;
+  // A Replay Worker can commit while closeView is awaiting monitor data.
+  // Preserve newer Replay metadata when applying that older closure snapshot.
+  const existingView = await queryRumViewByIdInTaskPool(rdbStore, viewId);
+  const incomingAttr = parseJsonRecord(attr);
+  const incomingReplay = splitViewExtraAttr(attr);
+  if (existingView !== null) {
+    const marker: FTDBTaskPoolReplayMarker = {
+      value: existingView.hasReplay === true || incomingReplay.hasReplay,
+      recordsCount: Math.max(existingView.recordsCount || 0, incomingReplay.recordsCount),
+      sampledOnReplayError: existingView.sampledOnReplayError === true || incomingReplay.sampledOnReplayError
+    };
+    incomingAttr[Constants.KEY_HAS_REPLAY] = marker;
+  }
+  values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = JSON.stringify(incomingAttr);
   values[FTSQL.RUM_DATA_UPDATE_TIME] = now;
   if (newSessionId && newSessionId.length > 0) {
     values[FTSQL.RUM_COLUMN_SESSION_ID] = newSessionId;
   }
   const updated = await rdbStore.update(values, predicates);
   return updated > 0;
+}
+
+/** Runs in the ordered DB lane and never overwrites counters or View closure. */
+async function updateRumViewReplayInTaskPool(
+  rdbStore: relationalStore.RdbStore,
+  request: FTDBTaskPoolRequest
+): Promise<boolean> {
+  const metadata = request.replayMetadata;
+  if (metadata === undefined || !metadata.hasReplay || !Number.isFinite(metadata.recordsCount) ||
+    metadata.recordsCount <= 0 || !request.replaySessionId) {
+    return false;
+  }
+  const view = await queryRumViewByIdInTaskPool(rdbStore, request.viewId || '');
+  if (view === null || view.sessionId !== request.replaySessionId) {
+    return false;
+  }
+  const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
+  const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
+  if (view.hasReplay === true && count === view.recordsCount && sampledOnError === view.sampledOnReplayError) {
+    return false;
+  }
+  view.hasReplay = true;
+  view.recordsCount = count;
+  view.sampledOnReplayError = sampledOnError;
+  const values = {} as relationalStore.ValuesBucket;
+  values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = stringifyViewExtraAttr(view);
+  values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
+  values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(request.now || Date.now(), view.dataUpdateTime + 1, view.dataUploadTime + 1);
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+  predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
+  predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, view.sessionId);
+  return await rdbStore.update(values, predicates) > 0;
 }
 
 async function updateViewUploadTimeInTaskPool(

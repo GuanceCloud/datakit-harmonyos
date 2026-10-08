@@ -17,6 +17,7 @@ import {
 import FTTrackInner from '../FTTrackInner';
 import {
   FTDBTaskPoolExecutor,
+  FTDBTaskPoolReplayMetadata,
   FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
@@ -69,6 +70,13 @@ import preferences from '@ohos.data.preferences';
 import { FTRUMConfigManager } from './FTRUMConfigManager';
 import { DataType } from '../enum/Enums';
 import { FTCrashFreeDuration, FTCrashFreeDurationManager } from '../monitor/FTCrashFreeDurationManager';
+import {
+  FTSessionReplayBridgeRegistry,
+  FTSessionReplayErrorContext,
+  FTSessionReplayRUMContext,
+  FTSessionReplaySessionContext,
+  FTSessionReplayViewMetadata
+} from '../sessionreplay/FTSessionReplayBridge';
 
 /**
  * Property wrapper interface for error properties
@@ -508,11 +516,19 @@ export class FTRUMInnerManager {
    * View snapshot have crossed the durable cache boundary.
    */
   private protectedCrashRecoveryViewIds: Set<string> = new Set<string>();
+  private readonly replayCurrentViewProvider = (): FTSessionReplayRUMContext | null => {
+    const view = this.activeView;
+    if (view === null || view.isClose()) {
+      return null;
+    }
+    return this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+  };
 
 
   // Maximum size for Set collections to prevent memory leak (using Constants.MAX_SET_SIZE_ACTION for Action, MAX_SET_SIZE_VIEW for View)
   
   private constructor() {
+    this.bindSessionReplayCallbacks();
     this.initSessionTimer();
     // Note: Session ID is created in field initialization, but checkSessionKeep will be called
     // in initParams() after sampling rates are set from FTRUMConfig
@@ -1629,6 +1645,7 @@ export class FTRUMInnerManager {
       viewName: actionBean.getViewName(),
       viewReferrer: actionBean.getViewReferrer(),
       duration: actionBean.getDuration(),
+      hasReplay: actionBean.isHasReplay(),
       errorCount: actionBean.getErrorCount(),
       longTaskCount: actionBean.getLongTaskCount(),
       resourceCount: actionBean.getResourceCount(),
@@ -1880,6 +1897,15 @@ export class FTRUMInnerManager {
       }
       fieldsMap.set(Constants.KEY_RUM_VIEW_IS_ACTIVE, (!viewBean.getIsClose()).toString());
       fieldsMap.set(Constants.KEY_SDK_VIEW_UPDATE_TIME, viewBean.getViewUpdateTime().toString());
+      if (viewBean.isHasReplay()) {
+        fieldsMap.set(Constants.KEY_HAS_REPLAY, 'true');
+      }
+      if (viewBean.getRecordsCount() > 0) {
+        fieldsMap.set(Constants.KEY_SESSION_REPLAY_RECORDS_COUNT, viewBean.getRecordsCount().toString());
+      }
+      if (viewBean.isSampledOnReplayError()) {
+        fieldsMap.set(Constants.KEY_SAMPLED_FOR_ERROR_REPLAY, 'true');
+      }
       
       // Device performance fields (aligned with Android: conditional based on DeviceMetricsMonitorType)
       // Get monitor data from ViewBean.extraAttr (set by FTMonitorManager.attachMonitorData)
@@ -2200,6 +2226,7 @@ export class FTRUMInnerManager {
   }
 
   private resetInternalState(): void {
+    FTSessionReplayBridgeRegistry.clearRUMCallbacks(this.replayCurrentViewProvider);
     if (this.actionCheckTimer !== null) {
       clearTimeout(this.actionCheckTimer);
       this.actionCheckTimer = null;
@@ -2487,6 +2514,7 @@ export class FTRUMInnerManager {
    * @param config RUM configuration
    */
   public initParams(config: FTRUMConfig): void {
+    this.bindSessionReplayCallbacks();
     // Save config reference
     this.rumConfig = config;
     
@@ -2567,6 +2595,328 @@ export class FTRUMInnerManager {
     return this.context;
   }
 
+  private createSessionReplayLinkContext(view: ActiveViewBean): Record<string, string | number | boolean> {
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicTagKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicTagKeys.length; index++) {
+      const key = dynamicTagKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    const viewTags = view.getTags();
+    const viewTagKeys = Object.keys(viewTags);
+    for (let index = 0; index < viewTagKeys.length; index++) {
+      const key = viewTagKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, viewTags[key]);
+    }
+    const properties = view.getProperty();
+    const propertyKeys = Object.keys(properties);
+    for (let index = 0; index < propertyKeys.length; index++) {
+      const key = propertyKeys[index];
+      this.appendSessionReplayObjectLinkValue(result, linkKeys, key, properties[key]);
+    }
+    return result;
+  }
+
+  private appendSessionReplayObjectLinkValue(
+    target: Record<string, string | number | boolean>,
+    linkKeys: Array<string>,
+    key: string,
+    value: object
+  ): void {
+    if (value instanceof String) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.toString());
+    } else if (value instanceof Number) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.valueOf());
+    } else if (value instanceof Boolean) {
+      this.appendSessionReplayScalarLinkValue(target, linkKeys, key, value.valueOf());
+    }
+  }
+
+  private appendSessionReplayScalarLinkValue(
+    target: Record<string, string | number | boolean>,
+    linkKeys: Array<string>,
+    key: string,
+    value: string | number | boolean
+  ): void {
+    for (let index = 0; index < linkKeys.length; index++) {
+      if (key.indexOf(linkKeys[index]) >= 0) {
+        target[key] = value;
+        return;
+      }
+    }
+  }
+
+  private createSessionReplayRUMContext(view: ActiveViewBean, timestamp: number): FTSessionReplayRUMContext {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplayRUMContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      sessionId: view.getSessionId(),
+      viewId: view.getId(),
+      viewName: view.getViewName(),
+      viewReferrer: view.getViewReferrer(),
+      linkContext: this.createSessionReplayLinkContext(view),
+      timestamp
+    };
+    return context;
+  }
+
+  private notifySessionReplayViewStarted(view: ActiveViewBean): void {
+    const context = this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+    FTSessionReplayBridgeRegistry.notifyViewStarted(context);
+    this.applySessionReplayViewMetadata(view, context);
+  }
+
+  private notifySessionReplayViewStopped(view: ActiveViewBean): void {
+    const context = this.createSessionReplayRUMContext(view, Utils.getCurrentNanoTime());
+    FTSessionReplayBridgeRegistry.notifyViewStopped(context);
+    this.applySessionReplayViewMetadata(view, context);
+  }
+
+  private notifySessionReplayError(view: ActiveViewBean | null, timestamp: number, errorType: string, state: AppState): void {
+    if (view === null) {
+      return;
+    }
+    const base = this.createSessionReplayRUMContext(view, timestamp);
+    const context: FTSessionReplayErrorContext = {
+      applicationId: base.applicationId,
+      sessionId: base.sessionId,
+      viewId: base.viewId,
+      viewName: base.viewName,
+      viewReferrer: base.viewReferrer,
+      linkContext: base.linkContext,
+      timestamp: base.timestamp,
+      errorType,
+      appState: state.toString()
+    };
+    FTSessionReplayBridgeRegistry.notifyError(context);
+    this.applySessionReplayViewMetadata(view, base);
+  }
+
+  /**
+   * A Resource can fail after navigation has made another View active. Capture
+   * a fresh ArkUI snapshot only for the Resource's still-active View; otherwise
+   * promote the matching error-sampled session without attaching the current
+   * page's tree to a historical Resource error.
+   */
+  private notifySessionReplayResourceError(resource: ResourceBean, timestamp: number): void {
+    const activeView = this.activeView;
+    if (activeView !== null && activeView.getId() === resource.viewId &&
+      activeView.getSessionId() === resource.sessionId) {
+      this.notifySessionReplayError(activeView, timestamp, ErrorType.NETWORK.toString(), AppState.RUN);
+      return;
+    }
+    if (resource.sessionId.length === 0 || resource.viewId.length === 0) {
+      return;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplayErrorContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      sessionId: resource.sessionId,
+      viewId: resource.viewId,
+      viewName: resource.viewName,
+      viewReferrer: resource.viewReferrer,
+      linkContext: this.createSessionReplayResourceLinkContext(resource),
+      timestamp,
+      errorType: ErrorType.NETWORK.toString(),
+      appState: AppState.UNKNOWN.toString()
+    };
+    if (context.applicationId.length > 0) {
+      FTSessionReplayBridgeRegistry.notifyErrorTimeline(context);
+    }
+  }
+
+  /**
+   * Crash recovery may run before a new RUM View exists. Use the persisted
+   * recovery context or legacy crash properties to notify Replay before normal
+   * RUM sampling examines the newly-created session.
+   */
+  private notifySessionReplayPersistedCrashError(
+    property: Record<string, object> | null,
+    timestamp: number,
+    errorType: string,
+    state: AppState,
+    recoveryContext: FTRUMCrashRecoveryContext | null
+  ): void {
+    if (recoveryContext === null &&
+      (property === null || this.readSessionReplayProperty(property, Constants.KEY_NATIVE_CRASH) !== 'true')) {
+      return;
+    }
+    const sessionId = recoveryContext !== null ? recoveryContext.sessionId :
+      this.readSessionReplayProperty(property, Constants.KEY_RUM_SESSION_ID);
+    const viewId = recoveryContext !== null ? recoveryContext.viewId :
+      this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_ID);
+    if (sessionId.length === 0 || viewId.length === 0 || viewId === 'unknown' || viewId === 'error') {
+      return;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const applicationId = config === null ? '' : config.getRumAppId();
+    if (applicationId.length === 0) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.notifyErrorTimeline({
+      applicationId,
+      sessionId,
+      viewId,
+      viewName: recoveryContext !== null ? recoveryContext.viewName :
+        this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_NAME),
+      viewReferrer: recoveryContext !== null ? recoveryContext.viewReferrer :
+        this.readSessionReplayProperty(property, Constants.KEY_RUM_VIEW_REFERRER),
+      linkContext: this.createSessionReplayResourceLinkContextForStoredView(),
+      timestamp,
+      errorType,
+      appState: state.toString()
+    });
+  }
+
+  private readSessionReplayProperty(property: Record<string, object> | null, key: string): string {
+    if (property === null) {
+      return '';
+    }
+    const raw = property[key];
+    if (raw === undefined || raw === null) {
+      return '';
+    }
+    const wrapper = raw as PropertyWrapper;
+    if (wrapper.value !== undefined && wrapper.value !== null) {
+      return String(wrapper.value);
+    }
+    return String(raw);
+  }
+
+  /** Restored crashes have no live View; retain only configured app-level keys. */
+  private createSessionReplayResourceLinkContextForStoredView(): Record<string, string | number | boolean> {
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicKeys.length; index++) {
+      const key = dynamicKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    return result;
+  }
+
+  /**
+   * A completed Resource no longer owns an ActiveViewBean. Preserve selected
+   * application-level link keys, while live matching Views retain their full
+   * View tags and properties through createSessionReplayLinkContext().
+   */
+  private createSessionReplayResourceLinkContext(resource: ResourceBean): Record<string, string | number | boolean> {
+    const activeView = this.activeView;
+    if (activeView !== null && activeView.getId() === resource.viewId &&
+      activeView.getSessionId() === resource.sessionId) {
+      return this.createSessionReplayLinkContext(activeView);
+    }
+    const result: Record<string, string | number | boolean> = {};
+    const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    if (linkKeys.length === 0) {
+      return result;
+    }
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config !== null) {
+      config.getGlobalContext().forEach((value: object, key: string): void => {
+        this.appendSessionReplayObjectLinkValue(result, linkKeys, key, value);
+      });
+    }
+    const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+    const dynamicKeys = Object.keys(dynamicTags);
+    for (let index = 0; index < dynamicKeys.length; index++) {
+      const key = dynamicKeys[index];
+      this.appendSessionReplayScalarLinkValue(result, linkKeys, key, dynamicTags[key]);
+    }
+    return result;
+  }
+
+  private applySessionReplayViewMetadata(view: ActiveViewBean, context: FTSessionReplayRUMContext): void {
+    const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
+    this.mergeSessionReplayViewMetadata(view, metadata);
+  }
+
+  private mergeSessionReplayViewMetadata(view: ActiveViewBean, metadata: FTSessionReplayViewMetadata): void {
+    if (metadata.hasReplay) {
+      view.setHasReplay(true);
+    }
+    if (metadata.recordsCount > view.getRecordsCount()) {
+      view.setRecordsCount(metadata.recordsCount);
+    }
+    if (metadata.sampledOnError) {
+      view.setSampledOnReplayError(true);
+    }
+  }
+
+  private bindSessionReplayCallbacks(): void {
+    FTSessionReplayBridgeRegistry.bindRUMCallbacks(this.replayCurrentViewProvider,
+      (context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata): void => {
+        this.onSessionReplayMetadataChanged(context, metadata);
+      });
+  }
+
+  private onSessionReplayMetadataChanged(
+    replayContext: FTSessionReplayRUMContext,
+    metadata: FTSessionReplayViewMetadata
+  ): void {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config === null || replayContext.applicationId !== config.getRumAppId() ||
+      replayContext.sessionId.length === 0 || replayContext.viewId.length === 0 ||
+      !metadata.hasReplay || !Number.isFinite(metadata.recordsCount) || metadata.recordsCount <= 0) {
+      return;
+    }
+    const view = this.activeView;
+    if (view !== null && view.getId() === replayContext.viewId && view.getSessionId() === replayContext.sessionId) {
+      this.mergeSessionReplayViewMetadata(view, metadata);
+    }
+    const context = this.context;
+    if (context !== null) {
+      const replayMetadata: FTDBTaskPoolReplayMetadata = {
+        hasReplay: metadata.hasReplay,
+        recordsCount: metadata.recordsCount,
+        sampledOnError: metadata.sampledOnError
+      };
+      // Update only Replay attributes, including when the captured View has
+      // already closed. Full View writes would overwrite atomic RUM counters.
+      FTDBTaskPoolExecutor.updateRumViewReplay(context, replayContext.viewId, replayContext.sessionId, replayMetadata)
+        .then((updated: boolean): void => {
+          if (updated && this.context === context) {
+            this.generateRumData();
+          }
+        })
+        .catch((error: Error): void => {
+          FTInnerLogger.w(TAG, `Failed to persist Replay View metadata: ${error.message}`);
+        });
+    }
+  }
+
+  private notifySessionReplaySessionRenewed(previousSessionId: string, sessionId: string): void {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    const context: FTSessionReplaySessionContext = {
+      applicationId: config === null ? '' : config.getRumAppId(),
+      previousSessionId,
+      sessionId,
+      timestamp: Utils.getCurrentNanoTime()
+    };
+    FTSessionReplayBridgeRegistry.notifySessionRenewed(context);
+  }
+
   /**
    * Start view
    */
@@ -2624,6 +2974,7 @@ export class FTRUMInnerManager {
         }
         
         const closedViewName = this.activeView.getViewName();
+        this.notifySessionReplayViewStopped(this.activeView);
         this.activeView.close();
         await this.closeView(this.activeView);
         
@@ -2680,6 +3031,7 @@ export class FTRUMInnerManager {
       this.collectInitialViewMetrics(this.activeView);
 
       // Initialize view
+      this.notifySessionReplayViewStarted(this.activeView);
       this.initView(this.activeView);
       this.generateRumData();
       // Save RUM context to preferences for crash recovery
@@ -2744,6 +3096,7 @@ export class FTRUMInnerManager {
       this.activeView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       
       // Close view
+      this.notifySessionReplayViewStopped(this.activeView);
       this.activeView.close();
       
       // Store view name before closing
@@ -2999,6 +3352,7 @@ export class FTRUMInnerManager {
       const viewId = view.getId();
       const viewName = view.getViewName();
       const viewReferrer = view.getViewReferrer();
+      const hasReplay = view.isHasReplay();
       const collectType = this.checkSessionWillCollect(this.sessionId);
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
@@ -3020,6 +3374,7 @@ export class FTRUMInnerManager {
         viewName,
         viewReferrer,
         duration: actualDuration,
+        hasReplay,
         errorCount: 0,
         longTaskCount: 0,
         resourceCount: 0,
@@ -3844,6 +4199,7 @@ export class FTRUMInnerManager {
     const validRecoveryContext: FTRUMCrashRecoveryContext | null =
       hasFTRUMCrashRecoveryContext(recoveryContext) ? recoveryContext as FTRUMCrashRecoveryContext : null;
     try {
+      this.notifySessionReplayPersistedCrashError(actualProperty, actualDateline, errorType, state, validRecoveryContext);
       // Refresh session
       this.checkSessionRefresh(true);
       const collectType = this.checkSessionWillCollect(this.sessionId);
@@ -3908,6 +4264,10 @@ export class FTRUMInnerManager {
 	      }
 
       effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
+
+      if (crashFreeDuration === undefined || crashFreeDuration === null || !crashFreeDuration.isPreCrash) {
+        this.notifySessionReplayError(this.activeView, actualDateline, errorType, state);
+      }
 
 	      if (actualCallBack === null && crashFreeDuration === undefined) {
 	        const context = validRecoveryContext !== null ?
@@ -4287,7 +4647,9 @@ export class FTRUMInnerManager {
       await this.syntheticCloseBarrier;
       await this.closeSyntheticViews();
       this.lastSessionTime = now;
+      const oldSessionId = this.sessionId;
       this.sessionId = Utils.generateUUID();
+      this.notifySessionReplaySessionRenewed(oldSessionId, this.sessionId);
       
       FTInnerLogger.d(TAG, `Session Track -> New SessionId: ${this.sessionId}, longTimeSessionReset: ${longTimeSession}`);
       
@@ -4298,6 +4660,7 @@ export class FTRUMInnerManager {
       if (checkRefreshView) {
         await this.closeLaunchView();
         if (this.activeView && !this.activeView.isClose()) {
+          this.notifySessionReplayViewStopped(this.activeView);
           this.activeView.close();
           // Close the predecessor with its original Session and sampling decision.
           await this.closeView(this.activeView);
@@ -4321,6 +4684,7 @@ export class FTRUMInnerManager {
           this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
           FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
           this.collectInitialViewMetrics(this.activeView);
+          this.notifySessionReplayViewStarted(this.activeView);
           this.initView(this.activeView);
           
           FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
@@ -4778,6 +5142,7 @@ export class FTRUMInnerManager {
       } else {
         SyncTaskManager.getInstance().setErrorTimeLine(time, null);
       }
+      this.notifySessionReplayResourceError(resourceBean, time);
       
       // Build error tags (aligned with Android SDK)
       // Merge with global RUM context and dynamic tags (aligned with putRUMResourcePerformance)
@@ -5234,6 +5599,7 @@ export class FTRUMInnerManager {
    * Shutdown RUM manager
    */
   public async shutdown(): Promise<void> {
+    FTSessionReplayBridgeRegistry.clearRUMCallbacks(this.replayCurrentViewProvider);
     try {
       // Clear timers
       if (this.actionCheckTimer) {
@@ -5258,6 +5624,7 @@ export class FTRUMInnerManager {
       }
       
       if (this.activeView && !this.activeView.isClose()) {
+        this.notifySessionReplayViewStopped(this.activeView);
         this.activeView.close();
         await this.closeView(this.activeView);
       }

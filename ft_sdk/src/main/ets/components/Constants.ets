@@ -186,6 +186,8 @@ export class Constants {
    * Session replay related
    */
   static readonly KEY_HAS_REPLAY = "has_replay";
+  static readonly KEY_SESSION_REPLAY_RECORDS_COUNT = "records_count";
+  static readonly KEY_SAMPLED_FOR_ERROR_REPLAY = "sampled_on_reply_error";
   
   /**
    * Log status key

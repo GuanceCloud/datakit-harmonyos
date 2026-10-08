@@ -36,6 +36,13 @@ import {
   RemoteConfigBean
 } from '@guancecloud/ft_sdk/Index';
 import { FTColdLaunchBridge } from '@guancecloud/ft_sdk/Index';
+import {
+  FTSessionReplay,
+  FTSessionReplayConfig,
+  ImagePrivacy,
+  TextAndInputPrivacy,
+  TouchPrivacy
+} from '@guancecloud/ft_session_replay';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
 import { DemoGlobalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
@@ -512,7 +519,23 @@ export default class EntryAbility extends UIAbility {
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
         // .setRumCacheLimitCount(60000)
 
+      // Configure Replay without starting collection. The demo page's Enable
+      // button calls start() when the user chooses to record.
+      // SHOW is intentional for the demo touch-signal verification button;
+      // production integrations should keep the SDK default of HIDE.
+      const sessionReplayConfig = new FTSessionReplayConfig()
+        .setSampleRate(1)
+        .setSessionReplayOnErrorSampleRate(0)
+        // Preserve ordinary demo copy and local assets while keeping text-input
+        // privacy on. The library defaults remain MASK_ALL/MASK_ALL for apps
+        // that do not explicitly select this validation profile.
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_NONE)
+        .setTouchPrivacy(TouchPrivacy.SHOW)
+        .setDelayInit(true);
+      FTSessionReplay.getInstance().init(sessionReplayConfig, context.filesDir);
       FTSDK.installRUMConfig(rumConfig);
+      DemoLogger.i(LOG_TAG, 'Session Replay configured for manual start');
 
       // Bind user data using new UserData class with persistence
       const userData = new UserData();

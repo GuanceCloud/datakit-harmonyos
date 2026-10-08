@@ -1,13 +1,14 @@
 {
   "name": "@cloudcare/hvigor-ohos-plugin",
-  "version": "0.1.1",
-  "description": "Guance HarmonyOS Hvigor plugin for automatic console, HiLog, and cold-launch collection.",
+  "version": "0.1.2-alpha01",
+  "description": "Guance HarmonyOS Hvigor plugin for automatic console, cold-launch, and Session Replay page-root collection.",
   "main": "index.js",
   "files": [
     "index.js",
     "hvigorCompile/ft-source-transform-host.ts",
     "hvigorCompile/ft-console-log-transform.ts",
     "hvigorCompile/ft-cold-launch-transform.ts",
+    "hvigorCompile/ft-session-replay-transform.ts",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -27,10 +28,14 @@
     "node": ">=18"
   },
   "peerDependencies": {
-    "@guancecloud/ft_sdk": ">=0.1.17"
+    "@guancecloud/ft_sdk": ">=0.1.17",
+    "@guancecloud/ft_session_replay": ">=0.1.0-alpha01"
   },
   "peerDependenciesMeta": {
     "@guancecloud/ft_sdk": {
+      "optional": true
+    },
+    "@guancecloud/ft_session_replay": {
       "optional": true
     }
   }

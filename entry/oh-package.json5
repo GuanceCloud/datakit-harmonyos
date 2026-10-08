@@ -9,6 +9,7 @@
     "@ohos/axios": "2.2.8",
     "@guancecloud/ft_sdk":"file:../ft_sdk",
     "@guancecloud/ft_sdk_ext":"file:../ft_sdk_ext",
+    "@guancecloud/ft_session_replay":"file:../ft_session_replay",
     "@guancecloud/ft_native": "file:../ft_native"
   }
 }

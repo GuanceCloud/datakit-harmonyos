@@ -59,20 +59,28 @@ export default function samplingUnitTest() {
     it('viewAndActionShouldKeepSamplingDecisionOutsideReportedAttributes', 0, () => {
       const view = new ActiveViewBean('Index', 'root', 0, 'previous-session');
       view.setCollectType(CollectType.SAMPLING);
+      view.setHasReplay(true);
+      view.setRecordsCount(3);
+      view.setSampledOnReplayError(true);
       const storedView = view.convertToViewBean();
       expect(storedView.getCollectType()).assertEqual(CollectType.SAMPLING);
       const restoredView = new ViewBean('view', 'Index', 1);
       restoredView.setAttrJsonString(storedView.getAttrJsonString());
       expect(restoredView.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(restoredView.isHasReplay()).assertTrue();
+      expect(restoredView.getRecordsCount()).assertEqual(3);
+      expect(restoredView.isSampledOnReplayError()).assertTrue();
       expect(Object.keys(restoredView.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
 
       const action = new ActiveActionBean('tap', 'click', 'previous-session', view.getId(), 'Index', 'root');
       action.setCollectType(CollectType.SAMPLING);
+      action.setHasReplay(true);
       const storedAction = action.convertToActionBean();
       expect(storedAction.getCollectType()).assertEqual(CollectType.SAMPLING);
       const restoredAction = new ActionBean('action', 'tap', 'click', 1);
       restoredAction.setAttrJsonString(storedAction.getAttrJsonString());
       expect(restoredAction.getCollectType()).assertEqual(CollectType.SAMPLING);
+      expect(restoredAction.isHasReplay()).assertTrue();
       expect(Object.keys(restoredAction.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
     });
 

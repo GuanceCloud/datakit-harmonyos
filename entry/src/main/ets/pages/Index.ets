@@ -78,6 +78,20 @@ struct Index {
             .margin({ bottom: 10 })
 
 
+            // Session Replay verification page
+            ListItem() {
+              Button() {
+                Text("Session Replay Demo")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#0E7490')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/SessionReplayPocPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Action Count test page
             ListItem() {
               Button() {

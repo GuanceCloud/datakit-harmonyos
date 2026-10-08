@@ -15,6 +15,8 @@ interface ActiveViewBeanJSON {
     loadTime: number;
     isClose: boolean;
     hasReplay: boolean;
+    recordsCount: number;
+    sampledOnReplayError: boolean;
     duration: number;
     actionCount: number;
     errorCount: number;
@@ -41,6 +43,8 @@ export class ActiveViewBean {
   private loadTime: number;
   private isClosed: boolean = false;
   private hasReplay: boolean = false;
+  private recordsCount: number = 0;
+  private sampledOnReplayError: boolean = false;
   private property: Record<string, object> = {};
   private tags: Record<string, string> = {};
   private extraAttr: Map<string, string | number | boolean> = new Map();
@@ -182,6 +186,22 @@ export class ActiveViewBean {
    */
   public setHasReplay(hasReplay: boolean): void {
     this.hasReplay = hasReplay;
+  }
+
+  public getRecordsCount(): number {
+    return this.recordsCount;
+  }
+
+  public setRecordsCount(recordsCount: number): void {
+    this.recordsCount = Math.max(0, Math.floor(recordsCount));
+  }
+
+  public isSampledOnReplayError(): boolean {
+    return this.sampledOnReplayError;
+  }
+
+  public setSampledOnReplayError(sampledOnReplayError: boolean): void {
+    this.sampledOnReplayError = sampledOnReplayError;
   }
   
   /**
@@ -424,6 +444,9 @@ export class ActiveViewBean {
     viewBean.setMonotonicStartTime(this.startTimeNanoForDuration);
     viewBean.setViewLoadTime(this.loadTime);
     viewBean.setIsClose(this.isClosed);
+    viewBean.setHasReplay(this.hasReplay);
+    viewBean.setRecordsCount(this.recordsCount);
+    viewBean.setSampledOnReplayError(this.sampledOnReplayError);
     viewBean.setActionCount(this.actionCount);
     viewBean.setErrorCount(this.errorCount);
     viewBean.setResourceCount(this.resourceCount);
@@ -499,6 +522,8 @@ export class ActiveViewBean {
       loadTime: this.loadTime,
       isClose: this.isClosed,
       hasReplay: this.hasReplay,
+      recordsCount: this.recordsCount,
+      sampledOnReplayError: this.sampledOnReplayError,
       duration: this.getDuration(),
       actionCount: this.actionCount,
       errorCount: this.errorCount,

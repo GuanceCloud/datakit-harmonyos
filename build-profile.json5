@@ -82,6 +82,10 @@
       "srcPath": "./ft_sdk_ext",
     },
     {
+      "name": "ft_session_replay",
+      "srcPath": "./ft_session_replay"
+    },
+    {
       "name": "ft_native",
       "srcPath": "./ft_native"
     }

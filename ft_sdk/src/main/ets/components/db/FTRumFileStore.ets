@@ -19,7 +19,7 @@ export class FTRumFileStore {
 
   static handles(command: string): boolean {
     return ['cleanupExpiredRumView', 'cleanupExpiredRumAction', 'upsertRumView', 'updateRumView',
-      'closeRumView', 'updateViewUploadTime', 'increaseViewAction', 'getRumPendingResource',
+      'closeRumView', 'updateRumViewReplay', 'updateViewUploadTime', 'increaseViewAction', 'getRumPendingResource',
       'forceClearRumPendingResource', 'getActionInfo', 'applyRumCounterDeltas', 'updateViewUpdateTime',
       'setViewLongTaskDuration',
       'insertRumAction', 'closeRumAction', 'querySumAction', 'getActionCounts', 'querySumView',
@@ -73,6 +73,25 @@ export class FTRumFileStore {
           this.put(changes, 'view', view.id, view);
         }
         break;
+      case 'updateRumViewReplay': {
+        const metadata = request.replayMetadata;
+        response.value = false;
+        if (view && view.sessionId === request.replaySessionId && metadata && metadata.hasReplay &&
+          Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0) {
+          const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
+          const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
+          if (view.hasReplay !== true || count !== view.recordsCount || sampledOnError !== view.sampledOnReplayError) {
+            view.hasReplay = true;
+            view.recordsCount = count;
+            view.sampledOnReplayError = sampledOnError;
+            view.viewUpdateTime++;
+            view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
+            this.put(changes, 'view', view.id, view);
+            response.value = true;
+          }
+        }
+        break;
+      }
       case 'closeRumAction':
         response.closeAction = { wasClosed: false, hadPendingResource: !!action && action.pendingResource > 0 };
         if (action && (request.force || action.pendingResource <= 0)) {
@@ -290,8 +309,22 @@ export class FTRumFileStore {
       else if (key === Constants.KEY_RUM_TAGS) { view.tags = source[key] as Record<string, string>; }
       else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
         view.collectType = parseCollectType(String(source[key]));
-      } else { extra[key] = source[key]; }
+      }
+      else if (key === Constants.KEY_HAS_REPLAY) {
+        const marker = source[key] as ReplayViewMarker;
+        view.hasReplay = view.hasReplay === true || marker.value === true;
+        const count = Number(marker.recordsCount);
+        view.recordsCount = Math.max(view.recordsCount || 0, Number.isFinite(count) ? Math.floor(count) : 0);
+        view.sampledOnReplayError = view.sampledOnReplayError === true || marker.sampledOnReplayError === true;
+      }
+      else { extra[key] = source[key]; }
     }
     view.extraAttr = extra;
   }
+}
+
+interface ReplayViewMarker {
+  value: boolean;
+  recordsCount: number;
+  sampledOnReplayError: boolean;
 }

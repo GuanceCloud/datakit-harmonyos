@@ -16,6 +16,9 @@ export interface ViewBeanJSON {
   viewReferrer: string;
   startTime: number;
   isClose: boolean;
+  hasReplay?: boolean;
+  recordsCount?: number;
+  sampledOnReplayError?: boolean;
   sessionId: string;
   actionCount: number;
   errorCount: number;
@@ -38,6 +41,12 @@ export interface ViewBeanJSON {
  */
 interface MonitorValue {
   value: string;
+}
+
+interface ReplayMarker {
+  value: boolean;
+  recordsCount?: number;
+  sampledOnReplayError?: boolean;
 }
 
 /**
@@ -69,6 +78,11 @@ export class ViewBean {
    * Whether closed
    */
   private isClose: boolean = false;
+
+  /** Whether this View is associated with a captured Session Replay record. */
+  private hasReplay: boolean = false;
+  private recordsCount: number = 0;
+  private sampledOnReplayError: boolean = false;
 
   /**
    * Session ID
@@ -205,6 +219,17 @@ export class ViewBean {
 
   public getIsClose(): boolean { return this.isClose; }
   public setIsClose(isClose: boolean): void { this.isClose = isClose; }
+
+  public isHasReplay(): boolean { return this.hasReplay; }
+  public setHasReplay(hasReplay: boolean): void { this.hasReplay = hasReplay; }
+
+  public getRecordsCount(): number { return this.recordsCount; }
+  public setRecordsCount(recordsCount: number): void { this.recordsCount = Math.max(0, Math.floor(recordsCount)); }
+
+  public isSampledOnReplayError(): boolean { return this.sampledOnReplayError; }
+  public setSampledOnReplayError(sampledOnReplayError: boolean): void {
+    this.sampledOnReplayError = sampledOnReplayError;
+  }
 
   public getSessionId(): string { return this.sessionId; }
   public setSessionId(sessionId: string): void { this.sessionId = sessionId; }
@@ -361,6 +386,12 @@ export class ViewBean {
       if (this.collectType !== null) {
         obj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
       }
+      const replayMarker: ReplayMarker = {
+        value: this.hasReplay,
+        recordsCount: this.recordsCount,
+        sampledOnReplayError: this.sampledOnReplayError
+      };
+      obj[Constants.KEY_HAS_REPLAY] = replayMarker;
       return JSON.stringify(obj);
     } catch (error) {
       return "{}";
@@ -394,6 +425,11 @@ export class ViewBean {
             }
           } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
             this.collectType = parseCollectType(String(value));
+          } else if (key === Constants.KEY_HAS_REPLAY) {
+            const replayMarker = value as ReplayMarker;
+            this.hasReplay = replayMarker.value === true;
+            this.recordsCount = replayMarker.recordsCount === undefined ? 0 : Math.max(0, Math.floor(replayMarker.recordsCount));
+            this.sampledOnReplayError = replayMarker.sampledOnReplayError === true;
           } else {
             this.extraAttr.set(key, value);
           }
@@ -543,6 +579,9 @@ export class ViewBean {
       viewReferrer: this.viewReferrer,
       startTime: this.startTime,
       isClose: this.isClose,
+      hasReplay: this.hasReplay,
+      recordsCount: this.recordsCount,
+      sampledOnReplayError: this.sampledOnReplayError,
       sessionId: this.sessionId,
       actionCount: this.actionCount,
       errorCount: this.errorCount,
@@ -570,6 +609,9 @@ export class ViewBean {
     const viewBean = new ViewBean(json.id, json.viewName, json.startTime || Utils.getCurrentNanoTime());
     viewBean.viewReferrer = json.viewReferrer || "";
     viewBean.isClose = json.isClose || false;
+    viewBean.hasReplay = json.hasReplay === true;
+    viewBean.recordsCount = json.recordsCount === undefined ? 0 : Math.max(0, Math.floor(json.recordsCount));
+    viewBean.sampledOnReplayError = json.sampledOnReplayError === true;
     viewBean.sessionId = json.sessionId || "";
     viewBean.collectType = json.collectType ? parseCollectType(json.collectType) : null;
     viewBean.actionCount = json.actionCount || 0;
@@ -609,6 +651,9 @@ export class ViewBean {
     const cloned = new ViewBean(this.id, this.viewName, this.startTime);
     cloned.viewReferrer = this.viewReferrer;
     cloned.isClose = this.isClose;
+    cloned.hasReplay = this.hasReplay;
+    cloned.recordsCount = this.recordsCount;
+    cloned.sampledOnReplayError = this.sampledOnReplayError;
     cloned.sessionId = this.sessionId;
     cloned.collectType = this.collectType;
     cloned.actionCount = this.actionCount;

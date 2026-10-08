@@ -1277,6 +1277,14 @@ export class FTSDK {
     FTSDK.triggerPendingRemoteConfigInit();
   }
 
+  /**
+   * Returns the installed SDK configuration for optional SDK modules that
+   * share the configured intake route. Callers must treat it as read-only.
+   */
+  static getSDKConfig(): FTSDKConfig | null {
+    return FTSDK.getInstalledConfig();
+  }
+
   /** Dynamically switch between a system device identifier and HarmonyOS privacy UUID. */
   static setEnableAccessDeviceID(enableAccessDeviceID: boolean): void {
     const config = FTSDK.getInstalledConfig();

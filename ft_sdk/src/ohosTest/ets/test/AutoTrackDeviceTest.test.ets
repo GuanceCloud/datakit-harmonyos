@@ -497,6 +497,23 @@ export default function autoTrackDeviceTest() {
       SdkInternalTestAccess.resetRuntime();
     });
 
+    it('startsCurrentRouterViewWhenInitialShownEventWasMissed', 0, async () => {
+      uiContext.currentRouterName = 'pages/Index';
+      initializeAutoTrack(context, uiContext, buildRumConfig(true, false));
+
+      const view = await DBAssert.waitForViewNamed('Index', 5000);
+      expect(view !== null).assertTrue();
+      expect(view?.getViewName() ?? '').assertEqual('Index');
+      expect((view?.getSessionId() ?? '').length > 0).assertTrue();
+
+      await uiContext.observer.emitRouterPageUpdate('pages/Index', 2);
+      await WaitUtils.delay(300);
+      expect((await DBAssert.queryViews(20)).length).assertEqual(1);
+
+      await closeCurrentViewAndWaitForRum();
+      await flushAndAssertPayload(collector, ['view,', 'view_name=Index', 'session_id=']);
+    });
+
     it('autoTrackDestroyRemoveOnlySdkCallbacks', 0, async () => {
       initializeAutoTrack(context, uiContext, buildRumConfig(true, true));
       let appRouterCallbackCount = 0;

@@ -8,7 +8,7 @@ GuanceCloud Application Monitoring can collect metric data from HarmonyOS applic
 
 ## Example
 
-This repository contains the HarmonyOS SDK source modules, including `@guancecloud/ft_sdk`, `@guancecloud/ft_sdk_ext`, and `@guancecloud/ft_native`.
+This repository contains the HarmonyOS SDK source modules, including `@guancecloud/ft_sdk`, `@guancecloud/ft_sdk_ext`, `@guancecloud/ft_native`, and the optional `@guancecloud/ft_session_replay` package.
 
 ## Installation
 
@@ -17,6 +17,7 @@ Choose the package that matches your scenario:
 - `@guancecloud/ft_sdk`: core SDK for RUM, logging, tracing, and lifecycle monitoring
 - `@guancecloud/ft_sdk_ext`: extension package for newer compiler/platform capabilities, built on top of `@guancecloud/ft_sdk`
 - `@guancecloud/ft_native`: native crash collection module
+- `@guancecloud/ft_session_replay`: optional ArkUI and WebView Session Replay recording; see its [integration guide](ft_session_replay/README.md) for configuration and privacy controls
 
 Install with `ohpm install`:
 

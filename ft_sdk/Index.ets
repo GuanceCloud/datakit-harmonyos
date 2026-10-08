@@ -157,6 +157,21 @@ export {
 export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
 export { FTWebViewHandler } from './src/main/ets/components/web/FTWebViewHandler';
 
+// Optional Session Replay HAR bridge. The core SDK keeps a no-op registry until
+// a replay module explicitly registers a bridge implementation.
+export {
+  FTSessionReplayBridge,
+  FTSessionReplayBridgeRegistry,
+  FTSessionReplayErrorContext,
+  FTSessionReplayRUMContext,
+  FTSessionReplaySessionContext,
+  FTSessionReplayWebDataContext,
+  FTSessionReplayWebErrorContext,
+  FTSessionReplayWebContextChange,
+  FTSessionReplayWebViewOptions,
+  FTSessionReplayViewMetadata
+} from './src/main/ets/components/sessionreplay/FTSessionReplayBridge';
+
 // ============================================================================
 // Network Auto Track Helpers
 // ============================================================================

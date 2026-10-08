@@ -401,6 +401,7 @@ export class ActiveActionBean {
     actionBean.setViewName(this.viewName);
     actionBean.setViewReferrer(this.viewReferrer);
     actionBean.setIsClose(this.isClose);
+    actionBean.setHasReplay(this.hasReplay);
     actionBean.setErrorCount(this.errorCount);
     actionBean.setResourceCount(this.resourceCount);
     actionBean.setLongTaskCount(this.longTaskCount);

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.2-alpha01] - 2026-09-29
+
+- Added automatic Session Replay root registration for `@Entry` ArkUI pages.
+  The compiler now injects opaque page-instance tokens and page visibility
+  callbacks in memory, while the optional Replay HAR centrally selects the
+  latest visible, laid-out root.
+- Preserved existing page root IDs and skipped Replay source transformation
+  entirely when the HAP does not declare `@guancecloud/ft_session_replay`.
+
 ## [0.1.1] - 2026-09-14
 
 - Fixed console/HiLog instrumentation being skipped when cold-launch instrumentation is enabled in the same Hvigor plugin.
@@ -21,4 +30,3 @@
 ## [0.1.0-alpha.1] - 2026-09-11
 
 - Prepared the initial npm prerelease of the console/HiLog and cold-launch instrumentation plugin.
-

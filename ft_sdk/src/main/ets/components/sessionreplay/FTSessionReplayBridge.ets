@@ -1,0 +1,382 @@
+import { FTInnerLogger } from '../log/FTLogger';
+
+const TAG = 'FTSessionReplayBridge';
+
+/** Immutable RUM identity handed to an optional Session Replay HAR. */
+export interface FTSessionReplayRUMContext {
+  applicationId: string;
+  sessionId: string;
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  linkContext: Record<string, string | number | boolean>;
+  timestamp: number;
+}
+
+export interface FTSessionReplayErrorContext extends FTSessionReplayRUMContext {
+  errorType: string;
+  appState: string;
+}
+
+export interface FTSessionReplaySessionContext {
+  applicationId: string;
+  previousSessionId: string;
+  sessionId: string;
+  timestamp: number;
+}
+
+/**
+ * A Browser SDK Replay record forwarded by the native WebView bridge.
+ *
+ * `payload` is deliberately kept as the Browser SDK's JSON record instead of
+ * being converted into an ArkUI snapshot. The optional Replay HAR owns its
+ * validation and persistence, while core supplies the trusted RUM linkage and
+ * a stable slot ID for the WebView instance.
+ */
+export interface FTSessionReplayWebDataContext {
+  applicationId: string;
+  sessionId: string;
+  viewId: string;
+  slotId: string;
+  linkContext: Record<string, string | number | boolean>;
+  payload: string;
+  timestamp: number;
+}
+
+/** A Browser RUM Error that can promote an error-sampled Replay session. */
+export interface FTSessionReplayWebErrorContext {
+  applicationId: string;
+  sessionId: string;
+  viewId: string;
+  slotId: string;
+  linkContext: Record<string, string | number | boolean>;
+  timestamp: number;
+}
+
+/**
+ * A Browser RUM link-context change bound to its current native container
+ * View.  The optional HAR uses this to place a fresh native snapshot at the
+ * association boundary, matching Android's WebView rebind behavior.
+ */
+export interface FTSessionReplayWebContextChange extends FTSessionReplayRUMContext {
+  browserViewId: string;
+  slotId: string;
+}
+
+/** Browser SDK capabilities provided only while the optional Replay HAR runs. */
+export interface FTSessionReplayWebViewOptions {
+  privacyLevel: string;
+  capabilities: Array<string>;
+}
+
+/** Replay availability state that core RUM persists with a View. */
+export interface FTSessionReplayViewMetadata {
+  hasReplay: boolean;
+  recordsCount: number;
+  sampledOnError: boolean;
+}
+
+/**
+ * Optional Replay contract. The core SDK owns no recorder, storage, or upload
+ * implementation. A HAR registers this bridge only when Replay is enabled.
+ */
+export interface FTSessionReplayBridge {
+  /** Returns the RUM key fragments that the optional Replay HAR may receive. */
+  getRUMLinkKeys(): Array<string>;
+  getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata;
+  onViewStarted(context: FTSessionReplayRUMContext): boolean;
+  onViewStopped(context: FTSessionReplayRUMContext): void;
+  onError(context: FTSessionReplayErrorContext): boolean;
+  onSessionRenewed(context: FTSessionReplaySessionContext): void;
+  /** Returns Browser SDK privacy/capability negotiation values. */
+  getWebViewOptions?(): FTSessionReplayWebViewOptions | null;
+  /** Receives one Browser SDK record, already associated with RUM identity. */
+  onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
+  /** Promotes Browser Replay data when a Browser RUM Error is reported. */
+  onWebReplayError?(context: FTSessionReplayWebErrorContext): boolean;
+  /** Promotes an error-sampled session when no live native root can be captured. */
+  onErrorTimeline?(context: FTSessionReplayErrorContext): boolean;
+  /** Forces a native snapshot when Browser RUM association data changes. */
+  onWebReplayContextChanged?(context: FTSessionReplayWebContextChange): boolean;
+  /** Marks a stable WebView slot active or inactive for delayed draining. */
+  onWebReplaySlotActive?(slotId: string, active: boolean, timestamp: number): void;
+  /** Enables the Browser SDK's periodic full snapshots for error sampling. */
+  isWebReplayErrorSampled?(sessionId: string): boolean;
+}
+
+/** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
+export class FTSessionReplayBridgeRegistry {
+  private static bridge: FTSessionReplayBridge | null = null;
+  private static currentViewProvider: (() => FTSessionReplayRUMContext | null) | null = null;
+  private static metadataChangedCallback:
+    ((context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata) => void) | null = null;
+  private static readonly MAX_PENDING_ERROR_TIMELINES: number = 8;
+  /** Holds crash recovery notifications until an optional HAR registers. */
+  private static pendingErrorTimelines: Array<FTSessionReplayErrorContext> = [];
+
+  public static register(bridge: FTSessionReplayBridge): void {
+    if (FTSessionReplayBridgeRegistry.bridge === bridge) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.bridge = bridge;
+    // Resolve now, after the HAR's link keys become available. Remembering an
+    // old View-start event would retain stale identity, timestamps and tags.
+    const provider = FTSessionReplayBridgeRegistry.currentViewProvider;
+    if (provider !== null) {
+      try {
+        const context = provider();
+        if (context !== null) {
+          FTSessionReplayBridgeRegistry.notifyViewStarted(context);
+          FTSessionReplayBridgeRegistry.logDiagnostic(`Attached current RUM View: sessionId=${context.sessionId}, viewId=${context.viewId}`);
+        }
+      } catch (error) {
+        FTSessionReplayBridgeRegistry.logDiagnostic(`Replay current-View callback failed: ${String(error)}`, true);
+      }
+    }
+    const pending = FTSessionReplayBridgeRegistry.pendingErrorTimelines.slice();
+    FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
+    for (let index = 0; index < pending.length; index++) {
+      FTSessionReplayBridgeRegistry.notifyErrorTimeline(pending[index]);
+    }
+  }
+
+  /** Core callbacks stay independent of the optional recorder's lifetime. */
+  public static bindRUMCallbacks(
+    currentViewProvider: () => FTSessionReplayRUMContext | null,
+    metadataChangedCallback: (context: FTSessionReplayRUMContext, metadata: FTSessionReplayViewMetadata) => void
+  ): void {
+    FTSessionReplayBridgeRegistry.currentViewProvider = currentViewProvider;
+    FTSessionReplayBridgeRegistry.metadataChangedCallback = metadataChangedCallback;
+  }
+
+  public static clearRUMCallbacks(currentViewProvider: () => FTSessionReplayRUMContext | null): void {
+    if (FTSessionReplayBridgeRegistry.currentViewProvider !== currentViewProvider) {
+      return;
+    }
+    FTSessionReplayBridgeRegistry.currentViewProvider = null;
+    FTSessionReplayBridgeRegistry.metadataChangedCallback = null;
+    FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
+  }
+
+  /** Accepted capture work is not evidence of Replay; report committed data. */
+  public static notifyViewMetadataChanged(
+    context: FTSessionReplayRUMContext,
+    metadata: FTSessionReplayViewMetadata
+  ): void {
+    const callback = FTSessionReplayBridgeRegistry.metadataChangedCallback;
+    if (callback === null) {
+      return;
+    }
+    try {
+      // A stopped recorder can still finish its already accepted first frame.
+      callback(context, metadata);
+    } catch (error) {
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay metadata update failed: ${String(error)}`, true);
+    }
+  }
+
+  /** Optional HAR diagnostics use the core logger's configured level. */
+  public static logDiagnostic(message: string, warning: boolean = false): void {
+    if (warning) {
+      FTInnerLogger.w(TAG, message);
+    } else {
+      FTInnerLogger.d(TAG, message);
+    }
+  }
+
+  public static unregister(bridge: FTSessionReplayBridge): void {
+    if (FTSessionReplayBridgeRegistry.bridge === bridge) {
+      FTSessionReplayBridgeRegistry.bridge = null;
+    }
+  }
+
+  public static getRUMLinkKeys(): Array<string> {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return [];
+    }
+    try {
+      return bridge.getRUMLinkKeys().filter((key: string): boolean => key.length > 0);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay link-key callback failed: ${String(error)}`);
+      return [];
+    }
+  }
+
+  public static getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
+    }
+    try {
+      return bridge.getViewMetadata(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay metadata callback failed: ${String(error)}`);
+      return { hasReplay: false, recordsCount: 0, sampledOnError: false };
+    }
+  }
+
+  public static notifyViewStarted(context: FTSessionReplayRUMContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return false;
+    }
+    try {
+      return bridge.onViewStarted(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay view-start callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyViewStopped(context: FTSessionReplayRUMContext): void {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return;
+    }
+    try {
+      bridge.onViewStopped(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay view-stop callback failed: ${String(error)}`);
+    }
+  }
+
+  public static notifyError(context: FTSessionReplayErrorContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return false;
+    }
+    try {
+      return bridge.onError(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay error callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifySessionRenewed(context: FTSessionReplaySessionContext): void {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null) {
+      return;
+    }
+    try {
+      bridge.onSessionRenewed(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay session callback failed: ${String(error)}`);
+    }
+  }
+
+  public static getWebViewOptions(): FTSessionReplayWebViewOptions | null {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.getWebViewOptions === undefined) {
+      return null;
+    }
+    try {
+      return bridge.getWebViewOptions();
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView options callback failed: ${String(error)}`);
+      return null;
+    }
+  }
+
+  public static notifyWebReplayData(context: FTSessionReplayWebDataContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayData === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayData(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView data callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyWebReplayError(context: FTSessionReplayWebErrorContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayError === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayError(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView error callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Error timelines from a completed Resource retain the Resource's View
+   * identity but must not snapshot whichever ArkUI root happens to be visible
+   * now. The optional HAR promotes its existing rolling window only.
+   */
+  public static notifyErrorTimeline(context: FTSessionReplayErrorContext): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onErrorTimeline === undefined) {
+      FTSessionReplayBridgeRegistry.rememberPendingErrorTimeline(context);
+      return false;
+    }
+    try {
+      return bridge.onErrorTimeline(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay error-timeline callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  private static rememberPendingErrorTimeline(context: FTSessionReplayErrorContext): void {
+    if (context.applicationId.length === 0 || context.sessionId.length === 0 || context.viewId.length === 0) {
+      return;
+    }
+    const pending = FTSessionReplayBridgeRegistry.pendingErrorTimelines;
+    for (let index = 0; index < pending.length; index++) {
+      const candidate = pending[index];
+      if (candidate.applicationId === context.applicationId && candidate.sessionId === context.sessionId &&
+        candidate.viewId === context.viewId && candidate.timestamp === context.timestamp) {
+        return;
+      }
+    }
+    pending.push(context);
+    if (pending.length > FTSessionReplayBridgeRegistry.MAX_PENDING_ERROR_TIMELINES) {
+      pending.splice(0, pending.length - FTSessionReplayBridgeRegistry.MAX_PENDING_ERROR_TIMELINES);
+    }
+  }
+
+  public static notifyWebReplayContextChanged(context: FTSessionReplayWebContextChange): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplayContextChanged === undefined) {
+      return false;
+    }
+    try {
+      return bridge.onWebReplayContextChanged(context);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView context callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static notifyWebReplaySlotActive(slotId: string, active: boolean, timestamp: number): void {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.onWebReplaySlotActive === undefined) {
+      return;
+    }
+    try {
+      bridge.onWebReplaySlotActive(slotId, active, timestamp);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView slot callback failed: ${String(error)}`);
+    }
+  }
+
+  public static isWebReplayErrorSampled(sessionId: string): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.isWebReplayErrorSampled === undefined) {
+      return false;
+    }
+    try {
+      return bridge.isWebReplayErrorSampled(sessionId);
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Replay WebView sampling callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+}
