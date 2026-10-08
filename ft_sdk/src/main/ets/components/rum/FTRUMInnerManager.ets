@@ -1565,7 +1565,9 @@ export class FTRUMInnerManager {
     const batch = this.pendingCompletedActions.slice(0, batchSize);
     const actions: SDKRumCompletedActionDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
-      actions.push(batch[i].payload);
+      const action = batch[i].payload;
+      this.refreshCompletedActionReplayMetadata(action);
+      actions.push(action);
     }
 
     const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
@@ -1652,7 +1654,54 @@ export class FTRUMInnerManager {
       properties: actionBean.getProperty()
     };
     this.attachCompletedActionDynamicTags(payload);
+    this.refreshCompletedActionReplayMetadata(payload);
     return payload;
+  }
+
+  /** The first frame can commit after Action creation or while its batch waits. */
+  private refreshCompletedActionReplayMetadata(payload: SDKRumCompletedActionDTO): void {
+    if (payload.hasReplay === true || !payload.rumAppId ||
+      payload.sessionId.length === 0 || payload.viewId.length === 0) {
+      return;
+    }
+    // Always use the Action's original identity; navigation may have changed
+    // the current View before a completed Action reaches the Worker.
+    const context: FTSessionReplayRUMContext = {
+      applicationId: payload.rumAppId,
+      sessionId: payload.sessionId,
+      viewId: payload.viewId,
+      viewName: payload.viewName,
+      viewReferrer: payload.viewReferrer,
+      linkContext: {},
+      timestamp: payload.time
+    };
+    const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
+    if (metadata.hasReplay && Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0) {
+      payload.hasReplay = true;
+    }
+  }
+
+  /** Recover availability when the recorder is stopped or the process restarted. */
+  private async applyStoredActionReplayMetadata(
+    actionBean: ActionBean,
+    viewCache: Map<string, ViewBean | null>
+  ): Promise<void> {
+    if (actionBean.isHasReplay() || this.context === null ||
+      actionBean.getSessionId().length === 0 || actionBean.getViewId().length === 0) {
+      return;
+    }
+    const viewId = actionBean.getViewId();
+    try {
+      if (!viewCache.has(viewId)) {
+        viewCache.set(viewId, await FTDBTaskPoolExecutor.queryRumViewById(this.context, viewId));
+      }
+      const view = viewCache.get(viewId);
+      if (view && view.getId() === viewId && view.getSessionId() === actionBean.getSessionId() && view.isHasReplay()) {
+        actionBean.setHasReplay(true);
+      }
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Failed to read Replay metadata for Action ${actionBean.getId()}: ${String(error)}`);
+    }
   }
 
   private attachCompletedActionDynamicTags(payload: SDKRumCompletedActionDTO): void {
@@ -1747,7 +1796,9 @@ export class FTRUMInnerManager {
           
           // Update ActionBean counts from database BEFORE deleting actions
           // This ensures we have the latest counts even if resources/errors/long tasks complete asynchronously
+          const replayViews: Map<string, ViewBean | null> = new Map();
           for (const bean of unprocessedBeans) {
+            await this.applyStoredActionReplayMetadata(bean, replayViews);
             const actionId = bean.getId();
             try {
               const dbCounts = await FTDBTaskPoolExecutor.getActionCounts(this.context!, actionId);
@@ -1990,6 +2041,12 @@ export class FTRUMInnerManager {
         }
       }
       
+      // Replay availability is SDK metadata, not a custom View property.
+      fieldsMap.delete(Constants.KEY_SESSION_HAS_REPLAY);
+      if (viewBean.isHasReplay()) {
+        fieldsMap.set(Constants.KEY_SESSION_HAS_REPLAY, 'true');
+      }
+
       // Call FTTrackInner.rum() to store the completed View snapshot in the
       // durable sync queue. The callback must acknowledge that exact snapshot:
       // a closed View can then be removed, while a View changed in the meantime
@@ -2876,6 +2933,18 @@ export class FTRUMInnerManager {
     const view = this.activeView;
     if (view !== null && view.getId() === replayContext.viewId && view.getSessionId() === replayContext.sessionId) {
       this.mergeSessionReplayViewMetadata(view, metadata);
+    }
+    const action = this.activeAction;
+    if (action !== null && action.getViewId() === replayContext.viewId &&
+      action.getSessionId() === replayContext.sessionId) {
+      action.setHasReplay(true);
+    }
+    for (let index = 0; index < this.pendingCompletedActions.length; index++) {
+      const payload = this.pendingCompletedActions[index].payload;
+      if (payload.rumAppId === replayContext.applicationId && payload.sessionId === replayContext.sessionId &&
+        payload.viewId === replayContext.viewId) {
+        payload.hasReplay = true;
+      }
     }
     const context = this.context;
     if (context !== null) {

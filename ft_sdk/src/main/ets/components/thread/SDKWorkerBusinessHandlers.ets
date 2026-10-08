@@ -999,6 +999,12 @@ function prepareRumAppLineRecords(
   mergeStringRecords(tags, event.tags || {});
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
   mergeStringRecords(fields, lineContext.rumStaticFields);
+  // Native View/Action Replay availability must survive global custom context.
+  if (event.measurement === Constants.FT_MEASUREMENT_RUM_VIEW ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+    // The serializer omits empty fields; ArkTS does not support object delete.
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = event.fields?.[Constants.KEY_SESSION_HAS_REPLAY] === 'true' ? 'true' : '';
+  }
   return {
     tags,
     fields,
@@ -2185,6 +2191,9 @@ function appendCompletedActionDraft(
   fields[Constants.KEY_RUM_ACTION_RESOURCE_COUNT] = String(action.resourceCount || 0);
   if (action.hasReplay === true) {
     fields[Constants.KEY_HAS_REPLAY] = 'true';
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = 'true';
+  } else {
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = '';
   }
   if (action.actionType === Constants.ACTION_TYPE_LAUNCH_COLD) {
     copyColdLaunchPropertiesToFields(action.properties || {}, fields);

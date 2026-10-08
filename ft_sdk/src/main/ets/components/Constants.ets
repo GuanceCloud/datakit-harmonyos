@@ -186,6 +186,8 @@ export class Constants {
    * Session replay related
    */
   static readonly KEY_HAS_REPLAY = "has_replay";
+  // Public RUM Replay availability field; keep KEY_HAS_REPLAY for cached metadata.
+  static readonly KEY_SESSION_HAS_REPLAY = "session_has_replay";
   static readonly KEY_SESSION_REPLAY_RECORDS_COUNT = "records_count";
   static readonly KEY_SAMPLED_FOR_ERROR_REPLAY = "sampled_on_reply_error";
   

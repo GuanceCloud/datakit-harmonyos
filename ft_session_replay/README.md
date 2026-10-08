@@ -56,7 +56,11 @@ With the Hvigor plugin enabled, pages do not need individual `registerRoot()` ca
 
 Without the plugin, give the visible ArkUI root an `.id()`, then call `registerRoot(this.getUIContext(), rootId, vp2px(1))` after it is laid out. Call `unregisterRoot()` when the page is hidden. Do not combine manual root registration with the plugin's automatic registration for the same page.
 
-When `start()` is called after a page is already visible, Replay attaches to the current RUM View and records its first snapshot once the root is available. The session and View IDs stay the same; recording begins at the time Replay is enabled. RUM receives `has_replay` and the record count after capture succeeds.
+When `start()` is called after a page is already visible, Replay attaches to the current RUM View and records its first snapshot once the root is available. The session and View IDs stay the same; recording begins at the time Replay is enabled. After capture succeeds, native RUM Views and Actions with Replay metadata report the boolean field `session_has_replay=true`, which the console uses for Replay entry points. They retain `has_replay=true` for compatibility, and Views also report the record count.
+
+`session_has_replay` is reserved SDK metadata: custom View/Action properties and global custom context cannot override it or add it to these records without Replay metadata. The local database continues to store Replay metadata under `has_replay`; this upload-field addition does not rename cached metadata or change sampling and capture timing.
+
+The first snapshot may finish after an Action starts. Its committed metadata updates matching active and queued Actions, and completed Actions check their original application's session and View again before dispatch. Stored Actions also inherit availability from their matching stored View when summaries are generated. Actions already dispatched before Replay becomes available are not retroactively updated.
 
 ## Privacy and images
 

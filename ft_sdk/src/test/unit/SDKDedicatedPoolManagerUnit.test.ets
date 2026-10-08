@@ -2151,6 +2151,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const properties = new Object() as Record<string, object>;
       properties['custom_text'] = customText;
       properties['custom_json'] = customJson;
+      const customReplayFlag: SDKCompletedActionPropertyTestValue = { value: 'false' };
+      properties['session_has_replay'] = customReplayFlag;
       properties['duration'] = new String('must-not-override-sdk-duration');
       const launchType: SDKCompletedActionPropertyTestValue = { value: 'foreground' };
       properties['app_launch_type'] = launchType;
@@ -2176,6 +2178,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.errorCount = 1;
       completedAction.longTaskCount = 2;
       completedAction.resourceCount = 3;
+      completedAction.hasReplay = true;
       completedAction.properties = properties;
 
       const batch: SDKRumCompletedActionBatchDTO = {
@@ -2184,6 +2187,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const lineContext = createRumWorkerLineContext();
       lineContext.rumStaticFields['duration'] = 'must-not-override-sdk-duration-from-context';
       lineContext.rumStaticFields['app_launch_type'] = 'must-not-override-cold-launch-type';
+      lineContext.rumStaticFields['session_has_replay'] = 'false';
       batch.lineContext = lineContext;
       const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
@@ -2210,12 +2214,16 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(fields['action_long_task_count'])).assertEqual('2');
       expect(String(fields['action_resource_count'])).assertEqual('3');
       expect(String(fields['custom_text'])).assertEqual('fast');
+      expect(String(fields['session_has_replay'])).assertEqual('true');
+      expect(String(fields['has_replay'])).assertEqual('true');
       expect(String(fields['custom_json']).includes('nested')).assertTrue();
       expect(String(fields['app_launch_type'])).assertEqual('foreground');
       expect(String(fields['app_pre_application_init_time'])).assertEqual('{"start":0,"duration":20}');
       const syncDrafts = getPayloadArray(response.payload, 'syncDrafts');
       const lineProtocol = String((syncDrafts[0] as Record<string, object>)['dataString']);
       expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
+      expect(lineProtocol.includes('session_has_replay=true')).assertTrue();
+      expect(lineProtocol.includes('session_has_replay="true"')).assertFalse();
       expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
 
       completedAction.customDataType = 'rum_app_error_sampled';
@@ -2241,6 +2249,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         expect(events[0].tags?.['action_id']).assertEqual('action-1');
         expect(events[0].tags?.['env']).assertEqual('test');
         expect(events[0].fields?.['duration']).assertEqual('42');
+        expect(events[0].fields?.['session_has_replay']).assertEqual('true');
         expect(events[0].fields?.['app_launch_type']).assertEqual('foreground');
         expect(events[0].fields?.['app_pre_application_init_time']).assertEqual('{"start":0,"duration":20}');
         const deltas = getPayloadArray(rawResponse.payload, 'deltas') as Object as SDKRumCounterDeltaDTO[];
