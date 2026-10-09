@@ -46,7 +46,6 @@ export class UserDataManager {
   private randomUserId: string = '';
   private userData: UserData | null = null;
   private userDataExplicitlyUnbound: boolean = false;
-  private preferencesInitPromise: Promise<void> | null = null;
   private userDataGeneration: number = 0;
   private userDataPersistChain: Promise<void> = Promise.resolve();
 
@@ -68,23 +67,21 @@ export class UserDataManager {
   }
 
   /**
-   * Initialize preferences store
+   * Restore identity before RUM can capture its first user snapshot, matching
+   * Android's synchronous SharedPreferences read. Persistence remains queued.
    */
   public init(context: Context): void {
-    if (this.preferencesInitPromise !== null || this.preferencesStore !== null) {
+    if (this.preferencesStore !== null) {
       return;
     }
-    const generationAtInit = this.userDataGeneration;
-    this.preferencesInitPromise = this.initializePreferences(context, generationAtInit);
-  }
-
-  private async initializePreferences(context: Context, generationAtInit: number): Promise<void> {
     try {
-      const store = await preferences.getPreferences(context, { name: UserDataManager.PREFERENCES_NAME });
+      const store = preferences.getPreferencesSync(context, { name: UserDataManager.PREFERENCES_NAME });
       this.preferencesStore = store;
-      await this.restoreRandomUserId(store);
-      if (this.userDataGeneration === generationAtInit) {
-        await this.restoreUserData(store, generationAtInit);
+      this.restoreRandomUserId(store);
+      // Explicit binding/unbinding before SDK installation takes precedence
+      // over the identity left by a previous process.
+      if (this.userDataGeneration === 0) {
+        this.restoreUserData(store);
       } else {
         this.persistUserDataWhenReady();
       }
@@ -128,9 +125,9 @@ export class UserDataManager {
   /**
    * Load random user ID from preferences
    */
-  private async restoreRandomUserId(store: preferences.Preferences): Promise<void> {
+  private restoreRandomUserId(store: preferences.Preferences): void {
     try {
-      const storedValue = await store.get(UserDataManager.KEY_RANDOM_USER_ID, '');
+      const storedValue = store.getSync(UserDataManager.KEY_RANDOM_USER_ID, '');
       const storedRandomUserId = typeof storedValue === 'string' ? storedValue : '';
       if (UserDataManager.isValidRandomUserId(storedRandomUserId)) {
         this.randomUserId = storedRandomUserId;
@@ -157,21 +154,16 @@ export class UserDataManager {
   /**
    * Load user data from preferences
    */
-  private async restoreUserData(store: preferences.Preferences, expectedGeneration: number): Promise<void> {
+  private restoreUserData(store: preferences.Preferences): void {
     try {
-      const idValue = await store.get(UserDataManager.KEY_USER_ID, '');
-      const nameValue = await store.get(UserDataManager.KEY_USER_NAME, '');
-      const emailValue = await store.get(UserDataManager.KEY_USER_EMAIL, '');
-      const extJsonValue = await store.get(UserDataManager.KEY_USER_EXT, '');
+      const idValue = store.getSync(UserDataManager.KEY_USER_ID, '');
+      const nameValue = store.getSync(UserDataManager.KEY_USER_NAME, '');
+      const emailValue = store.getSync(UserDataManager.KEY_USER_EMAIL, '');
+      const extJsonValue = store.getSync(UserDataManager.KEY_USER_EXT, '');
       const id = typeof idValue === 'string' ? idValue : '';
       const name = typeof nameValue === 'string' ? nameValue : '';
       const email = typeof emailValue === 'string' ? emailValue : '';
       const extJson = typeof extJsonValue === 'string' ? extJsonValue : '';
-
-      if (this.userDataGeneration !== expectedGeneration) {
-        this.persistUserDataWhenReady();
-        return;
-      }
 
       if (id || name || email || extJson) {
         this.userData = new UserData();
@@ -219,13 +211,8 @@ export class UserDataManager {
   }
 
   private persistUserDataWhenReady(): void {
-    const initPromise = this.preferencesInitPromise;
     if (this.preferencesStore) {
       this.enqueueUserDataPersistence();
-      return;
-    }
-    if (initPromise) {
-      initPromise.then(() => this.enqueueUserDataPersistence());
     }
   }
 

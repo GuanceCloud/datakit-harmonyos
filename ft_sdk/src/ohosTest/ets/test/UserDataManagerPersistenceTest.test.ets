@@ -8,6 +8,9 @@ import { DataType } from '../../../main/ets/components/enum/Enums';
 import { UserData } from '../../../main/ets/components/rum/bean/UserData';
 import { FTRUMConfigManager } from '../../../main/ets/components/rum/FTRUMConfigManager';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
+import { FTRUMInnerManager } from '../../../main/ets/components/rum/FTRUMInnerManager';
+import { UserDataManager } from '../../../main/ets/components/rum/UserDataManager';
+import { Utils } from '../../../main/ets/components/utils/Utils';
 import { DBAssert } from './helpers/DBAssert';
 import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
@@ -130,6 +133,67 @@ export default function userDataManagerPersistenceTest() {
       expect(consumed).assertTrue();
     });
 
+    it('bindingBeforeRumInitializationShouldReachTheFirstLaunchView', 0, async () => {
+      await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      FTSDK.bindRumUserData(new UserData('launch-user-id', 'launch-user-name', 'launch@example.com'));
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      FTRUMInnerManager.getInstance().addAction('bound-launch', Constants.ACTION_TYPE_LAUNCH_COLD,
+        1000000, Utils.getCurrentNanoTime());
+      await startViewAndWaitForStore('after_bound_launch');
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,', 'view_name=ApplicationLaunch', 'userid=launch-user-id', 'view_is_active=false'
+      ], 8000);
+      const point = RumAttributeAssert.record(record, { measurement: 'view', appId: TEST_FAKE_RUM_ID,
+        viewName: Constants.VIEW_NAME_APPLICATION_LAUNCH });
+      expect(point.tags.get(Constants.KEY_RUM_USER_ID)).assertEqual('launch-user-id');
+      expect(point.tags.get(Constants.KEY_RUM_USER_EMAIL)).assertEqual('launch@example.com');
+      expect(point.tags.get(Constants.KEY_RUM_IS_SIGN_IN)).assertEqual('T');
+    });
+
+    it('anonymousLaunchViewShouldNotBorrowLaterBoundUserFields', 0, async () => {
+      const anonymousId = UserDataManager.getInstance().getRandomUserId();
+      FTRUMInnerManager.getInstance().addAction('anonymous-launch', Constants.ACTION_TYPE_LAUNCH_COLD,
+        1000000, Utils.getCurrentNanoTime());
+      const exts: Record<string, string> = {};
+      exts['plan'] = 'later-user-plan';
+      FTSDK.bindRumUserData(new UserData('later-user-id', 'later-user-name', 'later@example.com', exts));
+      await startViewAndWaitForStore('after_anonymous_launch');
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,', 'view_name=ApplicationLaunch', `userid=${anonymousId}`, 'view_is_active=false'
+      ], 8000);
+      const point = RumAttributeAssert.record(record, { measurement: 'view', appId: TEST_FAKE_RUM_ID,
+        viewName: Constants.VIEW_NAME_APPLICATION_LAUNCH });
+      expect(point.tags.get(Constants.KEY_RUM_IS_SIGN_IN)).assertEqual('F');
+      expect(point.tags.has(Constants.KEY_RUM_USER_NAME)).assertFalse();
+      expect(point.tags.has(Constants.KEY_RUM_USER_EMAIL)).assertFalse();
+      expect(point.tags.has('plan')).assertFalse();
+    });
+
+    it('savedLaunchViewShouldKeepItsUserWhenTheBoundUserChanges', 0, async () => {
+      FTSDK.bindRumUserData(new UserData('original-user-id', 'original-user-name'));
+      FTRUMInnerManager.getInstance().addAction('original-user-launch', Constants.ACTION_TYPE_LAUNCH_COLD,
+        1000000, Utils.getCurrentNanoTime());
+      const exts: Record<string, string> = {};
+      exts['plan'] = 'replacement-user-plan';
+      FTSDK.bindRumUserData(new UserData('replacement-user-id', 'replacement-user-name',
+        'replacement@example.com', exts));
+      await startViewAndWaitForStore('after_user_change');
+
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'view,', 'view_name=ApplicationLaunch', 'userid=original-user-id', 'view_is_active=false'
+      ], 8000);
+      const point = RumAttributeAssert.record(record, { measurement: 'view', appId: TEST_FAKE_RUM_ID,
+        viewName: Constants.VIEW_NAME_APPLICATION_LAUNCH });
+      expect(point.tags.get(Constants.KEY_RUM_USER_NAME)).assertEqual('original-user-name');
+      expect(point.tags.get(Constants.KEY_RUM_IS_SIGN_IN)).assertEqual('T');
+      expect(point.tags.has(Constants.KEY_RUM_USER_EMAIL)).assertFalse();
+      expect(point.tags.has('plan')).assertFalse();
+    });
+
     it('boundUserShouldSurviveReset', 0, async () => {
       const exts: Record<string, string> = {};
       exts['region'] = 'restart-region';
@@ -158,14 +222,12 @@ export default function userDataManagerPersistenceTest() {
       collector.start();
       FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
       FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
-      const restored = await WaitUtils.waitUntil(async () => {
-        const tags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
-        return tags[Constants.KEY_RUM_USER_ID] === 'restart-user-id' &&
-          tags[Constants.KEY_RUM_USER_NAME] === 'restart-user-name' &&
-          tags[Constants.KEY_RUM_USER_EMAIL] === 'restart@example.com' &&
-          tags['region'] === 'restart-region';
-      }, 5000);
-      expect(restored).assertTrue();
+      // The first synchronous read after installation must already be restored.
+      const tags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+      expect(tags[Constants.KEY_RUM_USER_ID]).assertEqual('restart-user-id');
+      expect(tags[Constants.KEY_RUM_USER_NAME]).assertEqual('restart-user-name');
+      expect(tags[Constants.KEY_RUM_USER_EMAIL]).assertEqual('restart@example.com');
+      expect(tags['region']).assertEqual('restart-region');
 
       await startViewAndWaitForStore('restart_user_data_view');
       FTRUMGlobalManager.getInstance().addAction('restart_user_data_action', 'click');
@@ -189,6 +251,44 @@ export default function userDataManagerPersistenceTest() {
 
       expect(uploaded.length > 0).assertTrue();
       expect(consumed).assertTrue();
+    });
+
+    it('preInstallBindingAndUnbindingShouldOverrideSavedUser', 0, async () => {
+      const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+      FTSDK.bindRumUserData(new UserData('saved-user-id', 'saved-user-name', 'saved@example.com'));
+      expect(await WaitUtils.waitUntil(async () => {
+        return await store.get(KEY_USER_ID, '') === 'saved-user-id' &&
+          await store.get(KEY_USER_NAME, '') === 'saved-user-name' &&
+          await store.get(KEY_USER_EMAIL, '') === 'saved@example.com';
+      }, 5000)).assertTrue();
+
+      await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
+      FTSDK.bindRumUserData(new UserData('preinstall-user-id', 'preinstall-user-name', 'preinstall@example.com'));
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      const boundTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+      expect(boundTags[Constants.KEY_RUM_USER_ID]).assertEqual('preinstall-user-id');
+      expect(boundTags[Constants.KEY_RUM_USER_EMAIL]).assertEqual('preinstall@example.com');
+      expect(await WaitUtils.waitUntil(async () => {
+        return await store.get(KEY_USER_ID, '') === 'preinstall-user-id' &&
+          await store.get(KEY_USER_NAME, '') === 'preinstall-user-name' &&
+          await store.get(KEY_USER_EMAIL, '') === 'preinstall@example.com';
+      }, 5000)).assertTrue();
+
+      await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
+      FTSDK.unbindRumUserData();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      const unboundTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+      expect(unboundTags[Constants.KEY_RUM_USER_ID].startsWith('ft.rd_')).assertTrue();
+      expect(unboundTags[Constants.KEY_RUM_IS_SIGN_IN]).assertEqual('F');
+      expect(unboundTags[Constants.KEY_RUM_USER_EMAIL] === undefined).assertTrue();
+      expect(await WaitUtils.waitUntil(async () => {
+        return await store.get(KEY_USER_ID, '') === '' &&
+          await store.get(KEY_USER_NAME, '') === '' &&
+          await store.get(KEY_USER_EMAIL, '') === '' &&
+          await store.get(KEY_USER_EXT, '') === '';
+      }, 5000)).assertTrue();
     });
 
     it('unbindUserShouldClearFields', 0, async () => {

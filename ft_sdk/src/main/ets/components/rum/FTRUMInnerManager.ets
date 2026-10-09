@@ -1899,21 +1899,9 @@ export class FTRUMInnerManager {
       const tagsMap = new Map<string, string>();
       const fieldsMap = new Map<string, string>();
       
-      const tags: Record<string, string> = {};
-
-      const dynamicTags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
-      const dynamicTagKeys = Object.keys(dynamicTags);
-      for (let i = 0; i < dynamicTagKeys.length; i++) {
-        const key = dynamicTagKeys[i];
-        tags[key] = dynamicTags[key];
-      }
-
-      const viewTags = viewBean.getTags();
-      const viewTagKeys = Object.keys(viewTags);
-      for (let i = 0; i < viewTagKeys.length; i++) {
-        const key = viewTagKeys[i];
-        tags[key] = viewTags[key];
-      }
+      // Match Android: a View owns its complete dynamic-tag snapshot. Adding
+      // current tags would mix its old identity with a later user's fields.
+      const tags: Record<string, string> = viewBean.getTags();
 
       // View-specific tags
       tags[Constants.KEY_RUM_VIEW_ID] = viewBean.getId();

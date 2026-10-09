@@ -534,10 +534,9 @@ export default class EntryAbility extends UIAbility {
         .setTouchPrivacy(TouchPrivacy.SHOW)
         .setDelayInit(true);
       FTSessionReplay.getInstance().init(sessionReplayConfig, context.filesDir);
-      FTSDK.installRUMConfig(rumConfig);
-      DemoLogger.i(LOG_TAG, 'Session Replay configured for manual start');
 
-      // Bind user data using new UserData class with persistence
+      // RUM readiness can immediately emit a cached cold-launch result. Bind
+      // the demo identity first so ApplicationLaunch captures the same user.
       const userData = new UserData();
       userData.setId("harmonyos.guance.userid");
       userData.setName("harmonyos_user_guance_test");
@@ -545,6 +544,9 @@ export default class EntryAbility extends UIAbility {
       userData.addExt("ft_key", "ft_value");
 
       FTSDK.bindRumUserData(userData);
+
+      FTSDK.installRUMConfig(rumConfig);
+      DemoLogger.i(LOG_TAG, 'Session Replay configured for manual start');
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()
