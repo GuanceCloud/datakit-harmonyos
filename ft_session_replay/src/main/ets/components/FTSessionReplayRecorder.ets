@@ -1,4 +1,4 @@
-import { UIContext } from '@kit.ArkUI';
+import { FrameNode, UIContext, uiObserver } from '@kit.ArkUI';
 import window from '@ohos.window';
 import {
   FTSessionReplayBridge,
@@ -15,6 +15,9 @@ import {
 import {
   ArkUIReplayCollector,
   ArkUIReplayLightSnapshot,
+  ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds,
+  ArkUIReplayScenePage,
   CapturedReplayImageResource
 } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
@@ -24,6 +27,7 @@ import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
   ReplayWorkerCommit,
   ReplayWorkerResult,
+  ReplaySnapshotKind,
   ReplayStoreKind,
   ReplayViewport,
   REPLAY_STALE_QUEUE_REASON,
@@ -53,6 +57,26 @@ interface SessionReplayRootBinding {
   uiContext: UIContext;
   rootId: string;
   vpToPxScale: number;
+  captureScene: boolean;
+  sceneRoot: FrameNode | null;
+  sceneRootIds: Array<string>;
+  // null uses root IDs; an explicit empty list means all scene pages exited.
+  scenePages: Array<ArkUIReplayScenePage> | null;
+}
+
+interface ReplayNavigationPage {
+  key: string;
+  root: FrameNode;
+  parentKey: string;
+  visible: boolean;
+  retained: boolean;
+  paintOrder: number;
+  releaseTimer: number;
+}
+
+interface ReplayTouchPoint {
+  x: number;
+  y: number;
 }
 
 /** The normalized bounds of the currently visible native root. */
@@ -112,6 +136,36 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
   private motionUntil: number = 0;
+  private readonly activePointers: Map<number, ReplayTouchPoint> = new Map();
+  private readonly pageTransitions: Map<string, ArkUIReplayPageTransition> = new Map();
+  private readonly navigationPages: Map<string, ReplayNavigationPage> = new Map();
+  private nextNavigationPaintOrder: number = 0;
+  private transitionObserverContext: UIContext | null = null;
+  private sceneViewport: ArkUIReplaySceneBounds | null = null;
+  private readonly routerTransitionListener = (_info: uiObserver.RouterPageInfo): void => {
+    this.captureActiveViewMutation();
+    this.notifyTransition();
+  };
+  private readonly navigationSwitchListener = (info: uiObserver.NavDestinationSwitchInfo): void => {
+    const from = info.from === 'navBar' ? null : this.ensureNavigationPage(info.from);
+    const to = info.to === 'navBar' ? null : this.ensureNavigationPage(info.to);
+    if (from !== null) this.retainNavigationPage(from);
+    if (to !== null) {
+      if (to.releaseTimer !== -1) clearTimeout(to.releaseTimer);
+      to.releaseTimer = -1;
+      to.visible = true;
+      to.retained = false;
+    }
+    if (info.operation === NavigationOperation.POP && from !== null) from.paintOrder = ++this.nextNavigationPaintOrder;
+    else if (to !== null) to.paintOrder = ++this.nextNavigationPaintOrder;
+    this.captureActiveViewMutation();
+    this.notifyTransition();
+  };
+  private readonly navigationStateListener = (info: uiObserver.NavDestinationInfo): void => {
+    this.onNavigationPageState(info);
+  };
+  private drawObserverContext: UIContext | null = null;
+  private readonly drawListener = (): void => this.notifyPageChanged();
   private lastFullSnapshotAt: number = 0;
   private observedViewport: SessionReplayViewportBounds | null = null;
   // Kept separately because an IME can reduce the root's layout height or
@@ -122,11 +176,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private nativeWindow: window.Window | null = null;
   private windowObserverEpoch: number = 0;
   private readonly windowSizeChangeListener = (_size: window.Size): void => {
+    this.refreshWindowSceneViewport();
     this.scheduleViewportCapture();
   };
   private readonly keyboardHeightChangeListener = (height: number): void => {
     this.keyboardHeightPx = Number.isFinite(height) && height > 0 ? Math.round(height) : 0;
     this.keyboardResizesRoot = null;
+    this.refreshWindowSceneViewport();
+    this.scheduleViewportCapture();
+  };
+  private readonly avoidAreaChangeListener = (): void => {
+    this.refreshWindowSceneViewport();
     this.scheduleViewportCapture();
   };
 
@@ -172,11 +232,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return;
     }
     FTSessionReplayBridgeRegistry.unregister(this);
+    this.finishTouchPointers();
     this.isStarted = false;
     this.isStopping = true;
     this.pendingViewStartContext = null;
     this.pendingViewStartFailure = '';
     this.unbindWindowViewportObserver();
+    this.unbindTransitionObserver();
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
     this.stopObservation();
     // Do not advance the generation or clear the active context here: an
     // accepted snapshot may be materializing or committing in the Worker.
@@ -208,13 +273,42 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public registerRoot(
     uiContext: UIContext,
     rootId: string,
-    vpToPxScale: number = 1
+    vpToPxScale: number = 1,
+    captureScene: boolean = false,
+    sceneRootIds: Array<string> = [],
+    scenePages: Array<ArkUIReplayScenePage> = []
   ): void {
     if (this.isStopping) return;
     const current = this.rootBinding;
+    const sceneRoot = captureScene ? this.collector.findSceneRoot(uiContext, rootId) : null;
+    const pageRoots = captureScene ? sceneRootIds.slice() : [];
+    const pages = captureScene && scenePages.length > 0 ? scenePages.slice() : null;
     if (current !== null && current.uiContext === uiContext && current.rootId === rootId &&
-      current.vpToPxScale === vpToPxScale) {
+      current.vpToPxScale === vpToPxScale && current.captureScene === captureScene) {
+      const changed = current.sceneRootIds.join('\n') !== pageRoots.join('\n');
+      current.sceneRootIds = pageRoots;
+      current.scenePages = pages;
       this.capturePendingViewStart();
+      if (changed) this.notifyTransition();
+      return;
+    }
+    if (current !== null && sceneRoot !== null && current.sceneRoot !== null &&
+      sceneRoot.getUniqueId() === current.sceneRoot.getUniqueId() && current.vpToPxScale === vpToPxScale &&
+      this.sameWindow(current.uiContext, uiContext)) {
+      this.rootBinding = { uiContext, rootId, vpToPxScale, captureScene, sceneRoot, sceneRootIds: pageRoots, scenePages: pages };
+      this.bindTransitionObserver(uiContext);
+      this.capturePendingViewStart();
+      if (this.activeContext !== null) this.startObservation();
+      this.notifyTransition();
+      return;
+    }
+    if (current !== null && captureScene && current.captureScene &&
+      current.vpToPxScale === vpToPxScale && this.sameWindow(current.uiContext, uiContext)) {
+      this.rootBinding = { uiContext, rootId, vpToPxScale, captureScene, sceneRoot, sceneRootIds: pageRoots, scenePages: pages };
+      this.bindTransitionObserver(uiContext);
+      this.capturePendingViewStart();
+      if (this.activeContext !== null) this.startObservation();
+      this.notifyTransition();
       return;
     }
     this.captureGeneration++;
@@ -222,15 +316,25 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.processor.reset();
     this.baselineContextKey = '';
     this.unbindWindowViewportObserver();
+    this.unbindTransitionObserver();
+    this.sceneViewport = null;
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
     const binding: SessionReplayRootBinding = {
       uiContext,
       rootId,
-      vpToPxScale
+      vpToPxScale,
+      captureScene,
+      sceneRoot,
+      sceneRootIds: pageRoots,
+      scenePages: pages
     };
     this.rootBinding = binding;
     this.resetViewportObservation();
     this.lastFullSnapshotAt = 0;
     this.bindWindowViewportObserver(uiContext);
+    this.bindTransitionObserver(uiContext);
     this.capturePendingViewStart();
     if (this.activeContext !== null) {
       this.startObservation();
@@ -247,7 +351,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.lastFullSnapshotAt = 0;
     this.resetViewportObservation();
     this.unbindWindowViewportObserver();
-    this.stopObservation();
+    this.unbindTransitionObserver();
+    this.sceneViewport = null;
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
   }
 
   public getLastCapture(): SessionReplayCapture | null {
@@ -314,7 +422,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture {
-    const record = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
+    const record = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale));
     this.persistCapturedImageResources(context, record);
     const capture = this.createCapture(context, [record], record);
     this.appendRecordedRecords(context, capture.records, true, false, record);
@@ -322,14 +430,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return capture;
   }
 
-  /** Captures only structural changes using Android's mutation record grammar. */
+  /** Falls back to a checkpoint while earlier captures are still being committed. */
   public captureIncrementalSnapshot(
     uiContext: UIContext,
     rootId: string,
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture | null {
-    const fullSnapshot = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
+    const fullSnapshot = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale));
     this.persistCapturedImageResources(context, fullSnapshot);
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     const mutation = !this.workQueue.hasPendingWork() && this.processor.hasBaseline() &&
@@ -384,8 +492,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /**
    * Emits Android's resize mutation and follows it with a Full Snapshot when
-   * a root is still available, so later mutations use the rotated layout as
-   * their baseline.
+   * a root is still available. Use the captured native viewport for both
+   * records; a caller's stale or synthetic dimensions must not resize the
+   * persistent page scene. Inputs are a fallback when capture is unavailable.
    */
   public recordActiveViewportResize(width: number, height: number): SessionReplayCapture | null {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) {
@@ -395,15 +504,19 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
     }
-    const records: Array<SessionReplayRecord> = [
-      this.processor.createViewportResizeRecord(this.normalizePhysicalLength(width), this.normalizePhysicalLength(height))
-    ];
-    let fullSnapshot: SessionReplayRecord | null = null;
+    this.refreshWindowSceneViewport();
     const snapshotCapture = this.captureWithRegisteredRoot(activeContext);
-    if (snapshotCapture !== null) {
-      fullSnapshot = snapshotCapture.record;
+    const fullSnapshot = snapshotCapture?.record ?? null;
+    const viewport = fullSnapshot === null ? null : this.getViewportBounds(fullSnapshot);
+    const records: Array<SessionReplayRecord> = [
+      this.processor.createViewportResizeRecord(
+        viewport?.width ?? this.normalizePhysicalLength(width),
+        viewport?.height ?? this.normalizePhysicalLength(height),
+        fullSnapshot?.timestamp ?? Date.now())
+    ];
+    if (fullSnapshot !== null) {
       records.push(fullSnapshot);
-      this.observedViewport = this.getViewportBounds(fullSnapshot);
+      this.observedViewport = viewport;
       this.lastFullSnapshotAt = fullSnapshot.timestamp;
     }
     return this.appendActiveProtocolRecords(records, fullSnapshot);
@@ -424,8 +537,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.processor.createPointerRecord(
         pointerEventType,
         Math.floor(pointerId),
-        this.normalizePhysicalLength(x),
-        this.normalizePhysicalLength(y)
+        this.normalizePhysicalLength(x) - this.sceneOriginX(),
+        this.normalizePhysicalLength(y) - this.sceneOriginY()
       )
     ], null);
     if (pointerEventType === 'move') {
@@ -436,6 +549,52 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return capture;
   }
 
+  /** ArkUI events already contain window-space vp coordinates. */
+  public recordTouchEvent(event: TouchEvent): void {
+    if (!this.isStarted || this.activeContext === null || event === undefined || event === null) return;
+    this.notifyMotion();
+    if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
+      this.activePointers.clear();
+      return;
+    }
+    const changed = event.changedTouches.length > 0 ? event.changedTouches : event.touches;
+    const records: Array<SessionReplayRecord> = [];
+    const timestamp = Date.now();
+    const type = event.type === TouchType.Down ? 'down' : event.type === TouchType.Move ? 'move' : 'up';
+    if (event.type !== TouchType.Down && event.type !== TouchType.Move &&
+      event.type !== TouchType.Up && event.type !== TouchType.Cancel) return;
+    for (let index = 0; index < changed.length; index++) {
+      const point = changed[index];
+      if (!Number.isFinite(point.id) || !Number.isFinite(point.windowX) || !Number.isFinite(point.windowY)) continue;
+      const id = Math.floor(point.id);
+      const position: ReplayTouchPoint = { x: Math.round((point.windowX - this.sceneOriginX()) * 100) / 100,
+        y: Math.round((point.windowY - this.sceneOriginY()) * 100) / 100 };
+      const previous = this.activePointers.get(id);
+      if (type === 'up' && previous === undefined) continue;
+      if (type === 'move' && previous === undefined) continue;
+      if (type === 'move' && previous?.x === position.x && previous?.y === position.y) continue;
+      records.push(this.processor.createPointerRecord(type, id, position.x, position.y, timestamp));
+      if (type === 'up') this.activePointers.delete(id);
+      else this.activePointers.set(id, position);
+    }
+    if (event.type === TouchType.Cancel) {
+      this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+        records.push(this.processor.createPointerRecord('up', id, point.x, point.y, timestamp));
+      });
+      this.activePointers.clear();
+    }
+    if (records.length > 0) this.appendActiveProtocolRecords(records, null);
+  }
+
+  private finishTouchPointers(): void {
+    const records: Array<SessionReplayRecord> = [];
+    this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+      records.push(this.processor.createPointerRecord('up', id, point.x, point.y));
+    });
+    this.activePointers.clear();
+    if (records.length > 0) this.appendActiveProtocolRecords(records, null);
+  }
+
   /**
    * Generated page instrumentation and integration code call this after a
    * layout/state change. It coalesces many draws into one detached snapshot.
@@ -444,15 +603,57 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.scheduleAutomaticCapture();
   }
 
-  /** Marks scrolling/animation/transition activity and waits for it to settle. */
+  /** Keeps captures running through motion, including its settled final frame. */
   public notifyMotion(): void {
     this.motionUntil = Date.now() + this.config.getMotionQuietPeriodMs();
     this.scheduleAutomaticCapture();
   }
 
-  /** A navigation boundary keeps the final stable frame but skips intermediates. */
+  /** A navigation boundary starts the same continuous motion capture. */
   public notifyTransition(): void {
     this.notifyMotion();
+  }
+
+  public updatePageTransition(rootId: string, transition: ArkUIReplayPageTransition): void {
+    this.pageTransitions.set(rootId, transition);
+    const navigationPage = this.navigationPages.get(rootId);
+    if (navigationPage !== undefined && !transition.entering && transition.progress < 1) {
+      this.retainNavigationPage(navigationPage);
+    }
+    this.notifyTransition();
+    // Preserve the actual callback boundary even when the ordinary sampling
+    // timer would run only after a short transition has already finished.
+    if (transition.progress === 0 || transition.progress === 1) this.captureActiveViewMutation();
+  }
+
+  public finishPageTransition(key: string): void {
+    this.pageTransitions.delete(key);
+    const page = this.navigationPages.get(key);
+    if (page !== undefined && !page.visible) {
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+      this.navigationPages.delete(key);
+    }
+    this.notifyTransition();
+  }
+
+  /** Release Router pages independently of the incoming root's layout readiness. */
+  public releaseScenePages(keys: Array<string>): void {
+    if (keys.length === 0) return;
+    const binding = this.rootBinding;
+    if (binding !== null && binding.captureScene) {
+      const released = new Set<string>(keys);
+      binding.scenePages = this.getRootScenePages(binding).filter((page: ArkUIReplayScenePage): boolean => {
+        if (!released.has(page.key) && !released.has(page.rootId)) return true;
+        this.pageTransitions.delete(page.key);
+        this.pageTransitions.delete(page.rootId);
+        return false;
+      });
+      binding.sceneRootIds = binding.scenePages.map((page: ArkUIReplayScenePage): string => page.rootId);
+    }
+    // Queue removal under the current View even if its new root is still
+    // laying out. Keep the stable scene canvas when the last page exits.
+    this.captureActiveViewMutation('settled');
+    this.notifyTransition();
   }
 
   /** Converts public physical-pixel viewport and touch inputs into Replay vp units. */
@@ -627,6 +828,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
       return;
     }
+    this.finishTouchPointers();
     const viewKey = this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId);
     if (this.pendingViewStarts.has(viewKey)) {
       FTSessionReplayBridgeRegistry.logDiagnostic(
@@ -664,6 +866,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     if (!this.isStarted) return;
+    this.finishTouchPointers();
     this.renewRootEpoch();
     this.activeContext = null;
     this.captureGeneration++;
@@ -750,6 +953,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (lightSnapshot === null) {
       return false;
     }
+    if (this.activeContext !== null && !this.isSameView(this.activeContext, replayContext)) this.finishTouchPointers();
     this.captureGeneration++;
     this.processor.reset();
     this.resetViewportObservation(true);
@@ -802,7 +1006,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private enqueueWorkerSnapshot(
-    kind: 'start' | 'full' | 'automatic',
+    kind: ReplaySnapshotKind,
     snapshot: ArkUIReplayLightSnapshot,
     context: SessionReplayContext,
     generation: number,
@@ -829,6 +1033,31 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
+  private captureRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
+    const binding = this.rootBinding;
+    if (binding !== null && binding.rootId === rootId &&
+      (binding.captureScene || this.navigationPages.size > 0)) {
+      const pages = this.getScenePages(binding);
+      if (this.sceneViewport === null) {
+        const root = uiContext.getFrameNodeById(rootId);
+        if (root !== null) {
+          const position = root.getPositionToWindow();
+          const size = root.getMeasuredSize();
+          if (size.width > 0 && size.height > 0) this.sceneViewport = {
+            x: position.x, y: position.y, width: size.width / scale, height: size.height / scale
+          };
+        }
+      }
+      const pageIds = pages.map((page: ArkUIReplayScenePage): string => page.rootId);
+      return this.collector.captureSceneLight(uiContext, pageIds, scale, Date.now(),
+        this.pageTransitions, this.sceneViewport, pages);
+    }
+    if (binding !== null && binding.rootId === rootId && binding.sceneRoot !== null && binding.sceneRoot.isAttached()) {
+      return this.collector.captureFrameNodeLight(binding.sceneRoot, scale);
+    }
+    return this.collector.captureLightSnapshot(uiContext, rootId, scale);
+  }
+
   private captureLightSnapshotForContext(context: SessionReplayContext): ArkUIReplayLightSnapshot | null {
     if (!this.isStarted) {
       this.lastCaptureFailure = 'Session Replay recorder is not started.';
@@ -844,7 +1073,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return null;
     }
     try {
-      return this.collector.captureLightSnapshot(
+      return this.captureRootLight(
         rootBinding.uiContext,
         rootBinding.rootId,
         rootBinding.vpToPxScale
@@ -879,7 +1108,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private completeWorkerSnapshot(
-    kind: 'start' | 'full' | 'automatic',
+    kind: ReplaySnapshotKind,
     context: SessionReplayContext,
     generation: number,
     result: ReplayWorkerResult | null,
@@ -902,13 +1131,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
           true);
       }
       if (result !== null) this.removeWorkerSegments(result);
-      if (currentCapture && kind === 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
+      if (currentCapture && (kind === 'automatic' || kind === 'settled') && error !== REPLAY_STALE_QUEUE_REASON) {
         this.lastFullSnapshotAt = 0;
       }
       if (currentCapture && this.isStarted && kind === 'start' && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
         this.queueViewStartedFromRUMContext(rumContext, promoteErrorAt);
       }
-      if (currentCapture && this.isStarted && kind === 'automatic' &&
+      if (currentCapture && this.isStarted && (kind === 'automatic' || kind === 'settled') &&
         (error === REPLAY_STALE_QUEUE_REASON || Date.now() < this.motionUntil)) this.scheduleAutomaticCapture();
       return;
     }
@@ -975,11 +1204,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return null;
     }
     try {
-      const record = this.collector.captureFullSnapshot(
-        this.rootBinding.uiContext,
-        this.rootBinding.rootId,
-        this.rootBinding.vpToPxScale
-      );
+      const record = this.collector.materializeLightSnapshot(this.captureRootLight(
+        this.rootBinding.uiContext, this.rootBinding.rootId, this.rootBinding.vpToPxScale));
       this.persistCapturedImageResources(context, record);
       return this.createCapture(context, [record], record);
     } catch (error) {
@@ -1260,13 +1486,26 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
       return;
     }
-    // Collection is signal-driven. A View start's Full Snapshot already owns
-    // the baseline; this only asks for a coalesced incremental check after the
-    // page has completed any immediate layout work.
+    // Drawing also covers text/style changes that do not resize the root and
+    // works independently of application-owned onAreaChange/onTouch callbacks.
+    const uiContext = this.rootBinding.uiContext;
+    try {
+      uiContext.getUIObserver().on('willDraw', this.drawListener);
+      this.drawObserverContext = uiContext;
+    } catch (_) {
+      // Explicit page notifications remain available on unsupported contexts.
+    }
     this.notifyPageChanged();
   }
 
   private stopObservation(): void {
+    const uiContext = this.drawObserverContext;
+    this.drawObserverContext = null;
+    if (uiContext !== null) {
+      try {
+        uiContext.getUIObserver().off('willDraw', this.drawListener);
+      } catch (_) { }
+    }
     if (this.mutationCaptureTimer !== -1) {
       clearTimeout(this.mutationCaptureTimer);
       this.mutationCaptureTimer = -1;
@@ -1277,7 +1516,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
   }
 
-  private captureActiveViewMutation(): void {
+  private captureActiveViewMutation(kind: 'automatic' | 'settled' = 'automatic'): void {
     const context = this.activeContext;
     const rootBinding = this.rootBinding;
     if (!this.isStarted || context === null || rootBinding === null) {
@@ -1287,41 +1526,44 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       // This is the only automatic code that runs in an ArkUI callback. It
       // reads FrameNode into a detached handoff and immediately returns. The
       // Replay Worker materializes and diffs it, then writes the record batch.
-      const lightSnapshot = this.collector.captureLightSnapshot(
+      const lightSnapshot = this.captureRootLight(
         rootBinding.uiContext,
         rootBinding.rootId,
         rootBinding.vpToPxScale
       );
       const generation = this.captureGeneration;
       const contextSnapshot = this.copyReplayContext(context);
-      this.enqueueWorkerSnapshot('automatic', lightSnapshot, contextSnapshot, generation, null, null);
+      this.enqueueWorkerSnapshot(kind, lightSnapshot, contextSnapshot, generation, null, null);
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and capture.
       // The next page-change signal will retry after its layout has settled.
     }
   }
 
-  /** Coalesces change notifications and drops intermediate motion frames. */
+  /** Samples motion at the configured interval, retaining a final frame too. */
   private scheduleAutomaticCapture(): void {
     if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
       return;
     }
-    if (this.mutationCaptureTimer !== -1) {
-      clearTimeout(this.mutationCaptureTimer);
-    }
-    const now = Date.now();
-    const motionDelay = Math.max(0, this.motionUntil - now);
-    const delay = Math.max(this.config.getSnapshotIntervalMs(), motionDelay);
+    // Keep the first deadline so neither drawing nor pointer moves postpone it.
+    if (this.mutationCaptureTimer !== -1) return;
+    const delay = this.config.getSnapshotIntervalMs();
     this.mutationCaptureTimer = setTimeout((): void => {
       this.mutationCaptureTimer = -1;
-      // A continuous Scroll/animation keeps extending motionUntil. Do not
-      // traverse the root until it becomes stable.
-      if (Date.now() < this.motionUntil) {
-        this.scheduleAutomaticCapture();
-        return;
-      }
-      this.captureActiveViewMutation();
+      const settled = this.motionUntil > 0 && Date.now() >= this.motionUntil && !this.hasRetainedScenePages();
+      if (settled) this.motionUntil = 0;
+      this.captureActiveViewMutation(settled ? 'settled' : 'automatic');
+      if (Date.now() < this.motionUntil || this.hasRetainedScenePages()) this.scheduleAutomaticCapture();
     }, delay);
+  }
+
+  private hasRetainedScenePages(): boolean {
+    if (this.rootBinding?.scenePages?.some((page: ArkUIReplayScenePage): boolean => page.retained)) return true;
+    let retained = false;
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      if (page.retained) retained = true;
+    });
+    return retained;
   }
 
   private isCurrentCapture(context: SessionReplayContext, generation: number): boolean {
@@ -1349,6 +1591,199 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       }
     }
     return result;
+  }
+
+  private sameWindow(left: UIContext, right: UIContext): boolean {
+    if (left === right) return true;
+    try {
+      const id = left.getWindowId();
+      return id !== undefined && id === right.getWindowId();
+    } catch (_) { return false; }
+  }
+
+  private usesSceneCoordinates(): boolean {
+    return this.rootBinding !== null &&
+      (this.rootBinding.captureScene || this.navigationPages.size > 0);
+  }
+
+  private sceneOriginX(): number {
+    return this.usesSceneCoordinates() ? (this.sceneViewport?.x ?? 0) : 0;
+  }
+
+  private sceneOriginY(): number {
+    return this.usesSceneCoordinates() ? (this.sceneViewport?.y ?? 0) : 0;
+  }
+
+  private bindTransitionObserver(uiContext: UIContext): void {
+    if (this.transitionObserverContext === uiContext) return;
+    this.unbindTransitionObserver();
+    this.transitionObserverContext = uiContext;
+    try {
+      const observer = uiContext.getUIObserver();
+      // Subscribe independently: an unavailable event must not disable others.
+      try { observer.on('routerPageUpdate', this.routerTransitionListener); } catch (_) { }
+      try { observer.on('navDestinationSwitch', this.navigationSwitchListener); } catch (_) { }
+      try { observer.on('navDestinationUpdate', this.navigationStateListener); } catch (_) { }
+    } catch (_) { }
+  }
+
+  private unbindTransitionObserver(): void {
+    const context = this.transitionObserverContext;
+    this.transitionObserverContext = null;
+    if (context === null) return;
+    try {
+      const observer = context.getUIObserver();
+      try { observer.off('routerPageUpdate', this.routerTransitionListener); } catch (_) { }
+      try { observer.off('navDestinationSwitch', this.navigationSwitchListener); } catch (_) { }
+      try { observer.off('navDestinationUpdate', this.navigationStateListener); } catch (_) { }
+    } catch (_) { }
+  }
+
+  private ensureNavigationPage(info: uiObserver.NavDestinationInfo): ReplayNavigationPage | null {
+    const binding = this.rootBinding;
+    if (binding === null || info.uniqueId === undefined) return null;
+    const key = `navigation:${info.uniqueId}`;
+    const existing = this.navigationPages.get(key);
+    if (existing !== undefined) return existing;
+    try {
+      const root = binding.uiContext.getFrameNodeByUniqueId(info.uniqueId);
+      if (root === null) return null;
+      const parentKey = this.findNavigationHost(root, binding);
+      if (parentKey === null) return null;
+      const page: ReplayNavigationPage = {
+        key, root, parentKey, visible: true, retained: false,
+        paintOrder: ++this.nextNavigationPaintOrder, releaseTimer: -1
+      };
+      this.navigationPages.set(key, page);
+      return page;
+    } catch (_) { return null; }
+  }
+
+  private findNavigationHost(root: FrameNode, binding: SessionReplayRootBinding): string | null {
+    if (binding.scenePages === null) return binding.rootId;
+    let current: FrameNode | null = root;
+    for (let depth = 0; depth < 64 && current !== null; depth++) {
+      try {
+        const id = current.getUniqueId();
+        const host = binding.scenePages.find((page: ArkUIReplayScenePage): boolean => page.root?.getUniqueId() === id);
+        if (host !== undefined) return host.key;
+        current = current.getParent();
+      } catch (_) { break; }
+    }
+    // A destination on a not-yet-registered Router page must not be attached
+    // to the previous page just because its lifecycle observer ran first.
+    return null;
+  }
+
+  private onNavigationPageState(info: uiObserver.NavDestinationInfo): void {
+    const page = this.ensureNavigationPage(info);
+    if (page === null) { this.notifyTransition(); return; }
+    const state = info.state;
+    if (state === uiObserver.NavDestinationState.ON_WILL_HIDE ||
+      state === uiObserver.NavDestinationState.ON_WILL_DISAPPEAR) {
+      this.retainNavigationPage(page);
+      this.captureActiveViewMutation();
+    } else if (state === uiObserver.NavDestinationState.ON_HIDDEN ||
+      state === uiObserver.NavDestinationState.ON_DISAPPEAR) {
+      page.visible = false;
+      const progress = this.pageTransitions.get(page.key);
+      if (progress === undefined || progress.progress >= 1) {
+        if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+        this.navigationPages.delete(page.key);
+      }
+    } else if (state === uiObserver.NavDestinationState.ON_WILL_SHOW ||
+      state === uiObserver.NavDestinationState.ON_SHOWN || state === uiObserver.NavDestinationState.ON_APPEAR) {
+      page.visible = true;
+      page.retained = false;
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+      page.releaseTimer = -1;
+    }
+    this.notifyTransition();
+  }
+
+  private retainNavigationPage(page: ReplayNavigationPage): void {
+    page.visible = false;
+    page.retained = true;
+    if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+    page.releaseTimer = setTimeout((): void => {
+      page.releaseTimer = -1;
+      if (this.navigationPages.get(page.key) !== page || page.visible) return;
+      this.navigationPages.delete(page.key);
+      this.pageTransitions.delete(page.key);
+      this.notifyTransition();
+    }, 10000);
+  }
+
+  private clearNavigationPages(): void {
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+    });
+    this.navigationPages.clear();
+  }
+
+  private getRootScenePages(binding: SessionReplayRootBinding): Array<ArkUIReplayScenePage> {
+    return binding.scenePages ??
+      (binding.sceneRootIds.length > 0 ? binding.sceneRootIds : [binding.rootId])
+        .map((id: string): ArkUIReplayScenePage => {
+          return { key: id, rootId: id, root: binding.uiContext.getFrameNodeById(id), retained: false };
+        });
+  }
+
+  private getScenePages(binding: SessionReplayRootBinding): Array<ArkUIReplayScenePage> {
+    const roots = this.getRootScenePages(binding);
+    const result: Array<ArkUIReplayScenePage> = [];
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      const host = this.findNavigationHost(page.root, binding);
+      if (host !== null) page.parentKey = host;
+    });
+    const rootKeys = new Set<string>();
+    for (const root of roots) {
+      rootKeys.add(root.key);
+      result.push(root);
+      const children: Array<ReplayNavigationPage> = [];
+      this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+        if (page.parentKey === root.key && (page.visible || page.retained)) children.push(page);
+      });
+      children.sort((left: ReplayNavigationPage, right: ReplayNavigationPage): number => left.paintOrder - right.paintOrder);
+      for (const page of children) result.push({ key: page.key, rootId: page.key, root: page.root,
+        retained: page.retained, parentKey: root.key, paintOrder: page.paintOrder });
+    }
+    this.navigationPages.forEach((page: ReplayNavigationPage, key: string): void => {
+      if (!rootKeys.has(page.parentKey)) {
+        if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+        this.navigationPages.delete(key);
+        this.pageTransitions.delete(key);
+      }
+    });
+    return result;
+  }
+
+  private refreshWindowSceneViewport(): void {
+    const nativeWindow = this.nativeWindow;
+    const binding = this.rootBinding;
+    if (nativeWindow === null || binding === null) return;
+    try {
+      const rect = nativeWindow.getWindowProperties().drawableRect;
+      const scale = binding.vpToPxScale > 0 ? binding.vpToPxScale : 1;
+      if (![rect.left, rect.top, rect.width, rect.height].every((value: number): boolean => Number.isFinite(value)) ||
+        rect.width <= 0 || rect.height <= 0) return;
+      this.sceneViewport = { x: rect.left / scale, y: rect.top / scale,
+        width: rect.width / scale, height: rect.height / scale };
+    } catch (_) { }
+  }
+
+  private attachWindowViewportObserver(nativeWindow: window.Window, epoch: number): void {
+    if (epoch !== this.windowObserverEpoch || this.rootBinding === null) return;
+    try {
+      const windowId = this.rootBinding.uiContext.getWindowId();
+      if (windowId !== undefined && windowId !== nativeWindow.getWindowProperties().id) return;
+    } catch (_) { }
+    this.nativeWindow = nativeWindow;
+    this.refreshWindowSceneViewport();
+    try { nativeWindow.on('windowSizeChange', this.windowSizeChangeListener); } catch (_) { }
+    try { nativeWindow.on('keyboardHeightChange', this.keyboardHeightChangeListener); } catch (_) { }
+    try { nativeWindow.on('avoidAreaChange', this.avoidAreaChangeListener); } catch (_) { }
+    this.scheduleViewportCapture();
   }
 
   /** Reads the root's already normalized viewport dimensions from a snapshot. */
@@ -1396,19 +1831,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     const epoch = ++this.windowObserverEpoch;
     try {
+      const name = uiContext.getWindowName();
+      if (name !== undefined) {
+        this.attachWindowViewportObserver(window.findWindow(name), epoch);
+        return;
+      }
+    } catch (_) { }
+    try {
       window.getLastWindow(hostContext)
         .then((nativeWindow: window.Window): void => {
-          if (epoch !== this.windowObserverEpoch || this.rootBinding === null) {
-            return;
-          }
-          this.nativeWindow = nativeWindow;
-          try {
-            nativeWindow.on('windowSizeChange', this.windowSizeChangeListener);
-            nativeWindow.on('keyboardHeightChange', this.keyboardHeightChangeListener);
-          } catch (_) {
-            // Compiler-injected root change callbacks remain available when a
-            // host window does not expose viewport events.
-          }
+          this.attachWindowViewportObserver(nativeWindow, epoch);
         })
         .catch((): void => {
           // A page can be detached while its UIContext is resolving a window.
@@ -1425,12 +1857,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (nativeWindow === null) {
       return;
     }
-    try {
-      nativeWindow.off('windowSizeChange', this.windowSizeChangeListener);
-      nativeWindow.off('keyboardHeightChange', this.keyboardHeightChangeListener);
-    } catch (_) {
-      // The window can already be destroyed during an Ability transition.
-    }
+    try { nativeWindow.off('windowSizeChange', this.windowSizeChangeListener); } catch (_) { }
+    try { nativeWindow.off('keyboardHeightChange', this.keyboardHeightChangeListener); } catch (_) { }
+    try { nativeWindow.off('avoidAreaChange', this.avoidAreaChangeListener); } catch (_) { }
   }
 
   /** Defers until ArkUI has applied the new window or IME layout. */
@@ -1498,6 +1927,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         if (image.shapeStyle !== undefined) masked.shapeStyle = image.shapeStyle;
         if (image.border !== undefined) masked.border = image.border;
         if (image.permanentId !== undefined) masked.permanentId = image.permanentId;
+        if (image.clip !== undefined) masked.clip = image.clip;
+        if (image.zIndex !== undefined) masked.zIndex = image.zIndex;
         data.wireframes[index] = masked;
       } else {
         wireframe.resourceId = resourceId;

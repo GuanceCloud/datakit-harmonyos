@@ -55,7 +55,7 @@ function automaticCommit(timestamp: number, childX: number): ReplayWorkerCommit 
 
 export default function sessionReplayWorkerUnitTest(): void {
   describe('SessionReplayWorkerUnit', () => {
-    it('expires later snapshots after one second but retains immutable View Starts', 0, () => {
+    it('expires intermediate snapshots but retains first frames and settled scene boundaries', 0, () => {
       expect(isReplaySnapshotExpired(100, 1100)).assertFalse();
       expect(isReplaySnapshotExpired(100, 1101)).assertTrue();
       expect(isReplaySnapshotExpired(100, 1100, 'automatic')).assertFalse();
@@ -63,6 +63,7 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(isReplaySnapshotExpired(100, 1101, 'full')).assertTrue();
       expect(isReplaySnapshotExpired(100, 1101, 'start')).assertFalse();
       expect(isReplaySnapshotExpired(100, 60100, 'start')).assertFalse();
+      expect(isReplaySnapshotExpired(100, 60100, 'settled')).assertFalse();
     });
 
     it('serially produces a baseline and a mutation from worker snapshots', 0, () => {
@@ -100,6 +101,22 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(mutation.payload.includes('"source":0')).assertTrue();
 
       expect(operations.process('automatic', commit).records.length).assertEqual(0);
+    });
+
+    it('writes the settled scene removal as Mutation under the existing checkpoint', 0, () => {
+      const operations = newOperations();
+      const commit = automaticCommit(1000, 50);
+      operations.process('start', commit);
+      commit.snapshot = fullSnapshot(1200, 50);
+      (commit.snapshot.data as FullSnapshotData).wireframes.splice(1, 1);
+      const settled = operations.process('settled', commit);
+      expect(settled.records.length).assertEqual(1);
+      expect(settled.records[0].type).assertEqual(ReplayRecordType.INCREMENTAL_SNAPSHOT);
+      const mutation = settled.records[0].data as ReplayMutationData;
+      expect(mutation.removes.length).assertEqual(1);
+      expect(mutation.removes[0].id).assertEqual(2);
+      expect(mutation.adds.length).assertEqual(0);
+      expect(settled.lastFullSnapshotAt).assertEqual(1000);
     });
 
     it('keeps queued frames incremental when UI checkpoint hints are stale', 0, () => {

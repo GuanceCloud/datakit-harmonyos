@@ -2,6 +2,10 @@ import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import {
+  ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds, ArkUIReplaySceneFrame, ArkUIReplayScenePage, SessionReplayScene
+} from './SessionReplayScene';
+import {
   FullSnapshotData,
   ReplayGradient,
   ReplayImageWireframe,
@@ -16,8 +20,13 @@ import {
   ReplayTextWireframe,
   ReplayTransform,
   ReplayWireframe,
+  ReplayWireframeClip,
   SessionReplayRecord
 } from './SessionReplayProtocol';
+export {
+  ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds, ArkUIReplayScenePage
+} from './SessionReplayScene';
 
 const MAX_INSPECTOR_BYTES = 64 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -43,10 +52,9 @@ interface ReplayInsets {
 }
 
 /**
- * Window-space clipping rectangle used only while collecting a snapshot.
- * Android Replay wireframes are flat and have no clip-path field, so the
- * collector must reduce each native node to its visible rectangle before it
- * serializes the existing wireframe protocol.
+ * Window-space clipping rectangle used while collecting a snapshot. It is
+ * serialized as Android clipping insets, separately from each node's original
+ * position and measured size.
  */
 interface ReplayClipRect {
   left: number;
@@ -67,34 +75,6 @@ export interface CapturedReplayImageResource {
 }
 
 /**
- * A deliberately small, FrameNode-only read captured on the UI thread.
- *
- * It contains no Replay wireframe, JSON text, decoded image, or protocol
- * record.  Inspector values are retained as opaque snapshots and are parsed
- * only by `materializeLightSnapshot` after the UI callback has returned.
- */
-export interface ArkUIReplayLightNode {
-  id: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  componentId: string;
-  nodeType: string;
-  inspectorInfo: Object | null;
-  shouldCaptureAsText: boolean;
-  isRoot: boolean;
-  usedTransformedPosition: boolean;
-}
-
-/** Immutable-by-convention handoff payload from the ArkUI read phase. */
-export interface ArkUIReplayLightSnapshot {
-  timestamp: number;
-  vpToPxScale: number;
-  nodes: Array<ArkUIReplayLightNode>;
-}
-
-/**
  * Captures a privacy-filtered, visual ArkUI snapshot from a registered root.
  *
  * FrameNode deliberately exposes layout rather than pixels. This collector
@@ -109,6 +89,7 @@ export class ArkUIReplayCollector {
   private readonly parsedInspectorCache: Map<string, Record<string, Object>> = new Map();
   private pendingImageResources: Array<CapturedReplayImageResource> = [];
   private rootEpoch: number = 1;
+  private readonly scene: SessionReplayScene = new SessionReplayScene();
 
   constructor(maxNodes: number = 1500, config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.maxNodes = Math.max(1, Math.floor(maxNodes));
@@ -118,6 +99,11 @@ export class ArkUIReplayCollector {
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
   public renewRootEpoch(): void {
     this.rootEpoch++;
+    this.scene.clear();
+  }
+
+  public clearScene(): void {
+    this.scene.clear();
   }
 
   /**
@@ -185,12 +171,125 @@ export class ArkUIReplayCollector {
     return this.captureFrameNodeLight(root, vpToPxScale, timestamp);
   }
 
+  /** Resolves reachable ArkUI containers; internal Page/Stage parents remain private. */
+  public findSceneRoot(uiContext: UIContext, rootId: string): FrameNode | null {
+    const pageRoot = uiContext.getFrameNodeById(rootId);
+    if (pageRoot === null) return null;
+    let root: FrameNode = pageRoot;
+    for (let depth = 0; depth < 64; depth++) {
+      try {
+        const parent: FrameNode | null = root.getParent();
+        if (parent === null || !parent.isAttached()) break;
+        const size = parent.getMeasuredSize();
+        if (size.width <= 0 || size.height <= 0) break;
+        root = parent;
+        if (parent.getNodeType().toLowerCase() === 'stage') break;
+      } catch (_) { break; }
+    }
+    return root;
+  }
+
   public captureFrameNode(
     root: FrameNode,
     vpToPxScale: number = 1,
     timestamp: number = Date.now()
   ): SessionReplayRecord {
     return this.materializeLightSnapshot(this.captureFrameNodeLight(root, vpToPxScale, timestamp));
+  }
+
+  /** Page/Stage parents are private; compose roots supplied by page lifecycle hooks. */
+  public captureSceneLight(
+    uiContext: UIContext,
+    rootIds: Array<string>,
+    vpToPxScale: number = 1,
+    timestamp: number = Date.now(),
+    transitions: Map<string, ArkUIReplayPageTransition> = new Map(),
+    viewportBounds: ArkUIReplaySceneBounds | null = null,
+    scenePages: Array<ArkUIReplayScenePage> = []
+  ): ArkUIReplayLightSnapshot {
+    const scale = Number.isFinite(vpToPxScale) && vpToPxScale > 0 ? vpToPxScale : 1;
+    const pages = scenePages.length > 0 ? scenePages : rootIds.map((rootId: string): ArkUIReplayScenePage => {
+      return { key: rootId, rootId, root: uiContext.getFrameNodeById(rootId), retained: false };
+    });
+    const excludedIds = new Set<number>();
+    for (const page of pages) {
+      if (page.parentKey !== undefined && page.root !== null) excludedIds.add(page.root.getUniqueId());
+    }
+    const frames: Array<ArkUIReplaySceneFrame> = [];
+    for (const page of pages) {
+      const root = page.root;
+      if (root === null) continue;
+      try {
+        this.assertRenderableRoot(root);
+        try { if (!root.isVisible()) continue; } catch (_) { }
+        const size = root.getMeasuredSize();
+        const layout = root.getPositionToWindow();
+        let measured = layout;
+        try { measured = root.getPositionToWindowWithTransform(); } catch (_) { }
+        const nativeX = measured.x - layout.x;
+        const nativeY = measured.y - layout.y;
+        if (!Number.isFinite(nativeX) || !Number.isFinite(nativeY) ||
+          !Number.isFinite(layout.x) || !Number.isFinite(layout.y)) continue;
+        const pageNodes: Array<ArkUIReplayLightNode> = [];
+        this.appendLightPreOrder(root, scale, pageNodes, true, undefined,
+          page.parentKey === undefined ? 1 : this.readAncestorOpacity(root), 0, 0, excludedIds,
+          this.maxNodes - (page.parentKey === undefined ? 2 : 1));
+        if (page.parentKey === undefined) {
+          // A transparent application Column still sits on an opaque native
+          // Router Page. Record that backing separately, below its contents.
+          if (pageNodes.length > 0) pageNodes[0].isRoot = false;
+          pageNodes.unshift({
+            id: -this.toProtocolId(root.getUniqueId()), x: measured.x, y: measured.y,
+            width: size.width / scale, height: size.height / scale,
+            componentId: 'ft-session-replay-page-surface', nodeType: 'Column', inspectorInfo: null,
+            shouldCaptureAsText: false, isRoot: true, usedTransformedPosition: true,
+            opacity: 1, clip: { top: 0, right: 0, bottom: 0, left: 0 }, isPageSurface: true
+          });
+        }
+        if (pageNodes.length === 0) continue;
+        // Remove only the page's movement; retain each child's own scroll or
+        // translation and its ancestor-local clip for later scene composition.
+        for (const node of pageNodes) {
+          node.x = this.roundReplayMetric(node.x - nativeX);
+          node.y = this.roundReplayMetric(node.y - nativeY);
+        }
+        frames.push({ key: page.key, bounds: { x: layout.x, y: layout.y,
+          width: size.width / scale, height: size.height / scale }, nativeX, nativeY, nodes: pageNodes });
+      } catch (_) {
+        // A retained page can already be detached. Its bounded detached frame
+        // stays usable until the transition owner releases that page.
+      }
+    }
+    const fallback = frames.find((frame: ArkUIReplaySceneFrame): boolean =>
+      pages.some((page: ArkUIReplayScenePage): boolean => page.key === frame.key && page.parentKey === undefined));
+    const viewport = viewportBounds ?? fallback?.bounds;
+    if (viewport === undefined || viewport.width <= 0 || viewport.height <= 0) {
+      throw new Error('Session Replay scene has no valid viewport.');
+    }
+    const nodes: Array<ArkUIReplayLightNode> = [{
+      id: this.toProtocolId(0), x: 0, y: 0,
+      width: viewport.width, height: viewport.height,
+      componentId: 'ft-session-replay-scene', nodeType: 'Column', inspectorInfo: null,
+      shouldCaptureAsText: false, isRoot: true, usedTransformedPosition: false, opacity: 1,
+      clip: { top: 0, right: 0, bottom: 0, left: 0 }
+    }];
+    const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1);
+    for (const node of composed) nodes.push(node);
+    return { timestamp, vpToPxScale: scale, nodes };
+  }
+
+  private readAncestorOpacity(root: FrameNode): number {
+    let opacity = 1;
+    let parent: FrameNode | null = null;
+    try { parent = root.getParent(); } catch (_) { }
+    for (let depth = 0; depth < 64 && parent !== null; depth++) {
+      try {
+        const value = parent.getOpacity();
+        if (Number.isFinite(value)) opacity *= Math.max(0, Math.min(1, value));
+        parent = parent.getParent();
+      } catch (_) { break; }
+    }
+    return opacity;
   }
 
   /** Same UI-only phase for callers that already hold the root FrameNode. */
@@ -213,6 +312,7 @@ export class ArkUIReplayCollector {
    */
   public materializeLightSnapshot(snapshot: ArkUIReplayLightSnapshot): SessionReplayRecord {
     const wireframes: Array<ReplayWireframe> = [];
+    const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
     this.parsedInspectorCache.clear();
     for (let index = 0; index < snapshot.nodes.length; index++) {
@@ -233,7 +333,39 @@ export class ArkUIReplayCollector {
       );
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
       this.appendCommonVisualProperties(wireframe, inspector);
+      // Use a canonical zero clip for unclipped nodes so applying a clearing
+      // Mutation produces exactly the same properties as the latest Full.
+      wireframe.clip = {
+        top: node.clip?.top ?? 0,
+        right: node.clip?.right ?? 0,
+        bottom: node.clip?.bottom ?? 0,
+        left: node.clip?.left ?? 0
+      };
+      if (wireframe.type !== 'placeholder' && node.opacity !== undefined) {
+        const style = wireframe.shapeStyle ?? {};
+        style.opacity = node.opacity;
+        wireframe.shapeStyle = style;
+      }
       wireframes.push(wireframe);
+      if (node.sceneLayer !== undefined && !node.isPageSurface) {
+        let indices = pageZIndices.get(node.sceneLayer);
+        if (indices === undefined) {
+          indices = [];
+          pageZIndices.set(node.sceneLayer, indices);
+        }
+        const zIndex = wireframe.zIndex ?? 0;
+        if (!indices.includes(zIndex)) indices.push(zIndex);
+      }
+    }
+    pageZIndices.forEach((indices: Array<number>): void => { indices.sort((left: number, right: number): number => left - right); });
+    for (let index = 0; index < wireframes.length; index++) {
+      const node = snapshot.nodes[index];
+      if (node.sceneLayer === undefined) continue;
+      const wireframe = wireframes[index];
+      // Native zIndex is local to its page. Compact its relative order into
+      // that page's reserved band instead of allowing it to cross pages.
+      const rank = node.isPageSurface ? 0 : (pageZIndices.get(node.sceneLayer)?.indexOf(wireframe.zIndex ?? 0) ?? 0) + 1;
+      wireframe.zIndex = node.sceneLayer + rank;
     }
     const data: FullSnapshotData = { wireframes };
     return {
@@ -271,16 +403,28 @@ export class ArkUIReplayCollector {
     vpToPxScale: number,
     output: Array<ArkUIReplayLightNode>,
     isRoot: boolean,
-    ancestorClip: ReplayClipRect | null | undefined = undefined
+    ancestorClip: ReplayClipRect | null | undefined = undefined,
+    ancestorOpacity: number = 1,
+    sceneOffsetX: number = 0,
+    sceneOffsetY: number = 0,
+    excludedIds: Set<number> = new Set(),
+    nodeBudget: number = this.maxNodes
   ): void {
-    if (output.length >= this.maxNodes) {
+    if (output.length >= nodeBudget) {
       return;
     }
 
     const nodeId = node.getUniqueId();
+    if (!isRoot && excludedIds.has(nodeId)) return;
     if (nodeId <= 0 || !node.isAttached()) {
       return;
     }
+    let opacity = ancestorOpacity;
+    try {
+      if (!node.isVisible()) return;
+      const ownOpacity = node.getOpacity();
+      if (Number.isFinite(ownOpacity)) opacity *= Math.max(0, Math.min(1, ownOpacity));
+    } catch (_) { }
 
     let x = 0;
     let y = 0;
@@ -310,38 +454,35 @@ export class ArkUIReplayCollector {
       height = Math.max(0, this.roundReplayMetric(size.height / vpToPxScale));
     } catch (_) { }
 
+    x = this.roundReplayMetric(x + sceneOffsetX);
+    y = this.roundReplayMetric(y + sceneOffsetY);
+
     const bounds = this.createClipRect(x, y, width, height);
-    const visibleBounds = this.intersectClipRects(ancestorClip, bounds);
     const clipsDescendants = isRoot || this.isClipToFrame(node);
     const childClip = clipsDescendants
       ? this.intersectClipRects(ancestorClip, bounds)
       : ancestorClip;
 
-    // The Replay player accepts only flat geometry. Do not emit an offscreen
-    // native node; for a partially visible node, serialize its visible bounds
-    // rather than inventing a protocol field the player cannot render.
-    if (visibleBounds !== null) {
+    // Keep attached nodes and their original geometry while they move through
+    // a clipping boundary. Fully clipped nodes remain present with an empty
+    // clip instead of being removed and added again when they slide back in.
+    if (width > 0 && height > 0) {
       const nodeType = this.readNodeType(node);
       output.push({
         id: this.toProtocolId(nodeId),
-        x: visibleBounds.left,
-        y: visibleBounds.top,
-        width: visibleBounds.right - visibleBounds.left,
-        height: visibleBounds.bottom - visibleBounds.top,
+        x,
+        y,
+        width,
+        height,
         componentId: this.readComponentId(node),
         nodeType,
         inspectorInfo: this.readInspectorInfo(node),
         shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
         isRoot,
-        usedTransformedPosition
+        usedTransformedPosition,
+        opacity,
+        clip: this.resolveWireframeClip(ancestorClip, bounds)
       });
-    }
-
-    // A clipping container outside its inherited viewport cannot have visible
-    // descendants. A non-clipping container still traverses its children: a
-    // child may apply a transform that brings it back into the visible region.
-    if (childClip === null) {
-      return;
     }
 
     let child: FrameNode | null = null;
@@ -350,8 +491,8 @@ export class ArkUIReplayCollector {
     } catch (_) {
       return;
     }
-    while (child !== null && output.length < this.maxNodes) {
-      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip);
+    while (child !== null && output.length < nodeBudget) {
+      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY, excludedIds, nodeBudget);
       try {
         child = child.getNextSibling();
       } catch (_) {
@@ -366,6 +507,28 @@ export class ArkUIReplayCollector {
       top: y,
       right: x + Math.max(0, width),
       bottom: y + Math.max(0, height)
+    };
+  }
+
+  private resolveWireframeClip(
+    ancestor: ReplayClipRect | null | undefined,
+    bounds: ReplayClipRect
+  ): ReplayWireframeClip {
+    if (ancestor === undefined) {
+      return { top: 0, right: 0, bottom: 0, left: 0 };
+    }
+    const width = this.roundReplayMetric(bounds.right - bounds.left);
+    const height = this.roundReplayMetric(bounds.bottom - bounds.top);
+    if (ancestor === null) {
+      // A clipping ancestor has no visible region. Keep descendants hidden
+      // even when their own transforms would bring them inside the window.
+      return { top: 0, right: width, bottom: 0, left: 0 };
+    }
+    return {
+      top: this.roundReplayMetric(Math.max(0, Math.min(height, ancestor.top - bounds.top))),
+      right: this.roundReplayMetric(Math.max(0, Math.min(width, bounds.right - ancestor.right))),
+      bottom: this.roundReplayMetric(Math.max(0, Math.min(height, bounds.bottom - ancestor.bottom))),
+      left: this.roundReplayMetric(Math.max(0, Math.min(width, ancestor.left - bounds.left)))
     };
   }
 

@@ -31,14 +31,14 @@ export class FTSessionReplayConfig {
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
-  // Debounce for a coalesced UI-change signal. This is not a polling period:
-  // no FrameNode capture occurs until a page/root change is reported.
-  private snapshotIntervalMs: number = 64;
+  // Drawing and motion are sampled at about 30 fps by default. Idle pages
+  // perform no polling once the motion tail has finished.
+  private snapshotIntervalMs: number = 32;
   // Mirrors Android Replay's sparse checkpoint approach: normal traffic is
   // Incremental Snapshot records; a Full Snapshot is a periodic resync only.
   private fullSnapshotIntervalMs: number = 30_000;
-  // During scrolling, animations and page transitions retain only the final
-  // settled frame instead of serializing every intermediate frame.
+  // Keep sampling after a gesture/transition signal to cover inertia and the
+  // final state. Drawing notifications continue sampling longer animations.
   private motionQuietPeriodMs: number = 400;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;

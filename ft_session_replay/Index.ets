@@ -40,6 +40,7 @@ export {
   SessionReplayRecord,
   ReplayWireframe,
   ReplayWireframeBase,
+  ReplayWireframeClip,
   ReplayWireframeUpdate,
   createReplayEnvelope,
   serializeReplayEnvelope,
@@ -50,6 +51,9 @@ export {
   ArkUIReplayCollector,
   ArkUIReplayLightNode,
   ArkUIReplayLightSnapshot,
+  ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds,
+  ArkUIReplayScenePage,
   CapturedReplayImageResource
 } from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';

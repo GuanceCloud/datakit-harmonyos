@@ -14,6 +14,7 @@ import {
   ReplayViewportResizeData,
   ReplayViewEndData,
   ReplayWireframe,
+  ReplayWireframeClip,
   ReplayWireframeUpdate,
   SessionReplayRecord
 } from './SessionReplayProtocol';
@@ -256,6 +257,14 @@ export class ReplaySnapshotProcessor {
     if (previous.y !== current.y) update.y = current.y;
     if (previous.width !== current.width) update.width = current.width;
     if (previous.height !== current.height) update.height = current.height;
+    if (!this.clipsEqual(previous.clip, current.clip)) {
+      update.clip = {
+        top: current.clip?.top ?? 0,
+        right: current.clip?.right ?? 0,
+        bottom: current.clip?.bottom ?? 0,
+        left: current.clip?.left ?? 0
+      };
+    }
     if (previous.zIndex !== current.zIndex && current.zIndex !== undefined) update.zIndex = current.zIndex;
     if (current.type === 'placeholder' && previous.type === 'placeholder' && previous.label !== current.label) {
       update.label = current.label;
@@ -267,15 +276,23 @@ export class ReplaySnapshotProcessor {
     } else if (current.type === 'image') {
       this.appendImageUpdate(update, previous as ReplayImageWireframe, current);
     }
-    // Key ordering can differ in serialized input
+    // Key ordering or equivalent zero clips can differ in serialized input
     // without changing any rendered property. Do not emit an id/type-only
     // update: existing mobile players may rebuild a node for every update.
     return Object.keys(update).length > 2 ? update : null;
   }
 
+  private clipsEqual(previous: ReplayWireframeClip | undefined, current: ReplayWireframeClip | undefined): boolean {
+    return (previous?.top ?? 0) === (current?.top ?? 0) &&
+      (previous?.right ?? 0) === (current?.right ?? 0) &&
+      (previous?.bottom ?? 0) === (current?.bottom ?? 0) &&
+      (previous?.left ?? 0) === (current?.left ?? 0);
+  }
+
   /**
-   * The protocol's update grammar cannot remove an optional visual field. A
-   * remove/add pair is therefore required when, for example, a node changes
+   * Except for clip (which has an explicit zero reset), the protocol's update
+   * grammar cannot remove an optional visual field. A remove/add pair is
+   * therefore required when, for example, a node changes
    * from a resource-backed image to a privacy-masked image. This prevents a
    * player from retaining an obsolete colour, border, position, or image.
    */

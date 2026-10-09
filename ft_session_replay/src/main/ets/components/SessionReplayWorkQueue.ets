@@ -2,7 +2,7 @@ import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 
-export type ReplaySnapshotKind = 'start' | 'full' | 'automatic';
+export type ReplaySnapshotKind = 'start' | 'full' | 'automatic' | 'settled';
 export type ReplayStoreKind = 'main' | 'error' | 'none';
 
 export interface ReplayViewport {
@@ -28,9 +28,9 @@ export function isReplaySnapshotExpired(
   now: number,
   kind: ReplaySnapshotKind = 'automatic'
 ): boolean {
-  // A View Start owns an immutable first frame. It may be the only snapshot
-  // of a short visit, and must precede its View End even after the page closes.
-  return kind !== 'start' && now - queuedAt > 1000;
+  // View Starts and settled scene removals are immutable lifecycle boundaries.
+  // Dropping a removal could leave the preceding transition frame on screen.
+  return kind !== 'start' && kind !== 'settled' && now - queuedAt > 1000;
 }
 
 export interface ReplayWorkerCommit {
@@ -257,10 +257,11 @@ export class SessionReplayWorkQueue {
     });
   }
 
-  /** Drops superseded frames, retaining View Starts until validity is checked. */
+  /** Drops superseded samples while retaining accepted lifecycle boundaries. */
   public clear(keepViewStart: boolean = true): void {
     for (let index = this.jobs.length - 1; index >= 0; index--) {
-      if (this.isSnapshot(this.jobs[index]) && !(keepViewStart && this.jobs[index].kind === 'start')) {
+      const kind = this.jobs[index].kind;
+      if (this.isSnapshot(this.jobs[index]) && !(keepViewStart && (kind === 'start' || kind === 'settled'))) {
         this.jobs.splice(index, 1);
       }
     }
@@ -292,7 +293,7 @@ export class SessionReplayWorkQueue {
   }
 
   private isSnapshot(job: ReplayQueuedJob): boolean {
-    return job.kind === 'start' || job.kind === 'full' || job.kind === 'automatic';
+    return job.kind === 'start' || job.kind === 'full' || job.kind === 'automatic' || job.kind === 'settled';
   }
 
   private addJob(job: ReplayQueuedJob): void {

@@ -42,9 +42,19 @@ export interface ReplayWireframeBase {
   y: number;
   width: number;
   height: number;
+  /** Insets in Replay coordinates; clipping never changes the original geometry. */
+  clip?: ReplayWireframeClip;
   /** Native stacking order when ArkUI exposes it. */
   zIndex?: number;
   permanentId?: string;
+}
+
+/** Android-compatible clipping insets. Four zeroes explicitly clear clipping. */
+export interface ReplayWireframeClip {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
 }
 
 /** A portable subset of ArkUI's gradient description. */
@@ -214,6 +224,7 @@ export interface ReplayWireframeUpdate {
   y?: number;
   width?: number;
   height?: number;
+  clip?: ReplayWireframeClip;
   zIndex?: number;
   shapeStyle?: ReplayShapeStyle;
   border?: ReplayShapeBorder;

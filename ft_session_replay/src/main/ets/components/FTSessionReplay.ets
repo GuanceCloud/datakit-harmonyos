@@ -5,6 +5,7 @@ import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayRecorder, SessionReplayCapture } from './FTSessionReplayRecorder';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySamplingMode } from './SessionReplaySampler';
+import { ArkUIReplayScenePage } from './SessionReplayScene';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionReplayUploader';
 import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
@@ -25,6 +26,7 @@ export class FTSessionReplay {
   // callback here avoids a core-to-bridge import cycle while allowing delayed
   // consent/remote-config activation to bind an already visible page.
   private static autoRootRefreshHandler: (() => void) | null = null;
+  private static autoRootTransitionEndHandler: ((key: string) => Array<string>) | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayRecorder | null = null;
@@ -47,6 +49,10 @@ export class FTSessionReplay {
   /** Internal contract for the Hvigor-generated Session Replay root bridge. */
   public static setAutoRootRefreshHandler(handler: (() => void) | null): void {
     FTSessionReplay.autoRootRefreshHandler = handler;
+  }
+
+  public static setAutoRootTransitionEndHandler(handler: ((key: string) => Array<string>) | null): void {
+    FTSessionReplay.autoRootTransitionEndHandler = handler;
   }
 
   /**
@@ -143,12 +149,15 @@ export class FTSessionReplay {
   public registerRoot(
     uiContext: UIContext,
     rootId: string,
-    vpToPxScale: number = 1
+    vpToPxScale: number = 1,
+    captureScene: boolean = false,
+    sceneRootIds: Array<string> = [],
+    scenePages: Array<ArkUIReplayScenePage> = []
   ): boolean {
     if (this.recorder === null) {
       return false;
     }
-    this.recorder.registerRoot(uiContext, rootId, vpToPxScale);
+    this.recorder.registerRoot(uiContext, rootId, vpToPxScale, captureScene, sceneRootIds, scenePages);
     return true;
   }
 
@@ -326,7 +335,7 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveViewport(width, height, scale);
   }
 
-  /** Records a physical-px viewport/rotation boundary and a fresh Full Snapshot when possible. */
+  /** Native capture determines resize dimensions; physical-px inputs are a fallback when unavailable. */
   public recordViewportResize(width: number, height: number): SessionReplayCapture | null {
     return this.recorder === null ? null : this.recorder.recordActiveViewportResize(width, height);
   }
@@ -341,6 +350,11 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveTouch(pointerEventType, pointerId, x, y);
   }
 
+  /** Forwards ArkUI touch events using their window-relative vp coordinates. */
+  public recordTouchEvent(event: TouchEvent): void {
+    this.recorder?.recordTouchEvent(event);
+  }
+
   /**
    * Signals that the active ArkUI page produced a stable visual/layout change.
    * It is intentionally a signal rather than a capture call: the recorder
@@ -351,14 +365,43 @@ export class FTSessionReplay {
     this.recorder?.notifyPageChanged();
   }
 
-  /** Defers collection until a scrolling gesture has settled. */
+  /** Marks motion for continuous capture and a final settled frame. */
   public notifyScroll(): void {
     this.recorder?.notifyMotion();
   }
 
-  /** Defers collection until an animation or page transition has settled. */
+  /** Captures animation/transition frames and their final state. */
   public notifyTransition(): void {
     this.recorder?.notifyTransition();
+  }
+
+  /** Runtime endpoint for compiler-injected native page-transition progress. */
+  public updatePageTransition(rootId: string, entering: boolean, progress: number,
+    slide?: SlideEffect, opacity?: number, sceneKey?: string): void {
+    if (!Number.isFinite(progress)) return;
+    this.recorder?.updatePageTransition(sceneKey ?? rootId,
+      { entering, progress: Math.max(0, Math.min(1, progress)), slide, opacity });
+  }
+
+  /** Forward actual custom Navigation progress; uniqueId comes from NavDestinationInfo. */
+  public updateNavigationTransition(uniqueId: number, entering: boolean, progress: number,
+    slide?: SlideEffect, opacity?: number): void {
+    if (!Number.isFinite(uniqueId) || uniqueId <= 0) return;
+    this.updatePageTransition(`navigation:${uniqueId}`, entering, progress, slide, opacity);
+    if (!entering && progress >= 1) this.finishPageTransition(`navigation:${uniqueId}`);
+  }
+
+  /** Call from the actual completion/cancellation callback of a custom transition. */
+  public finishPageTransition(key: string): void {
+    this.recorder?.finishPageTransition(key);
+    const released = FTSessionReplay.autoRootTransitionEndHandler?.(key) ?? [];
+    for (const pageKey of released) this.recorder?.finishPageTransition(pageKey);
+    this.recorder?.releaseScenePages(released);
+  }
+
+  public finishNavigationTransition(uniqueId: number): void {
+    if (!Number.isFinite(uniqueId) || uniqueId <= 0) return;
+    this.finishPageTransition(`navigation:${uniqueId}`);
   }
 
   private requireRecorder(): FTSessionReplayRecorder {

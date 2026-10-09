@@ -43,6 +43,7 @@ function orderedPlaceholders(ids: Array<number>): Array<ReplayWireframe> {
   });
 }
 
+/** Reference application for the order/placeholder fixtures below. */
 function applyPlaceholderMutation(
   previous: Array<ReplayWireframe>, mutation: ReplayMutationData
 ): Array<ReplayWireframe> {
@@ -293,6 +294,59 @@ export default function sessionReplayProtocolUnitTest() {
       const processor = new ReplaySnapshotProcessor();
       processor.setFullSnapshotBaseline(fullSnapshotRecord(1000, [first]));
       expect(processor.createMutationRecord(fullSnapshotRecord(1100, [latest])) === null).assertTrue();
+    });
+
+    it('clears clipping with updates for every wireframe type', 0, () => {
+      const shape: ReplayShapeWireframe = { id: 1, x: 0, y: 0, width: 100, height: 40, type: 'shape' };
+      const text: ReplayTextWireframe = {
+        id: 2, x: 0, y: 0, width: 100, height: 40, type: 'text', text: 'Label',
+        textStyle: { family: 'sans-serif', size: 16, color: '#000000FF' }
+      };
+      const image: ReplayImageWireframe = { id: 3, x: 0, y: 0, width: 100, height: 40, type: 'image', isEmpty: true };
+      const placeholder: ReplayPlaceholderWireframe = {
+        id: 4, x: 0, y: 0, width: 100, height: 40, type: 'placeholder', label: 'Hidden'
+      };
+      const nodes: Array<ReplayWireframe> = [shape, text, image, placeholder];
+      for (const node of nodes) node.clip = { top: 10, right: 20, bottom: 5, left: 15 };
+      const processor = new ReplaySnapshotProcessor();
+      const first = fullSnapshotRecord(1700000000000, nodes);
+      processor.setFullSnapshotBaseline(first);
+      const clearNodes = JSON.parse(JSON.stringify(nodes)) as Array<ReplayWireframe>;
+      for (const node of clearNodes) node.clip = { top: 0, right: 0, bottom: 0, left: 0 };
+      const latest = fullSnapshotRecord(1700000000100, clearNodes);
+      const mutation = processor.createMutationRecord(latest);
+      const data = mutation?.data as ReplayMutationData;
+      expect(data.adds.length).assertEqual(0);
+      expect(data.removes.length).assertEqual(0);
+      expect(data.updates.length).assertEqual(4);
+      for (let index = 0; index < data.updates.length; index++) {
+        const update = data.updates[index];
+        expect(update.id).assertEqual(nodes[index].id);
+        expect(update.type).assertEqual(nodes[index].type);
+        expect(update.x === undefined && update.y === undefined).assertTrue();
+        expect(update.width === undefined && update.height === undefined).assertTrue();
+        expect(JSON.stringify(update.clip)).assertEqual(JSON.stringify(clearNodes[index].clip));
+        nodes[index].clip = update.clip;
+      }
+      expect(JSON.stringify(nodes)).assertEqual(JSON.stringify(clearNodes));
+      expect(processor.createMutationRecord(latest) === null).assertTrue();
+    });
+
+    it('resets a removed optional clip without replacing the node', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      const clipped: ReplayShapeWireframe = {
+        id: 1, x: 0, y: 0, width: 100, height: 40, type: 'shape', clip: { left: 20 }
+      };
+      processor.setFullSnapshotBaseline(fullSnapshotRecord(1700000000000, [clipped]));
+      const restored: ReplayShapeWireframe = { id: 1, x: 0, y: 0, width: 100, height: 40, type: 'shape' };
+      const mutation = processor.createMutationRecord(fullSnapshotRecord(1700000000100, [restored]));
+      const data = mutation?.data as ReplayMutationData;
+      expect(data.adds.length).assertEqual(0);
+      expect(data.removes.length).assertEqual(0);
+      expect(data.updates[0].clip?.top).assertEqual(0);
+      expect(data.updates[0].clip?.right).assertEqual(0);
+      expect(data.updates[0].clip?.bottom).assertEqual(0);
+      expect(data.updates[0].clip?.left).assertEqual(0);
     });
 
     it('preserves native text insets and alignment in Android wireframes', 0, () => {

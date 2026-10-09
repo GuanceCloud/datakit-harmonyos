@@ -8,6 +8,11 @@
   latest visible, laid-out root.
 - Preserved existing page root IDs and skipped Replay source transformation
   entirely when the HAP does not declare `@guancecloud/ft_session_replay`.
+- Forwarded real root touch events through the Replay privacy policy while
+  preserving existing application callbacks. Automatic root registration
+  composes outgoing/incoming roots in page-stack drawing order. Page-transition
+  slide and opacity effects use native progress callbacks, preserving existing
+  application callbacks.
 
 ## [0.1.1] - 2026-09-14
 
