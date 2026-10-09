@@ -23,8 +23,14 @@ export interface ReplayWorkerOptions {
 
 export const REPLAY_STALE_QUEUE_REASON = 'Session Replay snapshot waited in the queue for more than 1 second.';
 
-export function isReplaySnapshotExpired(queuedAt: number, now: number): boolean {
-  return now - queuedAt > 1000;
+export function isReplaySnapshotExpired(
+  queuedAt: number,
+  now: number,
+  kind: ReplaySnapshotKind = 'automatic'
+): boolean {
+  // A View Start owns an immutable first frame. It may be the only snapshot
+  // of a short visit, and must precede its View End even after the page closes.
+  return kind !== 'start' && now - queuedAt > 1000;
 }
 
 export interface ReplayWorkerCommit {
@@ -71,6 +77,8 @@ export interface ReplayWorkerMessage {
   segmentIds?: Array<string>;
   success?: boolean;
   requiresStart?: boolean;
+  baselineSnapshot?: SessionReplayRecord;
+  baselineViewport?: ReplayViewport;
 }
 
 interface ReplayWorkerEvent {
@@ -88,10 +96,12 @@ interface ReplayQueuedJob {
   records?: Array<SessionReplayRecord>;
   storeKind?: ReplayStoreKind;
   requiresStart?: boolean;
+  baselineSnapshot?: SessionReplayRecord;
+  baselineViewport?: ReplayViewport;
   sessionId?: string;
   timestamp?: number;
   segmentIds?: Array<string>;
-  finish?: (success: boolean, error: string) => void;
+  finish?: (success: boolean, error: string, records?: Array<SessionReplayRecord>) => void;
   resolve?: () => void;
   reject?: (reason: Error) => void;
   barrierAction?: () => void;
@@ -174,8 +184,10 @@ export class SessionReplayWorkQueue {
     context: SessionReplayContext,
     records: Array<SessionReplayRecord>,
     storeKind: ReplayStoreKind,
-    finish: (success: boolean, error: string) => void,
-    requiresStart: boolean = false
+    finish: (success: boolean, error: string, records?: Array<SessionReplayRecord>) => void,
+    requiresStart: boolean = false,
+    baselineSnapshot: SessionReplayRecord | null = null,
+    baselineViewport: ReplayViewport | null = null
   ): boolean {
     if (this.closing) return false;
     if (records.length === 0) {
@@ -183,13 +195,16 @@ export class SessionReplayWorkQueue {
       return true;
     }
     let failedSynchronously = false;
-    const complete = (success: boolean, error: string): void => {
+    const complete = (success: boolean, error: string, writtenRecords?: Array<SessionReplayRecord>): void => {
       if (!success) failedSynchronously = true;
-      finish(success, error);
+      finish(success, error, writtenRecords);
     };
     this.addJob({
       id: ++this.nextId, kind: 'records', queuedAt: Date.now(), context,
-      records: records.slice(), storeKind, finish: complete, requiresStart
+      records: records.slice(), storeKind, finish: complete, requiresStart,
+      baselineSnapshot: baselineSnapshot ?? undefined,
+      baselineViewport: baselineViewport === null ? undefined :
+        { width: baselineViewport.width, height: baselineViewport.height }
     });
     this.dispatch();
     return !failedSynchronously;
@@ -226,6 +241,11 @@ export class SessionReplayWorkQueue {
       this.addJob({ id: ++this.nextId, kind: 'list', queuedAt: Date.now(), listResolve: resolve, listReject: reject });
       this.dispatch();
     });
+  }
+
+  /** Synchronous captures use a checkpoint when the committed baseline is uncertain. */
+  public hasPendingWork(): boolean {
+    return !this.ready || this.closing || this.active !== null || this.jobs.length > 0 || this.retiringThread !== null;
   }
 
   /** A FIFO barrier for flush and for orderly Worker shutdown. */
@@ -398,7 +418,8 @@ export class SessionReplayWorkQueue {
         }
         continue;
       }
-      if (!this.closing && this.isSnapshot(job) && isReplaySnapshotExpired(job.queuedAt, Date.now())) {
+      if (!this.closing && this.isSnapshot(job) &&
+        isReplaySnapshotExpired(job.queuedAt, Date.now(), job.kind as ReplaySnapshotKind)) {
         this.completing = true;
         try {
           job.complete?.(null, REPLAY_STALE_QUEUE_REASON);
@@ -420,7 +441,8 @@ export class SessionReplayWorkQueue {
           this.thread?.postMessage({
             id: job.id, phase: job.kind, context: job.context, records: job.records,
             storeKind: job.storeKind, requiresStart: job.requiresStart, sessionId: job.sessionId,
-            timestamp: job.timestamp, segmentIds: job.segmentIds
+            timestamp: job.timestamp, segmentIds: job.segmentIds, baselineSnapshot: job.baselineSnapshot,
+            baselineViewport: job.baselineViewport
           } as ReplayWorkerMessage);
         }
       } catch (error) {
@@ -450,7 +472,8 @@ export class SessionReplayWorkQueue {
       return;
     }
     if (message.phase === 'done') {
-      this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? []);
+      this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? [],
+        message.records);
     } else if (message.phase === 'error') {
       // Stop may race the Worker's age check for the already-dispatched frame.
       // Retry that immutable handoff once in drain mode; do not read the UI.
@@ -471,7 +494,7 @@ export class SessionReplayWorkQueue {
 
   private finish(
     result: ReplayWorkerResult | null, error: string, success: boolean = false,
-    segmentIds: Array<string> = []
+    segmentIds: Array<string> = [], writtenRecords?: Array<SessionReplayRecord>
   ): void {
     const job = this.active;
     this.active = null;
@@ -481,7 +504,7 @@ export class SessionReplayWorkQueue {
         if (success) job.listResolve?.(segmentIds);
         else job.listReject?.(new Error(error));
       } else if (job !== null && this.isSnapshot(job)) job.complete?.(result, error);
-      else job?.finish?.(success, error);
+      else job?.finish?.(success, error, writtenRecords);
     } finally {
       this.completing = false;
       this.callbackInsertIndex = 0;

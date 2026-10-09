@@ -32,7 +32,8 @@ port.onmessage = (event: MessageEvents): void => {
       return;
     }
     if (message.phase === 'materialize') {
-      if (!message.draining && isReplaySnapshotExpired(message.queuedAt ?? 0, Date.now())) {
+      if (!message.draining &&
+        isReplaySnapshotExpired(message.queuedAt ?? 0, Date.now(), message.kind ?? 'automatic')) {
         port.postMessage({ id: message.id, phase: 'error', error: REPLAY_STALE_QUEUE_REASON } as ReplayWorkerMessage);
         return;
       }
@@ -52,8 +53,9 @@ port.onmessage = (event: MessageEvents): void => {
     }
     if (message.phase === 'records') {
       const success = operations.appendRecords(message.context!, message.records!, message.storeKind!,
-        message.requiresStart ?? false);
+        message.requiresStart ?? false, message.baselineSnapshot ?? null, message.baselineViewport ?? null);
       port.postMessage({ id: message.id, phase: 'done', success,
+        records: operations.getLastWrittenRecords(),
         error: success ? '' : operations.getLastWriteError() } as ReplayWorkerMessage);
       return;
     }

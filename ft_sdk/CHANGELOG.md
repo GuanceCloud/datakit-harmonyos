@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.18-alpha04] - 2026-10-08
+- Fixed Replay snapshots using stale baselines after mixed manual/automatic captures, queued View changes, or Worker recovery. Ordered writes reuse committed checkpoints and viewport state, and native node reordering retains unchanged nodes instead of replacing them unnecessarily.
+- Fixed Replay cache trimming and error-window promotion retaining mutations without their required Full Snapshot. The retained checkpoint chain remains replayable, and writes rejected by quota eviction recover the same frame with a Full Snapshot.
 - Fixed completed Actions losing their Replay entry when serialized before a pending first frame was saved. Actions now retain their original application, Session, and View while waiting for accepted Replay work, refresh availability before dispatch, and allow ready Actions from other Views to proceed; failed captures report normally.
 - Fixed short-lived Views losing their Replay entry when a RUM summary reached the sync queue before its first frame was stored. Closed-View acknowledgement now waits for accepted Replay writes and their RUM metadata updates, then regenerates the latest summary before cleanup; failed captures still release normally.
 - Fixed Action Replay metadata being lost during SQLite attribute serialization and restoration. Committed Replay now promotes matching persisted Actions together with their original View, including after that View has been removed, so pending Actions retain `session_has_replay` after Replay is disabled.

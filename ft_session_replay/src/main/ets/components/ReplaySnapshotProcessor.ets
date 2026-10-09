@@ -20,14 +20,20 @@ import {
 
 /**
  * Converts privacy-safe ArkUI wireframes into the Android mobile record grammar.
- * It owns only an in-memory baseline; persistence and upload are deliberately
- * deferred to a later priority.
+ * The recorder and Worker advance this baseline only along their ordered
+ * record stream; a reset requires a Full Snapshot before another mutation.
  */
 export class ReplaySnapshotProcessor {
   private previousWireframes: Array<ReplayWireframe> = [];
+  private baselineAvailable: boolean = false;
 
   public reset(): void {
     this.previousWireframes = [];
+    this.baselineAvailable = false;
+  }
+
+  public hasBaseline(): boolean {
+    return this.baselineAvailable;
   }
 
   /**
@@ -37,7 +43,8 @@ export class ReplaySnapshotProcessor {
    */
   public setFullSnapshotBaseline(fullSnapshot: SessionReplayRecord): void {
     const data = fullSnapshot.data as FullSnapshotData;
-    this.previousWireframes = data.wireframes.slice();
+    this.previousWireframes = JSON.parse(JSON.stringify(data.wireframes)) as Array<ReplayWireframe>;
+    this.baselineAvailable = true;
   }
 
   public createViewStartRecords(
@@ -82,10 +89,12 @@ export class ReplaySnapshotProcessor {
     const data = fullSnapshot.data as FullSnapshotData;
     const currentWireframes = data.wireframes;
     const previousById = new Map<number, ReplayWireframe>();
+    const previousIndices = new Map<number, number>();
     const currentById = new Map<number, ReplayWireframe>();
     for (let index = 0; index < this.previousWireframes.length; index++) {
       const wireframe = this.previousWireframes[index];
       previousById.set(wireframe.id, wireframe);
+      previousIndices.set(wireframe.id, index);
     }
     for (let index = 0; index < currentWireframes.length; index++) {
       const wireframe = currentWireframes[index];
@@ -95,6 +104,7 @@ export class ReplaySnapshotProcessor {
     const adds: Array<ReplayMutationAdd> = [];
     const removes: Array<ReplayMutationRemove> = [];
     const updates: Array<ReplayWireframeUpdate> = [];
+    const retainedIds = this.findRetainedIds(currentWireframes, previousById, previousIndices);
     for (let index = 0; index < currentWireframes.length; index++) {
       const current = currentWireframes[index];
       const previous = previousById.get(current.id);
@@ -104,7 +114,7 @@ export class ReplaySnapshotProcessor {
           add.previousId = currentWireframes[index - 1].id;
         }
         adds.push(add);
-      } else if (this.needsWireframeReplacement(previous, current)) {
+      } else if (!retainedIds.has(current.id)) {
         removes.push({ id: previous.id });
         const add: ReplayMutationAdd = { wireframe: current };
         if (index > 0) {
@@ -124,7 +134,7 @@ export class ReplaySnapshotProcessor {
         removes.push({ id: previous.id });
       }
     }
-    this.previousWireframes = currentWireframes.slice();
+    this.setFullSnapshotBaseline(fullSnapshot);
     if (adds.length === 0 && removes.length === 0 && updates.length === 0) {
       return null;
     }
@@ -139,6 +149,46 @@ export class ReplaySnapshotProcessor {
       type: ReplayRecordType.INCREMENTAL_SNAPSHOT,
       data: mutation
     };
+  }
+
+  /**
+   * Keep the longest subsequence that already has the requested draw order.
+   * A rotation [a,b,c,d] -> [d,a,b,c] then moves only d, rather than replacing
+   * a, b and c. Nodes that require a visual replacement cannot be retained.
+   */
+  private findRetainedIds(
+    currentWireframes: Array<ReplayWireframe>,
+    previousById: Map<number, ReplayWireframe>,
+    previousIndices: Map<number, number>
+  ): Set<number> {
+    const candidates: Array<ReplayWireframe> = [];
+    const indices: Array<number> = [];
+    const predecessors: Array<number> = [];
+    const tails: Array<number> = [];
+    for (const current of currentWireframes) {
+      const previous = previousById.get(current.id);
+      if (previous === undefined || this.needsWireframeReplacement(previous, current)) continue;
+      const previousIndex = previousIndices.get(current.id)!;
+      let low = 0;
+      let high = tails.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (indices[tails[middle]] < previousIndex) low = middle + 1;
+        else high = middle;
+      }
+      const candidateIndex = candidates.length;
+      candidates.push(current);
+      indices.push(previousIndex);
+      predecessors.push(low === 0 ? -1 : tails[low - 1]);
+      tails[low] = candidateIndex;
+    }
+    const retained = new Set<number>();
+    let cursor = tails.length === 0 ? -1 : tails[tails.length - 1];
+    while (cursor !== -1) {
+      retained.add(candidates[cursor].id);
+      cursor = predecessors[cursor];
+    }
+    return retained;
   }
 
   public createFocusRecord(hasFocus: boolean, timestamp: number = Date.now()): SessionReplayRecord {
@@ -217,7 +267,10 @@ export class ReplaySnapshotProcessor {
     } else if (current.type === 'image') {
       this.appendImageUpdate(update, previous as ReplayImageWireframe, current);
     }
-    return update;
+    // Key ordering can differ in serialized input
+    // without changing any rendered property. Do not emit an id/type-only
+    // update: existing mobile players may rebuild a node for every update.
+    return Object.keys(update).length > 2 ? update : null;
   }
 
   /**
@@ -227,7 +280,7 @@ export class ReplaySnapshotProcessor {
    * player from retaining an obsolete colour, border, position, or image.
    */
   private needsWireframeReplacement(previous: ReplayWireframe, current: ReplayWireframe): boolean {
-    if (previous.type !== current.type) {
+    if (previous.type !== current.type || previous.permanentId !== current.permanentId) {
       return true;
     }
     if (this.wasOptionalValueRemoved(previous.zIndex !== undefined, current.zIndex !== undefined)) {

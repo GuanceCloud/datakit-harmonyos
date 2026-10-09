@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0-alpha01] - 2026-09-29
 
+- Fixed Replay snapshots using stale baselines after mixed manual/automatic captures, queued View changes, or Worker recovery. Ordered writes reuse committed checkpoints and viewport state, and native node reordering retains unchanged nodes instead of replacing them unnecessarily.
+- Fixed Replay cache trimming and error-window promotion retaining mutations without their required Full Snapshot. The retained checkpoint chain remains replayable, and writes rejected by quota eviction recover the same frame with a Full Snapshot.
+- Fixed short visits losing Replay when their first snapshot waited over one second: both queue and Worker retain the captured View Start under its original View ID and write it before View End. Added first-frame latency and unavailable-root diagnostics.
 - Added Session Replay for ArkUI pages and supported ArkWeb content, linked to Guance RUM Views and Errors.
 - Added session sampling, error-triggered recording, and configurable text, image, and touch privacy.
 - Added private on-device storage, scheduled uploads, and an explicit `flush()` option.

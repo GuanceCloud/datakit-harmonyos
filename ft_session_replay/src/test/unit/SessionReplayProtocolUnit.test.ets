@@ -10,6 +10,7 @@ import {
   ReplayPlaceholderWireframe,
   ReplayRecordType,
   ReplayMutationData,
+  ReplayMutationRemove,
   ReplayShapeWireframe,
   ReplayTextWireframe,
   ReplayViewportData,
@@ -34,6 +35,34 @@ import { SessionReplayStoredSegment } from '../../main/ets/components/SessionRep
 function fullSnapshotRecord(timestamp: number, wireframes: Array<ReplayWireframe>): SessionReplayRecord {
   const data: FullSnapshotData = { wireframes };
   return { timestamp, type: ReplayRecordType.FULL_SNAPSHOT, data };
+}
+
+function orderedPlaceholders(ids: Array<number>): Array<ReplayWireframe> {
+  return ids.map((id: number): ReplayPlaceholderWireframe => {
+    return { id, x: 0, y: 0, width: 100, height: 40, type: 'placeholder', label: `node-${id}` };
+  });
+}
+
+function applyPlaceholderMutation(
+  previous: Array<ReplayWireframe>, mutation: ReplayMutationData
+): Array<ReplayWireframe> {
+  const result = (JSON.parse(JSON.stringify(previous)) as Array<ReplayWireframe>)
+    .filter((node: ReplayWireframe): boolean => !mutation.removes.some((item: ReplayMutationRemove): boolean => item.id === node.id));
+  for (const add of mutation.adds) {
+    const insertionIndex = add.previousId === undefined ? 0 :
+      result.findIndex((node: ReplayWireframe): boolean => node.id === add.previousId) + 1;
+    expect(add.previousId === undefined || insertionIndex > 0).assertTrue();
+    result.splice(insertionIndex, 0, add.wireframe);
+  }
+  for (const update of mutation.updates) {
+    const node = result.find((candidate: ReplayWireframe): boolean => candidate.id === update.id)!;
+    if (update.x !== undefined) node.x = update.x;
+    if (update.y !== undefined) node.y = update.y;
+    if (update.width !== undefined) node.width = update.width;
+    if (update.height !== undefined) node.height = update.height;
+    if (node.type === 'placeholder' && update.label !== undefined) node.label = update.label;
+  }
+  return result;
 }
 
 export default function sessionReplayProtocolUnitTest() {
@@ -206,6 +235,64 @@ export default function sessionReplayProtocolUnitTest() {
       expect(mutationData.updates[0].x).assertEqual(8);
       expect(mutationData.updates[0].zIndex).assertEqual(4);
       expect(mutationData.updates[0].shapeStyle?.backgroundColor).assertEqual('#0A59F7FF');
+    });
+
+    it('moves only one node when rotating draw order in either direction', 0, () => {
+      const first = orderedPlaceholders([0, 1, 2, 3, 4]);
+      const rotations: Array<Array<number>> = [[0, 4, 1, 2, 3], [0, 2, 3, 4, 1]];
+      for (const ids of rotations) {
+        const processor = new ReplaySnapshotProcessor();
+        processor.setFullSnapshotBaseline(fullSnapshotRecord(1000, first));
+        const latest = orderedPlaceholders(ids);
+        const mutation = processor.createMutationRecord(fullSnapshotRecord(1100, latest));
+        const data = mutation?.data as ReplayMutationData;
+        expect(data.removes.length).assertEqual(1);
+        expect(data.adds.length).assertEqual(1);
+        expect(data.updates.length).assertEqual(0);
+        expect(JSON.stringify(applyPlaceholderMutation(first, data))).assertEqual(JSON.stringify(latest));
+      }
+    });
+
+    it('reconstructs reordering with additions deletions and property changes', 0, () => {
+      const first = orderedPlaceholders([0, 1, 2, 3, 4]);
+      const latest = orderedPlaceholders([0, 4, 5, 1, 3]);
+      (latest[3] as ReplayPlaceholderWireframe).label = 'updated';
+      latest[3].x = 20;
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(fullSnapshotRecord(1000, first));
+      const mutation = processor.createMutationRecord(fullSnapshotRecord(1100, latest));
+      const data = mutation?.data as ReplayMutationData;
+      expect(data.removes.length).assertEqual(2);
+      expect(data.adds.length).assertEqual(2);
+      expect(data.updates.length).assertEqual(1);
+      expect(JSON.stringify(applyPlaceholderMutation(first, data))).assertEqual(JSON.stringify(latest));
+      expect(processor.createMutationRecord(fullSnapshotRecord(1200, latest)) === null).assertTrue();
+    });
+
+    it('does not replace unchanged siblings when a retained candidate needs replacement', 0, () => {
+      const first = orderedPlaceholders([0, 1, 2, 3, 4]);
+      first[4].permanentId = 'old-component';
+      const latest = orderedPlaceholders([0, 4, 1, 2, 3]);
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(fullSnapshotRecord(1000, first));
+      const mutation = processor.createMutationRecord(fullSnapshotRecord(1100, latest));
+      const data = mutation?.data as ReplayMutationData;
+      expect(data.removes.length).assertEqual(1);
+      expect(data.adds.length).assertEqual(1);
+      expect(data.removes[0].id).assertEqual(4);
+      expect(JSON.stringify(applyPlaceholderMutation(first, data))).assertEqual(JSON.stringify(latest));
+    });
+
+    it('suppresses id-only updates caused by serialized property order', 0, () => {
+      const first: ReplayPlaceholderWireframe = {
+        id: 1, x: 0, y: 0, width: 100, height: 40, type: 'placeholder', label: 'same'
+      };
+      const latest: ReplayPlaceholderWireframe = {
+        type: 'placeholder', label: 'same', height: 40, width: 100, y: 0, x: 0, id: 1
+      };
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(fullSnapshotRecord(1000, [first]));
+      expect(processor.createMutationRecord(fullSnapshotRecord(1100, [latest])) === null).assertTrue();
     });
 
     it('preserves native text insets and alignment in Android wireframes', 0, () => {

@@ -1,6 +1,8 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
-import { SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord } from './SessionReplayProtocol';
+import {
+  ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
+} from './SessionReplayProtocol';
 
 /** One durable batch of Android-compatible records for a single RUM View. */
 export interface SessionReplayStoredSegment {
@@ -31,6 +33,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private sequence: number = 0;
   private lastWriteError: string = '';
   private lastAppendedIds: Array<string> = [];
+  private readonly resyncStreams: Set<string> = new Set();
 
   constructor(
     filesDir: string,
@@ -72,12 +75,17 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
         const segmentRecords = records.slice(start, start + this.maxRecordsPerSegment);
         const segment = this.createSegment(context, segmentRecords);
         const body = JSON.stringify(segment);
-        if (!this.reserveBytes(this.byteLength(body))) {
-          this.lastWriteError = `Replay segment exceeds the configured ${this.maxBytes}-byte local storage quota.`;
+        if (!this.reserveBytes(this.byteLength(body), context, segmentRecords)) {
+          this.lastWriteError = `Replay storage needs a Full Snapshot or exceeds the configured ${this.maxBytes}-byte quota.`;
           return false;
         }
         this.atomicWrite(`${this.root}/${segment.id}.json`, body);
         this.lastAppendedIds.push(segment.id);
+        for (let index = 0; index < segmentRecords.length; index++) {
+          if (this.isCheckpoint(segmentRecords[index])) {
+            this.resyncStreams.delete(this.streamKey(context, segmentRecords[index]));
+          }
+        }
       }
       return true;
     } catch (error) {
@@ -138,12 +146,18 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     return completed;
   }
 
-  /** Removes complete segments whose latest record is outside a rolling window. */
+  /** Keeps the checkpoint and mutation prefix required by the retained window. */
   public pruneBefore(timestamp: number): void {
     const segments = this.list();
+    const selected = this.selectWindowRecords(segments, timestamp);
+    let ordinal = 0;
     for (let index = 0; index < segments.length; index++) {
       const segment = segments[index];
-      if (this.latestRecordTimestamp(segment) < timestamp) {
+      let keep = false;
+      for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++) {
+        if (selected.has(ordinal++)) keep = true;
+      }
+      if (!keep) {
         this.remove([segment.id]);
       }
     }
@@ -161,13 +175,16 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     destination: SessionReplaySegmentStore
   ): boolean {
     const cutoff = timestamp - Math.max(0, windowMs);
-    const segments = this.list();
+    const segments = this.list().filter((segment: SessionReplayStoredSegment): boolean =>
+      segment.context.sessionId === sessionId);
+    const selected = this.selectWindowRecords(segments, cutoff);
+    let ordinal = 0;
     for (let index = 0; index < segments.length; index++) {
       const segment = segments[index];
-      if (segment.context.sessionId !== sessionId) {
-        continue;
+      const records: Array<SessionReplayRecord> = [];
+      for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++) {
+        if (selected.has(ordinal++)) records.push(segment.records[recordIndex]);
       }
-      const records = segment.records.filter((record: SessionReplayRecord): boolean => record.timestamp >= cutoff);
       if (records.length === 0) {
         if (!this.remove([segment.id])) {
           return false;
@@ -191,6 +208,58 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   public getFilesDir(): string {
     return this.replayRoot.substring(0, this.replayRoot.length - '/ft_session_replay'.length);
+  }
+
+  public requiresFullSnapshot(context: SessionReplayContext): boolean {
+    return this.resyncStreams.has(`${context.applicationId}|${context.sessionId}|${context.viewId}|native`);
+  }
+
+  private streamKey(context: SessionReplayContext, record: SessionReplayRecord): string {
+    return `${context.applicationId}|${context.sessionId}|${context.viewId}|${record.slotId ?? 'native'}`;
+  }
+
+  private isCheckpoint(record: SessionReplayRecord): boolean {
+    return record.slotId === undefined ? record.type === ReplayRecordType.FULL_SNAPSHOT : (record.type as number) === 2;
+  }
+
+  private isMutation(record: SessionReplayRecord): boolean {
+    return (record.slotId === undefined ? record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT : (record.type as number) === 3) &&
+      (record.data as ReplayMutationData).source === 0;
+  }
+
+  private selectWindowRecords(segments: Array<SessionReplayStoredSegment>, timestamp: number): Set<number> {
+    const checkpoints = new Map<string, number>();
+    const starts = new Map<string, number>();
+    const initialization = new Map<string, Map<number, number>>();
+    const selected = new Set<number>();
+    let ordinal = 0;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++, ordinal++) {
+        const record = segment.records[recordIndex];
+        const key = this.streamKey(segment.context, record);
+        if (this.isCheckpoint(record)) checkpoints.set(key, ordinal);
+        if (record.type === ReplayRecordType.META || record.type === ReplayRecordType.FOCUS ||
+          record.type === ReplayRecordType.VIEWPORT) {
+          const events = initialization.get(key) ?? new Map<number, number>();
+          events.set(record.type, ordinal);
+          initialization.set(key, events);
+        }
+        if (record.timestamp >= timestamp && !starts.has(key)) {
+          starts.set(key, checkpoints.get(key) ?? ordinal);
+          initialization.get(key)?.forEach((value: number): void => { selected.add(value); });
+        }
+      }
+    }
+    ordinal = 0;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++, ordinal++) {
+        const start = starts.get(this.streamKey(segment.context, segment.records[recordIndex]));
+        if (start !== undefined && ordinal >= start) selected.add(ordinal);
+      }
+    }
+    return selected;
   }
 
   private createSegment(context: SessionReplayContext, records: Array<SessionReplayRecord>): SessionReplayStoredSegment {
@@ -231,23 +300,61 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     this.list();
   }
 
-  private reserveBytes(incomingBytes: number): boolean {
+  private reserveBytes(
+    incomingBytes: number, context: SessionReplayContext, records: Array<SessionReplayRecord>
+  ): boolean {
     if (incomingBytes > this.maxBytes) {
       return false;
     }
     const names = this.segmentFileNames();
+    const sizes = new Map<string, number>();
     let usedBytes = 0;
     for (let index = 0; index < names.length; index++) {
-      usedBytes += fs.statSync(`${this.root}/${names[index]}`).size;
+      const size = fs.statSync(`${this.root}/${names[index]}`).size;
+      sizes.set(names[index].substring(0, names[index].length - '.json'.length), size);
+      usedBytes += size;
     }
-    let candidateIndex = 0;
-    while (usedBytes + incomingBytes > this.maxBytes && candidateIndex < names.length) {
-      const path = `${this.root}/${names[candidateIndex]}`;
-      usedBytes -= fs.statSync(path).size;
-      fs.unlinkSync(path);
-      candidateIndex++;
+    if (usedBytes + incomingBytes <= this.maxBytes && this.resyncStreams.size === 0) return true;
+    const segments = this.list();
+    const victims = new Set<string>();
+    const blocked = new Set<string>();
+    this.resyncStreams.forEach((key: string): void => { blocked.add(key); });
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      // Losing any structural record invalidates its later diffs until the
+      // next checkpoint. Cascade across interleaved streams in whole files.
+      const restored = new Set<string>();
+      let dependent = false;
+      for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++) {
+        const record = segment.records[recordIndex];
+        const key = this.streamKey(segment.context, record);
+        if (this.isCheckpoint(record)) restored.add(key);
+        else if (this.isMutation(record) && blocked.has(key) && !restored.has(key)) dependent = true;
+      }
+      if (usedBytes + incomingBytes > this.maxBytes || dependent) {
+        victims.add(segment.id);
+        usedBytes -= sizes.get(segment.id) ?? 0;
+        for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++) {
+          const record = segment.records[recordIndex];
+          if (this.isCheckpoint(record) || this.isMutation(record)) {
+            blocked.add(this.streamKey(segment.context, record));
+          }
+        }
+      } else {
+        restored.forEach((key: string): void => { blocked.delete(key); });
+      }
     }
-    return usedBytes + incomingBytes <= this.maxBytes;
+    const restored = new Set<string>();
+    for (let index = 0; index < records.length; index++) {
+      const key = this.streamKey(context, records[index]);
+      if (this.isCheckpoint(records[index])) restored.add(key);
+      else if (this.isMutation(records[index]) && blocked.has(key) && !restored.has(key)) return false;
+    }
+    if (usedBytes + incomingBytes > this.maxBytes) return false;
+    if (!this.remove(Array.from(victims))) return false;
+    this.resyncStreams.clear();
+    blocked.forEach((key: string): void => { this.resyncStreams.add(key); });
+    return true;
   }
 
   private atomicWrite(path: string, body: string): void {
@@ -315,11 +422,4 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     return /^\d{13}-\d{6}(?:-[0-9a-f]{8})?$/.test(id);
   }
 
-  private latestRecordTimestamp(segment: SessionReplayStoredSegment): number {
-    let latest = segment.createdAt;
-    for (let index = 0; index < segment.records.length; index++) {
-      latest = Math.max(latest, segment.records[index].timestamp);
-    }
-    return latest;
-  }
 }
