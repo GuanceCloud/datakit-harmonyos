@@ -741,11 +741,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const contextSnapshot = this.copyReplayContext(replayContext);
     this.pendingViewStarts.set(
       this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId), generation);
-    this.workQueue.enqueue('start', lightSnapshot,
-      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources, true),
-      (result: ReplayWorkerResult | null, error: string): void =>
-        this.completeWorkerSnapshot('start', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    this.enqueueWorkerSnapshot('start', lightSnapshot, contextSnapshot, generation, context, promoteErrorAt);
     return true;
   }
 
@@ -773,12 +769,34 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     const generation = this.captureGeneration;
     const contextSnapshot = this.copyReplayContext(replayContext);
-    this.workQueue.enqueue('full', lightSnapshot,
-      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
-      (result: ReplayWorkerResult | null, error: string): void =>
-        this.completeWorkerSnapshot('full', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    this.enqueueWorkerSnapshot('full', lightSnapshot, contextSnapshot, generation, context, promoteErrorAt);
     return true;
+  }
+
+  private enqueueWorkerSnapshot(
+    kind: 'start' | 'full' | 'automatic',
+    snapshot: ArkUIReplayLightSnapshot,
+    context: SessionReplayContext,
+    generation: number,
+    rumContext: FTSessionReplayRUMContext | null,
+    promoteErrorAt: number | null
+  ): void {
+    const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
+    try {
+      this.workQueue.enqueue(kind, snapshot,
+        (record: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
+          this.prepareWorkerSnapshot(context, generation, record, resources, kind === 'start'),
+        (result: ReplayWorkerResult | null, error: string): void => {
+          try {
+            this.completeWorkerSnapshot(kind, context, generation, result, error, rumContext, promoteErrorAt);
+          } finally {
+            completePersistence();
+          }
+        });
+    } catch (error) {
+      completePersistence();
+      throw new Error(String(error));
+    }
   }
 
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
@@ -889,7 +907,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (promoteErrorAt !== null && this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.ERROR) {
       this.promoteErrorSampledSession(context.sessionId, promoteErrorAt);
     } else if (result.storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
-      this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
+      this.enqueueReplayPromotion(context.sessionId, Date.now(),
         (success: boolean, failure: string): void => {
           if (!success) this.lastCaptureFailure = failure;
         });
@@ -1024,8 +1042,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.notifyReplayMetadata(context);
   }
 
-  private notifyReplayMetadata(context: SessionReplayContext): void {
-    const rumContext: FTSessionReplayRUMContext = {
+  private createReplayRUMContext(context: SessionReplayContext): FTSessionReplayRUMContext {
+    return {
       applicationId: context.applicationId,
       sessionId: context.sessionId,
       viewId: context.viewId,
@@ -1034,6 +1052,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       linkContext: context.globalContext ?? {},
       timestamp: Date.now() * 1000000
     };
+  }
+
+  private notifyReplayMetadata(context: SessionReplayContext): void {
+    const rumContext = this.createReplayRUMContext(context);
     FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext));
   }
 
@@ -1070,22 +1092,33 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const targetStore = this.getStoreForContext(context);
     const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
       (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
-    const accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
-      (success: boolean, failure: string): void => {
-        if (!success) {
-          this.lastCaptureFailure = failure;
-          return;
-        }
-        this.recordReplayMetadata(context, records.length);
-        // Stop can queue View End before an earlier Error snapshot promotes
-        // the session. Move that already-targeted error batch as well.
-        if (storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
-          this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
-            (promoted: boolean, promotionFailure: string): void => {
-              if (!promoted) this.lastCaptureFailure = promotionFailure;
-            });
-        }
-      }, requiresStart);
+    const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
+    let accepted = false;
+    try {
+      accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
+        (success: boolean, failure: string): void => {
+          try {
+            if (!success) {
+              this.lastCaptureFailure = failure;
+              return;
+            }
+            this.recordReplayMetadata(context, records.length);
+            // Stop can queue View End before an earlier Error snapshot promotes
+            // the session. Move that already-targeted error batch as well.
+            if (storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
+              this.enqueueReplayPromotion(context.sessionId, Date.now(),
+                (promoted: boolean, promotionFailure: string): void => {
+                  if (!promoted) this.lastCaptureFailure = promotionFailure;
+                });
+            }
+          } finally {
+            completePersistence();
+          }
+        }, requiresStart);
+    } finally {
+      // enqueueRecords can reject before invoking its completion callback.
+      if (!accepted) completePersistence();
+    }
     if (!accepted) this.lastCaptureFailure = 'Session Replay Worker did not accept the record batch.';
     return accepted;
   }
@@ -1131,7 +1164,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.errorSampleResourcePromoter(sessionId, timestamp);
     if (!resourcesPromoted) return false;
     this.promotedErrorSessions.add(sessionId);
-    const accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
+    const accepted = this.enqueueReplayPromotion(sessionId, timestamp,
       (success: boolean, failure: string): void => {
         if (!success) {
           this.lastCaptureFailure = failure;
@@ -1143,6 +1176,36 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         }
       });
     if (!accepted) this.promotedErrorSessions.delete(sessionId);
+    return accepted;
+  }
+
+  private enqueueReplayPromotion(
+    sessionId: string,
+    timestamp: number,
+    finish: (success: boolean, failure: string) => void
+  ): boolean {
+    const completions: Array<() => void> = [];
+    this.recordedContextsByView.forEach((context: SessionReplayContext): void => {
+      if (context.sessionId === sessionId) {
+        completions.push(FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context)));
+      }
+    });
+    const completePersistence = (): void => {
+      for (let index = 0; index < completions.length; index++) completions[index]();
+    };
+    let accepted = false;
+    try {
+      accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
+        (success: boolean, failure: string): void => {
+          try {
+            finish(success, failure);
+          } finally {
+            completePersistence();
+          }
+        });
+    } finally {
+      if (!accepted) completePersistence();
+    }
     return accepted;
   }
 
@@ -1185,11 +1248,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       );
       const generation = this.captureGeneration;
       const contextSnapshot = this.copyReplayContext(context);
-      this.workQueue.enqueue('automatic', lightSnapshot,
-        (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-          this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
-        (result: ReplayWorkerResult | null, error: string): void =>
-          this.completeWorkerSnapshot('automatic', contextSnapshot, generation, result, error, null, null));
+      this.enqueueWorkerSnapshot('automatic', lightSnapshot, contextSnapshot, generation, null, null);
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and capture.
       // The next page-change signal will retry after its layout has settled.

@@ -76,6 +76,12 @@ export interface FTSessionReplayViewMetadata {
   sampledOnError: boolean;
 }
 
+interface FTSessionReplayPendingPersistence {
+  count: number;
+  completion: Promise<void>;
+  resolve: () => void;
+}
+
 /**
  * Optional Replay contract. The core SDK owns no recorder, storage, or upload
  * implementation. A HAR registers this bridge only when Replay is enabled.
@@ -113,6 +119,55 @@ export class FTSessionReplayBridgeRegistry {
   private static readonly MAX_PENDING_ERROR_TIMELINES: number = 8;
   /** Holds crash recovery notifications until an optional HAR registers. */
   private static pendingErrorTimelines: Array<FTSessionReplayErrorContext> = [];
+  // Capture and core metadata writes share this lifetime, including accepted
+  // work finishing after the optional HAR unregisters on stop.
+  private static readonly pendingPersistence: Map<string, FTSessionReplayPendingPersistence> = new Map();
+  private static persistenceEpoch: number = 0;
+
+  /** Holds the original View until one accepted write finishes or fails. */
+  public static beginViewPersistence(context: FTSessionReplayRUMContext): () => void {
+    const key = FTSessionReplayBridgeRegistry.persistenceKey(context.applicationId, context.sessionId, context.viewId);
+    let pending = FTSessionReplayBridgeRegistry.pendingPersistence.get(key);
+    if (pending === undefined) {
+      let complete = (): void => {};
+      const completion = new Promise<void>((resolve: () => void): void => { complete = resolve; });
+      pending = { count: 0, completion, resolve: complete };
+      FTSessionReplayBridgeRegistry.pendingPersistence.set(key, pending);
+    }
+    const entry = pending;
+    entry.count++;
+    let finished = false;
+    return (): void => {
+      if (finished) return;
+      finished = true;
+      if (FTSessionReplayBridgeRegistry.pendingPersistence.get(key) !== entry) return;
+      entry.count--;
+      if (entry.count === 0) {
+        FTSessionReplayBridgeRegistry.pendingPersistence.delete(key);
+        entry.resolve();
+      }
+    };
+  }
+
+  public static hasPendingViewPersistence(applicationId: string, sessionId: string, viewId: string): boolean {
+    const key = FTSessionReplayBridgeRegistry.persistenceKey(applicationId, sessionId, viewId);
+    return FTSessionReplayBridgeRegistry.pendingPersistence.has(key);
+  }
+
+  /** Waits for storage and its RUM metadata update, without implying Replay. */
+  public static async waitForViewPersistence(applicationId: string, sessionId: string, viewId: string): Promise<void> {
+    const key = FTSessionReplayBridgeRegistry.persistenceKey(applicationId, sessionId, viewId);
+    const epoch = FTSessionReplayBridgeRegistry.persistenceEpoch;
+    let pending = FTSessionReplayBridgeRegistry.pendingPersistence.get(key);
+    while (pending !== undefined && epoch === FTSessionReplayBridgeRegistry.persistenceEpoch) {
+      await pending.completion;
+      pending = FTSessionReplayBridgeRegistry.pendingPersistence.get(key);
+    }
+  }
+
+  private static persistenceKey(applicationId: string, sessionId: string, viewId: string): string {
+    return `${applicationId}|${sessionId}|${viewId}`;
+  }
 
   public static register(bridge: FTSessionReplayBridge): void {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
@@ -156,6 +211,11 @@ export class FTSessionReplayBridgeRegistry {
     FTSessionReplayBridgeRegistry.currentViewProvider = null;
     FTSessionReplayBridgeRegistry.metadataChangedCallback = null;
     FTSessionReplayBridgeRegistry.pendingErrorTimelines = [];
+    FTSessionReplayBridgeRegistry.persistenceEpoch++;
+    FTSessionReplayBridgeRegistry.pendingPersistence.forEach((pending: FTSessionReplayPendingPersistence): void => {
+      pending.resolve();
+    });
+    FTSessionReplayBridgeRegistry.pendingPersistence.clear();
   }
 
   /** Accepted capture work is not evidence of Replay; report committed data. */

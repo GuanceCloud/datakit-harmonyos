@@ -76,8 +76,11 @@ export class FTRumFileStore {
       case 'updateRumViewReplay': {
         const metadata = request.replayMetadata;
         response.value = false;
-        if (view && view.sessionId === request.replaySessionId && metadata && metadata.hasReplay &&
-          Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0) {
+        if (!request.viewId || !request.replaySessionId || !metadata || !metadata.hasReplay ||
+          !Number.isFinite(metadata.recordsCount) || metadata.recordsCount <= 0) {
+          break;
+        }
+        if (view && view.sessionId === request.replaySessionId) {
           const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
           const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
           if (view.hasReplay !== true || count !== view.recordsCount || sampledOnError !== view.sampledOnReplayError) {
@@ -87,6 +90,16 @@ export class FTRumFileStore {
             view.viewUpdateTime++;
             view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
             this.put(changes, 'view', view.id, view);
+            response.value = true;
+          }
+        }
+        // Keep Actions independently replayable after their original View is
+        // acknowledged and removed, or the recorder is disabled.
+        for (const candidate of this.actions()) {
+          if (candidate.sessionId === request.replaySessionId && candidate.viewId === request.viewId &&
+            candidate.hasReplay !== true) {
+            candidate.hasReplay = true;
+            this.put(changes, 'action', candidate.id, candidate);
             response.value = true;
           }
         }

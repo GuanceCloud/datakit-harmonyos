@@ -14,5 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Replay starting on an already visible page: it attaches to the current RUM View and captures a first snapshot without changing the session or View ID.
 - Fixed Replay stopping before accepted snapshots finish: their image resources and final View End now reach storage, and scheduled uploads drain pending segments with retries. Rapid restart preserves the active upload schedule.
 - Fixed RUM Replay metadata being reported before capture succeeds; `has_replay` and the record count are now updated after successful capture, including when the View has already closed.
+- Fixed closed RUM Views being cleaned up before accepted Replay writes and metadata updates finish, including after recording stops. Successful writes now retain the original View long enough to report its Replay availability and final record count.
 - Added first-snapshot and scheduled or manual upload diagnostics through the core SDK logger.
 - Known limitation: inherited text colors and automatically resized long button labels may differ from the original ArkUI screen during playback.

@@ -388,6 +388,8 @@ export class FTRUMInnerManager {
    */
   private pendingRumCounterUpdates: Map<string, SDKRumCounterUpdateDTO> = new Map();
   private pendingCompletedActions: PendingCompletedActionWorkerCommand[] = [];
+  /** One asynchronous Replay wait per original app/session/View; other Actions can dispatch. */
+  private pendingCompletedActionReplayWaits: Map<string, Promise<void>> = new Map();
   private pendingResourceCommands: PendingRumResourceWorkerCommand[] = [];
   private pendingErrorCommands: PendingRumErrorWorkerCommand[] = [];
   /** Resource start persistence barriers; later lifecycle commands wait behind them. */
@@ -1555,20 +1557,28 @@ export class FTRUMInnerManager {
       return;
     }
 
+    const batch: PendingCompletedActionWorkerCommand[] = [];
+    const actions: SDKRumCompletedActionDTO[] = [];
+    for (let i = 0; i < this.pendingCompletedActions.length &&
+      batch.length < FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE; i++) {
+      const entry = this.pendingCompletedActions[i];
+      const action = entry.payload;
+      this.refreshCompletedActionReplayMetadata(action);
+      if (action.hasReplay !== true && FTSessionReplayBridgeRegistry.hasPendingViewPersistence(
+        action.rumAppId || '', action.sessionId, action.viewId)) {
+        this.deferCompletedActionForReplay(action, traceBaseName);
+        continue;
+      }
+      batch.push(entry);
+      actions.push(action);
+    }
+    // Resume from the Replay completion signal, rather than polling a queue
+    // consisting entirely of waiting Actions or blocking upload's flush loop.
+    if (batch.length === 0) return;
+
     const trackInner = FTTrackInner.getInstance();
     const lineContext: SDKLineProtocolContextDTO | null = trackInner.getWorkerLineProtocolContextSnapshot();
     trackInner.ensureWorkerLineProtocolContextSynced(SDKDedicatedPoolType.EVENT_CONSUMER);
-    const batchSize = Math.min(
-      FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE,
-      this.pendingCompletedActions.length
-    );
-    const batch = this.pendingCompletedActions.slice(0, batchSize);
-    const actions: SDKRumCompletedActionDTO[] = [];
-    for (let i = 0; i < batch.length; i++) {
-      const action = batch[i].payload;
-      this.refreshCompletedActionReplayMetadata(action);
-      actions.push(action);
-    }
 
     const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
     const payload: SDKRumCompletedActionBatchDTO = {
@@ -1596,12 +1606,41 @@ export class FTRUMInnerManager {
       }
       return;
     }
-    this.pendingCompletedActions.splice(0, batchSize);
+    const dispatched = new Set<PendingCompletedActionWorkerCommand>(batch);
+    this.pendingCompletedActions = this.pendingCompletedActions.filter(
+      (entry: PendingCompletedActionWorkerCommand): boolean => !dispatched.has(entry));
     this.registerRumSemanticRequest(workerRequest);
     this.scheduleRumCounterFlush();
-    if (this.pendingCompletedActions.length > 0) {
+    if (this.pendingCompletedActions.length > 0 && batch.length === FTRUMInnerManager.RUM_TRANSPORT_BATCH_SIZE) {
       this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
     }
+  }
+
+  private deferCompletedActionForReplay(action: SDKRumCompletedActionDTO, traceBaseName: string): void {
+    const key = `${action.rumAppId}|${action.sessionId}|${action.viewId}`;
+    if (this.pendingCompletedActionReplayWaits.has(key)) return;
+    const context = this.context;
+    const wait = FTSessionReplayBridgeRegistry.waitForViewPersistence(
+      action.rumAppId || '', action.sessionId, action.viewId);
+    this.pendingCompletedActionReplayWaits.set(key, wait);
+    FTInnerLogger.d(TAG, `Completed Actions waiting for Replay: session=${action.sessionId}, view=${action.viewId}`);
+    wait.then((): void => {
+      // Reset, shutdown, and terminal mailbox degradation invalidate old waits.
+      if (this.pendingCompletedActionReplayWaits.get(key) !== wait) return;
+      this.pendingCompletedActionReplayWaits.delete(key);
+      if (this.context !== context) return;
+      try {
+        this.flushCompletedActionWorkerBatch(traceBaseName);
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Completed Action Replay resume failed: ${String(error)}`);
+        this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
+      }
+    }).catch((error: Error): void => {
+      if (this.pendingCompletedActionReplayWaits.get(key) !== wait) return;
+      this.pendingCompletedActionReplayWaits.delete(key);
+      FTInnerLogger.w(TAG, `Completed Action Replay wait failed: ${error.message}`);
+      if (this.context === context) this.scheduleCompletedActionWorkerBatchFlush(traceBaseName);
+    });
   }
 
   public flushPendingWorkerCommandsBeforeUpload(): void {
@@ -1666,18 +1705,66 @@ export class FTRUMInnerManager {
     }
     // Always use the Action's original identity; navigation may have changed
     // the current View before a completed Action reaches the Worker.
+    payload.hasReplay = this.hasSessionReplayForView(payload.rumAppId, payload.sessionId, payload.viewId);
+  }
+
+  private hasSessionReplayForView(applicationId: string, sessionId: string, viewId: string): boolean {
+    if (applicationId.length === 0 || sessionId.length === 0 || viewId.length === 0) {
+      return false;
+    }
+    const view = this.findCurrentViewById(viewId);
+    if (applicationId === this.getSemanticRumAppId() && view !== null &&
+      view.getSessionId() === sessionId && view.isHasReplay()) {
+      return true;
+    }
     const context: FTSessionReplayRUMContext = {
-      applicationId: payload.rumAppId,
-      sessionId: payload.sessionId,
-      viewId: payload.viewId,
-      viewName: payload.viewName,
-      viewReferrer: payload.viewReferrer,
-      linkContext: {},
-      timestamp: payload.time
+      applicationId, sessionId, viewId, viewName: '', viewReferrer: '',
+      linkContext: {}, timestamp: Utils.getCurrentNanoTime()
     };
     const metadata = FTSessionReplayBridgeRegistry.getViewMetadata(context);
-    if (metadata.hasReplay && Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0) {
-      payload.hasReplay = true;
+    return metadata.hasReplay && Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0;
+  }
+
+  private refreshResourceContextReplayMetadata(context: SDKRumResourceContextDTO): void {
+    if (context.hasReplay !== true && context.rumAppId) {
+      context.hasReplay = this.hasSessionReplayForView(context.rumAppId, context.sessionId, context.viewId);
+    }
+  }
+
+  /** Reserved availability metadata is added after all custom properties. */
+  private applySessionReplayField(
+    fields: Record<string, string>,
+    sessionId: string,
+    viewId: string,
+    hasReplay: boolean = false
+  ): void {
+    const available = hasReplay || this.hasSessionReplayForView(this.getSemanticRumAppId(), sessionId, viewId);
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = available ? 'true' : '';
+  }
+
+  private async applyStoredResourceReplayMetadata(context: SDKRumResourceContextDTO): Promise<void> {
+    if (context.hasReplay === true || this.context === null ||
+      context.rumAppId !== this.getSemanticRumAppId() || context.sessionId.length === 0 || context.viewId.length === 0) {
+      return;
+    }
+    try {
+      const view = await FTDBTaskPoolExecutor.queryRumViewById(this.context, context.viewId);
+      if (view !== null && view.getId() === context.viewId && view.getSessionId() === context.sessionId && view.isHasReplay()) {
+        context.hasReplay = true;
+      }
+    } catch (error) {
+      FTInnerLogger.w(TAG, `Failed to read stored Replay metadata for View ${context.viewId}: ${String(error)}`);
+    }
+    this.refreshResourceContextReplayMetadata(context);
+  }
+
+  private promoteResourceContextReplayMetadata(
+    context: SDKRumResourceContextDTO | undefined,
+    replayContext: FTSessionReplayRUMContext
+  ): void {
+    if (context && context.rumAppId === replayContext.applicationId &&
+      context.sessionId === replayContext.sessionId && context.viewId === replayContext.viewId) {
+      context.hasReplay = true;
     }
   }
 
@@ -2227,10 +2314,18 @@ export class FTRUMInnerManager {
 
   private async acknowledgePersistedViewAfterComplete(context: Context, snapshot: ViewBean): Promise<void> {
     try {
-      // Capture this before awaiting: the recovered Error callback clears the
-      // persisted context immediately after its replacement View draft is
-      // cached, while this acknowledgement may still be queued behind it.
+      // The recovered Error callback can clear this protection while Replay
+      // or the database acknowledgement is still queued.
       const keepClosedView = this.protectedCrashRecoveryViewIds.has(snapshot.getId());
+      if (snapshot.getIsClose()) {
+        // A sync-row insertion can finish before the page's detached Replay
+        // snapshot. Wait for both that write and its metadata update. The
+        // existing version predicate then rejects the old summary and causes
+        // a new one carrying Replay; failed captures can still be cleaned up.
+        await FTSessionReplayBridgeRegistry.waitForViewPersistence(
+          this.getSemanticRumAppId(), snapshot.getSessionId(), snapshot.getId());
+        if (this.context !== context) return;
+      }
       const success = await FTDBTaskPoolExecutor.acknowledgeView(context, snapshot, keepClosedView);
       if (!success) {
         // The database contains a newer state. Ensure it is serialized even if
@@ -2318,6 +2413,7 @@ export class FTRUMInnerManager {
     }
     this.pendingRumCounterUpdates.clear();
     this.pendingCompletedActions = [];
+    this.pendingCompletedActionReplayWaits.clear();
     this.pendingResourceCommands = [];
     this.pendingErrorCommands = [];
     this.pendingResourceRegistrations.clear();
@@ -2927,12 +3023,33 @@ export class FTRUMInnerManager {
       action.getSessionId() === replayContext.sessionId) {
       action.setHasReplay(true);
     }
+    let promotedQueuedActions = false;
     for (let index = 0; index < this.pendingCompletedActions.length; index++) {
       const payload = this.pendingCompletedActions[index].payload;
       if (payload.rumAppId === replayContext.applicationId && payload.sessionId === replayContext.sessionId &&
         payload.viewId === replayContext.viewId) {
+        promotedQueuedActions = promotedQueuedActions || payload.hasReplay !== true;
         payload.hasReplay = true;
       }
+    }
+    if (promotedQueuedActions && this.pendingCompletedActionReplayWaits.size > 0) {
+      // Availability is committed now. Dispatch need not wait for future
+      // animation frames from the same still-visible page to finish.
+      this.scheduleCompletedActionWorkerBatchFlush('rum.completedAction.replayMetadata');
+    }
+    this.resourceContextById.forEach((context: SDKRumResourceContextDTO): void => {
+      this.promoteResourceContextReplayMetadata(context, replayContext);
+    });
+    this.resourceBeanMap.forEach((resource: ResourceBean): void => {
+      if (resource.sessionId === replayContext.sessionId && resource.viewId === replayContext.viewId) {
+        resource.hasSessionReplay = true;
+      }
+    });
+    for (let index = 0; index < this.pendingResourceCommands.length; index++) {
+      this.promoteResourceContextReplayMetadata(this.pendingResourceCommands[index].payload.context, replayContext);
+    }
+    for (let index = 0; index < this.pendingErrorCommands.length; index++) {
+      this.promoteResourceContextReplayMetadata(this.pendingErrorCommands[index].payload.context, replayContext);
     }
     const context = this.context;
     if (context !== null) {
@@ -2941,8 +3058,9 @@ export class FTRUMInnerManager {
         recordsCount: metadata.recordsCount,
         sampledOnError: metadata.sampledOnError
       };
-      // Update only Replay attributes, including when the captured View has
-      // already closed. Full View writes would overwrite atomic RUM counters.
+      // Persist matching Actions together with the View, even after its row is
+      // removed. Full aggregate writes would overwrite atomic RUM counters.
+      const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext);
       FTDBTaskPoolExecutor.updateRumViewReplay(context, replayContext.viewId, replayContext.sessionId, replayMetadata)
         .then((updated: boolean): void => {
           if (updated && this.context === context) {
@@ -2950,8 +3068,9 @@ export class FTRUMInnerManager {
           }
         })
         .catch((error: Error): void => {
-          FTInnerLogger.w(TAG, `Failed to persist Replay View metadata: ${error.message}`);
-        });
+          FTInnerLogger.w(TAG, `Failed to persist Replay View/Action metadata: ${error.message}`);
+        })
+        .finally(completePersistence);
     }
   }
 
@@ -3480,6 +3599,7 @@ export class FTRUMInnerManager {
       actionId,
       actionName,
       rumAppId: this.getSemanticRumAppId(),
+      hasReplay: view.isHasReplay(),
       dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
       // The listener owns all platform I/O. Resource creation only copies its
       // cached value, so a request never observes its completion-time network.
@@ -3570,8 +3690,9 @@ export class FTRUMInnerManager {
       return Promise.resolve(null);
     }
     const restore = FTDBTaskPoolExecutor.getPendingRumResource(context, resourceId).then(
-      (pending: FTDBTaskPoolPendingRumResourceDTO | null): FTDBTaskPoolPendingRumResourceDTO | null => {
+      async (pending: FTDBTaskPoolPendingRumResourceDTO | null): Promise<FTDBTaskPoolPendingRumResourceDTO | null> => {
         if (pending) {
+          await this.applyStoredResourceReplayMetadata(pending.context);
           this.resourceContextById.set(resourceId, pending.context);
           this.startedResourceIds.add(resourceId);
           this.startedResourceActionIds.set(resourceId, pending.context.actionId);
@@ -3638,7 +3759,11 @@ export class FTRUMInnerManager {
     const batch = this.pendingResourceCommands.slice(0, batchSize);
     const commands: SDKRumResourceCommandDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
-      commands.push(batch[i].payload);
+      const command = batch[i].payload;
+      if (command.context) {
+        this.refreshResourceContextReplayMetadata(command.context);
+      }
+      commands.push(command);
     }
 
     const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
@@ -3864,7 +3989,9 @@ export class FTRUMInnerManager {
     const batch = this.pendingErrorCommands.slice(0, batchSize);
     const commands: SDKRumErrorCommandDTO[] = [];
     for (let i = 0; i < batch.length; i++) {
-      commands.push(batch[i].payload);
+      const command = batch[i].payload;
+      this.refreshResourceContextReplayMetadata(command.context);
+      commands.push(command);
     }
 
     const traceName = this.nextRumEventTaskName(`${traceBaseName}.batch`);
@@ -3933,6 +4060,7 @@ export class FTRUMInnerManager {
       this.forgetProcessedActionId(actionId);
     }
     this.pendingCompletedActions = [];
+    this.pendingCompletedActionReplayWaits.clear();
     FTInnerLogger.w(TAG, `Completed action transport degraded: dropped=${dropped}, ${reason}`);
   }
 
@@ -4318,9 +4446,15 @@ export class FTRUMInnerManager {
 
       effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
 
+      const recoveredReplayContext = validRecoveryContext !== null ?
+        this.createCrashRecoveryResourceContext(validRecoveryContext) : null;
+      if (recoveredReplayContext !== null) {
+        await this.applyStoredResourceReplayMetadata(recoveredReplayContext);
+      }
+
 	      if (actualCallBack === null && crashFreeDuration === undefined) {
-	        const context = validRecoveryContext !== null ?
-	          this.createCrashRecoveryResourceContext(validRecoveryContext) : this.createCurrentResourceContext('', state);
+	        const context = recoveredReplayContext !== null ?
+	          recoveredReplayContext : this.createCurrentResourceContext('', state);
 	        this.increaseErrorMemoryCount(context);
 	        this.submitErrorWorkerCommand({
 	          context,
@@ -4407,6 +4541,9 @@ export class FTRUMInnerManager {
           }
         }
       }
+
+      this.applySessionReplayField(allFields, allTags[Constants.KEY_RUM_SESSION_ID] || '',
+        allTags[Constants.KEY_RUM_VIEW_ID] || '', recoveredReplayContext?.hasReplay === true);
 
       const self = this;
 
@@ -5262,6 +5399,8 @@ export class FTRUMInnerManager {
           self.increaseError(resourceTags);
         }
       }
+
+      this.applySessionReplayField(errorFields, resourceBean.sessionId, resourceBean.viewId, resourceBean.hasSessionReplay);
       
       FTTrackInner.getInstance().rumRecords(
         time,
@@ -5649,6 +5788,7 @@ export class FTRUMInnerManager {
    */
   public async shutdown(): Promise<void> {
     FTSessionReplayBridgeRegistry.clearRUMCallbacks(this.replayCurrentViewProvider);
+    this.pendingCompletedActionReplayWaits.clear();
     try {
       // Clear timers
       if (this.actionCheckTimer) {
@@ -5855,6 +5995,8 @@ export class FTRUMInnerManager {
       }
       
       // Send long task data
+      this.applySessionReplayField(allFields, allTags[Constants.KEY_RUM_SESSION_ID] || '',
+        allTags[Constants.KEY_RUM_VIEW_ID] || '');
       FTTrackInner.getInstance().rumRecords(
         time,
         Constants.FT_MEASUREMENT_RUM_LONG_TASK,
@@ -6141,6 +6283,7 @@ export class FTRUMInnerManager {
       fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(transportMetrics.connectionReuse);
     }
     
+    this.applySessionReplayField(fields, resourceBean.sessionId, resourceBean.viewId, resourceBean.hasSessionReplay);
     return fields;
   }
 

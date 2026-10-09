@@ -634,6 +634,7 @@ export class FTDBTaskPoolExecutor {
     return response.value === true;
   }
 
+  /** Atomically promotes Replay metadata on the original View and its persisted Actions. */
   public static async updateRumViewReplay(
     context: Context,
     viewId: string,

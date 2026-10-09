@@ -303,7 +303,17 @@ interface FTDBTaskPoolReplayMarker {
 
 interface FTDBTaskPoolActionAttrParts {
   extraAttr: Record<string, object>;
+  hasReplay: boolean;
   collectType: CollectType | null;
+}
+
+interface FTDBTaskPoolActionReplayMarker {
+  value: boolean;
+}
+
+interface FTDBTaskPoolActionReplayUpdate {
+  id: string;
+  attr: string;
 }
 
 enum FTDBTaskPoolCacheCategory {
@@ -1844,8 +1854,12 @@ function stringifyActionExtraAttr(actionBean: ActionBeanJSON): string {
   const obj: Record<string, object | string> = {};
   const extraAttr = actionBean.extraAttr ? actionBean.extraAttr : emptyObjectRecord();
   for (const key of Object.keys(extraAttr)) {
-    obj[key] = extraAttr[key];
+    if (key !== Constants.KEY_HAS_REPLAY) {
+      obj[key] = extraAttr[key];
+    }
   }
+  const replayMarker: FTDBTaskPoolActionReplayMarker = { value: actionBean.hasReplay === true };
+  obj[Constants.KEY_HAS_REPLAY] = replayMarker;
   if (actionBean.collectType) {
     obj[Constants.KEY_RUM_COLLECT_TYPE] = actionBean.collectType;
   }
@@ -1905,15 +1919,19 @@ function splitViewExtraAttr(jsonString: string): FTDBTaskPoolViewAttrParts {
 function splitActionExtraAttr(jsonString: string): FTDBTaskPoolActionAttrParts {
   const parsed = parseJsonRecord(jsonString);
   const extraAttr: Record<string, object> = {};
+  let hasReplay = false;
   let collectType: CollectType | null = null;
   for (const key of Object.keys(parsed)) {
-    if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+    if (key === Constants.KEY_HAS_REPLAY && parsed[key] && typeof parsed[key] === 'object') {
+      const marker = parsed[key] as FTDBTaskPoolActionReplayMarker;
+      hasReplay = marker.value === true;
+    } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
       collectType = parseCollectType(String(parsed[key]));
     } else {
       extraAttr[key] = parsed[key];
     }
   }
-  return { extraAttr, collectType };
+  return { extraAttr, hasReplay, collectType };
 }
 
 function toViewValues(view: ViewBeanJSON, includeId: boolean): relationalStore.ValuesBucket {
@@ -1998,6 +2016,7 @@ function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBe
     startTime: startTimeStr ? Number.parseInt(startTimeStr, 10) : 0,
     actionDuration: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_DURATION)),
     isClose: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_IS_CLOSE)) === 1,
+    hasReplay: attr.hasReplay,
     errorCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ERROR_COUNT)),
     longTaskCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_LONG_TASK_COUNT)),
     resourceCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_RESOURCE_COUNT)),
@@ -2081,36 +2100,80 @@ async function closeRumViewInTaskPool(
   return updated > 0;
 }
 
-/** Runs in the ordered DB lane and never overwrites counters or View closure. */
+/** Persists committed Replay on the original View and Actions without replacing counters. */
 async function updateRumViewReplayInTaskPool(
   rdbStore: relationalStore.RdbStore,
   request: FTDBTaskPoolRequest
 ): Promise<boolean> {
   const metadata = request.replayMetadata;
   if (metadata === undefined || !metadata.hasReplay || !Number.isFinite(metadata.recordsCount) ||
-    metadata.recordsCount <= 0 || !request.replaySessionId) {
+    metadata.recordsCount <= 0 || !request.replaySessionId || !request.viewId) {
     return false;
   }
-  const view = await queryRumViewByIdInTaskPool(rdbStore, request.viewId || '');
-  if (view === null || view.sessionId !== request.replaySessionId) {
-    return false;
+  rdbStore.beginTransaction();
+  try {
+    let changed = false;
+    const view = await queryRumViewByIdInTaskPool(rdbStore, request.viewId);
+    if (view !== null && view.sessionId === request.replaySessionId) {
+      const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
+      const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
+      if (view.hasReplay !== true || count !== view.recordsCount || sampledOnError !== view.sampledOnReplayError) {
+        view.hasReplay = true;
+        view.recordsCount = count;
+        view.sampledOnReplayError = sampledOnError;
+        const values = {} as relationalStore.ValuesBucket;
+        values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = stringifyViewExtraAttr(view);
+        values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
+        values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(request.now || Date.now(), view.dataUpdateTime + 1, view.dataUploadTime + 1);
+        const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+        predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
+        predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, view.sessionId);
+        changed = await rdbStore.update(values, predicates) > 0;
+      }
+    }
+
+    // An Action can outlive its View row and the registered Replay bridge.
+    // Query only the original identity and update only its cached marker.
+    const actions = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+    actions.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, request.replaySessionId);
+    actions.equalTo(FTSQL.RUM_COLUMN_VIEW_ID, request.viewId);
+    const resultSet = await rdbStore.query(actions, [FTSQL.RUM_COLUMN_ID, FTSQL.RUM_COLUMN_EXTRA_ATTR]);
+    const updates: FTDBTaskPoolActionReplayUpdate[] = [];
+    try {
+      if (resultSet.goToFirstRow()) {
+        do {
+          const attr = parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
+          const marker = attr[Constants.KEY_HAS_REPLAY] as FTDBTaskPoolActionReplayMarker;
+          if (marker?.value === true) {
+            continue;
+          }
+          const committed: FTDBTaskPoolActionReplayMarker = { value: true };
+          attr[Constants.KEY_HAS_REPLAY] = committed;
+          updates.push({
+            id: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ID)),
+            attr: JSON.stringify(attr)
+          });
+        } while (resultSet.goToNextRow());
+      }
+    } finally {
+      resultSet.close();
+    }
+    for (const update of updates) {
+      const values = {} as relationalStore.ValuesBucket;
+      values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = update.attr;
+      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+      predicates.equalTo(FTSQL.RUM_COLUMN_ID, update.id);
+      predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, request.replaySessionId);
+      predicates.equalTo(FTSQL.RUM_COLUMN_VIEW_ID, request.viewId);
+      const updated = await rdbStore.update(values, predicates);
+      changed = updated > 0 || changed;
+    }
+    rdbStore.commit();
+    return changed;
+  } catch (error) {
+    rdbStore.rollBack();
+    throw new Error(String(error));
   }
-  const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
-  const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
-  if (view.hasReplay === true && count === view.recordsCount && sampledOnError === view.sampledOnReplayError) {
-    return false;
-  }
-  view.hasReplay = true;
-  view.recordsCount = count;
-  view.sampledOnReplayError = sampledOnError;
-  const values = {} as relationalStore.ValuesBucket;
-  values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = stringifyViewExtraAttr(view);
-  values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
-  values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(request.now || Date.now(), view.dataUpdateTime + 1, view.dataUploadTime + 1);
-  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-  predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
-  predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, view.sessionId);
-  return await rdbStore.update(values, predicates) > 0;
 }
 
 async function updateViewUploadTimeInTaskPool(

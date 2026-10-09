@@ -232,6 +232,8 @@ export interface SDKRumResourceContextDTO {
   actionName: string;
   /** Host-side fallback for semantic events when the Worker line context is unavailable. */
   rumAppId?: string;
+  /** Committed Replay availability for this original session and View. */
+  hasReplay?: boolean;
 }
 
 export interface SDKRumResourceParamsDTO {

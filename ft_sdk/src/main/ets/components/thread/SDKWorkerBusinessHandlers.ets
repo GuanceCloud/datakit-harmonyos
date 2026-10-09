@@ -999,9 +999,12 @@ function prepareRumAppLineRecords(
   mergeStringRecords(tags, event.tags || {});
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
   mergeStringRecords(fields, lineContext.rumStaticFields);
-  // Native View/Action Replay availability must survive global custom context.
+  // Native RUM Replay availability must survive global custom context.
   if (event.measurement === Constants.FT_MEASUREMENT_RUM_VIEW ||
-    event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION) {
+    event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_LONG_TASK ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
     // The serializer omits empty fields; ArkTS does not support object delete.
     fields[Constants.KEY_SESSION_HAS_REPLAY] = event.fields?.[Constants.KEY_SESSION_HAS_REPLAY] === 'true' ? 'true' : '';
   }
@@ -1168,6 +1171,7 @@ function processRumErrorCommand(
   fields[Constants.KEY_RUM_ERROR_MESSAGE] = command.message || '';
   fields[Constants.KEY_RUM_ERROR_STACK] = command.log || '';
   mergeStringRecords(fields, normalizeRumPropertyRecord(command.property || {}));
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = context.hasReplay === true ? 'true' : '';
 
   const event: SDKRumEventDTO = {
     eventType: 'rum.error',
@@ -1468,6 +1472,13 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   resource.context.viewReferrer = resource.context.viewReferrer || context.viewReferrer;
   resource.context.actionId = resource.context.actionId || context.actionId;
   resource.context.actionName = resource.context.actionName || context.actionName;
+  resource.context.rumAppId = resource.context.rumAppId || context.rumAppId;
+  // Completion may observe the first committed frame after startResource.
+  // Never promote a Resource with a later page or session's Replay metadata.
+  if (context.hasReplay === true && resource.context.rumAppId === context.rumAppId &&
+    resource.context.sessionId === context.sessionId && resource.context.viewId === context.viewId) {
+    resource.context.hasReplay = true;
+  }
 }
 
 function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRumResourceParamsDTO): void {
@@ -1806,6 +1817,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
   if (resource.requestErrorStack.length > 0) {
     fields[Constants.KEY_RUM_ERROR_STACK] = resource.requestErrorStack;
   }
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = resource.context.hasReplay === true ? 'true' : '';
   return {
     eventType: 'rum.error',
     name: fields[Constants.KEY_RUM_ERROR_MESSAGE],
@@ -1942,6 +1954,7 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   if (resource.connectionReuse !== undefined) {
     fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(resource.connectionReuse);
   }
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = resource.context.hasReplay === true ? 'true' : '';
   return fields;
 }
 
