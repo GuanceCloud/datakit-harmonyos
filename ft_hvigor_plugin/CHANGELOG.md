@@ -13,6 +13,9 @@
   composes outgoing/incoming roots in page-stack drawing order. Page-transition
   slide and opacity effects use native progress callbacks, preserving existing
   application callbacks.
+- Added an effect-free default Router transition start hook for pages without
+  `pageTransition()`, preserving the system default animation and existing
+  explicit effects and callbacks.
 
 ## [0.1.1] - 2026-09-14
 

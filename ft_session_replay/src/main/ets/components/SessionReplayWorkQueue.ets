@@ -2,7 +2,7 @@ import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 
-export type ReplaySnapshotKind = 'start' | 'full' | 'automatic' | 'settled';
+export type ReplaySnapshotKind = 'start' | 'full' | 'automatic' | 'transition' | 'settled';
 export type ReplayStoreKind = 'main' | 'error' | 'none';
 
 export interface ReplayViewport {
@@ -28,9 +28,9 @@ export function isReplaySnapshotExpired(
   now: number,
   kind: ReplaySnapshotKind = 'automatic'
 ): boolean {
-  // View Starts and settled scene removals are immutable lifecycle boundaries.
-  // Dropping a removal could leave the preceding transition frame on screen.
-  return kind !== 'start' && kind !== 'settled' && now - queuedAt > 1000;
+  // Accepted default transition samples cover a bounded animation window.
+  // Dropping them while a Worker is busy turns a smooth entry into a switch.
+  return kind !== 'start' && kind !== 'transition' && kind !== 'settled' && now - queuedAt > 1000;
 }
 
 export interface ReplayWorkerCommit {
@@ -261,7 +261,8 @@ export class SessionReplayWorkQueue {
   public clear(keepViewStart: boolean = true): void {
     for (let index = this.jobs.length - 1; index >= 0; index--) {
       const kind = this.jobs[index].kind;
-      if (this.isSnapshot(this.jobs[index]) && !(keepViewStart && (kind === 'start' || kind === 'settled'))) {
+      if (this.isSnapshot(this.jobs[index]) &&
+        !(keepViewStart && (kind === 'start' || kind === 'transition' || kind === 'settled'))) {
         this.jobs.splice(index, 1);
       }
     }
@@ -293,7 +294,8 @@ export class SessionReplayWorkQueue {
   }
 
   private isSnapshot(job: ReplayQueuedJob): boolean {
-    return job.kind === 'start' || job.kind === 'full' || job.kind === 'automatic' || job.kind === 'settled';
+    return job.kind === 'start' || job.kind === 'full' || job.kind === 'automatic' ||
+      job.kind === 'transition' || job.kind === 'settled';
   }
 
   private addJob(job: ReplayQueuedJob): void {

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0-alpha01] - 2026-09-29
 
+- Added an effect-free compiler hook for the real default Router transition start. Replay prefers native intermediate geometry and reconstructs target-only Push/Pop positions with a bounded default-spring approximation; disposed outgoing pages are released at its end. Native timing variations, clipping, and masks still require playback validation.
+- Fixed delayed Worker processing dropping default Router intermediate frames after one second. Samples within the bounded reconstruction window now retain their original timestamps and View context through the ordered queue.
 - Fixed Replay snapshots using stale baselines after mixed manual/automatic captures, queued View changes, or Worker recovery. Ordered writes reuse committed checkpoints and viewport state, and native node reordering retains unchanged nodes instead of replacing them unnecessarily.
 - Fixed Replay cache trimming and error-window promotion retaining mutations without their required Full Snapshot. The retained checkpoint chain remains replayable, and writes rejected by quota eviction recover the same frame with a Full Snapshot.
 - Fixed short visits losing Replay when their first snapshot waited over one second: both queue and Worker retain the captured View Start under its original View ID and write it before View End. Added first-frame latency and unavailable-root diagnostics.

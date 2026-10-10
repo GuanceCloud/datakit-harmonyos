@@ -1533,7 +1533,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       );
       const generation = this.captureGeneration;
       const contextSnapshot = this.copyReplayContext(context);
-      this.enqueueWorkerSnapshot(kind, lightSnapshot, contextSnapshot, generation, null, null);
+      const defaultInFlight = kind === 'automatic' && this.getRootScenePages(rootBinding)
+        .some((page: ArkUIReplayScenePage): boolean => {
+          const transition = page.defaultTransition;
+          return transition !== undefined && lightSnapshot.timestamp >= transition.startedAt &&
+            lightSnapshot.timestamp < transition.startedAt + transition.durationMs;
+        });
+      this.enqueueWorkerSnapshot(defaultInFlight ? 'transition' : kind,
+        lightSnapshot, contextSnapshot, generation, null, null);
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and capture.
       // The next page-change signal will retry after its layout has settled.

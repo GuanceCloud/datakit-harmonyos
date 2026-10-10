@@ -1,5 +1,6 @@
 import { FrameNode, UIContext } from '@kit.ArkUI';
-import { ArkUIReplayScenePage } from './SessionReplayScene';
+import { i18n } from '@kit.LocalizationKit';
+import { ArkUIReplayDefaultTransition, ArkUIReplayScenePage } from './SessionReplayScene';
 import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { FTSessionReplay } from './FTSessionReplay';
 
@@ -29,6 +30,9 @@ interface AutoReplayRoot {
   frameNode: FrameNode | null;
   exitProgressKnown: boolean;
   exitCompleted: boolean;
+  defaultTransitionPending: boolean;
+  defaultTransition: ArkUIReplayDefaultTransition | null;
+  defaultTimer: number;
 }
 
 interface AutoReplayTransition {
@@ -41,6 +45,7 @@ export class FTSessionReplayAutoRootBridge {
   private static readonly LAYOUT_RETRY_DELAY_MS: number = 16;
   private static readonly EXIT_WATCHDOG_MS: number = 10000;
   private static readonly UNKNOWN_EXIT_GRACE_MS: number = 1000;
+  private static readonly DEFAULT_TRANSITION_MS: number = 450;
   private static readonly roots: Map<string, AutoReplayRoot> = new Map();
   private static nextToken: number = 0;
   private static nextShownOrder: number = 0;
@@ -61,7 +66,8 @@ export class FTSessionReplayAutoRootBridge {
     uiContext: UIContext,
     token: string,
     rootId: string,
-    vpToPxScale: number = 1
+    vpToPxScale: number = 1,
+    observeDefaultTransition: boolean = false
   ): void {
     FTSessionReplay.setAutoRootRefreshHandler(FTSessionReplayAutoRootBridge.refreshHandler);
     FTSessionReplay.setAutoRootTransitionEndHandler(FTSessionReplayAutoRootBridge.finishHandler);
@@ -75,6 +81,7 @@ export class FTSessionReplayAutoRootBridge {
     entry.retainedUntil = 0;
     entry.exitProgressKnown = false;
     entry.exitCompleted = false;
+    FTSessionReplayAutoRootBridge.cancelDefaultTransition(entry);
     FTSessionReplayAutoRootBridge.updateRouterIndex(entry);
     FTSessionReplay.getInstance().finishPageTransition(entry.token);
     FTSessionReplayAutoRootBridge.cancelSceneTimer(entry);
@@ -83,7 +90,20 @@ export class FTSessionReplayAutoRootBridge {
     entry.shownOrder = FTSessionReplayAutoRootBridge.nextShownOrder;
     // Keep the shared scene attached while the incoming page is laying out;
     // it contains both outgoing and incoming pages during the transition.
-    FTSessionReplayAutoRootBridge.activateWhenLaidOut(entry, 0);
+    // Wait one layout boundary for the native default start hook. A returning
+    // page already has a layout: binding it immediately can persist B's final
+    // position before ArkUI starts its animation. Non-animated shows still bind.
+    entry.defaultTransitionPending = observeDefaultTransition;
+    if (observeDefaultTransition) {
+      FTSessionReplayAutoRootBridge.cancelRetry(entry);
+      const generation = entry.generation;
+      entry.retryTimer = setTimeout((): void => {
+        entry.retryTimer = -1;
+        if (entry.generation !== generation || !entry.visible) return;
+        entry.defaultTransitionPending = false;
+        FTSessionReplayAutoRootBridge.activateWhenLaidOut(entry, 0);
+      }, FTSessionReplayAutoRootBridge.LAYOUT_RETRY_DELAY_MS);
+    } else FTSessionReplayAutoRootBridge.activateWhenLaidOut(entry, 0);
   }
 
   /** Called by injected @Entry `onPageHide` code. */
@@ -93,6 +113,7 @@ export class FTSessionReplayAutoRootBridge {
       return;
     }
     entry.visible = false;
+    entry.defaultTransitionPending = false;
     FTSessionReplayAutoRootBridge.retainDepartingPage(entry);
     if (FTSessionReplayAutoRootBridge.activeToken === entry.token) {
       FTSessionReplay.getInstance().notifyTransition();
@@ -112,14 +133,60 @@ export class FTSessionReplayAutoRootBridge {
     FTSessionReplayAutoRootBridge.cancelRetry(entry);
     entry.visible = false;
     entry.disposed = true;
-    if (!entry.exitProgressKnown || entry.exitCompleted) {
-      // Disposal no longer exposes a default Router animation to record.
-      // Keep detached content only when actual exit progress still owns it.
+    const defaultExiting = entry.defaultTransition !== null && !entry.defaultTransition.entering &&
+      Date.now() < entry.defaultTransition.startedAt + entry.defaultTransition.durationMs;
+    if ((!entry.exitProgressKnown && !defaultExiting) || entry.exitCompleted) {
+      // Keep detached content only while actual exit progress or the bounded
+      // default reconstruction still owns it.
       FTSessionReplay.getInstance().finishPageTransition(entry.token);
       return;
     }
     FTSessionReplayAutoRootBridge.retainDepartingPage(entry);
     FTSessionReplayAutoRootBridge.activateMostRecentVisibleRoot();
+  }
+
+  /** Always false: a declarative condition observes start without adding effects. */
+  public static defaultTransitionStarted(token: string): boolean {
+    const entry = FTSessionReplayAutoRootBridge.roots.get(token);
+    if (entry === undefined || !FTSessionReplay.getInstance().isEnabled()) return false;
+    let other: AutoReplayRoot | null = null;
+    const now = Date.now();
+    FTSessionReplayAutoRootBridge.roots.forEach((candidate: AutoReplayRoot): void => {
+      if (candidate.token !== token && candidate.visible !== entry.visible &&
+        (candidate.visible || candidate.retainedUntil > now) &&
+        FTSessionReplayAutoRootBridge.sameWindow(candidate.uiContext, entry.uiContext) &&
+        (other === null || candidate.shownOrder > other.shownOrder)) other = candidate;
+    });
+    if (other === null) return false;
+    const incoming = entry.visible ? entry : other;
+    const outgoing = entry.visible ? other : entry;
+    if (incoming.routerIndex <= 0 || outgoing.routerIndex <= 0) return false;
+    const pop = outgoing.routerIndex > incoming.routerIndex;
+    let rtl = false;
+    try { rtl = i18n.isRTL(i18n.System.getSystemLanguage()); } catch (_) { }
+    const foreground = entry.visible ? !pop : pop;
+    FTSessionReplayAutoRootBridge.cancelDefaultTransition(entry);
+    entry.defaultTransitionPending = false;
+    entry.defaultTransition = {
+      entering: entry.visible, startedAt: now,
+      durationMs: FTSessionReplayAutoRootBridge.DEFAULT_TRANSITION_MS,
+      translateXRatio: foreground ? (rtl ? -0.2 : 0.5) : (rtl ? 0.5 : -0.2)
+    };
+    if (!entry.visible) {
+      FTSessionReplayAutoRootBridge.cancelSceneTimer(entry);
+      entry.retainedUntil = now + FTSessionReplayAutoRootBridge.DEFAULT_TRANSITION_MS;
+    }
+    entry.defaultTimer = setTimeout((): void => {
+      entry.defaultTimer = -1;
+      entry.defaultTransition = null;
+      if (!entry.visible) FTSessionReplay.getInstance().finishPageTransition(entry.token);
+      else FTSessionReplayAutoRootBridge.activateMostRecentVisibleRoot();
+    }, FTSessionReplayAutoRootBridge.DEFAULT_TRANSITION_MS);
+    // Register the incoming root with its start metadata before its first View
+    // snapshot. This hook does not create or modify a native animation effect.
+    FTSessionReplayAutoRootBridge.activateMostRecentVisibleRoot();
+    FTSessionReplay.getInstance().notifyTransition();
+    return false;
   }
 
   /**
@@ -192,6 +259,7 @@ export class FTSessionReplayAutoRootBridge {
     entering: boolean, progress: number): void {
     const transition = FTSessionReplayAutoRootBridge.transitions.get(`${token}:${spec}`);
     const entry = FTSessionReplayAutoRootBridge.roots.get(token);
+    if (entry !== undefined) FTSessionReplayAutoRootBridge.cancelDefaultTransition(entry);
     if (entry !== undefined && !entering) {
       entry.exitProgressKnown = true;
       entry.exitCompleted = progress >= 1;
@@ -276,7 +344,10 @@ export class FTSessionReplayAutoRootBridge {
       layoutWarningGeneration: -1,
       frameNode: null,
       exitProgressKnown: false,
-      exitCompleted: false
+      exitCompleted: false,
+      defaultTransitionPending: false,
+      defaultTransition: null,
+      defaultTimer: -1
     };
     FTSessionReplayAutoRootBridge.roots.set(normalizedToken, entry);
     return entry;
@@ -321,10 +392,10 @@ export class FTSessionReplayAutoRootBridge {
   }
 
   private static activateWhenLaidOut(entry: AutoReplayRoot, attempt: number): void {
-    FTSessionReplayAutoRootBridge.cancelRetry(entry);
-    if (!entry.visible || FTSessionReplayAutoRootBridge.roots.get(entry.token) !== entry) {
+    if (!entry.visible || entry.defaultTransitionPending || FTSessionReplayAutoRootBridge.roots.get(entry.token) !== entry) {
       return;
     }
+    FTSessionReplayAutoRootBridge.cancelRetry(entry);
     const replay = FTSessionReplay.getInstance();
     if (!replay.isEnabled()) {
       return;
@@ -369,7 +440,8 @@ export class FTSessionReplayAutoRootBridge {
         pages.map((page: AutoReplayRoot): string => page.rootId),
         pages.map((page: AutoReplayRoot): ArkUIReplayScenePage => {
           return { key: page.token, rootId: page.rootId, root: page.frameNode,
-            retained: !page.visible && page.retainedUntil > now, paintOrder: page.paintOrder };
+            retained: !page.visible && page.retainedUntil > now, paintOrder: page.paintOrder,
+            defaultTransition: page.defaultTransition ?? undefined };
         }));
       if (FTSessionReplayAutoRootBridge.activeToken !== entry.token) {
         FTSessionReplayBridgeRegistry.logDiagnostic(
@@ -418,8 +490,15 @@ export class FTSessionReplayAutoRootBridge {
     }
   }
 
+  private static cancelDefaultTransition(entry: AutoReplayRoot): void {
+    if (entry.defaultTimer !== -1) clearTimeout(entry.defaultTimer);
+    entry.defaultTimer = -1;
+    entry.defaultTransition = null;
+  }
+
   private static retainDepartingPage(entry: AutoReplayRoot): void {
     FTSessionReplayAutoRootBridge.cancelSceneTimer(entry);
+    if (entry.defaultTransition !== null && !entry.defaultTransition.entering) return;
     if (entry.exitCompleted) {
       // Completion can precede onPageHide. Use the same recorder cleanup
       // path when the later lifecycle callback finally marks it hidden.
@@ -442,6 +521,7 @@ export class FTSessionReplayAutoRootBridge {
 
   private static releaseDepartingPage(entry: AutoReplayRoot): void {
     FTSessionReplayAutoRootBridge.cancelSceneTimer(entry);
+    FTSessionReplayAutoRootBridge.cancelDefaultTransition(entry);
     entry.retainedUntil = 0;
     entry.frameNode = null;
     if (entry.disposed) {

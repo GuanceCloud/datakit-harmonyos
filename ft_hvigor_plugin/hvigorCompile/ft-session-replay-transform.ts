@@ -400,7 +400,14 @@ function applyInjections(code: string, injections: Injection[]): string {
 function addTransitionInjections(code: string, injections: Injection[], entry: EntryStruct,
   bridgeName: string, tokenField: string, rootExpression: string): void {
   const method = findTopLevelMethod(code, entry.bodyStart, entry.bodyEnd, 'pageTransition');
-  if (method === null) return;
+  if (method === null) {
+    const indentation = `${lineIndentation(code, entry.bodyEnd)}  `;
+    // An empty effect list keeps ArkUI's default transition. The method is
+    // invoked by the real Router animation, including its outgoing page.
+    injections.push({ position: entry.bodyEnd, content: `\n${indentation}pageTransition(): void {\n` +
+      `${indentation}  if (${bridgeName}.defaultTransitionStarted(this.${tokenField})) {}\n${indentation}}\n` });
+    return;
+  }
   let cursor = method.bodyStart + 1;
   let nextSpec = 0;
   while (cursor < method.bodyEnd) {
@@ -457,9 +464,9 @@ function addTransitionInjections(code: string, injections: Injection[], entry: E
 }
 
 function lifecycleCall(bridgeName: string, tokenField: string, method: 'pageShown' | 'pageHidden' | 'pageDisposed',
-  rootExpression: string): string {
+  rootExpression: string, observeDefaultTransition: boolean): string {
   if (method === 'pageShown') {
-    return `${bridgeName}.pageShown(this.getUIContext(), this.${tokenField}, ${rootExpression}, vp2px(1));`;
+    return `${bridgeName}.pageShown(this.getUIContext(), this.${tokenField}, ${rootExpression}, vp2px(1), ${observeDefaultTransition});`;
   }
   return `${bridgeName}.${method}(this.${tokenField});`;
 }
@@ -476,7 +483,8 @@ function addLifecycleInjection(
   rootExpression: string
 ): void {
   const existing = findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, methodName);
-  const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression);
+  const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression,
+    findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, 'pageTransition') === null);
   if (existing !== null) {
     const indentation = `${lineIndentation(code, existing.nameStart)}  `;
     injections.push({ position: existing.bodyStart + 1, content: `\n${indentation}${call}` });

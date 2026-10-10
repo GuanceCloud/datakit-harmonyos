@@ -55,7 +55,7 @@ function automaticCommit(timestamp: number, childX: number): ReplayWorkerCommit 
 
 export default function sessionReplayWorkerUnitTest(): void {
   describe('SessionReplayWorkerUnit', () => {
-    it('expires intermediate snapshots but retains first frames and settled scene boundaries', 0, () => {
+    it('expires ordinary samples but retains first frames, bounded transitions and settled boundaries', 0, () => {
       expect(isReplaySnapshotExpired(100, 1100)).assertFalse();
       expect(isReplaySnapshotExpired(100, 1101)).assertTrue();
       expect(isReplaySnapshotExpired(100, 1100, 'automatic')).assertFalse();
@@ -64,6 +64,7 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(isReplaySnapshotExpired(100, 1101, 'start')).assertFalse();
       expect(isReplaySnapshotExpired(100, 60100, 'start')).assertFalse();
       expect(isReplaySnapshotExpired(100, 60100, 'settled')).assertFalse();
+      expect(isReplaySnapshotExpired(100, 60100, 'transition')).assertFalse();
     });
 
     it('serially produces a baseline and a mutation from worker snapshots', 0, () => {

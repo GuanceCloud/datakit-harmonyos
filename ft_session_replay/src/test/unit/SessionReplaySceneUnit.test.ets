@@ -19,6 +19,78 @@ function frame(key: string, id: number, nativeX: number = 0, width: number = 100
 
 export default function sessionReplaySceneUnitTest(): void {
   describe('SessionReplaySceneUnit', () => {
+    it('reconstructs default Router entry from target-only geometry and settles at zero', 0, () => {
+      const scene = new SessionReplayScene();
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
+      const incoming = page('incoming');
+      incoming.defaultTransition = { entering: true, startedAt: 1000, durationMs: 450, translateXRatio: 0.5 };
+      const positions: Array<number> = [];
+      for (const timestamp of [1000, 1100, 1200, 1300, 1450, 1600]) {
+        const nodes = scene.compose([incoming], [frame('incoming', 1)], viewport, new Map(), 10, timestamp);
+        positions.push(nodes[0].x);
+        expect(nodes[0].width).assertEqual(100);
+        expect(nodes[0].clip?.right).assertEqual(nodes[0].x);
+      }
+      expect(positions[0]).assertEqual(50);
+      expect(positions[1] < positions[0] && positions[1] > positions[2]).assertTrue();
+      expect(positions[2] > positions[3] && positions[3] > 0).assertTrue();
+      expect(positions[4]).assertEqual(0);
+      expect(positions[5]).assertEqual(0);
+    });
+
+    it('keeps the default Push page clipping boundary aligned across surfaces and Navigation children', 0, () => {
+      const scene = new SessionReplayScene();
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
+      const outgoing = page('old', true);
+      const incoming = page('new');
+      outgoing.defaultTransition = { entering: false, startedAt: 1000, durationMs: 450, translateXRatio: -0.2 };
+      incoming.defaultTransition = { entering: true, startedAt: 1000, durationMs: 450, translateXRatio: 0.5 };
+      const pages = [outgoing, incoming, page('destination', false, 'new')];
+      for (const timestamp of [1000, 1100, 1200, 1450]) {
+        const nodes = scene.compose(pages, [frame('old', 1), frame('new', 2), frame('destination', 3)],
+          viewport, new Map(), 10, timestamp);
+        const outgoingRight = nodes[0].x + nodes[0].width - (nodes[0].clip?.right ?? 0);
+        const incomingLeft = nodes[1].x + (nodes[1].clip?.left ?? 0);
+        expect(Math.abs(outgoingRight - incomingLeft) < 0.03).assertTrue();
+        expect(nodes[2].clip?.left).assertEqual(nodes[1].clip?.left);
+      }
+    });
+
+    it('prefers native default motion through completion and resets for a new animation', 0, () => {
+      const scene = new SessionReplayScene();
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
+      const incoming = page('incoming');
+      incoming.defaultTransition = { entering: true, startedAt: 1000, durationMs: 450, translateXRatio: 0.5 };
+      expect(scene.compose([incoming], [frame('incoming', 1, 23)], viewport, new Map(), 10, 1050)[0].x).assertEqual(23);
+      expect(scene.compose([incoming], [frame('incoming', 1)], viewport, new Map(), 10, 1100)[0].x).assertEqual(0);
+      incoming.defaultTransition.startedAt = 2000;
+      expect(scene.compose([incoming], [frame('incoming', 1)], viewport, new Map(), 10, 2000)[0].x).assertEqual(50);
+      const actual = new Map<string, ArkUIReplayPageTransition>();
+      actual.set('incoming', { entering: true, progress: 0.25, slide: SlideEffect.Right });
+      expect(scene.compose([incoming], [frame('incoming', 1)], viewport, actual, 10, 2050)[0].x).assertEqual(75);
+    });
+
+    it('bounds detached default exit reconstruction and preserves Pop layering', 0, () => {
+      const scene = new SessionReplayScene();
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
+      const returning = page('home');
+      const outgoing = page('demo', true);
+      returning.defaultTransition = { entering: true, startedAt: 1000, durationMs: 450, translateXRatio: -0.2 };
+      outgoing.defaultTransition = { entering: false, startedAt: 1000, durationMs: 450, translateXRatio: 0.5 };
+      const pages = [returning, outgoing];
+      const first = scene.compose(pages, [frame('home', 1), frame('demo', 2, 50)], viewport, new Map(), 10, 1000);
+      expect(first[0].x).assertEqual(-20);
+      expect(first[1].x).assertEqual(0);
+      const moving = scene.compose(pages, [frame('home', 1)], viewport, new Map(), 10, 1200);
+      expect(moving.length).assertEqual(2);
+      expect(moving[1].x > 0 && moving[1].x < 50).assertTrue();
+      expect((moving[0].sceneLayer ?? 0) < (moving[1].sceneLayer ?? 0)).assertTrue();
+      const ended = scene.compose(pages, [frame('home', 1)], viewport, new Map(), 10, 1450);
+      expect(ended.length).assertEqual(1);
+      expect(ended[0].x).assertEqual(0);
+      expect(scene.compose(pages, [], viewport, new Map(), 10, 1600).length).assertEqual(0);
+    });
+
     it('uses the original page width independently of the window or moving layout', 0, () => {
       const scene = new SessionReplayScene();
       const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 300, height: 100 };

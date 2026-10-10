@@ -273,7 +273,7 @@ export class ArkUIReplayCollector {
       shouldCaptureAsText: false, isRoot: true, usedTransformedPosition: false, opacity: 1,
       clip: { top: 0, right: 0, bottom: 0, left: 0 }
     }];
-    const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1);
+    const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1, timestamp);
     for (const node of composed) nodes.push(node);
     return { timestamp, vpToPxScale: scale, nodes };
   }
