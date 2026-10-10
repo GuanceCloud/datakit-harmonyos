@@ -21,6 +21,8 @@ export interface ReplayWorkerOptions {
   imagePrivacy: string;
 }
 
+export const REPLAY_COALESCED_REASON = 'Session Replay pending sample was replaced by a newer state.';
+
 export const REPLAY_STALE_QUEUE_REASON = 'Session Replay snapshot waited in the queue for more than 1 second.';
 
 export function isReplaySnapshotExpired(
@@ -141,6 +143,8 @@ export class SessionReplayWorkQueue {
   private completing: boolean = false;
   private callbackInsertIndex: number = 0;
   private nextId: number = 0;
+  private coalesced: number = 0;
+  private deferred: number = 0;
   private unavailableReason: string = '';
   private closing: boolean = false;
   private ready: boolean = false;
@@ -186,8 +190,56 @@ export class SessionReplayWorkQueue {
       complete(null, this.unavailableReason);
       return;
     }
+    // Only merge a trailing run; records, checkpoints and barriers split it.
+    // Never alter the active frame or a different View/store/context.
+    const pending = this.pendingSamples(capture.context, capture.storeKind, kind);
+    const limit = kind === 'automatic' ? 2 : (kind === 'transition' ? 8 : 0);
+    if (limit > 0 && pending.length >= limit) {
+      let removeIndex = pending.length - 1;
+      if (kind === 'transition') {
+        let closest = Number.MAX_VALUE;
+        for (let index = 1; index < pending.length - 1; index++) {
+          const gap = pending[index + 1].queuedAt - pending[index - 1].queuedAt;
+          if (gap < closest) { closest = gap; removeIndex = index; }
+        }
+      }
+      const replaced = pending[removeIndex];
+      this.jobs.splice(this.jobs.indexOf(replaced), 1);
+      this.coalesced++;
+      replaced.complete?.(null, REPLAY_COALESCED_REASON);
+    }
     this.addJob({ id: ++this.nextId, kind, snapshot, queuedAt: Date.now(), capture, complete });
     this.dispatch();
+  }
+
+  /** Consult before traversing FrameNodes. Critical boundaries always pass. */
+  public shouldCapture(context: SessionReplayContext, kind: ReplaySnapshotKind): boolean {
+    if (kind !== 'automatic' && kind !== 'transition') return true;
+    const pending = this.pendingSamples(context, undefined, kind);
+    const limit = kind === 'transition' ? 8 : 2;
+    const minimumGap = kind === 'transition' ? 64 : 128;
+    const latest = pending[pending.length - 1];
+    if (pending.length >= limit && latest !== undefined && Date.now() - latest.queuedAt < minimumGap) {
+      this.deferred++;
+      return false;
+    }
+    return true;
+  }
+
+  private pendingSamples(context: SessionReplayContext, storeKind: ReplayStoreKind | undefined,
+    kind: ReplaySnapshotKind): Array<ReplayQueuedJob> {
+    const pending: Array<ReplayQueuedJob> = [];
+    for (let index = this.jobs.length - 1; index >= 0; index--) {
+      const job = this.jobs[index];
+      const capture = job.capture;
+      if (job.kind !== kind || capture === undefined ||
+        (storeKind !== undefined && capture.storeKind !== storeKind) ||
+        capture.context.applicationId !== context.applicationId || capture.context.sessionId !== context.sessionId ||
+        capture.context.viewId !== context.viewId ||
+        JSON.stringify(capture.context.globalContext) !== JSON.stringify(context.globalContext)) break;
+      pending.unshift(job);
+    }
+    return pending;
   }
 
   /** All segment mutations share the same FIFO as detached snapshots. */
@@ -283,7 +335,8 @@ export class SessionReplayWorkQueue {
       const kind = this.jobs[index].kind;
       if (this.isSnapshot(this.jobs[index]) &&
         !(keepViewStart && (kind === 'start' || kind === 'transition' || kind === 'settled'))) {
-        this.jobs.splice(index, 1);
+        const dropped = this.jobs.splice(index, 1)[0];
+        dropped.complete?.(null, REPLAY_COALESCED_REASON);
       }
     }
   }

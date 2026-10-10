@@ -31,6 +31,7 @@ import {
   ReplayStoreKind,
   ReplayViewport,
   REPLAY_STALE_QUEUE_REASON,
+  REPLAY_COALESCED_REASON,
   SessionReplayWorkQueue
 } from './SessionReplayWorkQueue';
 import {
@@ -136,6 +137,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private captureGeneration: number = 0;
   private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
+  private captureDeferred: boolean = false;
   private motionUntil: number = 0;
   private readonly activePointers: Map<number, ReplayTouchPoint> = new Map();
   private readonly pageTransitions: Map<string, ArkUIReplayPageTransition> = new Map();
@@ -234,6 +236,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.workQueue.close();
       return;
     }
+    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
     FTSessionReplayBridgeRegistry.unregister(this);
     this.finishTouchPointers();
     this.isStarted = false;
@@ -511,6 +514,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) {
       return null;
     }
+    if (this.captureDeferred) this.captureActiveViewMutation('settled');
     const activeContext = this.activeContext;
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
@@ -634,7 +638,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.notifyTransition();
     // Preserve the actual callback boundary even when the ordinary sampling
     // timer would run only after a short transition has already finished.
-    if (transition.progress === 0 || transition.progress === 1) this.captureActiveViewMutation();
+    if (transition.progress === 0 || transition.progress === 1) this.captureActiveViewMutation('settled');
   }
 
   public finishPageTransition(key: string): void {
@@ -839,6 +843,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
       return;
     }
+    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
     this.finishTouchPointers();
     const viewKey = this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId);
     if (this.pendingViewStarts.has(viewKey)) {
@@ -1110,6 +1115,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     promoteErrorAt: number | null,
     queuedAt: number = 0
   ): void {
+    if (error === REPLAY_COALESCED_REASON) return;
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     const endedStart = kind === 'start' && this.isEndedStart(context, generation);
     const currentCapture = this.isCurrentCapture(context, generation);
@@ -1403,6 +1409,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     records: Array<SessionReplayRecord>,
     fullSnapshot: SessionReplayRecord | null
   ): SessionReplayCapture | null {
+    if (this.captureDeferred) this.captureActiveViewMutation('settled');
     const activeContext = this.activeContext;
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
@@ -1519,30 +1526,31 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
   }
 
-  private captureActiveViewMutation(kind: 'automatic' | 'settled' = 'automatic'): void {
+  private captureActiveViewMutation(kind: 'automatic' | 'transition' | 'settled' = 'automatic'): void {
     const context = this.activeContext;
     const rootBinding = this.rootBinding;
     if (!this.isStarted || context === null || rootBinding === null) {
       return;
     }
+    const timestamp = Date.now();
+    const defaultInFlight = kind === 'automatic' && this.getRootScenePages(rootBinding)
+      .some((page: ArkUIReplayScenePage): boolean => {
+        const transition = page.defaultTransition;
+        return transition !== undefined && timestamp >= transition.startedAt &&
+          timestamp < transition.startedAt + transition.durationMs;
+      });
+    const sampleKind: ReplaySnapshotKind = defaultInFlight ? 'transition' : kind;
+    if (!this.workQueue.shouldCapture(context, sampleKind)) {
+      this.captureDeferred = true;
+      this.scheduleAutomaticCapture();
+      return;
+    }
     try {
-      // This is the only automatic code that runs in an ArkUI callback. It
-      // reads FrameNode into a detached handoff and immediately returns. The
-      // Replay Worker materializes and diffs it, then writes the record batch.
-      const lightSnapshot = this.captureRootLight(
-        rootBinding.uiContext,
-        rootBinding.rootId,
-        rootBinding.vpToPxScale
-      );
+      const lightSnapshot = this.captureRootLight(rootBinding.uiContext, rootBinding.rootId, rootBinding.vpToPxScale);
+      this.captureDeferred = false;
       const generation = this.captureGeneration;
       const contextSnapshot = this.copyReplayContext(context);
-      const defaultInFlight = kind === 'automatic' && this.getRootScenePages(rootBinding)
-        .some((page: ArkUIReplayScenePage): boolean => {
-          const transition = page.defaultTransition;
-          return transition !== undefined && lightSnapshot.timestamp >= transition.startedAt &&
-            lightSnapshot.timestamp < transition.startedAt + transition.durationMs;
-        });
-      this.enqueueWorkerSnapshot(defaultInFlight ? 'transition' : kind,
+      this.enqueueWorkerSnapshot(sampleKind,
         lightSnapshot, contextSnapshot, generation, null, null);
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and capture.
