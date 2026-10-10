@@ -45,6 +45,7 @@ interface AbilityLifecycleCallback {
   onWindowStageCreate?: (ability: UIAbility, windowStage: window.WindowStage) => void;
   onWindowStageActive?: (ability: UIAbility, windowStage: window.WindowStage) => void;
   onWindowStageDestroy?: (ability: UIAbility, windowStage: window.WindowStage) => void;
+  onAbilityWillForeground?: (ability: UIAbility) => void;
   onAbilityForeground?: (ability: UIAbility) => void;
   onAbilityBackground?: (ability: UIAbility) => void;
   onAbilityDestroy?: (ability: UIAbility) => void;
@@ -186,9 +187,29 @@ export class FTAbilityLifecycleListener {
             this.flushDbLaneOnLifecycleChange("onWindowStageDestroy");
           }
         },
+        onAbilityWillForeground: (ability: UIAbility) => {
+          if (this.foregroundAbilities.size === 0 && this.alreadySleep &&
+            FTAppStartCounter.getInstance().isInited()) {
+            this.beginHotStart();
+          }
+        },
         onAbilityForeground: (ability: UIAbility) => {
           const wasBackground = this.foregroundAbilities.size === 0;
+          const isHotStart = wasBackground && this.alreadySleep && FTAppStartCounter.getInstance().isInited();
           this.foregroundAbilities.add(ability);
+          if (wasBackground) {
+            if (this.sleepCheckTimer !== null) {
+              clearTimeout(this.sleepCheckTimer);
+              this.sleepCheckTimer = null;
+            }
+            // Consume this background period once, before another Ability or
+            // duplicate foreground callback can try to report the same launch.
+            this.alreadySleep = false;
+            if (isHotStart) {
+              // Fallback for runtimes without onAbilityWillForeground.
+              this.beginHotStart();
+            }
+          }
           FTMonitorManager.getInstance().setAppInForeground(true);
           FTUIBlockManager.getInstance().setAppInForeground(true);
           if (wasBackground) {
@@ -198,66 +219,26 @@ export class FTAbilityLifecycleListener {
           if (wasBackground) {
             this.resumeViewOnForeground(ability);
           }
-          
-          // Clear sleep check timer if app returns to foreground
-          if (this.sleepCheckTimer !== null) {
-            clearTimeout(this.sleepCheckTimer);
-            this.sleepCheckTimer = null;
+          // The first foreground callback completes this hot-start boundary.
+          // Page restoration may still be awaiting persistence; it does not
+          // determine the startup duration or keep ApplicationLaunch active.
+          if (isHotStart) {
+            this.finishHotStart();
           }
           
-          // Record start time for potential hot start
-          // Similar to Android's LifeCircleTraceCallback.onPreStart()
-          const appStartCounter = FTAppStartCounter.getInstance();
-          const config = FTSDK.getRumConfig();
-          const isHotStart: boolean = this.alreadySleep && appStartCounter.isInited();
-          FTInnerLogger.d(TAG, `App foregrounded: slept=${this.alreadySleep}, hotStart=${isHotStart}`);
-
+          FTInnerLogger.d(TAG, `App foregrounded: wasBackground=${wasBackground}, hotStart=${isHotStart}`);
           if (isHotStart) {
             // Keep the Android hot-start refresh behaviour even when no UI
             // tracking feature is enabled and this listener exists solely for
             // remote configuration.
             FTSDK.updateRemoteConfig();
-            // App has been initialized and was sleeping (in background for >10s)
-            // This is a hot start
-            // In HarmonyOS, onAbilityWindowStageCreate may not be called again if WindowStage already exists
-            // So we calculate and upload hot start directly in onAbilityForeground
-            const startTime = Utils.getCurrentNanoTime();
-            this.startTimeNanoTime = startTime;
-            this.startClockTimeNano = FTAppLaunchTracker.getStartupUptimeNs();
-            
-            // Calculate hot start duration after a short delay to ensure UI is ready
-            // Use setTimeout to delay the calculation, similar to waiting for onAbilityWindowStageCreate
-            setTimeout(() => {
-              if (this.startTimeNanoTime > 0 && this.startClockTimeNano > 0) {
-                const endTime = FTAppLaunchTracker.getStartupUptimeNs();
-                const hotStartDuration = endTime - this.startClockTimeNano;
-                
-                if (hotStartDuration > 0 && config && config.isEnableTraceUserAction()) {
-                  // Upload hot start data //FIXME do not call in first cold launch
-                  appStartCounter.hotStart(hotStartDuration, this.startTimeNanoTime);
-                  FTInnerLogger.d(TAG, `Hot start recorded: durationMs=${hotStartDuration / 1000000}`);
-                }
-                
-                // Reset start time after upload
-                this.startTimeNanoTime = 0;
-                this.startClockTimeNano = 0;
-              } else {
-                // Never retain a half-recorded hot-start boundary. In
-                // particular, do not retry with a wall-clock duration if the
-                // monotonic STARTUP clock is unavailable.
-                this.startTimeNanoTime = 0;
-                this.startClockTimeNano = 0;
-              }
-            }, 100); // 100ms delay to ensure UI is ready
-          } else {
-            // Reset alreadySleep if app returns to foreground before 10 seconds.
-            this.alreadySleep = false;
           }
         },
         onAbilityBackground: (ability: UIAbility) => {
           FTInnerLogger.d(TAG, `onAbilityBackground: UIAbility lifecycle event`);
           this.foregroundAbilities.delete(ability);
           if (this.foregroundAbilities.size === 0) {
+            this.resetHotStartBoundary();
             FTMonitorManager.getInstance().setAppInForeground(false);
             FTUIBlockManager.getInstance().setAppInForeground(false);
             FTSDK.recordAppLaunchApplicationBackground();
@@ -271,6 +252,7 @@ export class FTAbilityLifecycleListener {
           FTInnerLogger.d(TAG, `onAbilityDestroy: UIAbility lifecycle event`);
           this.foregroundAbilities.delete(ability);
           if (this.foregroundAbilities.size === 0) {
+            this.resetHotStartBoundary();
             FTMonitorManager.getInstance().setAppInForeground(false);
             FTUIBlockManager.getInstance().setAppInForeground(false);
             FTSDK.recordAppLaunchApplicationBackground();
@@ -327,6 +309,7 @@ export class FTAbilityLifecycleListener {
           FTSDK.recordAppLaunchApplicationForeground();
         },
         onApplicationBackground: (): void => {
+          this.resetHotStartBoundary();
           FTSDK.recordAppLaunchApplicationBackground();
         }
       };
@@ -423,6 +406,36 @@ export class FTAbilityLifecycleListener {
 
     } catch (error) {
       FTInnerLogger.e(TAG, `Failed to unregister lifecycle listener: ${String(error)}`);
+    }
+  }
+
+  private beginHotStart(): void {
+    if (this.startTimeNanoTime > 0 && this.startClockTimeNano > 0) {
+      return;
+    }
+    this.startTimeNanoTime = Utils.getCurrentNanoTime();
+    this.startClockTimeNano = FTAppLaunchTracker.getStartupUptimeNs();
+  }
+
+  private resetHotStartBoundary(): void {
+    this.startTimeNanoTime = 0;
+    this.startClockTimeNano = 0;
+  }
+
+  /** Complete the first foreground callback once, independently of page restoration. */
+  private finishHotStart(): void {
+    const startTime = this.startTimeNanoTime;
+    const startClockTime = this.startClockTimeNano;
+    this.resetHotStartBoundary();
+    if (startTime <= 0 || startClockTime <= 0) {
+      return;
+    }
+    const endTime = FTAppLaunchTracker.getStartupUptimeNs();
+    const duration = endTime > startClockTime ? endTime - startClockTime : 0;
+    const config = FTSDK.getRumConfig();
+    if (config && config.isEnableTraceUserAction()) {
+      FTAppStartCounter.getInstance().hotStart(duration, startTime);
+      FTInnerLogger.d(TAG, `Hot start recorded: durationMs=${duration / 1000000}`);
     }
   }
 
@@ -544,7 +557,7 @@ export class FTAbilityLifecycleListener {
    */
   private checkLongTimeSleep(): void {
     const appStartCounter = FTAppStartCounter.getInstance();
-    if (appStartCounter.isInited()) {
+    if (this.foregroundAbilities.size === 0 && appStartCounter.isInited()) {
       // App was initialized, and we're here after 10 seconds delay
       // This means app has been in background for >10 seconds
       this.alreadySleep = true;

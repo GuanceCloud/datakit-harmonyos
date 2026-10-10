@@ -347,6 +347,7 @@ export class FTRUMInnerManager {
   private activeView: ActiveViewBean | null = null;
   /** Launch Actions use their own View without replacing the foreground page. */
   private launchView: ActiveViewBean | null = null;
+  private launchViewKey: string = '';
   private launchViewReady: Promise<void> = Promise.resolve();
   private syntheticViews: Map<string, ActiveViewBean> = new Map();
   private syntheticViewReady: Map<string, Promise<void>> = new Map();
@@ -2450,6 +2451,7 @@ export class FTRUMInnerManager {
     this.sessionErrorSampleRate = 0.0;
     this.activeView = null;
     this.launchView = null;
+    this.launchViewKey = '';
     this.launchViewReady = Promise.resolve();
     this.activeAction = null;
     this.resourceBeanMap.clear();
@@ -3094,6 +3096,9 @@ export class FTRUMInnerManager {
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
       await this.startupViewRecovery;
+      if (this.appState === AppState.BACKGROUND) {
+        return;
+      }
       // Save previous view name before updating viewList (for referrer calculation)
       // This ensures we can use the previous active view as referrer even if viewList is empty
       // Note: Even if activeView is closed (isClose()=true), we should still use its viewName as previousViewName
@@ -3114,8 +3119,6 @@ export class FTRUMInnerManager {
       
       // Refresh session
       await this.checkSessionRefresh(false);
-      // Android closes the synthetic launch View when a real page starts.
-      await this.closeLaunchView();
       await this.syntheticCloseBarrier;
       await this.closeSyntheticViews();
       
@@ -3183,6 +3186,12 @@ export class FTRUMInnerManager {
         }
       }
       
+      // A lifecycle callback can background the app while persistence is awaited.
+      // Do not recreate a foreground page after its background stop was queued.
+      if ((this.appState as AppState) === AppState.BACKGROUND) {
+        return;
+      }
+
       // Create new active view
       this.activeView = new ActiveViewBean(viewName, viewReferrer, loadTime, this.sessionId);
       
@@ -3232,8 +3241,6 @@ export class FTRUMInnerManager {
     // This prevents race condition where multiple threads modify activeView simultaneously
     this.viewOperationLock = this.viewOperationLock.then(async () => {
       try {
-      // A background transition can occur without an active page View.
-      await this.closeLaunchView(undefined, shouldGenerateSummary);
       if (!this.activeView) {
         FTInnerLogger.w(TAG, "stopView ignored: no active view");
         return;
@@ -3425,6 +3432,22 @@ export class FTRUMInnerManager {
     // ApplicationLaunch is stored separately from the other synthetic Views.
     // Close it here even when automatic page tracking is disabled.
     const launchClose = this.closeLaunchView();
+    // Freeze the page at this lifecycle boundary before awaiting persistence.
+    // Application-state callbacks may arrive without any page-hide callback.
+    const pageView = this.activeView;
+    if (pageView && !pageView.isClose()) {
+      this.checkActionClose();
+      pageView.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
+      this.notifySessionReplayViewStopped(pageView);
+      pageView.close();
+      // Keep page persistence out of syntheticCloseBarrier: startView itself
+      // awaits that barrier, so waiting for its queued stop would deadlock.
+      this.viewOperationLock = this.viewOperationLock.then(async (): Promise<void> => {
+        await this.closeView(pageView);
+      }).catch((error: Error): void => {
+        FTInnerLogger.w(TAG, `Background page closure failed: ${error.message}`);
+      });
+    }
     this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async () => {
       await launchClose;
       await this.closeSyntheticViews(Constants.VIEW_NAME_BACKGROUND);
@@ -3439,8 +3462,17 @@ export class FTRUMInnerManager {
       return;
     }
     this.appState = AppState.RUN;
-    // Android keeps BackgroundView until the next real View starts. A return
-    // without an active page must not report the background View prematurely.
+    // Background time ends at the application foreground boundary, even if
+    // no real page is restored or that restoration is still waiting on I/O.
+    const backgroundView = this.syntheticViews.get(Constants.VIEW_NAME_BACKGROUND);
+    if (backgroundView && !backgroundView.isClose()) {
+      backgroundView.close();
+      const ready = this.syntheticViewReady.get(Constants.VIEW_NAME_BACKGROUND) || Promise.resolve();
+      this.syntheticCloseBarrier = this.syntheticCloseBarrier.then(async (): Promise<void> => {
+        await ready;
+        await this.closeView(backgroundView);
+      });
+    }
   }
 
   private resolveEventView(state?: AppState): ActiveViewBean {
@@ -3472,14 +3504,18 @@ export class FTRUMInnerManager {
     return null;
   }
 
-  private ensureLaunchView(startTime: number): ActiveViewBean {
-    if (this.launchView === null || this.launchView.isClose()) {
+  private ensureLaunchView(startTime: number, actionType: string): ActiveViewBean {
+    const launchKey = `${actionType}:${startTime}`;
+    // Closing a launch does not change its identity. A repeated submission for
+    // the same launch must retain its View, including after background closure.
+    if (this.launchView === null || this.launchViewKey !== launchKey) {
       const view = new ActiveViewBean(Constants.VIEW_NAME_APPLICATION_LAUNCH,
         Constants.VIEW_NAME_ROOT, -1, this.sessionId);
       view.setStartTime(startTime);
       view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
       view.setCollectType(this.checkSessionWillCollect(this.sessionId));
       this.launchView = view;
+      this.launchViewKey = launchKey;
       // Synthetic Views do not start device-metrics monitoring.
       this.launchViewReady = this.initView(view);
     }
@@ -3508,15 +3544,49 @@ export class FTRUMInnerManager {
     startTime: number,
     property: Record<string, object> = {}
   ): void {
+    if (this.isLaunchActionType(actionType)) {
+      const actualStartTime = startTime > 0 ? startTime : Utils.getCurrentNanoTime();
+      const actualDuration = duration >= 0 ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
+      // Launch creation and real-page transitions must not interleave while
+      // startView waits for a background View to finish persisting.
+      this.viewOperationLock = this.viewOperationLock.then(async (): Promise<void> => {
+        await this.startupViewRecovery;
+        if (this.launchViewKey === `${actionType}:${actualStartTime}`) {
+          return;
+        }
+        await this.checkSessionRefresh(true);
+        await this.closeLaunchView();
+        this.addActionInternal(actionName, actionType, actualDuration, actualStartTime, property);
+        // A launch Action is submitted at the measured completion boundary.
+        // Its View covers that startup interval, independent of page tracking.
+        await this.closeLaunchView(actualDuration);
+      }).catch((error: Error): void => {
+        FTInnerLogger.e(TAG, `Error adding launch Action ${actionName}: ${error.message}`);
+      });
+      return;
+    }
+    this.addActionInternal(actionName, actionType, duration, startTime, property);
+  }
+
+  private addActionInternal(
+    actionName: string,
+    actionType: string,
+    duration: number,
+    startTime: number,
+    property: Record<string, object>
+  ): void {
     try {
       // Refresh session
-      this.checkSessionRefresh(true);
+      if (!this.isLaunchActionType(actionType)) {
+        this.checkSessionRefresh(true);
+      }
 
       const actionId = Utils.generateUUID();
       const actualStartTime = startTime > 0 ? startTime : Utils.getCurrentNanoTime();
-      const actualDuration = duration > 0 ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
       const isLaunchAction = this.isLaunchActionType(actionType);
-      const view = isLaunchAction ? this.ensureLaunchView(actualStartTime) : this.resolveEventView();
+      const actualDuration = (isLaunchAction ? duration >= 0 : duration > 0)
+        ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
+      const view = isLaunchAction ? this.ensureLaunchView(actualStartTime, actionType) : this.resolveEventView();
       const viewId = view.getId();
       const viewName = view.getViewName();
       const viewReferrer = view.getViewReferrer();
@@ -3557,9 +3627,6 @@ export class FTRUMInnerManager {
         payload,
         `rum.addAction:${actionName}`
       );
-      if (isLaunchAction && this.activeView !== null && !this.activeView.isClose()) {
-        void this.closeLaunchView(actualDuration);
-      }
       this.scheduleRumCounterFlush();
       
 
@@ -4850,6 +4917,11 @@ export class FTRUMInnerManager {
           this.activeView.close();
           // Close the predecessor with its original Session and sampling decision.
           await this.closeView(this.activeView);
+          if (this.appState === AppState.BACKGROUND) {
+            this.lastUserActiveTime = now;
+            this.saveRumContext();
+            return;
+          }
           
           const viewName = this.activeView.getViewName();
           const viewReferrer = this.activeView.getViewReferrer();
@@ -5823,6 +5895,7 @@ export class FTRUMInnerManager {
       this.activeAction = null;
       this.activeView = null;
       this.launchView = null;
+      this.launchViewKey = '';
       this.launchViewReady = Promise.resolve();
       this.syntheticViews.clear();
       this.syntheticViewReady.clear();

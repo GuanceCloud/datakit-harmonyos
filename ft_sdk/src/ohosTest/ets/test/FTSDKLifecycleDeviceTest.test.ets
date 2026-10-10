@@ -63,6 +63,7 @@ interface DeviceApplicationStateCallback {
 }
 
 interface DeviceAbilityLifecycleCallback {
+  onAbilityWillForeground?: (ability: Object) => void;
   onAbilityForeground?: (ability: Object) => void;
   onAbilityBackground?: (ability: Object) => void;
 }
@@ -411,12 +412,12 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(launchView !== null).assertTrue();
       expect(record!.getDataString().includes(`view_id=${launchView!.getId()}`)).assertTrue();
       expect(launchView!.getViewReferrer()).assertEqual(Constants.VIEW_NAME_ROOT);
-      await FTRUMGlobalManager.getInstance().startView('first_foreground_page');
-      const closedOnFirstPage = await WaitUtils.waitUntil(async () => {
+      const closedOnLaunchCompletion = await WaitUtils.waitUntil(async () => {
         const views = await DBAssert.queryViews(100);
         return views.some(view => view.getId() === launchView!.getId() && view.getIsClose());
       }, 5000);
-      expect(closedOnFirstPage).assertTrue();
+      expect(closedOnLaunchCompletion).assertTrue();
+      await FTRUMGlobalManager.getInstance().startView('first_foreground_page');
       expect(actionHandler.coldCount).assertEqual(1);
       expect(FTAppLaunchTracker.getInstance().getSnapshot().reported).assertTrue();
     });
@@ -567,6 +568,56 @@ export default function ftSDKLifecycleDeviceTest() {
       } finally {
         listener.unregister();
         FTCrashFreeDurationManager.setInstanceForTesting(null);
+        Utils.init(originalAbilityContext);
+      }
+    });
+
+    it('duplicateForegroundCallbacksReportOneCompletedHotLaunch', 0, async () => {
+      const originalAbilityContext = Utils.getAbilityContext();
+      const applicationContext = new DeviceMultiAbilityApplicationContext();
+      const listener = FTAbilityLifecycleListener.getInstance();
+      const firstAbility = new Object();
+      const secondAbility = new Object();
+      try {
+        FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+        FTSDK.installRUMConfig(new FTRUMConfig()
+          .setRumAppId(TEST_FAKE_RUM_ID)
+          .setEnableTraceUserAction(true));
+        listener.unregister();
+        Utils.init(new DeviceMultiAbilityStageContext(applicationContext) as Object as common.UIAbilityContext);
+        listener.register();
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
+        await FTRUMGlobalManager.getInstance().startView('page_before_hot_launch');
+        const page = FTRUMInnerManager.getInstance().getActiveView();
+        applicationContext.lifecycleCallback?.onAbilityBackground?.(firstAbility);
+        expect(page?.isClose()).assertTrue();
+        const background = await DBAssert.waitForViewNamed(Constants.VIEW_NAME_BACKGROUND, 5000);
+        expect(background !== null).assertTrue();
+        await WaitUtils.delay(10_100);
+        applicationContext.lifecycleCallback?.onAbilityWillForeground?.(firstAbility);
+        await WaitUtils.delay(25);
+        applicationContext.stateCallback?.onApplicationForeground();
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(firstAbility);
+        applicationContext.lifecycleCallback?.onAbilityForeground?.(secondAbility);
+        const action = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+          ['action,', 'action_type=launch_hot'], 5000);
+        expect(action !== null).assertTrue();
+        expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+          ['view,', `view_id=${background?.getId()}`, 'is_active=false'], 5000) !== null).assertTrue();
+        const viewIdMatch = action!.getDataString().match(/(?:^|,)view_id=([^,\s]+)/);
+        const launchId = viewIdMatch !== null ? viewIdMatch[1] : '';
+        expect(launchId.length > 0).assertTrue();
+        const summary = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+          ['view,', `view_id=${launchId}`, 'is_active=false'], 5000);
+        expect(summary !== null).assertTrue();
+        const durationMatch = summary!.getDataString().match(/(?:^|[ ,])time_spent=(\d+)/);
+        expect(Number(durationMatch !== null ? durationMatch[1] : '0') >= 10_000_000).assertTrue();
+        const actions = (await DBAssert.querySyncData([DataType.RUM_APP], 100)).filter(record =>
+          record.getDataString().includes('action_type=launch_hot'));
+        expect(actions.length).assertEqual(1);
+      } finally {
+        listener.unregister();
         Utils.init(originalAbilityContext);
       }
     });

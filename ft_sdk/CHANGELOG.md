@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.18-alpha04] - 2026-10-08
+- Fixed startup and background View lifetimes: each cold or hot launch retains one `ApplicationLaunch` View and closes it with the measured startup duration when launch completes, independently of page tracking. Hot launches complete on the first foreground callback without a fixed timer and repeated foreground callbacks do not create extra launches. Entering background closes the active page; `BackgroundView` closes on foreground return without waiting for page restoration.
 - Fixed Replay snapshots using stale baselines after mixed manual/automatic captures, queued View changes, or Worker recovery. Ordered writes reuse committed checkpoints and viewport state, and native node reordering retains unchanged nodes instead of replacing them unnecessarily.
 - Fixed Replay cache trimming and error-window promotion retaining mutations without their required Full Snapshot. The retained checkpoint chain remains replayable, and writes rejected by quota eviction recover the same frame with a Full Snapshot.
 - Fixed completed Actions losing their Replay entry when serialized before a pending first frame was saved. Actions now retain their original application, Session, and View while waiting for accepted Replay work, refresh availability before dispatch, and allow ready Actions from other Views to proceed; failed captures report normally.
