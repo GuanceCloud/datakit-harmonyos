@@ -1,3 +1,4 @@
+import { copyReplayValue, copyReplayWireframe, replayValuesEqual } from './ReplayWireframeValues';
 import {
   FullSnapshotData,
   ReplayFocusData,
@@ -44,7 +45,7 @@ export class ReplaySnapshotProcessor {
    */
   public setFullSnapshotBaseline(fullSnapshot: SessionReplayRecord): void {
     const data = fullSnapshot.data as FullSnapshotData;
-    this.previousWireframes = JSON.parse(JSON.stringify(data.wireframes)) as Array<ReplayWireframe>;
+    this.previousWireframes = data.wireframes.map((frame: ReplayWireframe): ReplayWireframe => copyReplayWireframe(frame));
     this.baselineAvailable = true;
   }
 
@@ -62,12 +63,12 @@ export class ReplaySnapshotProcessor {
         for (const add of mutation.adds) {
           const index = add.previousId === undefined ? -1 :
             this.previousWireframes.findIndex((frame: ReplayWireframe): boolean => frame.id === add.previousId);
-          this.previousWireframes.splice(index + 1, 0, JSON.parse(JSON.stringify(add.wireframe)) as ReplayWireframe);
+          this.previousWireframes.splice(index + 1, 0, copyReplayWireframe(add.wireframe));
         }
         for (const update of mutation.updates) {
           const frame = this.previousWireframes.find((candidate: ReplayWireframe): boolean => candidate.id === update.id);
           if (frame === undefined) continue;
-          const copy = JSON.parse(JSON.stringify(update)) as ReplayWireframeUpdate;
+          const copy = copyReplayValue(update) as ReplayWireframeUpdate;
           if (copy.x !== undefined) frame.x = copy.x;
           if (copy.y !== undefined) frame.y = copy.y;
           if (copy.width !== undefined) frame.width = copy.width;
@@ -293,11 +294,6 @@ export class ReplaySnapshotProcessor {
     previous: ReplayWireframe,
     current: ReplayWireframe
   ): ReplayWireframeUpdate | null {
-    if (previous.x === current.x && previous.y === current.y &&
-      previous.width === current.width && previous.height === current.height &&
-      JSON.stringify(previous) === JSON.stringify(current)) {
-      return null;
-    }
     const update: ReplayWireframeUpdate = { id: current.id, type: current.type };
     if (previous.x !== current.x) update.x = current.x;
     if (previous.y !== current.y) update.y = current.y;
@@ -379,10 +375,10 @@ export class ReplaySnapshotProcessor {
     previous: ReplayShapeWireframe,
     current: ReplayShapeWireframe
   ): void {
-    if (JSON.stringify(previous.shapeStyle) !== JSON.stringify(current.shapeStyle) && current.shapeStyle !== undefined) {
+    if (!replayValuesEqual(previous.shapeStyle, current.shapeStyle) && current.shapeStyle !== undefined) {
       update.shapeStyle = current.shapeStyle;
     }
-    if (JSON.stringify(previous.border) !== JSON.stringify(current.border) && current.border !== undefined) {
+    if (!replayValuesEqual(previous.border, current.border) && current.border !== undefined) {
       update.border = current.border;
     }
   }
@@ -392,15 +388,15 @@ export class ReplaySnapshotProcessor {
     previous: ReplayTextWireframe,
     current: ReplayTextWireframe
   ): void {
-    if (JSON.stringify(previous.shapeStyle) !== JSON.stringify(current.shapeStyle) && current.shapeStyle !== undefined) {
+    if (!replayValuesEqual(previous.shapeStyle, current.shapeStyle) && current.shapeStyle !== undefined) {
       update.shapeStyle = current.shapeStyle;
     }
-    if (JSON.stringify(previous.border) !== JSON.stringify(current.border) && current.border !== undefined) {
+    if (!replayValuesEqual(previous.border, current.border) && current.border !== undefined) {
       update.border = current.border;
     }
     if (previous.text !== current.text) update.text = current.text;
-    if (JSON.stringify(previous.textStyle) !== JSON.stringify(current.textStyle)) update.textStyle = current.textStyle;
-    if (JSON.stringify(previous.textPosition) !== JSON.stringify(current.textPosition) && current.textPosition !== undefined) {
+    if (!replayValuesEqual(previous.textStyle, current.textStyle)) update.textStyle = current.textStyle;
+    if (!replayValuesEqual(previous.textPosition, current.textPosition) && current.textPosition !== undefined) {
       update.textPosition = current.textPosition;
     }
   }
@@ -410,17 +406,17 @@ export class ReplaySnapshotProcessor {
     previous: ReplayImageWireframe,
     current: ReplayImageWireframe
   ): void {
-    if (JSON.stringify(previous.shapeStyle) !== JSON.stringify(current.shapeStyle) && current.shapeStyle !== undefined) {
+    if (!replayValuesEqual(previous.shapeStyle, current.shapeStyle) && current.shapeStyle !== undefined) {
       update.shapeStyle = current.shapeStyle;
     }
-    if (JSON.stringify(previous.border) !== JSON.stringify(current.border) && current.border !== undefined) {
+    if (!replayValuesEqual(previous.border, current.border) && current.border !== undefined) {
       update.border = current.border;
     }
     if (previous.base64 !== current.base64 && current.base64 !== undefined) update.base64 = current.base64;
     if (previous.resourceId !== current.resourceId && current.resourceId !== undefined) update.resourceId = current.resourceId;
     if (previous.mimeType !== current.mimeType && current.mimeType !== undefined) update.mimeType = current.mimeType;
     if (previous.isEmpty !== current.isEmpty && current.isEmpty !== undefined) update.isEmpty = current.isEmpty;
-    if (JSON.stringify(previous.imageStyle) !== JSON.stringify(current.imageStyle) && current.imageStyle !== undefined) {
+    if (!replayValuesEqual(previous.imageStyle, current.imageStyle) && current.imageStyle !== undefined) {
       update.imageStyle = current.imageStyle;
     }
   }

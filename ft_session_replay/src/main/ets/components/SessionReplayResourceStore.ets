@@ -50,9 +50,13 @@ export class SessionReplayResourceStore {
     if (recoverOnInit) this.recover();
   }
 
-  /** Persists bytes and returns their content-addressed file name, or null on failure. */
-  public put(context: SessionReplayContext, data: Uint8Array, mimeType: string = 'application/octet-stream'): string | null {
-    if (!this.isValidContext(context) || data.byteLength === 0) {
+  /** Persists bytes and returns their content-addressed file name, or null on failure.
+   * knownHash is reserved for Worker-owned immutable bytes already hashed here.
+   */
+  public put(context: SessionReplayContext, data: Uint8Array, mimeType: string = 'application/octet-stream',
+    knownHash?: string): string | null {
+    if (!this.isValidContext(context) || data.byteLength === 0 ||
+      (knownHash !== undefined && !this.isSafeFileName(knownHash))) {
       return null;
     }
     try {
@@ -62,11 +66,11 @@ export class SessionReplayResourceStore {
       this.ensureDirectory(this.root);
       this.ensureDirectory(this.dataRoot);
       this.ensureDirectory(this.metadataRoot);
-      const fileName = sha256(data);
+      const fileName = knownHash ?? sha256(data);
       const routeKey = this.getRouteKey(context);
       const id = `${fileName}-${routeKey}`;
       const metadataPath = `${this.metadataRoot}/${id}.json`;
-      if (this.exists(metadataPath)) {
+      if (this.exists(metadataPath) && this.exists(`${this.dataRoot}/${fileName}.bin`)) {
         this.markTouched(fileName);
         return fileName;
       }
@@ -427,7 +431,7 @@ export class SessionReplayResourceStore {
   }
 }
 
-function sha256(bytes: Uint8Array): string {
+export function sha256(bytes: Uint8Array): string {
   const md = cryptoFramework.createMd('SHA256');
   md.updateSync({ data: bytes });
   const digest = md.digestSync().data;

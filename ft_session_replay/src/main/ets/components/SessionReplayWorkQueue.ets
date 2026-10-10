@@ -1,3 +1,4 @@
+import { replayValuesEqual } from './ReplayWireframeValues';
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
@@ -236,7 +237,7 @@ export class SessionReplayWorkQueue {
         (storeKind !== undefined && capture.storeKind !== storeKind) ||
         capture.context.applicationId !== context.applicationId || capture.context.sessionId !== context.sessionId ||
         capture.context.viewId !== context.viewId ||
-        JSON.stringify(capture.context.globalContext) !== JSON.stringify(context.globalContext)) break;
+        !replayValuesEqual(capture.context.globalContext, context.globalContext)) break;
       pending.unshift(job);
     }
     return pending;

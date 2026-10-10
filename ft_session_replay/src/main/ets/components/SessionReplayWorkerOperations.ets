@@ -1,6 +1,6 @@
 import { ArkUIReplayCollector, ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
-import { SessionReplayResourceStore } from './SessionReplayResourceStore';
+import { SessionReplayResourceStore, sha256 } from './SessionReplayResourceStore';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
@@ -31,6 +31,8 @@ export class SessionReplayWorkerOperations {
   private readonly errorSampleWindowMs: number;
   private readonly mainResources: SessionReplayResourceStore | null;
   private readonly errorResources: SessionReplayResourceStore | null;
+  private readonly imageHashes: Map<Uint8Array, string> = new Map();
+  private cachedImageBytes: number = 0;
   private needsFullSnapshot: boolean = false;
   private baselineContextKey: string = '';
   private lastFullSnapshotAt: number = 0;
@@ -69,7 +71,7 @@ export class SessionReplayWorkerOperations {
     const record = this.collector.materializeLightSnapshot(snapshot);
     const materialized: ReplayMaterializedSnapshot = {
       record,
-      resources: this.collector.takeCapturedImageResources()
+      resources: this.collector.takeCapturedImageResources(false)
     };
     return materialized;
   }
@@ -81,7 +83,18 @@ export class SessionReplayWorkerOperations {
       (capture.storeKind === 'error' ? this.errorResources : null);
     const resources = new Map<string, string>();
     for (const resource of materialized.resources) {
-      const name = store?.put(capture.context, resource.bytes, resource.mimeType) ?? null;
+      let hash = this.imageHashes.get(resource.bytes);
+      if (hash === undefined) {
+        hash = sha256(resource.bytes);
+        if (this.cachedImageBytes + resource.bytes.byteLength > 8 * 1024 * 1024 || this.imageHashes.size >= 64) {
+          this.imageHashes.clear();
+          this.cachedImageBytes = 0;
+        }
+        this.imageHashes.set(resource.bytes, hash);
+        this.cachedImageBytes += resource.bytes.byteLength;
+      }
+      // Revalidate files even on a hash hit: upload or sandbox reclaim may delete them.
+      const name = store?.put(capture.context, resource.bytes, resource.mimeType, hash) ?? null;
       if (name !== null) resources.set(resource.token, name);
     }
     const data = materialized.record.data as FullSnapshotData;

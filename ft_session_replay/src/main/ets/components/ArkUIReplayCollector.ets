@@ -1,3 +1,4 @@
+import { copyReplayWireframe } from './ReplayWireframeValues';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
@@ -44,6 +45,12 @@ interface RegisteredImageAsset {
   mimeType: string;
 }
 
+interface CachedReplayProperties {
+  inspector: string | null;
+  signature: string;
+  frame: ReplayWireframe;
+}
+
 interface ReplayInsets {
   top?: number;
   right?: number;
@@ -87,6 +94,11 @@ export class ArkUIReplayCollector {
   private readonly config: FTSessionReplayConfig;
   private readonly registeredImageAssets: Map<string, RegisteredImageAsset> = new Map();
   private readonly parsedInspectorCache: Map<string, Record<string, Object>> = new Map();
+  private readonly propertyCache: Map<number, CachedReplayProperties> = new Map();
+  private propertyCacheChars: number = 0;
+  private inspectorCacheChars: number = 0;
+  private readonly decodedImages: Map<string, RegisteredImageAsset> = new Map();
+  private decodedBytes: number = 0;
   private pendingImageResources: Array<CapturedReplayImageResource> = [];
   private rootEpoch: number = 1;
   private readonly scene: SessionReplayScene = new SessionReplayScene();
@@ -99,6 +111,8 @@ export class ArkUIReplayCollector {
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
   public renewRootEpoch(): void {
     this.rootEpoch++;
+    this.propertyCache.clear();
+    this.propertyCacheChars = 0;
     this.scene.clear();
   }
 
@@ -124,21 +138,25 @@ export class ArkUIReplayCollector {
     }
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
+    this.propertyCache.clear();
+    this.propertyCacheChars = 0;
     this.registeredImageAssets.set(key, { bytes: copy, mimeType: normalizedMimeType });
     return true;
   }
 
   public unregisterImageAsset(componentId: string): void {
     this.registeredImageAssets.delete(componentId.trim());
+    this.propertyCache.clear();
+    this.propertyCacheChars = 0;
   }
 
   /** Returns and clears resources produced by the immediately preceding capture. */
-  public takeCapturedImageResources(): Array<CapturedReplayImageResource> {
+  public takeCapturedImageResources(copyBytes: boolean = true): Array<CapturedReplayImageResource> {
     const result: Array<CapturedReplayImageResource> = [];
     for (let index = 0; index < this.pendingImageResources.length; index++) {
       const resource = this.pendingImageResources[index];
-      const bytes = new Uint8Array(resource.bytes.byteLength);
-      bytes.set(resource.bytes);
+      const bytes = copyBytes ? new Uint8Array(resource.bytes.byteLength) : resource.bytes;
+      if (copyBytes) bytes.set(resource.bytes);
       result.push({ token: resource.token, bytes, mimeType: resource.mimeType });
     }
     this.pendingImageResources = [];
@@ -278,6 +296,34 @@ export class ArkUIReplayCollector {
     return { timestamp, vpToPxScale: scale, nodes };
   }
 
+  private cachedWireframe(node: ArkUIReplayLightNode, inspector: string | null, scale: number): ReplayWireframe {
+    const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
+      `${node.shouldCaptureAsText}|${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
+    const cached = this.propertyCache.get(node.id);
+    if (cached !== undefined && cached.inspector === inspector && cached.signature === signature) {
+      const frame = copyReplayWireframe(cached.frame);
+      frame.x = node.x;
+      frame.y = node.y;
+      if (frame.type === 'image' && frame.resourceId !== undefined) {
+        const resource = this.resolveImageResource(node.componentId, node.id, inspector);
+        if (resource !== null) frame.resourceId = resource.token;
+      }
+      return frame;
+    }
+    const frame = this.createWireframe(node.id, node.x, node.y, node.width, node.height,
+      node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale);
+    this.appendCommonVisualProperties(frame, inspector);
+    this.propertyCacheChars -= cached?.inspector?.length ?? 0;
+    this.propertyCacheChars += inspector?.length ?? 0;
+    this.propertyCache.set(node.id, { inspector, signature, frame: copyReplayWireframe(frame) });
+    while (this.propertyCacheChars > 2 * 1024 * 1024 || this.propertyCache.size > this.maxNodes) {
+      const oldest = this.propertyCache.keys().next().value as number;
+      this.propertyCacheChars -= this.propertyCache.get(oldest)?.inspector?.length ?? 0;
+      this.propertyCache.delete(oldest);
+    }
+    return frame;
+  }
+
   private readAncestorOpacity(root: FrameNode): number {
     let opacity = 1;
     let parent: FrameNode | null = null;
@@ -314,25 +360,14 @@ export class ArkUIReplayCollector {
     const wireframes: Array<ReplayWireframe> = [];
     const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
-    this.parsedInspectorCache.clear();
+    const retained = new Set<number>();
     for (let index = 0; index < snapshot.nodes.length; index++) {
       const node = snapshot.nodes[index];
       const inspector = this.serializeInspectorInfo(node.inspectorInfo);
-      const wireframe = this.createWireframe(
-        node.id,
-        node.x,
-        node.y,
-        node.width,
-        node.height,
-        node.componentId,
-        node.nodeType,
-        inspector,
-        node.shouldCaptureAsText,
-        node.isRoot,
-        snapshot.vpToPxScale
-      );
+      retained.add(node.id);
+      const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale);
+
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
-      this.appendCommonVisualProperties(wireframe, inspector);
       // Use a canonical zero clip for unclipped nodes so applying a clearing
       // Mutation produces exactly the same properties as the latest Full.
       wireframe.clip = {
@@ -357,6 +392,12 @@ export class ArkUIReplayCollector {
         if (!indices.includes(zIndex)) indices.push(zIndex);
       }
     }
+    this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
+      if (!retained.has(id)) {
+        this.propertyCache.delete(id);
+        this.propertyCacheChars -= cached.inspector?.length ?? 0;
+      }
+    });
     pageZIndices.forEach((indices: Array<number>): void => { indices.sort((left: number, right: number): number => left - right); });
     for (let index = 0; index < wireframes.length; index++) {
       const node = snapshot.nodes[index];
@@ -727,8 +768,7 @@ export class ArkUIReplayCollector {
       return null;
     }
     const token = `arkui-image-${this.rootEpoch}-${wireframeId}-${this.pendingImageResources.length}`;
-    const bytes = new Uint8Array(asset.bytes.byteLength);
-    bytes.set(asset.bytes);
+    const bytes = asset.bytes;
     const resource: CapturedReplayImageResource = { token, bytes, mimeType: asset.mimeType };
     this.pendingImageResources.push(resource);
     return resource;
@@ -738,6 +778,8 @@ export class ArkUIReplayCollector {
     if (value === null || value.length > MAX_IMAGE_BYTES * 2) {
       return null;
     }
+    const cached = this.decodedImages.get(value);
+    if (cached !== undefined) return cached;
     const match = /^data:(image\/(?:png|jpeg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(value);
     if (match === null) {
       return null;
@@ -751,7 +793,15 @@ export class ArkUIReplayCollector {
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
         return null;
       }
-      return { bytes, mimeType };
+      const asset: RegisteredImageAsset = { bytes, mimeType };
+      this.decodedImages.set(value, asset);
+      this.decodedBytes += bytes.byteLength;
+      while (this.decodedBytes > 8 * 1024 * 1024 || this.decodedImages.size > 16) {
+        const key = this.decodedImages.keys().next().value as string;
+        this.decodedBytes -= this.decodedImages.get(key)?.bytes.byteLength ?? 0;
+        this.decodedImages.delete(key);
+      }
+      return asset;
     } catch (_) {
       return null;
     }
@@ -1126,6 +1176,12 @@ export class ArkUIReplayCollector {
         return null;
       }
       this.parsedInspectorCache.set(inspector, value);
+      this.inspectorCacheChars += inspector.length;
+      while (this.inspectorCacheChars > 1024 * 1024 || this.parsedInspectorCache.size > this.maxNodes) {
+        const key = this.parsedInspectorCache.keys().next().value as string;
+        this.inspectorCacheChars -= key.length;
+        this.parsedInspectorCache.delete(key);
+      }
       return value;
     } catch (_error) {
       return null;
