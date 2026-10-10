@@ -4,7 +4,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
-import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe } from '../../main/ets/components/SessionReplayProtocol';
+import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
 
 interface ReplayPosition {
@@ -59,6 +59,7 @@ class ReplayFrameNodeFixture {
   private readonly clipsChildren: boolean;
   private firstChild: ReplayFrameNodeFixture | null = null;
   private nextSibling: ReplayFrameNodeFixture | null = null;
+  private parent: ReplayFrameNodeFixture | null = null;
   private visible: boolean = true;
   private nodeType: string = 'Column';
   private inspectorInfo: Object = new EmptyInspectorInfo();
@@ -84,6 +85,7 @@ class ReplayFrameNodeFixture {
   }
 
   public append(child: ReplayFrameNodeFixture): ReplayFrameNodeFixture {
+    child.parent = this;
     if (this.firstChild === null) {
       this.firstChild = child;
       return child;
@@ -151,6 +153,43 @@ class ReplayFrameNodeFixture {
     return this.nextSibling === null ? null : asFrameNode(this.nextSibling);
   }
 
+  public getParent(): FrameNode | null {
+    return this.parent === null || this.parent.nodeType === 'page' || this.parent.nodeType === 'stage' ?
+      null : asFrameNode(this.parent);
+  }
+
+  public removeChildren(): void {
+    let child = this.firstChild;
+    while (child !== null) {
+      const next = child.nextSibling;
+      child.parent = null;
+      child.nextSibling = null;
+      child = next;
+    }
+    this.firstChild = null;
+  }
+}
+
+class ReplayOverlayContextFixture {
+  public treeReads: number = 0;
+  public tree: string;
+  private readonly overlay: FrameNode;
+
+  constructor(overlay: ReplayFrameNodeFixture) {
+    this.overlay = asFrameNode(overlay);
+    this.tree = `{"$children":[{"$type":"MenuWrapper","$ID":${overlay.getUniqueId()}}]}`;
+  }
+
+  public getFilteredInspectorTree(filters: Array<string>): string {
+    expect(filters.length).assertEqual(1);
+    expect(filters[0]).assertEqual('id');
+    this.treeReads++;
+    return this.tree;
+  }
+
+  public getFrameNodeByUniqueId(id: number): FrameNode | null {
+    return id === this.overlay.getUniqueId() ? this.overlay : null;
+  }
 }
 
 /** The fixture supplies only the FrameNode reads exercised by this collector. */
@@ -597,9 +636,9 @@ export default function arkUIReplayCollectorUnitTest(): void {
         { key: 'new', rootId: 'fixture-3', root: asFrameNode(incoming), retained: false }
       ];
       const collector = new ArkUIReplayCollector();
-      // Supplied FrameNodes and viewport do not require any UIContext reads.
+      // A runtime without overlay discovery must still capture supplied pages.
       const context = new EmptyInspectorInfo() as Object as UIContext;
-      const viewport = { x: 0, y: 0, width: 100, height: 100 };
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
       const light = collector.captureSceneLight(context, [], 1, 1234, new Map(), viewport, pages);
       const first = collector.materializeLightSnapshot(light);
       const wireframes = (first.data as FullSnapshotData).wireframes;
@@ -626,6 +665,79 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(mutation.adds.length).assertEqual(0);
       expect(mutation.removes.length).assertEqual(3);
       expect(mutation.updates.length).assertEqual(0);
+    });
+
+    it('keeps window popup geometry above moving pages and removes closed cached overlays', 0, () => {
+      const page = new ReplayFrameNodeFixture(1, 10, 20, 50, 20, 100, 100);
+      const windowRoot = new ReplayFrameNodeFixture(10, 0, 0, 0, 0, 200, 200).withNodeType('root');
+      const stage = windowRoot.append(new ReplayFrameNodeFixture(11, 0, 0, 0, 0, 200, 200).withNodeType('stage'));
+      const popup = windowRoot.append(new ReplayFrameNodeFixture(12, 30, 50, 30, 50, 100, 100)
+        .withNodeType('MenuWrapper'));
+      const attrs: Record<string, Object> = { 'content': 'Popup option', 'fontColor': '#FF000000' };
+      popup.append(new ReplayFrameNodeFixture(13, 90, 80, 90, 80, 40, 20).withNodeType('Text').withInspector(attrs));
+      const context = new ReplayOverlayContextFixture(popup);
+      const pages: Array<ArkUIReplayScenePage> = [
+        { key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }
+      ];
+      const viewport: ArkUIReplaySceneBounds = { x: 10, y: 20, width: 100, height: 100 };
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const capture = (): SessionReplayRecord => collector.materializeLightSnapshot(collector.captureSceneLight(
+        context as Object as UIContext, [], 1, 1234, new Map(), viewport, pages));
+      const first = capture();
+      const frames = (first.data as FullSnapshotData).wireframes;
+      const label = findWireframe(frames, 13) as ReplayTextWireframe;
+      expect(label.text).assertEqual('Popup option');
+      expect(label.x).assertEqual(80);
+      expect(label.y).assertEqual(60);
+      expect(label.clip?.right).assertEqual(20);
+      expect((label.zIndex ?? 0) > (findWireframe(frames, 1)?.zIndex ?? 0)).assertTrue();
+      expect((findWireframe(frames, 12) as ReplayShapeWireframe).shapeStyle?.backgroundColor === undefined).assertTrue();
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      page.moveTo(70, 20);
+      const moving = capture();
+      expect(findWireframe((moving.data as FullSnapshotData).wireframes, 13)?.x).assertEqual(80);
+      expect(context.treeReads).assertEqual(1);
+      processor.createMutationRecord(moving);
+      windowRoot.removeChildren();
+      windowRoot.append(stage);
+      // A removed menu must not linger because it appeared in an old Inspector tree.
+      const closed = capture();
+      expect(findWireframe((closed.data as FullSnapshotData).wireframes, 13) === null).assertTrue();
+      expect(context.treeReads).assertEqual(1);
+      const changes = processor.createMutationRecord(closed)!.data as ReplayMutationData;
+      expect(changes.removes.length).assertEqual(2);
+      windowRoot.append(popup);
+      const reopened = capture();
+      expect(findWireframe((reopened.data as FullSnapshotData).wireframes, 13) !== null).assertTrue();
+      expect(context.treeReads).assertEqual(1);
+    });
+
+    it('prioritizes private-filtered popup nodes within the shared scene budget', 0, () => {
+      const page = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 100);
+      for (let id = 2; id < 10; id++) page.append(new ReplayFrameNodeFixture(id, 0, 0, 0, 0, 20, 20));
+      const popup = new ReplayFrameNodeFixture(12, 0, 0, 0, 0, 100, 100).withNodeType('MenuWrapper');
+      const attrs: Record<string, Object> = { 'content': 'Private option' };
+      popup.append(new ReplayFrameNodeFixture(13, 0, 0, 0, 0, 40, 20).withNodeType('Text').withInspector(attrs));
+      const context = new ReplayOverlayContextFixture(popup);
+      const pages: Array<ArkUIReplayScenePage> = [
+        { key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }
+      ];
+      const collector = new ArkUIReplayCollector(6, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL));
+      const light = collector.captureSceneLight(context as Object as UIContext, [], 1, 1234, new Map(),
+        { x: 0, y: 0, width: 100, height: 100 }, pages);
+      expect(light.nodes.length).assertEqual(6);
+      const data = collector.materializeLightSnapshot(light).data as FullSnapshotData;
+      const label = findWireframe(data.wireframes, 13) as ReplayTextWireframe;
+      expect(label !== null).assertTrue();
+      expect(label.text.includes('Private')).assertFalse();
+      context.tree = '{invalid';
+      const fallback = collector.captureSceneLight(context as Object as UIContext, [], 1, 1234, new Map(),
+        { x: 0, y: 0, width: 100, height: 100 }, pages);
+      expect(fallback.nodes.length).assertEqual(6);
+      expect(fallback.nodes.some((node): boolean => node.id === label.id)).assertFalse();
     });
   });
 }

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added private local Replay caching and uploads through the SDK's DataKit or Dataway endpoint. Pass `filesDir` to `init()` for persistent caching; use `flush()` for immediate uploads or `setUploadIntervalMs(0)` for manual uploads.
 - Changed `resource_tcp` and `resource_connect_time` to include SSL/TLS handshake time for automatically collected HTTPS Resources.
 - Fixed ArkUI Replay text colors, font sizes, alignment, padding, and rounded corners being rendered incorrectly, and Select controls losing labels or dropdown arrows.
+- Fixed native menus, popups, dialogs, and sheets missing from ArkUI Replay, with correct layering and removal when closed.
 - Fixed missing Replay entry points for short-lived Views and pending Actions, including after the View closes or recording stops.
 - Fixed incorrect RUM user attribution after initialization or account changes, including missing restored user data and mixed user details in View summaries. Explicit pre-initialization binding or unbinding takes precedence.
 - Fixed `ApplicationLaunch`, page, and `BackgroundView` Views remaining open after startup or foreground/background transitions, and duplicate hot-launch Views.

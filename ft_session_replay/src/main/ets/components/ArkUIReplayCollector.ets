@@ -30,6 +30,8 @@ export {
 } from './SessionReplayScene';
 
 const MAX_INSPECTOR_BYTES = 64 * 1024;
+const MAX_OVERLAY_TREE_BYTES = 2 * 1024 * 1024;
+const MAX_WINDOW_CHILDREN = 64;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const LARGE_IMAGE_PIXEL_COUNT = 100_000;
 const DEFAULT_FONT_FAMILY = 'sans-serif';
@@ -103,6 +105,8 @@ export class ArkUIReplayCollector {
   private pendingImageResources: Array<CapturedReplayImageResource> = [];
   private rootEpoch: number = 1;
   private readonly scene: SessionReplayScene = new SessionReplayScene();
+  private overlayContext: UIContext | null = null;
+  private overlayWindowRoot: FrameNode | null = null;
 
   constructor(maxNodes: number = 1500, config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.maxNodes = Math.max(1, Math.floor(maxNodes));
@@ -115,10 +119,14 @@ export class ArkUIReplayCollector {
     this.propertyCache.clear();
     this.propertyCacheChars = 0;
     this.scene.clear();
+    this.overlayContext = null;
+    this.overlayWindowRoot = null;
   }
 
   public clearScene(): void {
     this.scene.clear();
+    this.overlayContext = null;
+    this.overlayWindowRoot = null;
   }
 
   /**
@@ -216,7 +224,7 @@ export class ArkUIReplayCollector {
     return this.materializeLightSnapshot(this.captureFrameNodeLight(root, vpToPxScale, timestamp));
   }
 
-  /** Page/Stage parents are private; compose roots supplied by page lifecycle hooks. */
+  /** Compose lifecycle page roots together with the window's native floating surfaces. */
   public captureSceneLight(
     uiContext: UIContext,
     rootIds: Array<string>,
@@ -293,8 +301,85 @@ export class ArkUIReplayCollector {
       clip: { top: 0, right: 0, bottom: 0, left: 0 }
     }];
     const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1, timestamp);
-    for (const node of composed) nodes.push(node);
+    const capturedIds = new Set<number>();
+    let overlayLayer = 0;
+    for (const node of composed) {
+      if (node.id > this.toProtocolId(0)) capturedIds.add(node.id - this.toProtocolId(0));
+      overlayLayer = Math.max(overlayLayer, node.sceneLayer ?? 0);
+    }
+    const overlays: Array<ArkUIReplayLightNode> = [];
+    const viewportClip = this.createClipRect(0, 0, viewport.width, viewport.height);
+    for (const root of this.readWindowOverlayRoots(uiContext)) {
+      try {
+        const start = overlays.length;
+        this.appendLightPreOrder(root, scale, overlays, false, viewportClip,
+          this.readAncestorOpacity(root), -viewport.x, -viewport.y, capturedIds, this.maxNodes - 1);
+        overlayLayer += this.maxNodes + 1;
+        for (let index = start; index < overlays.length; index++) {
+          overlays[index].sceneLayer = overlayLayer;
+          capturedIds.add(overlays[index].id - this.toProtocolId(0));
+        }
+      } catch (_) { }
+    }
+    // Floating surfaces must remain visible even when a large page exhausts
+    // the budget. Their window-space geometry never inherits Router movement.
+    for (const node of composed.slice(0, Math.max(0, this.maxNodes - 1 - overlays.length))) nodes.push(node);
+    for (const node of overlays) nodes.push(node);
     return { timestamp, vpToPxScale: scale, nodes };
+  }
+
+  private isWindowOverlay(nodeType: string): boolean {
+    return nodeType === 'MenuWrapper' || nodeType === 'Popup' || nodeType === 'Dialog' ||
+      nodeType === 'SheetWrapper';
+  }
+
+  /**
+   * Page/Stage hide their parents from FrameNode. Bootstrap floating roots
+   * from the public, id-filtered window Inspector; discard its attributes.
+   * Once an overlay exposes the window root, use only live FrameNode siblings
+   * on subsequent frames. No Inspector tree is handed off or persisted.
+   */
+  private readWindowOverlayRoots(uiContext: UIContext): Array<FrameNode> {
+    const roots: Array<FrameNode> = [];
+    if (this.overlayContext !== uiContext) {
+      this.overlayContext = uiContext;
+      this.overlayWindowRoot = null;
+    }
+    try {
+      if (this.overlayWindowRoot !== null && this.overlayWindowRoot.isAttached()) {
+        let child = this.overlayWindowRoot.getFirstChild();
+        for (let index = 0; child !== null && index < MAX_WINDOW_CHILDREN; index++) {
+          if (this.isWindowOverlay(child.getNodeType())) roots.push(child);
+          child = child.getNextSibling();
+        }
+        return roots;
+      }
+      this.overlayWindowRoot = null;
+      const tree = uiContext.getFilteredInspectorTree(['id']);
+      if (tree.length === 0 || tree.length > MAX_OVERLAY_TREE_BYTES) return roots;
+      const info = JSON.parse(tree) as Record<string, Object>;
+      const children = info['$children'];
+      if (!Array.isArray(children)) return roots;
+      for (let index = 0; index < Math.min(children.length, MAX_WINDOW_CHILDREN); index++) {
+        const descriptor = children[index] as Record<string, Object>;
+        if (descriptor === null || typeof descriptor !== 'object') continue;
+        const nodeType = descriptor['$type'];
+        const id = descriptor['$ID'];
+        if (typeof nodeType !== 'string' || !this.isWindowOverlay(nodeType) ||
+          typeof id !== 'number' || !Number.isInteger(id) || id <= 0) continue;
+        const root = uiContext.getFrameNodeByUniqueId(id);
+        if (root === null || !root.isAttached() || !this.isWindowOverlay(root.getNodeType())) continue;
+        roots.push(root);
+        const parent = root.getParent();
+        if (parent !== null && parent.getNodeType() === 'root' && parent.isAttached()) {
+          this.overlayWindowRoot = parent;
+        }
+      }
+    } catch (_) {
+      // Older runtimes or a disappearing overlay cannot invalidate the page.
+      this.overlayWindowRoot = null;
+    }
+    return roots;
   }
 
   private cachedWireframe(
