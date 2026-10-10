@@ -68,9 +68,10 @@ export struct UIBlockTestPage {
   setupRUMContext() {
     try {
       const rumConfig = FTSDK.getRumConfig();
-      if (rumConfig !== null && rumConfig.getRumAppId().length > 0) {
+      if (rumConfig !== null && rumConfig.getRumAppId().length > 0 && !rumConfig.isEnableTraceUserView()) {
         const rumGlobalManager = FTRUMGlobalManager.getInstance();
-        // Start view for UIBlockTestPage
+        // Automatic Router tracking owns this page when enabled. Starting a
+        // manual View in aboutToAppear would create a second, very short View.
         rumGlobalManager.startView('UIBlockTestPage', {});
         DemoLogger.i(TAG, `<FT-UI-BLOCK-TEST> RUM view started: UIBlockTestPage`);
       }

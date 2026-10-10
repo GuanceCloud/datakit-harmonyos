@@ -14,6 +14,12 @@ struct SessionReplayPocPage {
   @State showMutationProbe: boolean = false;
   @State replayEnabled: boolean = false;
   @State uploadInFlight: boolean = false;
+  @State fixedSizeProbe: string = 'Replay text A';
+  @State orderedProbes: Array<string> = ['Replay node A', 'Replay node B'];
+  @State touchResult: string = 'Touch and drag here';
+  @State animationX: number = 0;
+  @State animationOpacity: number = 1;
+  private readonly swiper: SwiperController = new SwiperController();
   private bridgeViewActive: boolean = false;
   private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
@@ -147,11 +153,6 @@ struct SessionReplayPocPage {
     this.showLifecycleSignal('Viewport resize signal', capture === null ? null : capture.payload);
   }
 
-  private recordTouchSignal(): void {
-    const capture = this.replay.recordTouch('down', 1, vp2px(120), vp2px(160));
-    this.showLifecycleSignal('Touch signal', capture === null ? null : capture.payload);
-  }
-
   private uploadDurableSegments(): void {
     if (this.uploadInFlight) {
       return;
@@ -203,7 +204,7 @@ struct SessionReplayPocPage {
             Text('如何开启会话回放')
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
-            Text('1. 使用非空 appId 启动 Demo，然后点击 Enable Session Replay 手动开启。\n2. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n3. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
+            Text('1. 使用非空 appId 启动 Demo，点击 Enable Session Replay 开启，页面会自动关联 RUM View。\n2. 在触摸板拖动、滑动 Swiper，点击位移/淡入淡出按钮，再进入动画页面并返回。\n3. 配置 DataKit / Dataway 后点击 Upload Durable Replay Segments，在 Studio 对照轨迹、动画中间过程和最终画面。')
               .fontSize(14)
               .fontColor('#444444')
             Text('提示：此验证页面将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
@@ -272,11 +273,16 @@ struct SessionReplayPocPage {
             .height(48)
             .enabled(this.replayEnabled)
             .onClick(() => this.recordViewportResize())
-          Button('Emit Touch Signal')
+          Text(this.touchResult)
+            .id('session-replay-touch-pad')
             .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => this.recordTouchSignal())
+            .height(120)
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#DDF4FF')
+            .onTouch((event: TouchEvent) => {
+              const point = event.changedTouches[0];
+              if (point !== undefined) this.touchResult = `Touch ${event.type}: ${Math.round(point.windowX)}, ${Math.round(point.windowY)}`;
+            })
           Button('Capture Incremental Mutation')
             .width('90%')
             .height(48)
@@ -309,6 +315,71 @@ struct SessionReplayPocPage {
                 }
               }, 80);
             })
+          Text(this.fixedSizeProbe)
+            .id('session-replay-fixed-text')
+            .width('90%')
+            .height(32)
+            .fontSize(16)
+          Button('Change Fixed-size Text')
+            .id('session-replay-fixed-text-button')
+            .width('90%')
+            .height(48)
+            .enabled(this.replayEnabled)
+            .onClick(() => {
+              this.fixedSizeProbe = this.fixedSizeProbe === 'Replay text A' ? 'Replay text B' : 'Replay text A';
+            })
+          Column() {
+            ForEach(this.orderedProbes, (label: string) => {
+              Text(label)
+                .id(label === 'Replay node A' ? 'session-replay-order-a' : 'session-replay-order-b')
+                .width('100%')
+                .height(28)
+            }, (label: string) => label)
+          }
+          .width('90%')
+          Button('Reorder Replay Nodes')
+            .id('session-replay-reorder-button')
+            .width('90%')
+            .height(48)
+            .enabled(this.replayEnabled)
+            .onClick(() => {
+              this.orderedProbes = this.orderedProbes.slice().reverse();
+            })
+          Swiper(this.swiper) {
+            Text('Replay slide A').id('session-replay-slide-a')
+              .fontSize(24).width('100%').height('100%').backgroundColor('#DDF4FF')
+            Text('Replay slide B').id('session-replay-slide-b')
+              .fontSize(24).width('100%').height('100%').backgroundColor('#DCFCE7')
+            Text('Replay slide C').id('session-replay-slide-c')
+              .fontSize(24).width('100%').height('100%').backgroundColor('#FEF3C7')
+          }
+          .id('session-replay-swiper')
+          .width('90%').height(150).loop(false).duration(800)
+          Button('Animate Next Slide')
+            .id('session-replay-swiper-next')
+            .width('90%').height(48)
+            .onClick(() => this.swiper.showNext())
+          Text('Replay moving probe')
+            .id('session-replay-moving-probe')
+            .width(160).height(40).backgroundColor('#93C5FD')
+            .translate({ x: this.animationX }).opacity(this.animationOpacity)
+          Button('Animate Translation and Fade')
+            .id('session-replay-animation-button')
+            .width('90%').height(48)
+            .onClick(() => {
+              this.getUIContext().animateTo({ duration: 800, curve: Curve.Linear }, () => {
+                this.animationX = this.animationX === 0 ? 120 : 0;
+                this.animationOpacity = this.animationOpacity === 1 ? 0.25 : 1;
+              });
+            })
+          Button('Open Animated Replay Page')
+            .id('session-replay-transition-button')
+            .width('90%').height(48)
+            .onClick(() => router.pushUrl({ url: 'pages/SessionReplayTransitionPage' }))
+          Button('Default Router Transition')
+            .id('session-replay-default-transition-button')
+            .width('90%').height(44)
+            .onClick(() => router.pushUrl({ url: 'pages/SessionReplayDefaultTransitionPage' }))
           if (this.showMutationProbe) {
             Text('Incremental layout probe')
               .fontSize(16)
