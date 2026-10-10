@@ -48,6 +48,7 @@ export interface ArkUIReplayLightNode {
 }
 
 export interface ArkUIReplayLightSnapshot {
+  collectionDurationMs?: number;
   timestamp: number;
   vpToPxScale: number;
   nodes: Array<ArkUIReplayLightNode>;

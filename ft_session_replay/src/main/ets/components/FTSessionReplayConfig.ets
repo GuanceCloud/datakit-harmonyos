@@ -34,6 +34,7 @@ export class FTSessionReplayConfig {
   // Drawing and motion are sampled at about 30 fps by default. Idle pages
   // perform no polling once the motion tail has finished.
   private snapshotIntervalMs: number = 32;
+  private performanceDiagnosticsEnabled: boolean = false;
   // Mirrors Android Replay's sparse checkpoint approach: normal traffic is
   // Incremental Snapshot records; a Full Snapshot is a periodic resync only.
   private fullSnapshotIntervalMs: number = 30_000;
@@ -137,6 +138,16 @@ export class FTSessionReplayConfig {
     }
     this.snapshotIntervalMs = Math.max(16, Math.min(10000, Math.floor(intervalMs)));
     return this;
+  }
+
+  /** Enables bounded aggregate timing logs for profiling; disabled by default. */
+  public setPerformanceDiagnosticsEnabled(enabled: boolean): FTSessionReplayConfig {
+    this.performanceDiagnosticsEnabled = enabled;
+    return this;
+  }
+
+  public isPerformanceDiagnosticsEnabled(): boolean {
+    return this.performanceDiagnosticsEnabled;
   }
 
   public getSnapshotIntervalMs(): number {

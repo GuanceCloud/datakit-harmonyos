@@ -1,3 +1,4 @@
+import { ReplayPerformanceDiagnostics } from './ReplayPerformanceDiagnostics';
 import { replayValuesEqual } from './ReplayWireframeValues';
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
@@ -20,6 +21,7 @@ export interface ReplayWorkerOptions {
   errorSampleWindowMs: number;
   textPrivacy: string;
   imagePrivacy: string;
+  diagnosticsEnabled?: boolean;
 }
 
 export const REPLAY_COALESCED_REASON = 'Session Replay pending sample was replaced by a newer state.';
@@ -53,6 +55,18 @@ export interface ReplayWorkerCommit extends ReplayWorkerCapture {
   storeKind: ReplayStoreKind;
 }
 
+export interface ReplayWorkerTimings {
+  startedAt: number;
+  collectionMs: number;
+  handoffMs?: number;
+  materializeMs: number;
+  resourceMs: number;
+  diffMs: number;
+  writeMs: number;
+  workerMs: number;
+  effectiveIntervalMs: number;
+}
+
 export interface ReplayWorkerResult {
   records: Array<SessionReplayRecord>;
   payload: string;
@@ -64,6 +78,7 @@ export interface ReplayWorkerResult {
   storeKind: ReplayStoreKind;
   segmentIds: Array<string>;
   resourceNames?: Array<string>;
+  timings?: ReplayWorkerTimings;
 }
 
 export interface ReplayWorkerMessage {
@@ -107,6 +122,7 @@ interface ReplayQueuedJob {
   bytes?: Uint8Array;
   mimeType?: string;
   queuedAt: number;
+  handoffMs?: number;
   capture?: ReplayWorkerCapture;
   canRemove?: () => boolean;
   complete?: (result: ReplayWorkerResult | null, error: string) => void;
@@ -147,6 +163,10 @@ export class SessionReplayWorkQueue {
   private completing: boolean = false;
   private callbackInsertIndex: number = 0;
   private nextId: number = 0;
+  private readonly diagnostics: ReplayPerformanceDiagnostics | null;
+  private maxDepth: number = 0;
+  private expired: number = 0;
+  private failures: number = 0;
   private coalesced: number = 0;
   private deferred: number = 0;
   private unavailableReason: string = '';
@@ -161,6 +181,7 @@ export class SessionReplayWorkQueue {
 
   constructor(options: ReplayWorkerOptions) {
     this.options = options;
+    this.diagnostics = options.diagnosticsEnabled ? new ReplayPerformanceDiagnostics() : null;
     this.closedPromise = new Promise<void>((resolve: () => void): void => {
       this.closeResolve = resolve;
     });
@@ -390,6 +411,7 @@ export class SessionReplayWorkQueue {
   private addJob(job: ReplayQueuedJob): void {
     if (this.completing) this.jobs.splice(this.callbackInsertIndex++, 0, job);
     else this.jobs.push(job);
+    this.maxDepth = Math.max(this.maxDepth, this.jobs.length + (this.active === null ? 0 : 1));
   }
 
   private ensureThread(): boolean {
@@ -467,6 +489,7 @@ export class SessionReplayWorkQueue {
         this.thread = null;
         if (thread === null) {
           if (!this.released) {
+            this.reportDiagnostics(true);
             this.released = true;
             this.releaseOwner();
             this.closeResolve();
@@ -495,6 +518,8 @@ export class SessionReplayWorkQueue {
       if (job === undefined) break;
       if (!this.closing && this.isSnapshot(job) &&
         isReplaySnapshotExpired(job.queuedAt, Date.now(), job.kind as ReplaySnapshotKind)) {
+        this.expired++;
+        this.reportDiagnostics();
         this.completing = true;
         try {
           job.complete?.(null, REPLAY_STALE_QUEUE_REASON);
@@ -512,10 +537,12 @@ export class SessionReplayWorkQueue {
       this.active = job;
       try {
         if (this.isSnapshot(job)) {
+          const handoffAt = this.diagnostics === null ? 0 : Date.now();
           this.thread?.postMessage({
             id: job.id, phase: 'capture', kind: job.kind, capture: job.capture,
             snapshot: job.snapshot, queuedAt: job.queuedAt, draining: this.closing
           } as ReplayWorkerMessage);
+          job.handoffMs = this.diagnostics === null ? 0 : Math.max(0, Date.now() - handoffAt);
         } else {
           this.thread?.postMessage({
             id: job.id, phase: job.kind === 'barrier' ? 'flush' : job.kind, context: job.context, records: job.records,
@@ -565,6 +592,13 @@ export class SessionReplayWorkQueue {
     const job = this.active;
     this.active = null;
     this.completing = true;
+    if (job !== null && this.isSnapshot(job)) {
+      if (error === REPLAY_STALE_QUEUE_REASON) this.expired++;
+      else if (result === null || !result.stored) this.failures++;
+      if (result?.timings !== undefined) result.timings.handoffMs = job.handoffMs ?? 0;
+      this.diagnostics?.record(result, job.queuedAt);
+      this.reportDiagnostics(job.kind === 'settled');
+    }
     try {
       if (job?.kind === 'barrier') {
         if (!success) job.reject?.(new Error(error));
@@ -586,12 +620,22 @@ export class SessionReplayWorkQueue {
     }
   }
 
+  private reportDiagnostics(force: boolean = false): void {
+    try {
+      this.diagnostics?.report(this.jobs.length + (this.active === null ? 0 : 1), this.maxDepth,
+        this.coalesced, this.deferred, this.expired, this.failures, force);
+    } catch (_) { }
+  }
+
   private failJob(job: ReplayQueuedJob | null, reason: string): void {
     if (job === null) return;
     if (job.kind === 'barrier') job.reject?.(new Error(reason));
     else if (job.kind === 'flush') this.lastFailure = reason;
     else if (job.kind === 'list') job.listReject?.(new Error(reason));
-    else if (this.isSnapshot(job)) job.complete?.(null, reason);
+    else if (this.isSnapshot(job)) {
+      this.failures++;
+      job.complete?.(null, reason);
+    }
     else job.finish?.(false, reason);
   }
 

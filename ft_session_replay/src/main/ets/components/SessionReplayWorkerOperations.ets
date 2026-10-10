@@ -27,6 +27,9 @@ export class SessionReplayWorkerOperations {
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
   private readonly mainStore: SessionReplaySegmentStore | null;
   private readonly errorStore: SessionReplaySegmentStore | null;
+  private readonly diagnosticsEnabled: boolean;
+  private lastEffectiveKey: string = '';
+  private lastEffectiveAt: number = 0;
   private readonly fullSnapshotIntervalMs: number;
   private readonly errorSampleWindowMs: number;
   private readonly mainResources: SessionReplayResourceStore | null;
@@ -48,6 +51,7 @@ export class SessionReplayWorkerOperations {
       .setTextAndInputPrivacy(options.textPrivacy as TextAndInputPrivacy)
       .setImagePrivacy(options.imagePrivacy as ImagePrivacy);
     this.collector = new ArkUIReplayCollector(options.maxNodes, config);
+    this.diagnosticsEnabled = options.diagnosticsEnabled ?? false;
     this.fullSnapshotIntervalMs = options.fullSnapshotIntervalMs;
     this.errorSampleWindowMs = options.errorSampleWindowMs;
     this.mainStore = options.filesDir.length === 0 ? null :
@@ -80,7 +84,9 @@ export class SessionReplayWorkerOperations {
 
   /** Detached nodes enter once; only emitted protocol records leave the Worker. */
   public capture(kind: ReplaySnapshotKind, light: ArkUIReplayLightSnapshot, capture: ReplayWorkerCapture): ReplayWorkerResult {
+    const startedAt = this.diagnosticsEnabled ? Date.now() : 0;
     const materialized = this.materialize(light);
+    const materializedAt = this.diagnosticsEnabled ? Date.now() : 0;
     const store = capture.storeKind === 'main' ? this.mainResources :
       (capture.storeKind === 'error' ? this.errorResources : null);
     const resources = new Map<string, string>();
@@ -123,7 +129,15 @@ export class SessionReplayWorkerOperations {
       previousViewport: capture.previousViewport, lastFullSnapshotAt: capture.lastFullSnapshotAt,
       storeKind: capture.storeKind
     };
+    const resourceDoneAt = this.diagnosticsEnabled ? Date.now() : 0;
     const result = this.process(kind, commit);
+    if (result.timings !== undefined) {
+      result.timings.startedAt = startedAt;
+      result.timings.collectionMs = light.collectionDurationMs ?? 0;
+      result.timings.materializeMs = Math.max(0, materializedAt - startedAt);
+      result.timings.resourceMs = Math.max(0, resourceDoneAt - materializedAt);
+      result.timings.workerMs = Math.max(0, Date.now() - startedAt);
+    }
     result.resourceNames = Array.from(resources.values());
     return result;
   }
@@ -133,6 +147,7 @@ export class SessionReplayWorkerOperations {
   }
 
   public process(kind: ReplaySnapshotKind, commit: ReplayWorkerCommit): ReplayWorkerResult {
+    const processingAt = this.diagnosticsEnabled ? Date.now() : 0;
     const snapshot = commit.snapshot;
     const viewport = commit.viewport;
     const store = commit.storeKind === 'main' ? this.mainStore :
@@ -174,6 +189,7 @@ export class SessionReplayWorkerOperations {
       if (mutation !== null) records = [mutation];
     }
 
+    const diffDoneAt = this.diagnosticsEnabled ? Date.now() : 0;
     const data = snapshot.data as FullSnapshotData;
     let stored = store === null || records.length === 0 || store.append(commit.context, records);
     if (!stored && store !== null && records.length === 1 &&
@@ -188,6 +204,7 @@ export class SessionReplayWorkerOperations {
       }
     }
     if (kind === 'settled' && stored && store !== null) stored = store.flush();
+    const writeDoneAt = this.diagnosticsEnabled ? Date.now() : 0;
     const payload = records.length === 0 ? '' : serializeReplayEnvelope(commit.context, records);
     if (!stored) this.needsFullSnapshot = true;
     else {
@@ -201,7 +218,7 @@ export class SessionReplayWorkerOperations {
       record.type === ReplayRecordType.FULL_SNAPSHOT && record.slotId === undefined)) {
       this.startedViews.add(this.viewKey(commit.context));
     }
-    return {
+    const result: ReplayWorkerResult = {
       records,
       payload,
       wireframeCount: data.wireframes.length,
@@ -212,6 +229,18 @@ export class SessionReplayWorkerOperations {
       storeKind: commit.storeKind,
       segmentIds: store === null || records.length === 0 ? [] : store.getLastAppendedIds()
     };
+    if (this.diagnosticsEnabled) {
+      const effective = stored && records.length > 0;
+      result.timings = {
+        startedAt: processingAt, collectionMs: 0, materializeMs: 0, resourceMs: 0,
+        diffMs: Math.max(0, diffDoneAt - processingAt), writeMs: Math.max(0, writeDoneAt - diffDoneAt),
+        workerMs: Math.max(0, Date.now() - processingAt),
+        effectiveIntervalMs: effective && this.lastEffectiveKey === contextKey ?
+          Math.max(0, snapshot.timestamp - this.lastEffectiveAt) : 0
+      };
+      if (effective) { this.lastEffectiveKey = contextKey; this.lastEffectiveAt = snapshot.timestamp; }
+    }
+    return result;
   }
 
   public appendRecords(

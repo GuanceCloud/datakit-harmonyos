@@ -1,4 +1,4 @@
-import { FrameNode, UIContext, uiObserver } from '@kit.ArkUI';
+import { FrameCallback, FrameNode, UIContext, uiObserver } from '@kit.ArkUI';
 import window from '@ohos.window';
 import {
   FTSessionReplayBridge,
@@ -90,6 +90,18 @@ interface BrowserReplayRecord {
   data?: object;
 }
 
+class ReplaySamplingFrame extends FrameCallback {
+  private readonly callback: () => void;
+  constructor(callback: () => void) {
+    super();
+    this.callback = callback;
+  }
+  // Collect after layout/paint. willDraw still sees the pending timer and
+  // cannot rearm collection for the frame requested by Replay itself.
+  public onFrame(_frameTimeInNano: number): void {}
+  public onIdle(_timeLeftInNano: number): void { this.callback(); }
+}
+
 /**
  * Recorder for ArkUI and ArkWeb collection, RUM linkage, and durable replay
  * segments.
@@ -136,6 +148,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   // Generations protect the current UI shadow, while accepted immutable frames
   // keep their original View and finish in FIFO order through a transition.
   private captureGeneration: number = 0;
+  private samplingFrameEpoch: number = 0;
+  private nextSamplingDeadline: number = 0;
   private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
   private captureDeferred: boolean = false;
@@ -218,7 +232,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       fullSnapshotIntervalMs: config.getFullSnapshotIntervalMs(),
       errorSampleWindowMs: config.getErrorSampleWindowMs(),
       textPrivacy: config.getTextAndInputPrivacy(),
-      imagePrivacy: config.getImagePrivacy()
+      imagePrivacy: config.getImagePrivacy(),
+      diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });
   }
 
@@ -1060,6 +1075,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
   private captureRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
+    if (!this.config.isPerformanceDiagnosticsEnabled()) return this.collectRootLight(uiContext, rootId, scale);
+    const startedAt = Date.now();
+    const snapshot = this.collectRootLight(uiContext, rootId, scale);
+    snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
+    return snapshot;
+  }
+
+  private collectRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
     const binding = this.rootBinding;
     if (binding !== null && binding.rootId === rootId &&
       (binding.captureScene || this.navigationPages.size > 0)) {
@@ -1520,6 +1543,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private stopObservation(): void {
+    this.samplingFrameEpoch++;
+    this.nextSamplingDeadline = 0;
     const uiContext = this.drawObserverContext;
     this.drawObserverContext = null;
     if (uiContext !== null) {
@@ -1576,14 +1601,42 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     // Keep the first deadline so neither drawing nor pointer moves postpone it.
     if (this.mutationCaptureTimer !== -1) return;
-    const delay = this.config.getSnapshotIntervalMs();
-    this.mutationCaptureTimer = setTimeout((): void => {
+    const interval = this.config.getSnapshotIntervalMs();
+    const now = Date.now();
+    const next = this.nextSamplingDeadline === 0 ? now + interval : this.nextSamplingDeadline + interval;
+    // Anchor to deadlines rather than frame completion; never burst to catch up.
+    this.nextSamplingDeadline = next <= now ? now + interval : next;
+    const delay = this.nextSamplingDeadline - now;
+    const epoch = ++this.samplingFrameEpoch;
+    const run = (): void => {
+      if (epoch !== this.samplingFrameEpoch || this.mutationCaptureTimer === -1) return;
+      this.samplingFrameEpoch++;
+      clearTimeout(this.mutationCaptureTimer);
       this.mutationCaptureTimer = -1;
-      const settled = this.motionUntil > 0 && Date.now() >= this.motionUntil && !this.hasRetainedScenePages();
+      const settled = this.motionUntil > 0 && Date.now() >= this.motionUntil && !this.hasSamplingSceneMotion();
       if (settled) this.motionUntil = 0;
       this.captureActiveViewMutation(settled ? 'settled' : 'automatic');
-      if (Date.now() < this.motionUntil || this.hasRetainedScenePages()) this.scheduleAutomaticCapture();
-    }, delay);
+      if (Date.now() < this.motionUntil || this.hasSamplingSceneMotion()) this.scheduleAutomaticCapture();
+      if (this.mutationCaptureTimer === -1) this.nextSamplingDeadline = 0;
+    };
+    try {
+      this.rootBinding.uiContext.postDelayedFrameCallback(new ReplaySamplingFrame(run), delay);
+      // An idle/detached surface may not produce a display frame. Keep a
+      // bounded fallback for its final state; the epoch prevents duplicates.
+      this.mutationCaptureTimer = setTimeout(run, delay + 32);
+    } catch (_) {
+      this.mutationCaptureTimer = setTimeout(run, delay);
+    }
+  }
+
+  private hasSamplingSceneMotion(): boolean {
+    if (this.hasRetainedScenePages()) return true;
+    const binding = this.rootBinding;
+    const now = Date.now();
+    return binding !== null && this.getRootScenePages(binding).some((page: ArkUIReplayScenePage): boolean => {
+      const transition = page.defaultTransition;
+      return transition !== undefined && now >= transition.startedAt && now < transition.startedAt + transition.durationMs;
+    });
   }
 
   private hasRetainedScenePages(): boolean {
