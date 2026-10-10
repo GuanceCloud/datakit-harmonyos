@@ -83,10 +83,7 @@ export class FTSessionReplay {
       this.config,
       this.storage,
       this.errorSampleStorage,
-      (sessionId: string, timestamp: number): boolean => {
-        if (resourceStorage === null || errorResourceStorage === null) return false;
-        return errorResourceStorage.promoteSessionWindow(sessionId, timestamp, errorWindowMs, resourceStorage);
-      },
+      null,
       (context: SessionReplayContext, data: Uint8Array, mimeType: string): string | null =>
         this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType),
       (names: Array<string>, kind: string): void => {
@@ -225,9 +222,6 @@ export class FTSessionReplay {
       !recorder.isErrorSampledSessionPromoted(context.sessionId);
     const store = isDeferredErrorSample ? errorResourceStorage : resourceStorage;
     const fileName = store === null ? null : store.put(context, bytes, mimeType);
-    if (fileName !== null && isDeferredErrorSample) {
-      errorResourceStorage?.pruneBefore(Date.now() - errorWindowMs);
-    }
     return fileName;
   }
 

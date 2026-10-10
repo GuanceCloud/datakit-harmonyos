@@ -26,10 +26,12 @@ port.onmessage = (event: MessageEvents): void => {
     if (operations === null) throw new Error('Session Replay Worker is not initialized.');
     if (message.phase === 'addImage') {
       operations.registerImageAsset(message.componentId!, message.bytes!, message.mimeType!);
+      if (message.id !== 0) port.postMessage({ id: message.id, phase: 'done', success: true } as ReplayWorkerMessage);
       return;
     }
     if (message.phase === 'removeImage') {
       operations.unregisterImageAsset(message.componentId!);
+      if (message.id !== 0) port.postMessage({ id: message.id, phase: 'done', success: true } as ReplayWorkerMessage);
       return;
     }
     if (message.phase === 'capture') {
@@ -67,6 +69,12 @@ port.onmessage = (event: MessageEvents): void => {
       port.postMessage({ id: message.id, phase: 'done', result } as ReplayWorkerMessage);
       return;
     }
+    if (message.phase === 'flush') {
+      const success = operations.flush();
+      port.postMessage({ id: message.id, phase: 'done', success,
+        error: success ? '' : operations.getLastWriteError() } as ReplayWorkerMessage);
+      return;
+    }
     if (message.phase === 'records') {
       const success = operations.appendRecords(message.context!, message.records!, message.storeKind!,
         message.requiresStart ?? false, message.baselineSnapshot ?? null, message.baselineViewport ?? null);
@@ -78,6 +86,7 @@ port.onmessage = (event: MessageEvents): void => {
     if (message.phase === 'promote') {
       const success = operations.promote(message.sessionId!, message.timestamp!);
       port.postMessage({ id: message.id, phase: 'done', success,
+        resourceNames: operations.getLastPromotedResources(),
         error: success ? '' : 'Session Replay error window promotion failed.' } as ReplayWorkerMessage);
       return;
     }

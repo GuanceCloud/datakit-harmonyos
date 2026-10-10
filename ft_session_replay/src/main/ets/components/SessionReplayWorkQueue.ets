@@ -72,6 +72,7 @@ export interface ReplayWorkerMessage {
   kind?: ReplaySnapshotKind;
   snapshot?: ArkUIReplayLightSnapshot | SessionReplayRecord;
   resources?: Array<CapturedReplayImageResource>;
+  resourceNames?: Array<string>;
   commit?: ReplayWorkerCommit;
   capture?: ReplayWorkerCapture;
   result?: ReplayWorkerResult;
@@ -100,8 +101,11 @@ interface ReplayWorkerEvent {
 
 interface ReplayQueuedJob {
   id: number;
-  kind: ReplaySnapshotKind | 'records' | 'promote' | 'remove' | 'removeResources' | 'list' | 'barrier';
+  kind: ReplaySnapshotKind | 'records' | 'promote' | 'remove' | 'removeResources' | 'list' | 'flush' | 'barrier' | 'addImage' | 'removeImage';
   snapshot?: ArkUIReplayLightSnapshot;
+  componentId?: string;
+  bytes?: Uint8Array;
+  mimeType?: string;
   queuedAt: number;
   capture?: ReplayWorkerCapture;
   canRemove?: () => boolean;
@@ -115,7 +119,7 @@ interface ReplayQueuedJob {
   sessionId?: string;
   timestamp?: number;
   segmentIds?: Array<string>;
-  finish?: (success: boolean, error: string, records?: Array<SessionReplayRecord>) => void;
+  finish?: (success: boolean, error: string, records?: Array<SessionReplayRecord>, resourceNames?: Array<string>) => void;
   resolve?: () => void;
   reject?: (reason: Error) => void;
   barrierAction?: () => void;
@@ -136,7 +140,6 @@ export class SessionReplayWorkQueue {
   private static readonly ownerTails: Map<string, Promise<void>> = new Map();
   private readonly options: ReplayWorkerOptions;
   private readonly jobs: Array<ReplayQueuedJob> = [];
-  private readonly imageCommands: Array<ReplayImageCommand> = [];
   private readonly registeredImages: Map<string, ReplayImageCommand> = new Map();
   private thread: worker.ThreadWorker | null = null;
   private retiringThread: worker.ThreadWorker | null = null;
@@ -149,6 +152,8 @@ export class SessionReplayWorkQueue {
   private unavailableReason: string = '';
   private closing: boolean = false;
   private ready: boolean = false;
+  private closeFlushQueued: boolean = false;
+  private lastFailure: string = '';
   private released: boolean = false;
   private readonly releaseOwner: () => void;
   private readonly closedPromise: Promise<void>;
@@ -216,7 +221,14 @@ export class SessionReplayWorkQueue {
   /** Consult before traversing FrameNodes. Critical boundaries always pass. */
   public shouldCapture(context: SessionReplayContext, kind: ReplaySnapshotKind): boolean {
     if (kind !== 'automatic' && kind !== 'transition') return true;
-    const pending = this.pendingSamples(context, undefined, kind);
+    // Backpressure spans event boundaries; merging remains restricted to a
+    // trailing run. Frequent pointer moves must not bypass the capture budget.
+    const pending = this.jobs.filter((job: ReplayQueuedJob): boolean => {
+      const capture = job.capture;
+      return (job.kind === 'automatic' || job.kind === 'transition') && capture !== undefined &&
+        capture.context.applicationId === context.applicationId && capture.context.sessionId === context.sessionId &&
+        capture.context.viewId === context.viewId && replayValuesEqual(capture.context.globalContext, context.globalContext);
+    });
     const limit = kind === 'transition' ? 8 : 2;
     const minimumGap = kind === 'transition' ? 64 : 128;
     const latest = pending[pending.length - 1];
@@ -274,12 +286,13 @@ export class SessionReplayWorkQueue {
     return !failedSynchronously;
   }
 
-  public enqueuePromotion(sessionId: string, timestamp: number, finish: (success: boolean, error: string) => void): boolean {
+  public enqueuePromotion(sessionId: string, timestamp: number,
+    finish: (success: boolean, error: string, resources?: Array<string>) => void): boolean {
     if (this.released) return false;
     let failedSynchronously = false;
-    const complete = (success: boolean, error: string): void => {
+    const complete = (success: boolean, error: string, _records?: Array<SessionReplayRecord>, resources?: Array<string>): void => {
       if (!success) failedSynchronously = true;
-      finish(success, error);
+      finish(success, error, resources);
     };
     this.addJob({ id: ++this.nextId, kind: 'promote', queuedAt: Date.now(), sessionId, timestamp, finish: complete });
     this.dispatch();
@@ -317,6 +330,8 @@ export class SessionReplayWorkQueue {
   }
 
   /** Synchronous captures use a checkpoint when the committed baseline is uncertain. */
+  public getLastFailure(): string { return this.lastFailure; }
+
   public hasPendingWork(): boolean {
     return !this.ready || this.closing || this.active !== null || this.jobs.length > 0 || this.retiringThread !== null;
   }
@@ -349,7 +364,7 @@ export class SessionReplayWorkQueue {
     copy.set(bytes);
     const command: ReplayImageCommand = { componentId: key, bytes: copy, mimeType };
     this.registeredImages.set(key, command);
-    this.imageCommands.push(command);
+    this.addJob({ id: ++this.nextId, kind: 'addImage', queuedAt: Date.now(), componentId: key, bytes: copy, mimeType });
     this.dispatch();
   }
 
@@ -357,7 +372,7 @@ export class SessionReplayWorkQueue {
     if (this.closing) return;
     const key = componentId.trim();
     this.registeredImages.delete(key);
-    this.imageCommands.push({ componentId: key, bytes: null, mimeType: '' });
+    this.addJob({ id: ++this.nextId, kind: 'removeImage', queuedAt: Date.now(), componentId: key });
     this.dispatch();
   }
 
@@ -425,7 +440,6 @@ export class SessionReplayWorkQueue {
             mimeType: command.mimeType
           } as ReplayWorkerMessage);
         });
-        this.imageCommands.splice(0, this.imageCommands.length);
         return true;
       } catch (error) {
         this.unavailableReason = String(error);
@@ -441,8 +455,14 @@ export class SessionReplayWorkQueue {
     if (this.completing) return;
     if (this.active !== null) return;
     if (this.retiringThread !== null) return;
-    if (this.jobs.length === 0 && this.imageCommands.length === 0) {
+    if (this.jobs.length === 0) {
       if (this.closing) {
+        if (!this.closeFlushQueued && this.thread !== null) {
+          this.closeFlushQueued = true;
+          this.addJob({ id: ++this.nextId, kind: 'flush', queuedAt: Date.now() });
+          this.dispatch();
+          return;
+        }
         const thread = this.thread;
         this.thread = null;
         if (thread === null) {
@@ -459,7 +479,6 @@ export class SessionReplayWorkQueue {
       return;
     }
     if (!this.ensureThread()) {
-      this.imageCommands.splice(0, this.imageCommands.length);
       const pending = this.jobs.splice(0, this.jobs.length);
       for (let index = 0; index < pending.length; index++) {
         try {
@@ -469,32 +488,11 @@ export class SessionReplayWorkQueue {
       if (this.closing) this.dispatch();
       return;
     }
-    while (this.imageCommands.length > 0) {
-      const command = this.imageCommands.shift();
-      if (command !== undefined) {
-        this.thread?.postMessage({
-          id: 0,
-          phase: command.bytes === null ? 'removeImage' : 'addImage',
-          componentId: command.componentId,
-          bytes: command.bytes === null ? undefined : command.bytes,
-          mimeType: command.mimeType
-        } as ReplayWorkerMessage);
-      }
-    }
     // A stale job's completion callback may synchronously enqueue and dispatch
     // a replacement. Stop this drain once that callback has claimed the slot.
     while (this.active === null && this.jobs.length > 0) {
       const job = this.jobs.shift();
       if (job === undefined) break;
-      if (job.kind === 'barrier') {
-        try {
-          job.barrierAction?.();
-          job.resolve?.();
-        } catch (error) {
-          job.reject?.(new Error(String(error)));
-        }
-        continue;
-      }
       if (!this.closing && this.isSnapshot(job) &&
         isReplaySnapshotExpired(job.queuedAt, Date.now(), job.kind as ReplaySnapshotKind)) {
         this.completing = true;
@@ -520,10 +518,10 @@ export class SessionReplayWorkQueue {
           } as ReplayWorkerMessage);
         } else {
           this.thread?.postMessage({
-            id: job.id, phase: job.kind, context: job.context, records: job.records,
+            id: job.id, phase: job.kind === 'barrier' ? 'flush' : job.kind, context: job.context, records: job.records,
             storeKind: job.storeKind, requiresStart: job.requiresStart, sessionId: job.sessionId,
             timestamp: job.timestamp, segmentIds: job.segmentIds, baselineSnapshot: job.baselineSnapshot,
-            baselineViewport: job.baselineViewport
+            baselineViewport: job.baselineViewport, componentId: job.componentId, bytes: job.bytes, mimeType: job.mimeType
           } as ReplayWorkerMessage);
         }
       } catch (error) {
@@ -541,7 +539,7 @@ export class SessionReplayWorkQueue {
     if (job === null || message.id !== job.id) return;
     if (message.phase === 'done') {
       this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? [],
-        message.records);
+        message.records, message.resourceNames);
     } else if (message.phase === 'error') {
       // Stop may race the Worker's age check for the already-dispatched frame.
       // Retry that immutable handoff once in drain mode; do not read the UI.
@@ -562,17 +560,25 @@ export class SessionReplayWorkQueue {
 
   private finish(
     result: ReplayWorkerResult | null, error: string, success: boolean = false,
-    segmentIds: Array<string> = [], writtenRecords?: Array<SessionReplayRecord>
+    segmentIds: Array<string> = [], writtenRecords?: Array<SessionReplayRecord>, resourceNames?: Array<string>
   ): void {
     const job = this.active;
     this.active = null;
     this.completing = true;
     try {
-      if (job?.kind === 'list') {
+      if (job?.kind === 'barrier') {
+        if (!success) job.reject?.(new Error(error));
+        else {
+          try { job.barrierAction?.(); job.resolve?.(); }
+          catch (failure) { job.reject?.(new Error(String(failure))); }
+        }
+      } else if (job?.kind === 'flush') {
+        if (!success) this.lastFailure = error;
+      } else if (job?.kind === 'list') {
         if (success) job.listResolve?.(segmentIds);
         else job.listReject?.(new Error(error));
       } else if (job !== null && this.isSnapshot(job)) job.complete?.(result, error);
-      else job?.finish?.(success, error, writtenRecords);
+      else job?.finish?.(success, error, writtenRecords, resourceNames);
     } finally {
       this.completing = false;
       this.callbackInsertIndex = 0;
@@ -582,7 +588,8 @@ export class SessionReplayWorkQueue {
 
   private failJob(job: ReplayQueuedJob | null, reason: string): void {
     if (job === null) return;
-    if (job.kind === 'barrier') job.resolve?.();
+    if (job.kind === 'barrier') job.reject?.(new Error(reason));
+    else if (job.kind === 'flush') this.lastFailure = reason;
     else if (job.kind === 'list') job.listReject?.(new Error(reason));
     else if (this.isSnapshot(job)) job.complete?.(null, reason);
     else job.finish?.(false, reason);

@@ -1,7 +1,8 @@
+import { replayValuesEqual } from './ReplayWireframeValues';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import {
-  ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
+  FullSnapshotData, ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
 } from './SessionReplayProtocol';
 
 /** One durable batch of Android-compatible records for a single RUM View. */
@@ -19,9 +20,9 @@ export interface SessionReplayRecordStore {
 }
 
 /**
- * Crash-safe private-file segment storage. Each capture batch is first written
- * to a temporary file, fsynced, then atomically renamed. The oldest segments
- * are evicted before a write when the configured quota would be exceeded.
+ * Checkpoints/events use atomic JSON files. The recording Worker optionally
+ * appends adjacent native mutations to a checksummed, fsynced journal, then
+ * seals it into the same JSON format consumed by existing uploaders.
  */
 export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private static readonly VERSION: number = 1;
@@ -29,7 +30,12 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private readonly replayRoot: string;
   private readonly root: string;
   private readonly maxBytes: number;
+  private readonly appendMutations: boolean;
   private readonly maxRecordsPerSegment: number;
+  private activeSegment: SessionReplayStoredSegment | null = null;
+  private activeBytes: number = 0;
+  private journalDamaged: boolean = false;
+  private readonly sealedSizes: Map<string, number> = new Map();
   private sequence: number = 0;
   private lastWriteError: string = '';
   private lastAppendedIds: Array<string> = [];
@@ -40,7 +46,8 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     maxBytes: number,
     maxRecordsPerSegment: number,
     directoryName: string = 'segments',
-    recoverOnInit: boolean = true
+    recoverOnInit: boolean = true,
+    appendMutations: boolean = false
   ) {
     if (filesDir.trim().length === 0) {
       throw new Error('Session Replay storage requires a non-empty filesDir');
@@ -51,6 +58,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     this.replayRoot = `${filesDir}/ft_session_replay`;
     this.root = `${this.replayRoot}/${directoryName}`;
     this.maxBytes = Math.max(1024 * 1024, Math.floor(maxBytes));
+    this.appendMutations = appendMutations;
     this.maxRecordsPerSegment = Math.max(1, Math.floor(maxRecordsPerSegment));
     // `mkdirSync(path, true)` is only available from newer platform APIs.
     // Create each level explicitly so Replay works on the API 12 devices this
@@ -58,6 +66,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     this.ensureDirectory(this.replayRoot);
     this.ensureDirectory(this.root);
     if (recoverOnInit) this.recover();
+    this.refreshSizes();
   }
 
   public append(context: SessionReplayContext, records: Array<SessionReplayRecord>): boolean {
@@ -69,10 +78,17 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     try {
       // App sandbox storage may be reclaimed between initialization and a
       // later RUM View. Recreate both levels immediately before the write.
+      if (!this.exists(this.root)) this.sealedSizes.clear();
       this.ensureDirectory(this.replayRoot);
       this.ensureDirectory(this.root);
       for (let start = 0; start < records.length; start += this.maxRecordsPerSegment) {
         const segmentRecords = records.slice(start, start + this.maxRecordsPerSegment);
+        if (this.appendMutations && segmentRecords.every((record: SessionReplayRecord): boolean =>
+          this.isJournalRecord(record))) {
+          if (!this.appendMutationBatch(context, segmentRecords)) return false;
+          continue;
+        }
+        if (!this.flush()) return false;
         const segment = this.createSegment(context, segmentRecords);
         const body = JSON.stringify(segment);
         if (!this.reserveBytes(this.byteLength(body), context, segmentRecords)) {
@@ -94,6 +110,86 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     }
   }
 
+  /** Seal before uploads, event boundaries, stop and explicit flush. */
+  public flush(): boolean {
+    const segment = this.activeSegment;
+    if (segment === null) return true;
+    try {
+      this.ensureDirectory(this.replayRoot);
+      this.ensureDirectory(this.root);
+      this.atomicWrite(`${this.root}/${segment.id}.json`, JSON.stringify(segment));
+      // If unlink is interrupted, recovery prefers the complete sealed JSON.
+      try { fs.unlinkSync(`${this.root}/${segment.id}.journal`); } catch (_) { }
+      this.activeSegment = null;
+      this.activeBytes = 0;
+      this.journalDamaged = false;
+      return true;
+    } catch (error) {
+      this.lastWriteError = `Unable to seal Replay journal: ${String(error)}`;
+      return false;
+    }
+  }
+
+  private appendMutationBatch(context: SessionReplayContext, records: Array<SessionReplayRecord>): boolean {
+    const payload = JSON.stringify(records);
+    const line = `${this.byteLength(payload)}:${this.checksum(payload)}:${payload}\n`;
+    const previous = this.activeSegment;
+    if (previous !== null && (this.journalDamaged || !this.exists(`${this.root}/${previous.id}.journal`) || !replayValuesEqual(previous.context, context) ||
+      previous.records.length + records.length > this.maxRecordsPerSegment ||
+      this.activeBytes + this.byteLength(line) > 256 * 1024 || Date.now() - previous.createdAt >= 1000)) {
+      if (!this.flush()) return false;
+    }
+    let segment = this.activeSegment;
+    let header = '';
+    if (segment === null) {
+      segment = this.createSegment(context, []);
+      header = JSON.stringify(segment) + '\n';
+    }
+    const body = header + line;
+    if (!this.reserveBytes(this.byteLength(body), context, records)) {
+      this.lastWriteError = 'Replay mutation journal needs a Full Snapshot or exceeds its quota.';
+      return false;
+    }
+    // Quota handling may have sealed the old journal. Start a fresh id then.
+    if (header.length === 0 && this.activeSegment === null) {
+      return this.appendMutationBatch(context, records);
+    }
+    const file = fs.openSync(`${this.root}/${segment.id}.journal`,
+      fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
+    try {
+      const written = fs.writeSync(file.fd, body);
+      if (written !== this.byteLength(body)) throw new Error('Replay journal short write.');
+      fs.fsyncSync(file.fd);
+    } catch (error) {
+      this.journalDamaged = true;
+      throw new Error(String(error));
+    } finally {
+      fs.closeSync(file);
+    }
+    segment.records.push(...records);
+    this.activeSegment = segment;
+    this.activeBytes += this.byteLength(body);
+    this.lastAppendedIds.push(segment.id);
+    if (segment.records.length >= this.maxRecordsPerSegment || this.activeBytes >= 256 * 1024) return this.flush();
+    return true;
+  }
+
+  private checksum(value: string): number {
+    const bytes = util.TextEncoder.create('utf-8').encodeInto(value);
+    let hash = 2166136261;
+    for (let index = 0; index < bytes.length; index++) {
+      hash = Math.imul(hash ^ bytes[index], 16777619) >>> 0;
+    }
+    return hash;
+  }
+
+  private refreshSizes(): void {
+    this.sealedSizes.clear();
+    for (const name of this.segmentFileNames()) {
+      this.sealedSizes.set(name.substring(0, name.length - 5), fs.statSync(`${this.root}/${name}`).size);
+    }
+  }
+
   /** Exposes the latest append failure without leaking application content. */
   public getLastWriteError(): string | null {
     return this.lastWriteError.length === 0 ? null : this.lastWriteError;
@@ -105,11 +201,13 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   /** Enumerates candidate batches without parsing their contents. */
   public listIds(): Array<string> {
+    if (!this.flush()) throw new Error(this.lastWriteError);
     return this.segmentFileNames().map((name: string): string => name.substring(0, name.length - '.json'.length));
   }
 
   /** Reopens valid segments after process restart and removes interrupted writes. */
   public list(): Array<SessionReplayStoredSegment> {
+    if (!this.flush()) throw new Error(this.lastWriteError);
     const segments: Array<SessionReplayStoredSegment> = [];
     const names = this.segmentFileNames();
     for (let index = 0; index < names.length; index++) {
@@ -130,6 +228,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   /** Removes only successfully acknowledged segments from private storage. */
   public remove(ids: Array<string>): boolean {
+    if (this.activeSegment !== null && ids.includes(this.activeSegment.id) && !this.flush()) return false;
     let completed = true;
     for (let index = 0; index < ids.length; index++) {
       const id = ids[index];
@@ -139,6 +238,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       }
       try {
         fs.unlinkSync(`${this.root}/${id}.json`);
+        this.sealedSizes.delete(id);
       } catch (_error) {
         completed = false;
       }
@@ -191,7 +291,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
         }
         continue;
       }
-      if (!destination.append(segment.context, records)) {
+      if (!destination.append(segment.context, records) || !destination.flush()) {
         return false;
       }
       if (!this.remove([segment.id])) {
@@ -200,6 +300,34 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     }
     this.pruneBefore(cutoff);
     return true;
+  }
+
+  /** Resource dependencies include the checkpoint/prefix retained before cutoff. */
+  public getReferencedResourceNames(timestamp: number, sessionId?: string): Set<string> {
+    const segments = this.list().filter((segment: SessionReplayStoredSegment): boolean =>
+      sessionId === undefined || segment.context.sessionId === sessionId);
+    const selected = this.selectWindowRecords(segments, timestamp);
+    const names = new Set<string>();
+    let ordinal = 0;
+    for (const segment of segments) {
+      for (const record of segment.records) {
+        if (!selected.has(ordinal++) || record.slotId !== undefined) continue;
+        if (record.type === ReplayRecordType.FULL_SNAPSHOT) {
+          for (const frame of (record.data as FullSnapshotData).wireframes) {
+            if (frame.type === 'image' && frame.resourceId !== undefined) names.add(frame.resourceId);
+          }
+        } else if (this.isMutation(record)) {
+          const mutation = record.data as ReplayMutationData;
+          for (const add of mutation.adds) {
+            if (add.wireframe.type === 'image' && add.wireframe.resourceId !== undefined) names.add(add.wireframe.resourceId);
+          }
+          for (const update of mutation.updates) {
+            if (update.resourceId !== undefined) names.add(update.resourceId);
+          }
+        }
+      }
+    }
+    return names;
   }
 
   public getRoot(): string {
@@ -211,7 +339,9 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   public requiresFullSnapshot(context: SessionReplayContext): boolean {
-    return this.resyncStreams.has(`${context.applicationId}|${context.sessionId}|${context.viewId}|native`);
+    const key = `${context.applicationId}|${context.sessionId}|${context.viewId}|native`;
+    if (!this.exists(this.root)) this.resyncStreams.add(key);
+    return this.resyncStreams.has(key);
   }
 
   private streamKey(context: SessionReplayContext, record: SessionReplayRecord): string {
@@ -220,6 +350,12 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private isCheckpoint(record: SessionReplayRecord): boolean {
     return record.slotId === undefined ? record.type === ReplayRecordType.FULL_SNAPSHOT : (record.type as number) === 2;
+  }
+
+  private isJournalRecord(record: SessionReplayRecord): boolean {
+    if (record.slotId !== undefined || record.type !== ReplayRecordType.INCREMENTAL_SNAPSHOT) return false;
+    const source: number = (record.data as ReplayMutationData).source;
+    return source === 0 || source === 9;
   }
 
   private isMutation(record: SessionReplayRecord): boolean {
@@ -297,7 +433,50 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
         try { fs.unlinkSync(`${this.root}/${names[index]}`); } catch (_) { }
       }
     }
+    for (const name of this.fileNames().filter((entry: string): boolean => entry.endsWith('.journal')).sort()) {
+      const path = `${this.root}/${name}`;
+      let body: string;
+      try { body = fs.readTextSync(path); } catch (_) { continue; }
+      const segment = this.readJournal(body, name);
+      try {
+        if (segment !== null) {
+          const jsonName = `${segment.id}.json`;
+          const sealedPath = `${this.root}/${jsonName}`;
+          let sealed = false;
+          try { sealed = this.isValidSegment(JSON.parse(fs.readTextSync(sealedPath)) as SessionReplayStoredSegment, jsonName); }
+          catch (_) { }
+          if (!sealed) this.atomicWrite(sealedPath, JSON.stringify(segment));
+        }
+        fs.unlinkSync(path);
+      } catch (_) {
+        // Keep a journal on an I/O failure; retry recovery at the next startup.
+      }
+    }
     this.list();
+  }
+
+  private readJournal(body: string, name: string): SessionReplayStoredSegment | null {
+    try {
+      const lines = body.split('\n');
+      const segment = JSON.parse(lines[0]) as SessionReplayStoredSegment;
+      segment.records = [];
+      for (let index = 1; index < lines.length - 1; index++) {
+        const first = lines[index].indexOf(':');
+        const second = lines[index].indexOf(':', first + 1);
+        if (first < 1 || second < 0) break;
+        const payload = lines[index].substring(second + 1);
+        if (Number(lines[index].substring(0, first)) !== this.byteLength(payload) ||
+          Number(lines[index].substring(first + 1, second)) !== this.checksum(payload)) break;
+        try {
+          const records = JSON.parse(payload) as Array<SessionReplayRecord>;
+          if (!Array.isArray(records) || !records.every((record: SessionReplayRecord): boolean =>
+            this.isJournalRecord(record))) break;
+          segment.records.push(...records);
+        } catch (_) { break; }
+      }
+      const jsonName = name.substring(0, name.length - '.journal'.length) + '.json';
+      return this.isValidSegment(segment, jsonName) ? segment : null;
+    } catch (_) { return null; }
   }
 
   private reserveBytes(
@@ -306,15 +485,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     if (incomingBytes > this.maxBytes) {
       return false;
     }
-    const names = this.segmentFileNames();
-    const sizes = new Map<string, number>();
-    let usedBytes = 0;
-    for (let index = 0; index < names.length; index++) {
-      const size = fs.statSync(`${this.root}/${names[index]}`).size;
-      sizes.set(names[index].substring(0, names[index].length - '.json'.length), size);
-      usedBytes += size;
-    }
+    if (!this.appendMutations) this.refreshSizes();
+    let usedBytes = this.activeBytes;
+    this.sealedSizes.forEach((size: number): void => { usedBytes += size; });
     if (usedBytes + incomingBytes <= this.maxBytes && this.resyncStreams.size === 0) return true;
+    if (!this.flush()) return false;
+    usedBytes = 0;
+    this.sealedSizes.forEach((size: number): void => { usedBytes += size; });
+    const sizes = this.sealedSizes;
     const segments = this.list();
     const victims = new Set<string>();
     const blocked = new Set<string>();
@@ -373,6 +551,8 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       fs.closeSync(file);
     }
     fs.renameSync(temp, path);
+    const name = path.substring(path.lastIndexOf('/') + 1);
+    this.sealedSizes.set(name.substring(0, name.length - 5), this.byteLength(body));
   }
 
   private ensureDirectory(path: string): void {

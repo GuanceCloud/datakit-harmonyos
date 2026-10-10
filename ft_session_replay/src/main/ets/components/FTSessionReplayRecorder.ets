@@ -38,6 +38,7 @@ import {
   createReplayEnvelope,
   FullSnapshotData,
   ReplayImageWireframe,
+  ReplayPointerInteractionData,
   ReplayRecordType,
   serializeReplayEnvelope,
   SessionReplayContext,
@@ -259,6 +260,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     this.workQueue.close();
     this.workQueue.drain().then((): void => {
+      const failure = this.workQueue.getLastFailure();
+      if (failure.length > 0) FTSessionReplayBridgeRegistry.logDiagnostic(`Replay stop seal failed: ${failure}`, true);
       this.rootBinding = null;
       this.activeContext = null;
       this.resetViewportObservation();
@@ -476,6 +479,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
       return null;
     }
+    if (this.captureDeferred && pointerEventType !== 'move' && this.activeContext !== null &&
+      this.isSameReplayContext(this.activeContext, context)) this.captureActiveViewMutation('settled');
     const record = this.processor.createPointerRecord(pointerEventType, pointerId, x, y);
     const capture = this.createCapture(context, [record], null);
     this.appendRecordedRecords(context, capture.records);
@@ -1409,7 +1414,12 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     records: Array<SessionReplayRecord>,
     fullSnapshot: SessionReplayRecord | null
   ): SessionReplayCapture | null {
-    if (this.captureDeferred) this.captureActiveViewMutation('settled');
+    const onlyPointerMoves = records.every((record: SessionReplayRecord): boolean => {
+      const data = record.data as ReplayPointerInteractionData;
+      return record.slotId === undefined && record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT &&
+        data.source === 9 && data.pointerEventType === 'move';
+    });
+    if (this.captureDeferred && !onlyPointerMoves) this.captureActiveViewMutation('settled');
     const activeContext = this.activeContext;
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
@@ -1478,7 +1488,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     let accepted = false;
     try {
       accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
-        (success: boolean, failure: string): void => {
+        (success: boolean, failure: string, resources?: Array<string>): void => {
+          this.resourceTouch?.(resources ?? [], 'main');
           try {
             finish(success, failure);
           } finally {

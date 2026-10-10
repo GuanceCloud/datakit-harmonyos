@@ -202,10 +202,10 @@ export class SessionReplayResourceStore {
   }
 
   /** Drops unpromoted resource assets older than an error-sampling cutoff. */
-  public pruneBefore(timestamp: number): void {
+  public pruneBefore(timestamp: number, retained: Set<string> | null = null): void {
     const resources = this.list();
     for (let index = 0; index < resources.length; index++) {
-      if (resources[index].createdAt < timestamp) {
+      if (resources[index].createdAt < timestamp && !retained?.has(resources[index].fileName)) {
         this.remove([resources[index].id]);
       }
     }
@@ -220,7 +220,8 @@ export class SessionReplayResourceStore {
     sessionId: string,
     timestamp: number,
     windowMs: number,
-    destination: SessionReplayResourceStore
+    destination: SessionReplayResourceStore,
+    retained: Set<string> | null = null
   ): boolean {
     const cutoff = timestamp - Math.max(0, windowMs);
     const resources = this.list();
@@ -229,7 +230,7 @@ export class SessionReplayResourceStore {
       if (resource.context.sessionId !== sessionId) {
         continue;
       }
-      if (resource.createdAt < cutoff) {
+      if (resource.createdAt < cutoff && !retained?.has(resource.fileName)) {
         if (!this.remove([resource.id])) {
           return false;
         }
@@ -243,7 +244,7 @@ export class SessionReplayResourceStore {
         return false;
       }
     }
-    this.pruneBefore(cutoff);
+    this.pruneBefore(cutoff, retained);
     return true;
   }
 

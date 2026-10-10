@@ -38,6 +38,8 @@ export class SessionReplayWorkerOperations {
   private lastFullSnapshotAt: number = 0;
   private viewport: ReplayViewport | null = null;
   private readonly startedViews: Set<string> = new Set();
+  private lastErrorPruneAt: number = 0;
+  private lastPromotedResources: Array<string> = [];
   private lastWriteError: string = '';
   private lastWrittenRecords: Array<SessionReplayRecord> = [];
 
@@ -49,9 +51,9 @@ export class SessionReplayWorkerOperations {
     this.fullSnapshotIntervalMs = options.fullSnapshotIntervalMs;
     this.errorSampleWindowMs = options.errorSampleWindowMs;
     this.mainStore = options.filesDir.length === 0 ? null :
-      new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment);
+      new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment, 'segments', true, true);
     this.errorStore = options.filesDir.length === 0 ? null :
-      new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment, 'error_segments');
+      new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment, 'error_segments', true, true);
     this.mainResources = options.filesDir.length === 0 ? null :
       new SessionReplayResourceStore(options.filesDir, options.maxBytes, 'resources');
     this.errorResources = options.filesDir.length === 0 ? null :
@@ -115,9 +117,6 @@ export class SessionReplayWorkerOperations {
         masked.permanentId = frame.permanentId;
         data.wireframes[index] = masked;
       }
-    }
-    if (capture.storeKind === 'error' && resources.size > 0) {
-      this.errorResources?.pruneBefore(Date.now() - this.errorSampleWindowMs);
     }
     const commit: ReplayWorkerCommit = {
       context: capture.context, snapshot: materialized.record, viewport: capture.viewport,
@@ -188,6 +187,7 @@ export class SessionReplayWorkerOperations {
         lastFullSnapshotAt = snapshot.timestamp;
       }
     }
+    if (kind === 'settled' && stored && store !== null) stored = store.flush();
     const payload = records.length === 0 ? '' : serializeReplayEnvelope(commit.context, records);
     if (!stored) this.needsFullSnapshot = true;
     else {
@@ -196,9 +196,7 @@ export class SessionReplayWorkerOperations {
       this.viewport = viewport === null ? null : { width: viewport.width, height: viewport.height };
       if (records.length > 0) this.needsFullSnapshot = false;
     }
-    if (stored && store === this.errorStore && records.length > 0) {
-      this.errorStore?.pruneBefore(Date.now() - this.errorSampleWindowMs);
-    }
+    this.pruneErrorStore(store, stored && records.length > 0);
     if (stored && records.some((record: SessionReplayRecord): boolean =>
       record.type === ReplayRecordType.FULL_SNAPSHOT && record.slotId === undefined)) {
       this.startedViews.add(this.viewKey(commit.context));
@@ -286,9 +284,7 @@ export class SessionReplayWorkerOperations {
         }
       }
     }
-    if (store === this.errorStore && records.length > 0) {
-      this.errorStore?.pruneBefore(Date.now() - this.errorSampleWindowMs);
-    }
+    this.pruneErrorStore(store, records.length > 0);
     for (let index = 0; index < records.length; index++) {
       if (records[index].type === ReplayRecordType.VIEW_END) {
         this.startedViews.delete(this.viewKey(context));
@@ -296,6 +292,22 @@ export class SessionReplayWorkerOperations {
       }
     }
     return true;
+  }
+
+  public flush(): boolean {
+    const main = this.mainStore?.flush() ?? true;
+    const error = this.errorStore?.flush() ?? true;
+    if (!main || !error) this.lastWriteError = this.mainStore?.getLastWriteError() ??
+      this.errorStore?.getLastWriteError() ?? 'Replay journal seal failed.';
+    return main && error;
+  }
+
+  private pruneErrorStore(store: SessionReplaySegmentStore | null, changed: boolean): void {
+    if (!changed || store === null || store !== this.errorStore || Date.now() - this.lastErrorPruneAt < 1000) return;
+    this.lastErrorPruneAt = Date.now();
+    const cutoff = Date.now() - this.errorSampleWindowMs;
+    store.pruneBefore(cutoff);
+    this.errorResources?.pruneBefore(cutoff, store.getReferencedResourceNames(cutoff));
   }
 
   public getLastWriteError(): string {
@@ -308,10 +320,14 @@ export class SessionReplayWorkerOperations {
 
   public promote(sessionId: string, timestamp: number): boolean {
     if (this.errorStore === null || this.mainStore === null) return false;
+    const retained = this.errorStore.getReferencedResourceNames(timestamp - this.errorSampleWindowMs, sessionId);
+    this.lastPromotedResources = Array.from(retained);
     if (this.errorResources !== null && this.mainResources !== null &&
-      !this.errorResources.promoteSessionWindow(sessionId, timestamp, this.errorSampleWindowMs, this.mainResources)) return false;
+      !this.errorResources.promoteSessionWindow(sessionId, timestamp, this.errorSampleWindowMs, this.mainResources, retained)) return false;
     return this.errorStore.promoteSessionWindow(sessionId, timestamp, this.errorSampleWindowMs, this.mainStore);
   }
+
+  public getLastPromotedResources(): Array<string> { return this.lastPromotedResources.slice(); }
 
   public remove(storeKind: 'main' | 'error' | 'none', ids: Array<string>): boolean {
     const store = storeKind === 'main' ? this.mainStore : (storeKind === 'error' ? this.errorStore : null);
