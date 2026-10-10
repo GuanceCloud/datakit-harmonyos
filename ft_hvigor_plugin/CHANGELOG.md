@@ -2,20 +2,9 @@
 
 ## [0.1.2-alpha01] - 2026-09-29
 
-- Added automatic Session Replay root registration for `@Entry` ArkUI pages.
-  The compiler now injects opaque page-instance tokens and page visibility
-  callbacks in memory, while the optional Replay HAR centrally selects the
-  latest visible, laid-out root.
-- Preserved existing page root IDs and skipped Replay source transformation
-  entirely when the HAP does not declare `@guancecloud/ft_session_replay`.
-- Forwarded real root touch events through the Replay privacy policy while
-  preserving existing application callbacks. Automatic root registration
-  composes outgoing/incoming roots in page-stack drawing order. Page-transition
-  slide and opacity effects use native progress callbacks, preserving existing
-  application callbacks.
-- Added an effect-free default Router transition start hook for pages without
-  `pageTransition()`, preserving the system default animation and existing
-  explicit effects and callbacks.
+- Added automatic Session Replay page registration and visibility tracking for supported `@Entry` ArkUI pages. Declare `@guancecloud/ft_session_replay` in the HAP and initialize `FTSessionReplay`; existing root IDs and page callbacks are preserved.
+- Added automatic root touch capture controlled by Replay's `TouchPrivacy` setting. Existing `onTouch` callbacks and event propagation are preserved.
+- Added capture of `PageTransitionEnter/Exit` slide and opacity effects, plus default Router animations. Existing transition settings and callbacks are preserved; default Router playback is approximate.
 
 ## [0.1.1] - 2026-09-14
 
