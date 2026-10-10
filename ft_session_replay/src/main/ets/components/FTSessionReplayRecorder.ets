@@ -25,7 +25,7 @@ import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
-  ReplayWorkerCommit,
+  ReplayWorkerCapture,
   ReplayWorkerResult,
   ReplaySnapshotKind,
   ReplayStoreKind,
@@ -100,7 +100,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
   private baselineContextKey: string = '';
-  private preparedBaselineSnapshot: SessionReplayRecord | null = null;
+  private readonly pendingManualBaseline: Array<SessionReplayRecord> = [];
   private readonly sampler: SessionReplaySampler;
   private readonly store: SessionReplaySegmentStore | null;
   private readonly errorSampleStore: SessionReplaySegmentStore | null;
@@ -123,6 +123,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
   private readonly errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null;
+  private readonly resourceTouch: ((names: Array<string>, kind: ReplayStoreKind) => void) | null;
   private readonly imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null;
   // Zero means active. A positive timestamp retains the Android-compatible
   // two-second grace period after a WebView slot becomes inactive.
@@ -195,7 +196,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     store: SessionReplaySegmentStore | null = null,
     errorSampleStore: SessionReplaySegmentStore | null = null,
     errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null = null,
-    imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null = null
+    imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null = null,
+    resourceTouch: ((names: Array<string>, kind: ReplayStoreKind) => void) | null = null
   ) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot(), config);
@@ -204,6 +206,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.errorSampleStore = errorSampleStore;
     this.errorSampleResourcePromoter = errorSampleResourcePromoter;
     this.imageResourceWriter = imageResourceWriter;
+    this.resourceTouch = resourceTouch;
     this.workQueue = new SessionReplayWorkQueue({
       filesDir: store?.getFilesDir() ?? errorSampleStore?.getFilesDir() ?? '',
       maxNodes: config.getMaxNodesPerSnapshot(),
@@ -380,6 +383,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.store?.getFilesDir() ?? this.errorSampleStore?.getFilesDir() ?? '';
   }
 
+  public removeUploadedResources(ids: Array<string>, canRemove: () => boolean): Promise<boolean> {
+    return this.workQueue.removeResources(ids, canRemove);
+  }
+
   public listPendingSegmentIds(): Promise<Array<string>> {
     return this.workQueue.listPendingIds();
   }
@@ -440,6 +447,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const fullSnapshot = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale));
     this.persistCapturedImageResources(context, fullSnapshot);
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    if (!this.workQueue.hasPendingWork()) {
+      this.processor.applyCommittedRecords(this.pendingManualBaseline);
+      this.pendingManualBaseline.splice(0);
+    }
     const mutation = !this.workQueue.hasPendingWork() && this.processor.hasBaseline() &&
       this.baselineContextKey === key ? this.processor.createMutationRecord(fullSnapshot) : fullSnapshot;
     if (mutation === null) {
@@ -1016,9 +1027,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   ): void {
     const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
     try {
-      this.workQueue.enqueue(kind, snapshot,
-        (record: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-          this.prepareWorkerSnapshot(context, record, resources),
+      const targetStore = this.getStoreForContext(context);
+      const capture: ReplayWorkerCapture = {
+        context, viewport: this.getRootViewport(snapshot.nodes[0]?.width, snapshot.nodes[0]?.height), previousViewport: this.observedViewport,
+        lastFullSnapshotAt: this.lastFullSnapshotAt,
+        storeKind: targetStore === this.store && targetStore !== null ? 'main' :
+          (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none')
+      };
+      this.workQueue.enqueue(kind, snapshot, capture,
         (result: ReplayWorkerResult | null, error: string): void => {
           try {
             this.completeWorkerSnapshot(kind, context, generation, result, error, rumContext, promoteErrorAt, queuedAt);
@@ -1084,29 +1100,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
   }
 
-  private prepareWorkerSnapshot(
-    context: SessionReplayContext,
-    snapshot: SessionReplayRecord,
-    resources: Array<CapturedReplayImageResource>
-  ): ReplayWorkerCommit | null {
-    // The detached FrameNode handoff was captured with this immutable View
-    // context. A later page switch must not discard its animation frames.
-    this.persistCapturedImageResources(context, snapshot, resources);
-    const targetStore = this.getStoreForContext(context);
-    const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
-      (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
-    const commit: ReplayWorkerCommit = {
-      context,
-      snapshot,
-      viewport: this.getViewportBounds(snapshot),
-      previousViewport: this.observedViewport,
-      lastFullSnapshotAt: this.lastFullSnapshotAt,
-      storeKind
-    };
-    this.preparedBaselineSnapshot = snapshot;
-    return commit;
-  }
-
   private completeWorkerSnapshot(
     kind: ReplaySnapshotKind,
     context: SessionReplayContext,
@@ -1141,9 +1134,18 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         (error === REPLAY_STALE_QUEUE_REASON || Date.now() < this.motionUntil)) this.scheduleAutomaticCapture();
       return;
     }
-    if (currentCapture && this.preparedBaselineSnapshot !== null) {
-      this.processor.setFullSnapshotBaseline(this.preparedBaselineSnapshot);
+    this.resourceTouch?.(result.resourceNames ?? [], result.storeKind);
+    if (currentCapture) {
+      if (this.baselineContextKey !== key) {
+        this.processor.reset();
+        this.pendingManualBaseline.splice(0);
+      }
       this.baselineContextKey = key;
+      this.pendingManualBaseline.push(...result.records);
+      if (this.pendingManualBaseline.length > FTSessionReplayRecorder.MAX_RECORDS_PER_VIEW) {
+        this.pendingManualBaseline.splice(0);
+        this.processor.reset();
+      }
     }
     if (result.records.length === 0) return;
     const capture = this.createCaptureFromWorker(context, result);
@@ -1363,6 +1365,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
             const committedRecords = writtenRecords ?? records;
             if (baselineSnapshot !== null) {
               this.appendRecordedRecords(context, committedRecords, false);
+              this.pendingManualBaseline.splice(0);
               this.processor.setFullSnapshotBaseline(baselineSnapshot);
               this.baselineContextKey = key;
               if (committedRecords.some((record: SessionReplayRecord): boolean =>
@@ -1802,7 +1805,12 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (data.wireframes.length === 0) {
       return null;
     }
-    const root = data.wireframes[0];
+    return this.getRootViewport(data.wireframes[0].width, data.wireframes[0].height);
+  }
+
+  private getRootViewport(width: number | undefined, height: number | undefined): SessionReplayViewportBounds | null {
+    if (width === undefined || height === undefined) return null;
+    const root: ReplayViewport = { width, height };
     if (!Number.isFinite(root.width) || !Number.isFinite(root.height) || root.width <= 0 || root.height <= 0) {
       return null;
     }

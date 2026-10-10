@@ -193,7 +193,7 @@ export class SessionReplayResourceStore {
     return false;
   }
 
-  private markTouched(fileName: string): void {
+  public markTouched(fileName: string): void {
     this.lastTouched.set(fileName, ++this.touchEpoch);
   }
 

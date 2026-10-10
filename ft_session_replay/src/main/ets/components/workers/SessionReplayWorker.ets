@@ -5,6 +5,7 @@ import {
   isReplaySnapshotExpired,
   REPLAY_STALE_QUEUE_REASON,
   ReplayWorkerCommit,
+  ReplayWorkerCapture,
   ReplayWorkerMessage
 } from '../SessionReplayWorkQueue';
 
@@ -29,6 +30,21 @@ port.onmessage = (event: MessageEvents): void => {
     }
     if (message.phase === 'removeImage') {
       operations.unregisterImageAsset(message.componentId!);
+      return;
+    }
+    if (message.phase === 'capture') {
+      if (!message.draining && isReplaySnapshotExpired(message.queuedAt ?? 0, Date.now(), message.kind ?? 'automatic')) {
+        port.postMessage({ id: message.id, phase: 'error', error: REPLAY_STALE_QUEUE_REASON } as ReplayWorkerMessage);
+        return;
+      }
+      const result = operations.capture(message.kind!, message.snapshot as ArkUIReplayLightSnapshot,
+        message.capture as ReplayWorkerCapture);
+      port.postMessage({ id: message.id, phase: 'done', result } as ReplayWorkerMessage);
+      return;
+    }
+    if (message.phase === 'removeResources') {
+      const success = operations.removeResources(message.segmentIds!);
+      port.postMessage({ id: message.id, phase: 'done', success } as ReplayWorkerMessage);
       return;
     }
     if (message.phase === 'materialize') {

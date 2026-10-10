@@ -1,16 +1,18 @@
 import { ArkUIReplayCollector, ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
+import { SessionReplayResourceStore } from './SessionReplayResourceStore';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
   ReplaySnapshotKind,
   ReplayViewport,
   ReplayWorkerCommit,
+  ReplayWorkerCapture,
   ReplayWorkerOptions,
   ReplayWorkerResult
 } from './SessionReplayWorkQueue';
 import {
-  FullSnapshotData, ReplayRecordType, ReplayViewportData, ReplayViewportResizeData, serializeReplayEnvelope,
+  ReplayImageWireframe, FullSnapshotData, ReplayRecordType, ReplayViewportData, ReplayViewportResizeData, serializeReplayEnvelope,
   SessionReplayContext, SessionReplayRecord
 } from './SessionReplayProtocol';
 
@@ -27,6 +29,8 @@ export class SessionReplayWorkerOperations {
   private readonly errorStore: SessionReplaySegmentStore | null;
   private readonly fullSnapshotIntervalMs: number;
   private readonly errorSampleWindowMs: number;
+  private readonly mainResources: SessionReplayResourceStore | null;
+  private readonly errorResources: SessionReplayResourceStore | null;
   private needsFullSnapshot: boolean = false;
   private baselineContextKey: string = '';
   private lastFullSnapshotAt: number = 0;
@@ -46,6 +50,10 @@ export class SessionReplayWorkerOperations {
       new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment);
     this.errorStore = options.filesDir.length === 0 ? null :
       new SessionReplaySegmentStore(options.filesDir, options.maxBytes, options.maxRecordsPerSegment, 'error_segments');
+    this.mainResources = options.filesDir.length === 0 ? null :
+      new SessionReplayResourceStore(options.filesDir, options.maxBytes, 'resources');
+    this.errorResources = options.filesDir.length === 0 ? null :
+      new SessionReplayResourceStore(options.filesDir, options.maxBytes, 'error_resources');
     this.restoreStartedViews();
   }
 
@@ -64,6 +72,52 @@ export class SessionReplayWorkerOperations {
       resources: this.collector.takeCapturedImageResources()
     };
     return materialized;
+  }
+
+  /** Detached nodes enter once; only emitted protocol records leave the Worker. */
+  public capture(kind: ReplaySnapshotKind, light: ArkUIReplayLightSnapshot, capture: ReplayWorkerCapture): ReplayWorkerResult {
+    const materialized = this.materialize(light);
+    const store = capture.storeKind === 'main' ? this.mainResources :
+      (capture.storeKind === 'error' ? this.errorResources : null);
+    const resources = new Map<string, string>();
+    for (const resource of materialized.resources) {
+      const name = store?.put(capture.context, resource.bytes, resource.mimeType) ?? null;
+      if (name !== null) resources.set(resource.token, name);
+    }
+    const data = materialized.record.data as FullSnapshotData;
+    for (let index = 0; index < data.wireframes.length; index++) {
+      const frame = data.wireframes[index];
+      if (frame.type !== 'image' || frame.resourceId === undefined) continue;
+      const name = resources.get(frame.resourceId);
+      if (name !== undefined) frame.resourceId = name;
+      else {
+        const masked: ReplayImageWireframe = {
+          id: frame.id, type: 'image', x: frame.x, y: frame.y,
+          width: frame.width, height: frame.height, isEmpty: true
+        };
+        masked.shapeStyle = frame.shapeStyle;
+        masked.border = frame.border;
+        masked.clip = frame.clip;
+        masked.zIndex = frame.zIndex;
+        masked.permanentId = frame.permanentId;
+        data.wireframes[index] = masked;
+      }
+    }
+    if (capture.storeKind === 'error' && resources.size > 0) {
+      this.errorResources?.pruneBefore(Date.now() - this.errorSampleWindowMs);
+    }
+    const commit: ReplayWorkerCommit = {
+      context: capture.context, snapshot: materialized.record, viewport: capture.viewport,
+      previousViewport: capture.previousViewport, lastFullSnapshotAt: capture.lastFullSnapshotAt,
+      storeKind: capture.storeKind
+    };
+    const result = this.process(kind, commit);
+    result.resourceNames = Array.from(resources.values());
+    return result;
+  }
+
+  public removeResources(ids: Array<string>): boolean {
+    return this.mainResources?.remove(ids) ?? false;
   }
 
   public process(kind: ReplaySnapshotKind, commit: ReplayWorkerCommit): ReplayWorkerResult {
@@ -241,6 +295,8 @@ export class SessionReplayWorkerOperations {
 
   public promote(sessionId: string, timestamp: number): boolean {
     if (this.errorStore === null || this.mainStore === null) return false;
+    if (this.errorResources !== null && this.mainResources !== null &&
+      !this.errorResources.promoteSessionWindow(sessionId, timestamp, this.errorSampleWindowMs, this.mainResources)) return false;
     return this.errorStore.promoteSessionWindow(sessionId, timestamp, this.errorSampleWindowMs, this.mainStore);
   }
 

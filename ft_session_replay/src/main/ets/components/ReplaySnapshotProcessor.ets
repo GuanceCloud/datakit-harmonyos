@@ -48,6 +48,52 @@ export class ReplaySnapshotProcessor {
     this.baselineAvailable = true;
   }
 
+  /** Lazily advance the synchronous API's shadow from already emitted records. */
+  public applyCommittedRecords(records: Array<SessionReplayRecord>): void {
+    for (const record of records) {
+      if (record.slotId !== undefined) continue;
+      if (record.type === ReplayRecordType.FULL_SNAPSHOT) this.setFullSnapshotBaseline(record);
+      else if (record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT && this.baselineAvailable) {
+        const mutation = record.data as ReplayMutationData;
+        if (mutation.source !== 0) continue;
+        for (const remove of mutation.removes) {
+          this.previousWireframes = this.previousWireframes.filter((frame: ReplayWireframe): boolean => frame.id !== remove.id);
+        }
+        for (const add of mutation.adds) {
+          const index = add.previousId === undefined ? -1 :
+            this.previousWireframes.findIndex((frame: ReplayWireframe): boolean => frame.id === add.previousId);
+          this.previousWireframes.splice(index + 1, 0, JSON.parse(JSON.stringify(add.wireframe)) as ReplayWireframe);
+        }
+        for (const update of mutation.updates) {
+          const frame = this.previousWireframes.find((candidate: ReplayWireframe): boolean => candidate.id === update.id);
+          if (frame === undefined) continue;
+          const copy = JSON.parse(JSON.stringify(update)) as ReplayWireframeUpdate;
+          if (copy.x !== undefined) frame.x = copy.x;
+          if (copy.y !== undefined) frame.y = copy.y;
+          if (copy.width !== undefined) frame.width = copy.width;
+          if (copy.height !== undefined) frame.height = copy.height;
+          if (copy.clip !== undefined) frame.clip = copy.clip;
+          if (copy.zIndex !== undefined) frame.zIndex = copy.zIndex;
+          if (frame.type === 'shape' || frame.type === 'text' || frame.type === 'image') {
+            if (copy.shapeStyle !== undefined) frame.shapeStyle = copy.shapeStyle;
+            if (copy.border !== undefined) frame.border = copy.border;
+          }
+          if (frame.type === 'text') {
+            if (copy.text !== undefined) frame.text = copy.text;
+            if (copy.textStyle !== undefined) frame.textStyle = copy.textStyle;
+            if (copy.textPosition !== undefined) frame.textPosition = copy.textPosition;
+          } else if (frame.type === 'image') {
+            if (copy.resourceId !== undefined) frame.resourceId = copy.resourceId;
+            if (copy.base64 !== undefined) frame.base64 = copy.base64;
+            if (copy.mimeType !== undefined) frame.mimeType = copy.mimeType;
+            if (copy.isEmpty !== undefined) frame.isEmpty = copy.isEmpty;
+            if (copy.imageStyle !== undefined) frame.imageStyle = copy.imageStyle;
+          } else if (frame.type === 'placeholder' && copy.label !== undefined) frame.label = copy.label;
+        }
+      }
+    }
+  }
+
   public createViewStartRecords(
     fullSnapshot: SessionReplayRecord,
     viewportWidth?: number,

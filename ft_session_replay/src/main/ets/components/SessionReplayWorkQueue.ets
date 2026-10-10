@@ -33,7 +33,15 @@ export function isReplaySnapshotExpired(
   return kind !== 'start' && kind !== 'transition' && kind !== 'settled' && now - queuedAt > 1000;
 }
 
-export interface ReplayWorkerCommit {
+export interface ReplayWorkerCapture {
+  context: SessionReplayContext;
+  viewport: ReplayViewport | null;
+  previousViewport: ReplayViewport | null;
+  lastFullSnapshotAt: number;
+  storeKind: ReplayStoreKind;
+}
+
+export interface ReplayWorkerCommit extends ReplayWorkerCapture {
   context: SessionReplayContext;
   snapshot: SessionReplayRecord;
   viewport: ReplayViewport | null;
@@ -52,6 +60,7 @@ export interface ReplayWorkerResult {
   viewport: ReplayViewport | null;
   storeKind: ReplayStoreKind;
   segmentIds: Array<string>;
+  resourceNames?: Array<string>;
 }
 
 export interface ReplayWorkerMessage {
@@ -61,6 +70,7 @@ export interface ReplayWorkerMessage {
   snapshot?: ArkUIReplayLightSnapshot | SessionReplayRecord;
   resources?: Array<CapturedReplayImageResource>;
   commit?: ReplayWorkerCommit;
+  capture?: ReplayWorkerCapture;
   result?: ReplayWorkerResult;
   queuedAt?: number;
   draining?: boolean;
@@ -87,10 +97,11 @@ interface ReplayWorkerEvent {
 
 interface ReplayQueuedJob {
   id: number;
-  kind: ReplaySnapshotKind | 'records' | 'promote' | 'remove' | 'list' | 'barrier';
+  kind: ReplaySnapshotKind | 'records' | 'promote' | 'remove' | 'removeResources' | 'list' | 'barrier';
   snapshot?: ArkUIReplayLightSnapshot;
   queuedAt: number;
-  prepare?: (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>) => ReplayWorkerCommit | null;
+  capture?: ReplayWorkerCapture;
+  canRemove?: () => boolean;
   complete?: (result: ReplayWorkerResult | null, error: string) => void;
   context?: SessionReplayContext;
   records?: Array<SessionReplayRecord>;
@@ -164,7 +175,7 @@ export class SessionReplayWorkQueue {
   public enqueue(
     kind: ReplaySnapshotKind,
     snapshot: ArkUIReplayLightSnapshot,
-    prepare: (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>) => ReplayWorkerCommit | null,
+    capture: ReplayWorkerCapture,
     complete: (result: ReplayWorkerResult | null, error: string) => void
   ): void {
     if (this.closing) {
@@ -175,7 +186,7 @@ export class SessionReplayWorkQueue {
       complete(null, this.unavailableReason);
       return;
     }
-    this.addJob({ id: ++this.nextId, kind, snapshot, queuedAt: Date.now(), prepare, complete });
+    this.addJob({ id: ++this.nextId, kind, snapshot, queuedAt: Date.now(), capture, complete });
     this.dispatch();
   }
 
@@ -232,6 +243,15 @@ export class SessionReplayWorkQueue {
       segmentIds: segmentIds.slice(), finish });
     this.dispatch();
     return true;
+  }
+
+  public removeResources(ids: Array<string>, canRemove: () => boolean): Promise<boolean> {
+    if (this.closing) return this.closedPromise.then((): boolean => false);
+    return new Promise<boolean>((resolve: (success: boolean) => void): void => {
+      this.addJob({ id: ++this.nextId, kind: 'removeResources', queuedAt: Date.now(),
+        segmentIds: ids.slice(), canRemove, finish: (success: boolean): void => resolve(success) });
+      this.dispatch();
+    });
   }
 
   public listPendingIds(): Promise<Array<string>> {
@@ -433,11 +453,15 @@ export class SessionReplayWorkQueue {
         }
         continue;
       }
+      if (job.kind === 'removeResources' && !job.canRemove?.()) {
+        job.finish?.(false, 'Resource was reused after upload started.');
+        continue;
+      }
       this.active = job;
       try {
         if (this.isSnapshot(job)) {
           this.thread?.postMessage({
-            id: job.id, phase: 'materialize', kind: job.kind,
+            id: job.id, phase: 'capture', kind: job.kind, capture: job.capture,
             snapshot: job.snapshot, queuedAt: job.queuedAt, draining: this.closing
           } as ReplayWorkerMessage);
         } else {
@@ -461,19 +485,6 @@ export class SessionReplayWorkQueue {
     const message = (event as Object as ReplayWorkerEvent).data;
     const job = this.active;
     if (job === null || message.id !== job.id) return;
-    if (message.phase === 'materialized' && this.isSnapshot(job)) {
-      try {
-        const commit = job.prepare?.(message.snapshot as SessionReplayRecord, message.resources ?? []) ?? null;
-        if (commit === null) {
-          this.finish(null, 'Session Replay snapshot was invalidated before processing.');
-          return;
-        }
-        this.thread?.postMessage({ id: job.id, phase: 'process', kind: job.kind, commit } as ReplayWorkerMessage);
-      } catch (error) {
-        this.finish(null, String(error));
-      }
-      return;
-    }
     if (message.phase === 'done') {
       this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? [],
         message.records);
@@ -483,7 +494,7 @@ export class SessionReplayWorkQueue {
       if (this.closing && this.isSnapshot(job) && message.error === REPLAY_STALE_QUEUE_REASON) {
         try {
           this.thread?.postMessage({
-            id: job.id, phase: 'materialize', kind: job.kind,
+            id: job.id, phase: 'capture', kind: job.kind, capture: job.capture,
             snapshot: job.snapshot, queuedAt: job.queuedAt, draining: true
           } as ReplayWorkerMessage);
         } catch (error) {

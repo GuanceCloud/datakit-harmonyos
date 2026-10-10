@@ -88,7 +88,11 @@ export class FTSessionReplay {
         return errorResourceStorage.promoteSessionWindow(sessionId, timestamp, errorWindowMs, resourceStorage);
       },
       (context: SessionReplayContext, data: Uint8Array, mimeType: string): string | null =>
-        this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType)
+        this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType),
+      (names: Array<string>, kind: string): void => {
+        const store = kind === 'error' ? errorResourceStorage : resourceStorage;
+        for (const name of names) store?.markTouched(name);
+      }
     );
     recorder.start();
     this.recorder = recorder;
@@ -466,6 +470,10 @@ export class FTSessionReplay {
         return segmentStorage.remove([id]);
       },
       (ids: Array<string>, touchEpoch: number): Promise<boolean> => {
+        const recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          return recorder.removeUploadedResources(ids, (): boolean => !resourceStorage.wasTouchedAfter(ids, touchEpoch));
+        }
         if (resourceStorage.wasTouchedAfter(ids, touchEpoch)) return Promise.resolve(false);
         return Promise.resolve(resourceStorage.remove(ids));
       }
