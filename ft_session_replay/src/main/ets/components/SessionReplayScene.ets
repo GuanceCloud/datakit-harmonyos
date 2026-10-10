@@ -39,6 +39,10 @@ export interface ArkUIReplayLightNode {
   nodeType: string;
   inspectorInfo: Object | null;
   shouldCaptureAsText: boolean;
+  /** Native Select spinner, rendered from a fixed safe vector instead of its platform font. */
+  isSelectArrow?: boolean;
+  /** Internal Select label's owner; native Inspector can omit the child's content. */
+  selectLabelOwnerId?: number;
   isRoot: boolean;
   usedTransformedPosition: boolean;
   opacity?: number;
@@ -233,6 +237,8 @@ export class SessionReplayScene {
           id: source.id, x, y, width: source.width, height: source.height,
           componentId: source.componentId, nodeType: source.nodeType, inspectorInfo: source.inspectorInfo,
           shouldCaptureAsText: source.shouldCaptureAsText, isRoot: source.isRoot,
+          isSelectArrow: source.isSelectArrow,
+          selectLabelOwnerId: source.selectLabelOwnerId,
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface

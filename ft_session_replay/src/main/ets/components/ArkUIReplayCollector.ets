@@ -46,6 +46,7 @@ interface RegisteredImageAsset {
 }
 
 interface CachedReplayProperties {
+  selectLabel: string | null;
   inspector: string | null;
   signature: string;
   frame: ReplayWireframe;
@@ -296,11 +297,13 @@ export class ArkUIReplayCollector {
     return { timestamp, vpToPxScale: scale, nodes };
   }
 
-  private cachedWireframe(node: ArkUIReplayLightNode, inspector: string | null, scale: number): ReplayWireframe {
+  private cachedWireframe(
+    node: ArkUIReplayLightNode, inspector: string | null, scale: number, selectLabel: string | null
+  ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
-      `${node.shouldCaptureAsText}|${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
+      `${node.shouldCaptureAsText}|${node.isSelectArrow}|${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
     const cached = this.propertyCache.get(node.id);
-    if (cached !== undefined && cached.inspector === inspector && cached.signature === signature) {
+    if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
       const frame = copyReplayWireframe(cached.frame);
       frame.x = node.x;
       frame.y = node.y;
@@ -311,14 +314,15 @@ export class ArkUIReplayCollector {
       return frame;
     }
     const frame = this.createWireframe(node.id, node.x, node.y, node.width, node.height,
-      node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale);
+      node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale, node.isSelectArrow === true, selectLabel);
     this.appendCommonVisualProperties(frame, inspector);
-    this.propertyCacheChars -= cached?.inspector?.length ?? 0;
-    this.propertyCacheChars += inspector?.length ?? 0;
-    this.propertyCache.set(node.id, { inspector, signature, frame: copyReplayWireframe(frame) });
+    this.propertyCacheChars -= (cached?.inspector?.length ?? 0) + (cached?.selectLabel?.length ?? 0);
+    this.propertyCacheChars += (inspector?.length ?? 0) + (selectLabel?.length ?? 0);
+    this.propertyCache.set(node.id, { inspector, selectLabel, signature, frame: copyReplayWireframe(frame) });
     while (this.propertyCacheChars > 2 * 1024 * 1024 || this.propertyCache.size > this.maxNodes) {
       const oldest = this.propertyCache.keys().next().value as number;
-      this.propertyCacheChars -= this.propertyCache.get(oldest)?.inspector?.length ?? 0;
+      const evicted = this.propertyCache.get(oldest);
+      this.propertyCacheChars -= (evicted?.inspector?.length ?? 0) + (evicted?.selectLabel?.length ?? 0);
       this.propertyCache.delete(oldest);
     }
     return frame;
@@ -361,11 +365,18 @@ export class ArkUIReplayCollector {
     const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
     const retained = new Set<number>();
+    const selectInspectors = new Map<number, string | null>();
+    for (const node of snapshot.nodes) {
+      if (node.nodeType === 'Select') selectInspectors.set(node.id, this.serializeInspectorInfo(node.inspectorInfo));
+    }
     for (let index = 0; index < snapshot.nodes.length; index++) {
       const node = snapshot.nodes[index];
-      const inspector = this.serializeInspectorInfo(node.inspectorInfo);
+      const inspector = node.nodeType === 'Select' ? selectInspectors.get(node.id) ?? null :
+        this.serializeInspectorInfo(node.inspectorInfo);
+      const selectLabel = node.selectLabelOwnerId === undefined ? null :
+        this.readInspectorString(selectInspectors.get(node.selectLabelOwnerId) ?? null, ['value']);
       retained.add(node.id);
-      const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale);
+      const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
 
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
       // Use a canonical zero clip for unclipped nodes so applying a clearing
@@ -395,7 +406,7 @@ export class ArkUIReplayCollector {
     this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
       if (!retained.has(id)) {
         this.propertyCache.delete(id);
-        this.propertyCacheChars -= cached.inspector?.length ?? 0;
+        this.propertyCacheChars -= (cached.inspector?.length ?? 0) + (cached.selectLabel?.length ?? 0);
       }
     });
     pageZIndices.forEach((indices: Array<number>): void => { indices.sort((left: number, right: number): number => left - right); });
@@ -449,7 +460,11 @@ export class ArkUIReplayCollector {
     sceneOffsetX: number = 0,
     sceneOffsetY: number = 0,
     excludedIds: Set<number> = new Set(),
-    nodeBudget: number = this.maxNodes
+    nodeBudget: number = this.maxNodes,
+    parentType: string = '',
+    grandparentType: string = '',
+    parentId: number = 0,
+    grandparentId: number = 0
   ): void {
     if (output.length >= nodeBudget) {
       return;
@@ -507,8 +522,8 @@ export class ArkUIReplayCollector {
     // Keep attached nodes and their original geometry while they move through
     // a clipping boundary. Fully clipped nodes remain present with an empty
     // clip instead of being removed and added again when they slide back in.
+    const nodeType = this.readNodeType(node);
     if (width > 0 && height > 0) {
-      const nodeType = this.readNodeType(node);
       output.push({
         id: this.toProtocolId(nodeId),
         x,
@@ -519,6 +534,9 @@ export class ArkUIReplayCollector {
         nodeType,
         inspectorInfo: this.readInspectorInfo(node),
         shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
+        isSelectArrow: nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select',
+        selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
+          this.toProtocolId(grandparentId) : undefined,
         isRoot,
         usedTransformedPosition,
         opacity,
@@ -533,7 +551,8 @@ export class ArkUIReplayCollector {
       return;
     }
     while (child !== null && output.length < nodeBudget) {
-      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY, excludedIds, nodeBudget);
+      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
+        excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId);
       try {
         child = child.getNextSibling();
       } catch (_) {
@@ -635,10 +654,15 @@ export class ArkUIReplayCollector {
     inspector: string | null,
     shouldCaptureAsText: boolean,
     isRoot: boolean,
-    vpToPxScale: number
+    vpToPxScale: number,
+    isSelectArrow: boolean = false,
+    selectLabel: string | null = null
   ): ReplayWireframe {
+    if (isSelectArrow) {
+      return this.createSelectArrowWireframe(id, x, y, width, height, componentId, inspector, vpToPxScale);
+    }
     if (shouldCaptureAsText) {
-      return this.createTextWireframe(id, x, y, width, height, componentId, nodeType, inspector, vpToPxScale);
+      return this.createTextWireframe(id, x, y, width, height, componentId, nodeType, inspector, vpToPxScale, selectLabel);
     }
     if (this.isImageNode(nodeType)) {
       return this.createImageWireframe(id, x, y, width, height, componentId, nodeType, inspector, vpToPxScale);
@@ -682,9 +706,14 @@ export class ArkUIReplayCollector {
     componentId: string,
     nodeType: string,
     inspector: string | null,
-    vpToPxScale: number
+    vpToPxScale: number,
+    selectLabel: string | null = null
   ): ReplayTextWireframe {
-    const rawText = this.readInspectorString(inspector, ['text', 'content', 'value', 'placeholder', 'label']);
+    let rawText = this.readInspectorString(inspector, ['text', 'content', 'value', 'placeholder', 'label']);
+    // Native Select can paint a styled label while its Text Inspector reports
+    // empty content. Use only the owning Select's public value as fallback;
+    // keep the child geometry/typography and apply the normal text privacy.
+    if ((rawText === null || rawText.length === 0) && selectLabel !== null) rawText = selectLabel;
     const text: ReplayTextWireframe = {
       id, x, y, width, height,
       type: 'text',
@@ -699,7 +728,7 @@ export class ArkUIReplayCollector {
     if (border !== null) {
       text.border = border;
     }
-    const textPosition = this.createTextPosition(inspector, vpToPxScale);
+    const textPosition = this.createTextPosition(inspector, vpToPxScale, nodeType);
     if (textPosition !== undefined) {
       text.textPosition = textPosition;
     }
@@ -707,6 +736,29 @@ export class ArkUIReplayCollector {
       text.permanentId = componentId;
     }
     return text;
+  }
+
+  private createSelectArrowWireframe(
+    id: number, x: number, y: number, width: number, height: number,
+    componentId: string, inspector: string | null, vpToPxScale: number
+  ): ReplayImageWireframe {
+    // The native Select spinner uses HM Symbol, which the web player cannot
+    // render. This constant triangle contains no application text or pixels.
+    // Keep its native bounds/transform and the Inspector's symbol tint.
+    const value = this.getInspectorValue(inspector);
+    const colors = value === null ? null : this.findInspectorStringArray(value, ['fontColor', 'symbolColorList']);
+    const color = this.normalizeTextColor(colors?.[0] ?? null) ?? this.readRenderedTextColor(inspector) ?? '#000000E5';
+    const alpha = parseInt(color.substring(7, 9), 16) / 255;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 38 56">` +
+      `<path d="M3 18H35Q38 18 36 21L21 40Q19 43 17 40L2 21Q0 18 3 18Z" ` +
+      `fill="${color.substring(0, 7)}" fill-opacity="${alpha}"/></svg>`;
+    const arrow: ReplayImageWireframe = {
+      id, x, y, width, height, type: 'image', isEmpty: false, mimeType: 'image/svg+xml',
+      base64: new util.Base64Helper().encodeToStringSync(util.TextEncoder.create('utf-8').encodeInto(svg)),
+      shapeStyle: this.createShapeStyle('SymbolGlyph', inspector, false, width, height, vpToPxScale)
+    };
+    if (componentId.length > 0) arrow.permanentId = componentId;
+    return arrow;
   }
 
   private createImageWireframe(
@@ -872,9 +924,12 @@ export class ArkUIReplayCollector {
   }
 
   private createTextStyle(inspector: string | null, vpToPxScale: number): ReplayTextStyle {
-    const size = this.readInspectorLength(inspector, ['fontSize', 'textSize'], vpToPxScale);
-    const color = this.normalizeColor(this.readInspectorString(inspector, ['fontColor', 'textColor', 'color']));
-    const family = this.readInspectorString(inspector, ['fontFamily', 'font']) ?? DEFAULT_FONT_FAMILY;
+    const size = this.readInspectorLength(inspector, ['actualFontSize', 'fontSize', 'textSize'], vpToPxScale) ??
+      this.readInspectorNestedLength(inspector, ['font'], ['size', 'fontSize'], vpToPxScale);
+    const color = this.readRenderedTextColor(inspector);
+    const family = this.readInspectorString(inspector, ['fontFamily']) ??
+      this.readInspectorNestedString(inspector, ['font'], ['family', 'fontFamily']) ??
+      this.readInspectorString(inspector, ['font']) ?? DEFAULT_FONT_FAMILY;
     // If Inspector did not expose typography, a stable 14vp fallback is less
     // misleading than deriving a huge font from the node's container height.
     const style: ReplayTextStyle = {
@@ -882,8 +937,10 @@ export class ArkUIReplayCollector {
       size: Math.max(8, Math.min(72, Math.round(size === null ? 14 : size))),
       color: color === null ? DEFAULT_TEXT_COLOR : color
     };
-    const weight = this.normalizeFontWeight(this.readInspectorString(inspector, ['fontWeight', 'weight']));
-    const fontStyle = this.normalizeFontStyle(this.readInspectorString(inspector, ['fontStyle', 'style']));
+    const weight = this.normalizeFontWeight(this.readInspectorString(inspector, ['fontWeight', 'weight']) ??
+      this.readInspectorNestedString(inspector, ['font'], ['weight', 'fontWeight']));
+    const fontStyle = this.normalizeFontStyle(this.readInspectorString(inspector, ['fontStyle', 'style']) ??
+      this.readInspectorNestedString(inspector, ['font'], ['style', 'fontStyle']));
     const lineHeight = this.readInspectorLength(inspector, ['lineHeight'], vpToPxScale);
     const letterSpacing = this.readInspectorLength(inspector, ['letterSpacing', 'letterSpace'], vpToPxScale);
     const decoration = this.normalizeTextDecoration(this.readInspectorString(
@@ -897,12 +954,31 @@ export class ArkUIReplayCollector {
     return style;
   }
 
+  private readRenderedTextColor(inspector: string | null): string | null {
+    // ArkUI propagates inherited foreground colors into each descendant's
+    // RenderContext. Its Inspector foregroundColor is the painted color,
+    // whereas fontColor can still contain the Text theme's default (e.g. a
+    // custom Button's white label). Prefer that resolved value so we also
+    // preserve explicit child overrides without guessing from parent styles.
+    const foreground = this.normalizeTextColor(this.readInspectorString(inspector, ['foregroundColor']));
+    if (foreground !== null) return foreground;
+    return this.normalizeTextColor(this.readInspectorString(inspector, ['fontColor', 'textColor', 'color']));
+  }
+
+  private normalizeTextColor(value: string | null): string | null {
+    // Color::FOREGROUND (0x00000001) references the RenderContext color; it
+    // is not transparent blue. Keep this check specific to text, since other
+    // visual properties and real transparent text must retain their alpha.
+    if (value !== null && /^(?:#|0x)00000001$/i.test(value.trim())) return null;
+    return this.normalizeColor(value);
+  }
+
   /**
    * `textPosition` is already understood by Studio's Android wireframe
    * renderer. Supplying the native insets and alignment fixes the common
    * top-left/default-layout fallback without extending the wire protocol.
    */
-  private createTextPosition(inspector: string | null, vpToPxScale: number): ReplayTextPosition | undefined {
+  private createTextPosition(inspector: string | null, vpToPxScale: number, nodeType: string): ReplayTextPosition | undefined {
     const shorthand = this.readInspectorInsets(inspector, ['padding'], vpToPxScale);
     let top = this.readInspectorLength(inspector, ['paddingTop', 'topPadding'], vpToPxScale);
     let right = this.readInspectorLength(inspector, ['paddingRight', 'rightPadding'], vpToPxScale);
@@ -912,12 +988,14 @@ export class ArkUIReplayCollector {
     if (right === null && shorthand !== undefined && shorthand.right !== undefined) right = shorthand.right;
     if (bottom === null && shorthand !== undefined && shorthand.bottom !== undefined) bottom = shorthand.bottom;
     if (left === null && shorthand !== undefined && shorthand.left !== undefined) left = shorthand.left;
+    const blockAlignment = this.readInspectorString(inspector, ['align', 'alignment']);
+    const direction = this.readInspectorString(inspector, ['textDirection', 'direction']);
     const horizontal = this.normalizeHorizontalAlignment(
-      this.readInspectorString(inspector, ['textAlign', 'horizontalAlign', 'alignment'])
-    );
+      this.readInspectorString(inspector, ['textAlign', 'horizontalAlign']), direction?.toLowerCase().includes('rtl') === true
+    ) ?? this.normalizeHorizontalAlignment(blockAlignment);
     const vertical = this.normalizeVerticalAlignment(
-      this.readInspectorString(inspector, ['verticalAlign', 'verticalAlignment', 'alignment'])
-    );
+      this.readInspectorString(inspector, ['verticalAlign', 'verticalAlignment'])
+    ) ?? this.normalizeBlockVerticalAlignment(blockAlignment) ?? (nodeType === 'Text' || nodeType === 'Span' ? 'center' : null);
     if (top === null && right === null && bottom === null && left === null && horizontal === null && vertical === null) {
       return undefined;
     }
@@ -1238,6 +1316,12 @@ export class ArkUIReplayCollector {
           typeof candidate === 'object' && !Array.isArray(candidate)) {
           return candidate as Record<string, Object>;
         }
+        // ArkUI serializes padding, borderRadius and font as JSON strings.
+        // Decode only a requested named object, never arbitrary Inspector data.
+        if (property.toLowerCase() === expected && typeof candidate === 'string') {
+          const parsed = this.getInspectorValue(candidate);
+          if (parsed !== null) return parsed;
+        }
       }
     }
     const properties = Object.keys(value);
@@ -1267,11 +1351,14 @@ export class ArkUIReplayCollector {
       const properties = Object.keys(value);
       for (let propertyIndex = 0; propertyIndex < properties.length; propertyIndex++) {
         const property = properties[propertyIndex];
-        const candidate: Object = value[property];
+        let candidate: Object = value[property];
+        if (property.toLowerCase() === expected && typeof candidate === 'string' && candidate.trim().startsWith('[')) {
+          try { candidate = JSON.parse(candidate) as Object; } catch (_) { }
+        }
         if (property.toLowerCase() === expected && Array.isArray(candidate)) {
           const result: Array<string> = [];
           const values = candidate as Array<Object>;
-          for (let index = 0; index < values.length; index++) {
+          for (let index = 0; index < Math.min(values.length, 32); index++) {
             const scalar = this.inspectorScalarToString(values[index]);
             if (scalar === null) return null;
             result.push(scalar);
@@ -1340,13 +1427,12 @@ export class ArkUIReplayCollector {
    * control while retaining the common uniform-radius case exactly.
    */
   private readCornerRadius(inspector: string | null, vpToPxScale: number): number | null {
-    const scalar = this.readInspectorLength(inspector, ['borderRadius', 'cornerRadius', 'radius'], vpToPxScale);
-    if (scalar !== null) {
-      return scalar;
-    }
+    // Read the named corner object before a recursive scalar fallback. Native
+    // Inspector also includes foregroundEffect.radius and shadow.radius; their
+    // default zero must not replace a control's real borderRadius object.
     const radius = this.readInspectorObject(inspector, ['borderRadius', 'cornerRadius', 'radius']);
     if (radius === null) {
-      return null;
+      return this.readInspectorLength(inspector, ['borderRadius', 'cornerRadius', 'radius'], vpToPxScale);
     }
     const cornerKeys = [
       'topLeft', 'topRight', 'bottomRight', 'bottomLeft', 'topStart', 'topEnd', 'bottomStart', 'bottomEnd'
@@ -1362,7 +1448,7 @@ export class ArkUIReplayCollector {
         largest = length;
       }
     }
-    return largest;
+    return largest ?? this.readInspectorLength(inspector, ['borderRadius', 'cornerRadius', 'radius'], vpToPxScale);
   }
 
   private parseInspectorLength(value: string, vpToPxScale: number): number | null {
@@ -1392,7 +1478,7 @@ export class ArkUIReplayCollector {
     vpToPxScale: number
   ): ReplayInsets | undefined {
     const shorthand = this.readInspectorString(inspector, keys);
-    if (shorthand !== null) {
+    if (shorthand !== null && !shorthand.trim().startsWith('{')) {
       const values = shorthand.trim().split(/[\s,]+/);
       if (values.length >= 1 && values.length <= 4) {
         const normalized: Array<number> = [];
@@ -1443,21 +1529,37 @@ export class ArkUIReplayCollector {
     return insets;
   }
 
-  private normalizeHorizontalAlignment(value: string | null): 'left' | 'right' | 'center' | null {
+  private normalizeHorizontalAlignment(value: string | null, rtl: boolean = false): 'left' | 'right' | 'center' | null {
     if (value === null) return null;
     const normalized = value.toLowerCase();
-    if (normalized.includes('center') || normalized.includes('middle')) return 'center';
-    if (normalized.includes('right') || normalized.includes('end')) return 'right';
-    if (normalized.includes('left') || normalized.includes('start')) return 'left';
+    if (normalized.includes('right')) return 'right';
+    if (normalized.includes('left')) return 'left';
+    if (normalized.includes('end')) return rtl ? 'left' : 'right';
+    if (normalized.includes('start')) return rtl ? 'right' : 'left';
+    if (normalized.includes('center') || normalized.includes('middle') ||
+      normalized.includes('top') || normalized.includes('bottom')) return 'center';
     return null;
   }
 
   private normalizeVerticalAlignment(value: string | null): 'top' | 'bottom' | 'center' | null {
     if (value === null) return null;
     const normalized = value.toLowerCase();
+    if (normalized.includes('bottom')) return 'bottom';
+    if (normalized.includes('top')) return 'top';
     if (normalized.includes('center') || normalized.includes('middle')) return 'center';
-    if (normalized.includes('bottom') || normalized.includes('end')) return 'bottom';
-    if (normalized.includes('top') || normalized.includes('start')) return 'top';
+    if (normalized.includes('end')) return 'bottom';
+    if (normalized.includes('start')) return 'top';
+    return null;
+  }
+
+  private normalizeBlockVerticalAlignment(value: string | null): 'top' | 'bottom' | 'center' | null {
+    if (value === null) return null;
+    const normalized = value.toLowerCase();
+    if (normalized.includes('top')) return 'top';
+    if (normalized.includes('bottom')) return 'bottom';
+    // Alignment.Start/End place a block at centre-left/right. They are not
+    // the top/bottom meanings of the separate VerticalAlign enum.
+    if (/center|middle|start|end|left|right/.test(normalized)) return 'center';
     return null;
   }
 
