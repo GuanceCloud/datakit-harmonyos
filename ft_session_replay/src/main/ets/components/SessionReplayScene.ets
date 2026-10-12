@@ -51,7 +51,7 @@ export interface ArkUIReplayLightNode {
   isPageSurface?: boolean;
   /** Resolved window appearance for native material surfaces using System mode. */
   isDarkMode?: boolean;
-  /** Registered PNG for a privacy-approved native symbol or inline media Text. */
+  /** Registered PNG for a privacy-approved native symbol, inline media Text, or RichEditor. */
   componentRasterKey?: string;
 }
 

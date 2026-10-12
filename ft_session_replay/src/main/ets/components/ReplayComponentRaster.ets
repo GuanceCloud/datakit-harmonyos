@@ -13,7 +13,7 @@ interface RasterEntry {
 
 export interface ReplayRasterState { key?: string; pending: boolean; }
 
-/** Small, asynchronous native component fallback. Never snapshots a page or an input. */
+/** Bounded asynchronous native fallback; the collector approves component types and privacy first. */
 export class ReplayComponentRaster {
   private readonly entries: Map<number, RasterEntry> = new Map();
   private generation: number = 0;
@@ -36,18 +36,18 @@ export class ReplayComponentRaster {
   }
 
   public request(uiContext: UIContext | null, id: number, componentId: string, signature: string,
-    physicalArea: number): ReplayRasterState {
+    physicalArea: number, maxPhysicalArea: number = 262144, retryOnThrottle: boolean = false): ReplayRasterState {
     let entry = this.entries.get(id);
     if (entry !== undefined && entry.signature === signature) {
       entry.touched = Date.now();
       return { key: entry.ready ? entry.key : undefined, pending: entry.pending };
     }
     const key = entry?.ready === true ? entry.key : undefined;
-    if (uiContext === null || physicalArea <= 0 || physicalArea > 262144) return { key, pending: false };
+    if (uiContext === null || physicalArea <= 0 || physicalArea > Math.min(1048576, maxPhysicalArea)) return { key, pending: false };
     if (entry?.pending === true || this.inFlight >= 2) return { key, pending: true };
     // Layout can be reported for a frame requested by Replay itself. Retain
     // the last approved bitmap during refresh, and bound repeated packing.
-    if (entry?.ready === true && Date.now() - entry.updatedAt < 200) return { key, pending: false };
+    if (entry?.ready === true && Date.now() - entry.updatedAt < 200) return { key, pending: retryOnThrottle };
     if (entry === undefined) {
       while (this.entries.size >= 32) this.evictOldest();
       entry = { signature, key: `ft-replay-raster-${this.generation}-${id}-${++this.revision}`,

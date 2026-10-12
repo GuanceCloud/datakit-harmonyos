@@ -212,6 +212,61 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('uses native input type before unspecified content type and keeps placeholder styling separate', 0, () => {
+      const attrs: Record<string, Object> = { 'text': 'Demo-Password', 'placeholder': '密码提示',
+        'type': 'InputType.Password', 'contentType': 'TextContentType.UNSPECIFIED',
+        'fontColor': '#E5000000', 'placeholderColor': '#99000000', 'fontSize': '16fp',
+        'placeholderFont': '{"size":"14fp","weight":"500","fontFamily":"sans-serif"}',
+        'align': 'Alignment.Center', 'borderWidth': '0vp' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 240, 40).withNodeType('TextInput')
+        .withInspector({ '$type': 'TextInput', 'type': 'build-in', '$attrs': attrs } as Record<string, Object>);
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const password = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe;
+      expect(password.text).assertEqual('•'.repeat('Demo-Password'.length));
+      expect(password.border === undefined).assertTrue();
+      attrs['type'] = '2';
+      expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .text).assertEqual('•'.repeat('Demo-Password'.length));
+      attrs['type'] = 'InputType.Password';
+      attrs['text'] = '';
+      const placeholder = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe;
+      expect(placeholder.text).assertEqual('密码提示');
+      expect(placeholder.textStyle.color).assertEqual('#00000099');
+      expect(placeholder.textStyle.size).assertEqual(14);
+      expect(placeholder.textStyle.weight).assertEqual(500);
+      attrs['type'] = 'InputType.Normal';
+      attrs['text'] = 'Public copy';
+      expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .text).assertEqual('Public copy');
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
+      attrs['text'] = '';
+      expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .text.includes('密码')).assertFalse();
+    });
+
+    it('lets SearchField own its text and applies input privacy to SearchField and RichEditor descendants', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 240, 40).withNodeType('Search');
+      const field = root.append(new ReplayFrameNodeFixture(2, 30, 0, 30, 0, 140, 40).withNodeType('SearchField')
+        .withInspector({ 'text': 'Search value', 'type': 'TextAreaType.NORMAL' } as Record<string, Object>));
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const search = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      expect(search[0].type).assertEqual('shape');
+      expect((search[1] as ReplayTextWireframe).text).assertEqual('Search value');
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL_INPUTS);
+      expect(((collector.captureFrameNode(asFrameNode(field)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .text.includes('Search')).assertFalse();
+      const editor = new ReplayFrameNodeFixture(3, 0, 0, 0, 0, 240, 160).withNodeType('RichEditor')
+        .withInspector({ 'align': 'Alignment.Center' } as Record<string, Object>);
+      editor.append(new ReplayFrameNodeFixture(4, 10, 10, 10, 10, 100, 30).withNodeType('Text')
+        .withInspector({ 'content': 'Private editor descendant' } as Record<string, Object>));
+      const data = (collector.captureFrameNode(asFrameNode(editor)).data as FullSnapshotData).wireframes;
+      expect(data.length).assertEqual(1);
+      expect((data[0] as ReplayTextWireframe).text.includes('•')).assertTrue();
+      expect((data[0] as ReplayTextWireframe).textPosition?.alignment?.vertical).assertEqual('top');
+    });
+
     it('honors text and image privacy for native raster keys and keeps their geometry', 0, () => {
       const root = new ReplayFrameNodeFixture(1, 10, 20, 10, 20, 200, 60).withNodeType('Text')
         .withInspector({ 'content': 'Public inline copy' } as Record<string, Object>);
@@ -238,6 +293,14 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const masked = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe;
       expect(masked.type).assertEqual('text');
       expect(masked.text.includes('Public')).assertFalse();
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
+      root.withNodeType('RichEditor');
+      const editorLight = collector.captureFrameNodeLight(asFrameNode(root), 2);
+      editorLight.nodes[0].componentRasterKey = 'inline-raster';
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE);
+      expect((collector.materializeLightSnapshot(editorLight).data as FullSnapshotData).wireframes[0].type).assertEqual('image');
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL_INPUTS);
+      expect((collector.materializeLightSnapshot(editorLight).data as FullSnapshotData).wireframes[0].type).assertEqual('text');
       expect(collector.takeCapturedImageResources().length).assertEqual(0);
       config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL);
       expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('text');

@@ -117,6 +117,7 @@ export class ArkUIReplayCollector {
   private rasterContext: UIContext | null = null;
   private rasterLayoutEpoch: number = 0;
   private inlineMediaOwners: Set<number> | null = null;
+  private editorContentSignatures: Map<number, string> | null = null;
   private activeComponentAnimations: boolean = false;
   private captureTimestamp: number = 0;
 
@@ -145,6 +146,7 @@ export class ArkUIReplayCollector {
   public invalidateComponentRasters(): void {
     this.rasterLayoutEpoch++;
     this.inlineMediaOwners = null;
+    this.editorContentSignatures = null;
   }
 
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
@@ -461,7 +463,9 @@ export class ArkUIReplayCollector {
       return frame;
     }
     const canUseRaster = node.componentRasterKey !== undefined && this.canCaptureImage(node.width, node.height, scale) &&
-      (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL);
+      (node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor') &&
+      (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL) &&
+      (node.nodeType !== 'RichEditor' || this.canCaptureEditor(inspector));
     const frame = canUseRaster ? this.createImageWireframe(node.id, node.x, node.y, node.width, node.height,
       node.componentId, node.nodeType, inspector, scale, node.componentRasterKey) :
       this.createWireframe(node.id, node.x, node.y, node.width, node.height,
@@ -708,17 +712,19 @@ export class ArkUIReplayCollector {
     let componentRasterKey: string | undefined = undefined;
     const isSelectArrow = nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select';
     if (!isSelectArrow && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
-      (nodeType === 'SymbolGlyph' || (nodeType === 'Text' &&
+      (nodeType === 'SymbolGlyph' || (nodeType === 'RichEditor' && this.canCaptureEditorInfo(inspectorInfo) &&
+        !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) || (nodeType === 'Text' &&
         this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)))) {
       const info = (inspectorInfo ?? {}) as Record<string, Object>;
       const attrs = (info['$attrs'] ?? info) as Record<string, Object>;
-      const signature = `${this.rasterLayoutEpoch}|${width}|${height}|${vpToPxScale}|` +
+      const editorContent = nodeType === 'RichEditor' ? this.readEditorContentSignature(nodeId) : null;
+      const signature = `${editorContent ?? this.rasterLayoutEpoch}|${width}|${height}|${vpToPxScale}|${String(attrs['focused'] ?? '')}|${String(attrs['backgroundColor'] ?? '')}|` +
         `${String(attrs['content'] ?? '').substring(0, 16384)}|${String(attrs['fontColor'] ?? '')}|` +
         `${String(attrs['fontSize'] ?? '')}|${String(attrs['fontWeight'] ?? '')}|` +
         `${String(attrs['fontFamily'] ?? '')}|${String(attrs['fontStyle'] ?? '')}|${String(attrs['textAlign'] ?? '')}`;
       const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
       const state = this.rasters.request(visible ? this.rasterContext : null, nodeId, this.readComponentId(node), signature,
-        width * height * vpToPxScale * vpToPxScale);
+        width * height * vpToPxScale * vpToPxScale, nodeType === 'RichEditor' ? 1048576 : 262144, editorContent !== null);
       componentRasterKey = state.key;
       this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
     }
@@ -765,7 +771,7 @@ export class ArkUIReplayCollector {
     }
     while (child !== null && output.length < nodeBudget) {
       // A completed Text raster already contains its inline image children.
-      if (nodeType !== 'Text' || componentRasterKey === undefined) {
+      if (nodeType !== 'RichEditor' && (nodeType !== 'Text' || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
           excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
       }
@@ -792,6 +798,39 @@ export class ArkUIReplayCollector {
       } catch (_) {}
     }
     return this.inlineMediaOwners.has(nodeId);
+  }
+
+  /** Virtual editor Span content is used only as a bounded refresh signature, never emitted as Inspector data. */
+  private readEditorContentSignature(id: number): string | null {
+    if (this.editorContentSignatures === null) {
+      try {
+        const tree = this.rasterContext?.getFilteredInspectorTree(['id', 'content', 'fontSize', 'fontColor']) ?? '';
+        if (tree.length === 0 || tree.length > MAX_OVERLAY_TREE_BYTES) return null;
+        this.editorContentSignatures = new Map();
+        this.readEditorDescriptors(JSON.parse(tree) as Record<string, Object>, 0, 0, this.editorContentSignatures, [0]);
+      } catch (_) { return null; }
+    }
+    return this.editorContentSignatures.get(id) ?? null;
+  }
+
+  private readEditorDescriptors(node: Record<string, Object>, owner: number, depth: number,
+    signatures: Map<number, string>, count: Array<number>): void {
+    if (depth > 64 || count[0]++ > 4096) return;
+    if (node['$type'] === 'RichEditor' && typeof node['$ID'] === 'number') {
+      owner = node['$ID'] as number;
+      signatures.set(owner, '');
+    }
+    if (owner > 0) {
+      const attrs = (node['$attrs'] ?? {}) as Record<string, Object>;
+      let signature = `${node['$type']}|${node['$ID']}|${String(node['$rect'] ?? '')}|`;
+      for (const key of ['content', 'src', 'fontSize', 'fontColor', 'fontWeight', 'fontFamily', 'fontStyle',
+        'letterSpacing', 'lineHeight', 'decoration']) signature += `${String(attrs[key] ?? '').substring(0, 4096)}|`;
+      signatures.set(owner, ((signatures.get(owner) ?? '') + signature).substring(0, 16384));
+    }
+    const children = node['$children'];
+    if (Array.isArray(children)) for (const child of children as Array<Object>) {
+      if (child !== null && typeof child === 'object') this.readEditorDescriptors(child as Record<string, Object>, owner, depth + 1, signatures, count);
+    }
   }
 
   private readInlineMediaDescriptors(info: Record<string, Object>, owner: number, depth: number,
@@ -958,7 +997,9 @@ export class ArkUIReplayCollector {
     vpToPxScale: number,
     selectLabel: string | null = null
   ): ReplayTextWireframe {
-    let rawText = this.readInspectorString(inspector, ['text', 'content', 'value', 'placeholder', 'label']);
+    let rawText = this.readOwnInspectorString(inspector, ['text', 'content', 'value', 'label']);
+    const isPlaceholder = nodeType !== 'RichEditor' && this.isInputNode(nodeType) && (rawText === null || rawText.length === 0);
+    if (isPlaceholder) rawText = this.readOwnInspectorString(inspector, ['placeholder']);
     // Native Select can paint a styled label while its Text Inspector reports
     // empty content. Use only the owning Select's public value as fallback;
     // keep the child geometry/typography and apply the normal text privacy.
@@ -966,8 +1007,8 @@ export class ArkUIReplayCollector {
     const text: ReplayTextWireframe = {
       id, x, y, width, height,
       type: 'text',
-      text: this.filterText(rawText, nodeType, width, inspector),
-      textStyle: this.createTextStyle(inspector, vpToPxScale)
+      text: this.filterText(rawText, isPlaceholder ? 'Text' : nodeType, width, inspector),
+      textStyle: this.createTextStyle(inspector, vpToPxScale, isPlaceholder)
     };
     const shapeStyle = this.createShapeStyle(nodeType, inspector, false, width, height, vpToPxScale);
     if (shapeStyle !== undefined) {
@@ -1197,17 +1238,20 @@ export class ArkUIReplayCollector {
     if (color !== null && configuredWidth !== null && configuredWidth > 0) {
       return { color, width: Math.max(0.5, this.roundReplayMetric(configuredWidth)) };
     }
-    if (this.isInputNode(nodeType)) {
+    if (this.isInputNode(nodeType) && configuredWidth === null) {
       return { color: DEFAULT_INPUT_BORDER_COLOR, width: 1 };
     }
     return null;
   }
 
-  private createTextStyle(inspector: string | null, vpToPxScale: number): ReplayTextStyle {
-    const size = this.readInspectorLength(inspector, ['actualFontSize', 'fontSize', 'textSize'], vpToPxScale) ??
+  private createTextStyle(inspector: string | null, vpToPxScale: number, placeholder: boolean = false): ReplayTextStyle {
+    const size = (placeholder ? this.readInspectorNestedLength(inspector, ['placeholderFont'], ['size', 'fontSize'], vpToPxScale) : null) ??
+      this.readInspectorLength(inspector, ['actualFontSize', 'fontSize', 'textSize'], vpToPxScale) ??
       this.readInspectorNestedLength(inspector, ['font'], ['size', 'fontSize'], vpToPxScale);
-    const color = this.readRenderedTextColor(inspector);
-    const family = this.readInspectorString(inspector, ['fontFamily']) ??
+    const color = (placeholder ? this.normalizeTextColor(this.readInspectorString(inspector, ['placeholderColor'])) : null) ??
+      this.readRenderedTextColor(inspector);
+    const family = (placeholder ? this.readInspectorNestedString(inspector, ['placeholderFont'], ['fontFamily', 'family']) : null) ??
+      this.readInspectorString(inspector, ['fontFamily']) ??
       this.readInspectorNestedString(inspector, ['font'], ['family', 'fontFamily']) ??
       this.readInspectorString(inspector, ['font']) ?? DEFAULT_FONT_FAMILY;
     // If Inspector did not expose typography, a stable 14vp fallback is less
@@ -1217,9 +1261,11 @@ export class ArkUIReplayCollector {
       size: Math.max(8, Math.min(72, Math.round(size === null ? 14 : size))),
       color: color === null ? DEFAULT_TEXT_COLOR : color
     };
-    const weight = this.normalizeFontWeight(this.readInspectorString(inspector, ['fontWeight', 'weight']) ??
+    const weight = this.normalizeFontWeight((placeholder ? this.readInspectorNestedString(inspector, ['placeholderFont'], ['weight', 'fontWeight']) : null) ??
+      this.readInspectorString(inspector, ['fontWeight', 'weight']) ??
       this.readInspectorNestedString(inspector, ['font'], ['weight', 'fontWeight']));
-    const fontStyle = this.normalizeFontStyle(this.readInspectorString(inspector, ['fontStyle', 'style']) ??
+    const fontStyle = this.normalizeFontStyle((placeholder ? this.readInspectorNestedString(inspector, ['placeholderFont'], ['style', 'fontStyle']) : null) ??
+      this.readInspectorString(inspector, ['fontStyle', 'style']) ??
       this.readInspectorNestedString(inspector, ['font'], ['style', 'fontStyle']));
     const lineHeight = this.readInspectorLength(inspector, ['lineHeight'], vpToPxScale);
     const letterSpacing = this.readInspectorLength(inspector, ['letterSpacing', 'letterSpace'], vpToPxScale);
@@ -1275,7 +1321,8 @@ export class ArkUIReplayCollector {
     ) ?? this.normalizeHorizontalAlignment(blockAlignment);
     const vertical = this.normalizeVerticalAlignment(
       this.readInspectorString(inspector, ['verticalAlign', 'verticalAlignment'])
-    ) ?? this.normalizeBlockVerticalAlignment(blockAlignment) ??
+    ) ?? (nodeType === 'TextArea' || nodeType === 'RichEditor' ? 'top' : null) ??
+      this.normalizeBlockVerticalAlignment(blockAlignment) ??
       (nodeType === 'Text' || nodeType === 'Span' || nodeType === 'Hyperlink' ? 'center' : null);
     if (top === null && right === null && bottom === null && left === null && horizontal === null && vertical === null) {
       return undefined;
@@ -1479,6 +1526,18 @@ export class ArkUIReplayCollector {
       return null;
     }
     return this.findInspectorScalar(value, keys);
+  }
+
+  /** Content belongs to this node, never to a nested material/style's `value`. */
+  private readOwnInspectorString(inspector: string | null, keys: Array<string>): string | null {
+    const object = this.getInspectorValue(inspector);
+    if (object === null) return null;
+    const attrs = (object['$attrs'] ?? object) as Record<string, Object>;
+    for (const key of keys) {
+      const text = this.inspectorScalarToString(attrs[key]);
+      if (text !== null) return text;
+    }
+    return null;
   }
 
   /** Reads a whitelisted scalar nested under a named inspector style object. */
@@ -1930,7 +1989,7 @@ export class ArkUIReplayCollector {
     if (!this.isTextNode(nodeType) || this.isButtonLikeNode(nodeType)) {
       return false;
     }
-    if (nodeType === 'Text' || nodeType === 'Span' || nodeType === 'RichEditor') {
+    if (nodeType === 'Text' || nodeType === 'Span' || nodeType === 'Search') {
       return !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
     }
     return true;
@@ -1965,11 +2024,12 @@ export class ArkUIReplayCollector {
 
   private isTextNode(nodeType: string): boolean {
     return nodeType === 'Text' || nodeType === 'Span' || nodeType === 'Hyperlink' || nodeType === 'TextInput' ||
-      nodeType === 'TextArea' || nodeType === 'Search' || nodeType === 'RichEditor';
+      nodeType === 'TextArea' || nodeType === 'Search' || nodeType === 'SearchField' || nodeType === 'RichEditor';
   }
 
   private isInputNode(nodeType: string): boolean {
-    return nodeType === 'TextInput' || nodeType === 'TextArea' || nodeType === 'Search';
+    return nodeType === 'TextInput' || nodeType === 'TextArea' || nodeType === 'Search' ||
+      nodeType === 'SearchField' || nodeType === 'RichEditor';
   }
 
   /**
@@ -1979,15 +2039,42 @@ export class ArkUIReplayCollector {
    */
   private isSensitiveInput(nodeType: string, inspector: string | null): boolean {
     if (!this.isInputNode(nodeType)) return false;
-    const value = this.readInspectorString(inspector, [
-      'inputType', 'contentType', 'keyboardType', 'textContentType'
-    ]);
-    if (value === null) return true;
-    const normalized = value.toLowerCase();
+    const object = this.getInspectorValue(inspector);
+    const attrs = object === null ? null : this.findInspectorObject(object, ['$attrs']) ?? object;
+    const type = attrs === null ? null : this.inspectorScalarToString(attrs['type']);
+    const semantic = ['inputType', 'contentType', 'keyboardType', 'textContentType'].map(
+      (key: string): string => this.readOwnInspectorString(inspector, [key]) ?? '').join('|');
+    if (nodeType === 'RichEditor') return this.readInspectorString(inspector, ['privacySensitive']) === 'true';
+    const normalized = `${type ?? ''}|${semantic ?? ''}`.toLowerCase();
     if (/password|passcode|pin|email|phone|tel|number|card|bank|idcard|identity|security|verify|code/.test(normalized)) {
       return true;
     }
-    return !/text|normal|default|unspecified|url|nickname|name|search/.test(normalized);
+    const explicitType = this.readOwnInspectorString(inspector, ['inputType']) ?? type;
+    return !/text|normal|default|url|nickname|name|search/.test((explicitType ?? semantic).toLowerCase());
+  }
+
+  private canCaptureEditor(inspector: string | null): boolean {
+    return this.canCaptureEditorInfo(this.getInspectorValue(inspector));
+  }
+
+  private canCaptureEditorInfo(info: Object | null): boolean {
+    const object = (info ?? {}) as Record<string, Object>;
+    const attrs = (object['$attrs'] ?? object) as Record<string, Object>;
+    return this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+      String(attrs['privacySensitive'] ?? 'false') !== 'true' &&
+      String(attrs['builderSpanInfos'] ?? '').trim().length === 0;
+  }
+
+  private hasInputDescendant(node: FrameNode, depth: number): boolean {
+    if (depth <= 0) return true;
+    try {
+      let child = node.getFirstChild();
+      while (child !== null) {
+        if (this.isInputNode(this.readNodeType(child)) || this.hasInputDescendant(child, depth - 1)) return true;
+        child = child.getNextSibling();
+      }
+    } catch (_) { return true; }
+    return false;
   }
 
   private isImageNode(nodeType: string): boolean {

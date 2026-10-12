@@ -1095,6 +1095,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const binding = this.rootBinding;
     if (binding !== null && binding.rootId === rootId &&
       (binding.captureScene || this.navigationPages.size > 0)) {
+      // The scene canvas and its clips must share the same visible window
+      // bounds during IME animation, before the detached frame reaches Worker.
+      this.refreshWindowSceneViewport();
       const pages = this.getScenePages(binding);
       if (this.sceneViewport === null) {
         const root = uiContext.getFrameNodeById(rootId);
@@ -1864,6 +1867,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         rect.width <= 0 || rect.height <= 0) return;
       this.sceneViewport = { x: rect.left / scale, y: rect.top / scale,
         width: rect.width / scale, height: rect.height / scale };
+      const keyboard = nativeWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_KEYBOARD).bottomRect;
+      if (keyboard.width > 0 && keyboard.height > 0 && keyboard.top > rect.top &&
+        keyboard.left < rect.left + rect.width && keyboard.left + keyboard.width > rect.left) {
+        this.sceneViewport.height = Math.min(this.sceneViewport.height, (keyboard.top - rect.top) / scale);
+      }
     } catch (_) { }
   }
 
@@ -1900,6 +1908,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return null;
     }
     const rootBounds: SessionReplayViewportBounds = { width: root.width, height: root.height };
+    // collectRootLight already clips a scene to the native keyboard boundary.
+    // Deducting its height here again leaves Meta/Resize and Full out of sync.
+    if (this.usesSceneCoordinates()) return rootBounds;
     let viewport = rootBounds;
     if (this.keyboardHeightPx > 0) {
       if (this.keyboardResizesRoot === null) {

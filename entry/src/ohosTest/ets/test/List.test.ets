@@ -14,6 +14,7 @@ import rumUploadE2EUITest from './RumUploadE2EUITest.test';
 import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
 import sessionReplayMutationUITest from './SessionReplayMutationUITest.test';
 import sessionReplayStyleUITest from './SessionReplayStyleUITest.test';
+import sessionReplayInputUITest from './SessionReplayInputUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
@@ -32,4 +33,5 @@ export default function testsuite() {
   nativeWorkerIntegrationUITest();
   sessionReplayMutationUITest();
   sessionReplayStyleUITest();
+  sessionReplayInputUITest();
 }
