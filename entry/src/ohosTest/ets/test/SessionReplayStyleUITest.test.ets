@@ -4,11 +4,13 @@ import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry
 import window from '@ohos.window';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import { image } from '@kit.ImageKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { FTSDK, FTSessionReplayRUMContext } from '@guancecloud/ft_sdk';
 import {
   ArkUIReplayCollector, FTSessionReplayConfig, FTSessionReplayRecorder, FullSnapshotData, ImagePrivacy,
   ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplaySnapshotProcessor, ReplayTextWireframe,
-  ReplayWireframe, SessionReplayContext, TextAndInputPrivacy
+  ReplayWireframe, SessionReplayContext, SessionReplayResourceStore, SessionReplaySegmentStore, TextAndInputPrivacy
 } from '@guancecloud/ft_session_replay';
 import arkUIReplayCollectorUnitTest from '@guancecloud/ft_session_replay/src/test/unit/ArkUIReplayCollectorUnit.test';
 import { SessionReplayWorkQueue, ReplayWorkerResult } from '@guancecloud/ft_session_replay/src/main/ets/components/SessionReplayWorkQueue';
@@ -26,6 +28,15 @@ export default function sessionReplayStyleUITest(): void {
       const node = uiContext.getFrameNodeById(id);
       if (node === null) throw new Error(`Native style fixture is missing: ${id}`);
       return node;
+    };
+
+    const removeTestDirectory = (directory: string): void => {
+      for (const name of fileIo.listFileSync(directory)) {
+        const path = `${directory}/${name}`;
+        if (fileIo.statSync(path).isDirectory()) removeTestDirectory(path);
+        else fileIo.unlinkSync(path);
+      }
+      fileIo.rmdirSync(directory);
     };
 
     beforeAll(async () => {
@@ -182,6 +193,83 @@ export default function sessionReplayStyleUITest(): void {
         update.type === 'text' && update.text === '文字与富文本')).assertTrue();
     });
 
+    it('captures native inline image and symbols as nonempty PNGs without duplicate image children', 0, async () => {
+      const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
+      if (scroll === null) throw new Error('Text Scroll missing');
+      await scroll.scrollSearch(ON.id('session-replay-image-span'));
+      await driver.delayMs(300);
+      collector.invalidateComponentRasters();
+      const first = collector.materializeLightSnapshot(collector.captureLightSnapshot(uiContext,
+        'session-replay-image-span', vp2px(1)));
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      let light = collector.captureLightSnapshot(uiContext, 'session-replay-image-span', vp2px(1));
+      for (let attempt = 0; light.nodes[0].componentRasterKey === undefined && attempt < 30; attempt++) {
+        await driver.delayMs(100);
+        light = collector.captureLightSnapshot(uiContext, 'session-replay-image-span', vp2px(1));
+      }
+      const latest = collector.materializeLightSnapshot(light);
+      const frames = (latest.data as FullSnapshotData).wireframes;
+      expect(frames.length).assertEqual(1);
+      const bitmap = frames[0] as ReplayImageWireframe;
+      expect(bitmap.type).assertEqual('image');
+      expect(bitmap.isEmpty).assertFalse();
+      expect(bitmap.mimeType).assertEqual('png');
+      const resources = collector.takeCapturedImageResources();
+      expect(resources.length).assertEqual(1);
+      const source = image.createImageSource(resources[0].bytes.buffer as ArrayBuffer);
+      const pixels = await source.createPixelMap({ desiredPixelFormat: image.PixelMapFormat.RGBA_8888 });
+      try {
+        const size = pixels.getImageInfoSync().size;
+        const bytes = new Uint8Array(size.width * size.height * 4);
+        pixels.readPixelsToBufferSync(bytes.buffer as ArrayBuffer);
+        let ink = 0;
+        for (let offset = 3; offset < bytes.length; offset += 4) if (bytes[offset] > 0) ink++;
+        expect(ink > 100).assertTrue();
+      } finally { await pixels.release(); await source.release(); }
+      expect(processor.createMutationRecord(latest) !== null).assertTrue();
+      expect(processor.createMutationRecord(collector.materializeLightSnapshot(light)) === null).assertTrue();
+      let symbol = collector.captureLightSnapshot(uiContext, 'session-replay-symbol-glyph', vp2px(1));
+      for (let attempt = 0; symbol.nodes[0].componentRasterKey === undefined && attempt < 30; attempt++) {
+        await driver.delayMs(100);
+        symbol = collector.captureLightSnapshot(uiContext, 'session-replay-symbol-glyph', vp2px(1));
+      }
+      const icon = (collector.materializeLightSnapshot(symbol).data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
+      expect(icon.type).assertEqual('image');
+      expect(icon.isEmpty).assertFalse();
+      const iconSource = image.createImageSource(collector.takeCapturedImageResources()[0].bytes.buffer as ArrayBuffer);
+      const iconPixels = await iconSource.createPixelMap({ desiredPixelFormat: image.PixelMapFormat.RGBA_8888 });
+      try {
+        const size = iconPixels.getImageInfoSync().size;
+        const bytes = new Uint8Array(size.width * size.height * 4);
+        iconPixels.readPixelsToBufferSync(bytes.buffer as ArrayBuffer);
+        let blue = 0;
+        for (let offset = 0; offset < bytes.length; offset += 4) {
+          if (bytes[offset + 3] > 128 && bytes[offset + 2] > bytes[offset] + 50) blue++;
+        }
+        expect(blue > 100).assertTrue();
+      } finally { await iconPixels.release(); await iconSource.release(); }
+      const privateCollector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig().setImagePrivacy(ImagePrivacy.MASK_NONE));
+      const masked = privateCollector.materializeLightSnapshot(privateCollector.captureLightSnapshot(uiContext,
+        'session-replay-image-span', vp2px(1))).data as FullSnapshotData;
+      expect(masked.wireframes[0].type).assertEqual('text');
+      expect(JSON.stringify(masked).includes('行内图片')).assertFalse();
+      expect(privateCollector.takeCapturedImageResources().length).assertEqual(0);
+    });
+
+    it('captures a SymbolSpan-only Text even when FrameNode exposes no child frames', 0, async () => {
+      let light = collector.captureLightSnapshot(uiContext, 'session-replay-symbol-span-only', vp2px(1));
+      for (let attempt = 0; light.nodes[0].componentRasterKey === undefined && attempt < 30; attempt++) {
+        await driver.delayMs(100);
+        light = collector.captureLightSnapshot(uiContext, 'session-replay-symbol-span-only', vp2px(1));
+      }
+      const data = collector.materializeLightSnapshot(light).data as FullSnapshotData;
+      expect(data.wireframes.length).assertEqual(1);
+      expect(data.wireframes[0].type).assertEqual('image');
+      expect((data.wireframes[0] as ReplayImageWireframe).isEmpty).assertFalse();
+      expect(collector.takeCapturedImageResources().length).assertEqual(1);
+    });
+
     it('keeps visible native Marquee text moving instead of fully clipping its target position', 0, async () => {
       const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
       if (scroll === null) throw new Error('Text samples Scroll is missing');
@@ -277,6 +365,48 @@ export default function sessionReplayStyleUITest(): void {
       } finally {
         recorder.stop();
         await recorder.drainWrites();
+      }
+    });
+
+    it('forwards asynchronously packed component images through the automatic Recorder Worker queue', 0, async () => {
+      const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
+      if (scroll === null) throw new Error('Text Scroll missing');
+      await scroll.scrollSearch(ON.id('session-replay-image-span'));
+      const directory = `${AbilityDelegatorRegistry.getAbilityDelegator().getAppContext().cacheDir}/replay-inline-${Date.now()}`;
+      fileIo.mkdirSync(directory);
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE),
+        new SessionReplaySegmentStore(directory, 1024 * 1024, 100));
+      const context: FTSessionReplayRUMContext = { applicationId: 'style-test', sessionId: 'inline-auto-session',
+        viewId: 'inline-auto-view', viewName: 'Inline media', viewReferrer: '', linkContext: {}, timestamp: Date.now() };
+      try {
+        recorder.start();
+        recorder.registerRoot(uiContext, 'session-replay-image-span', vp2px(1));
+        expect(recorder.onViewStarted(context)).assertTrue();
+        await driver.delayMs(1600);
+        await recorder.drainWrites();
+        const replayContext: SessionReplayContext = { applicationId: context.applicationId,
+          sessionId: context.sessionId, viewId: context.viewId };
+        const records = recorder.getRecordedRecords(replayContext);
+        const images: Array<ReplayImageWireframe> = [];
+        for (const record of records) {
+          const frames = record.type === ReplayRecordType.FULL_SNAPSHOT ? (record.data as FullSnapshotData).wireframes :
+            record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT ? (record.data as ReplayMutationData).adds
+              .map((add): ReplayWireframe => add.wireframe) : [];
+          for (const node of frames) if (node.type === 'image') images.push(node as ReplayImageWireframe);
+        }
+        const bitmap = images.find((node): boolean => node.permanentId === 'session-replay-image-span' && !node.isEmpty);
+        expect(bitmap !== undefined).assertTrue();
+        expect(bitmap!.resourceId !== undefined).assertTrue();
+        expect(bitmap!.mimeType).assertEqual('png');
+        const resources = new SessionReplayResourceStore(directory, 1024 * 1024);
+        const asset = resources.list().find((resource): boolean => resource.fileName === bitmap!.resourceId);
+        expect(asset !== undefined).assertTrue();
+        expect(resources.read(asset!)!.byteLength > 100).assertTrue();
+      } finally {
+        recorder.stop();
+        await recorder.drainWrites();
+        removeTestDirectory(directory);
       }
     });
   });

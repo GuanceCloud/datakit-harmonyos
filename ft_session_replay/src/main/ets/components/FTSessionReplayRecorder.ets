@@ -185,6 +185,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   };
   private drawObserverContext: UIContext | null = null;
   private readonly drawListener = (): void => this.notifyPageChanged();
+  private readonly rasterLayoutListener = (): void => {
+    this.collector.invalidateComponentRasters();
+    this.notifyPageChanged();
+  };
   private lastFullSnapshotAt: number = 0;
   private observedViewport: SessionReplayViewportBounds | null = null;
   // Kept separately because an IME can reduce the root's layout height or
@@ -236,6 +240,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       imagePrivacy: config.getImagePrivacy(),
       diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });
+    this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array): void => {
+      this.workQueue.registerImageAsset(key, bytes, 'image/png');
+      this.notifyPageChanged();
+    }, (key: string): void => this.workQueue.unregisterImageAsset(key));
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -1537,6 +1545,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     try {
       uiContext.getUIObserver().on('willDraw', this.drawListener);
       this.drawObserverContext = uiContext;
+      try { uiContext.getUIObserver().on('didLayout', this.rasterLayoutListener); } catch (_) {}
     } catch (_) {
       // Explicit page notifications remain available on unsupported contexts.
     }
@@ -1552,6 +1561,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (uiContext !== null) {
       try {
         uiContext.getUIObserver().off('willDraw', this.drawListener);
+        try { uiContext.getUIObserver().off('didLayout', this.rasterLayoutListener); } catch (_) {}
       } catch (_) { }
     }
     if (this.mutationCaptureTimer !== -1) {

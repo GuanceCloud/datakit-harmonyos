@@ -114,7 +114,7 @@ export struct SessionReplayComponentSamples {
       .then((bytes: Uint8Array): void => {
         const replay = FTSessionReplay.getInstance();
         replay.registerImageAsset('session-replay-component-image', bytes, 'image/png');
-        replay.registerImageAsset('session-replay-image-span', bytes, 'image/png');
+        replay.registerImageAsset('session-replay-inline-image', bytes, 'image/png');
       })
       .catch((): void => {});
     context.resourceManager.getMediaContent($r('app.media.foreground'))
@@ -254,12 +254,17 @@ export struct SessionReplayComponentSamples {
       .id('session-replay-selectable-text').copyOption(CopyOptions.InApp).fontSize(16)
     Text() {
       Span('行内图片 ')
-      ImageSpan($r('app.media.startIcon')).width(24).height(24)
+      ImageSpan($r('app.media.startIcon')).id('session-replay-inline-image').width(24).height(24)
       Span(' 与符号 ')
       SymbolSpan($r('sys.symbol.ohos_wifi')).fontSize(24)
     }
     .id('session-replay-image-span').fontSize(18).height(48)
-    SymbolGlyph($r('sys.symbol.ohos_wifi')).fontSize(40).fontColor(['#2563EB'])
+    Text() {
+      Span('行内符号 ')
+      SymbolSpan($r('sys.symbol.ohos_wifi')).fontSize(24).fontColor(['#16A34A'])
+    }
+    .id('session-replay-symbol-span-only').fontSize(18).height(48)
+    SymbolGlyph($r('sys.symbol.ohos_wifi')).id('session-replay-symbol-glyph').fontSize(40).fontColor(['#2563EB'])
     this.section('Marquee / Hyperlink / RichText', '跑马灯移动、超链接和 HTML 富文本。')
     Marquee({ start: true, step: 3, loop: -1, fromStart: true, src: 'Session Replay · 跑马灯文字采集测试 · 长文本持续移动' })
       .id('session-replay-marquee').width('100%').height(40).fontSize(18)

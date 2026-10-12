@@ -212,6 +212,38 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('honors text and image privacy for native raster keys and keeps their geometry', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 10, 20, 10, 20, 200, 60).withNodeType('Text')
+        .withInspector({ 'content': 'Public inline copy' } as Record<string, Object>);
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_NONE);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const png = new util.Base64Helper().decodeSync('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII=');
+      collector.registerImageAsset('inline-raster', png, 'image/png');
+      const light = collector.captureFrameNodeLight(asFrameNode(root), 2);
+      light.nodes[0].componentRasterKey = 'inline-raster';
+      light.nodes[0].clip = { left: 3, top: 4, right: 5, bottom: 6 };
+      const bitmap = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
+      expect(bitmap.type).assertEqual('image');
+      expect(bitmap.isEmpty).assertFalse();
+      expect(bitmap.x).assertEqual(10);
+      expect(bitmap.width).assertEqual(100);
+      expect(bitmap.clip?.left).assertEqual(3);
+      expect(bitmap.clip?.bottom).assertEqual(6);
+      expect(collector.takeCapturedImageResources().length).assertEqual(1);
+      expect(((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayImageWireframe)
+        .isEmpty).assertFalse();
+      expect(collector.takeCapturedImageResources().length).assertEqual(1);
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
+      const masked = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe;
+      expect(masked.type).assertEqual('text');
+      expect(masked.text.includes('Public')).assertFalse();
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL);
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('text');
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
+    });
+
     it('captures Hyperlink content and typography as text with normal privacy filtering', 0, () => {
       const attrs: Record<string, Object> = { 'content': '观测云链接', 'fontSize': '16fp', 'foregroundColor': '#FF2563EB' };
       const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 80, 20).withNodeType('Hyperlink').withInspector(attrs);

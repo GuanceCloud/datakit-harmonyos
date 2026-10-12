@@ -4,6 +4,7 @@ import { util } from '@kit.ArkTS';
 import { resourceManager } from '@kit.LocalizationKit';
 import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
 import { ReplayRichText } from './ReplayRichText';
+import { ReplayComponentRaster } from './ReplayComponentRaster';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
@@ -112,12 +113,38 @@ export class ArkUIReplayCollector {
   private overlayWindowRoot: FrameNode | null = null;
   private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
   private readonly richText: ReplayRichText = new ReplayRichText();
+  private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
+  private rasterContext: UIContext | null = null;
+  private rasterLayoutEpoch: number = 0;
+  private inlineMediaOwners: Set<number> | null = null;
   private activeComponentAnimations: boolean = false;
   private captureTimestamp: number = 0;
 
   constructor(maxNodes: number = 1500, config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.maxNodes = Math.max(1, Math.floor(maxNodes));
     this.config = config;
+    this.rasters.setCallbacks((key: string, bytes: Uint8Array): void => {
+      this.registerImageAsset(key, bytes, 'image/png');
+      this.rasterPublished?.(key, bytes);
+    }, (key: string): void => {
+      this.unregisterImageAsset(key);
+      this.rasterRemoved?.(key);
+    });
+  }
+
+  private rasterPublished: ((key: string, bytes: Uint8Array) => void) | null = null;
+  private rasterRemoved: ((key: string) => void) | null = null;
+
+  /** Forward newly packed native resources to the existing FIFO Worker image queue. */
+  public setComponentRasterCallbacks(publish: (key: string, bytes: Uint8Array) => void,
+    remove: (key: string) => void): void {
+    this.rasterPublished = publish;
+    this.rasterRemoved = remove;
+  }
+
+  public invalidateComponentRasters(): void {
+    this.rasterLayoutEpoch++;
+    this.inlineMediaOwners = null;
   }
 
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
@@ -128,6 +155,8 @@ export class ArkUIReplayCollector {
     this.scene.clear();
     this.marquee.clear();
     this.richText.clear();
+    this.rasters.clear();
+    this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
   }
@@ -136,6 +165,8 @@ export class ArkUIReplayCollector {
     this.scene.clear();
     this.marquee.clear();
     this.richText.clear();
+    this.rasters.clear();
+    this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
   }
@@ -193,8 +224,9 @@ export class ArkUIReplayCollector {
   }
 
   /**
-   * UI-thread phase: reads only public FrameNode geometry/state and returns a
-   * cheap handoff object.  Do not add JSON, resource, or filesystem work here.
+   * UI-thread phase: reads public FrameNode state and returns a cheap handoff.
+   * Bounded, id-filtered metadata identifies virtual media spans; native PNG
+   * packing runs asynchronously and only registered resource keys enter frames.
    */
   public captureLightSnapshot(
     uiContext: UIContext,
@@ -202,6 +234,7 @@ export class ArkUIReplayCollector {
     vpToPxScale: number = 1,
     timestamp: number = Date.now()
   ): ArkUIReplayLightSnapshot {
+    this.rasterContext = uiContext;
     const root = uiContext.getFrameNodeById(rootId);
     if (root === null) {
       throw new Error(`Session Replay root was not found: ${rootId}`);
@@ -214,6 +247,7 @@ export class ArkUIReplayCollector {
 
   /** Resolves reachable ArkUI containers; internal Page/Stage parents remain private. */
   public findSceneRoot(uiContext: UIContext, rootId: string): FrameNode | null {
+    this.rasterContext = uiContext;
     const pageRoot = uiContext.getFrameNodeById(rootId);
     if (pageRoot === null) return null;
     let root: FrameNode = pageRoot;
@@ -248,6 +282,7 @@ export class ArkUIReplayCollector {
     viewportBounds: ArkUIReplaySceneBounds | null = null,
     scenePages: Array<ArkUIReplayScenePage> = []
   ): ArkUIReplayLightSnapshot {
+    this.rasterContext = uiContext;
     const scale = Number.isFinite(vpToPxScale) && vpToPxScale > 0 ? vpToPxScale : 1;
     this.beginComponentFrame(timestamp);
     const pages = scenePages.length > 0 ? scenePages : rootIds.map((rootId: string): ArkUIReplayScenePage => {
@@ -411,7 +446,7 @@ export class ArkUIReplayCollector {
     node: ArkUIReplayLightNode, inspector: string | null, scale: number, selectLabel: string | null
   ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
-      `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|` +
+      `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|${node.componentRasterKey}|` +
       `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
     const cached = this.propertyCache.get(node.id);
     if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
@@ -419,12 +454,17 @@ export class ArkUIReplayCollector {
       frame.x = node.x;
       frame.y = node.y;
       if (frame.type === 'image' && frame.resourceId !== undefined) {
-        const resource = this.resolveImageResource(node.componentId, node.id, inspector);
+        const resource = this.resolveImageResource(node.componentRasterKey ?? node.componentId, node.id,
+          node.componentRasterKey === undefined ? inspector : null);
         if (resource !== null) frame.resourceId = resource.token;
       }
       return frame;
     }
-    const frame = this.createWireframe(node.id, node.x, node.y, node.width, node.height,
+    const canUseRaster = node.componentRasterKey !== undefined && this.canCaptureImage(node.width, node.height, scale) &&
+      (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL);
+    const frame = canUseRaster ? this.createImageWireframe(node.id, node.x, node.y, node.width, node.height,
+      node.componentId, node.nodeType, inspector, scale, node.componentRasterKey) :
+      this.createWireframe(node.id, node.x, node.y, node.width, node.height,
       node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale, node.isSelectArrow === true, selectLabel);
     this.appendCommonVisualProperties(frame, inspector);
     if (node.nodeType === 'Menu' && frame.type === 'shape') {
@@ -665,6 +705,23 @@ export class ArkUIReplayCollector {
     // clip instead of being removed and added again when they slide back in.
     const nodeType = this.readNodeType(node);
     const inspectorInfo = this.readInspectorInfo(node);
+    let componentRasterKey: string | undefined = undefined;
+    const isSelectArrow = nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select';
+    if (!isSelectArrow && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
+      (nodeType === 'SymbolGlyph' || (nodeType === 'Text' &&
+        this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)))) {
+      const info = (inspectorInfo ?? {}) as Record<string, Object>;
+      const attrs = (info['$attrs'] ?? info) as Record<string, Object>;
+      const signature = `${this.rasterLayoutEpoch}|${width}|${height}|${vpToPxScale}|` +
+        `${String(attrs['content'] ?? '').substring(0, 16384)}|${String(attrs['fontColor'] ?? '')}|` +
+        `${String(attrs['fontSize'] ?? '')}|${String(attrs['fontWeight'] ?? '')}|` +
+        `${String(attrs['fontFamily'] ?? '')}|${String(attrs['fontStyle'] ?? '')}|${String(attrs['textAlign'] ?? '')}`;
+      const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
+      const state = this.rasters.request(visible ? this.rasterContext : null, nodeId, this.readComponentId(node), signature,
+        width * height * vpToPxScale * vpToPxScale);
+      componentRasterKey = state.key;
+      this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
+    }
     if (width > 0 && height > 0) {
       output.push({
         id: this.toProtocolId(nodeId),
@@ -676,7 +733,8 @@ export class ArkUIReplayCollector {
         nodeType,
         inspectorInfo,
         shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
-        isSelectArrow: nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select',
+        isSelectArrow,
+        componentRasterKey,
         selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
           this.toProtocolId(grandparentId) : undefined,
         isRoot,
@@ -706,12 +764,48 @@ export class ArkUIReplayCollector {
       } catch (_) { textX = x; }
     }
     while (child !== null && output.length < nodeBudget) {
-      this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
-        excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
+      // A completed Text raster already contains its inline image children.
+      if (nodeType !== 'Text' || componentRasterKey === undefined) {
+        this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
+          excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
+      }
       try {
         child = child.getNextSibling();
       } catch (_) {
         return;
+      }
+    }
+  }
+
+  private hasInlineMedia(nodeId: number, inspector: Object | null): boolean {
+    const info = (inspector ?? {}) as Record<string, Object>;
+    const attrs = (info['$attrs'] ?? info) as Record<string, Object>;
+    const images = attrs['imageNodes'];
+    if (Array.isArray(images) && images.length > 0) return true;
+    if (this.inlineMediaOwners === null) {
+      this.inlineMediaOwners = new Set();
+      try {
+        const tree = this.rasterContext?.getFilteredInspectorTree(['id']) ?? '';
+        if (tree.length > 0 && tree.length <= MAX_OVERLAY_TREE_BYTES) {
+          this.readInlineMediaDescriptors(JSON.parse(tree) as Record<string, Object>, 0, 0, this.inlineMediaOwners, [0]);
+        }
+      } catch (_) {}
+    }
+    return this.inlineMediaOwners.has(nodeId);
+  }
+
+  private readInlineMediaDescriptors(info: Record<string, Object>, owner: number, depth: number,
+    owners: Set<number>, count: Array<number>): void {
+    if (depth > 64 || count[0]++ > 4096) return;
+    const type = info['$type'];
+    const id = info['$ID'];
+    if (type === 'Text' && typeof id === 'number') owner = id;
+    if (owner > 0 && (type === 'SymbolSpan' || type === 'ImageSpan' || type === 'Image')) owners.add(owner);
+    const children = info['$children'];
+    if (!Array.isArray(children)) return;
+    for (const child of children as Array<Object>) {
+      if (child !== null && typeof child === 'object') {
+        this.readInlineMediaDescriptors(child as Record<string, Object>, owner, depth + 1, owners, count);
       }
     }
   }
@@ -925,7 +1019,8 @@ export class ArkUIReplayCollector {
     componentId: string,
     nodeType: string,
     inspector: string | null,
-    vpToPxScale: number
+    vpToPxScale: number,
+    rasterKey?: string
   ): ReplayImageWireframe {
     const image: ReplayImageWireframe = {
       id, x, y, width, height,
@@ -947,7 +1042,7 @@ export class ArkUIReplayCollector {
     if (!this.canCaptureImage(width, height, vpToPxScale)) {
       return image;
     }
-    const resource = this.resolveImageResource(componentId, id, inspector);
+    const resource = this.resolveImageResource(rasterKey ?? componentId, id, rasterKey === undefined ? inspector : null);
     if (resource === null) {
       return image;
     }
