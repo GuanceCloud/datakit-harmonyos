@@ -2,6 +2,7 @@ import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
+import { ReplayNativeControlPaint } from '../../main/ets/components/ReplayNativeControlPaint';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
@@ -212,6 +213,78 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('captures a native Button label when its internal Text has no rendered geometry', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 96, 40).withNodeType('Button')
+        .withInspector({ 'type': 'build-in', '$attrs': { 'type': 'ButtonType.Normal', 'label': '普通按钮',
+          'align': 'Alignment.Center', 'fontSize': '16fp', 'fontColor': '#FFFFFFFF' } as Record<string, Object> } as Record<string, Object>);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 0, 0).withNodeType('Text'));
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const frames = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      expect(frames.length).assertEqual(1);
+      const text = frames[0] as ReplayTextWireframe;
+      expect(text.type).assertEqual('text');
+      expect(text.text).assertEqual('普通按钮');
+      expect(text.shapeStyle?.cornerRadius).assertEqual(0);
+      expect(text.textPosition?.alignment?.horizontal).assertEqual('center');
+      const delegated = new ReplayFrameNodeFixture(3, 0, 0, 0, 0, 96, 40).withNodeType('Button')
+        .withInspector({ 'label': '普通按钮' } as Record<string, Object>);
+      delegated.append(new ReplayFrameNodeFixture(4, 16, 10, 16, 10, 64, 20).withNodeType('Text')
+        .withInspector({ 'content': '' } as Record<string, Object>));
+      expect(((collector.captureFrameNode(asFrameNode(delegated)).data as FullSnapshotData).wireframes[1] as ReplayTextWireframe)
+        .text).assertEqual('普通按钮');
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
+      expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .text.includes('普通')).assertFalse();
+    });
+
+    it('settles native control paint and refreshes group pixels after sibling checkbox state changes', 0, () => {
+      const paint = new ReplayNativeControlPaint();
+      const slider: Record<string, Object> = { 'constructor': { 'value': '35', 'min': '0', 'max': '100' } as Record<string, Object> };
+      const first = paint.sample(1, 'Slider', slider, 1000, true);
+      expect(first.active).assertTrue();
+      const settled = paint.sample(1, 'Slider', slider, 1700, true);
+      expect(settled.active).assertFalse();
+      expect(paint.sample(1, 'Slider', slider, 2400, true).signature).assertEqual(settled.signature);
+      for (let id = 100; id < 200; id++) paint.sample(id, 'Button', null, 2450, false);
+      expect(paint.sample(1, 'Slider', slider, 2460, true).active).assertFalse();
+      slider['constructor'] = { 'value': '80', 'min': '0', 'max': '100' } as Record<string, Object>;
+      const changed = paint.sample(1, 'Slider', slider, 2500, true);
+      expect(changed.active).assertTrue();
+      expect(changed.signature === settled.signature).assertFalse();
+      paint.sample(2, 'Checkbox', { 'select': 'false' } as Record<string, Object>, 3000, true);
+      const group = paint.sample(3, 'CheckboxGroup', { 'selectAll': 'false' } as Record<string, Object>, 3700, true);
+      paint.sample(2, 'Checkbox', { 'select': 'true' } as Record<string, Object>, 4500, true);
+      expect(paint.sample(3, 'CheckboxGroup', { 'selectAll': 'false' } as Record<string, Object>, 4501, true)
+        .signature === group.signature).assertFalse();
+      expect(paint.sample(4, 'LoadingProgress', null, 5000, false).active).assertFalse();
+      expect(paint.sample(4, 'LoadingProgress', null, 6000, true).active).assertTrue();
+      expect(paint.isSupported('TextInput')).assertFalse();
+    });
+
+    it('keeps native control bitmaps free of duplicate chrome and rechecks text and image masking', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 40).withNodeType('Slider')
+        .withInspector({ 'backgroundColor': '#19000000', 'borderWidth': '1vp', 'borderColor': '#FF000000' } as Record<string, Object>);
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_NONE);
+      const collector = new ArkUIReplayCollector(1500, config);
+      collector.registerImageAsset('control-raster', new util.Base64Helper().decodeSync(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      const light = collector.captureFrameNodeLight(asFrameNode(root));
+      light.nodes[0].componentRasterKey = 'control-raster';
+      const image = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
+      expect(image.type).assertEqual('image');
+      expect(image.isEmpty).assertFalse();
+      expect(image.shapeStyle?.backgroundColor === undefined).assertTrue();
+      expect(image.border === undefined).assertTrue();
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL);
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
+    });
+
     it('only captures a shown password after explicit opt-in and keeps stronger privacy policies masked', 0, () => {
       const attrs: Record<string, Object> = { 'type': 'InputType.Password', 'text': 'Demo-Password',
         'showPassword': true, 'contentType': 'TextContentType.UNSPECIFIED' };

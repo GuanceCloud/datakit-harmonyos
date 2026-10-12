@@ -5,6 +5,7 @@ import { resourceManager } from '@kit.LocalizationKit';
 import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
 import { ReplayRichText } from './ReplayRichText';
 import { ReplayComponentRaster } from './ReplayComponentRaster';
+import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
@@ -114,6 +115,7 @@ export class ArkUIReplayCollector {
   private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
   private readonly richText: ReplayRichText = new ReplayRichText();
   private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
+  private readonly controls: ReplayNativeControlPaint = new ReplayNativeControlPaint();
   private rasterContext: UIContext | null = null;
   private rasterLayoutEpoch: number = 0;
   private inlineMediaOwners: Set<number> | null = null;
@@ -158,6 +160,7 @@ export class ArkUIReplayCollector {
     this.marquee.clear();
     this.richText.clear();
     this.rasters.clear();
+    this.controls.clear();
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -168,6 +171,7 @@ export class ArkUIReplayCollector {
     this.marquee.clear();
     this.richText.clear();
     this.rasters.clear();
+    this.controls.clear();
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -463,7 +467,8 @@ export class ArkUIReplayCollector {
       return frame;
     }
     const canUseRaster = node.componentRasterKey !== undefined && this.canCaptureImage(node.width, node.height, scale) &&
-      (node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor') &&
+      (node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor' ||
+        (this.controls.isSupported(node.nodeType) && this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL)) &&
       (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL) &&
       (node.nodeType !== 'RichEditor' || this.canCaptureEditor(inspector));
     const frame = canUseRaster ? this.createImageWireframe(node.id, node.x, node.y, node.width, node.height,
@@ -535,14 +540,18 @@ export class ArkUIReplayCollector {
     const retained = new Set<number>();
     const selectInspectors = new Map<number, string | null>();
     for (const node of snapshot.nodes) {
-      if (node.nodeType === 'Select') selectInspectors.set(node.id, this.serializeInspectorInfo(node.inspectorInfo));
+      if (node.nodeType === 'Select' || node.nodeType === 'Button' || node.nodeType === 'Toggle') {
+        selectInspectors.set(node.id, this.serializeInspectorInfo(node.inspectorInfo));
+      }
     }
     for (let index = 0; index < snapshot.nodes.length; index++) {
       const node = snapshot.nodes[index];
       const inspector = node.nodeType === 'Select' ? selectInspectors.get(node.id) ?? null :
         this.serializeInspectorInfo(node.inspectorInfo);
-      const selectLabel = node.selectLabelOwnerId === undefined ? null :
-        this.readInspectorString(selectInspectors.get(node.selectLabelOwnerId) ?? null, ['value']);
+      const selectLabel = node.selectLabelOwnerId !== undefined ?
+        this.readInspectorString(selectInspectors.get(node.selectLabelOwnerId) ?? null, ['value']) :
+        node.buttonLabelOwnerId !== undefined ?
+          this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null;
       retained.add(node.id);
       const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
 
@@ -710,21 +719,31 @@ export class ArkUIReplayCollector {
     const nodeType = this.readNodeType(node);
     const inspectorInfo = this.readInspectorInfo(node);
     let componentRasterKey: string | undefined = undefined;
+    const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
+    const controlInfo = (inspectorInfo ?? {}) as Record<string, Object>;
+    const controlAttrs = (controlInfo['$attrs'] ?? controlInfo) as Record<string, Object>;
+    const hasNativeLabel = typeof controlAttrs['label'] === 'string' && (controlAttrs['label'] as string).length > 0;
+    const isNativeControl = this.controls.isSupported(nodeType) &&
+      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL &&
+      ((nodeType !== 'Button' && nodeType !== 'Toggle') || hasNativeLabel || !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) &&
+      !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
     const isSelectArrow = nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select';
     if (!isSelectArrow && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
-      (nodeType === 'SymbolGlyph' || (nodeType === 'RichEditor' && this.canCaptureEditorInfo(inspectorInfo) &&
+      (isNativeControl || nodeType === 'SymbolGlyph' || (nodeType === 'RichEditor' && this.canCaptureEditorInfo(inspectorInfo) &&
         !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) || (nodeType === 'Text' &&
         this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)))) {
       const info = (inspectorInfo ?? {}) as Record<string, Object>;
       const attrs = (info['$attrs'] ?? info) as Record<string, Object>;
       const editorContent = nodeType === 'RichEditor' ? this.readEditorContentSignature(nodeId) : null;
-      const signature = `${editorContent ?? this.rasterLayoutEpoch}|${width}|${height}|${vpToPxScale}|${String(attrs['focused'] ?? '')}|${String(attrs['backgroundColor'] ?? '')}|` +
+      const control = isNativeControl ? this.controls.sample(nodeId, nodeType, inspectorInfo, this.captureTimestamp, visible) : null;
+      this.activeComponentAnimations = this.activeComponentAnimations || control?.active === true;
+      const signature = `${control?.signature ?? editorContent ?? this.rasterLayoutEpoch}|${width}|${height}|${vpToPxScale}|${String(attrs['focused'] ?? '')}|${String(attrs['backgroundColor'] ?? '')}|` +
         `${String(attrs['content'] ?? '').substring(0, 16384)}|${String(attrs['fontColor'] ?? '')}|` +
         `${String(attrs['fontSize'] ?? '')}|${String(attrs['fontWeight'] ?? '')}|` +
         `${String(attrs['fontFamily'] ?? '')}|${String(attrs['fontStyle'] ?? '')}|${String(attrs['textAlign'] ?? '')}`;
-      const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
       const state = this.rasters.request(visible ? this.rasterContext : null, nodeId, this.readComponentId(node), signature,
-        width * height * vpToPxScale * vpToPxScale, nodeType === 'RichEditor' ? 1048576 : 262144, editorContent !== null);
+        width * height * vpToPxScale * vpToPxScale, nodeType === 'RichEditor' || isNativeControl ? 1048576 : 262144,
+        editorContent !== null || isNativeControl);
       componentRasterKey = state.key;
       this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
     }
@@ -738,11 +757,13 @@ export class ArkUIReplayCollector {
         componentId: this.readComponentId(node),
         nodeType,
         inspectorInfo,
-        shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
+        shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType, inspectorInfo),
         isSelectArrow,
         componentRasterKey,
         selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
           this.toProtocolId(grandparentId) : undefined,
+        buttonLabelOwnerId: nodeType === 'Text' && (parentType === 'Button' || parentType === 'Toggle') ?
+          this.toProtocolId(parentId) : undefined,
         isRoot,
         usedTransformedPosition,
         opacity,
@@ -771,7 +792,8 @@ export class ArkUIReplayCollector {
     }
     while (child !== null && output.length < nodeBudget) {
       // A completed Text raster already contains its inline image children.
-      if (nodeType !== 'RichEditor' && (nodeType !== 'Text' || componentRasterKey === undefined)) {
+      if (nodeType !== 'RichEditor' &&
+        ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
           excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
       }
@@ -1069,8 +1091,13 @@ export class ArkUIReplayCollector {
       shapeStyle: this.createShapeStyle(nodeType, inspector, false, width, height, vpToPxScale),
       isEmpty: true
     };
+    if (rasterKey !== undefined && this.controls.isSupported(nodeType)) {
+      // The native bitmap owns the track, background, border and shadow.
+      // Painting Inspector chrome beneath transparent pixels doubles alpha.
+      image.shapeStyle = undefined;
+    }
     const border = this.createBorder(nodeType, inspector, vpToPxScale);
-    if (border !== null) {
+    if (border !== null && (rasterKey === undefined || !this.controls.isSupported(nodeType))) {
       image.border = border;
     }
     if (componentId.length > 0) {
@@ -1184,7 +1211,11 @@ export class ArkUIReplayCollector {
     const shadow = this.createShadow(inspector, vpToPxScale);
     const transform = this.createTransform(inspector, vpToPxScale);
     const visible = this.readVisibility(inspector);
-    const fallbackColor = backgroundColor === null ? this.defaultBackgroundColor(nodeType, isRoot) : backgroundColor;
+    const selectedToggle = nodeType === 'Toggle' &&
+      this.readOwnInspectorString(inspector, ['type']) === 'ToggleType.Button' &&
+      this.readOwnInspectorString(inspector, ['isOn']) === 'true' ?
+      this.normalizeColor(this.readOwnInspectorString(inspector, ['selectedColor'])) : null;
+    const fallbackColor = selectedToggle ?? (backgroundColor === null ? this.defaultBackgroundColor(nodeType, isRoot) : backgroundColor);
     if (fallbackColor === null && cornerRadius === null && opacity === null && gradient === undefined && shadow === undefined &&
       transform === undefined && visible === null) {
       return undefined;
@@ -1962,7 +1993,7 @@ export class ArkUIReplayCollector {
     // payloads whose Button-specific field is simply named `type`. A value
     // such as `$type: Button` does not match any branch and therefore safely
     // retains ArkUI's documented Capsule default.
-    const value = this.readInspectorString(inspector, ['buttonType', 'type']);
+    const value = this.readOwnInspectorString(inspector, ['buttonType', 'type']);
     if (value === null) {
       return 'capsule';
     }
@@ -1982,11 +2013,17 @@ export class ArkUIReplayCollector {
   }
 
   /**
-   * A Text/Span/RichEditor wrapper with a text descendant is visual chrome;
+   * A Text/Span/Search wrapper with a text descendant is visual chrome;
    * its child owns the rendered glyphs. Representing the wrapper as a shape
    * retains its background/border while preventing duplicate rich-text runs.
    */
-  private shouldCaptureAsText(node: FrameNode, nodeType: string): boolean {
+  private shouldCaptureAsText(node: FrameNode, nodeType: string, info: Object | null): boolean {
+    if (nodeType === 'Button') {
+      const object = (info ?? {}) as Record<string, Object>;
+      const attrs = (object['$attrs'] ?? object) as Record<string, Object>;
+      return typeof attrs['label'] === 'string' && (attrs['label'] as string).length > 0 &&
+        !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
+    }
     if (!this.isTextNode(nodeType) || this.isButtonLikeNode(nodeType)) {
       return false;
     }
@@ -2009,7 +2046,10 @@ export class ArkUIReplayCollector {
     while (child !== null) {
       const childType = this.readNodeType(child);
       if (this.isTextNode(childType) && !this.isButtonLikeNode(childType)) {
-        return true;
+        try {
+          const size = child.getMeasuredSize();
+          if (size.width > 0 && size.height > 0) return true;
+        } catch (_) { return true; }
       }
       if (this.hasTextDescendant(child, remainingDepth - 1)) {
         return true;

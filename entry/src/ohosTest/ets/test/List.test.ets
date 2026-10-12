@@ -15,6 +15,7 @@ import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test'
 import sessionReplayMutationUITest from './SessionReplayMutationUITest.test';
 import sessionReplayStyleUITest from './SessionReplayStyleUITest.test';
 import sessionReplayInputUITest from './SessionReplayInputUITest.test';
+import sessionReplayControlUITest from './SessionReplayControlUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
@@ -34,4 +35,5 @@ export default function testsuite() {
   sessionReplayMutationUITest();
   sessionReplayStyleUITest();
   sessionReplayInputUITest();
+  sessionReplayControlUITest();
 }

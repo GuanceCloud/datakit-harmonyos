@@ -327,9 +327,9 @@ export struct SessionReplayComponentSamples {
   private controlSamples() {
     this.section('Button / Toggle / Checkbox / CheckboxGroup / Radio', '点击、切换、全选，检查选中态与禁用态。')
     Row({ space: 8 }) {
-      Button('普通按钮', { type: ButtonType.Normal }).onClick(() => { this.count++; })
-      Button('+', { type: ButtonType.Circle }).width(40).height(40).onClick(() => { this.count++; })
-      Button('禁用').enabled(false)
+      Button('普通按钮', { type: ButtonType.Normal }).id('session-replay-button-normal').onClick(() => { this.count++; })
+      Button('+', { type: ButtonType.Circle }).id('session-replay-button-circle').width(40).height(40).onClick(() => { this.count++; })
+      Button('禁用').id('session-replay-button-disabled').enabled(false)
     }
     Row({ space: 12 }) {
       Toggle({ type: ToggleType.Switch, isOn: this.switched })
@@ -337,6 +337,7 @@ export struct SessionReplayComponentSamples {
       Toggle({ type: ToggleType.Checkbox, isOn: this.checked })
         .id('session-replay-toggle-checkbox').onChange((value: boolean) => { this.checked = value; })
       Toggle({ type: ToggleType.Button, isOn: this.buttonToggle }) { Text('状态按钮') }
+        .id('session-replay-toggle-button')
         .onChange((value: boolean) => { this.buttonToggle = value; })
     }
     Row({ space: 12 }) {
@@ -350,9 +351,11 @@ export struct SessionReplayComponentSamples {
     }
     Row({ space: 12 }) {
       Radio({ value: 'A', group: 'replay-radio' }).checked(this.radio === 'A')
+        .id('session-replay-radio-a')
         .onChange((value: boolean) => { if (value) this.radio = 'A'; })
       Text('选项 A')
       Radio({ value: 'B', group: 'replay-radio' }).checked(this.radio === 'B')
+        .id('session-replay-radio-b')
         .onChange((value: boolean) => { if (value) this.radio = 'B'; })
       Text('选项 B')
     }
@@ -367,14 +370,19 @@ export struct SessionReplayComponentSamples {
     Rating({ rating: this.rating, indicator: false }).stars(5).stepSize(0.5)
       .id('session-replay-rating').onChange((value: number) => { this.rating = value; })
     Counter() { Text(`${this.count}`) }
+      .id('session-replay-counter')
       .width(180).height(40).onInc(() => { this.count++; }).onDec(() => { this.count--; })
     Progress({ value: this.slider, total: 100, type: ProgressType.Linear }).width('100%')
+      .id('session-replay-progress-linear')
     Row({ space: 16 }) {
       Progress({ value: this.slider, total: 100, type: ProgressType.Ring }).width(64).height(64)
-      LoadingProgress().width(40).height(40)
+        .id('session-replay-progress-ring')
+      LoadingProgress().id('session-replay-loading-progress').width(40).height(40)
       Gauge({ value: this.slider, min: 0, max: 100 }).width(120).height(120)
+        .id('session-replay-gauge')
     }
     DataPanel({ values: [this.slider, 100 - this.slider], max: 100, type: DataPanelType.Line })
+      .id('session-replay-data-panel')
       .width('100%').height(32)
     this.section('PatternLock', '连接图案节点，再重置；观察手势路径和节点状态。')
     PatternLock(this.pattern).id('session-replay-pattern-lock').width(240).height(240)

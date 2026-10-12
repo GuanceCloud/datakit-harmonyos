@@ -43,6 +43,8 @@ export interface ArkUIReplayLightNode {
   isSelectArrow?: boolean;
   /** Internal Select label's owner; native Inspector can omit the child's content. */
   selectLabelOwnerId?: number;
+  /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
+  buttonLabelOwnerId?: number;
   isRoot: boolean;
   usedTransformedPosition: boolean;
   opacity?: number;
@@ -245,6 +247,7 @@ export class SessionReplayScene {
           shouldCaptureAsText: source.shouldCaptureAsText, isRoot: source.isRoot,
           isSelectArrow: source.isSelectArrow,
           selectLabelOwnerId: source.selectLabelOwnerId,
+          buttonLabelOwnerId: source.buttonLabelOwnerId,
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
