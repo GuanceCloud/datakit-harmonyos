@@ -530,6 +530,8 @@ export default class EntryAbility extends UIAbility {
         // privacy on. The library defaults remain MASK_ALL/MASK_ALL for apps
         // that do not explicitly select this validation profile.
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        // Demo passwords are synthetic; replay the explicit eye-toggle state.
+        .setCaptureVisiblePassword(true)
         .setImagePrivacy(ImagePrivacy.MASK_NONE)
         .setTouchPrivacy(TouchPrivacy.SHOW)
         .setDelayInit(true);

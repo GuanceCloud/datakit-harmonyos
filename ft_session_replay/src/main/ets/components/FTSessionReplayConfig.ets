@@ -27,6 +27,7 @@ export class FTSessionReplayConfig {
   private sampleRate: number = 1;
   private sessionReplayOnErrorSampleRate: number = 0;
   private textAndInputPrivacy: TextAndInputPrivacy = TextAndInputPrivacy.MASK_ALL;
+  private captureVisiblePassword: boolean = false;
   private imagePrivacy: ImagePrivacy = ImagePrivacy.MASK_ALL;
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
@@ -79,6 +80,20 @@ export class FTSessionReplayConfig {
 
   public getTextAndInputPrivacy(): TextAndInputPrivacy {
     return this.textAndInputPrivacy;
+  }
+
+  /**
+   * Opts into plaintext for TextInput passwords explicitly shown by the page.
+   * Bind showPassword to state synchronized by onSecurityStateChange.
+   * Defaults to false; MASK_ALL_INPUTS and MASK_ALL always retain masking.
+   */
+  public setCaptureVisiblePassword(capture: boolean): FTSessionReplayConfig {
+    this.captureVisiblePassword = capture;
+    return this;
+  }
+
+  public isCaptureVisiblePasswordEnabled(): boolean {
+    return this.captureVisiblePassword;
   }
 
   public setImagePrivacy(privacy: ImagePrivacy): FTSessionReplayConfig {

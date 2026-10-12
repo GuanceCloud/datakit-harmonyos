@@ -49,6 +49,7 @@ export class SessionReplayWorkerOperations {
   constructor(options: ReplayWorkerOptions) {
     const config = new FTSessionReplayConfig()
       .setTextAndInputPrivacy(options.textPrivacy as TextAndInputPrivacy)
+      .setCaptureVisiblePassword(options.captureVisiblePassword === true)
       .setImagePrivacy(options.imagePrivacy as ImagePrivacy);
     this.collector = new ArkUIReplayCollector(options.maxNodes, config);
     this.diagnosticsEnabled = options.diagnosticsEnabled ?? false;

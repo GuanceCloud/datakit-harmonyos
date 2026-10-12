@@ -20,6 +20,7 @@ export interface ReplayWorkerOptions {
   fullSnapshotIntervalMs: number;
   errorSampleWindowMs: number;
   textPrivacy: string;
+  captureVisiblePassword?: boolean;
   imagePrivacy: string;
   diagnosticsEnabled?: boolean;
 }

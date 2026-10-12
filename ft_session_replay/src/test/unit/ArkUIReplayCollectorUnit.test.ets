@@ -212,6 +212,34 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('only captures a shown password after explicit opt-in and keeps stronger privacy policies masked', 0, () => {
+      const attrs: Record<string, Object> = { 'type': 'InputType.Password', 'text': 'Demo-Password',
+        'showPassword': true, 'contentType': 'TextContentType.UNSPECIFIED' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 40).withNodeType('TextInput')
+        .withInspector({ '$attrs': attrs } as Record<string, Object>);
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const text = (): string => ((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData)
+        .wireframes[0] as ReplayTextWireframe).text;
+      const masked = '•'.repeat('Demo-Password'.length);
+      expect(config.isCaptureVisiblePasswordEnabled()).assertFalse();
+      expect(text()).assertEqual(masked);
+      config.setCaptureVisiblePassword(true);
+      expect(text()).assertEqual('Demo-Password');
+      attrs['showPassword'] = false;
+      expect(text()).assertEqual(masked);
+      attrs['showPassword'] = '';
+      expect(text()).assertEqual(masked);
+      attrs['showPassword'] = 'true';
+      expect(text()).assertEqual('Demo-Password');
+      for (const privacy of [TextAndInputPrivacy.MASK_ALL_INPUTS, TextAndInputPrivacy.MASK_ALL]) {
+        config.setTextAndInputPrivacy(privacy);
+        expect(text()).assertEqual(masked);
+      }
+      config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setCaptureVisiblePassword(false);
+      expect(text()).assertEqual(masked);
+    });
+
     it('uses native input type before unspecified content type and keeps placeholder styling separate', 0, () => {
       const attrs: Record<string, Object> = { 'text': 'Demo-Password', 'placeholder': '密码提示',
         'type': 'InputType.Password', 'contentType': 'TextContentType.UNSPECIFIED',

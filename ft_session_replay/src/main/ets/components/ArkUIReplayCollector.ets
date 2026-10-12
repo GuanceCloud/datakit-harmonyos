@@ -449,7 +449,7 @@ export class ArkUIReplayCollector {
   ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
       `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|${node.componentRasterKey}|` +
-      `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
+      `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}|${this.config.isCaptureVisiblePasswordEnabled()}`;
     const cached = this.propertyCache.get(node.id);
     if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
       const frame = copyReplayWireframe(cached.frame);
@@ -1482,7 +1482,8 @@ export class ArkUIReplayCollector {
     const privacy = this.config.getTextAndInputPrivacy();
     const masked = privacy === TextAndInputPrivacy.MASK_ALL ||
       (privacy === TextAndInputPrivacy.MASK_ALL_INPUTS && input) ||
-      (privacy === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS && this.isSensitiveInput(nodeType, inspector));
+      (privacy === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS && this.isSensitiveInput(nodeType, inspector) &&
+        !this.canCaptureVisiblePassword(nodeType, inspector));
     if (!masked) {
       return source;
     }
@@ -2051,6 +2052,13 @@ export class ArkUIReplayCollector {
     }
     const explicitType = this.readOwnInspectorString(inspector, ['inputType']) ?? type;
     return !/text|normal|default|url|nickname|name|search/.test((explicitType ?? semantic).toLowerCase());
+  }
+
+  private canCaptureVisiblePassword(nodeType: string, inspector: string | null): boolean {
+    if (nodeType !== 'TextInput' || !this.config.isCaptureVisiblePasswordEnabled() ||
+      this.readOwnInspectorString(inspector, ['showPassword']) !== 'true') return false;
+    const type = this.readOwnInspectorString(inspector, ['inputType', 'type']);
+    return type !== null && /password/i.test(type);
   }
 
   private canCaptureEditor(inspector: string | null): boolean {

@@ -61,6 +61,7 @@ export struct SessionReplayComponentSamples {
   @State styleChanged: boolean = false;
   @State input: string = '';
   @State password: string = '';
+  @State passwordVisible: boolean = false;
   @State area: string = '';
   @State search: string = '';
   @State checked: boolean = false;
@@ -294,6 +295,8 @@ export struct SessionReplayComponentSamples {
       .onChange((value: string) => { this.input = value; })
     TextInput({ text: this.password, placeholder: '密码输入：仅使用演示密码' })
       .id('session-replay-password').type(InputType.Password).width('100%')
+      .showPassword(this.passwordVisible)
+      .onSecurityStateChange((visible: boolean) => { this.passwordVisible = visible; })
       .onChange((value: string) => { this.password = value; })
     TextArea({ text: this.area, placeholder: '多行输入：验证换行、编辑和内部滚动' })
       .id('session-replay-text-area').type(TextAreaType.NORMAL).width('100%').height(120)

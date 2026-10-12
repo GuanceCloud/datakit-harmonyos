@@ -237,6 +237,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       fullSnapshotIntervalMs: config.getFullSnapshotIntervalMs(),
       errorSampleWindowMs: config.getErrorSampleWindowMs(),
       textPrivacy: config.getTextAndInputPrivacy(),
+      captureVisiblePassword: config.isCaptureVisiblePasswordEnabled(),
       imagePrivacy: config.getImagePrivacy(),
       diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });

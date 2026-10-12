@@ -93,6 +93,71 @@ export default function sessionReplayInputUITest(): void {
         (node): boolean => node.type === 'image' && !node.isEmpty)).assertTrue();
     });
 
+    it('records native eye-toggle plaintext and masks it again with explicit visible-password capture', 0, async () => {
+      const secret = 'Demo-Password-123';
+      const masked = '•'.repeat(secret.length);
+      const shown = (): boolean => {
+        const info = frame('session-replay-password').getInspectorInfo() as Record<string, Object>;
+        return String((info['$attrs'] as Record<string, Object>)['showPassword']) === 'true';
+      };
+      const clickEye = async (): Promise<void> => {
+        const eye = frame('session-replay-password').getFirstChild();
+        if (eye === null) throw new Error('Native password eye is missing');
+        const position = eye.getPositionToWindowWithTransform();
+        const size = eye.getMeasuredSize();
+        await driver.click(Math.round(vp2px(position.x) + size.width / 2),
+          Math.round(vp2px(position.y) + size.height / 2));
+      };
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setCaptureVisiblePassword(true));
+      const context: FTSessionReplayRUMContext = { applicationId: 'input-test', sessionId: 'password-eye-test',
+        viewId: 'password-eye-view', viewName: 'Password eye', viewReferrer: '', linkContext: {}, timestamp: Date.now() };
+      const replayContext: SessionReplayContext = { applicationId: context.applicationId,
+        sessionId: context.sessionId, viewId: context.viewId };
+      const updates = (): Array<string> => {
+        const values: Array<string> = [];
+        for (const record of recorder.getRecordedRecords(replayContext)) {
+          if (record.type === ReplayRecordType.FULL_SNAPSHOT) {
+            const text = (record.data as FullSnapshotData).wireframes.find((node): boolean =>
+              node.permanentId === 'session-replay-password') as ReplayTextWireframe;
+            if (text !== undefined) values.push(text.text);
+          } else if (record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT && (record.data as ReplayMutationData).source === 0) {
+            for (const update of (record.data as ReplayMutationData).updates) {
+              if (update.type === 'text' && update.text !== undefined) values.push(update.text);
+            }
+          }
+        }
+        return values;
+      };
+      try {
+        expect(shown()).assertFalse();
+        recorder.start();
+        recorder.registerRoot(uiContext, 'session-replay-password', vp2px(1));
+        expect(recorder.onViewStarted(context)).assertTrue();
+        await driver.delayMs(350);
+        await recorder.drainWrites();
+        expect(updates()[0]).assertEqual(masked);
+        await clickEye();
+        await driver.delayMs(450);
+        expect(shown()).assertTrue();
+        await recorder.drainWrites();
+        expect(updates()[updates().length - 1]).assertEqual(secret);
+        const stillMasked = collector.materializeLightSnapshot(collector.captureLightSnapshot(uiContext,
+          'session-replay-password', vp2px(1))).data as FullSnapshotData;
+        expect((stillMasked.wireframes[0] as ReplayTextWireframe).text).assertEqual(masked);
+        await clickEye();
+        await driver.delayMs(450);
+        expect(shown()).assertFalse();
+        await recorder.drainWrites();
+        expect(updates()[updates().length - 1]).assertEqual(masked);
+      } finally {
+        if (shown()) await clickEye();
+        recorder.stop();
+        await recorder.drainWrites();
+        if (nativeWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_KEYBOARD).bottomRect.height > 0) await driver.pressBack();
+      }
+    });
+
     it('captures native RichEditor runs and colors while honoring all-input masking', 0, async () => {
       const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
       const append = await scroll!.scrollSearch(ON.text('追加富文本'));
