@@ -75,6 +75,7 @@ export default function sessionReplayMutationUITest(): void {
     let driver: Driver;
     let uiContext: UIContext;
     let context: SessionReplayContext;
+    let rootId: string = 'session-replay-transition-root';
 
     const click = async (id: string): Promise<void> => {
       let component = await driver.findComponent(ON.id(id));
@@ -109,7 +110,7 @@ export default function sessionReplayMutationUITest(): void {
       context = { applicationId: last.envelope.application_id, sessionId: last.envelope.session_id,
         viewId: last.envelope.view_id };
       const records = replay.getRecordedRecords(context);
-      const snapshot = replay.captureFullSnapshot(uiContext, 'session-replay-poc-root', context, vp2px(1)).record;
+      const snapshot = replay.captureFullSnapshot(uiContext, rootId, context, vp2px(1)).record;
       const actual = replayNodes(records);
       const expected = (snapshot.data as FullSnapshotData).wireframes;
       if (actual.length !== expected.length) {
@@ -188,6 +189,10 @@ export default function sessionReplayMutationUITest(): void {
       // Entry's delayed enable can initially attach to the outgoing Home View.
       // Wait for the animated navigation's native View/root binding to finish.
       await driver.delayMs(1600);
+      const functionalViewId = replay.getLastCapture()!.envelope.view_id;
+      await click('session-replay-transition-button');
+      await waitForViewCapture(functionalViewId);
+      await driver.delayMs(1400);
       const capture = replay.getLastCapture()!;
       context = { applicationId: capture.envelope.application_id,
         sessionId: capture.envelope.session_id, viewId: capture.envelope.view_id };
@@ -241,7 +246,7 @@ export default function sessionReplayMutationUITest(): void {
       await driver.delayMs(200);
       await click('session-replay-fixed-text-button');
       await driver.delayMs(50);
-      replay.captureIncrementalSnapshot(uiContext, 'session-replay-poc-root', context, vp2px(1));
+      replay.captureIncrementalSnapshot(uiContext, rootId, context, vp2px(1));
       await waitForCapture(baseline.timestamp);
       await driver.delayMs(1000);
       assertCurrentSnapshot();
@@ -307,10 +312,18 @@ export default function sessionReplayMutationUITest(): void {
     });
 
     it('capturesDefaultRouterPushAndPopWithoutExplicitTransitionEffects', 0, async () => {
+      const componentViewId = context.viewId;
+      await click('session-replay-transition-back');
+      await waitForViewCapture(componentViewId);
+      await driver.delayMs(1400);
+      const functionalCapture = replay.getLastCapture()!;
+      context = { applicationId: functionalCapture.envelope.application_id,
+        sessionId: functionalCapture.envelope.session_id, viewId: functionalCapture.envelope.view_id };
+      rootId = 'session-replay-poc-root';
       await scrollTo('session-replay-default-transition-button');
       // Establish a fresh outgoing baseline after UiTest's programmatic
       // scrollSearch, which does not forward touch-based motion signals.
-      const baseline = replay.captureFullSnapshot(uiContext, 'session-replay-poc-root', context, vp2px(1)).record;
+      const baseline = replay.captureFullSnapshot(uiContext, rootId, context, vp2px(1)).record;
       await driver.delayMs(200);
       await click('session-replay-default-transition-button');
       await driver.delayMs(1400);

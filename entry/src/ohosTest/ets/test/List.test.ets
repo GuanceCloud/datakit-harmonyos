@@ -13,6 +13,7 @@ import axiosPerformanceTimingE2ETest from './AxiosPerformanceTimingE2ETest.test'
 import rumUploadE2EUITest from './RumUploadE2EUITest.test';
 import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
 import sessionReplayMutationUITest from './SessionReplayMutationUITest.test';
+import sessionReplayStyleUITest from './SessionReplayStyleUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
@@ -30,4 +31,5 @@ export default function testsuite() {
   stressLogTimestampSequencerTest();
   nativeWorkerIntegrationUITest();
   sessionReplayMutationUITest();
+  sessionReplayStyleUITest();
 }

@@ -2,7 +2,7 @@ import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
-import { FTSessionReplayConfig, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
+import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
@@ -110,6 +110,10 @@ class ReplayFrameNodeFixture {
     return { x: this.layoutX, y: this.layoutY };
   }
 
+  public getPositionToParent(): ReplayPosition {
+    return { x: this.layoutX - (this.parent?.layoutX ?? 0), y: this.layoutY - (this.parent?.layoutY ?? 0) };
+  }
+
   public getPositionToWindowWithTransform(): ReplayPosition {
     return { x: this.renderedX, y: this.renderedY };
   }
@@ -208,6 +212,128 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('captures Hyperlink content and typography as text with normal privacy filtering', 0, () => {
+      const attrs: Record<string, Object> = { 'content': '观测云链接', 'fontSize': '16fp', 'foregroundColor': '#FF2563EB' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 80, 20).withNodeType('Hyperlink').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const first = collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData;
+      const link = first.wireframes[0] as ReplayTextWireframe;
+      expect(link.type).assertEqual('text');
+      expect(link.text).assertEqual('观测云链接');
+      expect(link.textStyle.color).assertEqual('#2563EBFF');
+      expect(link.textStyle.size).assertEqual(16);
+      expect(link.textPosition?.alignment?.vertical).assertEqual('center');
+      const masked = new ArkUIReplayCollector().captureFrameNode(asFrameNode(root)).data as FullSnapshotData;
+      expect((masked.wireframes[0] as ReplayTextWireframe).text.includes('观测云')).assertFalse();
+    });
+
+    it('reconstructs target-only Marquee motion at native pixel step and clears sampling on pause or finish', 0, () => {
+      const attrs: Record<string, Object> = { 'src': 'Moving text', 'start': 'true', 'step': '10', 'loop': '-1', 'fromStart': 'true' };
+      const root = new ReplayFrameNodeFixture(1, 20, 30, 20, 30, 200, 80).withNodeType('Marquee').withInspector(attrs);
+      const marqueeText = new ReplayFrameNodeFixture(2, 20, 30, -180, 30, 400, 80).withNodeType('Text')
+        .withInspector({ 'content': 'Moving text' } as Record<string, Object>);
+      root.append(marqueeText);
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const firstLight = collector.captureFrameNodeLight(asFrameNode(root), 2, 1000);
+      expect(firstLight.hasActiveAnimations).assertTrue();
+      const first = collector.materializeLightSnapshot(firstLight);
+      const label = findWireframe((first.data as FullSnapshotData).wireframes, 2) as ReplayTextWireframe;
+      expect(label.text).assertEqual('Moving text');
+      expect(label.x).assertEqual(20);
+      expect(label.clip?.left).assertEqual(0);
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      const moving = collector.captureFrameNode(asFrameNode(root), 2, 1850);
+      const changed = findWireframe((moving.data as FullSnapshotData).wireframes, 2)!;
+      expect(changed.x).assertEqual(-30);
+      expect(changed.clip?.left).assertEqual(50);
+      expect(changed.clip?.right).assertEqual(50);
+      expect((processor.createMutationRecord(moving)!.data as ReplayMutationData).updates.length).assertEqual(1);
+      attrs['start'] = 'false';
+      expect(collector.captureFrameNodeLight(asFrameNode(root), 2, 1850).hasActiveAnimations).assertFalse();
+      expect(collector.captureFrameNodeLight(asFrameNode(root), 2, 2850).nodes[1].x).assertEqual(-30);
+      attrs['start'] = 'true';
+      attrs['loop'] = '1';
+      expect(collector.captureFrameNodeLight(asFrameNode(root), 2, 3000).hasActiveAnimations).assertTrue();
+      const finished = collector.captureFrameNodeLight(asFrameNode(root), 2, 6401);
+      expect(finished.hasActiveAnimations).assertFalse();
+      expect(finished.nodes[1].x).assertEqual(20);
+      attrs['fromStart'] = 'false';
+      attrs['loop'] = '-1';
+      marqueeText.moveTo(120, 30);
+      collector.captureFrameNodeLight(asFrameNode(root), 2, 7000);
+      expect(collector.captureFrameNodeLight(asFrameNode(root), 2, 7850).nodes[1].x).assertEqual(70);
+      const fitted = new ReplayFrameNodeFixture(3, 20, 30, 20, 30, 200, 80).withNodeType('Marquee').withInspector(attrs);
+      fitted.append(new ReplayFrameNodeFixture(4, 20, 30, 20, 30, 200, 80).withNodeType('Text'));
+      const staticLight = collector.captureFrameNodeLight(asFrameNode(fitted), 2, 9000);
+      expect(staticLight.hasActiveAnimations).assertFalse();
+      expect(collector.captureFrameNodeLight(asFrameNode(fitted), 2, 10000).nodes[1].x).assertEqual(20);
+    });
+
+    it('renders HTML Web content as styled paragraphs with stable ids, privacy and viewport clipping', 0, () => {
+      const attrs: Record<string, Object> = { 'content': '<div style="color:#2563eb;font-size:18px"><b>HTML 富文本</b><p>段落与颜色采集测试</p></div>' };
+      const root = new ReplayFrameNodeFixture(1, 10, 20, 10, 20, 300, 110).withNodeType('Web').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(32, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const first = collector.captureFrameNode(asFrameNode(root));
+      const frames = (first.data as FullSnapshotData).wireframes;
+      const runs = frames.filter((node): boolean => node.type === 'text') as Array<ReplayTextWireframe>;
+      expect(runs.map((node): string => node.text).join('')).assertEqual('HTML 富文本段落与颜色采集测试');
+      expect(runs.every((node): boolean => node.textStyle.color === '#2563EBFF' && node.textStyle.size === 18)).assertTrue();
+      expect(runs[0].textStyle.weight).assertEqual(700);
+      expect(runs[runs.length - 1].textStyle.weight).assertEqual(400);
+      expect(runs[runs.length - 1].y > runs[0].y + 18).assertTrue();
+      expect(runs.every((node): boolean => node.width > 0 && node.height > 0)).assertTrue();
+      expect(new Set(frames.map((node): number => node.id)).size).assertEqual(frames.length);
+      expect(JSON.stringify(frames).includes('<div')).assertFalse();
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      expect(processor.createMutationRecord(collector.captureFrameNode(asFrameNode(root))) === null).assertTrue();
+      attrs['content'] = '<div style="color:#22c55e;font-size:18px"><b>HTML 富文本</b><p>段落与颜色采集测试</p></div>';
+      const changed = processor.createMutationRecord(collector.captureFrameNode(asFrameNode(root)))!.data as ReplayMutationData;
+      expect(changed.adds.length).assertEqual(0);
+      expect(changed.removes.length).assertEqual(0);
+      expect(changed.updates.every((node): boolean => node.textStyle?.color === '#22C55EFF')).assertTrue();
+      const masked = new ArkUIReplayCollector().captureFrameNode(asFrameNode(root));
+      expect(JSON.stringify(masked).includes('富文本')).assertFalse();
+      attrs['content'] = '<script>secret</script><span style="display:none">hidden</span><p>A &amp; B &#x4e2d;</p>';
+      const visible = collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData;
+      expect(visible.wireframes.filter((node): boolean => node.type === 'text')
+        .map((node): string => node.type === 'text' ? node.text : '').join('')).assertEqual('A & B 中');
+    });
+
+    it('masks editable HTML and textarea content while preserving public rich copy', 0, () => {
+      const attrs: Record<string, Object> = { 'content': '<div>Public</div><div contenteditable="true"><b>private-edit</b></div>' +
+        '<textarea>private-input</textarea><span contenteditable="false">Readable</span>' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 200).withNodeType('Web').withInspector(attrs);
+      for (const privacy of [TextAndInputPrivacy.MASK_SENSITIVE_INPUTS, TextAndInputPrivacy.MASK_ALL_INPUTS]) {
+        const collector = new ArkUIReplayCollector(32, new FTSessionReplayConfig().setTextAndInputPrivacy(privacy));
+        const data = collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData;
+        const content = data.wireframes.filter((node): boolean => node.type === 'text')
+          .map((node): string => node.type === 'text' ? node.text : '').join('');
+        expect(content.includes('Public')).assertTrue();
+        expect(content.includes('Readable')).assertTrue();
+        expect(content.includes('private')).assertFalse();
+        expect(content.includes('•')).assertTrue();
+      }
+    });
+
+    it('bounds rich text expansion and respects line height, nonbreaking spaces and clipped wraps', 0, () => {
+      const attrs: Record<string, Object> = { 'content': '<p style="line-height:2;font-size:20px">A&nbsp;B 长文本多行换行采集验证</p>' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 70, 25).withNodeType('Web').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(4, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const frames = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      const runs = frames.filter((node): boolean => node.type === 'text') as Array<ReplayTextWireframe>;
+      expect(frames.length <= 4).assertTrue();
+      expect(runs.length > 0).assertTrue();
+      expect(runs.every((node): boolean => node.textStyle.size === 20 && node.textStyle.lineHeight === 40)).assertTrue();
+      expect(runs.map((node): string => node.text).join('').includes('A\u00a0B')).assertTrue();
+      expect(runs.some((node): boolean => (node.clip?.bottom ?? 0) > 0)).assertTrue();
+    });
+
     it('captures all native block alignments and compound left/right alignments', 0, () => {
       const cases: Array<TextAlignmentCase> = [
         { align: 'Alignment.TopStart', horizontal: 'left', vertical: 'top' },
@@ -406,7 +532,8 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const arrow = findWireframe(data.wireframes, 4) as ReplayImageWireframe;
       expect(arrow.type).assertEqual('image');
       expect(arrow.isEmpty).assertFalse();
-      expect(arrow.mimeType).assertEqual('image/svg+xml');
+      expect(arrow.mimeType).assertEqual('svg+xml');
+      expect(`data:image/${arrow.mimeType};base64,${arrow.base64}`.startsWith('data:image/svg+xml;base64,')).assertTrue();
       expect(arrow.resourceId === undefined).assertTrue();
       const svg = util.TextDecoder.create('utf-8').decodeWithStream(new util.Base64Helper().decodeSync(arrow.base64!));
       expect(svg.includes('fill="#000000"')).assertTrue();
@@ -712,6 +839,71 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const reopened = capture();
       expect(findWireframe((reopened.data as FullSnapshotData).wireframes, 13) !== null).assertTrue();
       expect(context.treeReads).assertEqual(1);
+    });
+
+    it('paints native menu material without changing the transparent wrapper or configured colors', 0, () => {
+      const attrs: Record<string, Object> = {};
+      attrs['backgroundColor'] = '#00000000';
+      attrs['borderRadius'] = '{"topLeft":"20vp"}';
+      const options: Record<string, Object> = { 'colorMode': 'ThemeColorMode.System', 'policy': 'BlurStyleActivePolicy.ALWAYS_ACTIVE' };
+      const blur: Record<string, Object> = { 'value': 'BlurStyle.COMPONENT_ULTRA_THICK', 'options': options };
+      attrs['backgroundBlurStyle'] = blur;
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 400).withNodeType('MenuWrapper');
+      const menu = root.append(new ReplayFrameNodeFixture(2, 10, 10, 10, 10, 160, 200).withNodeType('Menu').withInspector(attrs));
+      const collector = new ArkUIReplayCollector();
+      const capture = (dark: boolean = false): SessionReplayRecord => {
+        const light = collector.captureFrameNodeLight(asFrameNode(root));
+        for (const node of light.nodes) node.isDarkMode = dark;
+        return collector.materializeLightSnapshot(light);
+      };
+      const first = capture();
+      const panel = findWireframe((first.data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe;
+      expect(panel.shapeStyle?.backgroundColor).assertEqual('#FFFFFFFF');
+      expect(panel.shapeStyle?.cornerRadius).assertEqual(20);
+      // Window-wide MenuWrapper keeps its own transparent chrome.
+      const wrapperAttrs: Record<string, Object> = { 'backgroundColor': '#00000000' };
+      root.withInspector(wrapperAttrs);
+      expect((findWireframe((capture().data as FullSnapshotData).wireframes, 1) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#00000000');
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(capture());
+      const dark = capture(true);
+      expect((findWireframe((dark.data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#333333FF');
+      const update = processor.createMutationRecord(dark)!.data as ReplayMutationData;
+      expect(update.updates.length).assertEqual(1);
+      expect(update.updates[0].shapeStyle?.backgroundColor).assertEqual('#333333FF');
+      options['colorMode'] = 'ThemeColorMode.Light';
+      expect((findWireframe((capture(true).data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#FFFFFFFF');
+      attrs['backgroundColor'] = '#FF2563EB';
+      expect((findWireframe((capture().data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#2563EBFF');
+      attrs['backgroundColor'] = '#00000000';
+      blur['value'] = 'BlurStyle.NONE';
+      menu.withInspector(attrs);
+      expect((findWireframe((capture().data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#00000000');
+      blur['value'] = 'BlurStyle.COMPONENT_ULTRA_THICK';
+      options['policy'] = 'BlurStyleActivePolicy.ALWAYS_INACTIVE';
+      options['inactiveColor'] = '#FF22C55E';
+      expect((findWireframe((capture().data as FullSnapshotData).wireframes, 2) as ReplayShapeWireframe)
+        .shapeStyle?.backgroundColor).assertEqual('#22C55EFF');
+    });
+
+    it('uses Replay MIME subtypes while keeping the uploaded image resource MIME complete', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 20, 20).withNodeType('Image');
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig().setImagePrivacy(ImagePrivacy.MASK_NONE));
+      const png = new util.Base64Helper().decodeSync('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII=');
+      expect(collector.registerImageAsset('fixture-1', png, 'image/png')).assertTrue();
+      const first = collector.captureFrameNode(asFrameNode(root));
+      const image = (first.data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
+      expect(image.mimeType).assertEqual('png');
+      expect(image.isEmpty).assertFalse();
+      const resources = collector.takeCapturedImageResources();
+      expect(resources.length).assertEqual(1);
+      expect(resources[0].mimeType).assertEqual('image/png');
+      expect(resources[0].bytes.length).assertEqual(png.length);
     });
 
     it('prioritizes private-filtered popup nodes within the shared scene budget', 0, () => {

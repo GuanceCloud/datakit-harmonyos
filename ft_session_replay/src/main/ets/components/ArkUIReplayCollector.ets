@@ -1,6 +1,9 @@
 import { copyReplayWireframe } from './ReplayWireframeValues';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import { resourceManager } from '@kit.LocalizationKit';
+import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
+import { ReplayRichText } from './ReplayRichText';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
@@ -107,6 +110,10 @@ export class ArkUIReplayCollector {
   private readonly scene: SessionReplayScene = new SessionReplayScene();
   private overlayContext: UIContext | null = null;
   private overlayWindowRoot: FrameNode | null = null;
+  private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
+  private readonly richText: ReplayRichText = new ReplayRichText();
+  private activeComponentAnimations: boolean = false;
+  private captureTimestamp: number = 0;
 
   constructor(maxNodes: number = 1500, config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.maxNodes = Math.max(1, Math.floor(maxNodes));
@@ -119,12 +126,16 @@ export class ArkUIReplayCollector {
     this.propertyCache.clear();
     this.propertyCacheChars = 0;
     this.scene.clear();
+    this.marquee.clear();
+    this.richText.clear();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
   }
 
   public clearScene(): void {
     this.scene.clear();
+    this.marquee.clear();
+    this.richText.clear();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
   }
@@ -195,7 +206,10 @@ export class ArkUIReplayCollector {
     if (root === null) {
       throw new Error(`Session Replay root was not found: ${rootId}`);
     }
-    return this.captureFrameNodeLight(root, vpToPxScale, timestamp);
+    const snapshot = this.captureFrameNodeLight(root, vpToPxScale, timestamp);
+    const isDarkMode = this.readDarkMode(uiContext);
+    for (const node of snapshot.nodes) if (node.nodeType === 'Menu') node.isDarkMode = isDarkMode;
+    return snapshot;
   }
 
   /** Resolves reachable ArkUI containers; internal Page/Stage parents remain private. */
@@ -235,6 +249,7 @@ export class ArkUIReplayCollector {
     scenePages: Array<ArkUIReplayScenePage> = []
   ): ArkUIReplayLightSnapshot {
     const scale = Number.isFinite(vpToPxScale) && vpToPxScale > 0 ? vpToPxScale : 1;
+    this.beginComponentFrame(timestamp);
     const pages = scenePages.length > 0 ? scenePages : rootIds.map((rootId: string): ArkUIReplayScenePage => {
       return { key: rootId, rootId, root: uiContext.getFrameNodeById(rootId), retained: false };
     });
@@ -300,7 +315,9 @@ export class ArkUIReplayCollector {
       shouldCaptureAsText: false, isRoot: true, usedTransformedPosition: false, opacity: 1,
       clip: { top: 0, right: 0, bottom: 0, left: 0 }
     }];
+    const isDarkMode = this.readDarkMode(uiContext);
     const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1, timestamp);
+    for (const node of composed) if (node.nodeType === 'Menu') node.isDarkMode = isDarkMode;
     const capturedIds = new Set<number>();
     let overlayLayer = 0;
     for (const node of composed) {
@@ -317,6 +334,7 @@ export class ArkUIReplayCollector {
         overlayLayer += this.maxNodes + 1;
         for (let index = start; index < overlays.length; index++) {
           overlays[index].sceneLayer = overlayLayer;
+          if (overlays[index].nodeType === 'Menu') overlays[index].isDarkMode = isDarkMode;
           capturedIds.add(overlays[index].id - this.toProtocolId(0));
         }
       } catch (_) { }
@@ -325,12 +343,19 @@ export class ArkUIReplayCollector {
     // the budget. Their window-space geometry never inherits Router movement.
     for (const node of composed.slice(0, Math.max(0, this.maxNodes - 1 - overlays.length))) nodes.push(node);
     for (const node of overlays) nodes.push(node);
-    return { timestamp, vpToPxScale: scale, nodes };
+    this.marquee.endFrame();
+    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
   }
 
   private isWindowOverlay(nodeType: string): boolean {
     return nodeType === 'MenuWrapper' || nodeType === 'Popup' || nodeType === 'Dialog' ||
       nodeType === 'SheetWrapper';
+  }
+
+  private readDarkMode(uiContext: UIContext): boolean {
+    try {
+      return uiContext.getHostContext()?.resourceManager.getConfigurationSync().colorMode === resourceManager.ColorMode.DARK;
+    } catch (_) { return false; }
   }
 
   /**
@@ -386,7 +411,8 @@ export class ArkUIReplayCollector {
     node: ArkUIReplayLightNode, inspector: string | null, scale: number, selectLabel: string | null
   ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
-      `${node.shouldCaptureAsText}|${node.isSelectArrow}|${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
+      `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|` +
+      `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}`;
     const cached = this.propertyCache.get(node.id);
     if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
       const frame = copyReplayWireframe(cached.frame);
@@ -401,6 +427,9 @@ export class ArkUIReplayCollector {
     const frame = this.createWireframe(node.id, node.x, node.y, node.width, node.height,
       node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale, node.isSelectArrow === true, selectLabel);
     this.appendCommonVisualProperties(frame, inspector);
+    if (node.nodeType === 'Menu' && frame.type === 'shape') {
+      this.appendMenuMaterialBackground(frame, inspector, node.isDarkMode === true);
+    }
     this.propertyCacheChars -= (cached?.inspector?.length ?? 0) + (cached?.selectLabel?.length ?? 0);
     this.propertyCacheChars += (inspector?.length ?? 0) + (selectLabel?.length ?? 0);
     this.propertyCache.set(node.id, { inspector, selectLabel, signature, frame: copyReplayWireframe(frame) });
@@ -434,10 +463,18 @@ export class ArkUIReplayCollector {
     timestamp: number = Date.now()
   ): ArkUIReplayLightSnapshot {
     this.assertRenderableRoot(root);
+    this.beginComponentFrame(timestamp);
     const scale = Number.isFinite(vpToPxScale) && vpToPxScale > 0 ? vpToPxScale : 1;
     const nodes: Array<ArkUIReplayLightNode> = [];
     this.appendLightPreOrder(root, scale, nodes, true);
-    return { timestamp, vpToPxScale: scale, nodes };
+    this.marquee.endFrame();
+    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
+  }
+
+  private beginComponentFrame(timestamp: number): void {
+    this.captureTimestamp = timestamp;
+    this.activeComponentAnimations = false;
+    this.marquee.beginFrame();
   }
 
   /**
@@ -447,6 +484,8 @@ export class ArkUIReplayCollector {
    */
   public materializeLightSnapshot(snapshot: ArkUIReplayLightSnapshot): SessionReplayRecord {
     const wireframes: Array<ReplayWireframe> = [];
+    const frameSources: Map<number, ArkUIReplayLightNode> = new Map();
+    let extraBudget = Math.max(0, this.maxNodes - snapshot.nodes.length);
     const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
     const retained = new Set<number>();
@@ -478,6 +517,20 @@ export class ArkUIReplayCollector {
         wireframe.shapeStyle = style;
       }
       wireframes.push(wireframe);
+      frameSources.set(wireframe.id, node);
+      if (node.nodeType === 'Web' || node.nodeType === 'RichText') {
+        const html = this.readInspectorString(inspector, ['content']);
+        if (html !== null && html.trim().length > 0) {
+          const children = this.richText.create(node, html, snapshot.vpToPxScale, extraBudget,
+            (value: string, input: boolean): string => this.filterText(value, input ? 'TextArea' : 'Text', node.width, null));
+          extraBudget -= children.length;
+          for (const child of children) {
+            child.zIndex = wireframe.zIndex;
+            wireframes.push(child);
+            frameSources.set(child.id, node);
+          }
+        }
+      }
       if (node.sceneLayer !== undefined && !node.isPageSurface) {
         let indices = pageZIndices.get(node.sceneLayer);
         if (indices === undefined) {
@@ -494,9 +547,10 @@ export class ArkUIReplayCollector {
         this.propertyCacheChars -= (cached.inspector?.length ?? 0) + (cached.selectLabel?.length ?? 0);
       }
     });
+    this.richText.retain(retained);
     pageZIndices.forEach((indices: Array<number>): void => { indices.sort((left: number, right: number): number => left - right); });
     for (let index = 0; index < wireframes.length; index++) {
-      const node = snapshot.nodes[index];
+      const node = frameSources.get(wireframes[index].id)!;
       if (node.sceneLayer === undefined) continue;
       const wireframe = wireframes[index];
       // Native zIndex is local to its page. Compact its relative order into
@@ -549,7 +603,8 @@ export class ArkUIReplayCollector {
     parentType: string = '',
     grandparentType: string = '',
     parentId: number = 0,
-    grandparentId: number = 0
+    grandparentId: number = 0,
+    marqueeTextX?: number
   ): void {
     if (output.length >= nodeBudget) {
       return;
@@ -597,6 +652,7 @@ export class ArkUIReplayCollector {
 
     x = this.roundReplayMetric(x + sceneOffsetX);
     y = this.roundReplayMetric(y + sceneOffsetY);
+    if (parentType === 'Marquee' && marqueeTextX !== undefined) x = this.roundReplayMetric(marqueeTextX);
 
     const bounds = this.createClipRect(x, y, width, height);
     const clipsDescendants = isRoot || this.isClipToFrame(node);
@@ -608,6 +664,7 @@ export class ArkUIReplayCollector {
     // a clipping boundary. Fully clipped nodes remain present with an empty
     // clip instead of being removed and added again when they slide back in.
     const nodeType = this.readNodeType(node);
+    const inspectorInfo = this.readInspectorInfo(node);
     if (width > 0 && height > 0) {
       output.push({
         id: this.toProtocolId(nodeId),
@@ -617,7 +674,7 @@ export class ArkUIReplayCollector {
         height,
         componentId: this.readComponentId(node),
         nodeType,
-        inspectorInfo: this.readInspectorInfo(node),
+        inspectorInfo,
         shouldCaptureAsText: this.shouldCaptureAsText(node, nodeType),
         isSelectArrow: nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select',
         selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
@@ -635,9 +692,22 @@ export class ArkUIReplayCollector {
     } catch (_) {
       return;
     }
+    let textX: number | undefined = undefined;
+    if (nodeType === 'Marquee' && child !== null) {
+      try {
+        const textWidth = child.getMeasuredSize().width / vpToPxScale;
+        const localX = child.getPositionToParent().x;
+        const nativeOffset = child.getPositionToWindowWithTransform().x + sceneOffsetX - x - localX;
+        const visible = this.intersectClipRects(ancestorClip, bounds);
+        const sample = this.marquee.sample(nodeId, inspectorInfo, width, textWidth, vpToPxScale,
+          this.captureTimestamp, nativeOffset, visible !== null && opacity > 0 && output.length < nodeBudget);
+        textX = x + localX + sample.offset;
+        this.activeComponentAnimations = this.activeComponentAnimations || sample.active;
+      } catch (_) { textX = x; }
+    }
     while (child !== null && output.length < nodeBudget) {
       this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
-        excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId);
+        excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
       try {
         child = child.getNextSibling();
       } catch (_) {
@@ -838,7 +908,7 @@ export class ArkUIReplayCollector {
       `<path d="M3 18H35Q38 18 36 21L21 40Q19 43 17 40L2 21Q0 18 3 18Z" ` +
       `fill="${color.substring(0, 7)}" fill-opacity="${alpha}"/></svg>`;
     const arrow: ReplayImageWireframe = {
-      id, x, y, width, height, type: 'image', isEmpty: false, mimeType: 'image/svg+xml',
+      id, x, y, width, height, type: 'image', isEmpty: false, mimeType: 'svg+xml',
       base64: new util.Base64Helper().encodeToStringSync(util.TextEncoder.create('utf-8').encodeInto(svg)),
       shapeStyle: this.createShapeStyle('SymbolGlyph', inspector, false, width, height, vpToPxScale)
     };
@@ -882,7 +952,9 @@ export class ArkUIReplayCollector {
       return image;
     }
     image.resourceId = resource.token;
-    image.mimeType = resource.mimeType;
+    // Mobile Replay constructs data:image/<mimeType>; uploaded asset metadata
+    // keeps the full MIME separately. Sending image/png here doubles the prefix.
+    image.mimeType = resource.mimeType.substring('image/'.length);
     image.isEmpty = false;
     return image;
   }
@@ -992,6 +1064,34 @@ export class ArkUIReplayCollector {
     return style;
   }
 
+  private appendMenuMaterialBackground(frame: ReplayShapeWireframe, inspector: string | null, isDarkMode: boolean): void {
+    const background = frame.shapeStyle?.backgroundColor;
+    if (background !== undefined && !background.endsWith('00')) return;
+    const blur = this.readInspectorObject(inspector, ['backgroundBlurStyle']);
+    if (blur === null || typeof blur['value'] !== 'string' ||
+      (blur['value'] as string).toUpperCase() !== 'BLURSTYLE.COMPONENT_ULTRA_THICK') return;
+    const options = this.findInspectorObject(blur, ['options']);
+    const policy = options === null ? null : this.findInspectorScalar(options, ['policy']);
+    if (policy?.toUpperCase().includes('ALWAYS_INACTIVE')) {
+      const inactive = options === null ? null : this.normalizeColor(this.findInspectorScalar(options, ['inactiveColor']));
+      if (inactive !== null) {
+        const style = frame.shapeStyle ?? {};
+        style.backgroundColor = inactive;
+        frame.shapeStyle = style;
+      }
+      return;
+    }
+    const colorMode = (options === null ? null : this.findInspectorScalar(options, ['colorMode']))?.toLowerCase();
+    const dark = colorMode?.endsWith('.dark') === true ||
+      (colorMode?.endsWith('.light') !== true && isDarkMode);
+    // ArkUI leaves backgroundColor transparent while Render Service paints
+    // the component material. Mobile Replay has no backdrop material field;
+    // use its opaque appearance so page glyphs cannot show through the panel.
+    const style = frame.shapeStyle ?? {};
+    style.backgroundColor = dark ? '#333333FF' : '#FFFFFFFF';
+    frame.shapeStyle = style;
+  }
+
   private createBorder(nodeType: string, inspector: string | null, vpToPxScale: number): ReplayShapeBorder | null {
     const directColor = this.readInspectorString(inspector, ['borderColor', 'outlineColor']);
     const nestedColor = directColor === null ?
@@ -1080,7 +1180,8 @@ export class ArkUIReplayCollector {
     ) ?? this.normalizeHorizontalAlignment(blockAlignment);
     const vertical = this.normalizeVerticalAlignment(
       this.readInspectorString(inspector, ['verticalAlign', 'verticalAlignment'])
-    ) ?? this.normalizeBlockVerticalAlignment(blockAlignment) ?? (nodeType === 'Text' || nodeType === 'Span' ? 'center' : null);
+    ) ?? this.normalizeBlockVerticalAlignment(blockAlignment) ??
+      (nodeType === 'Text' || nodeType === 'Span' || nodeType === 'Hyperlink' ? 'center' : null);
     if (top === null && right === null && bottom === null && left === null && horizontal === null && vertical === null) {
       return undefined;
     }
@@ -1768,7 +1869,7 @@ export class ArkUIReplayCollector {
   }
 
   private isTextNode(nodeType: string): boolean {
-    return nodeType === 'Text' || nodeType === 'Span' || nodeType === 'TextInput' ||
+    return nodeType === 'Text' || nodeType === 'Span' || nodeType === 'Hyperlink' || nodeType === 'TextInput' ||
       nodeType === 'TextArea' || nodeType === 'Search' || nodeType === 'RichEditor';
   }
 

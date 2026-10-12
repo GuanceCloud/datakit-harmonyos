@@ -154,6 +154,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private viewportCaptureTimer: number = -1;
   private captureDeferred: boolean = false;
   private motionUntil: number = 0;
+  private hasActiveComponentAnimations: boolean = false;
   private readonly activePointers: Map<number, ReplayTouchPoint> = new Map();
   private readonly pageTransitions: Map<string, ArkUIReplayPageTransition> = new Map();
   private readonly navigationPages: Map<string, ReplayNavigationPage> = new Map();
@@ -1075,10 +1076,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
   private captureRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
-    if (!this.config.isPerformanceDiagnosticsEnabled()) return this.collectRootLight(uiContext, rootId, scale);
     const startedAt = Date.now();
     const snapshot = this.collectRootLight(uiContext, rootId, scale);
-    snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
+    this.hasActiveComponentAnimations = snapshot.hasActiveAnimations === true;
+    if (this.config.isPerformanceDiagnosticsEnabled()) snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
     return snapshot;
   }
 
@@ -1543,6 +1544,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private stopObservation(): void {
+    this.hasActiveComponentAnimations = false;
     this.samplingFrameEpoch++;
     this.nextSamplingDeadline = 0;
     const uiContext = this.drawObserverContext;
@@ -1630,6 +1632,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private hasSamplingSceneMotion(): boolean {
+    if (this.hasActiveComponentAnimations) return true;
     if (this.hasRetainedScenePages()) return true;
     const binding = this.rootBinding;
     const now = Date.now();

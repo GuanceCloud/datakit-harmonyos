@@ -159,6 +159,7 @@ export interface ReplayImageWireframe extends ReplayWireframeBase {
   border?: ReplayShapeBorder;
   base64?: string;
   resourceId?: string;
+  /** Mobile Replay MIME subtype (png, jpeg, svg+xml); the player supplies image/. */
   mimeType?: string;
   isEmpty?: boolean;
   imageStyle?: ReplayImageStyle;

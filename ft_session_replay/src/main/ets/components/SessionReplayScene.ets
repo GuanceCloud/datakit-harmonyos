@@ -49,9 +49,13 @@ export interface ArkUIReplayLightNode {
   clip?: ReplayWireframeClip;
   sceneLayer?: number;
   isPageSurface?: boolean;
+  /** Resolved window appearance for native material surfaces using System mode. */
+  isDarkMode?: boolean;
 }
 
 export interface ArkUIReplayLightSnapshot {
+  /** Visible native component motion requires sampling even when RS does not redraw ArkUI. */
+  hasActiveAnimations?: boolean;
   collectionDurationMs?: number;
   timestamp: number;
   vpToPxScale: number;
@@ -241,7 +245,8 @@ export class SessionReplayScene {
           selectLabelOwnerId: source.selectLabelOwnerId,
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
-          sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface
+          sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
+          isDarkMode: source.isDarkMode
         });
       }
     }
