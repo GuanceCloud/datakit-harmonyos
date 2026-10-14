@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `registerImageAsset(...)` for unmasked bundle, file, and network images. Use `unregisterImageAsset(...)` to remove registered assets; Data-URI images can be collected directly.
 - Added delayed recording through `setDelayInit(true)` and `start()`. `disable()` stops collection while scheduled uploads drain pending data.
 - Added local cache limits through `setStorageMaxBytes(...)` and scheduled uploads through `setUploadIntervalMs(...)`. Use `setUploadIntervalMs(0)` with `flush()` for manual uploads. Replay uses the core SDK's DataKit or Dataway endpoint by default; `setUploadUrl(...)` overrides it.
+- Improved Replay recording performance during continuous animation, while keeping availability immediate and final record counts current at View end, recording stop, and upload.
 - Fixed text colors, font sizes, alignment, padding, and rounded corners being rendered incorrectly, and Select controls losing labels or dropdown arrows.
 - Fixed native menus, popups, dialogs, and sheets missing from Replay, with correct layering and removal when closed.
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.

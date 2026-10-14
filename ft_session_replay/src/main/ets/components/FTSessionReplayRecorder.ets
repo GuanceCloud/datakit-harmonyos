@@ -24,6 +24,7 @@ import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSe
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
+import { ReplayMetadataNotifier } from './ReplayMetadataNotifier';
 import {
   ReplayWorkerCapture,
   ReplayWorkerResult,
@@ -133,6 +134,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private pendingViewStartContext: FTSessionReplayRUMContext | null = null;
   private pendingViewStartFailure: string = '';
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
+  private readonly metadataNotifier: ReplayMetadataNotifier = new ReplayMetadataNotifier();
   private readonly recordedContextsByView: Map<string, SessionReplayContext> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
@@ -285,6 +287,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     this.workQueue.close();
     this.workQueue.drain().then((): void => {
+      this.metadataNotifier.flush();
       const failure = this.workQueue.getLastFailure();
       if (failure.length > 0) FTSessionReplayBridgeRegistry.logDiagnostic(`Replay stop seal failed: ${failure}`, true);
       this.rootBinding = null;
@@ -403,11 +406,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** Waits for all Replay batches accepted before this call to reach disk. */
   public drainWrites(): Promise<void> {
-    return this.workQueue.drain();
+    return this.workQueue.drain((): void => this.metadataNotifier.flush());
   }
 
   public withWriteBarrier(action: () => void): Promise<void> {
-    return this.workQueue.drain(action);
+    return this.workQueue.drain((): void => {
+      this.metadataNotifier.flush();
+      action();
+    });
   }
 
   public getStorageFilesDir(): string {
@@ -419,7 +425,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   public listPendingSegmentIds(): Promise<Array<string>> {
-    return this.workQueue.listPendingIds();
+    return this.workQueue.listPendingIds().then((ids: Array<string>): Array<string> => {
+      this.metadataNotifier.flush();
+      return ids;
+    });
   }
 
   public removeUploadedSegments(ids: Array<string>): Promise<boolean> {
@@ -887,6 +896,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
     this.appendRecordedRecords(replayContext, capture.records, true, true);
+    // Accepted frames can finish after the route closes. Publish their final count at the FIFO boundary.
+    this.workQueue.drain((): void => this.metadataNotifier.flush(viewKey)).catch((error: Error): void => {
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay View metadata drain failed: ${error.message}`, true);
+    });
     this.activeContext = null;
     this.captureGeneration++;
     this.stopObservation();
@@ -1344,7 +1357,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       sampledOnError
     });
     this.recordedContextsByView.set(key, this.copyReplayContext(context));
-    this.notifyReplayMetadata(context);
+    this.notifyReplayMetadata(context, existing === undefined || existing.sampledOnError !== sampledOnError);
   }
 
   private createReplayRUMContext(context: SessionReplayContext): FTSessionReplayRUMContext {
@@ -1359,9 +1372,12 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     };
   }
 
-  private notifyReplayMetadata(context: SessionReplayContext): void {
+  private notifyReplayMetadata(context: SessionReplayContext, immediate: boolean = true): void {
     const rumContext = this.createReplayRUMContext(context);
-    FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext));
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    this.metadataNotifier.notify(key, immediate,
+      (): void => FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext)),
+      (): (() => void) => FTSessionReplayBridgeRegistry.beginViewPersistence(rumContext));
   }
 
   private getViewMetadataKey(context: FTSessionReplayRUMContext): string {
