@@ -354,6 +354,16 @@ export class FTSessionReplay {
     this.recorder?.recordTouchEvent(event);
   }
 
+  /** Captures a PatternLock's own touch callback when its native recognizer consumes ancestor events. */
+  public recordPatternTouch(componentId: string, event: TouchEvent): void {
+    this.recorder?.recordPatternTouch(componentId, event);
+  }
+
+  /** Synchronizes PatternLock completion or an application-owned controller reset; indexes are 0..8. */
+  public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
+    this.recorder?.updatePatternLockState(componentId, points, completed);
+  }
+
   /**
    * Signals that the active ArkUI page produced a stable visual/layout change.
    * It is intentionally a signal rather than a capture call: the recorder

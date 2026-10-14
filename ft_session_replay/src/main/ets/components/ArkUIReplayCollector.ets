@@ -1,3 +1,4 @@
+import { ReplayPatternLock } from './ReplayPatternLock';
 import { copyReplayWireframe } from './ReplayWireframeValues';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
@@ -7,7 +8,7 @@ import { ReplayRichText } from './ReplayRichText';
 import { ReplayComponentRaster } from './ReplayComponentRaster';
 import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
 import { ReplayControlWireframes } from './ReplayControlWireframes';
-import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
+import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
   ArkUIReplaySceneBounds, ArkUIReplaySceneFrame, ArkUIReplayScenePage, ReplayInlineRun, SessionReplayScene
@@ -125,6 +126,7 @@ export class ArkUIReplayCollector {
   private readonly controlVectorCache: Map<string, ReplayControlVectorAsset> = new Map();
   private controlVectorBytes: number = 0;
   private controlVectorRevision: number = 0;
+  private readonly patterns: ReplayPatternLock = new ReplayPatternLock();
   private rasterContext: UIContext | null = null;
   private rasterLayoutEpoch: number = 0;
   private inlineMediaOwners: Set<number> | null = null;
@@ -162,6 +164,30 @@ export class ArkUIReplayCollector {
     this.inlineTextRuns = null;
   }
 
+  public preparePatternLock(uiContext: UIContext, componentId: string, scale: number, originX: number, originY: number): void {
+    if (this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_SENSITIVE_INPUTS ||
+      this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) return;
+    try {
+      const node = uiContext.getFrameNodeById(componentId);
+      if (node === null || !node.isAttached() || !node.isVisible() || this.readNodeType(node) !== 'PatternLock') return;
+      const info = this.readInspectorInfo(node);
+      if (!this.canCaptureEditorInfo(info)) return;
+      const attrs = this.controlFrames.attrs(info);
+      const position = node.getPositionToWindowWithTransform();
+      const size = node.getMeasuredSize();
+      const radius = Math.max(0, parseFloat(String(attrs['circleRadius'] ?? '6vp')) || 6) /
+        (String(attrs['circleRadius'] ?? '').endsWith('px') ? scale : 1);
+      this.patterns.observe(this.toProtocolId(node.getUniqueId()), componentId,
+        position.x - originX, position.y - originY, Math.min(size.width, size.height) / scale,
+        radius, String(attrs['autoReset'] ?? 'true') !== 'false', String(attrs['skipUnselectedPoint']) === 'true');
+    } catch (_) { }
+  }
+
+  public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
+    if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+      this.config.getTouchPrivacy() === TouchPrivacy.SHOW) this.patterns.update(componentId, points, completed);
+  }
+
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
   public renewRootEpoch(): void {
     this.rootEpoch++;
@@ -175,6 +201,7 @@ export class ArkUIReplayCollector {
     this.controlFrames.clear();
     this.controlVectorCache.clear();
     this.controlVectorBytes = 0;
+    this.patterns.clear();
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -189,6 +216,7 @@ export class ArkUIReplayCollector {
     this.controlFrames.clear();
     this.controlVectorCache.clear();
     this.controlVectorBytes = 0;
+    this.patterns.clear();
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -469,7 +497,7 @@ export class ArkUIReplayCollector {
   ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
       `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|${node.componentRasterKey}|` +
-      `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}|${this.config.isCaptureVisiblePasswordEnabled()}`;
+      `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}|${this.config.isCaptureVisiblePasswordEnabled()}|${this.config.getTouchPrivacy()}`;
     const cached = this.propertyCache.get(node.id);
     if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
       const frame = copyReplayWireframe(cached.frame);
@@ -540,6 +568,7 @@ export class ArkUIReplayCollector {
   }
 
   public invalidateNativeControlPaint(): void {
+    this.controls.invalidatePaint();
     // A Span can change while its Text/RichEditor retains the same layout box.
     this.editorContentSignatures = null;
     this.inlineTextRuns = null;
@@ -547,6 +576,8 @@ export class ArkUIReplayCollector {
 
   public recordControlTouch(type: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number): void {
     this.rasters.touch(x, y);
+    if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+      this.config.getTouchPrivacy() === TouchPrivacy.SHOW) this.patterns.touch(type, pointerId, x, y);
   }
 
   private invalidateImageProperties(key: string): void {
@@ -576,13 +607,18 @@ export class ArkUIReplayCollector {
   }
 
   private finishControlFrame(nodes: Array<ArkUIReplayLightNode>): void {
+    const ids = new Set<number>();
     for (const node of nodes) {
       if (node.componentRasterKey !== undefined && (node.nodeType === 'RichEditor' || node.nodeType === 'Text') &&
         (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
         (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height) {
         this.rasters.observeTouchRegion(node.id - this.toProtocolId(0), node.x, node.y, node.width, node.height);
       }
+      if (node.nodeType !== 'PatternLock') continue;
+      ids.add(node.id);
+      this.patterns.align(node.id, node.x, node.y);
     }
+    this.patterns.retain(ids);
   }
 
   private captureInlineRuns(id: number, scale: number, visible: boolean): Array<ReplayInlineRun> | undefined {
@@ -617,7 +653,9 @@ export class ArkUIReplayCollector {
 
   private canCaptureNativeControl(type: string, info: Object | null): boolean {
     return !this.controlFrames.supports(type, info) && this.controls.isSupported(type) &&
-      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL;
+      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL &&
+      (type !== 'PatternLock' || (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+        this.config.getTouchPrivacy() === TouchPrivacy.SHOW));
   }
 
   private controlVector(svg: string, template: ReplayShapeWireframe): ReplayWireframe {
@@ -645,6 +683,7 @@ export class ArkUIReplayCollector {
   }
 
   private beginComponentFrame(timestamp: number): void {
+    this.patterns.beginFrame();
     this.rasters.beginFrame();
     this.captureTimestamp = timestamp;
     this.activeComponentAnimations = false;
@@ -709,6 +748,7 @@ export class ArkUIReplayCollector {
         }
         const parts = this.controlFrames.create(node, snapshot.vpToPxScale, extraBudget, groupStates.get(node.id),
           this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS,
+          this.canCaptureEditorInfo(node.inspectorInfo) && this.config.getTouchPrivacy() === TouchPrivacy.SHOW,
           (source: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlImage(node, source, template, snapshot.vpToPxScale),
           (svg: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlVector(svg, template));
         extraBudget -= parts.length;
@@ -892,6 +932,12 @@ export class ArkUIReplayCollector {
     if (isFrameControl && String(controlAttrs['enabled'] ?? 'true') === 'false') opacity *= 0.4;
     const motion = isFrameControl ? this.controlFrames.sample(nodeId, nodeType, inspectorInfo, this.captureTimestamp, visible) : null;
     this.activeComponentAnimations = this.activeComponentAnimations || motion?.active === true;
+    const pattern = nodeType === 'PatternLock' && visible && this.canCaptureEditorInfo(inspectorInfo) &&
+      this.config.getTouchPrivacy() === TouchPrivacy.SHOW ?
+      this.patterns.observe(this.toProtocolId(nodeId), this.readComponentId(node), x, y, Math.min(width, height),
+        Math.max(0, parseFloat(String(controlAttrs['circleRadius'] ?? '6vp')) || 6) /
+          (String(controlAttrs['circleRadius'] ?? '').endsWith('px') ? vpToPxScale : 1),
+        String(controlAttrs['autoReset'] ?? 'true') !== 'false', String(controlAttrs['skipUnselectedPoint']) === 'true') : null;
     const hasNativeLabel = typeof controlAttrs['label'] === 'string' && (controlAttrs['label'] as string).length > 0;
     const isNativeControl = this.canCaptureNativeControl(nodeType, inspectorInfo) &&
       ((nodeType !== 'Button' && nodeType !== 'Toggle') || hasNativeLabel || !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) &&
@@ -933,6 +979,8 @@ export class ArkUIReplayCollector {
         isSelectArrow,
         componentRasterKey,
         controlState: motion?.value,
+        controlPoints: pattern?.points,
+        controlPointer: pattern?.pointer,
         controlParentId: isFrameControl && (nodeType === 'Checkbox' || nodeType === 'CheckboxGroup') ?
           this.toProtocolId(parentId) : undefined,
         inlineRuns,

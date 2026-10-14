@@ -23,6 +23,7 @@ export interface ReplayWorkerOptions {
   textPrivacy: string;
   captureVisiblePassword?: boolean;
   imagePrivacy: string;
+  touchPrivacy?: string;
   diagnosticsEnabled?: boolean;
 }
 

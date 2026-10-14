@@ -102,6 +102,7 @@ export struct SessionReplayComponentSamples {
   private readonly clock: TextClockController = new TextClockController();
   private readonly editor: RichEditorController = new RichEditorController();
   private readonly pattern: PatternLockController = new PatternLockController();
+  private replayPatternPoints: Array<number> = [];
   private readonly canvas: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private readonly paths: NavPathStack = new NavPathStack();
   private readonly nodeController: ReplaySampleNodeController = new ReplaySampleNodeController();
@@ -395,8 +396,23 @@ export struct SessionReplayComponentSamples {
       .width('100%').height(32)
     this.section('PatternLock', '连接图案节点，再重置；观察手势路径和节点状态。')
     PatternLock(this.pattern).id('session-replay-pattern-lock').width(240).height(240)
-      .onPatternComplete((value: Array<number>) => { this.controlResult = `图案连接 ${value.length} 个节点`; })
-    Button('重置图案').onClick(() => this.pattern.reset())
+      .onTouch((event: TouchEvent) => {
+        if (event.type === TouchType.Down) this.replayPatternPoints = [];
+        FTSessionReplay.getInstance().recordPatternTouch('session-replay-pattern-lock', event);
+      })
+      .onDotConnect((index: number) => {
+        if (!this.replayPatternPoints.includes(index)) this.replayPatternPoints.push(index);
+        FTSessionReplay.getInstance().updatePatternLockState('session-replay-pattern-lock', this.replayPatternPoints, false);
+      })
+      .onPatternComplete((value: Array<number>) => {
+        FTSessionReplay.getInstance().updatePatternLockState('session-replay-pattern-lock', value);
+        this.controlResult = `图案连接 ${value.length} 个节点`;
+      })
+    Button('重置图案').id('session-replay-pattern-reset').onClick(() => {
+        this.pattern.reset();
+        this.replayPatternPoints = [];
+        FTSessionReplay.getInstance().updatePatternLockState('session-replay-pattern-lock', []);
+      })
   }
 
   @Builder

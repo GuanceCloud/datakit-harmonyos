@@ -1,3 +1,4 @@
+import { ReplayPatternLock } from '../../main/ets/components/ReplayPatternLock';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { describe, expect, it } from '@ohos/hypium';
@@ -5,7 +6,7 @@ import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayColle
 import { ReplayNativeControlPaint } from '../../main/ets/components/ReplayNativeControlPaint';
 import { ReplayControlWireframes } from '../../main/ets/components/ReplayControlWireframes';
 import { ReplayControlVectors } from '../../main/ets/components/ReplayControlVectors';
-import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
+import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
@@ -480,22 +481,41 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
     });
 
-    it('models SwitchCompat as compact frames', 0, () => {
-      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+    it('models SwitchCompat and limits the complete PatternLock to twenty frames across gestures', 0, () => {
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setTouchPrivacy(TouchPrivacy.SHOW);
       const collector = new ArkUIReplayCollector(1500, config);
       const toggle = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 36, 20).withNodeType('SwitchCompat')
         .withInspector({ 'isOn': 'true' } as Record<string, Object>);
       expect((collector.captureFrameNode(asFrameNode(toggle)).data as FullSnapshotData).wireframes.length).assertEqual(3);
+      const pattern = new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 240, 240).withNodeType('PatternLock');
+      const light = collector.captureFrameNodeLight(asFrameNode(pattern));
+      light.nodes[0].controlPoints = [0, 1, 2, 5, 8];
+      light.nodes[0].controlPointer = { x: 100, y: 100 };
+      const first = collector.materializeLightSnapshot(light);
+      expect((first.data as FullSnapshotData).wireframes.length).assertEqual(20);
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      light.nodes[0].controlPoints = [];
+      light.nodes[0].controlPointer = undefined;
+      const latest = collector.materializeLightSnapshot(light);
+      const mutation = processor.createMutationRecord(latest)!.data as ReplayMutationData;
+      expect(mutation.adds.length + mutation.removes.length).assertEqual(0);
+      expect((latest.data as FullSnapshotData).wireframes.length).assertEqual(20);
     });
 
-    it('keeps rating values masked when input privacy forbids them', 0, () => {
+    it('keeps pattern state and rating values masked when input or touch privacy forbids them', 0, () => {
       const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 300);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 240, 240).withNodeType('PatternLock'));
       root.append(new ReplayFrameNodeFixture(3, 0, 250, 0, 250, 140, 28).withNodeType('Rating')
         .withInspector({ 'rating': '4.5' } as Record<string, Object>));
       const collector = new ArkUIReplayCollector();
       const light = collector.captureFrameNodeLight(asFrameNode(root));
+      light.nodes[1].controlPoints = [0, 1, 2];
+      light.nodes[1].controlPointer = { x: 200, y: 40 };
       const frames = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
-      const active = frames.filter((frame): boolean => frame.permanentId?.endsWith(':fill') === true) as Array<ReplayShapeWireframe>;
+      const active = frames.filter((frame): boolean => frame.permanentId?.includes(':path:') === true ||
+        frame.permanentId?.endsWith(':fill') === true) as Array<ReplayShapeWireframe>;
       expect(active.length > 0).assertTrue();
       expect(active.every((frame): boolean => frame.shapeStyle?.opacity === 0)).assertTrue();
       expect(frames.every((frame): boolean => frame.type === 'shape' || frame.type === 'text' || (frame.type === 'image' && frame.mimeType === 'svg+xml'))).assertTrue();
@@ -1451,5 +1471,74 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(fallback.nodes.length).assertEqual(6);
       expect(fallback.nodes.some((node): boolean => node.id === label.id)).assertFalse();
     });
+    it('models native pattern midpoint selection, completion, reset, cancellation and detached state', 0, () => {
+      const pattern = new ReplayPatternLock();
+      pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false);
+      pattern.touch('down', 3, 50, 60); pattern.touch('move', 3, 210, 60); pattern.touch('up', 3, 210, 60);
+      const completed = pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false);
+      expect(completed.points.join(',')).assertEqual('0,1,2');
+      expect(completed.pointer === undefined).assertTrue();
+      completed.points.push(8);
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).points.join(',')).assertEqual('0,1,2');
+      pattern.update('pattern', []);
+      pattern.touch('down', 3, 50, 60); pattern.touch('cancel', 3, 50, 60);
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).points.length).assertEqual(0);
+      pattern.beginFrame(); pattern.touch('down', 3, 50, 60);
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).points.length).assertEqual(0);
+      pattern.retain(new Set());
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).points.length).assertEqual(0);
+    });
+
+    it('keeps native dot updates during dragging and applies completion received before the first snapshot', 0, () => {
+      const pattern = new ReplayPatternLock();
+      pattern.update('pattern', [0, 1, 2]);
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).points.join(',')).assertEqual('0,1,2');
+      pattern.touch('down', 4, 50, 60);
+      pattern.update('pattern', [0], false);
+      pattern.touch('move', 4, 210, 60);
+      const dragging = pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false);
+      expect(dragging.points.join(',')).assertEqual('0,1,2');
+      expect(dragging.pointer !== undefined).assertTrue();
+      pattern.update('pattern', [0, 1, 2], true);
+      expect(pattern.observe(1, 'pattern', 10, 20, 240, 6, true, false).pointer === undefined).assertTrue();
+    });
+
+    it('refreshes PatternLock native paint with unchanged Inspector attributes and settles while idle', 0, () => {
+      const paint = new ReplayNativeControlPaint();
+      const attrs: Record<string, Object> = { 'regularColor': '#FF808080', 'pathColor': '#FF0A59F7', 'autoReset': 'true' };
+      expect(paint.isSupported('PatternLock')).assertTrue();
+      paint.sample(1, 'PatternLock', attrs, 1000, true);
+      const idle = paint.sample(1, 'PatternLock', attrs, 1700, true);
+      expect(idle.active).assertFalse();
+      expect(paint.sample(1, 'PatternLock', attrs, 2500, true).signature).assertEqual(idle.signature);
+      const slider = paint.sample(2, 'Slider', null, 1700, true);
+      paint.invalidatePaint();
+      const moving = paint.sample(1, 'PatternLock', attrs, 2600, true);
+      expect(moving.signature === idle.signature).assertFalse();
+      expect(moving.active).assertTrue();
+      expect(paint.sample(1, 'PatternLock', attrs, 3300, true).active).assertFalse();
+      expect(paint.sample(1, 'PatternLock', attrs, 3400, false).active).assertFalse();
+      // A native paint notification must not invalidate other controls' values.
+      expect(paint.sample(2, 'Slider', null, 1800, true).signature).assertEqual(slider.signature);
+    });
+
+    it('ignores obsolete PatternLock screenshots and applies privacy to modeled gesture paths', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 240, 240).withNodeType('PatternLock');
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_NONE).setTouchPrivacy(TouchPrivacy.SHOW);
+      const collector = new ArkUIReplayCollector(1500, config);
+      collector.registerImageAsset('pattern-raster', new util.Base64Helper().decodeSync(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      const light = collector.captureFrameNodeLight(asFrameNode(root));
+      light.nodes[0].componentRasterKey = 'pattern-raster';
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
+      config.setTouchPrivacy(TouchPrivacy.HIDE);
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+      config.setTouchPrivacy(TouchPrivacy.SHOW).setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL_INPUTS);
+      expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
   });
 }

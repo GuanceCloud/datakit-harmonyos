@@ -18,7 +18,7 @@ export class ReplayControlWireframes {
   public clear(): void { this.switches.clear(); this.loading.clear(); }
 
   public supports(type: string, info: Object | null): boolean {
-    if (['Button', 'Checkbox', 'CheckboxGroup', 'Radio', 'Switch', 'SwitchCompat', 'Gauge', 'Rating', 'LoadingProgress'].includes(type)) return true;
+    if (['Button', 'Checkbox', 'CheckboxGroup', 'Radio', 'Switch', 'SwitchCompat', 'Gauge', 'Rating', 'LoadingProgress', 'PatternLock'].includes(type)) return true;
     const attrs = this.attrs(info);
     if (type === 'Toggle' || type === 'Slider' || type === 'Progress') return true;
     if (type === 'DataPanel') return true;
@@ -73,7 +73,7 @@ export class ReplayControlWireframes {
     return result;
   }
 
-  public create(node: ArkUIReplayLightNode, scale: number, limit: number, groupState?: number, allowInputs: boolean = true, imageResolver?: ReplayControlImageResolver, vectorResolver?: ReplayControlVectorResolver): Array<ReplayWireframe> {
+  public create(node: ArkUIReplayLightNode, scale: number, limit: number, groupState?: number, allowInputs: boolean = true, allowPattern: boolean = true, imageResolver?: ReplayControlImageResolver, vectorResolver?: ReplayControlVectorResolver): Array<ReplayWireframe> {
     if (limit <= 0 || (!node.isSelectArrow && !this.supports(node.nodeType, node.inspectorInfo))) return [];
     const attrs = this.attrs(node.inspectorInfo);
     const parts: Array<ReplayWireframe> = [];
@@ -301,6 +301,30 @@ export class ReplayControlWireframes {
         shape(`loading:comet:${point}`, node.width / 2 + x * Math.cos(rotation) - y * Math.sin(rotation) - dot / 2,
           node.height / 2 + x * Math.sin(rotation) + y * Math.cos(rotation) - dot / 2,
           dot, dot, color, dot / 2, enabled ? 0.7 * Math.pow(0.82, point) : 0);
+      }
+    } else if (type === 'PatternLock') {
+      const points = allowPattern ? node.controlPoints ?? [] : [];
+      const pointer = allowPattern ? node.controlPointer : undefined;
+      const side = Math.min(node.width, node.height);
+      const regular = this.color(attrs['regularColor'], '#00000066');
+      const active = this.color(attrs['activeColor'], '#0A59F7FF');
+      const radius = this.length(attrs['circleRadius'], scale, 6);
+      const stroke = this.length(attrs['pathStrokeWidth'], scale, 4);
+      const center = (point: number): ControlPoint => ({ x: (point % 3 + 0.5) * side / 3,
+        y: (Math.floor(point / 3) + 0.5) * side / 3 });
+      const path = points.map(center);
+      if (pointer !== undefined && path.length > 0) path.push({ x: pointer.x, y: pointer.y });
+      vector('path:0', ReplayControlVectors.document(node.width, node.height,
+        ReplayControlVectors.path(path, stroke, this.color(attrs['pathColor'], '#0A59F7FF'))), path.length > 1 ? 1 : 0);
+      for (let point = 0; point < 9; point++) {
+        const position = center(point);
+        const selected = points.includes(point);
+        const halo = this.length(attrs['activeCircleRadius'], scale, radius * 2);
+        shape(`point:${point}:halo`, position.x - halo, position.y - halo, halo * 2, halo * 2,
+          this.color(attrs['activeCircleColor'], '#0A59F733'), halo, selected && point === points[points.length - 1] && pointer !== undefined ? 0.25 : 0);
+        shape(`point:${point}`, position.x - radius, position.y - radius, radius * 2, radius * 2,
+          selected ? point === points[points.length - 1] && pointer !== undefined ? active :
+            this.color(attrs['selectedColor'], active) : regular, radius);
       }
     } else if (type === 'Progress') {
       const loading = String(attrs['status'] ?? '').toUpperCase().includes('LOADING');

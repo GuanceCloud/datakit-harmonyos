@@ -245,6 +245,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       textPrivacy: config.getTextAndInputPrivacy(),
       captureVisiblePassword: config.isCaptureVisiblePasswordEnabled(),
       imagePrivacy: config.getImagePrivacy(),
+      touchPrivacy: config.getTouchPrivacy(),
       diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });
     this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array): void => {
@@ -528,6 +529,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return capture;
   }
 
+  /** Native controllers retain private paint state; this hook covers programmatic reset and completion. */
+  public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
+    if (!this.isStarted || this.activeContext === null) return;
+    this.collector.updatePatternLockState(componentId, points, completed);
+    this.notifyPageChanged();
+  }
+
   /** Emits a Focus record for the currently recorded native RUM View. */
   public recordActiveFocus(hasFocus: boolean): SessionReplayCapture | null {
     return this.appendActiveProtocolRecords([this.processor.createFocusRecord(hasFocus)], null);
@@ -611,6 +619,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return capture;
   }
 
+  public recordPatternTouch(componentId: string, event: TouchEvent): void {
+    const binding = this.rootBinding;
+    if (!this.isStarted || this.activeContext === null || binding === null) return;
+    this.collector.preparePatternLock(binding.uiContext, componentId, binding.vpToPxScale, this.sceneOriginX(), this.sceneOriginY());
+    this.recordTouchEvent(event);
+  }
+
   /** ArkUI events already contain window-space vp coordinates. */
   public recordTouchEvent(event: TouchEvent): void {
     if (!this.isStarted || this.activeContext === null || event === undefined || event === null) return;
@@ -632,6 +647,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       const position: ReplayTouchPoint = { x: Math.round((point.windowX - this.sceneOriginX()) * 100) / 100,
         y: Math.round((point.windowY - this.sceneOriginY()) * 100) / 100 };
       const previous = this.activePointers.get(id);
+      if (type === 'down' && previous?.x === position.x && previous?.y === position.y) continue;
       if (type === 'up' && previous === undefined) continue;
       if (type === 'move' && previous === undefined) continue;
       if (type === 'move' && previous?.x === position.x && previous?.y === position.y) continue;

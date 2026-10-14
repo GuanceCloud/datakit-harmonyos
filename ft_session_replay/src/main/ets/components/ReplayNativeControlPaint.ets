@@ -10,13 +10,19 @@ export class ReplayNativeControlPaint {
   private readonly states: Map<number, ControlPaintState> = new Map();
   private selectionRevision: number = 0;
   private selectionUntil: number = 0;
+  private paintRevision: number = 0;
 
   public isSupported(type: string): boolean {
     return ['Button', 'Toggle', 'Switch', 'Checkbox', 'CheckboxGroup', 'Radio', 'Slider',
-      'Rating', 'Progress', 'LoadingProgress', 'Gauge', 'DataPanel'].includes(type);
+      'Rating', 'Progress', 'LoadingProgress', 'Gauge', 'DataPanel', 'PatternLock'].includes(type);
   }
 
-  public clear(): void { this.states.clear(); this.selectionRevision = 0; this.selectionUntil = 0; }
+  /** PatternLock keeps its chosen points in native paint state, outside Inspector. */
+  public invalidatePaint(): void { this.paintRevision++; }
+
+  public clear(): void {
+    this.states.clear(); this.selectionRevision = 0; this.selectionUntil = 0; this.paintRevision = 0;
+  }
 
   public sample(id: number, type: string, info: Object | null, time: number, visible: boolean): ReplayControlPaintSample {
     const object = (info ?? {}) as Record<string, Object>;
@@ -29,12 +35,15 @@ export class ReplayNativeControlPaint {
       'borderRadius', 'padding', 'mark', 'switchPointColor', 'trackBorderRadius', 'rating', 'stars', 'starStyle',
       'indicator', 'trackColor', 'blockColor', 'blockSize', 'blockType', 'blockBorderColor', 'blockBorderWidth',
       'trackThickness', 'showSteps', 'stepColor', 'strokeWidth', 'progressGradientColor', 'startAngle', 'endAngle',
-      'trackShadow', 'trackBackgroundColor', 'valueColors', 'enableLoading']) {
+      'trackShadow', 'trackBackgroundColor', 'valueColors', 'enableLoading', 'circleRadius', 'regularColor',
+      'activeColor', 'pathColor', 'pathStrokeWidth', 'autoReset', 'activeCircleColor', 'activeCircleRadius',
+      'enableWaveEffect', 'enableForeground', 'skipUnselectedPoint']) {
       if (keys.has(key) && attrs[key] !== undefined) {
         try { signature += `${key}:${JSON.stringify(attrs[key]).substring(0, 2048)}|`; } catch (_) {}
       }
     }
     signature = signature.substring(0, 16384);
+    if (type === 'PatternLock') signature += `native-paint:${this.paintRevision}|`;
     // Offscreen controls must not evict visible paint state or restart its
     // animation tail on every pass through a long Scroll/List.
     if (!visible) return { signature: `${signature}|0|paint:3`, active: false };

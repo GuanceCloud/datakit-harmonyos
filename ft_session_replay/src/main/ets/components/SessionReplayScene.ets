@@ -1,3 +1,4 @@
+import { ReplayPatternPoint } from './ReplayPatternLock';
 import { FrameNode } from '@kit.ArkUI';
 import { ReplayWireframeClip } from './SessionReplayProtocol';
 
@@ -56,6 +57,8 @@ export interface ArkUIReplayLightNode {
   /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
   buttonLabelOwnerId?: number;
   controlState?: number;
+  controlPoints?: Array<number>;
+  controlPointer?: ReplayPatternPoint;
   controlParentId?: number;
   inlineRuns?: Array<ReplayInlineRun>;
   isRoot: boolean;
@@ -262,6 +265,8 @@ export class SessionReplayScene {
           selectLabelOwnerId: source.selectLabelOwnerId,
           buttonLabelOwnerId: source.buttonLabelOwnerId,
           controlState: source.controlState, controlParentId: source.controlParentId,
+          controlPoints: source.controlPoints?.slice(),
+          controlPointer: source.controlPointer === undefined ? undefined : { x: source.controlPointer.x, y: source.controlPointer.y },
           inlineRuns: source.inlineRuns?.map((run): ReplayInlineRun => ({
             id: run.id, nodeType: run.nodeType, inspectorInfo: run.inspectorInfo, text: run.text,
             width: run.width, height: run.height, componentRasterKey: run.componentRasterKey })),

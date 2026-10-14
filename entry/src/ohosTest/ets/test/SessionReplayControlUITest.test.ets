@@ -1,15 +1,15 @@
 import { beforeAll, describe, expect, it } from '@ohos/hypium';
-import { Driver, ON } from '@ohos.UiTest';
+import { Driver, ON, PointerMatrix } from '@ohos.UiTest';
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import window from '@ohos.window';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
-import { FTSDK, FTSessionReplayRUMContext } from '@guancecloud/ft_sdk';
-import { ArkUIReplayCollector, FTSessionReplayConfig, FTSessionReplayRecorder, FullSnapshotData, ImagePrivacy,
+import { FTSDK, FTSessionReplayBridgeRegistry, FTSessionReplayRUMContext } from '@guancecloud/ft_sdk';
+import { ArkUIReplayCollector, FTSessionReplay, FTSessionReplayConfig, FTSessionReplayRecorder, FullSnapshotData, ImagePrivacy,
   ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayContext,
-  SessionReplayResourceStore, SessionReplaySegmentStore, TextAndInputPrivacy } from '@guancecloud/ft_session_replay';
+  SessionReplayResourceStore, SessionReplaySegmentStore, TextAndInputPrivacy, TouchPrivacy } from '@guancecloud/ft_session_replay';
 
 export default function sessionReplayControlUITest(): void {
   describe('SessionReplayControlUITest', () => {
@@ -218,6 +218,62 @@ export default function sessionReplayControlUITest(): void {
       expect(JSON.stringify(await controlFrames('session-replay-rating')) === rating).assertFalse();
     });
 
+    it('records real PatternLock callbacks as compact vectors through gesture, completion and reset', 0, async () => {
+      const id = 'session-replay-pattern-lock';
+      await show('session-replay-pattern-reset');
+      await (await driver.findComponent(ON.id('session-replay-pattern-reset')))!.click();
+      await show(id);
+      const replay = FTSessionReplay.getInstance();
+      const directory = `${AbilityDelegatorRegistry.getAbilityDelegator().getAppContext().cacheDir}/replay-pattern-model-${Date.now()}`;
+      fileIo.mkdirSync(directory);
+      replay.init(new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_NONE).setTouchPrivacy(TouchPrivacy.SHOW), directory);
+      replay.registerRoot(uiContext, 'session-replay-transition-root', vp2px(1), true);
+      const context: FTSessionReplayRUMContext = { applicationId: 'pattern-model-test',
+        sessionId: `pattern-model-${Date.now()}`, viewId: 'pattern-view', viewName: 'PatternLock',
+        viewReferrer: '', linkContext: {}, timestamp: Date.now() };
+      expect(FTSessionReplayBridgeRegistry.notifyViewStarted(context)).assertTrue();
+      const replayContext: SessionReplayContext = { applicationId: context.applicationId,
+        sessionId: context.sessionId, viewId: context.viewId };
+      const capture = (): string => {
+        const result = replay.captureFullSnapshot(uiContext, id, replayContext, vp2px(1));
+        const frames = (result.records.find((record): boolean => record.type === ReplayRecordType.FULL_SNAPSHOT)!.data as FullSnapshotData).wireframes;
+        expect(frames.length).assertEqual(20);
+        const path = frames.find((frame): boolean => frame.permanentId === `${id}:control:path:0`) as ReplayImageWireframe;
+        expect(path.mimeType).assertEqual('svg+xml');
+        const resource = replay.getStoredResources().find((asset): boolean => asset.fileName === path.resourceId);
+        expect(resource?.mimeType).assertEqual('image/svg+xml');
+        return fileIo.readTextSync(`${replay.getResourceStorageRoot()!}/data/${path.resourceId!}.bin`);
+      };
+      try {
+        const initial = capture();
+        expect(initial.includes('<path')).assertFalse();
+        const bounds = await (await driver.findComponent(ON.id(id)))!.getBounds();
+        const path = PointerMatrix.create(1, 4);
+        const points: Array<Array<number>> = [[1 / 6, 1 / 6], [5 / 6, 1 / 6], [5 / 6, 1 / 2], [1 / 2, 1 / 2]];
+        points.forEach((point, index): void => path.setPoint(0, index, {
+          x: Math.round(bounds.left + (bounds.right - bounds.left) * point[0]),
+          y: Math.round(bounds.top + (bounds.bottom - bounds.top) * point[1]) }));
+        const models: Set<string> = new Set([initial]);
+        const timer = setInterval((): void => { models.add(capture()); }, 64);
+        try {
+          expect(await driver.injectMultiPointerAction(path, 250)).assertTrue();
+        } finally { clearInterval(timer); }
+        await driver.delayMs(200);
+        const completed = capture();
+        models.add(completed);
+        expect(models.size >= 3).assertTrue();
+        expect(completed.includes('<path')).assertTrue();
+        expect(completed.includes('stroke-linejoin="round"')).assertTrue();
+        await show('session-replay-pattern-reset');
+        await (await driver.findComponent(ON.id('session-replay-pattern-reset')))!.click();
+        await driver.delayMs(200);
+        expect(capture()).assertEqual(initial);
+        await driver.delayMs(600);
+        expect(capture()).assertEqual(initial);
+      } finally { replay.disable(); }
+
+    });
 
     it('persists checkbox shape mutations through Worker without a component image', 0, async () => {
       await show('session-replay-checkbox-a');

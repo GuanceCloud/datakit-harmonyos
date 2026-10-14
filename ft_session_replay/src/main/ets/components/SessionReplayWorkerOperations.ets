@@ -1,5 +1,5 @@
 import { ArkUIReplayCollector, ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
-import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
+import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { SessionReplayResourceStore, sha256 } from './SessionReplayResourceStore';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
@@ -51,7 +51,8 @@ export class SessionReplayWorkerOperations {
     const config = new FTSessionReplayConfig()
       .setTextAndInputPrivacy(options.textPrivacy as TextAndInputPrivacy)
       .setCaptureVisiblePassword(options.captureVisiblePassword === true)
-      .setImagePrivacy(options.imagePrivacy as ImagePrivacy);
+      .setImagePrivacy(options.imagePrivacy as ImagePrivacy)
+      .setTouchPrivacy((options.touchPrivacy ?? TouchPrivacy.HIDE) as TouchPrivacy);
     this.collector = new ArkUIReplayCollector(options.maxNodes, config);
     this.diagnosticsEnabled = options.diagnosticsEnabled ?? false;
     this.fullSnapshotIntervalMs = options.fullSnapshotIntervalMs;
