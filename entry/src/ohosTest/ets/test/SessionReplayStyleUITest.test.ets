@@ -9,7 +9,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { FTSDK, FTSessionReplayRUMContext } from '@guancecloud/ft_sdk';
 import {
   ArkUIReplayCollector, FTSessionReplayConfig, FTSessionReplayRecorder, FullSnapshotData, ImagePrivacy,
-  ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplaySnapshotProcessor, ReplayTextWireframe,
+  ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplayShapeWireframe, ReplaySnapshotProcessor, ReplayTextWireframe,
   ReplayWireframe, SessionReplayContext, SessionReplayResourceStore, SessionReplaySegmentStore, TextAndInputPrivacy
 } from '@guancecloud/ft_session_replay';
 import arkUIReplayCollectorUnitTest from '@guancecloud/ft_session_replay/src/test/unit/ArkUIReplayCollectorUnit.test';
@@ -77,18 +77,15 @@ export default function sessionReplayStyleUITest(): void {
       expect(label.textStyle.color).assertEqual('#000000CE');
       expect(label.textPosition?.alignment?.horizontal).assertEqual('left');
       expect(label.textPosition?.alignment?.vertical).assertEqual('center');
-      const arrow = data.wireframes.find((node: ReplayWireframe): boolean => node.type === 'image') as ReplayImageWireframe;
-      expect(arrow.mimeType).assertEqual('svg+xml');
-      expect(arrow.isEmpty).assertFalse();
-      expect(arrow.width > 0 && arrow.height > 0).assertTrue();
-      const svg = util.TextDecoder.create('utf-8').decodeWithStream(new util.Base64Helper().decodeSync(arrow.base64!));
-      expect(svg.includes('fill="#000000"')).assertTrue();
-      expect(svg.includes('fill-opacity="0.898')).assertTrue();
-      // The normal multi-page collection must preserve the spinner marker too.
+      const arrows = data.wireframes.filter((node: ReplayWireframe): boolean => node.id < 0) as Array<ReplayShapeWireframe>;
+      expect(arrows.length > 0).assertTrue();
+      expect(arrows.every((node): boolean => node.type === 'shape' &&
+        node.shapeStyle?.backgroundColor === '#000000E5')).assertTrue();
+      expect(data.wireframes.every((node): boolean => node.type !== 'image')).assertTrue();
       const scene = collector.materializeLightSnapshot(collector.captureSceneLight(uiContext,
         ['session-replay-transition-root'], vp2px(1))).data as FullSnapshotData;
-      expect(scene.wireframes.some((node: ReplayWireframe): boolean =>
-        node.id === arrow.id && node.type === 'image' && node.base64 === arrow.base64)).assertTrue();
+      expect(arrows.every((arrow): boolean => scene.wireframes.some((node: ReplayWireframe): boolean =>
+        node.id === arrow.id && node.type === 'shape'))).assertTrue();
     });
 
     it('captures and removes the expanded native category popup above the page', 0, async () => {

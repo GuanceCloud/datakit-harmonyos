@@ -3,6 +3,8 @@ import { util } from '@kit.ArkTS';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
 import { ReplayNativeControlPaint } from '../../main/ets/components/ReplayNativeControlPaint';
+import { ReplayControlWireframes } from '../../main/ets/components/ReplayControlWireframes';
+import { ReplayControlVectors } from '../../main/ets/components/ReplayControlVectors';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
@@ -213,6 +215,292 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('reuses the Gauge scale while changing only the indicator vector and keeps compact stable frames', 0, () => {
+      const attrs: Record<string, Object> = { 'value': '25', 'min': '0', 'max': '100' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 120, 120).withNodeType('Gauge').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig().setImagePrivacy(ImagePrivacy.MASK_ALL));
+      const first = collector.captureFrameNode(asFrameNode(root));
+      const frames = (first.data as FullSnapshotData).wireframes;
+      expect(frames.length).assertEqual(4);
+      const scale = frames.find((frame): boolean => frame.permanentId === 'fixture-1:control:scale:fill') as ReplayImageWireframe;
+      const indicator = frames.find((frame): boolean => frame.permanentId === 'fixture-1:control:indicator:1:vector') as ReplayImageWireframe;
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      attrs['value'] = '75';
+      const second = collector.captureFrameNode(asFrameNode(root));
+      const latest = (second.data as FullSnapshotData).wireframes;
+      expect((latest.find((frame): boolean => frame.id === scale.id) as ReplayImageWireframe).resourceId).assertEqual(scale.resourceId);
+      expect((latest.find((frame): boolean => frame.id === indicator.id) as ReplayImageWireframe).resourceId === indicator.resourceId).assertFalse();
+      const mutation = processor.createMutationRecord(second)!.data as ReplayMutationData;
+      expect(mutation.adds.length + mutation.removes.length).assertEqual(0);
+      expect(mutation.updates.length).assertEqual(1);
+      expect(mutation.updates[0].id).assertEqual(indicator.id);
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
+    it('uses bounded rating, loading and circle-panel frames with stable mutation identities', 0, () => {
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        .setImagePrivacy(ImagePrivacy.MASK_ALL);
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 320, 300);
+      const rating: Record<string, Object> = { 'rating': '2.5', 'stars': '5' };
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 140, 28).withNodeType('Rating').withInspector(rating));
+      root.append(new ReplayFrameNodeFixture(3, 0, 40, 0, 40, 40, 40).withNodeType('LoadingProgress'));
+      const panel: Record<string, Object> = { 'type': 'DataPanelType.Circle', 'values': [20, 30], 'max': '100' };
+      root.append(new ReplayFrameNodeFixture(4, 60, 40, 60, 40, 120, 120).withNodeType('DataPanel').withInspector(panel));
+      const collector = new ArkUIReplayCollector(1500, config);
+      const first = collector.captureFrameNode(asFrameNode(root), 1, 1000);
+      expect((first.data as FullSnapshotData).wireframes.every((frame): boolean => frame.type === 'shape' || frame.type === 'text' || (frame.type === 'image' && frame.mimeType === 'svg+xml'))).assertTrue();
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      rating['rating'] = '4.5'; panel['values'] = [60, 20];
+      const light = collector.captureFrameNodeLight(asFrameNode(root), 1, 1200);
+      expect(light.hasActiveAnimations).assertTrue();
+      const latest = collector.materializeLightSnapshot(light);
+      const mutation = processor.createMutationRecord(latest)!.data as ReplayMutationData;
+      expect(mutation.adds.length + mutation.removes.length).assertEqual(0);
+      expect(mutation.updates.every((frame): boolean => frame.type === 'shape' || frame.type === 'text' || frame.type === 'image')).assertTrue();
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+      for (const id of [2, 3, 4]) expect((latest.data as FullSnapshotData).wireframes.filter((frame): boolean =>
+        frame.permanentId?.startsWith(`fixture-${id}:control:`) === true).length <= 64).assertTrue();
+    });
+
+    it('restarts loading elapsed time only when enabled and stops offscreen sampling', 0, () => {
+      const controls = new ReplayControlWireframes();
+      const attrs: Record<string, Object> = { 'enableLoading': 'true' };
+      expect(controls.sample(1, 'LoadingProgress', attrs, 1000, true).value).assertEqual(0);
+      expect(controls.sample(1, 'LoadingProgress', attrs, 1250, true).value).assertEqual(250);
+      attrs['enableLoading'] = 'false';
+      expect(controls.sample(1, 'LoadingProgress', attrs, 1500, true).active).assertFalse();
+      attrs['enableLoading'] = 'true';
+      expect(controls.sample(1, 'LoadingProgress', attrs, 1600, true).value).assertEqual(0);
+      expect(controls.sample(1, 'LoadingProgress', attrs, 1700, false).active).assertFalse();
+    });
+
+    it('uses scalable circular paths and continuous gradients with a bounded frame count', 0, () => {
+      const collector = new ArkUIReplayCollector(100, new FTSessionReplayConfig());
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 64, 64).withNodeType('Progress')
+        .withInspector({ 'type': 'ProgressStyle.Ring', 'value': '35', 'total': '100' } as Record<string, Object>);
+      const frames = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      expect(frames.length).assertEqual(3);
+      expect((frames[2] as ReplayImageWireframe).mimeType).assertEqual('svg+xml');
+      const svg = ReplayControlVectors.arc(64, 64, 0, 126, 4, [{ color: '#0A59F7FF', offset: 0 }]);
+      expect(svg.includes('A30 30')).assertTrue();
+      expect(svg.includes('<rect')).assertFalse();
+      expect(svg.includes('stroke-width="4"')).assertTrue();
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
+    it('creates button, slider and determinate progress frames even when image collection is masked', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 160);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 96, 40).withNodeType('Button')
+        .withInspector({ 'label': '普通按钮', 'type': 'ButtonType.Normal', 'fontColor': '#FFFFFFFF' } as Record<string, Object>));
+      const values: Record<string, Object> = { 'constructor': { 'value': '35', 'min': '0', 'max': '100' } as Record<string, Object>,
+        'trackThickness': '4vp', 'blockSize': { 'width': '16vp', 'height': '16vp' } as Record<string, Object> };
+      root.append(new ReplayFrameNodeFixture(3, 0, 50, 0, 50, 200, 40).withNodeType('Slider').withInspector(values));
+      const progress: Record<string, Object> = { 'type': 'ProgressStyle.Linear', 'value': '35', 'total': '100', 'strokeWidth': '4vp' };
+      root.append(new ReplayFrameNodeFixture(4, 0, 100, 0, 100, 200, 4).withNodeType('Progress').withInspector(progress));
+      const collector = new ArkUIReplayCollector(100, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL));
+      const first = collector.captureFrameNode(asFrameNode(root));
+      const frames = (first.data as FullSnapshotData).wireframes;
+      expect(frames.every((node): boolean => node.type !== 'image')).assertTrue();
+      expect((findWireframe(frames, 2) as ReplayTextWireframe).text).assertEqual('普通按钮');
+      const thumb = frames.find((node): boolean => node.permanentId === 'fixture-3:control:thumb')!;
+      const fill = frames.find((node): boolean => node.permanentId === 'fixture-4:control:fill')!;
+      expect(fill.width).assertEqual(72.6);
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+      values['constructor'] = { 'value': '80', 'min': '0', 'max': '100' } as Record<string, Object>;
+      progress['value'] = '80';
+      const latest = collector.captureFrameNode(asFrameNode(root));
+      const after = (latest.data as FullSnapshotData).wireframes;
+      expect(after.find((node): boolean => node.id === thumb.id)!.x > thumb.x).assertTrue();
+      expect(after.find((node): boolean => node.id === fill.id)!.width).assertEqual(160.8);
+      const changed = processor.createMutationRecord(latest)!.data as ReplayMutationData;
+      expect(changed.adds.length + changed.removes.length).assertEqual(0);
+      expect(changed.updates.every((node): boolean => node.type === 'shape' && node.resourceId === undefined)).assertTrue();
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
+    it('preserves switch intermediate positions, direction reversals and settled state without image sampling', 0, () => {
+      const frames = new ReplayControlWireframes();
+      const attrs: Record<string, Object> = { 'type': 'ToggleType.Switch', 'isOn': 'false' };
+      expect(frames.sample(1, 'Toggle', attrs, 1000, true).value).assertEqual(0);
+      attrs['isOn'] = 'true';
+      expect(frames.sample(1, 'Toggle', attrs, 1100, true).active).assertTrue();
+      const mid = frames.sample(1, 'Toggle', attrs, 1200, true);
+      expect(mid.value! > 0 && mid.value! < 1).assertTrue();
+      attrs['isOn'] = 'false';
+      expect(frames.sample(1, 'Toggle', attrs, 1200, true).value).assertEqual(mid.value);
+      expect(frames.sample(1, 'Toggle', attrs, 1400, true).value).assertEqual(0);
+      expect(frames.sample(1, 'Toggle', attrs, 1500, true).active).assertFalse();
+    });
+
+    it('isolates same-name checkbox groups across retained scene pages', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 80);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 20, 20).withNodeType('CheckboxGroup')
+        .withInspector({ 'group': 'shared' } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(3, 40, 0, 40, 0, 20, 20).withNodeType('Checkbox')
+        .withInspector({ 'group': 'shared', 'select': 'true' } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(4, 80, 0, 80, 0, 20, 20).withNodeType('Checkbox')
+        .withInspector({ 'group': 'shared', 'select': 'false' } as Record<string, Object>));
+      const collector = new ArkUIReplayCollector(100, new FTSessionReplayConfig());
+      const light = collector.captureFrameNodeLight(asFrameNode(root));
+      light.nodes[1].sceneLayer = 100;
+      light.nodes[2].sceneLayer = 100;
+      light.nodes[3].sceneLayer = 200;
+      expect(new ReplayControlWireframes().groupStates(light.nodes).get(light.nodes[1].id)).assertEqual(1);
+      light.nodes[3].sceneLayer = 100;
+      expect(new ReplayControlWireframes().groupStates(light.nodes).get(light.nodes[1].id)).assertEqual(0.5);
+    });
+
+    it('uses native switch defaults, checkbox fill and radio tick without duplicate internal image nodes', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 100);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 36, 20).withNodeType('Toggle')
+        .withInspector({ 'type': 'ToggleType.Switch', 'isOn': 'false', 'unselectedColor': '#FF000000', 'pointRadius': '6vp' } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(3, 50, 0, 50, 0, 20, 20).withNodeType('Checkbox')
+        .withInspector({ 'select': 'false' } as Record<string, Object>));
+      const radio = new ReplayFrameNodeFixture(4, 80, 0, 80, 0, 20, 20).withNodeType('Radio')
+        .withInspector({ 'checked': 'true', 'indicatorType': 'TICK' } as Record<string, Object>);
+      radio.append(new ReplayFrameNodeFixture(5, 80, 0, 80, 0, 20, 20).withNodeType('Image'));
+      root.append(radio);
+      const frames = (new ArkUIReplayCollector(200, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)).captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      const part = (name: string): ReplayShapeWireframe => frames.find((frame): boolean => frame.permanentId === name) as ReplayShapeWireframe;
+      expect(part('fixture-2:control:track').shapeStyle?.backgroundColor).assertEqual('#7F7F7F33');
+      expect(part('fixture-2:control:thumb').width).assertEqual(12);
+      expect(part('fixture-3:control:box').shapeStyle?.backgroundColor).assertEqual('#FFFFFF33');
+      expect(part('fixture-3:control:box').border?.width).assertEqual(1);
+      expect(part('fixture-4:control:indicator').shapeStyle?.opacity).assertEqual(0);
+      expect(frames.some((frame): boolean => frame.permanentId?.includes('fixture-4:control:check:') === true &&
+        (frame as ReplayShapeWireframe).shapeStyle?.opacity === 1)).assertTrue();
+      expect(frames.every((frame): boolean => frame.type !== 'image' || frame.mimeType === 'svg+xml')).assertTrue();
+    });
+
+    it('retains selection backgrounds and paints checkbox, group and radio marks above them through mutations', 0, () => {
+      for (const scene of [false, true]) {
+        const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 240, 100);
+        const a: Record<string, Object> = { 'group': 'options', 'select': 'false' };
+        const b: Record<string, Object> = { 'group': 'options', 'select': 'false' };
+        const radio: Record<string, Object> = { 'checked': 'false', 'indicatorType': 'TICK' };
+        const toggle: Record<string, Object> = { 'type': 'ToggleType.Checkbox', 'isOn': 'false' };
+        root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 20, 20).withNodeType('CheckboxGroup')
+          .withInspector({ 'group': 'options' } as Record<string, Object>));
+        root.append(new ReplayFrameNodeFixture(3, 40, 0, 40, 0, 20, 20).withNodeType('Checkbox').withInspector(a));
+        root.append(new ReplayFrameNodeFixture(4, 80, 0, 80, 0, 20, 20).withNodeType('Checkbox').withInspector(b));
+        root.append(new ReplayFrameNodeFixture(5, 120, 0, 120, 0, 20, 20).withNodeType('Radio').withInspector(radio));
+        root.append(new ReplayFrameNodeFixture(6, 160, 0, 160, 0, 20, 20).withNodeType('Toggle').withInspector(toggle));
+        root.append(new ReplayFrameNodeFixture(7, 0, 0, 0, 0, 240, 100).withNodeType('Row')
+          .withInspector({ 'zIndex': 1 } as Record<string, Object>));
+        const collector = new ArkUIReplayCollector(500, new FTSessionReplayConfig()
+          .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+        const capture = (): SessionReplayRecord => {
+          const light = collector.captureFrameNodeLight(asFrameNode(root));
+          if (scene) for (const node of light.nodes) node.sceneLayer = 1000;
+          return collector.materializeLightSnapshot(light);
+        };
+        const processor = new ReplaySnapshotProcessor();
+        processor.setFullSnapshotBaseline(capture());
+        a['select'] = 'true';
+        radio['checked'] = 'true';
+        toggle['isOn'] = 'true';
+        const partial = capture();
+        const frames = (partial.data as FullSnapshotData).wireframes;
+        const overlay = findWireframe(frames, 7)!;
+        for (const id of [2, 3, 5, 6]) {
+          const background = frames.find((frame): boolean => frame.permanentId ===
+            `fixture-${id}:control:${id === 5 ? 'circle' : 'box'}`)!;
+          const prefix = `fixture-${id}:control:${id === 2 ? 'partial' : 'check:'}`;
+          const marks = frames.filter((frame): boolean => frame.permanentId?.startsWith(prefix) === true &&
+            (frame as ReplayShapeWireframe).shapeStyle?.opacity === 1);
+          expect(marks.length > 0).assertTrue();
+          expect(marks.every((frame): boolean => Number.isInteger(frame.zIndex) &&
+            frame.zIndex! > background.zIndex! && frame.zIndex! < overlay.zIndex!)).assertTrue();
+        }
+        const changed = processor.createMutationRecord(partial)!.data as ReplayMutationData;
+        expect(changed.adds.length).assertEqual(0);
+        expect(changed.removes.length).assertEqual(0);
+        expect(changed.updates.some((update): boolean => update.shapeStyle?.backgroundColor === '#0A59F7FF')).assertTrue();
+        b['select'] = 'true';
+        const selected = capture();
+        const selectedFrames = (selected.data as FullSnapshotData).wireframes;
+        expect(selectedFrames.some((frame): boolean => frame.permanentId?.startsWith('fixture-2:control:check:') === true &&
+          (frame as ReplayShapeWireframe).shapeStyle?.opacity === 1)).assertTrue();
+        const all = processor.createMutationRecord(selected)!.data as ReplayMutationData;
+        expect(all.adds.length + all.removes.length).assertEqual(0);
+        a['select'] = 'false'; b['select'] = 'false'; radio['checked'] = 'false'; toggle['isOn'] = 'false';
+        const cleared = processor.createMutationRecord(capture())!.data as ReplayMutationData;
+        expect(cleared.adds.length + cleared.removes.length).assertEqual(0);
+      }
+    });
+
+    it('preserves native solid linear colour, ring alpha, panel gaps and the gauge gradient indicator', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 400, 240);
+      const gradient = '[{"color":"#FF86C1FF","offset":"0"},{"color":"#FF254FF7","offset":"1"}]';
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 300, 4).withNodeType('Progress')
+        .withInspector({ 'type': 'ProgressStyle.Linear', 'value': '35', 'color': '#FF007DFF', 'progressGradientColor': gradient } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(3, 0, 20, 0, 20, 64, 64).withNodeType('Progress')
+        .withInspector({ 'type': 'ProgressStyle.Ring', 'value': '35', 'backgroundColor': '#0C000000', 'progressGradientColor': gradient } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(4, 80, 20, 80, 20, 120, 120).withNodeType('Gauge')
+        .withInspector({ 'value': '35', 'strokeWidth': '', 'colors': '["#FF64BB5C","#FFF7CE00","#FFE84026"]' } as Record<string, Object>));
+      root.append(new ReplayFrameNodeFixture(5, 0, 160, 0, 160, 300, 32).withNodeType('DataPanel')
+        .withInspector({ 'type': 'DataPanelType.Line', 'values': [35, 65], 'max': '100' } as Record<string, Object>));
+      const frames = (new ArkUIReplayCollector(1500, new FTSessionReplayConfig()).captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      const linear = frames.find((frame): boolean => frame.permanentId === 'fixture-2:control:fill') as ReplayShapeWireframe;
+      expect(linear.shapeStyle?.backgroundColor).assertEqual('#007DFFFF');
+      expect(linear.shapeStyle?.backgroundGradient === undefined).assertTrue();
+      const track = frames.filter((frame): boolean => frame.permanentId?.startsWith('fixture-3:control:ring:track') === true &&
+        frame.x <= 2 && frame.x + frame.width > 2 && frame.y <= 52.1 && frame.y + frame.height > 52.1);
+      expect(track.length).assertEqual(1);
+      expect((track[0] as ReplayShapeWireframe).border?.color).assertEqual('#0000000C');
+      const gauge = frames.filter((frame): boolean => frame.permanentId?.startsWith('fixture-4:control:') === true);
+      expect(gauge.length <= 8).assertTrue();
+      expect(gauge.some((frame): boolean => frame.permanentId?.includes(':indicator:1:') === true &&
+        frame.type === 'image' && frame.mimeType === 'svg+xml')).assertTrue();
+      expect(gauge.some((frame): boolean => frame.permanentId?.endsWith(':hub') === true)).assertFalse();
+      const panel = frames.find((frame): boolean => frame.permanentId === 'fixture-5:control:values') as ReplayImageWireframe;
+      expect(panel.mimeType).assertEqual('svg+xml');
+      expect(frames.every((frame): boolean => frame.type !== 'image' || frame.mimeType === 'svg+xml')).assertTrue();
+    });
+
+    it('keeps circle progress parts clipped, unique and bounded across value updates', 0, () => {
+      const attrs: Record<string, Object> = { 'type': 'ProgressStyle.Ring', 'value': '35', 'total': '100', 'strokeWidth': '4vp' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 64, 64).withNodeType('Progress').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(80, new FTSessionReplayConfig());
+      const light = collector.captureFrameNodeLight(asFrameNode(root));
+      light.nodes[0].clip = { bottom: 32 };
+      const before = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
+      expect(before.length <= 80).assertTrue();
+      expect(new Set(before.map((node): number => node.id)).size).assertEqual(before.length);
+      expect(before.every((node): boolean => (node.type === 'shape' || (node.type === 'image' && node.mimeType === 'svg+xml')) && node.width > 0 && node.height > 0)).assertTrue();
+      expect(before.every((node): boolean => node.clip?.bottom === 32)).assertTrue();
+      attrs['value'] = '100';
+      const after = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
+      expect(before.map((node): number => node.id).join(',')).assertEqual(after.map((node): number => node.id).join(','));
+      expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
+    it('models SwitchCompat as compact frames', 0, () => {
+      const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+      const collector = new ArkUIReplayCollector(1500, config);
+      const toggle = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 36, 20).withNodeType('SwitchCompat')
+        .withInspector({ 'isOn': 'true' } as Record<string, Object>);
+      expect((collector.captureFrameNode(asFrameNode(toggle)).data as FullSnapshotData).wireframes.length).assertEqual(3);
+    });
+
+    it('keeps rating values masked when input privacy forbids them', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 300);
+      root.append(new ReplayFrameNodeFixture(3, 0, 250, 0, 250, 140, 28).withNodeType('Rating')
+        .withInspector({ 'rating': '4.5' } as Record<string, Object>));
+      const collector = new ArkUIReplayCollector();
+      const light = collector.captureFrameNodeLight(asFrameNode(root));
+      const frames = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
+      const active = frames.filter((frame): boolean => frame.permanentId?.endsWith(':fill') === true) as Array<ReplayShapeWireframe>;
+      expect(active.length > 0).assertTrue();
+      expect(active.every((frame): boolean => frame.shapeStyle?.opacity === 0)).assertTrue();
+      expect(frames.every((frame): boolean => frame.type === 'shape' || frame.type === 'text' || (frame.type === 'image' && frame.mimeType === 'svg+xml'))).assertTrue();
+    });
+
     it('preserves initial native typography and ignores unset actual font sizes before a node update', 0, () => {
       const attrs: Record<string, Object> = { 'content': 'Initial text', 'fontFamily': 'HarmonyOS Sans',
         'fontColor': '#CE000000', 'fontSize': '16fp', 'actualFontSize': '0px', 'fontWeight': 'FontWeight.Normal' };
@@ -273,7 +561,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
         .withInspector({ 'label': '普通按钮' } as Record<string, Object>);
       delegated.append(new ReplayFrameNodeFixture(4, 16, 10, 16, 10, 64, 20).withNodeType('Text')
         .withInspector({ 'content': '' } as Record<string, Object>));
-      expect(((collector.captureFrameNode(asFrameNode(delegated)).data as FullSnapshotData).wireframes[1] as ReplayTextWireframe)
+      expect(((collector.captureFrameNode(asFrameNode(delegated)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
         .text).assertEqual('普通按钮');
       config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
       expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
@@ -304,8 +592,8 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(paint.isSupported('TextInput')).assertFalse();
     });
 
-    it('keeps native control bitmaps free of duplicate chrome and rechecks text and image masking', 0, () => {
-      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 40).withNodeType('Slider')
+    it('ignores stale loading-control bitmap keys and keeps image privacy independent of its frame model', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 40).withNodeType('LoadingProgress')
         .withInspector({ 'backgroundColor': '#19000000', 'borderWidth': '1vp', 'borderColor': '#FF000000' } as Record<string, Object>);
       const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
         .setImagePrivacy(ImagePrivacy.MASK_NONE);
@@ -314,11 +602,10 @@ export default function arkUIReplayCollectorUnitTest(): void {
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
       const light = collector.captureFrameNodeLight(asFrameNode(root));
       light.nodes[0].componentRasterKey = 'control-raster';
-      const image = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
-      expect(image.type).assertEqual('image');
-      expect(image.isEmpty).assertFalse();
-      expect(image.shapeStyle?.backgroundColor === undefined).assertTrue();
-      expect(image.border === undefined).assertTrue();
+      const shapes = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
+      expect(shapes.every((frame): boolean => frame.type === 'shape')).assertTrue();
+      expect(shapes.length).assertEqual(22);
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
       config.setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL);
       expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
       expect(collector.takeCapturedImageResources().length).assertEqual(0);
@@ -767,15 +1054,12 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const first = collector.materializeLightSnapshot(collector.captureSceneLight(context, [], 1, 1234,
         new Map(), { x: 0, y: 0, width: 100, height: 100 }, pages));
       const data = first.data as FullSnapshotData;
-      const arrow = findWireframe(data.wireframes, 4) as ReplayImageWireframe;
-      expect(arrow.type).assertEqual('image');
-      expect(arrow.isEmpty).assertFalse();
-      expect(arrow.mimeType).assertEqual('svg+xml');
-      expect(`data:image/${arrow.mimeType};base64,${arrow.base64}`.startsWith('data:image/svg+xml;base64,')).assertTrue();
-      expect(arrow.resourceId === undefined).assertTrue();
-      const svg = util.TextDecoder.create('utf-8').decodeWithStream(new util.Base64Helper().decodeSync(arrow.base64!));
-      expect(svg.includes('fill="#000000"')).assertTrue();
-      expect(svg.includes('fill-opacity="0.898')).assertTrue();
+      expect(findWireframe(data.wireframes, 4)!.type).assertEqual('shape');
+      const arrow = data.wireframes.filter((node): boolean =>
+        node.permanentId?.startsWith('fixture-4:control:arrow:') === true) as Array<ReplayShapeWireframe>;
+      expect(arrow.length > 0).assertTrue();
+      expect(arrow.every((node): boolean => node.shapeStyle?.backgroundColor === '#000000E5')).assertTrue();
+      expect(data.wireframes.every((node): boolean => node.type !== 'image')).assertTrue();
       expect(findWireframe(data.wireframes, 5)?.type).assertEqual('shape');
       const processor = new ReplaySnapshotProcessor();
       processor.setFullSnapshotBaseline(first);
@@ -784,11 +1068,9 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const latest = collector.materializeLightSnapshot(collector.captureSceneLight(context, [], 1, 1266,
         new Map(), { x: 0, y: 0, width: 100, height: 100 }, pages));
       const mutation = processor.createMutationRecord(latest)!.data as ReplayMutationData;
-      expect(mutation.updates.length).assertEqual(1);
-      expect(mutation.updates[0].type).assertEqual('image');
-      const updated = util.TextDecoder.create('utf-8').decodeWithStream(
-        new util.Base64Helper().decodeSync(mutation.updates[0].base64!));
-      expect(updated.includes('fill="#2563EB"')).assertTrue();
+      expect(mutation.updates.length > 0).assertTrue();
+      expect(mutation.updates.every((node): boolean => node.type === 'shape' &&
+        node.shapeStyle?.backgroundColor === '#2563EBFF')).assertTrue();
       expect(processor.createMutationRecord(latest) === null).assertTrue();
       expect(collector.takeCapturedImageResources().length).assertEqual(0);
     });

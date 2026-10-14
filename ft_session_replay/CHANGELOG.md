@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved Replay recording performance during continuous animation, while keeping availability immediate and final record counts current at View end, recording stop, and upload.
 - Fixed text colors, font sizes, alignment, padding, and rounded corners being rendered incorrectly, and Select controls losing labels or dropdown arrows.
 - Fixed incorrect initial text typography and missing span styles in inline Text and unfocused RichEditor. Inline images retain their resources when adjacent text changes.
+- Fixed native control labels, selection and disabled states, progress, ratings, and animations being rendered incorrectly or failing to update in Replay. Standard controls remain visible when images are masked.
 - Fixed native menus, popups, dialogs, and sheets missing from Replay, with correct layering and removal when closed.
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.
 - Fixed incomplete recordings at storage limits or during error-triggered upload, and inconsistent playback after mixed manual/automatic captures.

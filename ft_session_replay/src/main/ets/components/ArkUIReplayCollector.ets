@@ -6,6 +6,7 @@ import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
 import { ReplayRichText } from './ReplayRichText';
 import { ReplayComponentRaster } from './ReplayComponentRaster';
 import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
+import { ReplayControlWireframes } from './ReplayControlWireframes';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
@@ -52,6 +53,8 @@ interface RegisteredImageAsset {
   bytes: Uint8Array;
   mimeType: string;
 }
+
+interface ReplayControlVectorAsset { bytes: Uint8Array; token: string; }
 
 interface CachedReplayProperties {
   selectLabel: string | null;
@@ -118,6 +121,10 @@ export class ArkUIReplayCollector {
   private readonly richText: ReplayRichText = new ReplayRichText();
   private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
   private readonly controls: ReplayNativeControlPaint = new ReplayNativeControlPaint();
+  private readonly controlFrames: ReplayControlWireframes = new ReplayControlWireframes();
+  private readonly controlVectorCache: Map<string, ReplayControlVectorAsset> = new Map();
+  private controlVectorBytes: number = 0;
+  private controlVectorRevision: number = 0;
   private rasterContext: UIContext | null = null;
   private rasterLayoutEpoch: number = 0;
   private inlineMediaOwners: Set<number> | null = null;
@@ -165,6 +172,9 @@ export class ArkUIReplayCollector {
     this.richText.clear();
     this.rasters.clear();
     this.controls.clear();
+    this.controlFrames.clear();
+    this.controlVectorCache.clear();
+    this.controlVectorBytes = 0;
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -176,6 +186,9 @@ export class ArkUIReplayCollector {
     this.richText.clear();
     this.rasters.clear();
     this.controls.clear();
+    this.controlFrames.clear();
+    this.controlVectorCache.clear();
+    this.controlVectorBytes = 0;
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
@@ -471,7 +484,7 @@ export class ArkUIReplayCollector {
     }
     const canUseRaster = node.componentRasterKey !== undefined && this.canCaptureImage(node.width, node.height, scale) &&
       (node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor' ||
-        (this.controls.isSupported(node.nodeType) && this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL)) &&
+        this.canCaptureNativeControl(node.nodeType, node.inspectorInfo)) &&
       (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL) &&
       (node.nodeType !== 'RichEditor' || this.canCaptureEditor(inspector));
     const frame = canUseRaster ? this.createImageWireframe(node.id, node.x, node.y, node.width, node.height,
@@ -602,6 +615,35 @@ export class ArkUIReplayCollector {
     return runs;
   }
 
+  private canCaptureNativeControl(type: string, info: Object | null): boolean {
+    return !this.controlFrames.supports(type, info) && this.controls.isSupported(type) &&
+      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL;
+  }
+
+  private controlVector(svg: string, template: ReplayShapeWireframe): ReplayWireframe {
+    let asset = this.controlVectorCache.get(svg);
+    if (asset === undefined) {
+      const bytes = util.TextEncoder.create('utf-8').encodeInto(svg);
+      asset = { bytes, token: `arkui-vector-${this.rootEpoch}-${++this.controlVectorRevision}` };
+      this.controlVectorCache.set(svg, asset);
+      this.controlVectorBytes += asset.bytes.byteLength;
+      while (this.controlVectorCache.size > 64 || this.controlVectorBytes > 512 * 1024) {
+        const oldest = this.controlVectorCache.keys().next().value as string;
+        this.controlVectorBytes -= this.controlVectorCache.get(oldest)!.bytes.byteLength;
+        this.controlVectorCache.delete(oldest);
+      }
+    }
+    const token = asset.token;
+    if (!this.pendingImageResources.some((resource): boolean => resource.token === token)) {
+      this.pendingImageResources.push({ token, bytes: asset.bytes, mimeType: 'image/svg+xml' });
+    }
+    const frame: ReplayImageWireframe = { id: template.id, type: 'image', x: template.x, y: template.y,
+      width: template.width, height: template.height, permanentId: template.permanentId,
+      clip: template.clip, zIndex: template.zIndex, shapeStyle: template.shapeStyle,
+      resourceId: token, mimeType: 'svg+xml', isEmpty: false, imageStyle: { objectFit: 'fill' } };
+    return frame;
+  }
+
   private beginComponentFrame(timestamp: number): void {
     this.rasters.beginFrame();
     this.captureTimestamp = timestamp;
@@ -618,9 +660,11 @@ export class ArkUIReplayCollector {
     const wireframes: Array<ReplayWireframe> = [];
     const frameSources: Map<number, ArkUIReplayLightNode> = new Map();
     let extraBudget = Math.max(0, this.maxNodes - snapshot.nodes.length);
+    let hasControlParts = false;
     const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
     const retained = new Set<number>();
+    const groupStates = this.controlFrames.groupStates(snapshot.nodes);
     const selectInspectors = new Map<number, string | null>();
     for (const node of snapshot.nodes) {
       if (node.nodeType === 'Select' || node.nodeType === 'Button' || node.nodeType === 'Toggle') {
@@ -637,7 +681,6 @@ export class ArkUIReplayCollector {
           this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null;
       retained.add(node.id);
       const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
-
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
       // Use a canonical zero clip for unclipped nodes so applying a clearing
       // Mutation produces exactly the same properties as the latest Full.
@@ -654,6 +697,31 @@ export class ArkUIReplayCollector {
       }
       wireframes.push(wireframe);
       frameSources.set(wireframe.id, node);
+      if (node.isSelectArrow || this.controlFrames.supports(node.nodeType, node.inspectorInfo)) {
+        const attrs = this.controlFrames.attrs(node.inspectorInfo);
+        const isButton = node.nodeType === 'Button' ||
+          (node.nodeType === 'Toggle' && String(attrs['type']).includes('Button'));
+        if (!isButton && wireframe.type === 'shape') {
+          const style = wireframe.shapeStyle ?? {};
+          style.backgroundColor = '#00000000';
+          style.backgroundGradient = undefined;
+          wireframe.shapeStyle = style;
+        }
+        const parts = this.controlFrames.create(node, snapshot.vpToPxScale, extraBudget, groupStates.get(node.id),
+          this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS,
+          (source: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlImage(node, source, template, snapshot.vpToPxScale),
+          (svg: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlVector(svg, template));
+        extraBudget -= parts.length;
+        hasControlParts = hasControlParts || parts.length > 0;
+        for (const part of parts) {
+          retained.add(part.id);
+          // A foreground plane fits between this native zIndex and the next.
+          // It is compacted to an integer after all frames are materialized.
+          part.zIndex = (wireframe.zIndex ?? 0) + (part.zIndex ?? 0) * 0.5;
+          wireframes.push(part);
+          frameSources.set(part.id, node);
+        }
+      }
       if (node.nodeType === 'Web' || node.nodeType === 'RichText') {
         const html = this.readInspectorString(inspector, ['content']);
         if (html !== null && html.trim().length > 0) {
@@ -679,15 +747,6 @@ export class ArkUIReplayCollector {
           frameSources.set(child.id, node);
         }
       }
-      if (node.sceneLayer !== undefined && !node.isPageSurface) {
-        let indices = pageZIndices.get(node.sceneLayer);
-        if (indices === undefined) {
-          indices = [];
-          pageZIndices.set(node.sceneLayer, indices);
-        }
-        const zIndex = wireframe.zIndex ?? 0;
-        if (!indices.includes(zIndex)) indices.push(zIndex);
-      }
     }
     this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
       if (!retained.has(id)) {
@@ -696,15 +755,27 @@ export class ArkUIReplayCollector {
       }
     });
     this.richText.retain(retained);
+    for (const frame of wireframes) {
+      const source = frameSources.get(frame.id)!;
+      if (source.isPageSurface || (source.sceneLayer === undefined && !hasControlParts)) continue;
+      const layer = source.sceneLayer ?? -1;
+      let indices = pageZIndices.get(layer);
+      if (indices === undefined) {
+        indices = [];
+        pageZIndices.set(layer, indices);
+      }
+      const zIndex = frame.zIndex ?? 0;
+      if (!indices.includes(zIndex)) indices.push(zIndex);
+    }
     pageZIndices.forEach((indices: Array<number>): void => { indices.sort((left: number, right: number): number => left - right); });
     for (let index = 0; index < wireframes.length; index++) {
       const node = frameSources.get(wireframes[index].id)!;
-      if (node.sceneLayer === undefined) continue;
+      if (node.sceneLayer === undefined && !hasControlParts) continue;
       const wireframe = wireframes[index];
       // Native zIndex is local to its page. Compact its relative order into
       // that page's reserved band instead of allowing it to cross pages.
-      const rank = node.isPageSurface ? 0 : (pageZIndices.get(node.sceneLayer)?.indexOf(wireframe.zIndex ?? 0) ?? 0) + 1;
-      wireframe.zIndex = node.sceneLayer + rank;
+      const rank = node.isPageSurface ? 0 : (pageZIndices.get(node.sceneLayer ?? -1)?.indexOf(wireframe.zIndex ?? 0) ?? 0) + 1;
+      wireframe.zIndex = (node.sceneLayer ?? 0) + rank;
     }
     const data: FullSnapshotData = { wireframes };
     return {
@@ -817,9 +888,12 @@ export class ArkUIReplayCollector {
     const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
     const controlInfo = (inspectorInfo ?? {}) as Record<string, Object>;
     const controlAttrs = (controlInfo['$attrs'] ?? controlInfo) as Record<string, Object>;
+    const isFrameControl = this.controlFrames.supports(nodeType, inspectorInfo);
+    if (isFrameControl && String(controlAttrs['enabled'] ?? 'true') === 'false') opacity *= 0.4;
+    const motion = isFrameControl ? this.controlFrames.sample(nodeId, nodeType, inspectorInfo, this.captureTimestamp, visible) : null;
+    this.activeComponentAnimations = this.activeComponentAnimations || motion?.active === true;
     const hasNativeLabel = typeof controlAttrs['label'] === 'string' && (controlAttrs['label'] as string).length > 0;
-    const isNativeControl = this.controls.isSupported(nodeType) &&
-      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL &&
+    const isNativeControl = this.canCaptureNativeControl(nodeType, inspectorInfo) &&
       ((nodeType !== 'Button' && nodeType !== 'Toggle') || hasNativeLabel || !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) &&
       !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
     const isSelectArrow = nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select';
@@ -858,6 +932,9 @@ export class ArkUIReplayCollector {
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
         isSelectArrow,
         componentRasterKey,
+        controlState: motion?.value,
+        controlParentId: isFrameControl && (nodeType === 'Checkbox' || nodeType === 'CheckboxGroup') ?
+          this.toProtocolId(parentId) : undefined,
         inlineRuns,
         selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
           this.toProtocolId(grandparentId) : undefined,
@@ -891,7 +968,8 @@ export class ArkUIReplayCollector {
     }
     while (child !== null && output.length < nodeBudget) {
       // A completed Text raster already contains its inline image children.
-      if (inlineRuns === undefined && nodeType !== 'RichEditor' &&
+      if (inlineRuns === undefined && nodeType !== 'RichEditor' && !(nodeType === 'Button' && hasNativeLabel) &&
+        !(nodeType === 'Radio' && !String(controlAttrs['indicatorType'] ?? 'TICK').toUpperCase().includes('CUSTOM')) &&
         ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
           excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
@@ -1081,7 +1159,7 @@ export class ArkUIReplayCollector {
     selectLabel: string | null = null
   ): ReplayWireframe {
     if (isSelectArrow) {
-      return this.createSelectArrowWireframe(id, x, y, width, height, componentId, inspector, vpToPxScale);
+      return this.createShapeWireframe(id, x, y, width, height, componentId, nodeType, inspector, false, vpToPxScale);
     }
     if (shouldCaptureAsText) {
       return this.createTextWireframe(id, x, y, width, height, componentId, nodeType, inspector, vpToPxScale, selectLabel);
@@ -1160,29 +1238,6 @@ export class ArkUIReplayCollector {
       text.permanentId = componentId;
     }
     return text;
-  }
-
-  private createSelectArrowWireframe(
-    id: number, x: number, y: number, width: number, height: number,
-    componentId: string, inspector: string | null, vpToPxScale: number
-  ): ReplayImageWireframe {
-    // The native Select spinner uses HM Symbol, which the web player cannot
-    // render. This constant triangle contains no application text or pixels.
-    // Keep its native bounds/transform and the Inspector's symbol tint.
-    const value = this.getInspectorValue(inspector);
-    const colors = value === null ? null : this.findInspectorStringArray(value, ['fontColor', 'symbolColorList']);
-    const color = this.normalizeTextColor(colors?.[0] ?? null) ?? this.readRenderedTextColor(inspector) ?? '#000000E5';
-    const alpha = parseInt(color.substring(7, 9), 16) / 255;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 38 56">` +
-      `<path d="M3 18H35Q38 18 36 21L21 40Q19 43 17 40L2 21Q0 18 3 18Z" ` +
-      `fill="${color.substring(0, 7)}" fill-opacity="${alpha}"/></svg>`;
-    const arrow: ReplayImageWireframe = {
-      id, x, y, width, height, type: 'image', isEmpty: false, mimeType: 'svg+xml',
-      base64: new util.Base64Helper().encodeToStringSync(util.TextEncoder.create('utf-8').encodeInto(svg)),
-      shapeStyle: this.createShapeStyle('SymbolGlyph', inspector, false, width, height, vpToPxScale)
-    };
-    if (componentId.length > 0) arrow.permanentId = componentId;
-    return arrow;
   }
 
   private createImageWireframe(
@@ -2136,8 +2191,7 @@ export class ArkUIReplayCollector {
     if (nodeType === 'Button') {
       const object = (info ?? {}) as Record<string, Object>;
       const attrs = (object['$attrs'] ?? object) as Record<string, Object>;
-      return typeof attrs['label'] === 'string' && (attrs['label'] as string).length > 0 &&
-        !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
+      return typeof attrs['label'] === 'string' && (attrs['label'] as string).length > 0;
     }
     if (!this.isTextNode(nodeType) || this.isButtonLikeNode(nodeType)) {
       return false;

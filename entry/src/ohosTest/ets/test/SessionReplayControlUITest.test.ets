@@ -8,7 +8,7 @@ import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { FTSDK, FTSessionReplayRUMContext } from '@guancecloud/ft_sdk';
 import { ArkUIReplayCollector, FTSessionReplayConfig, FTSessionReplayRecorder, FullSnapshotData, ImagePrivacy,
-  ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplayTextWireframe, ReplayWireframe, SessionReplayContext,
+  ReplayImageWireframe, ReplayMutationData, ReplayRecordType, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayContext,
   SessionReplayResourceStore, SessionReplaySegmentStore, TextAndInputPrivacy } from '@guancecloud/ft_session_replay';
 
 export default function sessionReplayControlUITest(): void {
@@ -71,36 +71,21 @@ export default function sessionReplayControlUITest(): void {
       }
       throw new Error(`Control did not enter the viewport: ${id}`);
     };
-    const bitmap = async (id: string): Promise<Uint8Array> => {
+    const controlFrames = async (id: string): Promise<Array<ReplayWireframe>> => {
       await show(id);
-      for (let attempt = 0; attempt < 30; attempt++) {
-        const light = collector.captureLightSnapshot(uiContext, id, vp2px(1));
-        const frames = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
-        const pixels = frames[0] as ReplayImageWireframe;
-        const resources = collector.takeCapturedImageResources();
-        if (pixels.type === 'image' && !pixels.isEmpty && !light.hasActiveAnimations) {
-          expect(pixels.mimeType).assertEqual('png');
-          expect(pixels.shapeStyle?.backgroundColor === undefined).assertTrue();
-          expect(frames.length).assertEqual(1);
-          expect(resources.length).assertEqual(1);
-          return resources[0].bytes;
-        }
-        await driver.delayMs(100);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const light = id === 'session-replay-checkbox-group' ?
+          collector.captureFrameNodeLight(frame(id).getParent()!, vp2px(1)) :
+          collector.captureLightSnapshot(uiContext, id, vp2px(1));
+        const data = collector.materializeLightSnapshot(light).data as FullSnapshotData;
+        expect(data.wireframes.every((node): boolean => node.type !== 'image' || node.mimeType === 'svg+xml')).assertTrue();
+        expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+        if (!light.hasActiveAnimations) return id === 'session-replay-checkbox-group' ?
+          data.wireframes.filter((node): boolean => node.permanentId === id || node.permanentId?.startsWith(`${id}:control:`) === true) :
+          data.wireframes;
+        await driver.delayMs(40);
       }
-      throw new Error(`Native control bitmap did not settle: ${id}`);
-    };
-    const encoded = (bytes: Uint8Array): string => new util.Base64Helper().encodeToStringSync(bytes);
-    const ink = async (bytes: Uint8Array): Promise<number> => {
-      const source = image.createImageSource(bytes.buffer as ArrayBuffer);
-      const map = await source.createPixelMap({ desiredPixelFormat: image.PixelMapFormat.RGBA_8888 });
-      try {
-        const size = map.getImageInfoSync().size;
-        const data = new Uint8Array(size.width * size.height * 4);
-        map.readPixelsToBufferSync(data.buffer as ArrayBuffer);
-        let count = 0;
-        for (let offset = 3; offset < data.length; offset += 4) if (data[offset] > 0) count++;
-        return count;
-      } finally { await map.release(); await source.release(); }
+      throw new Error(`Frame control did not settle: ${id}`);
     };
     const removeDirectory = (directory: string): void => {
       for (const name of fileIo.listFileSync(directory)) {
@@ -111,9 +96,14 @@ export default function sessionReplayControlUITest(): void {
       fileIo.rmdirSync(directory);
     };
 
-    it('renders native normal, circle and disabled Button labels without duplicate chrome', 0, async () => {
+    it('renders normal, circle and disabled Button labels as text frames', 0, async () => {
       for (const id of ['session-replay-button-normal', 'session-replay-button-circle', 'session-replay-button-disabled']) {
-        expect(await ink(await bitmap(id)) > 100).assertTrue();
+        const frames = await controlFrames(id);
+        expect(frames.length).assertEqual(1);
+        expect(frames[0].type).assertEqual('text');
+        expect((frames[0] as ReplayTextWireframe).text.length > 0).assertTrue();
+        expect((frames[0] as ReplayTextWireframe).textPosition?.alignment?.horizontal).assertEqual('center');
+        if (id.endsWith('disabled')) expect((frames[0] as ReplayTextWireframe).shapeStyle!.opacity! < 1).assertTrue();
       }
       const masked = new ArkUIReplayCollector(1500, new FTSessionReplayConfig());
       const frames = (masked.materializeLightSnapshot(masked.captureLightSnapshot(uiContext,
@@ -122,51 +112,114 @@ export default function sessionReplayControlUITest(): void {
       expect(JSON.stringify(frames).includes('普通')).assertFalse();
     });
 
-    it('renders and updates Checkbox, partial CheckboxGroup, Radio and Switch pixels', 0, async () => {
-      const group = await bitmap('session-replay-checkbox-group');
-      const before = await bitmap('session-replay-checkbox-a');
+    it('updates Checkbox, partial CheckboxGroup, Radio and Switch shape frames', 0, async () => {
+      const group = JSON.stringify(await controlFrames('session-replay-checkbox-group'));
+      const before = JSON.stringify(await controlFrames('session-replay-checkbox-a'));
       const checkbox = await driver.findComponent(ON.id('session-replay-checkbox-a'));
       await checkbox!.click();
-      expect(encoded(await bitmap('session-replay-checkbox-a')) === encoded(before)).assertFalse();
-      expect(encoded(await bitmap('session-replay-checkbox-group')) === encoded(group)).assertFalse();
-      const radio = await bitmap('session-replay-radio-b');
+      expect(JSON.stringify(await controlFrames('session-replay-checkbox-a')) === before).assertFalse();
+      const partial = await controlFrames('session-replay-checkbox-group');
+      expect(JSON.stringify(partial) === group).assertFalse();
+      expect(partial.some((node): boolean => node.permanentId?.includes('control:partial') === true &&
+        (node as ReplayShapeWireframe).shapeStyle?.opacity === 1)).assertTrue();
+      const radio = JSON.stringify(await controlFrames('session-replay-radio-b'));
       await (await driver.findComponent(ON.id('session-replay-radio-b')))!.click();
-      expect(encoded(await bitmap('session-replay-radio-b')) === encoded(radio)).assertFalse();
-      const toggle = await bitmap('session-replay-toggle-switch');
+      expect(JSON.stringify(await controlFrames('session-replay-radio-b')) === radio).assertFalse();
+      const toggle = JSON.stringify(await controlFrames('session-replay-toggle-switch'));
       await (await driver.findComponent(ON.id('session-replay-toggle-switch')))!.click();
-      expect(encoded(await bitmap('session-replay-toggle-switch')) === encoded(toggle)).assertFalse();
+      expect(JSON.stringify(await controlFrames('session-replay-toggle-switch')) === toggle).assertFalse();
     });
 
-    it('captures the native Slider, Rating, linear and ring Progress, Gauge and DataPanel', 0, async () => {
-      for (const id of ['session-replay-slider', 'session-replay-rating', 'session-replay-progress-linear',
+    it('captures Slider, determinate Progress and Gauge with analytic frames and vectors', 0, async () => {
+      for (const id of ['session-replay-slider', 'session-replay-progress-linear',
         'session-replay-progress-ring', 'session-replay-gauge', 'session-replay-data-panel']) {
-        expect(await ink(await bitmap(id)) > 50).assertTrue();
+        const frames = await controlFrames(id);
+        expect(frames.length > 1).assertTrue();
+        expect(frames.some((node): boolean => node.id < 0 && (node.type === 'shape' || (node.type === 'image' && node.mimeType === 'svg+xml')))).assertTrue();
       }
     });
 
     it('updates Slider-linked Progress and Gauge without manual invalidation', 0, async () => {
-      const slider = await bitmap('session-replay-slider');
-      const progress = await bitmap('session-replay-progress-linear');
-      const gauge = await bitmap('session-replay-gauge');
+      const slider = JSON.stringify(await controlFrames('session-replay-slider'));
+      const progress = JSON.stringify(await controlFrames('session-replay-progress-linear'));
+      const gauge = JSON.stringify(await controlFrames('session-replay-gauge'));
       await show('session-replay-slider');
       const bounds = await (await driver.findComponent(ON.id('session-replay-slider')))!.getBounds();
       await driver.click(Math.round(bounds.left + (bounds.right - bounds.left) * 0.8), Math.round((bounds.top + bounds.bottom) / 2));
       const sliderInfo = frame('session-replay-slider').getInspectorInfo() as Record<string, Object>;
       const sliderAttrs = sliderInfo['$attrs'] as Record<string, Object>;
       expect(Number(String((sliderAttrs['constructor'] as Record<string, Object>)['value'])) > 60).assertTrue();
-      expect(encoded(await bitmap('session-replay-slider')) === encoded(slider)).assertFalse();
-      expect(encoded(await bitmap('session-replay-progress-linear')) === encoded(progress)).assertFalse();
-      expect(encoded(await bitmap('session-replay-gauge')) === encoded(gauge)).assertFalse();
+      expect(JSON.stringify(await controlFrames('session-replay-slider')) === slider).assertFalse();
+      expect(JSON.stringify(await controlFrames('session-replay-progress-linear')) === progress).assertFalse();
+      expect(JSON.stringify(await controlFrames('session-replay-gauge')) === gauge).assertFalse();
+    });
+
+    it('records Slider motion as changing shape positions while images are masked', 0, async () => {
+      await show('session-replay-slider');
+      const directory = `${AbilityDelegatorRegistry.getAbilityDelegator().getAppContext().cacheDir}/replay-frame-motion-${Date.now()}`;
+      fileIo.mkdirSync(directory);
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL),
+        new SessionReplaySegmentStore(directory, 1024 * 1024, 100));
+      const context: FTSessionReplayRUMContext = { applicationId: 'frame-motion', sessionId: 'frame-motion',
+        viewId: 'frame-motion', viewName: 'Slider', viewReferrer: '', linkContext: {}, timestamp: Date.now() };
+      const replayContext: SessionReplayContext = { applicationId: context.applicationId,
+        sessionId: context.sessionId, viewId: context.viewId };
+      try {
+        recorder.start();
+        recorder.registerRoot(uiContext, 'session-replay-transition-root', vp2px(1), true);
+        expect(recorder.onViewStarted(context)).assertTrue();
+        await driver.delayMs(500);
+        const bounds = await (await driver.findComponent(ON.id('session-replay-slider')))!.getBounds();
+        const start = Date.now();
+        await driver.swipe(Math.round(bounds.left + (bounds.right - bounds.left) * 0.1),
+          Math.round((bounds.top + bounds.bottom) / 2), Math.round(bounds.left + (bounds.right - bounds.left) * 0.9),
+          Math.round((bounds.top + bounds.bottom) / 2), 200);
+        const end = Date.now();
+        await driver.delayMs(500);
+        await recorder.drainWrites();
+        let thumbId = 0;
+        const positions = new Set<number>();
+        const times: Array<number> = [];
+        for (const record of recorder.getRecordedRecords(replayContext)) {
+          if (record.type === ReplayRecordType.FULL_SNAPSHOT) {
+            const frames = (record.data as FullSnapshotData).wireframes;
+            expect(frames.every((node): boolean => node.type !== 'image' || node.isEmpty === true || node.mimeType === 'svg+xml')).assertTrue();
+            const thumb = frames.find((node): boolean => node.permanentId === 'session-replay-slider:control:thumb');
+            if (thumb !== undefined) {
+              expect(thumb.type).assertEqual('shape');
+              thumbId = thumb.id;
+            }
+          } else if (record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT && (record.data as ReplayMutationData).source === 0 &&
+            record.timestamp >= start && record.timestamp <= end) {
+            for (const update of (record.data as ReplayMutationData).updates) if (update.id === thumbId && update.x !== undefined) {
+              expect(update.type).assertEqual('shape');
+              expect(update.resourceId === undefined && update.base64 === undefined).assertTrue();
+              positions.add(update.x);
+              times.push(record.timestamp);
+            }
+          }
+        }
+        expect(positions.size > 16).assertTrue();
+        expect(new SessionReplayResourceStore(directory, 1024 * 1024).list().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+        const gaps = times.slice(1).map((time, index): number => time - times[index]).sort((a, b): number => a - b);
+        console.info(`REPLAY_FRAME_MOTION positions=${positions.size}, durationMs=${end - start}, gapMedianMs=${gaps[Math.floor(gaps.length / 2)]}`);
+      } finally {
+        recorder.stop();
+        await recorder.drainWrites();
+        removeDirectory(directory);
+      }
     });
 
     it('updates the native Rating stars after an edit', 0, async () => {
-      const rating = await bitmap('session-replay-rating');
+      const rating = JSON.stringify(await controlFrames('session-replay-rating'));
       const stars = await (await driver.findComponent(ON.id('session-replay-rating')))!.getBounds();
       await driver.click(Math.round(stars.left + (stars.right - stars.left) * 0.9), Math.round((stars.top + stars.bottom) / 2));
-      expect(encoded(await bitmap('session-replay-rating')) === encoded(rating)).assertFalse();
+      expect(JSON.stringify(await controlFrames('session-replay-rating')) === rating).assertFalse();
     });
 
-    it('persists changed native control images through the automatic Recorder Worker queue', 0, async () => {
+
+    it('persists checkbox shape mutations through Worker without a component image', 0, async () => {
       await show('session-replay-checkbox-a');
       const directory = `${AbilityDelegatorRegistry.getAbilityDelegator().getAppContext().cacheDir}/replay-controls-${Date.now()}`;
       fileIo.mkdirSync(directory);
@@ -185,31 +238,26 @@ export default function sessionReplayControlUITest(): void {
         await (await driver.findComponent(ON.id('session-replay-checkbox-a')))!.click();
         await driver.delayMs(1200);
         await recorder.drainWrites();
-        const images: Array<ReplayImageWireframe> = [];
-        const resourceNames = new Set<string>();
-        let targetId = 0;
+        const targets = new Set<number>();
+        let mutations = 0;
         for (const record of recorder.getRecordedRecords(replayContext)) {
           const frames = record.type === ReplayRecordType.FULL_SNAPSHOT ? (record.data as FullSnapshotData).wireframes :
             record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT && (record.data as ReplayMutationData).source === 0 ?
               (record.data as ReplayMutationData).adds.map((add): ReplayWireframe => add.wireframe) : [];
-          for (const node of frames) if (node.permanentId === 'session-replay-checkbox-a') {
-            targetId = node.id;
-            if (node.type === 'image' && !node.isEmpty) images.push(node);
+          for (const node of frames) if (node.permanentId?.startsWith('session-replay-checkbox-a') === true) {
+            expect(node.type).assertEqual('shape');
+            targets.add(node.id);
           }
           if (record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT && (record.data as ReplayMutationData).source === 0) {
-            for (const update of (record.data as ReplayMutationData).updates) {
-              if (update.id === targetId && update.resourceId !== undefined) resourceNames.add(update.resourceId);
+            for (const update of (record.data as ReplayMutationData).updates) if (targets.has(update.id)) {
+              expect(update.type).assertEqual('shape');
+              expect(update.resourceId === undefined && update.base64 === undefined).assertTrue();
+              mutations++;
             }
           }
         }
-        for (const node of images) if (node.resourceId !== undefined) resourceNames.add(node.resourceId);
-        expect(images.length > 0).assertTrue();
-        expect(resourceNames.size >= 2).assertTrue();
-        const store = new SessionReplayResourceStore(directory, 1024 * 1024);
-        for (const name of resourceNames) {
-          const asset = store.list().find((resource): boolean => resource.fileName === name);
-          expect(asset !== undefined && store.read(asset!)!.byteLength > 100).assertTrue();
-        }
+        expect(targets.size > 1).assertTrue();
+        expect(mutations > 0).assertTrue();
       } finally {
         recorder.stop();
         await recorder.drainWrites();
