@@ -9,7 +9,7 @@ import { ReplayControlVectors } from '../../main/ets/components/ReplayControlVec
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
-import { ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
+import { ArkUIReplayLightSnapshot, ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
 
 interface ReplayPosition {
   x: number;
@@ -1538,6 +1538,130 @@ export default function arkUIReplayCollectorUnitTest(): void {
       config.setTouchPrivacy(TouchPrivacy.SHOW).setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL_INPUTS);
       expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
       expect(collector.takeCapturedImageResources().every((resource): boolean => resource.mimeType === 'image/svg+xml')).assertTrue();
+    });
+
+    it('discovers native AlertDialog and ActionSheet roots with opaque material panels and retained masks', 0, () => {
+      for (const kind of ['AlertDialog', 'ActionSheet']) {
+        const page = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 400);
+        const modal = new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 200, 400).withNodeType(kind)
+          .withInspector({ 'backgroundColor': '#33000000' } as Record<string, Object>);
+        const options: Record<string, Object> = { 'colorMode': 'ThemeColorMode.Light' };
+        const blur: Record<string, Object> = { 'value': 'BlurStyle.COMPONENT_ULTRA_THICK', 'options': options };
+        const attrs: Record<string, Object> = { 'backgroundColor': '#00000000', 'backgroundBlurStyle': blur,
+          'borderRadius': '{"topLeft":"32vp","topRight":"32vp","bottomLeft":"32vp","bottomRight":"32vp"}' };
+        const panel = modal.append(new ReplayFrameNodeFixture(3, 16, 240, 16, 240, 168, 120).withInspector(attrs));
+        panel.append(new ReplayFrameNodeFixture(4, 32, 260, 32, 260, 100, 24).withNodeType('Text')
+          .withInspector({ 'content': 'Modal title', 'fontSize': '20fp' } as Record<string, Object>));
+        const context = new ReplayOverlayContextFixture(modal);
+        context.tree = `{"$children":[{"$type":"${kind}","$ID":2}]}`;
+        const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+          .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL));
+        const pages: Array<ArkUIReplayScenePage> = [{ key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }];
+        const capture = (): SessionReplayRecord => collector.materializeLightSnapshot(collector.captureSceneLight(
+          context as Object as UIContext, [], 1, 1234, new Map(), { x: 0, y: 0, width: 200, height: 400 }, pages));
+        const first = capture(); const frames = (first.data as FullSnapshotData).wireframes;
+        expect((findWireframe(frames, 2) as ReplayShapeWireframe).shapeStyle?.backgroundColor).assertEqual('#00000033');
+        expect((findWireframe(frames, 3) as ReplayShapeWireframe).shapeStyle?.backgroundColor).assertEqual('#FFFFFFFF');
+        expect((findWireframe(frames, 3) as ReplayShapeWireframe).shapeStyle?.cornerRadius).assertEqual(32);
+        expect((findWireframe(frames, 4) as ReplayTextWireframe).text).assertEqual('Modal title');
+        const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(first);
+        attrs['backgroundColor'] = '#FF123456';
+        expect((findWireframe((capture().data as FullSnapshotData).wireframes, 3) as ReplayShapeWireframe)
+          .shapeStyle?.backgroundColor).assertEqual('#123456FF');
+        context.tree = '{"$children":[]}';
+        const closed = capture();
+        expect(findWireframe((closed.data as FullSnapshotData).wireframes, 4) === null).assertTrue();
+        expect((processor.createMutationRecord(closed)!.data as ReplayMutationData).removes.length).assertEqual(3);
+      }
+    });
+
+    it('models a native message Popup outline and Sheet close icon as cached vectors with no component screenshots', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 400).withNodeType('Popup');
+      const blur: Record<string, Object> = { 'value': 'BlurStyle.COMPONENT_ULTRA_THICK' };
+      const attrs: Record<string, Object> = { 'backgroundColor': '#00000000', 'backgroundBlurStyle': blur,
+        'shadow': 'ShadowStyle.OuterDefaultMD' };
+      const panel = root.append(new ReplayFrameNodeFixture(2, 20, 100, 20, 100, 150, 64).withInspector(attrs));
+      // Native message-popup content has no application id.
+      panel.append(new ReplayFrameNodeFixture(3, 28, 108, 28, 108, 134, 48).withNodeType('Scroll'))
+        .append(new ReplayFrameNodeFixture(4, 36, 116, 36, 116, 118, 32).withNodeType('Text')
+          .withInspector({ 'content': 'Popup message' } as Record<string, Object>));
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+        .setImagePrivacy(ImagePrivacy.MASK_ALL).setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const snapshot = collector.captureFrameNodeLight(asFrameNode(root));
+      snapshot.nodes[1].componentId = '';
+      const first = collector.materializeLightSnapshot(snapshot);
+      expect((first.data as FullSnapshotData).wireframes.length).assertEqual(4);
+      const vector = (first.data as FullSnapshotData).wireframes[1] as ReplayImageWireframe;
+      expect(vector.mimeType).assertEqual('svg+xml'); expect(vector.isEmpty).assertFalse();
+      const assets = collector.takeCapturedImageResources(); expect(assets.length).assertEqual(1);
+      const source = Array.from(assets[0].bytes).map((byte: number): string => String.fromCharCode(byte)).join('');
+      expect(source.includes('<rect')).assertTrue(); expect(source.includes('<path')).assertTrue();
+      expect(source.includes('rx="20"')).assertTrue();
+      const repeated = collector.materializeLightSnapshot(snapshot);
+      expect(((repeated.data as FullSnapshotData).wireframes[1] as ReplayImageWireframe).resourceId).assertEqual(vector.resourceId);
+      const sheet = new ReplayFrameNodeFixture(5, 0, 0, 0, 0, 200, 300).withNodeType('SheetPage');
+      sheet.append(new ReplayFrameNodeFixture(6, 150, 16, 150, 16, 40, 40).withNodeType('Button'))
+        .append(new ReplayFrameNodeFixture(7, 161, 27, 161, 27, 18, 18).withNodeType('SymbolGlyph'));
+      const close = collector.captureFrameNode(asFrameNode(sheet));
+      const glyph = findWireframe((close.data as FullSnapshotData).wireframes, 7) as ReplayImageWireframe;
+      expect(glyph.mimeType).assertEqual('svg+xml'); expect(glyph.isEmpty).assertFalse();
+      expect((close.data as FullSnapshotData).wireframes.length).assertEqual(3);
+    });
+
+    it('samples native modal entry until its final position settles without needing another page draw', 0, () => {
+      for (const kind of ['AlertDialog', 'ActionSheet']) {
+        const page = new ReplayFrameNodeFixture(1, 10, 38, 10, 38, 360, 740);
+        const modal = new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 380, 814).withNodeType(kind);
+        const panel = modal.append(new ReplayFrameNodeFixture(3, 26, 520, 51, 540, 328, 198));
+        const context = new ReplayOverlayContextFixture(modal);
+        context.tree = `{"$children":[{"$type":"${kind}","$ID":2}]}`;
+        const collector = new ArkUIReplayCollector();
+        const pages: Array<ArkUIReplayScenePage> = [{ key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }];
+        const capture = (time: number): ArkUIReplayLightSnapshot => collector.captureSceneLight(
+          context as Object as UIContext, [], 1, time, new Map(), { x: 10, y: 38, width: 360, height: 740 }, pages);
+        const entering = capture(1000);
+        expect(entering.hasActiveAnimations).assertTrue();
+        const baseline = collector.materializeLightSnapshot(entering);
+        const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(baseline);
+        panel.moveTo(26, 520);
+        const final = capture(1300);
+        const settled = collector.materializeLightSnapshot(final);
+        const frame = findWireframe((settled.data as FullSnapshotData).wireframes, 3)!;
+        expect(frame.x).assertEqual(16); expect(frame.y).assertEqual(482);
+        expect(frame.x + frame.width <= 360).assertTrue();
+        const mutation = processor.createMutationRecord(settled)!.data as ReplayMutationData;
+        expect(mutation.adds.length + mutation.removes.length).assertEqual(0);
+        expect(mutation.updates.find((update): boolean => update.id === frame.id)?.x).assertEqual(16);
+        expect(capture(1899).hasActiveAnimations).assertTrue();
+        expect(capture(1900).hasActiveAnimations).assertFalse();
+        context.tree = '{"$children":[]}';
+        expect(capture(2000).hasActiveAnimations).assertFalse();
+        collector.clearScene();
+        expect(capture(2100).hasActiveAnimations).assertFalse();
+      }
+    });
+
+    it('infers message Popup arrow direction from the visible native target geometry', 0, () => {
+      const page = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 360, 400);
+      const target = page.append(new ReplayFrameNodeFixture(2, 155, 60, 155, 60, 40, 32).withNodeType('Button'));
+      const popup = new ReplayFrameNodeFixture(3, 0, 0, 0, 0, 360, 400).withNodeType('Popup');
+      popup.append(new ReplayFrameNodeFixture(4, 100, 100, 100, 100, 150, 64));
+      const context = new ReplayOverlayContextFixture(popup);
+      context.tree = '{"$children":[{"$type":"Popup","$ID":3}]}';
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig());
+      const pages: Array<ArkUIReplayScenePage> = [{ key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }];
+      const cases: Array<ReplayPosition> = [{ x: 155, y: 60 }, { x: 155, y: 172 }, { x: 52, y: 116 }, { x: 258, y: 116 }];
+      const sides: Array<string> = ['top', 'bottom', 'left', 'right'];
+      for (let index = 0; index < cases.length; index++) {
+        target.moveTo(cases[index].x, cases[index].y);
+        const light = collector.captureSceneLight(context as Object as UIContext, [], 1, 1234,
+          new Map(), { x: 0, y: 0, width: 360, height: 400 }, pages);
+        expect(light.nodes.find((node): boolean => node.isPopupSurface === true)?.popupArrowSide).assertEqual(sides[index]);
+      }
+      target.moveTo(258, 116); target.hide();
+      const hidden = collector.captureSceneLight(context as Object as UIContext, [], 1, 1234,
+        new Map(), { x: 0, y: 0, width: 360, height: 400 }, pages);
+      expect(hidden.nodes.find((node): boolean => node.isPopupSurface === true)?.popupArrowSide).assertEqual('top');
     });
 
   });

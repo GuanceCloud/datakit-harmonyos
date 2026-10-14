@@ -1,4 +1,5 @@
 import { ReplayPatternPoint } from './ReplayPatternLock';
+import { ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode } from '@kit.ArkUI';
 import { ReplayWireframeClip } from './SessionReplayProtocol';
 
@@ -52,6 +53,10 @@ export interface ArkUIReplayLightNode {
   shouldCaptureAsText: boolean;
   /** Native Select spinner, rendered from a fixed safe vector instead of its platform font. */
   isSelectArrow?: boolean;
+  /** Native bubble outline and sheet close glyph have paint outside ordinary Inspector styles. */
+  isPopupSurface?: boolean;
+  popupArrowSide?: ReplayPopupArrowSide;
+  isOverlayCloseIcon?: boolean;
   /** Internal Select label's owner; native Inspector can omit the child's content. */
   selectLabelOwnerId?: number;
   /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
@@ -273,7 +278,8 @@ export class SessionReplayScene {
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
-          isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey
+          isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey,
+          isPopupSurface: source.isPopupSurface, popupArrowSide: source.popupArrowSide, isOverlayCloseIcon: source.isOverlayCloseIcon
         });
       }
     }

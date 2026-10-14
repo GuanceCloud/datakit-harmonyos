@@ -656,11 +656,11 @@ export struct SessionReplayComponentSamples {
   @Builder
   private sheetContent() {
     Column({ space: 16 }) {
-      Text('Sheet 采集测试').fontSize(22)
+      Text('Sheet 采集测试').id('session-replay-sheet-title').fontSize(22)
       TextInput({ placeholder: '弹层内输入演示文本' }).width('90%')
-      Button('关闭 Sheet').onClick(() => { this.sheetVisible = false; })
+      Button('关闭 Sheet').id('session-replay-sheet-close').onClick(() => { this.sheetVisible = false; })
     }
-    .width('100%').padding(24)
+    .id('session-replay-sheet-content').width('100%').padding(24)
   }
 
   @Builder
@@ -693,18 +693,22 @@ export struct SessionReplayComponentSamples {
     this.section('Menu / MenuItem / MenuItemGroup / Popup / Sheet / AlertDialog / ActionSheet', '展开、选择和关闭浮层，检查浮层是否进入回放、遮挡和返回后的页面状态。')
     Button('展开 Menu').width('100%').height(44).bindMenu(this.menuContent)
     Button('显示 / 隐藏 Popup').width('100%').height(44)
+      .id('session-replay-popup-open')
       .onClick(() => { this.popupVisible = !this.popupVisible; })
       .bindPopup(this.popupVisible, { message: 'Popup 演示文字',
         onStateChange: (event: ReplayPopupState) => { this.popupVisible = event.isVisible; } })
     Button('打开 Sheet').width('100%').height(44)
+      .id('session-replay-sheet-open')
       .onClick(() => { this.sheetVisible = true; })
       .bindSheet($$this.sheetVisible, this.sheetContent(), { height: SheetSize.MEDIUM })
     Button('打开 AlertDialog').width('100%').height(44)
+      .id('session-replay-alert-open')
       .onClick(() => {
         AlertDialog.show({ title: 'Replay 对话框', message: '观察对话框文字与背景遮挡',
           confirm: { value: '确认', action: () => { this.navigationResult = '对话框已确认'; } } });
       })
     Button('打开 ActionSheet').width('100%').height(44)
+      .id('session-replay-action-sheet-open')
       .onClick(() => {
         ActionSheet.show({ title: 'Replay 操作列表', message: '选择一项验证弹层关闭与文字更新', sheets: [
           { title: '选项 A', action: () => { this.navigationResult = 'ActionSheet A'; } },

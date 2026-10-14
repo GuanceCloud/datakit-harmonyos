@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed incorrect initial text typography and missing span styles in inline Text and unfocused RichEditor. Inline images retain their resources when adjacent text changes.
 - Fixed native control labels, selection and disabled states, progress, ratings, and animations being rendered incorrectly or failing to update in Replay. Standard controls remain visible when images are masked.
 - Fixed native menus, popups, dialogs, and sheets missing from Replay, with correct layering and removal when closed.
+- Fixed native Popup arrows, Sheet close icons, and dialog/sheet material backgrounds displaying incorrectly. Floating overlays now retain their final position after opening animations.
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.
 - Fixed incomplete recordings at storage limits or during error-triggered upload, and inconsistent playback after mixed manual/automatic captures.
 - Fixed Replay uploads being blocked when acknowledged resources were reused or local cleanup failed or timed out.

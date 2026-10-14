@@ -1,5 +1,6 @@
 import { ReplayPatternLock } from './ReplayPatternLock';
 import { copyReplayWireframe } from './ReplayWireframeValues';
+import { ReplayOverlayVectors, ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { resourceManager } from '@kit.LocalizationKit';
@@ -39,6 +40,7 @@ export {
 const MAX_INSPECTOR_BYTES = 64 * 1024;
 const MAX_OVERLAY_TREE_BYTES = 2 * 1024 * 1024;
 const MAX_WINDOW_CHILDREN = 64;
+const WINDOW_OVERLAY_SETTLE_MS = 600;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const LARGE_IMAGE_PIXEL_COUNT = 100_000;
 const DEFAULT_FONT_FAMILY = 'sans-serif';
@@ -118,6 +120,8 @@ export class ArkUIReplayCollector {
   private readonly scene: SessionReplayScene = new SessionReplayScene();
   private overlayContext: UIContext | null = null;
   private overlayWindowRoot: FrameNode | null = null;
+  private overlayGeometrySignature: string = '';
+  private overlaySamplingUntil: number = 0;
   private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
   private readonly richText: ReplayRichText = new ReplayRichText();
   private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
@@ -205,6 +209,8 @@ export class ArkUIReplayCollector {
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
+    this.overlayGeometrySignature = '';
+    this.overlaySamplingUntil = 0;
   }
 
   public clearScene(): void {
@@ -220,6 +226,8 @@ export class ArkUIReplayCollector {
     this.invalidateComponentRasters();
     this.overlayContext = null;
     this.overlayWindowRoot = null;
+    this.overlayGeometrySignature = '';
+    this.overlaySamplingUntil = 0;
   }
 
   /**
@@ -290,7 +298,7 @@ export class ArkUIReplayCollector {
     }
     const snapshot = this.captureFrameNodeLight(root, vpToPxScale, timestamp);
     const isDarkMode = this.readDarkMode(uiContext);
-    for (const node of snapshot.nodes) if (node.nodeType === 'Menu') node.isDarkMode = isDarkMode;
+    for (const node of snapshot.nodes) node.isDarkMode = isDarkMode;
     return snapshot;
   }
 
@@ -401,7 +409,7 @@ export class ArkUIReplayCollector {
     }];
     const isDarkMode = this.readDarkMode(uiContext);
     const composed = this.scene.compose(pages, frames, viewport, transitions, this.maxNodes - 1, timestamp);
-    for (const node of composed) if (node.nodeType === 'Menu') node.isDarkMode = isDarkMode;
+    for (const node of composed) node.isDarkMode = isDarkMode;
     const capturedIds = new Set<number>();
     let overlayLayer = 0;
     for (const node of composed) {
@@ -418,7 +426,7 @@ export class ArkUIReplayCollector {
         overlayLayer += this.maxNodes + 1;
         for (let index = start; index < overlays.length; index++) {
           overlays[index].sceneLayer = overlayLayer;
-          if (overlays[index].nodeType === 'Menu') overlays[index].isDarkMode = isDarkMode;
+          overlays[index].isDarkMode = isDarkMode;
           capturedIds.add(overlays[index].id - this.toProtocolId(0));
         }
       } catch (_) { }
@@ -426,7 +434,11 @@ export class ArkUIReplayCollector {
     // Floating surfaces must remain visible even when a large page exhausts
     // the budget. Their window-space geometry never inherits Router movement.
     for (const node of composed.slice(0, Math.max(0, this.maxNodes - 1 - overlays.length))) nodes.push(node);
-    for (const node of overlays) nodes.push(node);
+    for (const node of overlays) {
+      if (node.isPopupSurface) node.popupArrowSide = this.readPopupArrowSide(node, composed);
+      nodes.push(node);
+    }
+    this.sampleWindowOverlayMotion(overlays, timestamp);
     this.finishControlFrame(nodes);
     this.marquee.endFrame();
     return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
@@ -434,7 +446,43 @@ export class ArkUIReplayCollector {
 
   private isWindowOverlay(nodeType: string): boolean {
     return nodeType === 'MenuWrapper' || nodeType === 'Popup' || nodeType === 'Dialog' ||
+      nodeType === 'AlertDialog' || nodeType === 'ActionSheet' ||
       nodeType === 'SheetWrapper';
+  }
+
+  private sampleWindowOverlayMotion(nodes: Array<ArkUIReplayLightNode>, timestamp: number): void {
+    const signature = nodes.map((node): string =>
+      `${node.id}:${node.x}:${node.y}:${node.width}:${node.height}:${node.opacity ?? 1}`).join('|');
+    if (signature !== this.overlayGeometrySignature) {
+      this.overlayGeometrySignature = signature;
+      this.overlaySamplingUntil = nodes.length === 0 ? 0 : timestamp + WINDOW_OVERLAY_SETTLE_MS;
+    }
+    // Carry this through the existing frame scheduler so a final settled
+    // position is committed even when native overlay drawing is otherwise idle.
+    this.activeComponentAnimations = this.activeComponentAnimations || timestamp < this.overlaySamplingUntil;
+  }
+
+  private readPopupArrowSide(surface: ArkUIReplayLightNode, page: Array<ArkUIReplayLightNode>): ReplayPopupArrowSide {
+    let side: ReplayPopupArrowSide = 'top';
+    let score = Infinity;
+    for (const node of page) {
+      if (node.nodeType !== 'Button' || (node.opacity ?? 1) <= 0 ||
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) >= node.height ||
+        (node.clip?.left ?? 0) + (node.clip?.right ?? 0) >= node.width) continue;
+      const cx = surface.x + surface.width / 2, cy = surface.y + surface.height / 2;
+      const candidates: Array<number> = [surface.y - node.y - node.height, node.y - surface.y - surface.height,
+        surface.x - node.x - node.width, node.x - surface.x - surface.width];
+      const sides: Array<ReplayPopupArrowSide> = ['top', 'bottom', 'left', 'right'];
+      for (let index = 0; index < candidates.length; index++) {
+        const gap = candidates[index];
+        const aligned = index < 2 ? cx >= node.x && cx <= node.x + node.width : cy >= node.y && cy <= node.y + node.height;
+        // Native message popups leave an 8vp target gap. Fall back to their default Bottom placement.
+        if (aligned && gap >= 0 && gap <= 32 && Math.abs(gap - 8) < score) {
+          score = Math.abs(gap - 8); side = sides[index];
+        }
+      }
+    }
+    return side;
   }
 
   private readDarkMode(uiContext: UIContext): boolean {
@@ -454,6 +502,8 @@ export class ArkUIReplayCollector {
     if (this.overlayContext !== uiContext) {
       this.overlayContext = uiContext;
       this.overlayWindowRoot = null;
+      this.overlayGeometrySignature = '';
+      this.overlaySamplingUntil = 0;
     }
     try {
       if (this.overlayWindowRoot !== null && this.overlayWindowRoot.isAttached()) {
@@ -497,6 +547,7 @@ export class ArkUIReplayCollector {
   ): ReplayWireframe {
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
       `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|${node.componentRasterKey}|` +
+      `${node.isPopupSurface}|${node.isOverlayCloseIcon}|` +
       `${this.config.getTextAndInputPrivacy()}|${this.config.getImagePrivacy()}|${this.config.isCaptureVisiblePasswordEnabled()}|${this.config.getTouchPrivacy()}`;
     const cached = this.propertyCache.get(node.id);
     if (cached !== undefined && cached.inspector === inspector && cached.signature === signature && cached.selectLabel === selectLabel) {
@@ -520,8 +571,8 @@ export class ArkUIReplayCollector {
       this.createWireframe(node.id, node.x, node.y, node.width, node.height,
       node.componentId, node.nodeType, inspector, node.shouldCaptureAsText, node.isRoot, scale, node.isSelectArrow === true, selectLabel);
     this.appendCommonVisualProperties(frame, inspector);
-    if (node.nodeType === 'Menu' && frame.type === 'shape') {
-      this.appendMenuMaterialBackground(frame, inspector, node.isDarkMode === true);
+    if (frame.type === 'shape') {
+      this.appendNativeMaterialBackground(frame, inspector, node.isDarkMode === true);
     }
     this.propertyCacheChars -= (cached?.inspector?.length ?? 0) + (cached?.selectLabel?.length ?? 0);
     this.propertyCacheChars += (inspector?.length ?? 0) + (selectLabel?.length ?? 0);
@@ -719,7 +770,28 @@ export class ArkUIReplayCollector {
         node.buttonLabelOwnerId !== undefined ?
           this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null;
       retained.add(node.id);
-      const wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
+      let wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
+      const content = snapshot.nodes[index + 1];
+      const popupBackground = wireframe.type === 'shape' ? wireframe.shapeStyle?.backgroundColor : undefined;
+      if (node.isPopupSurface && wireframe.type === 'shape' && content?.nodeType === 'Scroll' &&
+        node.componentId.length === 0 && popupBackground !== undefined && !popupBackground.endsWith('00') &&
+        this.readInspectorString(inspector, ['shadow'])?.toUpperCase() === 'SHADOWSTYLE.OUTERDEFAULTMD') {
+        const template = wireframe;
+        template.shapeStyle = { opacity: node.opacity ?? 1,
+          transform: template.shapeStyle?.transform, visible: template.shapeStyle?.visible,
+          shadow: { color: '#00000026', offsetX: 0, offsetY: 6, blurRadius: 20 } };
+        wireframe = this.controlVector(ReplayOverlayVectors.popup(node.width, node.height,
+          { x: this.roundReplayMetric(content.x - node.x), y: this.roundReplayMetric(content.y - node.y),
+            width: content.width, height: content.height }, popupBackground, node.popupArrowSide), template);
+      }
+      if (node.isOverlayCloseIcon) {
+        const color = this.readRenderedTextColor(inspector) ?? '#000000E5';
+        const template: ReplayShapeWireframe = { id: node.id, type: 'shape', x: node.x, y: node.y,
+          width: node.width, height: node.height, permanentId: node.componentId || undefined,
+          shapeStyle: { opacity: node.opacity ?? 1 } };
+        wireframe = this.controlVector(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4L20 20M20 4L4 20" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/></svg>`, template);
+      }
+
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
       // Use a canonical zero clip for unclipped nodes so applying a clearing
       // Mutation produces exactly the same properties as the latest Full.
@@ -943,10 +1015,11 @@ export class ArkUIReplayCollector {
       ((nodeType !== 'Button' && nodeType !== 'Toggle') || hasNativeLabel || !this.hasTextDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) &&
       !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH);
     const isSelectArrow = nodeType === 'SymbolGlyph' && parentType === 'Row' && grandparentType === 'Select';
+    const isOverlayCloseIcon = nodeType === 'SymbolGlyph' && parentType === 'Button' && grandparentType === 'SheetPage';
     const inlineRuns = (nodeType === 'Text' && this.config.getImagePrivacy() !== ImagePrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)) ||
       (nodeType === 'RichEditor' && String(controlAttrs['focused'] ?? 'false') !== 'true' && this.canCaptureEditorInfo(inspectorInfo)) ?
       this.captureInlineRuns(nodeId, vpToPxScale, visible) : undefined;
-    if (!isSelectArrow && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
+    if (!isSelectArrow && !isOverlayCloseIcon && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
       inlineRuns === undefined && (isNativeControl || nodeType === 'SymbolGlyph' || (nodeType === 'RichEditor' && this.canCaptureEditorInfo(inspectorInfo) &&
         !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) || (nodeType === 'Text' &&
         this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)))) {
@@ -977,6 +1050,8 @@ export class ArkUIReplayCollector {
         inspectorInfo,
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
         isSelectArrow,
+        isPopupSurface: parentType === 'Popup' && nodeType === 'Column' ? true : undefined,
+        isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,
         componentRasterKey,
         controlState: motion?.value,
         controlPoints: pattern?.points,
@@ -1446,7 +1521,7 @@ export class ArkUIReplayCollector {
     return style;
   }
 
-  private appendMenuMaterialBackground(frame: ReplayShapeWireframe, inspector: string | null, isDarkMode: boolean): void {
+  private appendNativeMaterialBackground(frame: ReplayShapeWireframe, inspector: string | null, isDarkMode: boolean): void {
     const background = frame.shapeStyle?.backgroundColor;
     if (background !== undefined && !background.endsWith('00')) return;
     const blur = this.readInspectorObject(inspector, ['backgroundBlurStyle']);
