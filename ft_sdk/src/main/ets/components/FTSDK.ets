@@ -37,6 +37,7 @@ import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
 import { DeviceUUIDManager } from "./utils/DeviceUUIDManager";
+import { SDKProcessGuard } from "./utils/SDKProcessGuard";
 import { AppUtils } from "./utils/AppUtils";
 import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
@@ -420,6 +421,10 @@ export class FTSDK {
         return;
       }
 
+      if (!SDKProcessGuard.canInstall(sdkConfig.isOnlySupportMainProcess(), context)) {
+        return;
+      }
+
       FTSDK.resetInitializationSeparatorState();
       FTLogSeparator.initialization(TAG, "FTSDK 初始化开始");
 
@@ -430,19 +435,6 @@ export class FTSDK {
       } else {
         FTInnerLogger.w(TAG, "Context is not UIAbilityContext, Utils.init() skipped");
       }
-
-      // if (ftSDKConfig.isOnlySupportMainProcess()) {
-      //   const currentProcessName = Utils.getCurrentProcessName();
-      //   const packageName = context.getPackageName();
-      //
-      //   if (packageName && packageName !== currentProcessName) {
-      //     FTInnerLogger.e(
-      //       "FTManager",
-      //       `SDK can only run in main process, current process is ${currentProcessName}. To run in non-main process, call FTSDKConfig.setOnlySupportMainProcess(false)`
-      //     );
-      //     return;
-      //   }
-      // }
 
       FTSDK.ftSdk = new FTSDK(sdkConfig);
       FTSDK.ftSdk.initFTConfig(sdkConfig);
@@ -599,6 +591,10 @@ export class FTSDK {
 
   static installTraceConfig(traceConfig: FTTraceConfig): void {
     try {
+      if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+        FTInnerLogger.e(TAG, 'installTraceConfig failed: FTSDK.install not call');
+        return;
+      }
       // 1. Set service name (from base configuration)
       if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
         traceConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
@@ -626,6 +622,10 @@ export class FTSDK {
   }
 
   static installRUMConfig(rumConfig: FTRUMConfig): void {
+    if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+      FTInnerLogger.e(TAG, 'installRUMConfig failed: FTSDK.install not call');
+      return;
+    }
     FTSDK.uiPhaseResolved = false;
     if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
       rumConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());

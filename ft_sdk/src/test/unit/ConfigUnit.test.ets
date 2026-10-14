@@ -226,6 +226,8 @@ class FakeFTSDKRuntime implements FTSDKRuntime {
 }
 
 class FakeAbilityContext {
+  processName: string = 'com.ft.config.unit';
+  applicationInfo: Object = { name: 'com.ft.config.unit', process: 'com.ft.config.unit' };
   filesDir: string = '/tmp/ft-sdk-config-unit/files';
   databaseDir: string = '/tmp/ft-sdk-config-unit/databases';
 }
@@ -303,6 +305,44 @@ export default function configUnitTest() {
       expect(deferredEndpointConfig.getDatakitUrl()).assertEqual('');
       expect(deferredEndpointConfig.getDatawayUrl()).assertEqual('');
       expect(deferredEndpointConfig.getClientToken()).assertEqual('');
+    });
+
+    it('mainProcessRestrictionShouldRejectInstallationBeforeAnySDKInitialization', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      const context = new FakeAbilityContext();
+      context.processName = 'com.ft.config.unit:worker';
+      const config = FTSDKConfig.builder(TEST_FAKE_URL);
+      FTSDK.install(config, context as Object as common.UIAbilityContext);
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      FTSDK.installTraceConfig(new FTTraceConfig());
+      expect(FTSDK.getSDKConfig() === null).assertTrue();
+      expect(runtime.getAbilityContext() === null).assertTrue();
+      expect(runtime.syncTaskInitCount).assertEqual(0);
+      expect(FTRUMConfigManager.getInstance().isRumEnable()).assertFalse();
+      expect(config.getGlobalContext().has(Constants.KEY_DEVICE_UUID)).assertFalse();
+    });
+
+    it('explicitMultiProcessOptInShouldAllowInstallationOutsideTheMainProcess', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      const context = new FakeAbilityContext();
+      context.processName = 'com.ft.config.unit:worker';
+      const config = FTSDKConfig.builder(TEST_FAKE_URL).setOnlySupportMainProcess(false);
+      FTSDK.install(config, context as Object as common.UIAbilityContext);
+      expect(FTSDK.getSDKConfig() === config).assertTrue();
+      expect(runtime.syncTaskInitCount).assertEqual(1);
+    });
+
+    it('unavailableMainProcessMetadataShouldNotDisableSDKInstallation', 0, () => {
+      const runtime = new FakeFTSDKRuntime();
+      SdkInternalTestAccess.setRuntime(runtime);
+      const context = new FakeAbilityContext();
+      context.applicationInfo = { name: '', process: '' };
+      const config = FTSDKConfig.builder(TEST_FAKE_URL);
+      FTSDK.install(config, context as Object as common.UIAbilityContext);
+      expect(FTSDK.getSDKConfig() === config).assertTrue();
+      expect(runtime.syncTaskInitCount).assertEqual(1);
     });
 
     it('hvigorPluginVersionShouldReachRumAndLogPackageInfo', 0, () => {

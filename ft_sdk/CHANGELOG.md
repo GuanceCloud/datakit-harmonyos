@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed missing Replay entry points for short-lived Views and pending Actions, including after the View closes or recording stops.
 - Fixed incorrect RUM user attribution after initialization or account changes, including missing restored user data and mixed user details in View summaries. Explicit pre-initialization binding or unbinding takes precedence.
 - Fixed random device IDs and anonymous RUM user IDs changing after app restarts due to delayed persistence. Temporary storage read failures no longer overwrite existing IDs; data omits unavailable identity tags until recovery.
+- Fixed `setOnlySupportMainProcess(true)` being ignored during SDK installation. Secondary processes now skip SDK, RUM, and Trace initialization; use `setOnlySupportMainProcess(false)` to opt in. Installation continues when process information is unavailable.
 - Fixed `ApplicationLaunch`, page, and `BackgroundView` Views remaining open after startup or foreground/background transitions, and duplicate hot-launch Views.
 
 ## [0.1.18-alpha03] - 2026-09-30
