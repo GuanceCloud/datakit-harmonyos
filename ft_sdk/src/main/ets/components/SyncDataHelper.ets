@@ -125,6 +125,16 @@ export class SyncDataHelper {
     }
   }
 
+  /** Remove SDK-owned tags when a runtime identity is unavailable. */
+  removeGlobalContextKeyInternal(key: string): void {
+    this.basePublicTags.delete(key);
+    this.logTags.delete(key);
+    this.rumTags.delete(key);
+    this.dynamicBaseTags.delete(key);
+    this.dynamicLogTags.delete(key);
+    this.dynamicRumTags.delete(key);
+  }
+
   /**
    * Dynamically set RUM global tag
    * @param globalContext RUM global context map

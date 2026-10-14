@@ -18,6 +18,11 @@ import { Context } from '@kit.AbilityKit';
 import { FTInnerLogger } from '../log/FTLogger';
 import { UserData } from './bean/UserData';
 import { Utils } from '../utils/Utils';
+import {
+  PreferencesRandomIdentityStorage,
+  RandomIdentityStorage,
+  RandomIdentityStorageFactory
+} from '../utils/RandomIdentityStorage';
 
 const TAG = "UserDataManager";
 
@@ -36,14 +41,28 @@ interface UserDataPreferenceSnapshot {
 export class UserDataManager {
   private static instance: UserDataManager | null = null;
   private static readonly PREFERENCES_NAME = 'ft_sdk_user_data';
-  private static readonly KEY_RANDOM_USER_ID = 'ft.user.session.id';
   private static readonly KEY_USER_ID = 'ft.user.userid';
   private static readonly KEY_USER_NAME = 'ft.user.username';
   private static readonly KEY_USER_EMAIL = 'ft.user.email';
   private static readonly KEY_USER_EXT = 'ft.user.extdata';
   private static readonly RANDOM_USER_ID_PREFIX = 'ft.rd_';
+  private static randomIdentityStorageFactory: RandomIdentityStorageFactory =
+    (context: Context): RandomIdentityStorage => new PreferencesRandomIdentityStorage(
+      context, UserDataManager.PREFERENCES_NAME, 'ft_sdk_random_user_id', UserDataManager.isValidRandomUserId);
   private preferencesStore: preferences.Preferences | null = null;
+  private context: Context | null = null;
+  private randomIdentityStorage: RandomIdentityStorage | null = null;
+  private randomIdentityReady: boolean = false;
   private randomUserId: string = '';
+  private persistedRandomUserId: string = '';
+  private randomPersistenceInFlight: boolean = false;
+  private randomPersistencePromise: Promise<void> = Promise.resolve();
+  private randomPersistenceRetryTimer: number | null = null;
+  private randomPersistenceRetries: number = 0;
+  private randomRestoreRetryTimer: number | null = null;
+  private randomRestoreRetries: number = 0;
+  private released: boolean = false;
+  private static readonly MAX_RANDOM_ID_RETRIES: number = 3;
   private userData: UserData | null = null;
   private userDataExplicitlyUnbound: boolean = false;
   private userDataGeneration: number = 0;
@@ -63,21 +82,46 @@ export class UserDataManager {
   }
 
   public static resetStateInternal(): void {
+    const instance = UserDataManager.instance;
+    if (instance !== null) {
+      instance.released = true;
+      if (instance.randomPersistenceRetryTimer !== null) {
+        clearTimeout(instance.randomPersistenceRetryTimer);
+      }
+      if (instance.randomRestoreRetryTimer !== null) {
+        clearTimeout(instance.randomRestoreRetryTimer);
+      }
+    }
     UserDataManager.instance = null;
+    UserDataManager.randomIdentityStorageFactory =
+      (context: Context): RandomIdentityStorage => new PreferencesRandomIdentityStorage(
+        context, UserDataManager.PREFERENCES_NAME, 'ft_sdk_random_user_id', UserDataManager.isValidRandomUserId);
+  }
+
+  /** Internal test seams, not exported from the public SDK entry point. */
+  public static setRandomIdentityStorageFactoryInternal(factory: RandomIdentityStorageFactory): void {
+    UserDataManager.resetStateInternal();
+    UserDataManager.randomIdentityStorageFactory = factory;
+  }
+
+  public waitForRandomIdentityPersistenceInternal(): Promise<void> {
+    return this.randomPersistencePromise;
   }
 
   /**
    * Restore identity before RUM can capture its first user snapshot, matching
-   * Android's synchronous SharedPreferences read. Persistence remains queued.
+   * Android's synchronous SharedPreferences read. The anonymous ID is committed
+   * synchronously; persistence of bound user fields remains queued.
    */
   public init(context: Context): void {
+    this.context = context;
+    this.restoreRandomUserId();
     if (this.preferencesStore !== null) {
       return;
     }
     try {
       const store = preferences.getPreferencesSync(context, { name: UserDataManager.PREFERENCES_NAME });
       this.preferencesStore = store;
-      this.restoreRandomUserId(store);
       // Explicit binding/unbinding before SDK installation takes precedence
       // over the identity left by a previous process.
       if (this.userDataGeneration === 0) {
@@ -107,47 +151,107 @@ export class UserDataManager {
   }
 
   private saveRandomUserId(): void {
-    if (!this.preferencesStore) {
+    // A failed read is not evidence that the stored ID is absent. Never write
+    // a temporary memory ID until the identity store has been read successfully.
+    if (!this.randomIdentityReady || this.randomIdentityStorage === null || this.released ||
+      !UserDataManager.isValidRandomUserId(this.randomUserId) ||
+      this.persistedRandomUserId === this.randomUserId || this.randomPersistenceInFlight ||
+      this.randomPersistenceRetryTimer !== null) {
       return;
     }
-
-    const saveTask = async (): Promise<void> => {
-      try {
-        await this.preferencesStore!.put(UserDataManager.KEY_RANDOM_USER_ID, this.randomUserId);
-        await this.preferencesStore!.flush();
-      } catch (error) {
-        FTInnerLogger.e(TAG, ` Failed to save random user ID: ${error}`);
+    const userId = this.randomUserId;
+    let fileSaved = false;
+    try {
+      this.randomIdentityStorage.save(userId);
+      fileSaved = true;
+    } catch (error) {
+      FTInnerLogger.e(TAG, ` Failed to save random user ID file: ${error}`);
+    }
+    this.randomPersistenceInFlight = true;
+    this.randomPersistencePromise = this.randomIdentityStorage.flushPreferences(userId).then((): void => {
+      if (fileSaved) {
+        this.persistedRandomUserId = userId;
+        this.randomPersistenceRetries = 0;
+      } else {
+        this.scheduleRandomPersistenceRetry();
       }
-    };
-    saveTask();
+    }).catch((error: Error): void => {
+      FTInnerLogger.e(TAG, ` Failed to save random user ID Preferences: ${error}`);
+      this.scheduleRandomPersistenceRetry();
+    }).finally((): void => {
+      this.randomPersistenceInFlight = false;
+    });
   }
 
   /**
-   * Load random user ID from preferences
+   * Restore before generation; failed reads remain retryable and cannot write.
    */
-  private restoreRandomUserId(store: preferences.Preferences): void {
+  private restoreRandomUserId(): void {
+    if (this.randomIdentityReady || this.context === null || this.released) {
+      return;
+    }
     try {
-      const storedValue = store.getSync(UserDataManager.KEY_RANDOM_USER_ID, '');
-      const storedRandomUserId = typeof storedValue === 'string' ? storedValue : '';
+      if (this.randomIdentityStorage === null) {
+        this.randomIdentityStorage = UserDataManager.randomIdentityStorageFactory(this.context);
+      }
+      const storedRandomUserId = this.randomIdentityStorage.load();
+      this.randomIdentityReady = true;
+      this.randomRestoreRetries = 0;
+      if (this.randomRestoreRetryTimer !== null) {
+        clearTimeout(this.randomRestoreRetryTimer);
+        this.randomRestoreRetryTimer = null;
+      }
       if (UserDataManager.isValidRandomUserId(storedRandomUserId)) {
         this.randomUserId = storedRandomUserId;
+        this.saveRandomUserId();
       } else if (!UserDataManager.isValidRandomUserId(this.randomUserId)) {
         this.createNewRandomUserId();
       } else {
         this.saveRandomUserId();
       }
     } catch (error) {
+      this.randomIdentityStorage = null;
       FTInnerLogger.e(TAG, ` Failed to load random user ID: ${error}`);
+      this.scheduleRandomRestoreRetry();
     }
+  }
+
+  private scheduleRandomPersistenceRetry(): void {
+    if (this.released || this.randomPersistenceRetryTimer !== null ||
+      this.randomPersistenceRetries >= UserDataManager.MAX_RANDOM_ID_RETRIES) {
+      return;
+    }
+    this.randomPersistenceRetryTimer = setTimeout((): void => {
+      this.randomPersistenceRetryTimer = null;
+      this.saveRandomUserId();
+    }, 250 * Math.pow(2, this.randomPersistenceRetries++));
+  }
+
+  private scheduleRandomRestoreRetry(): void {
+    if (this.released || this.context === null || this.randomRestoreRetryTimer !== null ||
+      this.randomRestoreRetries >= UserDataManager.MAX_RANDOM_ID_RETRIES) {
+      return;
+    }
+    this.randomRestoreRetryTimer = setTimeout((): void => {
+      this.randomRestoreRetryTimer = null;
+      if (!this.released && this.context !== null) {
+        this.init(this.context);
+      }
+    }, 250 * Math.pow(2, this.randomRestoreRetries++));
   }
 
   /**
    * Get random user ID
    */
   public getRandomUserId(): string {
+    this.restoreRandomUserId();
+    if (!this.randomIdentityReady) {
+      return '';
+    }
     if (!UserDataManager.isValidRandomUserId(this.randomUserId)) {
       this.createNewRandomUserId();
     }
+    this.saveRandomUserId();
     return this.randomUserId;
   }
 

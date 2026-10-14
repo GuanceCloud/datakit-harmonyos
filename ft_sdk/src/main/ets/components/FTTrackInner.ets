@@ -1527,6 +1527,12 @@ class FTTrackInner {
     this.syncLineProtocolContextToDefaultWorkers();
   }
 
+  removeGlobalContextKeyInternal(key: string): void {
+    this.dataHelper.removeGlobalContextKeyInternal(key);
+    this.refreshWorkerLineProtocolContextSnapshot();
+    this.syncLineProtocolContextToDefaultWorkers();
+  }
+
   /**
    * Add RUM global context
    */

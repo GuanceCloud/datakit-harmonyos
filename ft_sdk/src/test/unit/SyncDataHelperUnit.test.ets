@@ -208,5 +208,38 @@ export default function syncDataHelperUnitTest() {
       expect(lineProtocol.includes('original-user')).assertFalse();
       expect(lineProtocol.includes('secret')).assertFalse();
     });
+
+    it('unavailableDeviceIdentityShouldBeRemovedFromCopiedTagsAndWorkerContext', 0, () => {
+      const helper = new SyncDataHelper();
+      const config = FTSDKConfig.builder(TEST_FAKE_URL)
+        .addGlobalContext(Constants.KEY_DEVICE_UUID, 'system-device-id' as Object);
+      helper.initBaseConfig(config);
+      helper.initLogConfig(new FTLoggerConfig());
+      helper.initRUMConfig(new FTRUMConfig().setRumAppId('rum-id'));
+      helper.appendGlobalContextByKeyValue(Constants.KEY_DEVICE_UUID, 'new-system-device-id');
+      helper.removeGlobalContextKeyInternal(Constants.KEY_DEVICE_UUID);
+
+      const fields = new Map<string, string>();
+      fields.set('message', 'identity read unavailable');
+      for (const dataType of [DataType.LOG, DataType.RUM_APP]) {
+        const line = helper.getBodyContent(TEST_MEASUREMENT, new Map<string, string>(), fields,
+          TEST_TIMESTAMP, dataType, 'identity-failure');
+        expect(line.includes('device_uuid=')).assertFalse();
+        expect(line.includes('identity read unavailable')).assertTrue();
+      }
+      const snapshot = helper.createWorkerLineProtocolContextSnapshot();
+      expect(snapshot !== null).assertTrue();
+      if (snapshot !== null) {
+        expect(snapshot.basePublicTags[Constants.KEY_DEVICE_UUID] === undefined).assertTrue();
+        expect(snapshot.logTags[Constants.KEY_DEVICE_UUID] === undefined).assertTrue();
+        expect(snapshot.rumTags[Constants.KEY_DEVICE_UUID] === undefined).assertTrue();
+        expect(snapshot.dynamicBaseTags[Constants.KEY_DEVICE_UUID] === undefined).assertTrue();
+      }
+
+      helper.appendGlobalContextByKeyValue(Constants.KEY_DEVICE_UUID, 'ft.rd_original-device-id');
+      const restored = helper.getBodyContent(TEST_MEASUREMENT, new Map<string, string>(), fields,
+        TEST_TIMESTAMP, DataType.RUM_APP, 'identity-recovered');
+      expect(restored.includes('device_uuid=ft.rd_original-device-id')).assertTrue();
+    });
   });
 }

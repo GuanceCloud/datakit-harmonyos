@@ -9,6 +9,7 @@
 
 import dataModifierTest from './DataModifierTest.test';
 import dataSyncTest from './DataSyncTest.test';
+import deviceUUIDPersistenceTest from './DeviceUUIDPersistenceTest.test';
 import autoTrackDeviceTest from './AutoTrackDeviceTest.test';
 import ftExceptionHandlerDeviceTest from './FTExceptionHandlerDeviceTest.test';
 import ftNativeCrashHandlerDeviceTest from './FTNativeCrashHandlerDeviceTest.test';
@@ -49,6 +50,7 @@ export default function testsuite() {
   resourceAutoTrackDeviceTest();
   syncUploadChainDeviceTest();
   userDataManagerPersistenceTest();
+  deviceUUIDPersistenceTest();
   webViewAutoTrackDeviceTest();
   uiBlockManagerDeviceTest();
   workerIntegrationDeviceTest();

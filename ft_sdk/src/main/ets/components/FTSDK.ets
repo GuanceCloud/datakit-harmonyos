@@ -538,9 +538,16 @@ export class FTSDK {
     // Initialize base configuration
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
+      DeviceUUIDManager.getInstance().setRestoreListenerInternal((): void => {
+        // Recovery can finish after a runtime switch or SDK reinstall. Always
+        // recompute using the currently installed configuration.
+        const currentConfig = FTSDK.getInstalledConfig();
+        if (currentConfig !== null) {
+          FTSDK.updateDeviceUUIDContext(currentConfig);
+        }
+      });
       FTRUMInnerManager.getInstance().initContext(context);
       FTCrashFreeDurationManager.getInstance().initialize(context, AppState.RUN);
-      this.refreshRandomDeviceUUIDContext(config);
       FTSDK.initRemoteDataFilters(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
@@ -927,7 +934,11 @@ export class FTSDK {
 
     // Add device information (using ODID - Huawei recommended)
     const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
-    hashMap.set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    if (deviceUUID.length > 0) {
+      hashMap.set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    } else {
+      hashMap.delete(Constants.KEY_DEVICE_UUID);
+    }
     hashMap.set(Constants.KEY_APPLICATION_UUID, new String(FTSDK.PACKAGE_UUID));
 
     let pkgJson = JSON.stringify(this.getInnerPkgInfoHashMap(config));
@@ -935,23 +946,6 @@ export class FTSDK {
     hashMap.set(Constants.KEY_SDK_PACKAGE_INFO, new String(pkgJson));
     hashMap.set(Constants.KEY_SDK_VERSION, new String(BuildProfile.HAR_VERSION));
 
-  }
-
-  /**
-   * Privacy-mode UUID is restored asynchronously. Refresh the dynamic tag once
-   * it is available so data created after restoration uses the persisted value.
-   */
-  private refreshRandomDeviceUUIDContext(config: FTSDKConfig): void {
-    if (config.isAccessODIDEnabled()) {
-      return;
-    }
-    DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
-      const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
-      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
-      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
-    }).catch((error: Error) => {
-      FTInnerLogger.w(TAG, `Failed to refresh random device UUID context: ${error.message}`);
-    });
   }
 
   private static getNativeCrashVersion(): string {
@@ -1477,18 +1471,12 @@ export class FTSDK {
 
   private static updateDeviceUUIDContext(config: FTSDKConfig): void {
     const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
-    config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
-    FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
-    if (!config.isAccessODIDEnabled()) {
-      DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
-        if (!config.isAccessODIDEnabled()) {
-          const persistedUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
-          config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(persistedUUID));
-          FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, persistedUUID);
-        }
-      }).catch((error: Error) => {
-        FTInnerLogger.w(TAG, `Failed to refresh privacy device UUID: ${error.message}`);
-      });
+    if (deviceUUID.length > 0) {
+      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    } else {
+      config.getGlobalContext().delete(Constants.KEY_DEVICE_UUID);
+      FTTrackInner.getInstance().removeGlobalContextKeyInternal(Constants.KEY_DEVICE_UUID);
     }
   }
 

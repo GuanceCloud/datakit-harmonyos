@@ -1,6 +1,8 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import preferences from '@ohos.data.preferences';
 import { Context } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
 import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
@@ -48,6 +50,18 @@ async function clearUserDataPreferences(context: Context): Promise<void> {
   await store.delete(KEY_USER_EMAIL);
   await store.delete(KEY_USER_EXT);
   await store.flush();
+  for (const suffix of ['', '.tmp']) {
+    const path = `${context.filesDir}/ft_sdk_random_user_id${suffix}`;
+    try {
+      if (fs.accessSync(path)) {
+        fs.unlinkSync(path);
+      }
+    } catch (error) {
+      if ((error as BusinessError).code !== 13900002) {
+        throw new Error(`Failed to clear anonymous user ID test file: ${error}`);
+      }
+    }
+  }
 }
 
 export default function userDataManagerPersistenceTest() {
@@ -70,6 +84,7 @@ export default function userDataManagerPersistenceTest() {
 
     afterEach(async () => {
       await runTestCleanup([
+        async () => { await UserDataManager.getInstance().waitForRandomIdentityPersistenceInternal(); },
         async () => { await collector.stop(); },
         () => { FTSDK.unbindRumUserData(); },
         async () => { await SdkTestLifecycle.resetRuntimeState(); },
@@ -361,6 +376,32 @@ export default function userDataManagerPersistenceTest() {
 
       expect(storedRandomUserId.startsWith('ft.rd_')).assertTrue();
       expect(storedRandomUserId.length > 'ft.rd_'.length).assertTrue();
+    });
+
+    it('randomUserIDIsDurableBeforeFlushAndRestoredOnTheFirstRead', 0, async () => {
+      const anonymousId = UserDataManager.getInstance().getRandomUserId();
+      expect(fs.readTextSync(`${context.filesDir}/ft_sdk_random_user_id`)).assertEqual(anonymousId);
+      await UserDataManager.getInstance().waitForRandomIdentityPersistenceInternal();
+      await SdkTestLifecycle.resetRuntimeState();
+      collector.start();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      const tags = FTRUMConfigManager.getInstance().getRUMPublicDynamicTags();
+      expect(tags[Constants.KEY_RUM_USER_ID]).assertEqual(anonymousId);
+    });
+
+    it('legacyAnonymousIDMigratesWithoutChangingIt', 0, async () => {
+      await UserDataManager.getInstance().waitForRandomIdentityPersistenceInternal();
+      await SdkTestLifecycle.resetRuntimeState();
+      await clearUserDataPreferences(context);
+      const legacyId = 'ft.rd_legacy-anonymous-user';
+      const store = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+      store.putSync(KEY_RANDOM_USER_ID, legacyId);
+      await store.flush();
+      collector.start();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), context);
+      expect(UserDataManager.getInstance().getRandomUserId()).assertEqual(legacyId);
+      expect(fs.readTextSync(`${context.filesDir}/ft_sdk_random_user_id`)).assertEqual(legacyId);
     });
   });
 }

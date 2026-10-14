@@ -11,6 +11,7 @@ import cachePolicyUnitTest from './unit/CachePolicyUnit.test';
 import cacheGovernanceUnitTest from './unit/CacheGovernanceUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
+import deviceUUIDManagerUnitTest from './unit/DeviceUUIDManagerUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
 import ftNetworkErrorHandlerUnitTest from './unit/FTNetworkErrorHandlerUnit.test';
 import ftNetworkListenerUnitTest from './unit/FTNetworkListenerUnit.test';
@@ -26,6 +27,7 @@ import httpAutoTrackSharedUnitTest from './unit/HttpAutoTrackSharedUnit.test';
 import lineProtocolEscapeTest from './unit/LineProtocolEscapeTest.test';
 import remoteConfigUnitTest from './unit/RemoteConfigUnit.test';
 import remoteDataFilterUnitTest from './unit/RemoteDataFilterUnit.test';
+import randomUserIdPersistenceUnitTest from './unit/RandomUserIdPersistenceUnit.test';
 import resourceTimingUnitTest from './unit/ResourceTimingUnit.test';
 import samplingUnitTest from './unit/SamplingUnit.test';
 import sdkDedicatedPoolManagerUnitTest from './unit/SDKDedicatedPoolManagerUnit.test';
@@ -69,4 +71,6 @@ export default function testsuite() {
   cacheGovernanceUnitTest();
   syncTaskManagerUnitTest();
   userDataUnitTest();
+  randomUserIdPersistenceUnitTest();
+  deviceUUIDManagerUnitTest();
 }

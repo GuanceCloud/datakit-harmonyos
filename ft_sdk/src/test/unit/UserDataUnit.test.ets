@@ -3,6 +3,14 @@ import { Constants } from '../../main/ets/components/Constants';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { UserData } from '../../main/ets/components/rum/bean/UserData';
 import { UserDataManager } from '../../main/ets/components/rum/UserDataManager';
+import { Context } from '@kit.AbilityKit';
+import { RandomIdentityStorage } from '../../main/ets/components/utils/RandomIdentityStorage';
+
+class TestUserIdentityStorage implements RandomIdentityStorage {
+  load(): string { return 'ft.rd_0123456789abcdef0123456789abcdef'; }
+  save(_value: string): void {}
+  async flushPreferences(_value: string): Promise<void> {}
+}
 
 function createRegionExts(): Record<string, string> {
   const exts: Record<string, string> = {};
@@ -29,11 +37,15 @@ function expectRandomUserId(userId: string): void {
 export default function userDataUnitTest() {
   describe('UserDataUnit', () => {
     beforeEach(() => {
+      UserDataManager.setRandomIdentityStorageFactoryInternal((_context: Context): RandomIdentityStorage =>
+        new TestUserIdentityStorage());
+      UserDataManager.getInstance().init({} as Context);
       resetUserDataState();
     });
 
     afterEach(() => {
       resetUserDataState();
+      UserDataManager.resetStateInternal();
     });
 
     it('rumTagsShouldUseRandomUser', 0, () => {

@@ -4,6 +4,7 @@ import { FTConsoleLogBridge } from '../../log/FTConsoleLogBridge';
 import { FTRUMConfigManager } from '../../rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../../rum/FTRUMInnerManager';
 import { UserDataManager } from '../../rum/UserDataManager';
+import { DeviceUUIDManager } from '../../utils/DeviceUUIDManager';
 
 export class TelemetryInternalTestAccess {
   public static resetState(): void {
@@ -13,5 +14,6 @@ export class TelemetryInternalTestAccess {
     FTConsoleLogBridge.resetStateInternal();
     FTTrackInner.resetInstanceInternal();
     UserDataManager.resetStateInternal();
+    DeviceUUIDManager.resetStateInternal();
   }
 }
