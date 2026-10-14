@@ -1623,17 +1623,16 @@ export default function arkUIReplayCollectorUnitTest(): void {
         expect(entering.hasActiveAnimations).assertTrue();
         const baseline = collector.materializeLightSnapshot(entering);
         const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(baseline);
+        expect(findWireframe((baseline.data as FullSnapshotData).wireframes, 3)!.x).assertEqual(16);
         panel.moveTo(26, 520);
         const final = capture(1300);
         const settled = collector.materializeLightSnapshot(final);
         const frame = findWireframe((settled.data as FullSnapshotData).wireframes, 3)!;
         expect(frame.x).assertEqual(16); expect(frame.y).assertEqual(482);
         expect(frame.x + frame.width <= 360).assertTrue();
-        const mutation = processor.createMutationRecord(settled)!.data as ReplayMutationData;
-        expect(mutation.adds.length + mutation.removes.length).assertEqual(0);
-        expect(mutation.updates.find((update): boolean => update.id === frame.id)?.x).assertEqual(16);
-        expect(capture(1899).hasActiveAnimations).assertTrue();
-        expect(capture(1900).hasActiveAnimations).assertFalse();
+        expect(processor.createMutationRecord(settled) === null).assertTrue();
+        expect(capture(1599).hasActiveAnimations).assertTrue();
+        expect(capture(1600).hasActiveAnimations).assertFalse();
         context.tree = '{"$children":[]}';
         expect(capture(2000).hasActiveAnimations).assertFalse();
         collector.clearScene();
@@ -1662,6 +1661,48 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const hidden = collector.captureSceneLight(context as Object as UIContext, [], 1, 1234,
         new Map(), { x: 0, y: 0, width: 360, height: 400 }, pages);
       expect(hidden.nodes.find((node): boolean => node.isPopupSurface === true)?.popupArrowSide).assertEqual('top');
+    });
+
+    it('keeps native modal closing frames anchored with scroll offsets and no doubled scale or new nodes', 0, () => {
+      for (const kind of ['AlertDialog', 'ActionSheet']) {
+        const page = new ReplayFrameNodeFixture(1, 10, 38, 10, 38, 1260, 2590);
+        const modal = new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 1330, 2849).withNodeType(kind);
+        const attrs: Record<string, Object> = { 'backgroundColor': '#FFFFFFFF', 'scaleX': 1, 'scaleY': 1 };
+        const panel = modal.append(new ReplayFrameNodeFixture(3, 26, 520, 26, 520, 1148, 693).withInspector(attrs));
+        const scroll = panel.append(new ReplayFrameNodeFixture(4, 50, 600, 50, 600, 1001, 308, true).withNodeType('Scroll'));
+        const text = scroll.append(new ReplayFrameNodeFixture(5, 62, 630, 62, 620, 959, 66).withNodeType('Text')
+          .withInspector({ 'content': 'Scrolled modal content', 'fontSize': '16fp' } as Record<string, Object>));
+        const context = new ReplayOverlayContextFixture(modal);
+        context.tree = `{"$children":[{"$type":"${kind}","$ID":2}]}`;
+        const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+          .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_ALL));
+        const pages: Array<ArkUIReplayScenePage> = [{ key: 'page', rootId: 'fixture-1', root: asFrameNode(page), retained: false }];
+        const capture = (time: number): SessionReplayRecord => collector.materializeLightSnapshot(collector.captureSceneLight(
+          context as Object as UIContext, [], 3.5, time, new Map(), { x: 10, y: 38, width: 360, height: 740 }, pages));
+        const baseline = capture(1000);
+        const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(baseline);
+        for (const scale of [0.85, 0.7]) {
+          const x = 26 + 328 * (1 - scale) / 2, y = 520 + 198 * (1 - scale) / 2;
+          panel.moveTo(x, y); scroll.moveTo(x + 24 * scale, y + 80 * scale);
+          text.moveTo(x + 36 * scale, y + 100 * scale);
+          attrs['scaleX'] = scale; attrs['scaleY'] = scale;
+          const closing = capture(1800);
+          const frames = (closing.data as FullSnapshotData).wireframes;
+          const surface = findWireframe(frames, 3) as ReplayShapeWireframe;
+          const label = findWireframe(frames, 5) as ReplayTextWireframe;
+          expect(surface.x).assertEqual(16); expect(surface.y).assertEqual(482);
+          expect(surface.width).assertEqual(328); expect(surface.height).assertEqual(198);
+          expect(surface.shapeStyle?.transform === undefined).assertTrue();
+          expect(label.x).assertEqual(52); expect(label.y).assertEqual(582);
+          expect(label.text).assertEqual('Scrolled modal content');
+          expect(frames.length).assertEqual((baseline.data as FullSnapshotData).wireframes.length);
+          expect(processor.createMutationRecord(closing) === null).assertTrue();
+          expect(collector.takeCapturedImageResources().length).assertEqual(0);
+        }
+        context.tree = '{"$children":[]}';
+        const removed = processor.createMutationRecord(capture(2000))!.data as ReplayMutationData;
+        expect(removed.removes.length).assertEqual(4);
+      }
     });
 
   });

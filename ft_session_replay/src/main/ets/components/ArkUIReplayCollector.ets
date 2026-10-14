@@ -59,6 +59,14 @@ interface RegisteredImageAsset {
 
 interface ReplayControlVectorAsset { bytes: Uint8Array; token: string; }
 
+interface ReplayNativeModalProjection {
+  x: number;
+  y: number;
+  drawnX: number;
+  drawnY: number;
+  scale: number;
+}
+
 interface CachedReplayProperties {
   selectLabel: string | null;
   inspector: string | null;
@@ -792,6 +800,12 @@ export class ArkUIReplayCollector {
         wireframe = this.controlVector(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4L20 20M20 4L4 20" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/></svg>`, template);
       }
 
+      // System dialog scale animations were normalized to layout coordinates
+      // on UI. Do not apply that native surface transform a second time.
+      if (node.isNativeModalSurface && wireframe.type !== 'placeholder' && wireframe.shapeStyle !== undefined) {
+        wireframe.shapeStyle.transform = undefined;
+      }
+
       this.removeBakedPositionTranslation(wireframe, node.usedTransformedPosition);
       // Use a canonical zero clip for unclipped nodes so applying a clearing
       // Mutation produces exactly the same properties as the latest Full.
@@ -935,7 +949,8 @@ export class ArkUIReplayCollector {
     grandparentType: string = '',
     parentId: number = 0,
     grandparentId: number = 0,
-    marqueeTextX?: number
+    marqueeTextX?: number,
+    inheritedModalProjection?: ReplayNativeModalProjection
   ): void {
     if (output.length >= nodeBudget) {
       return;
@@ -958,6 +973,9 @@ export class ArkUIReplayCollector {
     let width = 0;
     let height = 0;
     let usedTransformedPosition = false;
+    const nodeType = this.readNodeType(node);
+    const isNativeModalSurface = nodeType === 'Column' && (parentType === 'AlertDialog' || parentType === 'ActionSheet');
+    const modalProjection = isNativeModalSurface ? this.readNativeModalProjection(node, vpToPxScale) : inheritedModalProjection;
     try {
       // Scroll offsets and drawing translations are applied after layout. Use
       // the transformed window position so a scrolled child is captured where
@@ -981,6 +999,15 @@ export class ArkUIReplayCollector {
       height = Math.max(0, this.roundReplayMetric(size.height / vpToPxScale));
     } catch (_) { }
 
+    if (modalProjection !== undefined) {
+      // Native modal animations project the whole subtree, but measured
+      // dimensions and text metrics remain unscaled. Restore that single
+      // layout basis while retaining each descendant's own scroll offset.
+      x = isNativeModalSurface ? modalProjection.x :
+        this.roundReplayMetric(modalProjection.x + (x - modalProjection.drawnX) / modalProjection.scale);
+      y = isNativeModalSurface ? modalProjection.y :
+        this.roundReplayMetric(modalProjection.y + (y - modalProjection.drawnY) / modalProjection.scale);
+    }
     x = this.roundReplayMetric(x + sceneOffsetX);
     y = this.roundReplayMetric(y + sceneOffsetY);
     if (parentType === 'Marquee' && marqueeTextX !== undefined) x = this.roundReplayMetric(marqueeTextX);
@@ -994,7 +1021,6 @@ export class ArkUIReplayCollector {
     // Keep attached nodes and their original geometry while they move through
     // a clipping boundary. Fully clipped nodes remain present with an empty
     // clip instead of being removed and added again when they slide back in.
-    const nodeType = this.readNodeType(node);
     const inspectorInfo = this.readInspectorInfo(node);
     let componentRasterKey: string | undefined = undefined;
     const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
@@ -1052,6 +1078,7 @@ export class ArkUIReplayCollector {
         isSelectArrow,
         isPopupSurface: parentType === 'Popup' && nodeType === 'Column' ? true : undefined,
         isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,
+        isNativeModalSurface: isNativeModalSurface && modalProjection !== undefined ? true : undefined,
         componentRasterKey,
         controlState: motion?.value,
         controlPoints: pattern?.points,
@@ -1095,7 +1122,7 @@ export class ArkUIReplayCollector {
         !(nodeType === 'Radio' && !String(controlAttrs['indicatorType'] ?? 'TICK').toUpperCase().includes('CUSTOM')) &&
         ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
-          excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX);
+          excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX, modalProjection);
       }
       try {
         child = child.getNextSibling();
@@ -1103,6 +1130,21 @@ export class ArkUIReplayCollector {
         return;
       }
     }
+  }
+
+  private readNativeModalProjection(node: FrameNode, vpToPxScale: number): ReplayNativeModalProjection | undefined {
+    try {
+      const layout = node.getPositionToWindow();
+      const drawn = node.getPositionToWindowWithTransform();
+      const width = node.getMeasuredSize().width / vpToPxScale;
+      // The centre-anchored horizontal displacement exposes the system scale
+      // even on runtimes whose Inspector reports an empty scale object.
+      const scale = 1 - 2 * (drawn.x - layout.x) / width;
+      if (width <= 0 || !Number.isFinite(scale) || scale < 0.5 || scale > 1.05 ||
+        !Number.isFinite(layout.x) || !Number.isFinite(layout.y) || !Number.isFinite(drawn.x) || !Number.isFinite(drawn.y)) return undefined;
+      if (Math.abs(scale - 1) > 0.001 || Math.abs(drawn.y - layout.y) > 0.01) this.activeComponentAnimations = true;
+      return { x: layout.x, y: layout.y, drawnX: drawn.x, drawnY: drawn.y, scale };
+    } catch (_) { return undefined; }
   }
 
   private hasInlineMedia(nodeId: number, inspector: Object | null): boolean {

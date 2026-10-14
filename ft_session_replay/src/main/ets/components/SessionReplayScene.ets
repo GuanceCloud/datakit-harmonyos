@@ -57,6 +57,8 @@ export interface ArkUIReplayLightNode {
   isPopupSurface?: boolean;
   popupArrowSide?: ReplayPopupArrowSide;
   isOverlayCloseIcon?: boolean;
+  /** System modal entry/exit projection is normalized to its content layout. */
+  isNativeModalSurface?: boolean;
   /** Internal Select label's owner; native Inspector can omit the child's content. */
   selectLabelOwnerId?: number;
   /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
@@ -279,7 +281,8 @@ export class SessionReplayScene {
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
           isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey,
-          isPopupSurface: source.isPopupSurface, popupArrowSide: source.popupArrowSide, isOverlayCloseIcon: source.isOverlayCloseIcon
+          isPopupSurface: source.isPopupSurface, popupArrowSide: source.popupArrowSide, isOverlayCloseIcon: source.isOverlayCloseIcon,
+          isNativeModalSurface: source.isNativeModalSurface
         });
       }
     }

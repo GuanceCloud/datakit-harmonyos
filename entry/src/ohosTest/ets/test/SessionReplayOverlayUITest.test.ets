@@ -147,7 +147,10 @@ export default function sessionReplayOverlayUITest(): void {
       const light = scene(); const data = await save('alert', light);
       const confirm = await driver.findComponent(ON.text('确认'));
       if (confirm === null) throw new Error('Dialog confirmation is missing');
+      const closing: Array<ReplayModalMotionProbe> = [];
+      const closeTimer = observeModalMotion('AlertDialog', closing);
       await confirm.click(); await driver.delayMs(300);
+      clearInterval(closeTimer); write('alert-close-motion.json', JSON.stringify(closing));
       expect(data.wireframes.some((node): boolean => node.type === 'text' && node.text === 'Replay 对话框')).assertTrue();
       const title = data.wireframes.find((node): boolean => node.type === 'text' && node.text === 'Replay 对话框') as ReplayTextWireframe;
       expect(title.textStyle.size).assertEqual(20); expect(title.textStyle.weight).assertEqual(700);
@@ -159,6 +162,12 @@ export default function sessionReplayOverlayUITest(): void {
       expect(panel.shapeStyle?.backgroundColor).assertEqual('#FFFFFFFF'); expect(panel.shapeStyle?.cornerRadius).assertEqual(32);
       expect(Math.abs(panel.x - (light.nodes[0].width - panel.width) / 2) < 0.02).assertTrue();
       expect(panel.x >= 0 && panel.x + panel.width <= light.nodes[0].width).assertTrue();
+      for (const sample of closing) {
+        const pane = sample.light.nodes.find((node): boolean => node.isNativeModalSurface === true)!;
+        expect(Math.abs(pane.x - panel.x) < 0.02).assertTrue();
+        expect(Math.abs(pane.y - panel.y) < 0.02).assertTrue();
+        expect(pane.width).assertEqual(panel.width); expect(pane.height).assertEqual(panel.height);
+      }
       expect(motion.length > 0 && motion[0].light.hasActiveAnimations === true).assertTrue();
       expect(motion[motion.length - 1].light.hasActiveAnimations).assertFalse();
       expect(scene().nodes.some((node): boolean => node.nodeType === 'AlertDialog')).assertFalse();
@@ -175,7 +184,10 @@ export default function sessionReplayOverlayUITest(): void {
       const light = scene(); const data = await save('action-sheet', light);
       const option = await driver.findComponent(ON.text('选项 A'));
       if (option === null) throw new Error('ActionSheet option is missing');
+      const closing: Array<ReplayModalMotionProbe> = [];
+      const closeTimer = observeModalMotion('ActionSheet', closing);
       await option.click(); await driver.delayMs(300);
+      clearInterval(closeTimer); write('action-sheet-close-motion.json', JSON.stringify(closing));
       expect(data.wireframes.some((node): boolean => node.type === 'text' && node.text === 'Replay 操作列表')).assertTrue();
       const title = data.wireframes.find((node): boolean => node.type === 'text' && node.text === 'Replay 操作列表') as ReplayTextWireframe;
       expect(title.textStyle.size).assertEqual(20); expect(title.textStyle.weight).assertEqual(500);
@@ -187,6 +199,12 @@ export default function sessionReplayOverlayUITest(): void {
       expect(panel.shapeStyle?.backgroundColor).assertEqual('#FFFFFFFF'); expect(panel.shapeStyle?.cornerRadius).assertEqual(32);
       expect(Math.abs(panel.x - (light.nodes[0].width - panel.width) / 2) < 0.02).assertTrue();
       expect(panel.x >= 0 && panel.x + panel.width <= light.nodes[0].width).assertTrue();
+      for (const sample of closing) {
+        const pane = sample.light.nodes.find((node): boolean => node.isNativeModalSurface === true)!;
+        expect(Math.abs(pane.x - panel.x) < 0.02).assertTrue();
+        expect(Math.abs(pane.y - panel.y) < 0.02).assertTrue();
+        expect(pane.width).assertEqual(panel.width); expect(pane.height).assertEqual(panel.height);
+      }
       expect(motion.length > 0 && motion[0].light.hasActiveAnimations === true).assertTrue();
       expect(motion[motion.length - 1].light.hasActiveAnimations).assertFalse();
       expect(scene().nodes.some((node): boolean => node.nodeType === 'ActionSheet')).assertFalse();
