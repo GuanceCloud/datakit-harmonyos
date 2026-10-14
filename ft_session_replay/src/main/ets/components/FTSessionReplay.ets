@@ -11,6 +11,7 @@ import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionRe
 import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -463,13 +464,27 @@ export class FTSessionReplay {
         if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
         return segmentStorage.remove([id]);
       },
-      (ids: Array<string>, touchEpoch: number): Promise<boolean> => {
-        const recorder = this.recorder;
+      async (ids: Array<string>, touchEpoch: number): Promise<ReplayResourceCleanupResult> => {
+        let recorder = this.recorder;
         if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
-          return recorder.removeUploadedResources(ids, (): boolean => !resourceStorage.wasTouchedAfter(ids, touchEpoch));
+          return recorder.removeUploadedResources(ids,
+            (id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
         }
-        if (resourceStorage.wasTouchedAfter(ids, touchEpoch)) return Promise.resolve(false);
-        return Promise.resolve(resourceStorage.remove(ids));
+        const retiring = this.retiringRecorder;
+        if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
+        // Enabling Replay while the old recorder drained may have installed a new owner.
+        recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          return recorder.removeUploadedResources(ids,
+            (id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
+        }
+        const removable = ids.filter((id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
+        const result = resourceStorage.removeAcknowledged(removable);
+        result.deferredResources = ids.length - removable.length;
+        if (result.reason.length === 0 && result.deferredResources > 0) {
+          result.reason = 'Resources were reused after upload started.';
+        }
+        return Promise.resolve(result);
       }
     );
   }
@@ -501,7 +516,8 @@ export class FTSessionReplay {
         endpointBlocked: false,
         attemptedResources: 0,
         uploadedResources: 0,
-        remainingResources: 0
+        remainingResources: 0,
+        cleanup: replayResourceCleanup()
       };
     }
     if (this.resourceUploadInFlight) {
@@ -513,7 +529,8 @@ export class FTSessionReplay {
         endpointBlocked: false,
         attemptedResources: 0,
         uploadedResources: 0,
-        remainingResources: 0
+        remainingResources: 0,
+        cleanup: replayResourceCleanup()
       };
     }
     this.resourceUploadInFlight = true;

@@ -5,6 +5,7 @@ import BuildProfile from '../../../../BuildProfile';
 import { ANDROID_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import { isRetryableReplayUploadStatus, SessionReplayUploadRoute } from './SessionReplayUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
 
 const CONNECT_TIMEOUT_MS = 60_000;
 const READ_TIMEOUT_MS = 60_000;
@@ -15,8 +16,10 @@ export interface SessionReplayResourceUploadResult {
   retryable: boolean;
   endpointBlocked: boolean;
   attemptedResources: number;
+  /** Includes resources positively confirmed by the existence endpoint. */
   uploadedResources: number;
   remainingResources: number;
+  cleanup: ReplayResourceCleanupResult;
 }
 
 interface ResourceUploadTarget {
@@ -63,12 +66,13 @@ interface ResourceCheckResponseBody {
 export class SessionReplayResourceUploader {
   private readonly store: SessionReplayResourceStore;
   private readonly route: SessionReplayUploadRoute | null;
-  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null;
+  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<ReplayResourceCleanupResult>) | null;
+  private cleanup: ReplayResourceCleanupResult = replayResourceCleanup();
 
   constructor(
     store: SessionReplayResourceStore,
     route: SessionReplayUploadRoute | null = null,
-    removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null = null
+    removeAcknowledged: ((ids: Array<string>) => Promise<ReplayResourceCleanupResult>) | null = null
   ) {
     this.store = store;
     this.route = route;
@@ -76,6 +80,7 @@ export class SessionReplayResourceUploader {
   }
 
   public async uploadPending(): Promise<SessionReplayResourceUploadResult> {
+    this.cleanup = replayResourceCleanup();
     const pending = this.store.list();
     if (pending.length === 0) {
       return this.result(true, http.ResponseCode.OK, 'No pending Session Replay resources.', 0, 0);
@@ -105,12 +110,10 @@ export class SessionReplayResourceUploader {
           missing.push(resource);
         }
       }
-      if (existing.length > 0 && !await this.removeResources(
-        existing.map((resource: SessionReplayStoredResource): string => resource.id))) {
-        return this.result(false, 0, 'Session Replay resource check succeeded but local cleanup failed.', attempted, uploaded, true);
-      }
+      // Availability is acknowledged remotely even if local housekeeping must wait.
+      uploaded += existing.length;
+      await this.removeResources(existing.map((resource: SessionReplayStoredResource): string => resource.id));
       if (missing.length === 0) {
-        uploaded += existing.length;
         continue;
       }
       const status = await this.uploadGroup(target, group.applicationId, group.globalContext, missing);
@@ -118,13 +121,13 @@ export class SessionReplayResourceUploader {
         return this.result(false, status.code, status.message, attempted, uploaded,
           isRetryableReplayUploadStatus(status.code));
       }
-      if (!await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id))) {
-        return this.result(false, 0, 'Session Replay resource endpoint acknowledged data but local cleanup failed.',
-          attempted, uploaded, true);
-      }
-      uploaded += existing.length + missing.length;
+      uploaded += missing.length;
+      await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
     }
-    return this.result(true, http.ResponseCode.OK, 'Session Replay resources uploaded.', attempted, uploaded);
+    const retained = this.cleanup.deferredResources + this.cleanup.failedResources;
+    return this.result(true, http.ResponseCode.OK, retained > 0
+      ? 'Session Replay resources acknowledged; local cleanup remains pending.'
+      : 'Session Replay resources uploaded.', attempted, uploaded, this.cleanup.failedResources > 0);
   }
 
   private resolveTarget(): ResourceUploadTarget | null {
@@ -144,8 +147,21 @@ export class SessionReplayResourceUploader {
     return checkUrl.length === 0 || uploadUrl.length === 0 ? null : { checkUrl, uploadUrl };
   }
 
-  private async removeResources(ids: Array<string>): Promise<boolean> {
-    return this.removeAcknowledged === null ? this.store.remove(ids) : await this.removeAcknowledged(ids);
+  private async removeResources(ids: Array<string>): Promise<void> {
+    if (ids.length === 0) return;
+    let result: ReplayResourceCleanupResult;
+    try {
+      result = this.removeAcknowledged === null ? this.store.removeAcknowledged(ids) : await this.removeAcknowledged(ids);
+    } catch (error) {
+      result = replayResourceCleanup(0, 0, ids.length,
+        `Resource cleanup request failed: ${replayResourceCleanupError(error as Error)}`);
+    }
+    this.cleanup.deletedResources += result.deletedResources;
+    this.cleanup.deferredResources += result.deferredResources;
+    this.cleanup.failedResources += result.failedResources;
+    if (result.reason.length > 0 && (this.cleanup.reason.length === 0 || result.failedResources > 0)) {
+      this.cleanup.reason = result.reason;
+    }
   }
 
   private groupByRoute(resources: Array<SessionReplayStoredResource>): Array<ResourceGroup> {
@@ -318,7 +334,8 @@ export class SessionReplayResourceUploader {
       endpointBlocked,
       attemptedResources,
       uploadedResources,
-      remainingResources: this.store.list().length
+      remainingResources: this.store.list().length,
+      cleanup: this.cleanup
     };
   }
 }

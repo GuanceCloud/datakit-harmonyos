@@ -7,6 +7,7 @@ import {
   nextReplayUploadSchedule, ReplayUploadReady, ReplayUploadSchedule, ReplayUploadWorkerMessage
 } from '../SessionReplayUploadQueue';
 import { SessionReplayUploader, SessionReplayUploadResult } from '../SessionReplayUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup } from '../ReplayResourceCleanup';
 
 interface ReplayUploadEvent {
   data: ReplayUploadWorkerMessage;
@@ -31,6 +32,7 @@ let nextScheduledId: number = -1;
 let readyResolver: ((ready: ReplayUploadReady) => void) | null = null;
 let readyRejecter: ((reason: Error) => void) | null = null;
 let deletionResolver: ((success: boolean) => void) | null = null;
+let resourceDeletionResolver: ((result: ReplayResourceCleanupResult | null) => void) | null = null;
 let readyRequestId: number = 0;
 let deletionRequestId: number = 0;
 let nextDeletionRequestId: number = 1_000_000;
@@ -74,8 +76,11 @@ port.onmessage = (event: MessageEvents): void => {
     if (message.phase === 'deleted') {
       if (message.id !== deletionRequestId) return;
       const resolve = deletionResolver;
+      const resolveResource = resourceDeletionResolver;
       deletionResolver = null;
+      resourceDeletionResolver = null;
       resolve?.(message.deleted ?? false);
+      resolveResource?.(message.cleanup ?? null);
     }
   } catch (error) {
     port.postMessage({ id: message.id, phase: message.phase === 'init' ? 'fatal' : 'done',
@@ -115,7 +120,7 @@ async function runNext(): Promise<void> {
     if (segmentStore === null || resourceStore === null) throw new Error('Replay upload Worker is not initialized.');
     const ready = await requestReady(request.id);
     const resources = new SessionReplayResourceUploader(resourceStore, ready.route,
-      (ids: Array<string>): Promise<boolean> => requestDeleteResources(ids, ready.resourceTouchEpoch));
+      (ids: Array<string>): Promise<ReplayResourceCleanupResult> => requestDeleteResources(ids, ready.resourceTouchEpoch));
     resourceResult = await resources.uploadPending();
     if (request.resourceOnly) {
       result = null;
@@ -195,18 +200,18 @@ function requestDelete(_id: number, segmentId: string): Promise<boolean> {
   });
 }
 
-function requestDeleteResources(resourceIds: Array<string>, resourceTouchEpoch: number): Promise<boolean> {
-  return new Promise<boolean>((resolve: (success: boolean) => void): void => {
+function requestDeleteResources(resourceIds: Array<string>, resourceTouchEpoch: number): Promise<ReplayResourceCleanupResult> {
+  return new Promise<ReplayResourceCleanupResult>((resolve: (result: ReplayResourceCleanupResult) => void): void => {
     const commandId = ++nextDeletionRequestId;
     deletionRequestId = commandId;
     const timer = setTimeout((): void => {
-      if (deletionRequestId !== commandId || deletionResolver === null) return;
-      deletionResolver = null;
-      resolve(false);
+      if (deletionRequestId !== commandId || resourceDeletionResolver === null) return;
+      resourceDeletionResolver = null;
+      resolve(replayResourceCleanup(0, 0, resourceIds.length, 'Replay resource cleanup timed out after 30 seconds.'));
     }, 30_000);
-    deletionResolver = (success: boolean): void => {
+    resourceDeletionResolver = (result: ReplayResourceCleanupResult | null): void => {
       clearTimeout(timer);
-      resolve(success);
+      resolve(result ?? replayResourceCleanup(0, 0, resourceIds.length, 'Replay resource cleanup returned no result.'));
     };
     port.postMessage({ id: commandId, phase: 'deleteResource', resourceIds,
       resourceTouchEpoch } as ReplayUploadWorkerMessage);
@@ -220,5 +225,6 @@ function failedSegment(message: string): SessionReplayUploadResult {
 
 function failedResource(message: string): SessionReplayResourceUploadResult {
   return { success: false, code: 0, message, retryable: true, endpointBlocked: false,
-    attemptedResources: 0, uploadedResources: 0, remainingResources: resourceStore?.list().length ?? 0 };
+    attemptedResources: 0, uploadedResources: 0, remainingResources: resourceStore?.list().length ?? 0,
+    cleanup: replayResourceCleanup() };
 }

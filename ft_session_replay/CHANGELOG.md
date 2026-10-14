@@ -15,10 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `registerImageAsset(...)` for unmasked bundle, file, and network images. Use `unregisterImageAsset(...)` to remove registered assets; Data-URI images can be collected directly.
 - Added delayed recording through `setDelayInit(true)` and `start()`. `disable()` stops collection while scheduled uploads drain pending data.
 - Added local cache limits through `setStorageMaxBytes(...)` and scheduled uploads through `setUploadIntervalMs(...)`. Use `setUploadIntervalMs(0)` with `flush()` for manual uploads. Replay uses the core SDK's DataKit or Dataway endpoint by default; `setUploadUrl(...)` overrides it.
+- Added `cleanup` counts and a reason to resource upload results, separating local cleanup status from upload success.
 - Improved Replay recording performance during continuous animation, while keeping availability immediate and final record counts current at View end, recording stop, and upload.
 - Fixed text colors, font sizes, alignment, padding, and rounded corners being rendered incorrectly, and Select controls losing labels or dropdown arrows.
 - Fixed native menus, popups, dialogs, and sheets missing from Replay, with correct layering and removal when closed.
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.
 - Fixed incomplete recordings at storage limits or during error-triggered upload, and inconsistent playback after mixed manual/automatic captures.
+- Fixed Replay uploads being blocked when acknowledged resources were reused or local cleanup failed or timed out.
 - Fixed Replay being marked available before capture succeeds and missing entry points for short visits or after recording stops.
 - Known limitations: default Router animation playback is approximate; text colors and automatically resized font sizes may differ when ArkUI does not expose their rendered values.

@@ -24,6 +24,7 @@ import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSe
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
+import { ReplayResourceCleanupResult } from './ReplayResourceCleanup';
 import { ReplayMetadataNotifier } from './ReplayMetadataNotifier';
 import {
   ReplayWorkerCapture,
@@ -420,7 +421,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.store?.getFilesDir() ?? this.errorSampleStore?.getFilesDir() ?? '';
   }
 
-  public removeUploadedResources(ids: Array<string>, canRemove: () => boolean): Promise<boolean> {
+  public removeUploadedResources(ids: Array<string>, canRemove: (id: string) => boolean): Promise<ReplayResourceCleanupResult> {
     return this.workQueue.removeResources(ids, canRemove);
   }
 

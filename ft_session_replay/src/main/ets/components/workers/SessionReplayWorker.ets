@@ -45,8 +45,9 @@ port.onmessage = (event: MessageEvents): void => {
       return;
     }
     if (message.phase === 'removeResources') {
-      const success = operations.removeResources(message.segmentIds!);
-      port.postMessage({ id: message.id, phase: 'done', success } as ReplayWorkerMessage);
+      const cleanup = operations.removeResources(message.segmentIds!);
+      port.postMessage({ id: message.id, phase: 'done', cleanup,
+        success: cleanup.failedResources === 0, error: cleanup.reason } as ReplayWorkerMessage);
       return;
     }
     if (message.phase === 'materialize') {

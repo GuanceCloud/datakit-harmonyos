@@ -2,6 +2,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import cryptoFramework from '@ohos.security.cryptoFramework';
 import { util } from '@kit.ArkTS';
 import { SessionReplayContext } from './SessionReplayProtocol';
+import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
 
 /** One private-file resource that may be referenced by a Replay record. */
 export interface SessionReplayStoredResource {
@@ -150,34 +151,54 @@ export class SessionReplayResourceStore {
 
   /** Removes acknowledged metadata and unreferenced content-addressed byte files. */
   public remove(ids: Array<string>): boolean {
-    let complete = true;
-    const fileNames: Array<string> = [];
-    for (let index = 0; index < ids.length; index++) {
-      const id = ids[index];
+    return this.removeAcknowledged(ids).failedResources === 0;
+  }
+
+  public removeAcknowledged(ids: Array<string>): ReplayResourceCleanupResult {
+    const result = replayResourceCleanup();
+    const resources = this.list();
+    const retained = new Map<string, SessionReplayStoredResource>();
+    const references = new Map<string, number>();
+    for (const resource of resources) {
+      retained.set(resource.id, resource);
+      references.set(resource.fileName, (references.get(resource.fileName) ?? 0) + 1);
+    }
+    for (const id of new Set<string>(ids)) {
       if (!this.isSafeId(id)) {
-        complete = false;
+        result.failedResources++;
+        if (result.reason.length === 0) result.reason = 'Invalid resource id.';
         continue;
       }
       const path = `${this.metadataRoot}/${id}.json`;
+      const resource = retained.get(id);
+      const fileName = id.substring(0, 64);
       try {
-        const resource = JSON.parse(fs.readTextSync(path)) as SessionReplayStoredResource;
-        if (this.isSafeFileName(resource.fileName)) {
-          fileNames.push(resource.fileName);
+        // A previous acknowledgement may already have removed either file.
+        if (this.exists(path)) fs.unlinkSync(path);
+        retained.delete(id);
+        if (resource !== undefined) references.set(fileName, (references.get(fileName) ?? 1) - 1);
+        if ((references.get(fileName) ?? 0) === 0) {
+          const dataPath = this.getDataPath(fileName);
+          try {
+            if (this.exists(dataPath)) fs.unlinkSync(dataPath);
+          } catch (error) {
+            // Keep a retryable descriptor when byte cleanup fails after metadata deletion.
+            if (resource !== undefined) {
+              this.atomicWriteText(path, JSON.stringify(resource));
+              retained.set(id, resource);
+              references.set(fileName, 1);
+            }
+            throw new Error(replayResourceCleanupError(error as Error));
+          }
+          this.lastTouched.delete(fileName);
         }
-        fs.unlinkSync(path);
-      } catch (_error) {
-        complete = false;
+        result.deletedResources++;
+      } catch (error) {
+        result.failedResources++;
+        if (result.reason.length === 0) result.reason = `Resource file cleanup failed: ${replayResourceCleanupError(error as Error)}`;
       }
     }
-    const remaining = this.list();
-    for (let index = 0; index < fileNames.length; index++) {
-      const fileName = fileNames[index];
-      if (!remaining.some((resource: SessionReplayStoredResource): boolean => resource.fileName === fileName)) {
-        try { fs.unlinkSync(this.getDataPath(fileName)); } catch (_error) { complete = false; }
-        this.lastTouched.delete(fileName);
-      }
-    }
-    return complete;
+    return result;
   }
 
   public getRoot(): string {

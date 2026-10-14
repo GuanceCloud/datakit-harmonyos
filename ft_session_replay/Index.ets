@@ -85,3 +85,4 @@ export {
   createAndroidReplayResourceUrl
 } from './src/main/ets/components/SessionReplayResourceUploader';
 export { FTSessionReplayRecorder, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayRecorder';
+export { ReplayResourceCleanupResult } from './src/main/ets/components/ReplayResourceCleanup';

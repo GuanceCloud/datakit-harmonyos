@@ -3,6 +3,7 @@ import { replayValuesEqual } from './ReplayWireframeValues';
 import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
+import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
 
 export type ReplaySnapshotKind = 'start' | 'full' | 'automatic' | 'transition' | 'settled';
 export type ReplayStoreKind = 'main' | 'error' | 'none';
@@ -106,6 +107,7 @@ export interface ReplayWorkerMessage {
   timestamp?: number;
   segmentIds?: Array<string>;
   success?: boolean;
+  cleanup?: ReplayResourceCleanupResult;
   requiresStart?: boolean;
   baselineSnapshot?: SessionReplayRecord;
   baselineViewport?: ReplayViewport;
@@ -125,7 +127,9 @@ interface ReplayQueuedJob {
   queuedAt: number;
   handoffMs?: number;
   capture?: ReplayWorkerCapture;
-  canRemove?: () => boolean;
+  canRemove?: (id: string) => boolean;
+  cleanupFinish?: (result: ReplayResourceCleanupResult) => void;
+  deferredResources?: number;
   complete?: (result: ReplayWorkerResult | null, error: string) => void;
   context?: SessionReplayContext;
   records?: Array<SessionReplayRecord>;
@@ -333,11 +337,12 @@ export class SessionReplayWorkQueue {
     return true;
   }
 
-  public removeResources(ids: Array<string>, canRemove: () => boolean): Promise<boolean> {
-    if (this.closing) return this.closedPromise.then((): boolean => false);
-    return new Promise<boolean>((resolve: (success: boolean) => void): void => {
+  public removeResources(ids: Array<string>, canRemove: (id: string) => boolean): Promise<ReplayResourceCleanupResult> {
+    if (this.closing) return this.closedPromise.then((): ReplayResourceCleanupResult =>
+      replayResourceCleanup(0, 0, ids.length, 'Replay recorder Worker is closing.'));
+    return new Promise<ReplayResourceCleanupResult>((resolve: (result: ReplayResourceCleanupResult) => void): void => {
       this.addJob({ id: ++this.nextId, kind: 'removeResources', queuedAt: Date.now(),
-        segmentIds: ids.slice(), canRemove, finish: (success: boolean): void => resolve(success) });
+        segmentIds: Array.from(new Set<string>(ids)), canRemove, cleanupFinish: resolve });
       this.dispatch();
     });
   }
@@ -531,9 +536,15 @@ export class SessionReplayWorkQueue {
         }
         continue;
       }
-      if (job.kind === 'removeResources' && !job.canRemove?.()) {
-        job.finish?.(false, 'Resource was reused after upload started.');
-        continue;
+      if (job.kind === 'removeResources') {
+        const ids = job.segmentIds ?? [];
+        job.segmentIds = ids.filter((id: string): boolean => job.canRemove?.(id) === true);
+        job.deferredResources = ids.length - job.segmentIds.length;
+        if (job.segmentIds.length === 0) {
+          job.cleanupFinish?.(replayResourceCleanup(0, job.deferredResources, 0,
+            job.deferredResources > 0 ? 'Resources were reused after upload started.' : ''));
+          continue;
+        }
       }
       this.active = job;
       try {
@@ -567,7 +578,7 @@ export class SessionReplayWorkQueue {
     if (job === null || message.id !== job.id) return;
     if (message.phase === 'done') {
       this.finish(message.result ?? null, message.error ?? '', message.success ?? true, message.segmentIds ?? [],
-        message.records, message.resourceNames);
+        message.records, message.resourceNames, message.cleanup);
     } else if (message.phase === 'error') {
       // Stop may race the Worker's age check for the already-dispatched frame.
       // Retry that immutable handoff once in drain mode; do not read the UI.
@@ -588,7 +599,8 @@ export class SessionReplayWorkQueue {
 
   private finish(
     result: ReplayWorkerResult | null, error: string, success: boolean = false,
-    segmentIds: Array<string> = [], writtenRecords?: Array<SessionReplayRecord>, resourceNames?: Array<string>
+    segmentIds: Array<string> = [], writtenRecords?: Array<SessionReplayRecord>, resourceNames?: Array<string>,
+    cleanup?: ReplayResourceCleanupResult
   ): void {
     const job = this.active;
     this.active = null;
@@ -612,6 +624,14 @@ export class SessionReplayWorkQueue {
       } else if (job?.kind === 'list') {
         if (success) job.listResolve?.(segmentIds);
         else job.listReject?.(new Error(error));
+      } else if (job?.kind === 'removeResources') {
+        const removed = cleanup ?? replayResourceCleanup(0, 0, job.segmentIds?.length ?? 0,
+          error || 'Replay resource cleanup returned no result.');
+        removed.deferredResources += job.deferredResources ?? 0;
+        if (removed.reason.length === 0 && removed.deferredResources > 0) {
+          removed.reason = 'Resources were reused after upload started.';
+        }
+        job.cleanupFinish?.(removed);
       } else if (job !== null && this.isSnapshot(job)) job.complete?.(result, error);
       else job?.finish?.(success, error, writtenRecords, resourceNames);
     } finally {
@@ -633,6 +653,8 @@ export class SessionReplayWorkQueue {
     if (job.kind === 'barrier') job.reject?.(new Error(reason));
     else if (job.kind === 'flush') this.lastFailure = reason;
     else if (job.kind === 'list') job.listReject?.(new Error(reason));
+    else if (job.kind === 'removeResources') job.cleanupFinish?.(replayResourceCleanup(
+      0, job.deferredResources ?? 0, job.segmentIds?.length ?? 0, reason));
     else if (this.isSnapshot(job)) {
       this.failures++;
       job.complete?.(null, reason);

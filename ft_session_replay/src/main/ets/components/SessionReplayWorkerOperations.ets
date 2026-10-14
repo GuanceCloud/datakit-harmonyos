@@ -1,6 +1,7 @@
 import { ArkUIReplayCollector, ArkUIReplayLightSnapshot, CapturedReplayImageResource } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy } from './FTSessionReplayConfig';
 import { SessionReplayResourceStore, sha256 } from './SessionReplayResourceStore';
+import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import {
@@ -143,8 +144,9 @@ export class SessionReplayWorkerOperations {
     return result;
   }
 
-  public removeResources(ids: Array<string>): boolean {
-    return this.mainResources?.remove(ids) ?? false;
+  public removeResources(ids: Array<string>): ReplayResourceCleanupResult {
+    return this.mainResources?.removeAcknowledged(ids) ??
+      replayResourceCleanup(0, 0, ids.length, 'Replay resource storage is unavailable.');
   }
 
   public process(kind: ReplaySnapshotKind, commit: ReplayWorkerCommit): ReplayWorkerResult {

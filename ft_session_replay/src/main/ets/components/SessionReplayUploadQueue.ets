@@ -2,6 +2,7 @@ import worker, { ErrorEvent, MessageEvents } from '@ohos.worker';
 import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
 import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionReplayUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
 
 export interface ReplayUploadReady {
   segmentIds: Array<string> | null;
@@ -42,6 +43,7 @@ export interface ReplayUploadWorkerMessage {
   resourceIds?: Array<string>;
   resourceTouchEpoch?: number;
   deleted?: boolean;
+  cleanup?: ReplayResourceCleanupResult;
   result?: SessionReplayUploadResult;
   resourceResult?: SessionReplayResourceUploadResult;
   error?: string;
@@ -64,7 +66,7 @@ export class SessionReplayUploadQueue {
   private readonly maxRecordsPerSegment: number;
   private readonly prepare: () => Promise<ReplayUploadReady>;
   private readonly removeAcknowledged: (id: string) => Promise<boolean>;
-  private readonly removeResources: (ids: Array<string>, touchEpoch: number) => Promise<boolean>;
+  private readonly removeResources: (ids: Array<string>, touchEpoch: number) => Promise<ReplayResourceCleanupResult>;
   private readonly pending: Map<number, PendingUpload> = new Map();
   private thread: worker.ThreadWorker | null = null;
   private retiringThread: worker.ThreadWorker | null = null;
@@ -82,7 +84,7 @@ export class SessionReplayUploadQueue {
     maxRecordsPerSegment: number,
     prepare: () => Promise<ReplayUploadReady>,
     removeAcknowledged: (id: string) => Promise<boolean>,
-    removeResources: (ids: Array<string>, touchEpoch: number) => Promise<boolean>
+    removeResources: (ids: Array<string>, touchEpoch: number) => Promise<ReplayResourceCleanupResult>
   ) {
     this.filesDir = filesDir;
     this.maxBytes = maxBytes;
@@ -224,11 +226,13 @@ export class SessionReplayUploadQueue {
       return;
     }
     if (message.phase === 'deleteResource' && message.resourceIds !== undefined) {
-      Promise.resolve().then((): Promise<boolean> => this.removeResources(
-        message.resourceIds!, message.resourceTouchEpoch ?? -1)).then((deleted: boolean): void => {
-        this.sendReply(thread, { id: message.id, phase: 'deleted', deleted } as ReplayUploadWorkerMessage);
-      }).catch((): void => {
-        this.sendReply(thread, { id: message.id, phase: 'deleted', deleted: false } as ReplayUploadWorkerMessage);
+      Promise.resolve().then((): Promise<ReplayResourceCleanupResult> => this.removeResources(
+        message.resourceIds!, message.resourceTouchEpoch ?? -1)).then((cleanup: ReplayResourceCleanupResult): void => {
+        this.sendReply(thread, { id: message.id, phase: 'deleted', cleanup } as ReplayUploadWorkerMessage);
+      }).catch((error: Error): void => {
+        this.sendReply(thread, { id: message.id, phase: 'deleted',
+          cleanup: replayResourceCleanup(0, 0, message.resourceIds!.length,
+            replayResourceCleanupError(error)) } as ReplayUploadWorkerMessage);
       });
       return;
     }
@@ -303,7 +307,10 @@ export class SessionReplayUploadQueue {
         `Replay resource upload result: requestId=${message.id}, trigger=${trigger}, success=${resources.success}, ` +
         `code=${resources.code}, attemptedResources=${resources.attemptedResources}, ` +
         `uploadedResources=${resources.uploadedResources}, remainingResources=${resources.remainingResources}, ` +
-        `retryable=${resources.retryable}, message=${resources.message}`, !resources.success);
+        `cleanupDeletedResources=${resources.cleanup.deletedResources}, ` +
+        `cleanupDeferredResources=${resources.cleanup.deferredResources}, cleanupFailedResources=${resources.cleanup.failedResources}, ` +
+        `cleanupReason=${resources.cleanup.reason}, retryable=${resources.retryable}, message=${resources.message}`,
+        !resources.success || resources.cleanup.failedResources > 0);
     }
     if (message.error !== undefined) {
       FTSessionReplayBridgeRegistry.logDiagnostic(
@@ -318,6 +325,6 @@ export class SessionReplayUploadQueue {
 
   private failedResource(message: string): SessionReplayResourceUploadResult {
     return { success: false, code: 0, message, retryable: true, endpointBlocked: false,
-      attemptedResources: 0, uploadedResources: 0, remainingResources: 0 };
+      attemptedResources: 0, uploadedResources: 0, remainingResources: 0, cleanup: replayResourceCleanup() };
   }
 }
