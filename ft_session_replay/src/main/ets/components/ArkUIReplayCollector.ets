@@ -140,7 +140,6 @@ export class ArkUIReplayCollector {
   private controlVectorRevision: number = 0;
   private readonly patterns: ReplayPatternLock = new ReplayPatternLock();
   private rasterContext: UIContext | null = null;
-  private rasterLayoutEpoch: number = 0;
   private inlineMediaOwners: Set<number> | null = null;
   private editorContentSignatures: Map<number, string> | null = null;
   private inlineTextRuns: Map<number, Array<ReplayInlineRun> | null> | null = null;
@@ -170,8 +169,14 @@ export class ArkUIReplayCollector {
   }
 
   public invalidateComponentRasters(): void {
-    this.rasterLayoutEpoch++;
     this.inlineMediaOwners = null;
+    this.editorContentSignatures = null;
+    this.inlineTextRuns = null;
+  }
+
+  public invalidateNativeControlPaint(): void {
+    this.controls.invalidatePaint();
+    // A Span can change while its Text/RichEditor retains the same layout box.
     this.editorContentSignatures = null;
     this.inlineTextRuns = null;
   }
@@ -195,9 +200,22 @@ export class ArkUIReplayCollector {
     } catch (_) { }
   }
 
+  public recordControlTouch(type: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number): void {
+    this.rasters.touch(x, y);
+    if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+      this.config.getTouchPrivacy() === TouchPrivacy.SHOW) this.patterns.touch(type, pointerId, x, y);
+  }
+
   public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
     if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
       this.config.getTouchPrivacy() === TouchPrivacy.SHOW) this.patterns.update(componentId, points, completed);
+  }
+
+  private canCaptureNativeControl(type: string, info: Object | null): boolean {
+    return !this.controlFrames.supports(type, info) && this.controls.isSupported(type) &&
+      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL &&
+      (type !== 'PatternLock' || (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
+        this.config.getTouchPrivacy() === TouchPrivacy.SHOW));
   }
 
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
@@ -264,6 +282,15 @@ export class ArkUIReplayCollector {
   public unregisterImageAsset(componentId: string): void {
     this.registeredImageAssets.delete(componentId.trim());
     this.invalidateImageProperties(componentId.trim());
+  }
+
+  private invalidateImageProperties(key: string): void {
+    this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
+      if (cached.imageKeys?.includes(key)) {
+        this.propertyCache.delete(id);
+        this.propertyCacheChars -= (cached.inspector?.length ?? 0) + (cached.selectLabel?.length ?? 0);
+      }
+    });
   }
 
   /** Returns and clears resources produced by the immediately preceding capture. */
@@ -458,6 +485,7 @@ export class ArkUIReplayCollector {
       nodeType === 'SheetWrapper';
   }
 
+  /** Window Render Service animations can continue without another page willDraw callback. */
   private sampleWindowOverlayMotion(nodes: Array<ArkUIReplayLightNode>, timestamp: number): void {
     const signature = nodes.map((node): string =>
       `${node.id}:${node.x}:${node.y}:${node.width}:${node.height}:${node.opacity ?? 1}`).join('|');
@@ -483,7 +511,9 @@ export class ArkUIReplayCollector {
       const sides: Array<ReplayPopupArrowSide> = ['top', 'bottom', 'left', 'right'];
       for (let index = 0; index < candidates.length; index++) {
         const gap = candidates[index];
-        const aligned = index < 2 ? cx >= node.x && cx <= node.x + node.width : cy >= node.y && cy <= node.y + node.height;
+        const aligned: boolean = index < 2
+          ? (cx >= node.x && cx <= node.x + node.width)
+          : (cy >= node.y && cy <= node.y + node.height);
         // Native message popups leave an 8vp target gap. Fall back to their default Bottom placement.
         if (aligned && gap >= 0 && gap <= 32 && Math.abs(gap - 8) < score) {
           score = Math.abs(gap - 8); side = sides[index];
@@ -626,28 +656,7 @@ export class ArkUIReplayCollector {
     return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
   }
 
-  public invalidateNativeControlPaint(): void {
-    this.controls.invalidatePaint();
-    // A Span can change while its Text/RichEditor retains the same layout box.
-    this.editorContentSignatures = null;
-    this.inlineTextRuns = null;
-  }
-
-  public recordControlTouch(type: 'down' | 'move' | 'up' | 'cancel', pointerId: number, x: number, y: number): void {
-    this.rasters.touch(x, y);
-    if (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
-      this.config.getTouchPrivacy() === TouchPrivacy.SHOW) this.patterns.touch(type, pointerId, x, y);
-  }
-
-  private invalidateImageProperties(key: string): void {
-    this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
-      if (cached.imageKeys?.includes(key)) {
-        this.propertyCache.delete(id);
-        this.propertyCacheChars -= (cached.inspector?.length ?? 0) + (cached.selectLabel?.length ?? 0);
-      }
-    });
-  }
-
+  /** Custom thumbs and stars refer to immutable assets; state changes only move or clip the frames. */
   private controlImage(owner: ArkUIReplayLightNode, source: string, template: ReplayShapeWireframe, scale: number): ReplayWireframe {
     const info: Record<string, Object> = { 'src': source };
     const node: ArkUIReplayLightNode = { id: template.id, x: template.x, y: template.y,
@@ -665,58 +674,7 @@ export class ArkUIReplayCollector {
     return image;
   }
 
-  private finishControlFrame(nodes: Array<ArkUIReplayLightNode>): void {
-    const ids = new Set<number>();
-    for (const node of nodes) {
-      if (node.componentRasterKey !== undefined && (node.nodeType === 'RichEditor' || node.nodeType === 'Text') &&
-        (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
-        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height) {
-        this.rasters.observeTouchRegion(node.id - this.toProtocolId(0), node.x, node.y, node.width, node.height);
-      }
-      if (node.nodeType !== 'PatternLock') continue;
-      ids.add(node.id);
-      this.patterns.align(node.id, node.x, node.y);
-    }
-    this.patterns.retain(ids);
-  }
-
-  private captureInlineRuns(id: number, scale: number, visible: boolean): Array<ReplayInlineRun> | undefined {
-    this.readEditorContentSignature(id);
-    const descriptors = this.inlineTextRuns?.get(id);
-    if (descriptors === undefined || descriptors === null || descriptors.length === 0 || descriptors.length > 64) return undefined;
-    const runs: Array<ReplayInlineRun> = [];
-    for (const descriptor of descriptors) {
-      const run: ReplayInlineRun = { id: descriptor.id, nodeType: descriptor.nodeType,
-        inspectorInfo: descriptor.inspectorInfo, text: descriptor.text };
-      if (run.nodeType !== 'Span') {
-        try {
-          const image = this.rasterContext?.getFrameNodeByUniqueId(run.id);
-          if (image === null || image === undefined || !image.isAttached()) return undefined;
-          const size = image.getMeasuredSize();
-          run.width = this.roundReplayMetric(size.width / scale);
-          run.height = this.roundReplayMetric(size.height / scale);
-          if (run.width <= 0 || run.height <= 0) return undefined;
-          if (this.canCaptureImage(run.width, run.height, scale)) {
-            const signature = `${JSON.stringify(run.inspectorInfo)}|${run.width}|${run.height}|${scale}`;
-            const state = this.rasters.request(visible ? this.rasterContext : null, run.id, this.readComponentId(image), signature,
-              size.width * size.height);
-            run.componentRasterKey = state.key;
-            this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
-          }
-        } catch (_) { return undefined; }
-      }
-      runs.push(run);
-    }
-    return runs;
-  }
-
-  private canCaptureNativeControl(type: string, info: Object | null): boolean {
-    return !this.controlFrames.supports(type, info) && this.controls.isSupported(type) &&
-      this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL &&
-      (type !== 'PatternLock' || (this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS &&
-        this.config.getTouchPrivacy() === TouchPrivacy.SHOW));
-  }
-
+  /** Only SDK-generated geometry enters this path; application images retain image privacy. */
   private controlVector(svg: string, template: ReplayShapeWireframe): ReplayWireframe {
     let asset = this.controlVectorCache.get(svg);
     if (asset === undefined) {
@@ -739,6 +697,21 @@ export class ArkUIReplayCollector {
       clip: template.clip, zIndex: template.zIndex, shapeStyle: template.shapeStyle,
       resourceId: token, mimeType: 'svg+xml', isEmpty: false, imageStyle: { objectFit: 'fill' } };
     return frame;
+  }
+
+  private finishControlFrame(nodes: Array<ArkUIReplayLightNode>): void {
+    const ids = new Set<number>();
+    for (const node of nodes) {
+      if (node.componentRasterKey !== undefined && (node.nodeType === 'RichEditor' || node.nodeType === 'Text') &&
+        (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height) {
+        this.rasters.observeTouchRegion(node.id - this.toProtocolId(0), node.x, node.y, node.width, node.height);
+      }
+      if (node.nodeType !== 'PatternLock') continue;
+      ids.add(node.id);
+      this.patterns.align(node.id, node.x, node.y);
+    }
+    this.patterns.retain(ids);
   }
 
   private beginComponentFrame(timestamp: number): void {
@@ -1083,9 +1056,9 @@ export class ArkUIReplayCollector {
         controlState: motion?.value,
         controlPoints: pattern?.points,
         controlPointer: pattern?.pointer,
+        inlineRuns,
         controlParentId: isFrameControl && (nodeType === 'Checkbox' || nodeType === 'CheckboxGroup') ?
           this.toProtocolId(parentId) : undefined,
-        inlineRuns,
         selectLabelOwnerId: nodeType === 'Text' && parentType === 'Row' && grandparentType === 'Select' ?
           this.toProtocolId(grandparentId) : undefined,
         buttonLabelOwnerId: nodeType === 'Text' && (parentType === 'Button' || parentType === 'Toggle') ?
@@ -1132,6 +1105,7 @@ export class ArkUIReplayCollector {
     }
   }
 
+  /** Default AlertDialog/ActionSheet scale about the content centre during entry and exit. */
   private readNativeModalProjection(node: FrameNode, vpToPxScale: number): ReplayNativeModalProjection | undefined {
     try {
       const layout = node.getPositionToWindow();
@@ -1177,6 +1151,36 @@ export class ArkUIReplayCollector {
       } catch (_) { return null; }
     }
     return this.editorContentSignatures.get(id) ?? null;
+  }
+
+  private captureInlineRuns(id: number, scale: number, visible: boolean): Array<ReplayInlineRun> | undefined {
+    this.readEditorContentSignature(id);
+    const descriptors = this.inlineTextRuns?.get(id);
+    if (descriptors === undefined || descriptors === null || descriptors.length === 0 || descriptors.length > 64) return undefined;
+    const runs: Array<ReplayInlineRun> = [];
+    for (const descriptor of descriptors) {
+      const run: ReplayInlineRun = { id: descriptor.id, nodeType: descriptor.nodeType,
+        inspectorInfo: descriptor.inspectorInfo, text: descriptor.text };
+      if (run.nodeType !== 'Span') {
+        try {
+          const image = this.rasterContext?.getFrameNodeByUniqueId(run.id);
+          if (image === null || image === undefined || !image.isAttached()) return undefined;
+          const size = image.getMeasuredSize();
+          run.width = this.roundReplayMetric(size.width / scale);
+          run.height = this.roundReplayMetric(size.height / scale);
+          if (run.width <= 0 || run.height <= 0) return undefined;
+          if (this.canCaptureImage(run.width, run.height, scale)) {
+            const signature = `${JSON.stringify(run.inspectorInfo)}|${run.width}|${run.height}|${scale}`;
+            const state = this.rasters.request(visible ? this.rasterContext : null, run.id, this.readComponentId(image), signature,
+              size.width * size.height);
+            run.componentRasterKey = state.key;
+            this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
+          }
+        } catch (_) { return undefined; }
+      }
+      runs.push(run);
+    }
+    return runs;
   }
 
   private readEditorDescriptors(node: Record<string, Object>, owner: number, depth: number,

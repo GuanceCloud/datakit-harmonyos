@@ -2,15 +2,25 @@ import { beforeAll, describe, expect, it } from '@ohos/hypium';
 import { Driver, ON } from '@ohos.UiTest';
 import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
 import window from '@ohos.window';
-import { UIContext } from '@kit.ArkUI';
+import { FrameNode, UIContext } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { FTSDK } from '@guancecloud/ft_sdk';
 import {
   ArkUIReplayCollector, ArkUIReplayLightSnapshot, FTSessionReplayConfig, FullSnapshotData,
-  ImagePrivacy, ReplayImageWireframe, ReplayShapeWireframe,
+  ImagePrivacy, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplaySnapshotProcessor,
   ReplayTextWireframe, TextAndInputPrivacy
 } from '@guancecloud/ft_session_replay';
+
+interface ReplayGeometryProbe {
+  id: number;
+  type: string;
+  clip: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 interface ReplayModalGeometryProbe {
   id: number;
@@ -37,7 +47,11 @@ export default function sessionReplayOverlayUITest(): void {
     let directory: string;
     const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
       .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE));
-
+    const frame = (id: string): FrameNode => {
+      const node = ui.getFrameNodeById(id);
+      if (node === null) throw new Error(`Overlay fixture is missing: ${id}`);
+      return node;
+    };
     const show = async (id: string): Promise<void> => {
       const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
       if (scroll === null || await scroll.scrollSearch(ON.id(id)) === null) throw new Error(`Fixture is offscreen: ${id}`);
@@ -68,7 +82,17 @@ export default function sessionReplayOverlayUITest(): void {
       return data;
     };
     const scene = (): ArkUIReplayLightSnapshot => collector.captureSceneLight(ui, ['session-replay-transition-root'], vp2px(1));
-
+    const saveAncestors = (id: string, name: string): void => {
+      const nodes: Array<ReplayGeometryProbe> = [];
+      let node: FrameNode | null = frame(id);
+      for (let depth = 0; node !== null && depth < 32; depth++) {
+        const position = node.getPositionToWindowWithTransform(), size = node.getMeasuredSize();
+        nodes.push({ id: node.getUniqueId(), type: node.getNodeType(), clip: node.isClipToFrame(),
+          x: position.x, y: position.y, width: size.width, height: size.height });
+        node = node.getParent();
+      }
+      write(name, JSON.stringify(nodes));
+    };
     const observeModalMotion = (kind: string, output: Array<ReplayModalMotionProbe>): number => setInterval(() => {
       const light = scene();
       const root = light.nodes.find((node): boolean => node.nodeType === kind);
@@ -104,6 +128,69 @@ export default function sessionReplayOverlayUITest(): void {
       if (!fs.accessSync(directory)) fs.mkdirSync(directory);
     });
 
+    it('captures initial FolderStack text typography', 0, async () => {
+      const draws: Array<ArkUIReplayLightSnapshot> = [];
+      const listener = (): void => {
+        const text = ui.getFrameNodeById('session-replay-folder-text');
+        if (text !== null && text.isAttached() && text.getMeasuredSize().width > 0 && draws.length < 8) {
+          draws.push(collector.captureFrameNodeLight(text, vp2px(1)));
+        }
+      };
+      ui.getUIObserver().on('willDraw', listener);
+      await category('布局与容器');
+      const beforeScroll = collector.materializeLightSnapshot(scene());
+      const beforeFolder = (beforeScroll.data as FullSnapshotData).wireframes.find((node): boolean =>
+        node.permanentId === 'session-replay-folder-text')!;
+      expect((beforeFolder.clip?.bottom ?? 0) > 0).assertTrue();
+      const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(beforeScroll);
+      await show('session-replay-folder-text');
+      ui.getUIObserver().off('willDraw', listener);
+      write('folder-first-draws.json', JSON.stringify(draws));
+      const data = await save('folder-initial', collector.captureFrameNodeLight(frame('session-replay-folder-text'), vp2px(1)));
+      const text = data.wireframes[0] as ReplayTextWireframe;
+      expect(text.type).assertEqual('text'); expect(text.text).assertEqual('FolderStack 内容');
+      expect(text.textStyle.size).assertEqual(16); expect(text.textStyle.weight).assertEqual(400);
+      expect(text.textStyle.family).assertEqual('HarmonyOS Sans, sans-serif');
+      expect(text.textStyle.color).assertEqual('#000000CE');
+      expect(draws.length > 0).assertTrue();
+      const first = collector.materializeLightSnapshot(draws[0]).data as FullSnapshotData;
+      expect((first.wireframes[0] as ReplayTextWireframe).textStyle.size).assertEqual(16);
+      const page = scene(); const full = await save('folder-scene', page);
+      saveAncestors('session-replay-folder-text', 'folder-geometry.json');
+      const inPage = full.wireframes.find((node): boolean => node.permanentId === 'session-replay-folder-text') as ReplayTextWireframe;
+      expect(Math.abs(inPage.x - text.x) < 0.02).assertTrue();
+      expect(Math.abs(inPage.y - text.y + frame('session-replay-transition-root').getPositionToWindowWithTransform().y) < 0.02).assertTrue();
+      expect(inPage.textPosition?.alignment?.horizontal).assertEqual('left');
+      expect(inPage.textPosition?.alignment?.vertical).assertEqual('center');
+      expect(inPage.textPosition?.padding?.left).assertEqual(0);
+      expect(inPage.clip?.bottom).assertEqual(0);
+      const mutation = processor.createMutationRecord({ timestamp: page.timestamp, type: 10, data: full })!;
+      write('layout-scroll-mutation.json', JSON.stringify({ before: beforeScroll, mutation, after: full }));
+      const reset = (mutation.data as ReplayMutationData).updates.find((update): boolean => update.id === inPage.id);
+      expect(reset?.clip?.bottom).assertEqual(0);
+    });
+    it('captures initial and updated NodeContainer text typography', 0, async () => {
+      await show('session-replay-node-text');
+      const initial = await save('node-initial', collector.captureFrameNodeLight(frame('session-replay-node-text'), vp2px(1)));
+      expect((initial.wireframes[0] as ReplayTextWireframe).text).assertEqual('NodeContainer 初始文字');
+      const initialText = initial.wireframes[0] as ReplayTextWireframe;
+      expect(initialText.textStyle.size).assertEqual(16); expect(initialText.textStyle.weight).assertEqual(400);
+      expect(initialText.textStyle.family).assertEqual('HarmonyOS Sans, sans-serif');
+      expect(initialText.textStyle.color).assertEqual('#000000CE');
+      const page = scene(); const full = await save('node-scene', page);
+      saveAncestors('session-replay-node-text', 'node-geometry.json');
+      const inPage = full.wireframes.find((node): boolean => node.permanentId === 'session-replay-node-text') as ReplayTextWireframe;
+      expect(Math.abs(inPage.x - initialText.x) < 0.02).assertTrue();
+      expect(Math.abs(inPage.y - initialText.y + frame('session-replay-transition-root').getPositionToWindowWithTransform().y) < 0.02).assertTrue();
+      expect(inPage.textPosition?.alignment?.horizontal).assertEqual('left');
+      expect(inPage.textPosition?.alignment?.vertical).assertEqual('center');
+      expect(inPage.textPosition?.padding?.left).assertEqual(10);
+      expect(inPage.clip?.bottom).assertEqual(0);
+      await show('session-replay-node-update'); await click('session-replay-node-update'); await driver.delayMs(200);
+      const updated = await save('node-updated', collector.captureFrameNodeLight(frame('session-replay-node-text'), vp2px(1)));
+      expect((updated.wireframes[0] as ReplayTextWireframe).text).assertEqual('NodeContainer 更新 1');
+      expect(JSON.stringify((updated.wireframes[0] as ReplayTextWireframe).textStyle)).assertEqual(JSON.stringify(initialText.textStyle));
+    });
     it('captures the native Popup surface and label', 0, async () => {
       await category('弹层与导航'); await show('session-replay-popup-open'); await click('session-replay-popup-open');
       await driver.delayMs(400);

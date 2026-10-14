@@ -575,15 +575,15 @@ export struct SessionReplayComponentSamples {
     .showSideBar(this.sidebarVisible).onChange((value: boolean) => { this.sidebarVisible = value; })
     Button('显示 / 隐藏侧栏').onClick(() => { this.sidebarVisible = !this.sidebarVisible; })
     FolderStack() {
-      Text('FolderStack 内容').width('100%').height(64).backgroundColor('#E0F2FE')
+      Text('FolderStack 内容').id('session-replay-folder-text').width('100%').height(64).backgroundColor('#E0F2FE')
     }
-    .width('100%').height(80)
+    .id('session-replay-folder-stack').width('100%').height(80)
     Badge({ count: this.layoutChanged ? 12 : 3, position: BadgePosition.RightTop, style: { color: Color.White, badgeColor: '#2563EB' } }) {
       Text('Badge 角标').padding(14).backgroundColor('#DBEAFE')
     }
     this.section('NodeContainer / ContentSlot / WithTheme', '更新动态创建的节点和插槽内容，检查采集树中的文字与节点生命周期。')
     NodeContainer(this.nodeController).id('session-replay-node-container').width('100%').height(44)
-    Button('更新 NodeContainer').onClick(() => this.nodeController.updateText())
+    Button('更新 NodeContainer').id('session-replay-node-update').onClick(() => this.nodeController.updateText())
     if (this.slotContent !== null) {
       ContentSlot(this.slotContent)
     }
