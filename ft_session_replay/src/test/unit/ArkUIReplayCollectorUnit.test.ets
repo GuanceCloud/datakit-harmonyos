@@ -213,6 +213,48 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('preserves initial native typography and ignores unset actual font sizes before a node update', 0, () => {
+      const attrs: Record<string, Object> = { 'content': 'Initial text', 'fontFamily': 'HarmonyOS Sans',
+        'fontColor': '#CE000000', 'fontSize': '16fp', 'actualFontSize': '0px', 'fontWeight': 'FontWeight.Normal' };
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 320, 64).withNodeType('Text').withInspector(attrs);
+      const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
+      const first = collector.captureFrameNode(asFrameNode(root), 3.5);
+      const label = (first.data as FullSnapshotData).wireframes[0] as ReplayTextWireframe;
+      expect(label.textStyle.size).assertEqual(16);
+      expect(label.textStyle.family).assertEqual('HarmonyOS Sans, sans-serif');
+      expect(label.textStyle.weight).assertEqual(400);
+      expect(label.textStyle.color).assertEqual('#000000CE');
+      const processor = new ReplaySnapshotProcessor(); processor.setFullSnapshotBaseline(first);
+      attrs['content'] = 'Updated text'; attrs['fontSize'] = '22fp'; attrs['fontWeight'] = 'FontWeight.Bold';
+      const updated = collector.captureFrameNode(asFrameNode(root), 3.5);
+      const change = processor.createMutationRecord(updated)!.data as ReplayMutationData;
+      expect(change.updates.length).assertEqual(1);
+      expect(change.updates[0].textStyle?.size).assertEqual(22);
+      expect(change.updates[0].textStyle?.weight).assertEqual(700);
+      root.withInspector({ 'content': 'Default text' } as Record<string, Object>);
+      expect(((collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes[0] as ReplayTextWireframe)
+        .textStyle.size).assertEqual(16);
+    });
+
+    it('refreshes late image registration and removal without invalidating unrelated control presentation', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 200, 80);
+      root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 20, 20).withNodeType('Image'));
+      root.append(new ReplayFrameNodeFixture(3, 40, 0, 40, 0, 96, 40).withNodeType('Button')
+        .withInspector({ 'label': '按钮', 'fontColor': '#FF112233' } as Record<string, Object>));
+      const collector = new ArkUIReplayCollector(100, new FTSessionReplayConfig()
+        .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE));
+      const snapshot = (): Array<ReplayWireframe> => (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+      expect((findWireframe(snapshot(), 2) as ReplayImageWireframe).isEmpty).assertTrue();
+      collector.registerImageAsset('fixture-2', new util.Base64Helper().decodeSync(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      const after = snapshot();
+      expect((findWireframe(after, 2) as ReplayImageWireframe).isEmpty).assertFalse();
+      expect((findWireframe(after, 3) as ReplayTextWireframe).textStyle.color).assertEqual('#112233FF');
+      collector.unregisterImageAsset('fixture-2');
+      expect((findWireframe(snapshot(), 2) as ReplayImageWireframe).isEmpty).assertTrue();
+    });
+
     it('captures a native Button label when its internal Text has no rendered geometry', 0, () => {
       const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 96, 40).withNodeType('Button')
         .withInspector({ 'type': 'build-in', '$attrs': { 'type': 'ButtonType.Normal', 'label': '普通按钮',
@@ -594,7 +636,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const data = new ArkUIReplayCollector().captureFrameNode(asFrameNode(root), 3.5).data as FullSnapshotData;
       const label = data.wireframes[0] as ReplayTextWireframe;
       expect(label.textStyle.size).assertEqual(16);
-      expect(label.textStyle.family).assertEqual('HarmonyOS Sans');
+      expect(label.textStyle.family).assertEqual('HarmonyOS Sans, sans-serif');
       expect(label.textStyle.weight).assertEqual(500);
       expect(label.textStyle.style).assertEqual('normal');
       expect(label.shapeStyle?.backgroundColor).assertEqual('#0000000C');

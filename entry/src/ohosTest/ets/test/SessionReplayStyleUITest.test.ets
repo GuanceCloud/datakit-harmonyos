@@ -257,6 +257,36 @@ export default function sessionReplayStyleUITest(): void {
       expect(privateCollector.takeCapturedImageResources().length).assertEqual(0);
     });
 
+    it('keeps native inline copy as text and reuses only the small image after a text edit', 0, async () => {
+      const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
+      await scroll!.scrollSearch(ON.id('session-replay-inline-model'));
+      await driver.delayMs(300);
+      collector.invalidateComponentRasters();
+      let light = collector.captureLightSnapshot(uiContext, 'session-replay-inline-model', vp2px(1));
+      for (let attempt = 0; light.hasActiveAnimations && attempt < 30; attempt++) {
+        await driver.delayMs(100);
+        light = collector.captureLightSnapshot(uiContext, 'session-replay-inline-model', vp2px(1));
+      }
+      const before = collector.materializeLightSnapshot(light).data as FullSnapshotData;
+      expect(light.nodes[0].inlineRuns !== undefined).assertTrue();
+      expect(light.nodes[0].componentRasterKey === undefined).assertTrue();
+      expect(before.wireframes.some((node): boolean => node.type === 'text' && node.text.includes('独立文字'))).assertTrue();
+      const thumbnail = before.wireframes.find((node): boolean => node.type === 'image' && !node.isEmpty) as ReplayImageWireframe;
+      expect(thumbnail !== undefined).assertTrue();
+      expect(thumbnail.width).assertEqual(24);
+      expect(thumbnail.height).assertEqual(24);
+      const original = collector.takeCapturedImageResources()[0].bytes;
+      await (await driver.findComponent(ON.id('session-replay-inline-model-update')))!.click();
+      await driver.delayMs(300);
+      collector.invalidateComponentRasters();
+      const afterLight = collector.captureLightSnapshot(uiContext, 'session-replay-inline-model', vp2px(1));
+      expect(afterLight.hasActiveAnimations).assertFalse();
+      const after = collector.materializeLightSnapshot(afterLight).data as FullSnapshotData;
+      expect(after.wireframes.some((node): boolean => node.type === 'text' && node.text.includes('更新图片旁'))).assertTrue();
+      expect(new util.Base64Helper().encodeToStringSync(collector.takeCapturedImageResources()[0].bytes))
+        .assertEqual(new util.Base64Helper().encodeToStringSync(original));
+    });
+
     it('captures a SymbolSpan-only Text even when FrameNode exposes no child frames', 0, async () => {
       let light = collector.captureLightSnapshot(uiContext, 'session-replay-symbol-span-only', vp2px(1));
       for (let attempt = 0; light.nodes[0].componentRasterKey === undefined && attempt < 30; attempt++) {

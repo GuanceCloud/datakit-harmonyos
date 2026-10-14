@@ -11,6 +11,8 @@ interface RasterEntry {
   updatedAt: number;
 }
 
+interface RasterTouchRegion { id: number; x: number; y: number; width: number; height: number; }
+
 export interface ReplayRasterState { key?: string; pending: boolean; }
 
 /** Bounded asynchronous native fallback; the collector approves component types and privacy first. */
@@ -20,6 +22,7 @@ export class ReplayComponentRaster {
   private revision: number = 0;
   private inFlight: number = 0;
   private totalBytes: number = 0;
+  private readonly touchRegions: Array<RasterTouchRegion> = [];
   private publish: (key: string, bytes: Uint8Array) => void = (): void => {};
   private remove: (key: string) => void = (): void => {};
 
@@ -33,6 +36,24 @@ export class ReplayComponentRaster {
     this.entries.forEach((entry: RasterEntry): void => { if (entry.ready) this.remove(entry.key); });
     this.entries.clear();
     this.totalBytes = 0;
+    this.touchRegions.length = 0;
+  }
+
+  public beginFrame(): void { this.touchRegions.length = 0; }
+
+  public observeTouchRegion(id: number, x: number, y: number, width: number, height: number): void {
+    if (this.touchRegions.length < 32) this.touchRegions.push({ id, x, y, width, height });
+  }
+
+  /** Cursor, selection and internal scrolling can change without changing text. */
+  public touch(x: number, y: number): void {
+    for (let index = this.touchRegions.length - 1; index >= 0; index--) {
+      const region = this.touchRegions[index];
+      if (x < region.x || y < region.y || x > region.x + region.width || y > region.y + region.height) continue;
+      const entry = this.entries.get(region.id);
+      if (entry !== undefined) entry.signature = '';
+      return;
+    }
   }
 
   public request(uiContext: UIContext | null, id: number, componentId: string, signature: string,

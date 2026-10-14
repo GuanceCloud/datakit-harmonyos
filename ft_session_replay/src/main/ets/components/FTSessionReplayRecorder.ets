@@ -187,7 +187,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.onNavigationPageState(info);
   };
   private drawObserverContext: UIContext | null = null;
-  private readonly drawListener = (): void => this.notifyPageChanged();
+  private readonly drawListener = (): void => {
+    this.collector.invalidateNativeControlPaint();
+    this.notifyPageChanged();
+  };
   private readonly rasterLayoutListener = (): void => {
     this.collector.invalidateComponentRasters();
     this.notifyPageChanged();
@@ -514,6 +517,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
       return null;
     }
+    if (this.activeContext !== null && this.isSameReplayContext(this.activeContext, context))
+      this.collector.recordControlTouch(pointerEventType, pointerId, x, y);
     if (this.captureDeferred && pointerEventType !== 'move' && this.activeContext !== null &&
       this.isSameReplayContext(this.activeContext, context)) this.captureActiveViewMutation('settled');
     const record = this.processor.createPointerRecord(pointerEventType, pointerId, x, y);
@@ -588,6 +593,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       !Number.isFinite(x) || !Number.isFinite(y)) {
       return null;
     }
+    if (this.activeContext !== null) this.collector.recordControlTouch(pointerEventType, Math.floor(pointerId),
+      this.normalizePhysicalLength(x) - this.sceneOriginX(), this.normalizePhysicalLength(y) - this.sceneOriginY());
     const capture = this.appendActiveProtocolRecords([
       this.processor.createPointerRecord(
         pointerEventType,
@@ -628,12 +635,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       if (type === 'up' && previous === undefined) continue;
       if (type === 'move' && previous === undefined) continue;
       if (type === 'move' && previous?.x === position.x && previous?.y === position.y) continue;
+      this.collector.recordControlTouch(event.type === TouchType.Cancel ? 'cancel' : type, id, position.x, position.y);
       records.push(this.processor.createPointerRecord(type, id, position.x, position.y, timestamp));
       if (type === 'up') this.activePointers.delete(id);
       else this.activePointers.set(id, position);
     }
     if (event.type === TouchType.Cancel) {
       this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+        this.collector.recordControlTouch('cancel', id, point.x, point.y);
         records.push(this.processor.createPointerRecord('up', id, point.x, point.y, timestamp));
       });
       this.activePointers.clear();
@@ -644,6 +653,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private finishTouchPointers(): void {
     const records: Array<SessionReplayRecord> = [];
     this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+      this.collector.recordControlTouch('cancel', id, point.x, point.y);
       records.push(this.processor.createPointerRecord('up', id, point.x, point.y));
     });
     this.activePointers.clear();

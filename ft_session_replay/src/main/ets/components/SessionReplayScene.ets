@@ -28,6 +28,16 @@ export interface ArkUIReplayDefaultTransition {
   translateXRatio: number;
 }
 
+export interface ReplayInlineRun {
+  id: number;
+  nodeType: string;
+  inspectorInfo: Object | null;
+  text: string;
+  width?: number;
+  height?: number;
+  componentRasterKey?: string;
+}
+
 /** UI-thread handoff; opaque Inspector values are privacy-filtered by the Worker before persistence. */
 export interface ArkUIReplayLightNode {
   id: number;
@@ -45,6 +55,7 @@ export interface ArkUIReplayLightNode {
   selectLabelOwnerId?: number;
   /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
   buttonLabelOwnerId?: number;
+  inlineRuns?: Array<ReplayInlineRun>;
   isRoot: boolean;
   usedTransformedPosition: boolean;
   opacity?: number;
@@ -248,6 +259,9 @@ export class SessionReplayScene {
           isSelectArrow: source.isSelectArrow,
           selectLabelOwnerId: source.selectLabelOwnerId,
           buttonLabelOwnerId: source.buttonLabelOwnerId,
+          inlineRuns: source.inlineRuns?.map((run): ReplayInlineRun => ({
+            id: run.id, nodeType: run.nodeType, inspectorInfo: run.inspectorInfo, text: run.text,
+            width: run.width, height: run.height, componentRasterKey: run.componentRasterKey })),
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,

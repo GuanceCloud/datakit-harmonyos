@@ -1,16 +1,16 @@
 import { text } from '@kit.ArkGraphics2D';
-import { ArkUIReplayLightNode } from './SessionReplayScene';
-import { ReplayTextStyle, ReplayTextWireframe } from './SessionReplayProtocol';
+import { ArkUIReplayLightNode, ReplayInlineRun } from './SessionReplayScene';
+import { ReplayShapeWireframe, ReplayTextStyle, ReplayTextWireframe, ReplayWireframe } from './SessionReplayProtocol';
 
-interface HtmlRun { text: string; style: ReplayTextStyle; input: boolean; }
+interface HtmlRun { text: string; style: ReplayTextStyle; input: boolean; image?: ReplayInlineRun; }
 interface HtmlBlock { runs: Array<HtmlRun>; margin: number; alignment: 'left' | 'center' | 'right'; }
 interface HtmlContext { tag: string; style: ReplayTextStyle; hidden: boolean; input: boolean; alignment: 'left' | 'center' | 'right'; }
-interface RichFragment { text: string; style: ReplayTextStyle; input: boolean; x: number; y: number; width: number; height: number; }
+interface RichFragment { text: string; style: ReplayTextStyle; input: boolean; x: number; y: number; width: number; height: number; image?: ReplayInlineRun; }
 interface RichLayoutCache { html: string; width: number; scale: number; fragments: Array<RichFragment>; }
 
 function copyStyle(style: ReplayTextStyle): ReplayTextStyle {
   return { family: style.family, size: style.size, color: style.color, weight: style.weight,
-    style: style.style, decoration: style.decoration, lineHeight: style.lineHeight };
+    style: style.style, decoration: style.decoration, lineHeight: style.lineHeight, letterSpacing: style.letterSpacing };
 }
 
 /** Converts a bounded HTML typography subset into native-measured text, never executable HTML. */
@@ -63,6 +63,89 @@ export class ReplayRichText {
           bottom: this.round(Math.min(height, Math.max(0, y + height - bottom))) } });
     }
     return result;
+  }
+
+  /** Native spans use the same typography engine with media placeholders, rather than a Text screenshot. */
+  public createNative(node: ArkUIReplayLightNode, scale: number, limit: number,
+    filter: (value: string, input: boolean) => string,
+    imageResolver: (source: string, frame: ReplayShapeWireframe) => ReplayWireframe): Array<ReplayWireframe> {
+    if (node.inlineRuns === undefined || limit <= 0) return [];
+    const attrs = this.nativeAttrs(node.inspectorInfo);
+    const base = this.nativeStyle(attrs, { family: 'sans-serif', size: 16, color: '#1F2937FF', weight: 400 }, scale);
+    const alignment = String(attrs['textAlign'] ?? '').toUpperCase();
+    const runs = node.inlineRuns.map((run): HtmlRun => ({ text: run.text,
+      style: this.nativeStyle(this.nativeAttrs(run.inspectorInfo), base, scale), input: node.nodeType === 'RichEditor',
+      image: run.nodeType === 'Span' ? undefined : run }));
+    const signature = `${JSON.stringify(node.inspectorInfo)}|${JSON.stringify(node.inlineRuns)}`;
+    if (signature.length > 65536) return [];
+    let cached = this.cache.get(node.id);
+    if (cached === undefined || cached.html !== signature || cached.width !== node.width || cached.scale !== scale) {
+      const fragments = this.layout([{ runs, margin: 0,
+        alignment: alignment.includes('CENTER') ? 'center' : alignment.includes('END') || alignment.includes('RIGHT') ? 'right' : 'left' }], node.width, scale);
+      this.cacheChars -= cached?.html.length ?? 0;
+      cached = { html: signature, width: node.width, scale, fragments };
+      this.cache.set(node.id, cached);
+      this.cacheChars += signature.length;
+      while (this.cache.size > 64 || this.cacheChars > 256 * 1024) {
+        const first = this.cache.keys().next().value as number;
+        this.cacheChars -= this.cache.get(first)?.html.length ?? 0;
+        this.cache.delete(first);
+      }
+    }
+    const fragments = cached.fragments;
+    const contentHeight = fragments.reduce((height, part): number => Math.max(height, part.y + part.height), 0);
+    const offsetY = node.nodeType === 'Text' ? Math.max(0, (node.height - contentHeight) / 2) : 0;
+    const result: Array<ReplayWireframe> = [];
+    for (let index = 0; index < Math.min(256, limit, fragments.length); index++) {
+      const part = fragments[index];
+      const geometry: ReplayShapeWireframe = { id: -(node.id * 1024 + index + 1), type: 'shape',
+        x: this.round(node.x + part.x), y: this.round(node.y + part.y + offsetY),
+        width: this.round(part.width), height: this.round(part.height),
+        permanentId: node.componentId.length > 0 ? `${node.componentId}:inline:${index}` : undefined,
+        shapeStyle: { opacity: node.opacity ?? 1 } };
+      geometry.clip = { left: this.round(Math.min(geometry.width, Math.max(0, node.x + (node.clip?.left ?? 0) - geometry.x))),
+        right: this.round(Math.min(geometry.width, Math.max(0, geometry.x + geometry.width - node.x - node.width + (node.clip?.right ?? 0)))),
+        top: this.round(Math.min(geometry.height, Math.max(0, node.y + (node.clip?.top ?? 0) - geometry.y))),
+        bottom: this.round(Math.min(geometry.height, Math.max(0, geometry.y + geometry.height - node.y - node.height + (node.clip?.bottom ?? 0)))) };
+      if (part.image !== undefined) {
+        const imageAttrs = this.nativeAttrs(part.image.inspectorInfo);
+        result.push(imageResolver(part.image.componentRasterKey ?? String(imageAttrs['src'] ?? ''), geometry));
+      } else {
+        const frame: ReplayTextWireframe = { id: geometry.id, type: 'text', x: geometry.x, y: geometry.y,
+          width: geometry.width, height: geometry.height, permanentId: geometry.permanentId,
+          clip: geometry.clip, shapeStyle: geometry.shapeStyle, text: filter(part.text, part.input),
+          textStyle: part.style, textPosition: { alignment: { horizontal: 'left', vertical: 'center' } } };
+        result.push(frame);
+      }
+    }
+    return result;
+  }
+
+  private nativeAttrs(info: Object | null): Record<string, Object> {
+    const object = (info ?? {}) as Record<string, Object>;
+    return (object['$attrs'] ?? object) as Record<string, Object>;
+  }
+
+  private nativeStyle(attrs: Record<string, Object>, parent: ReplayTextStyle, scale: number): ReplayTextStyle {
+    const style = copyStyle(parent);
+    const length = (value: Object): number => parseFloat(String(value ?? '')) / (String(value).endsWith('px') ? scale : 1);
+    const size = length(attrs['fontSize']);
+    if (Number.isFinite(size) && size > 0) style.size = size;
+    const height = length(attrs['lineHeight']);
+    if (Number.isFinite(height) && height > 0) style.lineHeight = height;
+    const spacing = length(attrs['letterSpacing']);
+    if (Number.isFinite(spacing)) style.letterSpacing = spacing;
+    const color = String(attrs['fontColor'] ?? '');
+    if (/^#[0-9a-f]{8}$/i.test(color)) style.color = `#${color.substring(3)}${color.substring(1, 3)}`.toUpperCase();
+    else if (/^#[0-9a-f]{6}$/i.test(color)) style.color = color.toUpperCase() + 'FF';
+    const weight = String(attrs['fontWeight'] ?? '');
+    if (weight.toLowerCase().includes('bold')) style.weight = 700;
+    else if (weight.toLowerCase().includes('medium')) style.weight = 500;
+    else if (weight.toLowerCase().includes('normal') || weight.toLowerCase().includes('regular')) style.weight = 400;
+    else if (/^\d{3}$/.test(weight)) style.weight = Number(weight);
+    if (String(attrs['fontStyle'] ?? '').toLowerCase().includes('italic')) style.style = 'italic';
+    if (typeof attrs['fontFamily'] === 'string' && (attrs['fontFamily'] as string).length > 0) style.family = String(attrs['fontFamily']);
+    return style;
   }
 
   private parse(html: string): Array<HtmlBlock> {
@@ -186,17 +269,30 @@ export class ReplayRichText {
           block.alignment === 'right' ? text.TextAlign.RIGHT : text.TextAlign.LEFT }, text.FontCollection.getGlobalInstance());
         for (const run of block.runs) {
           builder.pushStyle({ fontSize: run.style.size * scale, fontFamilies: [run.style.family],
+            letterSpacing: (run.style.letterSpacing ?? 0) * scale,
             fontWeight: (Math.round((run.style.weight ?? 400) / 100) - 1) as text.FontWeight,
             heightOnly: run.style.lineHeight !== undefined,
             heightScale: run.style.lineHeight === undefined ? undefined : run.style.lineHeight / run.style.size,
             fontStyle: run.style.style === 'italic' ? text.FontStyle.ITALIC : text.FontStyle.NORMAL });
-          builder.addText(run.text);
+          if (run.image !== undefined) builder.addPlaceholder({ width: (run.image.width ?? run.style.size) * scale,
+            height: (run.image.height ?? run.style.size) * scale, align: text.PlaceholderAlignment.BOTTOM_OF_ROW_BOX,
+            baseline: text.TextBaseline.ALPHABETIC, baselineOffset: 0 });
+          else builder.addText(run.text);
           builder.popStyle();
         }
         const paragraph = builder.build();
         paragraph.layoutSync(width * scale);
         let position = 0;
+        let imageIndex = 0;
         for (const run of block.runs) {
+          if (run.image !== undefined) {
+            const box = paragraph.getRectsForPlaceholders()[imageIndex++]?.rect;
+            position++;
+            if (box !== undefined) result.push({ text: '', style: run.style, input: run.input,
+              x: box.left / scale, y: y + box.top / scale, width: (box.right - box.left) / scale,
+              height: (box.bottom - box.top) / scale, image: run.image });
+            continue;
+          }
           let fragment: RichFragment | null = null;
           for (const char of run.text) {
             const boxes = paragraph.getRectsForRange({ start: position, end: position + char.length },
@@ -224,6 +320,7 @@ export class ReplayRichText {
         }
         y += paragraph.getHeight() / scale;
       } catch (_) {
+        if (block.runs.some((run): boolean => run.image !== undefined)) return [];
         // Keep visible, filtered text on runtimes without the native typography module.
         for (const run of block.runs) {
           const height = run.style.lineHeight ?? run.style.size * 1.2;

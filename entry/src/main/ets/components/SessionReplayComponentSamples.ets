@@ -94,6 +94,7 @@ export struct SessionReplayComponentSamples {
   @State step: number = 0;
   @State timerRunning: boolean = false;
   @State contentRevision: number = 0;
+  @State inlineSampleChanged: boolean = false;
   private readonly outerScroller: Scroller = new Scroller();
   private readonly horizontalScroller: Scroller = new Scroller();
   private readonly swiper: SwiperController = new SwiperController();
@@ -260,6 +261,14 @@ export struct SessionReplayComponentSamples {
       SymbolSpan($r('sys.symbol.ohos_wifi')).fontSize(24)
     }
     .id('session-replay-image-span').fontSize(18).height(48)
+    Text() {
+      Span(this.inlineSampleChanged ? '更新图片旁文字 ' : '独立文字与图片 ')
+      ImageSpan($r('app.media.startIcon')).id('session-replay-inline-image-model').width(24).height(24)
+      Span(' 图片资源保持不变').fontColor('#2563EB')
+    }
+    .id('session-replay-inline-model').width('100%').fontSize(18).height(64)
+    Button('更新行内图片旁文字').id('session-replay-inline-model-update').width('100%')
+      .onClick(() => { this.inlineSampleChanged = !this.inlineSampleChanged; })
     Text() {
       Span('行内符号 ')
       SymbolSpan($r('sys.symbol.ohos_wifi')).fontSize(24).fontColor(['#16A34A'])

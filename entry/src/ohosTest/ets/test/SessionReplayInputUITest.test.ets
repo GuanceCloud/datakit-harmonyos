@@ -158,45 +158,29 @@ export default function sessionReplayInputUITest(): void {
       }
     });
 
-    it('captures native RichEditor runs and colors while honoring all-input masking', 0, async () => {
+    it('captures unfocused native RichEditor runs and colors as text while honoring all-input masking', 0, async () => {
       const scroll = await driver.findComponent(ON.id('session-replay-components-scroll'));
       const append = await scroll!.scrollSearch(ON.text('追加富文本'));
       await append!.click();
       await driver.delayMs(300);
-      collector.invalidateComponentRasters();
-      let light = collector.captureLightSnapshot(uiContext, 'session-replay-rich-editor', vp2px(1));
-      for (let attempt = 0; light.nodes[0].componentRasterKey === undefined && attempt < 30; attempt++) {
-        await driver.delayMs(100);
-        light = collector.captureLightSnapshot(uiContext, 'session-replay-rich-editor', vp2px(1));
-      }
-      const data = collector.materializeLightSnapshot(light).data as FullSnapshotData;
-      expect(data.wireframes.length).assertEqual(1);
-      expect(data.wireframes[0].type).assertEqual('image');
-      expect((data.wireframes[0] as ReplayImageWireframe).isEmpty).assertFalse();
-      const firstBytes = collector.takeCapturedImageResources()[0].bytes;
-      const source = image.createImageSource(firstBytes.buffer as ArrayBuffer);
-      const pixels = await source.createPixelMap({ desiredPixelFormat: image.PixelMapFormat.RGBA_8888 });
-      try {
-        const size = pixels.getImageInfoSync().size;
-        const bytes = new Uint8Array(size.width * size.height * 4);
-        pixels.readPixelsToBufferSync(bytes.buffer as ArrayBuffer);
-        let blue = 0;
-        for (let offset = 0; offset < bytes.length; offset += 4) {
-          if (bytes[offset + 3] > 128 && bytes[offset + 2] > bytes[offset] + 50) blue++;
-        }
-        expect(blue > 50).assertTrue();
-      } finally { await pixels.release(); await source.release(); }
+      collector.invalidateNativeControlPaint();
+      const light = collector.captureLightSnapshot(uiContext, 'session-replay-rich-editor', vp2px(1));
+      expect(light.nodes[0].inlineRuns !== undefined).assertTrue();
+      expect(light.nodes[0].componentRasterKey === undefined).assertTrue();
+      const first = collector.materializeLightSnapshot(light);
+      const data = first.data as FullSnapshotData;
+      const runs = data.wireframes.filter((frame): boolean => frame.type === 'text') as Array<ReplayTextWireframe>;
+      expect(runs.map((run): string => run.text).join('').includes('新增内容')).assertTrue();
+      expect(runs.some((run): boolean => run.textStyle.color === '#2563EBFF' && run.textStyle.size === 20)).assertTrue();
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
       await append!.click();
-      collector.invalidateComponentRasters();
-      let changedBytes = firstBytes;
-      for (let attempt = 0; attempt < 30; attempt++) {
-        await driver.delayMs(100);
-        const changed = collector.captureLightSnapshot(uiContext, 'session-replay-rich-editor', vp2px(1));
-        collector.materializeLightSnapshot(changed);
-        changedBytes = collector.takeCapturedImageResources()[0]?.bytes ?? firstBytes;
-        if (new util.Base64Helper().encodeToStringSync(changedBytes) !== new util.Base64Helper().encodeToStringSync(firstBytes)) break;
-      }
-      expect(new util.Base64Helper().encodeToStringSync(changedBytes) === new util.Base64Helper().encodeToStringSync(firstBytes)).assertFalse();
+      await driver.delayMs(300);
+      collector.invalidateNativeControlPaint();
+      const changed = collector.materializeLightSnapshot(collector.captureLightSnapshot(uiContext,
+        'session-replay-rich-editor', vp2px(1))).data as FullSnapshotData;
+      expect(JSON.stringify(changed.wireframes) === JSON.stringify(data.wireframes)).assertFalse();
+      expect(changed.wireframes.every((frame): boolean => frame.type !== 'image')).assertTrue();
+      expect(collector.takeCapturedImageResources().length).assertEqual(0);
       const privateCollector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig()
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_ALL_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE));
       const masked = privateCollector.materializeLightSnapshot(privateCollector.captureLightSnapshot(uiContext,
