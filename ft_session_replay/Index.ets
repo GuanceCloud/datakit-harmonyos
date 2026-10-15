@@ -59,6 +59,7 @@ export {
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
 export { FTSessionReplay } from './src/main/ets/components/FTSessionReplay';
+export { ReplayVideoState, ReplayVideoFrameProvider } from './src/main/ets/components/ReplayVideoCapture';
 // Runtime contract used only by the Guance Hvigor Replay page-root transform.
 // Applications should use FTSessionReplay for initialization and configuration.
 export { FTSessionReplayAutoRootBridge } from './src/main/ets/components/FTSessionReplayAutoRootBridge';

@@ -22,6 +22,7 @@ import {
 } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
+import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import { ReplayResourceCleanupResult } from './ReplayResourceCleanup';
@@ -160,6 +161,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private captureDeferred: boolean = false;
   private motionUntil: number = 0;
   private hasActiveComponentAnimations: boolean = false;
+  private componentSamplingIntervalMs: number = 0;
   private readonly activePointers: Map<number, ReplayTouchPoint> = new Map();
   private readonly pageTransitions: Map<string, ArkUIReplayPageTransition> = new Map();
   private readonly navigationPages: Map<string, ReplayNavigationPage> = new Map();
@@ -250,8 +252,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       touchPrivacy: config.getTouchPrivacy(),
       diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });
-    this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array): void => {
-      this.workQueue.registerImageAsset(key, bytes, 'image/png');
+    this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array, mimeType: string): void => {
+      this.workQueue.registerImageAsset(key, bytes, mimeType);
       this.notifyPageChanged();
     }, (key: string): void => this.workQueue.unregisterImageAsset(key));
   }
@@ -278,6 +280,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.finishTouchPointers();
     this.isStarted = false;
     this.isStopping = true;
+    this.collector.clearVideoSources();
     this.pendingViewStartContext = null;
     this.pendingViewStartFailure = '';
     this.unbindWindowViewportObserver();
@@ -470,6 +473,26 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public unregisterImageAsset(componentId: string): void {
     this.collector.unregisterImageAsset(componentId);
     this.workQueue.unregisterImageAsset(componentId);
+  }
+
+  public registerVideoSource(componentId: string, source: string, poster?: ResourceStr): void {
+    this.collector.registerVideoSource(componentId, source, poster);
+    this.notifyMotion();
+  }
+
+  public registerVideoFrameProvider(componentId: string, provider: ReplayVideoFrameProvider): void {
+    this.collector.registerVideoFrameProvider(componentId, provider);
+    this.notifyMotion();
+  }
+
+  public updateVideoState(componentId: string, state: ReplayVideoState): void {
+    this.collector.updateVideoState(componentId, state);
+    this.notifyPageChanged();
+  }
+
+  public unregisterVideoSource(componentId: string): void {
+    this.collector.unregisterVideoSource(componentId);
+    this.notifyPageChanged();
   }
 
   public captureFullSnapshot(
@@ -685,12 +708,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
    * layout/state change. It coalesces many draws into one detached snapshot.
    */
   public notifyPageChanged(): void {
+    this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
   }
 
   /** Keeps captures running through motion, including its settled final frame. */
   public notifyMotion(): void {
     this.motionUntil = Date.now() + this.config.getMotionQuietPeriodMs();
+    this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
   }
 
@@ -1134,6 +1159,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const startedAt = Date.now();
     const snapshot = this.collectRootLight(uiContext, rootId, scale);
     this.hasActiveComponentAnimations = snapshot.hasActiveAnimations === true;
+    this.componentSamplingIntervalMs = snapshot.preferredSamplingIntervalMs ?? 0;
     if (this.config.isPerformanceDiagnosticsEnabled()) snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
     return snapshot;
   }
@@ -1607,6 +1633,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   private stopObservation(): void {
     this.hasActiveComponentAnimations = false;
+    this.componentSamplingIntervalMs = 0;
     this.samplingFrameEpoch++;
     this.nextSamplingDeadline = 0;
     const uiContext = this.drawObserverContext;
@@ -1666,8 +1693,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     // Keep the first deadline so neither drawing nor pointer moves postpone it.
     if (this.mutationCaptureTimer !== -1) return;
-    const interval = this.config.getSnapshotIntervalMs();
     const now = Date.now();
+    const interval = now >= this.motionUntil && !this.hasSceneMotion() ?
+      Math.max(this.config.getSnapshotIntervalMs(), this.componentSamplingIntervalMs) : this.config.getSnapshotIntervalMs();
     const next = this.nextSamplingDeadline === 0 ? now + interval : this.nextSamplingDeadline + interval;
     // Anchor to deadlines rather than frame completion; never burst to catch up.
     this.nextSamplingDeadline = next <= now ? now + interval : next;
@@ -1696,6 +1724,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   private hasSamplingSceneMotion(): boolean {
     if (this.hasActiveComponentAnimations) return true;
+    return this.hasSceneMotion();
+  }
+
+  private hasSceneMotion(): boolean {
     if (this.hasRetainedScenePages()) return true;
     const binding = this.rootBinding;
     const now = Date.now();
@@ -1703,6 +1735,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       const transition = page.defaultTransition;
       return transition !== undefined && now >= transition.startedAt && now < transition.startedAt + transition.durationMs;
     });
+  }
+
+  /** User/draw signals must not wait behind a one-second video-only timer. */
+  private expediteMediaCapture(): void {
+    if (this.componentSamplingIntervalMs <= 0 || this.mutationCaptureTimer === -1 ||
+      this.nextSamplingDeadline - Date.now() <= this.config.getSnapshotIntervalMs()) return;
+    this.samplingFrameEpoch++;
+    clearTimeout(this.mutationCaptureTimer);
+    this.mutationCaptureTimer = -1;
+    this.nextSamplingDeadline = 0;
   }
 
   private hasRetainedScenePages(): boolean {

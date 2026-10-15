@@ -3,10 +3,13 @@ import { copyReplayWireframe } from './ReplayWireframeValues';
 import { ReplayOverlayVectors, ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import { image } from '@kit.ImageKit';
 import { resourceManager } from '@kit.LocalizationKit';
 import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
 import { ReplayRichText } from './ReplayRichText';
-import { ReplayComponentRaster } from './ReplayComponentRaster';
+import { ReplayComponentRaster, ReplayRasterOptions } from './ReplayComponentRaster';
+import { ReplayVideoCapture, ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
+import { ReplayVideoWireframes } from './ReplayVideoWireframes';
 import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
 import { ReplayControlWireframes } from './ReplayControlWireframes';
 import { ReplayCalendarWireframes } from './ReplayCalendarWireframes';
@@ -135,6 +138,9 @@ export class ArkUIReplayCollector {
   private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
   private readonly richText: ReplayRichText = new ReplayRichText();
   private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
+  private readonly mediaRasters: ReplayComponentRaster = new ReplayComponentRaster('media');
+  private readonly videoRasters: ReplayComponentRaster = new ReplayComponentRaster('video');
+  private readonly videos: ReplayVideoCapture = new ReplayVideoCapture();
   private readonly calendarFrames: ReplayCalendarWireframes = new ReplayCalendarWireframes();
   private readonly systemIcons: ReplaySystemIcons = new ReplaySystemIcons();
   private readonly controls: ReplayNativeControlPaint = new ReplayNativeControlPaint();
@@ -148,29 +154,49 @@ export class ArkUIReplayCollector {
   private editorContentSignatures: Map<number, string> | null = null;
   private inlineTextRuns: Map<number, Array<ReplayInlineRun> | null> | null = null;
   private activeComponentAnimations: boolean = false;
+  private activeMediaIntervalMs: number = 0;
+  private mediaPaintRevision: number = 0;
   private captureTimestamp: number = 0;
 
   constructor(maxNodes: number = 1500, config: FTSessionReplayConfig = new FTSessionReplayConfig()) {
     this.maxNodes = Math.max(1, Math.floor(maxNodes));
     this.config = config;
-    this.rasters.setCallbacks((key: string, bytes: Uint8Array): void => {
-      this.registerImageAsset(key, bytes, 'image/png');
-      this.rasterPublished?.(key, bytes);
-    }, (key: string): void => {
+    const publish = (key: string, bytes: Uint8Array, mimeType: string): void => {
+      this.registerImageAsset(key, bytes, mimeType);
+      this.rasterPublished?.(key, bytes, mimeType);
+    };
+    const remove = (key: string): void => {
       this.unregisterImageAsset(key);
       this.rasterRemoved?.(key);
-    });
+    };
+    this.rasters.setCallbacks(publish, remove);
+    this.mediaRasters.setCallbacks(publish, remove);
+    this.videoRasters.setCallbacks(publish, remove);
   }
 
-  private rasterPublished: ((key: string, bytes: Uint8Array) => void) | null = null;
+  private rasterPublished: ((key: string, bytes: Uint8Array, mimeType: string) => void) | null = null;
   private rasterRemoved: ((key: string) => void) | null = null;
 
   /** Forward newly packed native resources to the existing FIFO Worker image queue. */
-  public setComponentRasterCallbacks(publish: (key: string, bytes: Uint8Array) => void,
+  public setComponentRasterCallbacks(publish: (key: string, bytes: Uint8Array, mimeType: string) => void,
     remove: (key: string) => void): void {
     this.rasterPublished = publish;
     this.rasterRemoved = remove;
   }
+
+  public registerVideoSource(componentId: string, source: string, poster?: ResourceStr): void {
+    this.videos.register(componentId, source, poster);
+  }
+
+  public registerVideoFrameProvider(componentId: string, provider: ReplayVideoFrameProvider): void {
+    this.videos.setProvider(componentId, provider);
+  }
+
+  public updateVideoState(componentId: string, state: ReplayVideoState): void { this.videos.update(componentId, state); }
+
+  public unregisterVideoSource(componentId: string): void { this.videos.unregister(componentId); }
+
+  public clearVideoSources(): void { this.videos.clear(); }
 
   public invalidateComponentRasters(): void {
     this.inlineMediaOwners = null;
@@ -180,6 +206,9 @@ export class ArkUIReplayCollector {
 
   public invalidateNativeControlPaint(): void {
     this.controls.invalidatePaint();
+    // A PixelMap/Canvas can repaint with unchanged Inspector properties. Do
+    // not invalidate from the rendering pass requested by our own snapshots.
+    if (!this.rasters.isCapturing() && !this.mediaRasters.isCapturing() && !this.videoRasters.isCapturing()) this.mediaPaintRevision++;
     // A Span can change while its Text/RichEditor retains the same layout box.
     this.editorContentSignatures = null;
     this.inlineTextRuns = null;
@@ -258,6 +287,9 @@ export class ArkUIReplayCollector {
     this.marquee.clear();
     this.richText.clear();
     this.rasters.clear();
+    this.mediaRasters.clear();
+    this.videoRasters.clear();
+    this.videos.reset();
     this.controls.clear();
     this.controlFrames.clear();
     this.systemIcons.clear();
@@ -276,6 +308,9 @@ export class ArkUIReplayCollector {
     this.marquee.clear();
     this.richText.clear();
     this.rasters.clear();
+    this.mediaRasters.clear();
+    this.videoRasters.clear();
+    this.videos.reset();
     this.controls.clear();
     this.controlFrames.clear();
     this.systemIcons.clear();
@@ -521,7 +556,8 @@ export class ArkUIReplayCollector {
     if (nodes.length === 1) {
       throw new Error('Session Replay scene has no renderable content.');
     }
-    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
+    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations || this.activeMediaIntervalMs > 0,
+      preferredSamplingIntervalMs: this.activeComponentAnimations ? undefined : this.activeMediaIntervalMs };
   }
 
   private isWindowOverlay(nodeType: string): boolean {
@@ -645,10 +681,10 @@ export class ArkUIReplayCollector {
       return frame;
     }
     const canUseRaster = node.componentRasterKey !== undefined && this.canCaptureImage(node.width, node.height, scale) &&
-      (node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor' ||
+      (this.isMediaNode(node.nodeType) || node.nodeType === 'Text' || node.nodeType === 'SymbolGlyph' || node.nodeType === 'RichEditor' ||
         this.canCaptureNativeControl(node.nodeType, node.inspectorInfo)) &&
       (node.nodeType !== 'Text' || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL) &&
-      (node.nodeType !== 'RichEditor' || this.canCaptureEditor(inspector));
+      (node.nodeType !== 'RichEditor' || this.canCaptureEditor(inspector)) && this.canCaptureMedia(node.nodeType);
     const frame = canUseRaster ? this.createImageWireframe(node.id, node.x, node.y, node.width, node.height,
       node.componentId, node.nodeType, inspector, scale, node.componentRasterKey) :
       this.createWireframe(node.id, node.x, node.y, node.width, node.height,
@@ -698,7 +734,8 @@ export class ArkUIReplayCollector {
     this.appendLightPreOrder(root, scale, nodes, true);
     this.finishControlFrame(nodes);
     this.marquee.endFrame();
-    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
+    return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations || this.activeMediaIntervalMs > 0,
+      preferredSamplingIntervalMs: this.activeComponentAnimations ? undefined : this.activeMediaIntervalMs };
   }
 
   /** Custom thumbs and stars refer to immutable assets; state changes only move or clip the frames. */
@@ -746,7 +783,11 @@ export class ArkUIReplayCollector {
 
   private finishControlFrame(nodes: Array<ArkUIReplayLightNode>): void {
     const ids = new Set<number>();
+    const visibleVideos = new Set<string>();
     for (const node of nodes) {
+      if (node.nodeType === 'Video' && (node.opacity ?? 1) > 0 &&
+        (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height) visibleVideos.add(node.componentId);
       if (node.componentRasterKey !== undefined && (node.nodeType === 'RichEditor' || node.nodeType === 'Text') &&
         (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
         (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height) {
@@ -757,6 +798,7 @@ export class ArkUIReplayCollector {
       this.patterns.align(node.id, node.x, node.y);
     }
     this.patterns.retain(ids);
+    this.videos.retainVisible(visibleVideos);
   }
 
   private beginComponentFrame(timestamp: number): void {
@@ -764,6 +806,7 @@ export class ArkUIReplayCollector {
     this.rasters.beginFrame();
     this.captureTimestamp = timestamp;
     this.activeComponentAnimations = false;
+    this.activeMediaIntervalMs = 0;
     this.marquee.beginFrame();
   }
 
@@ -873,6 +916,17 @@ export class ArkUIReplayCollector {
       }
       wireframes.push(wireframe);
       frameSources.set(wireframe.id, node);
+      if (node.nodeType === 'Video' && this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL) {
+        const parts = ReplayVideoWireframes.create(node, extraBudget);
+        extraBudget -= parts.length;
+        hasControlParts = hasControlParts || parts.length > 0;
+        for (const part of parts) {
+          retained.add(part.id);
+          part.zIndex = (wireframe.zIndex ?? 0) + 0.5;
+          wireframes.push(part);
+          frameSources.set(part.id, node);
+        }
+      }
       const calendarGrid = calendar.grids.get(node.id);
       if (calendarGrid !== undefined) {
         const parts = this.calendarFrames.create(node, calendarGrid, snapshot.vpToPxScale, extraBudget,
@@ -1110,6 +1164,10 @@ export class ArkUIReplayCollector {
     const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
     const controlInfo = (inspectorInfo ?? {}) as Record<string, Object>;
     const controlAttrs = (controlInfo['$attrs'] ?? controlInfo) as Record<string, Object>;
+    const videoState = nodeType === 'Video' ? this.videos.state(this.readComponentId(node)) : undefined;
+    if (this.isMediaNode(nodeType) && systemIconSvg === undefined) {
+      componentRasterKey = this.captureMedia(node, nodeType, controlAttrs, width, height, vpToPxScale, visible);
+    }
     const isFrameControl = this.controlFrames.supports(nodeType, inspectorInfo);
     if (isFrameControl && String(controlAttrs['enabled'] ?? 'true') === 'false') opacity *= 0.4;
     const motion = isFrameControl ? this.controlFrames.sample(nodeId, nodeType, inspectorInfo, this.captureTimestamp, visible) : null;
@@ -1168,6 +1226,7 @@ export class ArkUIReplayCollector {
         isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,
         isNativeModalSurface: isNativeModalSurface && modalProjection !== undefined ? true : undefined,
         componentRasterKey,
+        videoState,
         controlState: motion?.value,
         controlPoints: pattern?.points,
         controlPointer: pattern?.pointer,
@@ -1206,7 +1265,8 @@ export class ArkUIReplayCollector {
     }
     while (child !== null && output.length < nodeBudget) {
       // A completed Text raster already contains its inline image children.
-      if (inlineRuns === undefined && nodeType !== 'RichEditor' && !(nodeType === 'Button' && hasNativeLabel) &&
+      if (!(componentRasterKey !== undefined && this.isMediaNode(nodeType) && nodeType !== 'Video') &&
+        inlineRuns === undefined && nodeType !== 'RichEditor' && !(nodeType === 'Button' && hasNativeLabel) &&
         !(nodeType === 'Radio' && !String(controlAttrs['indicatorType'] ?? 'TICK').toUpperCase().includes('CUSTOM')) &&
         ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
@@ -2580,6 +2640,77 @@ export class ArkUIReplayCollector {
 
   private isImageNode(nodeType: string): boolean {
     return nodeType === 'Image' || nodeType === 'ImageAnimator' || nodeType === 'PixelMap';
+  }
+
+  private isDrawingNode(type: string): boolean {
+    return ['QRCode', 'Shape', 'Rect', 'Circle', 'Ellipse', 'Line', 'Polygon', 'Polyline', 'Path', 'Canvas'].includes(type);
+  }
+
+  private isMediaNode(type: string): boolean { return this.isImageNode(type) || this.isDrawingNode(type) || type === 'Video'; }
+
+  private canCaptureMedia(type: string): boolean {
+    // Canvas may paint text and QRCode encodes application text as pixels.
+    return !this.isDrawingNode(type) || this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL;
+  }
+
+  private captureMedia(node: FrameNode, type: string, attrs: Record<string, Object>, width: number, height: number,
+    scale: number, visible: boolean): string | undefined {
+    const id = node.getUniqueId();
+    if (!this.canCaptureImage(width, height, scale) || !this.canCaptureMedia(type)) {
+      this.mediaRasters.discard(id);
+      this.videoRasters.discard(id);
+      return undefined;
+    }
+    if (!visible || width <= 0 || height <= 0) return undefined;
+    const componentId = this.readComponentId(node);
+    const source = String(attrs['src'] ?? attrs['source'] ?? '');
+    // Explicit bytes remain authoritative and avoid unnecessary native work.
+    if (this.isImageNode(type) && (this.registeredImageAssets.has(componentId) || this.registeredImageAssets.has(source.trim()) || source.startsWith('data:image/'))) return undefined;
+    const area = width * height * scale * scale;
+    const reduction = Math.min(1, 640 / Math.max(width * scale, height * scale));
+    const options: ReplayRasterOptions = { identity: `${type}|${source}|${String(attrs['images'] ?? '')}`, scale: reduction,
+      refreshIntervalMs: this.isImageNode(type) ? 2000 : 200,
+      minimumIntervalMs: this.isImageNode(type) ? 2000 : 200,
+      paintRevision: this.mediaPaintRevision,
+      approved: (): boolean => this.canCaptureImage(width, height, scale) && this.canCaptureMedia(type) && node.isAttached() };
+    const signature = `${JSON.stringify(attrs).substring(0, 16384)}|${width}|${height}|${scale}`;
+    if (type === 'ImageAnimator') {
+      const state = String(attrs['state'] ?? attrs['status'] ?? '').toLowerCase();
+      const running = state === '1' || state.includes('running');
+      options.refreshIntervalMs = running ? 200 : 0;
+      options.minimumIntervalMs = 200;
+      if (running) this.keepMediaSampling(200);
+    }
+    if (type === 'Video') {
+      if (!this.videos.canCapture(componentId)) return undefined;
+      const video = this.videos.state(componentId);
+      options.identity = `video|${this.videos.identity(componentId)}`;
+      options.refreshIntervalMs = 1000;
+      options.paintRevision = 0;
+      options.minimumIntervalMs = 1000;
+      options.mimeType = 'image/jpeg';
+      options.maxDimension = 640;
+      const ui = this.rasterContext;
+      options.pixels = (): Promise<image.PixelMap> => this.videos.pixels(componentId, ui, width * scale, height * scale);
+      if (video?.playing === true) this.keepMediaSampling(1000);
+      // onUpdate is normally once a second. Encode only at that low cadence,
+      // with a final refresh when pause/seek changes the scalar state.
+      const videoSignature = `${options.identity}|${video?.playing}|${Math.floor(video?.currentTime ?? 0)}|${width}|${height}`;
+      const capture = this.videoRasters.request(null, id, componentId, videoSignature, area * reduction * reduction, 1048576, false, options);
+      if (capture.pending) this.keepMediaSampling(200);
+      return capture.key;
+    }
+    // Only media/drawing subtrees may become bitmaps. Never screenshot a page
+    // or an arbitrary container which could contain privacy-filtered inputs.
+    if (this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) return undefined;
+    const capture = this.mediaRasters.request(this.rasterContext, id, componentId, signature,
+      area * reduction * reduction, 1048576, true, options);
+    if (capture.pending) this.keepMediaSampling(200);
+    return capture.key;
+  }
+
+  private keepMediaSampling(intervalMs: number): void {
+    this.activeMediaIntervalMs = this.activeMediaIntervalMs === 0 ? intervalMs : Math.min(this.activeMediaIntervalMs, intervalMs);
   }
 
   private normalizeColor(value: string | null): string | null {

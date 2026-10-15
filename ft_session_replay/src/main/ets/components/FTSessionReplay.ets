@@ -12,6 +12,7 @@ import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUplo
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
+import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -252,6 +253,23 @@ export class FTSessionReplay {
   public unregisterImageAsset(componentId: string): void {
     this.recorder?.unregisterImageAsset(componentId);
   }
+
+  /** Opt in to local/API 20+ network source keyframes. Times are in seconds. */
+  public registerVideoSource(componentId: string, source: string, poster?: ResourceStr): void {
+    this.recorder?.registerVideoSource(componentId, source, poster);
+  }
+
+  /** Prefer the player's own Surface/decoder when it can supply an owned PixelMap. */
+  public registerVideoFrameProvider(componentId: string, provider: ReplayVideoFrameProvider): void {
+    this.recorder?.registerVideoFrameProvider(componentId, provider);
+  }
+
+  public updateVideoState(componentId: string, state: ReplayVideoState): void {
+    this.recorder?.updateVideoState(componentId, state);
+  }
+
+  /** Release the decoder and callback when the player is removed. */
+  public unregisterVideoSource(componentId: string): void { this.recorder?.unregisterVideoSource(componentId); }
 
   /** Lists error-sampled assets awaiting a same-session RUM Error promotion. */
   public getDeferredErrorResources(): Array<SessionReplayStoredResource> {

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0-alpha01] - 2026-09-29
 
+- Added automatic rendered-image extraction, bounded ImageAnimator current-frame sampling, PNG capture for QRCode/Shape/Path/Canvas, and opt-in video posters, scalar playback state and one-per-second keyframes through source or frame-provider integrations.
 - Added ArkUI and supported ArkWeb replay linked to RUM Views and Errors. Configure `FTSessionReplayConfig`, then call `FTSessionReplay.getInstance().init(config, filesDir)` after core SDK and RUM setup; pass the application's private `filesDir` for persistent caching.
 - Added automatic capture of text/layout changes, scrolling, supported animations, viewport resizing, and Router/Navigation transitions. Automatic ArkUI collection requires `@cloudcare/hvigor-ohos-plugin`; manual integrations use `registerRoot(...)`, `unregisterRoot()`, and `recordTouchEvent(event)` to manage page roots and forward touches.
 - Added Navigation transition capture on API 15+, with `updateNavigationTransition(...)` and `finishNavigationTransition(...)` for custom animations. Custom Router integrations use `updatePageTransition(...)` and `finishPageTransition(...)` to report progress and completion.

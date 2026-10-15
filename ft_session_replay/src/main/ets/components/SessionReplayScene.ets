@@ -1,5 +1,6 @@
 import { ReplayPatternPoint } from './ReplayPatternLock';
 import { ReplayPopupArrowSide } from './ReplayOverlayVectors';
+import { ReplayVideoState } from './ReplayVideoCapture';
 import { FrameNode } from '@kit.ArkUI';
 import { ReplayShadow, ReplayWireframeClip } from './SessionReplayProtocol';
 
@@ -92,6 +93,8 @@ export interface ArkUIReplayLightNode {
   isDarkMode?: boolean;
   /** Registered PNG for a privacy-approved native symbol, inline media Text, or RichEditor. */
   componentRasterKey?: string;
+  /** Scalar playback state only; no source URLs, providers or native handles. */
+  videoState?: ReplayVideoState;
   /** Calendar-only semantic paint metadata; no pixels or private native state. */
   calendarTheme?: ReplayCalendarTheme;
   /** Allowlisted native control icon SVG; never input or application-image pixels. */
@@ -103,6 +106,8 @@ export interface ArkUIReplayLightNode {
 export interface ArkUIReplayLightSnapshot {
   /** Visible motion or pending native resources keep sampling active without ArkUI redraws. */
   hasActiveAnimations?: boolean;
+  /** Media-only polling may run more slowly than normal UI animations. */
+  preferredSamplingIntervalMs?: number;
   collectionDurationMs?: number;
   timestamp: number;
   vpToPxScale: number;
@@ -300,7 +305,7 @@ export class SessionReplayScene {
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
-          isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey,
+          isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey, videoState: source.videoState,
           isPopupSurface: source.isPopupSurface, popupArrowSide: source.popupArrowSide, isOverlayCloseIcon: source.isOverlayCloseIcon,
           isNativeModalSurface: source.isNativeModalSurface, calendarTheme: source.calendarTheme,
           systemIconSvg: source.systemIconSvg, systemIconZIndex: source.systemIconZIndex
