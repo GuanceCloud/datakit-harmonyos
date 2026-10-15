@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed native Popup arrows, Sheet close icons, and dialog/sheet material backgrounds displaying incorrectly. Floating overlays now retain their final position after opening animations.
 - Fixed AlertDialog and ActionSheet content shifting or being scaled twice during opening and closing animations. Replay preserves each modal's layout and inner scrolling.
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.
+- Fixed Replay's final frame becoming blank after disabling recording, closing the last page, or returning from a page with native controls.
 - Fixed CalendarPicker dialogs missing localized date grids, selection states, navigation arrows, and native panel styles in Replay.
 - Fixed missing password visibility, sidebar, search, clear, and calendar navigation icons in Replay.
 - Fixed incomplete recordings at storage limits or during error-triggered upload, and inconsistent playback after mixed manual/automatic captures.

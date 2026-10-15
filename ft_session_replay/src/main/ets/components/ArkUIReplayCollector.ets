@@ -473,6 +473,10 @@ export class ArkUIReplayCollector {
       width: viewport.width, height: viewport.height,
       componentId: 'ft-session-replay-scene', nodeType: 'Column', inspectorInfo: null,
       shouldCaptureAsText: false, isRoot: true, usedTransformedPosition: false, opacity: 1,
+      // Always emit an explicit background layer, including frames without
+      // modeled controls. Removing zIndex would replace this opaque canvas,
+      // letting the player's insertion fallback place it above the page.
+      sceneLayer: 0,
       clip: { top: 0, right: 0, bottom: 0, left: 0 }
     }];
     const isDarkMode = this.readDarkMode(uiContext);
@@ -509,6 +513,14 @@ export class ArkUIReplayCollector {
     this.sampleWindowOverlayMotion(overlays, timestamp);
     this.finishControlFrame(nodes);
     this.marquee.endFrame();
+    // The synthetic scene root only supplies a stable viewport; it is not a
+    // rendered application frame. When the last Router page has already been
+    // released, persisting that root would remove every visible wireframe and
+    // leave Replay on a blank final frame. Let the recorder keep the last
+    // renderable snapshot until a successor page or View End arrives.
+    if (nodes.length === 1) {
+      throw new Error('Session Replay scene has no renderable content.');
+    }
     return { timestamp, vpToPxScale: scale, nodes, hasActiveAnimations: this.activeComponentAnimations };
   }
 

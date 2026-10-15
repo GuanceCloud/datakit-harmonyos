@@ -383,5 +383,45 @@ export default function sessionReplayMutationUITest(): void {
       assertIntermediateValues(positions(replay.getRecordedRecords(context), 'session-replay-transition-root', baseline.timestamp), 'Router pop');
       assertCurrentSnapshot();
     });
+
+    it('keepsLastPageVisibleAfterReturningFromControlsAndDisablingReplay', 0, async () => {
+      const componentPage = await driver.findComponent(ON.id('session-replay-transition-back'));
+      if (componentPage !== null) {
+        const previousViewId = replay.getLastCapture()!.envelope.view_id;
+        await componentPage.click();
+        await waitForViewCapture(previousViewId);
+      }
+      await driver.delayMs(1400);
+      const capture = replay.getLastCapture()!;
+      const returnedContext: SessionReplayContext = { applicationId: capture.envelope.application_id,
+        sessionId: capture.envelope.session_id, viewId: capture.envelope.view_id };
+      await waitForSettledScene(returnedContext, 'session-replay-poc-root', 'session-replay-transition-root');
+      await click('session-replay-enable-button');
+      expect(replay.isEnabled()).assertFalse();
+
+      let records: Array<SessionReplayRecord> = [];
+      for (let attempt = 0; attempt < 50; attempt++) {
+        records = [];
+        for (const segment of replay.getStoredSegments()) {
+          if (segment.context.viewId === returnedContext.viewId) records.push(...segment.records);
+        }
+        records.sort((left: SessionReplayRecord, right: SessionReplayRecord): number => left.timestamp - right.timestamp);
+        if (records.some((record: SessionReplayRecord): boolean => record.type === ReplayRecordType.VIEW_END)) break;
+        await driver.delayMs(100);
+      }
+      expect(records[records.length - 1].type).assertEqual(ReplayRecordType.VIEW_END);
+      const nodes = replayNodes(records);
+      const canvas = nodes.find((node: ReplayWireframe): boolean => node.permanentId === 'ft-session-replay-scene');
+      expect(canvas !== undefined && canvas.zIndex !== undefined).assertTrue();
+      expect(nodes.some((node: ReplayWireframe): boolean => node.permanentId === 'session-replay-poc-root')).assertTrue();
+      expect(nodes.some((node: ReplayWireframe): boolean => node.type === 'text' && node.text === 'Disable Session Replay')).assertTrue();
+      expect(nodes.filter((node: ReplayWireframe): boolean => node.id !== canvas!.id)
+        .every((node: ReplayWireframe): boolean => node.zIndex !== undefined && node.zIndex > canvas!.zIndex!)).assertTrue();
+      expect(records.every((record: SessionReplayRecord): boolean => {
+        if (record.type !== ReplayRecordType.INCREMENTAL_SNAPSHOT) return true;
+        const mutation = record.data as ReplayMutationData;
+        return mutation.source !== 0 || !mutation.removes.some((removed): boolean => removed.id === canvas!.id);
+      })).assertTrue();
+    });
   });
 }

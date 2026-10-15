@@ -1568,6 +1568,52 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(mutation.updates.length).assertEqual(0);
     });
 
+    it('keeps the scene canvas below page content when native control parts disappear', 0, () => {
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 100);
+      const toggle = root.append(new ReplayFrameNodeFixture(2, 0, 20, 0, 20, 36, 20)
+        .withNodeType('Toggle').withInspector({ 'type': 'ToggleType.Switch', 'isOn': 'false' } as Record<string, Object>));
+      const pages: Array<ArkUIReplayScenePage> = [
+        { key: 'page', rootId: 'fixture-1', root: asFrameNode(root), retained: false }
+      ];
+      const collector = new ArkUIReplayCollector();
+      const context = new EmptyInspectorInfo() as Object as UIContext;
+      const viewport: ArkUIReplaySceneBounds = { x: 0, y: 0, width: 100, height: 100 };
+      const first = collector.materializeLightSnapshot(
+        collector.captureSceneLight(context, [], 1, 1234, new Map(), viewport, pages));
+      const canvas = (first.data as FullSnapshotData).wireframes[0];
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(first);
+
+      toggle.hide();
+      const last = collector.materializeLightSnapshot(
+        collector.captureSceneLight(context, [], 1, 1300, new Map(), viewport, pages));
+      const wireframes = (last.data as FullSnapshotData).wireframes;
+      const mutation = processor.createMutationRecord(last)?.data as ReplayMutationData;
+      expect(mutation.removes.some((removed): boolean => removed.id === canvas.id)).assertFalse();
+      expect(mutation.adds.some((added): boolean => added.wireframe.id === canvas.id)).assertFalse();
+      expect(wireframes[0].zIndex).assertEqual(canvas.zIndex);
+      expect(wireframes[0].zIndex !== undefined).assertTrue();
+      expect(wireframes.slice(1).every((frame): boolean => frame.zIndex! > wireframes[0].zIndex!)).assertTrue();
+      expect(processor.createMutationRecord(last) === null).assertTrue();
+    });
+
+    it('rejects a scene with no renderable page instead of emitting a blank final frame', 0, () => {
+      const page = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 100, 100);
+      page.hide();
+      const context = new EmptyInspectorInfo() as Object as UIContext;
+      const pages: Array<ArkUIReplayScenePage> = [
+        { key: 'closed', rootId: 'fixture-1', root: asFrameNode(page), retained: false }
+      ];
+      let rejected = false;
+      try {
+        new ArkUIReplayCollector().captureSceneLight(context, [], 1, 1234, new Map(),
+          { x: 0, y: 0, width: 100, height: 100 }, pages);
+      } catch (_) {
+        rejected = true;
+      }
+      expect(rejected).assertTrue();
+    });
+
     it('keeps window popup geometry above moving pages and removes closed cached overlays', 0, () => {
       const page = new ReplayFrameNodeFixture(1, 10, 20, 50, 20, 100, 100);
       const windowRoot = new ReplayFrameNodeFixture(10, 0, 0, 0, 0, 200, 200).withNodeType('root');

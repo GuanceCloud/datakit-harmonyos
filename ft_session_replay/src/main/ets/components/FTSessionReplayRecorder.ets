@@ -64,7 +64,8 @@ interface SessionReplayRootBinding {
   captureScene: boolean;
   sceneRoot: FrameNode | null;
   sceneRootIds: Array<string>;
-  // null uses root IDs; an explicit empty list means all scene pages exited.
+  // null uses root IDs; an explicit empty list means all scene pages exited
+  // and collection must retain the last renderable frame until View End.
   scenePages: Array<ArkUIReplayScenePage> | null;
 }
 
@@ -732,7 +733,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       binding.sceneRootIds = binding.scenePages.map((page: ArkUIReplayScenePage): string => page.rootId);
     }
     // Queue removal under the current View even if its new root is still
-    // laying out. Keep the stable scene canvas when the last page exits.
+    // laying out. If the last page exited, the collector rejects the synthetic
+    // scene-only snapshot so Replay retains the previous visible frame.
     this.captureActiveViewMutation('settled');
     this.notifyTransition();
   }
