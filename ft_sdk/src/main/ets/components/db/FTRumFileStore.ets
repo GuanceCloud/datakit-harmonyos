@@ -97,7 +97,8 @@ export class FTRumFileStore {
         // acknowledged and removed, or the recorder is disabled.
         for (const candidate of this.actions()) {
           if (candidate.sessionId === request.replaySessionId && candidate.viewId === request.viewId &&
-            candidate.hasReplay !== true) {
+            candidate.hasReplay !== true && (candidate.replayRecordingId === undefined ||
+            (candidate.replayRecordingId.length > 0 && candidate.replayRecordingId === metadata.recordingId))) {
             candidate.hasReplay = true;
             this.put(changes, 'action', candidate.id, candidate);
             response.value = true;

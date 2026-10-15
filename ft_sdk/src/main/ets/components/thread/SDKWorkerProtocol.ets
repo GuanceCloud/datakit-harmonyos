@@ -351,6 +351,8 @@ export interface SDKRumCompletedActionDTO {
   viewReferrer: string;
   duration: number;
   hasReplay?: boolean;
+  /** Immutable recording interval at event occurrence; empty explicitly excludes Replay. */
+  replayRecordingId?: string;
   errorCount: number;
   longTaskCount: number;
   resourceCount: number;

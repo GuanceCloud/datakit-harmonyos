@@ -304,11 +304,13 @@ interface FTDBTaskPoolReplayMarker {
 interface FTDBTaskPoolActionAttrParts {
   extraAttr: Record<string, object>;
   hasReplay: boolean;
+  replayRecordingId?: string;
   collectType: CollectType | null;
 }
 
 interface FTDBTaskPoolActionReplayMarker {
   value: boolean;
+  recordingId?: string;
 }
 
 interface FTDBTaskPoolActionReplayUpdate {
@@ -1858,7 +1860,9 @@ function stringifyActionExtraAttr(actionBean: ActionBeanJSON): string {
       obj[key] = extraAttr[key];
     }
   }
-  const replayMarker: FTDBTaskPoolActionReplayMarker = { value: actionBean.hasReplay === true };
+  const replayMarker: FTDBTaskPoolActionReplayMarker = {
+    value: actionBean.hasReplay === true, recordingId: actionBean.replayRecordingId
+  };
   obj[Constants.KEY_HAS_REPLAY] = replayMarker;
   if (actionBean.collectType) {
     obj[Constants.KEY_RUM_COLLECT_TYPE] = actionBean.collectType;
@@ -1920,18 +1924,20 @@ function splitActionExtraAttr(jsonString: string): FTDBTaskPoolActionAttrParts {
   const parsed = parseJsonRecord(jsonString);
   const extraAttr: Record<string, object> = {};
   let hasReplay = false;
+  let replayRecordingId: string | undefined = undefined;
   let collectType: CollectType | null = null;
   for (const key of Object.keys(parsed)) {
     if (key === Constants.KEY_HAS_REPLAY && parsed[key] && typeof parsed[key] === 'object') {
       const marker = parsed[key] as FTDBTaskPoolActionReplayMarker;
       hasReplay = marker.value === true;
+      replayRecordingId = marker.recordingId;
     } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
       collectType = parseCollectType(String(parsed[key]));
     } else {
       extraAttr[key] = parsed[key];
     }
   }
-  return { extraAttr, hasReplay, collectType };
+  return { extraAttr, hasReplay, replayRecordingId, collectType };
 }
 
 function toViewValues(view: ViewBeanJSON, includeId: boolean): relationalStore.ValuesBucket {
@@ -2017,6 +2023,7 @@ function readActionFromResultSet(resultSet: relationalStore.ResultSet): ActionBe
     actionDuration: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ACTION_DURATION)),
     isClose: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_IS_CLOSE)) === 1,
     hasReplay: attr.hasReplay,
+    replayRecordingId: attr.replayRecordingId,
     errorCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ERROR_COUNT)),
     longTaskCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_LONG_TASK_COUNT)),
     resourceCount: resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_RESOURCE_COUNT)),
@@ -2144,10 +2151,12 @@ async function updateRumViewReplayInTaskPool(
         do {
           const attr = parseJsonRecord(resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_EXTRA_ATTR)));
           const marker = attr[Constants.KEY_HAS_REPLAY] as FTDBTaskPoolActionReplayMarker;
-          if (marker?.value === true) {
+          const recordingId = marker?.recordingId;
+          if (marker?.value === true || (recordingId !== undefined &&
+            (recordingId.length === 0 || recordingId !== metadata.recordingId))) {
             continue;
           }
-          const committed: FTDBTaskPoolActionReplayMarker = { value: true };
+          const committed: FTDBTaskPoolActionReplayMarker = { value: true, recordingId };
           attr[Constants.KEY_HAS_REPLAY] = committed;
           updates.push({
             id: resultSet.getString(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_ID)),

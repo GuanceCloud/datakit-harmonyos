@@ -1,4 +1,5 @@
 import { FTInnerLogger } from '../log/FTLogger';
+import { Utils } from '../utils/Utils';
 
 const TAG = 'FTSessionReplayBridge';
 
@@ -74,6 +75,15 @@ export interface FTSessionReplayViewMetadata {
   hasReplay: boolean;
   recordsCount: number;
   sampledOnError: boolean;
+  /** Identifies the enable/disable interval that actually saved these frames. */
+  recordingId?: string;
+}
+
+interface FTSessionReplayRecordingInterval {
+  id: string;
+  startedAt: number;
+  stoppedAt: number;
+  views: Set<string>;
 }
 
 interface FTSessionReplayPendingPersistence {
@@ -123,6 +133,35 @@ export class FTSessionReplayBridgeRegistry {
   // work finishing after the optional HAR unregisters on stop.
   private static readonly pendingPersistence: Map<string, FTSessionReplayPendingPersistence> = new Map();
   private static persistenceEpoch: number = 0;
+  // Actions persist their interval ID, not this history. Bound history for
+  // callers that submit an Action later with its original occurrence time.
+  private static readonly MAX_RECORDING_INTERVALS: number = 128;
+  private static recordingSequence: number = 0;
+  private static recordingIntervals: Array<FTSessionReplayRecordingInterval> = [];
+  private static activeRecording: FTSessionReplayRecordingInterval | null = null;
+
+  /** Empty means the event occurred outside every known recording interval. */
+  public static getActionRecordingId(timestamp: number): string {
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+    const intervals = FTSessionReplayBridgeRegistry.recordingIntervals;
+    for (let index = intervals.length - 1; index >= 0; index--) {
+      const interval = intervals[index];
+      if (timestamp >= interval.startedAt && (interval.stoppedAt === 0 || timestamp < interval.stoppedAt)) {
+        return interval.id;
+      }
+    }
+    return '';
+  }
+
+  /** A previous recording of the same View cannot make a new interval available. */
+  public static hasReplayForRecording(
+    applicationId: string, sessionId: string, viewId: string, recordingId: string
+  ): boolean {
+    if (recordingId.length === 0) return false;
+    const key = FTSessionReplayBridgeRegistry.persistenceKey(applicationId, sessionId, viewId);
+    return FTSessionReplayBridgeRegistry.recordingIntervals.some(
+      (interval: FTSessionReplayRecordingInterval): boolean => interval.id === recordingId && interval.views.has(key));
+  }
 
   /** Holds the original View until one accepted write finishes or fails. */
   public static beginViewPersistence(context: FTSessionReplayRUMContext): () => void {
@@ -169,9 +208,21 @@ export class FTSessionReplayBridgeRegistry {
     return `${applicationId}|${sessionId}|${viewId}`;
   }
 
-  public static register(bridge: FTSessionReplayBridge): void {
+  public static register(bridge: FTSessionReplayBridge): string {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
-      return;
+      return FTSessionReplayBridgeRegistry.activeRecording?.id ?? '';
+    }
+    const timestamp = Utils.getCurrentNanoTime();
+    const previous = FTSessionReplayBridgeRegistry.activeRecording;
+    if (previous !== null) previous.stoppedAt = timestamp;
+    const interval: FTSessionReplayRecordingInterval = {
+      id: `${timestamp}:${++FTSessionReplayBridgeRegistry.recordingSequence}`,
+      startedAt: timestamp, stoppedAt: 0, views: new Set<string>()
+    };
+    FTSessionReplayBridgeRegistry.activeRecording = interval;
+    FTSessionReplayBridgeRegistry.recordingIntervals.push(interval);
+    if (FTSessionReplayBridgeRegistry.recordingIntervals.length > FTSessionReplayBridgeRegistry.MAX_RECORDING_INTERVALS) {
+      FTSessionReplayBridgeRegistry.recordingIntervals.shift();
     }
     FTSessionReplayBridgeRegistry.bridge = bridge;
     // Resolve now, after the HAR's link keys become available. Remembering an
@@ -193,6 +244,7 @@ export class FTSessionReplayBridgeRegistry {
     for (let index = 0; index < pending.length; index++) {
       FTSessionReplayBridgeRegistry.notifyErrorTimeline(pending[index]);
     }
+    return interval.id;
   }
 
   /** Core callbacks stay independent of the optional recorder's lifetime. */
@@ -223,6 +275,12 @@ export class FTSessionReplayBridgeRegistry {
     context: FTSessionReplayRUMContext,
     metadata: FTSessionReplayViewMetadata
   ): void {
+    if (metadata.hasReplay && metadata.recordsCount > 0 && metadata.recordingId) {
+      const interval = FTSessionReplayBridgeRegistry.recordingIntervals.find(
+        (candidate: FTSessionReplayRecordingInterval): boolean => candidate.id === metadata.recordingId);
+      interval?.views.add(FTSessionReplayBridgeRegistry.persistenceKey(
+        context.applicationId, context.sessionId, context.viewId));
+    }
     const callback = FTSessionReplayBridgeRegistry.metadataChangedCallback;
     if (callback === null) {
       return;
@@ -246,6 +304,9 @@ export class FTSessionReplayBridgeRegistry {
 
   public static unregister(bridge: FTSessionReplayBridge): void {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
+      const interval = FTSessionReplayBridgeRegistry.activeRecording;
+      if (interval !== null) interval.stoppedAt = Utils.getCurrentNanoTime();
+      FTSessionReplayBridgeRegistry.activeRecording = null;
       FTSessionReplayBridgeRegistry.bridge = null;
     }
   }

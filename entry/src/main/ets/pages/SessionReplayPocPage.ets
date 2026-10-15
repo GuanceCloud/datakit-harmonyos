@@ -14,7 +14,6 @@ struct SessionReplayPocPage {
   @State showMutationProbe: boolean = false;
   @State replayEnabled: boolean = false;
   @State uploadInFlight: boolean = false;
-  private bridgeViewActive: boolean = false;
   private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
   aboutToAppear(): void {
@@ -24,31 +23,9 @@ struct SessionReplayPocPage {
     }
   }
 
-  aboutToDisappear(): void {
-    if (!this.bridgeViewActive) {
-      return;
-    }
-    FTRUMGlobalManager.getInstance().stopView()
-      .then(() => {
-        this.bridgeViewActive = false;
-      })
-      .catch(() => {
-        this.bridgeViewActive = false;
-      });
-  }
-
   private toggleReplay(): void {
     if (this.replayEnabled) {
-      if (this.bridgeViewActive) {
-        FTRUMGlobalManager.getInstance().stopView()
-          .then(() => {
-            this.bridgeViewActive = false;
-            this.disableReplay();
-          })
-          .catch(() => this.disableReplay());
-      } else {
-        this.disableReplay();
-      }
+      this.disableReplay();
       return;
     }
     if (!this.requireRUMBridge()) {
@@ -175,7 +152,6 @@ struct SessionReplayPocPage {
     if (!this.requireRUMBridge()) return;
     FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
       .then(() => {
-        this.bridgeViewActive = true;
         this.showBridgeCapture('RUM View bridge');
       })
       .catch((error: Error) => {

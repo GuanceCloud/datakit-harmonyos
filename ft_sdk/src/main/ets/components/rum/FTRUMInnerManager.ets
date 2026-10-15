@@ -1565,7 +1565,8 @@ export class FTRUMInnerManager {
       const entry = this.pendingCompletedActions[i];
       const action = entry.payload;
       this.refreshCompletedActionReplayMetadata(action);
-      if (action.hasReplay !== true && FTSessionReplayBridgeRegistry.hasPendingViewPersistence(
+      if (action.hasReplay !== true && action.replayRecordingId !== '' &&
+        FTSessionReplayBridgeRegistry.hasPendingViewPersistence(
         action.rumAppId || '', action.sessionId, action.viewId)) {
         this.deferCompletedActionForReplay(action, traceBaseName);
         continue;
@@ -1688,6 +1689,7 @@ export class FTRUMInnerManager {
       viewReferrer: actionBean.getViewReferrer(),
       duration: actionBean.getDuration(),
       hasReplay: actionBean.isHasReplay(),
+      replayRecordingId: actionBean.getReplayRecordingId(),
       errorCount: actionBean.getErrorCount(),
       longTaskCount: actionBean.getLongTaskCount(),
       resourceCount: actionBean.getResourceCount(),
@@ -1700,13 +1702,31 @@ export class FTRUMInnerManager {
 
   /** The first frame can commit after Action creation or while its batch waits. */
   private refreshCompletedActionReplayMetadata(payload: SDKRumCompletedActionDTO): void {
+    if (payload.replayRecordingId === '') {
+      payload.hasReplay = false;
+      return;
+    }
     if (payload.hasReplay === true || !payload.rumAppId ||
       payload.sessionId.length === 0 || payload.viewId.length === 0) {
       return;
     }
     // Always use the Action's original identity; navigation may have changed
     // the current View before a completed Action reaches the Worker.
-    payload.hasReplay = this.hasSessionReplayForView(payload.rumAppId, payload.sessionId, payload.viewId);
+    payload.hasReplay = this.hasSessionReplayForAction(
+      payload.rumAppId, payload.sessionId, payload.viewId, payload.replayRecordingId);
+  }
+
+  private hasSessionReplayForAction(
+    applicationId: string, sessionId: string, viewId: string, recordingId: string | undefined
+  ): boolean {
+    // Only legacy cached Actions use View-wide availability. New Actions keep
+    // their occurrence-time interval even after disable, navigation or restart.
+    if (recordingId === undefined) return this.hasSessionReplayForView(applicationId, sessionId, viewId);
+    return FTSessionReplayBridgeRegistry.hasReplayForRecording(applicationId, sessionId, viewId, recordingId);
+  }
+
+  private matchesActionReplayRecording(recordingId: string | undefined, metadata: FTSessionReplayViewMetadata): boolean {
+    return recordingId === undefined || (recordingId.length > 0 && recordingId === metadata.recordingId);
   }
 
   private hasSessionReplayForView(applicationId: string, sessionId: string, viewId: string): boolean {
@@ -1774,6 +1794,15 @@ export class FTRUMInnerManager {
     actionBean: ActionBean,
     viewCache: Map<string, ViewBean | null>
   ): Promise<void> {
+    const recordingId = actionBean.getReplayRecordingId();
+    if (recordingId !== undefined) {
+      if (recordingId.length === 0) actionBean.setHasReplay(false);
+      else if (!actionBean.isHasReplay()) {
+        actionBean.setHasReplay(this.hasSessionReplayForAction(
+          this.getSemanticRumAppId(), actionBean.getSessionId(), actionBean.getViewId(), recordingId));
+      }
+      return;
+    }
     if (actionBean.isHasReplay() || this.context === null ||
       actionBean.getSessionId().length === 0 || actionBean.getViewId().length === 0) {
       return;
@@ -3022,14 +3051,15 @@ export class FTRUMInnerManager {
     }
     const action = this.activeAction;
     if (action !== null && action.getViewId() === replayContext.viewId &&
-      action.getSessionId() === replayContext.sessionId) {
+      action.getSessionId() === replayContext.sessionId &&
+      this.matchesActionReplayRecording(action.getReplayRecordingId(), metadata)) {
       action.setHasReplay(true);
     }
     let promotedQueuedActions = false;
     for (let index = 0; index < this.pendingCompletedActions.length; index++) {
       const payload = this.pendingCompletedActions[index].payload;
       if (payload.rumAppId === replayContext.applicationId && payload.sessionId === replayContext.sessionId &&
-        payload.viewId === replayContext.viewId) {
+        payload.viewId === replayContext.viewId && this.matchesActionReplayRecording(payload.replayRecordingId, metadata)) {
         promotedQueuedActions = promotedQueuedActions || payload.hasReplay !== true;
         payload.hasReplay = true;
       }
@@ -3058,7 +3088,8 @@ export class FTRUMInnerManager {
       const replayMetadata: FTDBTaskPoolReplayMetadata = {
         hasReplay: metadata.hasReplay,
         recordsCount: metadata.recordsCount,
-        sampledOnError: metadata.sampledOnError
+        sampledOnError: metadata.sampledOnError,
+        recordingId: metadata.recordingId
       };
       // Persist matching Actions together with the View, even after its row is
       // removed. Full aggregate writes would overwrite atomic RUM counters.
@@ -3332,7 +3363,6 @@ export class FTRUMInnerManager {
       const viewId = view.getId();
       const viewName = view.getViewName();
       const viewReferrer = view.getViewReferrer();
-      const hasReplay = view.isHasReplay();
       
       // Refresh session
       this.checkSessionRefresh(true);
@@ -3352,7 +3382,10 @@ export class FTRUMInnerManager {
           needWait
         );
         
-        this.activeAction.setHasReplay(hasReplay);
+        const recordingId = FTSessionReplayBridgeRegistry.getActionRecordingId(this.activeAction.getStartTime());
+        this.activeAction.setReplayRecordingId(recordingId);
+        this.activeAction.setHasReplay(this.hasSessionReplayForAction(
+          this.getSemanticRumAppId(), this.sessionId, viewId, recordingId));
         // Set properties
         if (property && this.hasProperties(property)) {
           this.activeAction.setProperty(property);
@@ -3591,7 +3624,9 @@ export class FTRUMInnerManager {
       const viewName = view.getViewName();
       const viewReferrer = view.getViewReferrer();
       const collectType = this.checkSessionWillCollect(this.sessionId);
-      const hasReplay = view.isHasReplay();
+      const replayRecordingId = FTSessionReplayBridgeRegistry.getActionRecordingId(actualStartTime);
+      const hasReplay = this.hasSessionReplayForAction(
+        this.getSemanticRumAppId(), this.sessionId, viewId, replayRecordingId);
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
         actualProperty = property;
@@ -3613,6 +3648,7 @@ export class FTRUMInnerManager {
         viewReferrer,
         duration: actualDuration,
         hasReplay,
+        replayRecordingId,
         errorCount: 0,
         longTaskCount: 0,
         resourceCount: 0,

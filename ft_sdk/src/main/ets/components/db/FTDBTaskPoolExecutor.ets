@@ -183,6 +183,7 @@ export interface FTDBTaskPoolReplayMetadata {
   hasReplay: boolean;
   recordsCount: number;
   sampledOnError: boolean;
+  recordingId?: string;
 }
 
 export interface FTDBTaskPoolRequest {

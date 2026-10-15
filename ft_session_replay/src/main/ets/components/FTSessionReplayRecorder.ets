@@ -123,6 +123,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private readonly errorSampleStore: SessionReplaySegmentStore | null;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
+  private recordingId: string = '';
   // Stop seals input immediately while accepted detached snapshots finish.
   private isStopping: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
@@ -261,7 +262,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return;
     }
     this.isStarted = true;
-    FTSessionReplayBridgeRegistry.register(this);
+    this.recordingId = FTSessionReplayBridgeRegistry.register(this);
   }
 
   /** Stops RUM lifecycle capture without changing the core SDK. */
@@ -270,8 +271,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.workQueue.close();
       return;
     }
-    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
+    // Seal association before final capture/drain. Late metadata still carries
+    // this recorder's ID, but cannot attach clicks from after this boundary.
     FTSessionReplayBridgeRegistry.unregister(this);
+    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
     this.finishTouchPointers();
     this.isStarted = false;
     this.isStopping = true;
@@ -877,7 +880,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return {
       hasReplay: metadata.hasReplay,
       recordsCount: metadata.recordsCount,
-      sampledOnError: metadata.sampledOnError
+      sampledOnError: metadata.sampledOnError,
+      recordingId: this.recordingId
     };
   }
 

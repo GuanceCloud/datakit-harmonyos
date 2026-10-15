@@ -2202,10 +2202,11 @@ function appendCompletedActionDraft(
   fields[Constants.KEY_RUM_ACTION_ERROR_COUNT] = String(action.errorCount || 0);
   fields[Constants.KEY_RUM_ACTION_LONG_TASK_COUNT] = String(action.longTaskCount || 0);
   fields[Constants.KEY_RUM_ACTION_RESOURCE_COUNT] = String(action.resourceCount || 0);
-  if (action.hasReplay === true) {
+  if (action.hasReplay === true && action.replayRecordingId !== '') {
     fields[Constants.KEY_HAS_REPLAY] = 'true';
     fields[Constants.KEY_SESSION_HAS_REPLAY] = 'true';
   } else {
+    fields[Constants.KEY_HAS_REPLAY] = '';
     fields[Constants.KEY_SESSION_HAS_REPLAY] = '';
   }
   if (action.actionType === Constants.ACTION_TYPE_LAUNCH_COLD) {

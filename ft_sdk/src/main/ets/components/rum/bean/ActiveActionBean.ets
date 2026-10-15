@@ -18,6 +18,7 @@ interface ActiveActionBeanJSON {
     isClose: boolean;
     needWaitAction: boolean;
     hasReplay: boolean;
+    replayRecordingId?: string;
     errorCount: number;
     resourceCount: number;
     longTaskCount: number;
@@ -48,6 +49,7 @@ export class ActiveActionBean {
   private isClose: boolean = false;
   private needWaitAction: boolean = false;
   private hasReplay: boolean = false;
+  private replayRecordingId: string | undefined = undefined;
   private property: Record<string, object> = {};
   private tags: Record<string, string> = {};
   private collectType: CollectType = CollectType.ALL;
@@ -257,6 +259,9 @@ export class ActiveActionBean {
   public setHasReplay(hasReplay: boolean): void {
     this.hasReplay = hasReplay;
   }
+
+  public getReplayRecordingId(): string | undefined { return this.replayRecordingId; }
+  public setReplayRecordingId(recordingId: string | undefined): void { this.replayRecordingId = recordingId; }
   
   /**
    * Get property
@@ -402,6 +407,7 @@ export class ActiveActionBean {
     actionBean.setViewReferrer(this.viewReferrer);
     actionBean.setIsClose(this.isClose);
     actionBean.setHasReplay(this.hasReplay);
+    actionBean.setReplayRecordingId(this.replayRecordingId);
     actionBean.setErrorCount(this.errorCount);
     actionBean.setResourceCount(this.resourceCount);
     actionBean.setLongTaskCount(this.longTaskCount);
@@ -439,6 +445,7 @@ export class ActiveActionBean {
       isClose: this.isClose,
       needWaitAction: this.needWaitAction,
       hasReplay: this.hasReplay,
+      replayRecordingId: this.replayRecordingId,
       errorCount: this.errorCount,
       resourceCount: this.resourceCount,
       longTaskCount: this.longTaskCount,
