@@ -468,15 +468,15 @@ export default function sessionReplayProtocolUnitTest() {
         applicationId: 'browser-app',
         sessionId: 'browser-session',
         viewId: 'browser-view',
-        slotId: 'harmony-web-test',
+        slotId: '1000000126',
         linkContext,
         payload: `{"timestamp":${now},"type":2,"data":{"node":{"id":1}}}`,
         timestamp: now
       };
       recorder.onWebReplaySlotActive(context.slotId, true, now);
-      FTSessionReplayBridgeRegistry.registerWebReplaySlot(context.slotId, 'web-test');
+      FTSessionReplayBridgeRegistry.registerWebReplayComponent('web-test');
       FTSessionReplayBridgeRegistry.observeWebReplaySlots(context.applicationId, context.sessionId,
-        'native-view', [context.slotId], now);
+        'native-view', [{ componentId: 'web-test', slotId: context.slotId }], now);
       expect(recorder.onWebReplayData(context)).assertTrue();
       recorder.flushWebReplayData();
       const replayContext: SessionReplayContext = {
@@ -486,7 +486,7 @@ export default function sessionReplayProtocolUnitTest() {
       };
       const records = recorder.getRecordedRecords(replayContext);
       expect(records.length).assertEqual(1);
-      expect(records[0].slotId).assertEqual('harmony-web-test');
+      expect(records[0].slotId).assertEqual('1000000126');
       expect(records[0].timestamp).assertEqual(now);
 
       recorder.onWebReplaySlotActive(context.slotId, false, now);
@@ -512,7 +512,7 @@ export default function sessionReplayProtocolUnitTest() {
         timestamp: now + 2000
       };
       expect(recorder.onWebReplayData(afterGrace)).assertFalse();
-      FTSessionReplayBridgeRegistry.unregisterWebReplaySlot(context.slotId);
+      FTSessionReplayBridgeRegistry.unregisterWebReplayComponent('web-test');
       recorder.stop();
     });
 

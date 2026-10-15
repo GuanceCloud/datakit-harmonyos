@@ -2,13 +2,14 @@ import { ReplayControlVectors } from '../../main/ets/components/ReplayControlVec
 import { ReplayPatternLock } from '../../main/ets/components/ReplayPatternLock';
 import { FrameNode, UIContext } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
 import { ReplayNativeControlPaint } from '../../main/ets/components/ReplayNativeControlPaint';
 import { ReplayControlWireframes } from '../../main/ets/components/ReplayControlWireframes';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
-import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
+import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWebViewWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { ArkUIReplayLightSnapshot, ArkUIReplayPageTransition, ArkUIReplaySceneBounds, ArkUIReplayScenePage } from '../../main/ets/components/SessionReplayScene';
 
 interface ReplayPosition {
@@ -216,6 +217,25 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
 
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
+    it('recognizes a registered Web on its first capture before any slot has been observed', 0, () => {
+      const registry = FTSessionReplayBridgeRegistry;
+      const node = new ReplayFrameNodeFixture(126, 0, 0, 0, 0, 320, 200).withNodeType('Web');
+      const collector = new ArkUIReplayCollector();
+      registry.registerWebReplayComponent('fixture-126');
+      try {
+        expect(registry.getWebReplaySlotId('fixture-126')).assertEqual('');
+        const first = collector.captureFrameNode(asFrameNode(node));
+        const web = (first.data as FullSnapshotData).wireframes[0] as ReplayWebViewWireframe;
+        expect(web.type).assertEqual('webview');
+        expect(web.slotId).assertEqual(String(web.id));
+        registry.observeWebReplaySlots('app', 's', 'native',
+          [{ componentId: 'fixture-126', slotId: String(web.id) }], first.timestamp);
+        expect(registry.getWebReplaySlotId('fixture-126')).assertEqual(String(web.id));
+      } finally {
+        registry.unregisterWebReplayComponent('fixture-126');
+      }
+    });
+
     it('preserves initial native typography and ignores unset actual font sizes before a node update', 0, () => {
       const attrs: Record<string, Object> = { 'content': 'Initial text', 'fontFamily': 'HarmonyOS Sans',
         'fontColor': '#CE000000', 'fontSize': '16fp', 'actualFontSize': '0px', 'fontWeight': 'FontWeight.Normal' };

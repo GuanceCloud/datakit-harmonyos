@@ -10,7 +10,8 @@ import {
   FTSessionReplayWebErrorContext,
   FTSessionReplayWebContextChange,
   FTSessionReplayWebViewOptions,
-  FTSessionReplayViewMetadata
+  FTSessionReplayViewMetadata,
+  WebReplaySlotObservation
 } from '@guancecloud/ft_sdk';
 import {
   ArkUIReplayCollector,
@@ -1174,10 +1175,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const snapshot = this.collectRootLight(uiContext, rootId, scale);
     const bindingContext = context ?? this.activeContext;
     if (bindingContext !== null) {
-      const slots = snapshot.nodes.filter((node): boolean => node.webViewSlotId !== undefined &&
+      const visibleWebNodes = snapshot.nodes.filter((node): boolean => node.webViewSlotId !== undefined &&
         (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
-        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height)
-        .map((node): string => node.webViewSlotId!);
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height);
+      const slots: Array<WebReplaySlotObservation> = [];
+      for (const node of visibleWebNodes) {
+        slots.push({ componentId: node.componentId, slotId: String(node.id) });
+      }
       FTSessionReplayBridgeRegistry.observeWebReplaySlots(bindingContext.applicationId, bindingContext.sessionId,
         bindingContext.viewId, slots, snapshot.timestamp);
     }

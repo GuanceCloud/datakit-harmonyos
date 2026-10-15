@@ -668,7 +668,9 @@ export class ArkUIReplayCollector {
   ): ReplayWireframe {
     if (node.nodeType === 'Web' && node.webViewSlotId !== undefined) {
       return {
-        id: node.id, type: 'webview', slotId: node.webViewSlotId,
+        // Studio keys the embedded Browser player by the serialized native id,
+        // not by the wireframe's slotId field. Match Android's id/slot identity.
+        id: node.id, type: 'webview', slotId: String(node.id),
         x: node.x, y: node.y, width: node.width, height: node.height,
         permanentId: node.componentId || undefined,
         isVisible: (node.opacity ?? 1) > 0 &&
@@ -1254,8 +1256,11 @@ export class ArkUIReplayCollector {
           this.calendarFrames.captureTheme(this.rasterContext, vpToPxScale, this.captureTimestamp) : undefined,
         inspectorInfo,
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
-        webViewSlotId: nodeType === 'Web' ?
-          FTSessionReplayBridgeRegistry.getWebReplaySlotId(this.readComponentId(node)) || undefined : undefined,
+        // Registration precedes the first native capture; derive its slot here
+        // from the same node ID used to serialize the wireframe, not an alias.
+        webViewSlotId: nodeType === 'Web' &&
+          FTSessionReplayBridgeRegistry.getWebReplayComponentBinding(this.readComponentId(node)) !== null ?
+          String(this.toProtocolId(nodeId)) : undefined,
         isSelectArrow,
         isPopupSurface: parentType === 'Popup' && nodeType === 'Column' ? true : undefined,
         isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,

@@ -171,6 +171,7 @@ export {
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from './src/main/ets/components/sessionreplay/FTSessionReplayBridge';
+export { WebReplaySlotObservation } from './src/main/ets/components/sessionreplay/WebReplaySlotBinder';
 
 // ============================================================================
 // Network Auto Track Helpers

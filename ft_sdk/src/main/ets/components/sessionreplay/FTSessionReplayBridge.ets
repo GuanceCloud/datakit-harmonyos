@@ -1,6 +1,6 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { Utils } from '../utils/Utils';
-import { WebReplaySlotBinder, WebReplaySlotBinding } from './WebReplaySlotBinder';
+import { WebReplaySlotBinder, WebReplaySlotBinding, WebReplaySlotObservation } from './WebReplaySlotBinder';
 
 const TAG = 'FTSessionReplayBridge';
 
@@ -33,7 +33,7 @@ export interface FTSessionReplaySessionContext {
  * `payload` is deliberately kept as the Browser SDK's JSON record instead of
  * being converted into an ArkUI snapshot. The optional Replay HAR owns its
  * validation and persistence, while core supplies the trusted RUM linkage and
- * a stable slot ID for the WebView instance.
+ * the observed native wireframe ID directly as the WebView slot ID.
  */
 export interface FTSessionReplayWebDataContext {
   applicationId: string;
@@ -129,19 +129,19 @@ export class FTSessionReplayBridgeRegistry {
   private static readonly webSlotListeners: Map<string, () => void> = new Map();
   private static webAppForeground: boolean = true;
 
-  public static registerWebReplaySlot(slotId: string, componentId: string): boolean {
-    return FTSessionReplayBridgeRegistry.webSlots.register(slotId, componentId);
+  public static registerWebReplayComponent(componentId: string): boolean {
+    return FTSessionReplayBridgeRegistry.webSlots.register(componentId);
   }
 
-  public static unregisterWebReplaySlot(slotId: string): void {
+  public static unregisterWebReplayComponent(componentId: string): void {
     FTSessionReplayBridgeRegistry.flushWebReplayData();
-    FTSessionReplayBridgeRegistry.webSlots.unregister(slotId);
-    FTSessionReplayBridgeRegistry.webSlotListeners.delete(slotId);
+    FTSessionReplayBridgeRegistry.webSlots.unregister(componentId);
+    FTSessionReplayBridgeRegistry.webSlotListeners.delete(componentId);
   }
 
-  public static setWebReplaySlotListener(slotId: string, listener: () => void): void {
-    if (FTSessionReplayBridgeRegistry.webSlots.get(slotId) !== null) {
-      FTSessionReplayBridgeRegistry.webSlotListeners.set(slotId, listener);
+  public static setWebReplaySlotListener(componentId: string, listener: () => void): void {
+    if (FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId) !== null) {
+      FTSessionReplayBridgeRegistry.webSlotListeners.set(componentId, listener);
     }
   }
 
@@ -172,30 +172,42 @@ export class FTSessionReplayBridgeRegistry {
     return FTSessionReplayBridgeRegistry.webSlots.get(slotId);
   }
 
+  public static getWebReplayComponentBinding(componentId: string): WebReplaySlotBinding | null {
+    return FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId);
+  }
+
   public static getLatestWebReplaySlotId(): string {
     return FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
   }
 
   public static observeWebReplaySlots(applicationId: string, sessionId: string, viewId: string,
-    visibleSlots: Array<string>, timestamp: number): void {
+    visibleSlots: Array<WebReplaySlotObservation>, timestamp: number): void {
     const previousLatest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
     const previous: Map<string, WebReplaySlotBinding> = new Map();
-    for (const slotId of FTSessionReplayBridgeRegistry.webSlots.getSlotIds()) {
-      const binding = FTSessionReplayBridgeRegistry.webSlots.get(slotId);
-      if (binding !== null) previous.set(slotId, binding);
+    for (const componentId of FTSessionReplayBridgeRegistry.webSlots.getComponentIds()) {
+      const binding = FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId);
+      if (binding !== null) previous.set(componentId, binding);
     }
     FTSessionReplayBridgeRegistry.webSlots.observe(applicationId, sessionId, viewId, visibleSlots, timestamp);
     const latest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
-    previous.forEach((before, slotId): void => {
-      const after = FTSessionReplayBridgeRegistry.webSlots.get(slotId);
+    previous.forEach((before, componentId): void => {
+      const after = FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId);
       if (after === null || (before.active === after.active && before.viewId === after.viewId &&
-        before.sessionId === after.sessionId && previousLatest === latest)) return;
+        before.sessionId === after.sessionId && before.applicationId === after.applicationId &&
+        before.slotId === after.slotId && previousLatest === latest)) return;
       FTSessionReplayBridgeRegistry.flushWebReplayData();
-      FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(slotId, after.active && latest === slotId, timestamp);
+      if (before.slotId.length > 0 && before.slotId !== after.slotId) {
+        FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(before.slotId, false, timestamp);
+      }
+      if (after.slotId.length > 0) {
+        FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(after.slotId, after.active && latest === after.slotId, timestamp);
+        FTSessionReplayBridgeRegistry.logDiagnostic(
+          `Replay Web binding: component=${componentId}, wireframeId=${after.slotId}, slot=${after.slotId}, view=${after.viewId}, active=${after.active && latest === after.slotId}`);
+      }
       // Enqueue the native frame before requesting a rebind Full Snapshot.
-      const listener = FTSessionReplayBridgeRegistry.webSlotListeners.get(slotId);
+      const listener = FTSessionReplayBridgeRegistry.webSlotListeners.get(componentId);
       if (listener !== undefined) setTimeout((): void => {
-        if (FTSessionReplayBridgeRegistry.webSlotListeners.get(slotId) === listener) listener();
+        if (FTSessionReplayBridgeRegistry.webSlotListeners.get(componentId) === listener) listener();
       }, 0);
     });
   }
