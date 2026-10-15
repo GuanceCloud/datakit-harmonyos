@@ -26,6 +26,7 @@ import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
 import { ReplayResourceCleanupResult } from './ReplayResourceCleanup';
+import { WebReplayBatcher } from './WebReplayBatcher';
 import { ReplayMetadataNotifier } from './ReplayMetadataNotifier';
 import {
   ReplayWorkerCapture,
@@ -149,6 +150,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   // two-second grace period after a WebView slot becomes inactive.
   private readonly webSlotInactiveAt: Map<string, number> = new Map();
   private readonly workQueue: SessionReplayWorkQueue;
+  private readonly webBatcher: WebReplayBatcher;
   private readonly pendingViewStarts: Map<string, number> = new Map();
   private readonly endedViewStarts: Map<string, number> = new Map();
   // Generations protect the current UI shadow, while accepted immutable frames
@@ -252,6 +254,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       touchPrivacy: config.getTouchPrivacy(),
       diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
     });
+    this.webBatcher = new WebReplayBatcher(
+      (context: SessionReplayContext, records: Array<SessionReplayRecord>, reason: string): boolean => {
+        const accepted = this.appendRecordedRecords(context, records);
+        if (accepted) this.lastCapture = this.createCapture(context, records, null);
+        FTSessionReplayBridgeRegistry.logDiagnostic(
+          `Replay Web batch: view=${context.viewId}, slot=${records[0]?.slotId}, records=${records.length}, reason=${reason}, accepted=${accepted}`);
+        return accepted;
+      },
+      (context: SessionReplayContext): (() => void) =>
+        FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context)));
     this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array, mimeType: string): void => {
       this.workQueue.registerImageAsset(key, bytes, mimeType);
       this.notifyPageChanged();
@@ -275,6 +287,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     // Seal association before final capture/drain. Late metadata still carries
     // this recorder's ID, but cannot attach clicks from after this boundary.
+    this.flushWebReplayData();
     FTSessionReplayBridgeRegistry.unregister(this);
     if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
     this.finishTouchPointers();
@@ -418,10 +431,12 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** Waits for all Replay batches accepted before this call to reach disk. */
   public drainWrites(): Promise<void> {
+    this.flushWebReplayData();
     return this.workQueue.drain((): void => this.metadataNotifier.flush());
   }
 
   public withWriteBarrier(action: () => void): Promise<void> {
+    this.flushWebReplayData();
     return this.workQueue.drain((): void => {
       this.metadataNotifier.flush();
       action();
@@ -437,6 +452,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   public listPendingSegmentIds(): Promise<Array<string>> {
+    this.flushWebReplayData();
     return this.workQueue.listPendingIds().then((ids: Array<string>): Array<string> => {
       this.metadataNotifier.flush();
       return ids;
@@ -822,19 +838,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (Object.keys(context.linkContext).length > 0) {
       replayContext.globalContext = context.linkContext;
     }
-    const capture = this.createCapture(replayContext, [record], null);
-    if (!this.appendRecordedRecords(replayContext, capture.records)) {
-      return false;
-    }
-    this.lastCapture = capture;
-    return true;
+    return this.webBatcher.add(replayContext, record);
   }
+
+  public flushWebReplayData(): boolean { return this.webBatcher.flush(); }
 
   /** Browser RUM Errors promote only the matching error-sampled session. */
   public onWebReplayError(context: FTSessionReplayWebErrorContext): boolean {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
       return true;
     }
@@ -846,6 +860,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     return this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR ||
       this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
   }
@@ -859,6 +874,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     const resolvedContext = this.mergeWebLinkContext(context);
     const nextContext = this.toReplayContext(resolvedContext);
     if (this.activeContext === null || !this.isSameView(this.activeContext, nextContext) ||
@@ -879,6 +895,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (slotId.length === 0) {
       return;
     }
+    if (!active) this.flushWebReplayData();
     this.webSlotInactiveAt.set(slotId, active ? 0 : timestamp);
   }
 
@@ -914,6 +931,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     if (this.queueViewStartedFromRUMContext(context)) {
       this.pendingViewStartContext = null;
       this.pendingViewStartFailure = '';
@@ -928,6 +946,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   public onViewStopped(context: FTSessionReplayRUMContext): void {
     if (!this.isStarted) return;
+    this.flushWebReplayData();
     const replayContext = this.toReplayContext(context);
     if (this.pendingViewStartContext !== null &&
       this.isSameView(this.toReplayContext(this.pendingViewStartContext), replayContext)) {
@@ -968,6 +987,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     const replayContext = this.toReplayContext(context);
     let accepted: boolean;
     if (this.activeContext === null || !this.isSameReplayContext(this.activeContext, replayContext)) {
@@ -983,6 +1003,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     if (!this.isStarted) return;
+    this.flushWebReplayData();
     this.finishTouchPointers();
     this.renewRootEpoch();
     this.activeContext = null;

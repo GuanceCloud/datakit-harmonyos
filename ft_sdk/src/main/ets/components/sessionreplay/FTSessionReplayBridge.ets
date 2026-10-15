@@ -109,6 +109,8 @@ export interface FTSessionReplayBridge {
   getWebViewOptions?(): FTSessionReplayWebViewOptions | null;
   /** Receives one Browser SDK record, already associated with RUM identity. */
   onWebReplayData?(context: FTSessionReplayWebDataContext): boolean;
+  /** Seals a buffered Browser batch before detach or another lifecycle boundary. */
+  flushWebReplayData?(): boolean;
   /** Promotes Browser Replay data when a Browser RUM Error is reported. */
   onWebReplayError?(context: FTSessionReplayWebErrorContext): boolean;
   /** Promotes an error-sampled session when no live native root can be captured. */
@@ -437,6 +439,16 @@ export class FTSessionReplayBridgeRegistry {
       return bridge.onWebReplayData(context);
     } catch (error) {
       FTInnerLogger.w(TAG, `Replay WebView data callback failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  public static flushWebReplayData(): boolean {
+    const bridge = FTSessionReplayBridgeRegistry.bridge;
+    if (bridge === null || bridge.flushWebReplayData === undefined) return true;
+    try { return bridge.flushWebReplayData(); }
+    catch (error) {
+      FTInnerLogger.w(TAG, `Replay Web batch flush failed: ${String(error)}`);
       return false;
     }
   }

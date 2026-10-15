@@ -475,6 +475,7 @@ export default function sessionReplayProtocolUnitTest() {
       };
       recorder.onWebReplaySlotActive(context.slotId, true, now);
       expect(recorder.onWebReplayData(context)).assertTrue();
+      recorder.flushWebReplayData();
       const replayContext: SessionReplayContext = {
         applicationId: context.applicationId,
         sessionId: context.sessionId,
