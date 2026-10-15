@@ -86,7 +86,7 @@ export struct SessionReplayComponentSamples {
   @State imageChanged: boolean = false;
   @State imageAnimation: boolean = false;
   @State canvasChanged: boolean = false;
-  @State videoUrl: string = '';
+  @State videoUrl: string = 'https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgplayer_doc_video/mp4/xgplayer-demo-360p.mp4';
   @State videoSource: string = '';
   @State popupVisible: boolean = false;
   @State sheetVisible: boolean = false;
@@ -116,18 +116,14 @@ export struct SessionReplayComponentSamples {
     context.resourceManager.getMediaContent($r('app.media.startIcon'))
       .then((bytes: Uint8Array): void => {
         const replay = FTSessionReplay.getInstance();
-        replay.registerImageAsset('session-replay-component-image', bytes, 'image/png');
         replay.registerImageAsset('session-replay-inline-image', bytes, 'image/png');
       })
       .catch((): void => {});
-    context.resourceManager.getMediaContent($r('app.media.foreground'))
-      .then((bytes: Uint8Array): void => {
-        FTSessionReplay.getInstance().registerImageAsset('session-replay-component-image-alternate', bytes, 'image/png');
-      })
-      .catch((): void => {});
+    FTSessionReplay.getInstance().registerVideoSource('session-replay-video', '', $r('app.media.startIcon'));
   }
 
   aboutToDisappear(): void {
+    FTSessionReplay.getInstance().unregisterVideoSource('session-replay-video');
     if (this.refreshTimer !== -1) clearTimeout(this.refreshTimer);
     this.timer.pause();
     this.clock.stop();
@@ -607,36 +603,50 @@ export struct SessionReplayComponentSamples {
         Image($r('app.media.startIcon')).id('session-replay-component-image')
           .width(96).height(96).objectFit(ImageFit.Contain).borderRadius(4)
       }
-      QRCode(this.imageChanged ? 'replay-image-B' : 'replay-image-A').width(96).height(96)
+      QRCode(this.imageChanged ? 'replay-image-B' : 'replay-image-A').id('session-replay-qrcode').width(96).height(96)
     }
-    Button('切换图片与二维码').onClick(() => { this.imageChanged = !this.imageChanged; })
+    Button('切换图片与二维码').id('session-replay-image-update').onClick(() => { this.imageChanged = !this.imageChanged; })
     ImageAnimator().images([
       { src: $r('app.media.startIcon'), width: 80, height: 80 },
       { src: $r('app.media.foreground'), width: 80, height: 80 }
-    ]).width(80).height(80).duration(1200).iterations(-1)
+    ]).id('session-replay-image-animator').width(80).height(80).duration(1200).iterations(-1)
       .state(this.imageAnimation ? AnimationStatus.Running : AnimationStatus.Paused)
-    Button('开始 / 暂停图片动画').onClick(() => { this.imageAnimation = !this.imageAnimation; })
+    Button('开始 / 暂停图片动画').id('session-replay-image-animation-toggle').onClick(() => { this.imageAnimation = !this.imageAnimation; })
     this.section('Shape / Rect / Circle / Ellipse / Line / Polygon / Polyline / Path', '检查图形颜色、边界和路径在回放中的表现。')
     Shape() {
-      Rect().width(60).height(40).fill('#2563EB').radius(8)
-      Circle({ width: 40, height: 40 }).translate({ x: 80 })
-      Ellipse().width(70).height(40).fill('#F59E0B').translate({ x: 150 })
-      Polygon().points([[0, 110], [30, 75], [60, 110]]).fill('#7C3AED')
-      Polyline().points([[80, 110], [110, 75], [140, 110]]).stroke('#2563EB').strokeWidth(3).fill(Color.Transparent)
-      Path().commands('M 160 110 L 190 75 L 220 110 Z').fill('#EC4899')
+      Rect().id('session-replay-rect').width(60).height(40).fill('#2563EB').radius(8)
+      Circle({ width: 40, height: 40 }).id('session-replay-circle').translate({ x: 80 })
+      Ellipse().id('session-replay-ellipse').width(70).height(40).fill('#F59E0B').translate({ x: 150 })
+      Polygon().id('session-replay-polygon').width(60).height(35)
+        .points([[0, 35], [30, 0], [60, 35]]).fill('#7C3AED').translate({ y: 75 })
+      Polyline().id('session-replay-polyline').width(60).height(35)
+        .points([[0, 35], [30, 0], [60, 35]]).stroke('#2563EB').strokeWidth(3).fill(Color.Transparent).translate({ x: 80, y: 75 })
+      Path().id('session-replay-path').width(60).height(35)
+        .commands('M 0 35 L 30 0 L 60 35 Z').fill('#EC4899').translate({ x: 160, y: 75 })
     }
-    .width('100%').height(130).fill('#16A34A')
-    Line().width('100%').height(8).startPoint([0, 4]).endPoint([220, 4]).stroke('#0F172A').strokeWidth(2)
-    this.section('Canvas / Video / XComponent', '操作绘制和独立渲染区域，核对内容或占位边界；这些区域需单独确认回放支持情况。')
+    .id('session-replay-shape').width('100%').height(130).fill('#16A34A')
+    Line().id('session-replay-line').width('100%').height(8).startPoint([0, 4]).endPoint([220, 4]).stroke('#0F172A').strokeWidth(2)
+    this.section('Canvas / Video / XComponent', 'Canvas 记录绘制内容；Video 记录封面、状态和低频关键帧；XComponent 保留边界。')
     Canvas(this.canvas).id('session-replay-canvas').width(280).height(120).backgroundColor(Color.White)
       .onReady(() => this.drawCanvas())
-    Button('更新 Canvas 绘制').onClick(() => { this.canvasChanged = !this.canvasChanged; this.drawCanvas(); })
+    Button('更新 Canvas 绘制').id('session-replay-canvas-update').onClick(() => { this.canvasChanged = !this.canvasChanged; this.drawCanvas(); })
     TextInput({ text: this.videoUrl, placeholder: '输入可访问的 MP4 地址后加载 Video' })
       .width('100%').onChange((value: string) => { this.videoUrl = value; })
-    Button('加载视频').enabled(this.videoUrl.trim().length > 0)
-      .onClick(() => { this.videoSource = this.videoUrl.trim(); })
+    Button('加载视频').id('session-replay-video-load').enabled(this.videoUrl.trim().length > 0)
+      .onClick(() => {
+        this.videoSource = this.videoUrl.trim();
+        FTSessionReplay.getInstance().registerVideoSource('session-replay-video', this.videoSource, $r('app.media.startIcon'));
+      })
     Video({ src: this.videoSource, previewUri: $r('app.media.startIcon') })
       .id('session-replay-video').width('100%').height(180).controls(true).autoPlay(false)
+      .onPrepared((event) => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { duration: event.duration, currentTime: 0, playing: false }); })
+      .onStart(() => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { playing: true, buffering: false }); })
+      .onPause(() => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { playing: false }); })
+      .onFinish(() => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { playing: false }); })
+      .onError(() => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { playing: false, buffering: false }); })
+      .onUpdate((event) => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { currentTime: event.time }); })
+      .onSeeking(() => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { buffering: true }); })
+      .onSeeked((event) => { FTSessionReplay.getInstance().updateVideoState('session-replay-video', { currentTime: event.time, buffering: false }); })
     XComponent({ id: 'session-replay-xcomponent', type: XComponentType.SURFACE })
       .id('session-replay-xcomponent').width('100%').height(90).backgroundColor('#CBD5E1')
     Text('XComponent 为 Surface 边界样例；自绘内容需结合实际 Native 渲染模块测试。')

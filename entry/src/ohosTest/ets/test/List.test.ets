@@ -18,6 +18,7 @@ import sessionReplayInputUITest from './SessionReplayInputUITest.test';
 import sessionReplayControlUITest from './SessionReplayControlUITest.test';
 import sessionReplayUploadStateTest from './SessionReplayUploadStateTest.test';
 import sessionReplayOverlayUITest from './SessionReplayOverlayUITest.test';
+import sessionReplayMediaUITest from './SessionReplayMediaUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
@@ -40,4 +41,5 @@ export default function testsuite() {
   sessionReplayControlUITest();
   sessionReplayUploadStateTest();
   sessionReplayOverlayUITest();
+  sessionReplayMediaUITest();
 }
