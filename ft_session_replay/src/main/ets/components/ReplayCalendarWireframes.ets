@@ -147,6 +147,67 @@ export class ReplayCalendarWireframes {
     return presentation;
   }
 
+  /** Native entry borders are layout paint; Inspector can report a zero RenderContext width. */
+  public completeEntry(entry: ArkUIReplayLightNode, nodes: Array<ArkUIReplayLightNode>, index: number,
+    frame: ReplayShapeWireframe, scale: number, limit: number): Array<ReplayWireframe> {
+    let up: ArkUIReplayLightNode | undefined;
+    let down: ArkUIReplayLightNode | undefined;
+    for (let next = index + 1; next + 1 < nodes.length && next < index + 24; next++) {
+      const button = nodes[next];
+      if (button.sceneLayer !== entry.sceneLayer || button.nodeType === 'CalendarPicker' ||
+        button.nodeType === 'CalendarDialog' || button.nodeType === 'Dialog') break;
+      const icon = nodes[next + 1];
+      if (button.nodeType !== 'Button' || button.componentId.length > 0 || icon.nodeType !== 'Image' ||
+        button.x < entry.x || button.y < entry.y || button.x + button.width > entry.x + entry.width + 0.5 ||
+        button.y + button.height > entry.y + entry.height + 0.5 || icon.sceneLayer !== entry.sceneLayer ||
+        icon.x < button.x || icon.y < button.y || icon.x + icon.width > button.x + button.width + 0.5 ||
+        icon.y + icon.height > button.y + button.height + 0.5) continue;
+      const source = this.string(icon, 'src');
+      if (source === 'resource:///ohos_ic_public_arrow_up.svg') up = button;
+      if (source === 'resource:///ohos_ic_public_arrow_down.svg') down = button;
+    }
+    // Require the real, stacked native buttons, not arbitrary content near a picker.
+    if (up === undefined || down === undefined || Math.abs(up.x - down.x) > 0.5 ||
+      Math.abs(up.width - down.width) > 0.5 || Math.abs(up.y + up.height - down.y) > 0.5) return [];
+    const span = down.y + down.height - up.y;
+    const padding = this.attrs(entry)['padding'];
+    let paddingTop = 0;
+    let paddingBottom = 0;
+    try {
+      const value = typeof padding === 'string' && padding.trim().startsWith('{') ?
+        JSON.parse(padding) as Record<string, Object> : padding as Record<string, Object>;
+      if (value !== undefined && value !== null && typeof value === 'object') {
+        paddingTop = this.length(value['top'], scale, 0);
+        paddingBottom = this.length(value['bottom'], scale, 0);
+      } else {
+        paddingTop = paddingBottom = this.length(padding, scale, 0);
+      }
+    } catch (_) { return []; }
+    const inset = this.round((entry.height - span - paddingTop - paddingBottom) / 2);
+    // No hard-coded outer outline: a genuinely borderless entry has no layout inset.
+    if (frame.border === undefined && inset > 0 && inset <= Math.min(entry.width, entry.height) / 4) {
+      frame.border = { width: inset, color: this.color(this.string(entry, 'borderColor'), '#00000019') };
+    }
+    if (limit < 2) return [];
+    // Native add/sub buttons retain their own theme borders even if the host border is overridden.
+    const width = 1;
+    const color = this.color(this.string(up, 'borderColor'), '#00000019');
+    const rtl = up.x + up.width / 2 < entry.x + entry.width / 2;
+    const vertical: ReplayShapeWireframe = {
+      id: -(entry.id * 1024 + 817), type: 'shape', x: rtl ? up.x + up.width - width : up.x,
+      y: up.y, width, height: span,
+      shapeStyle: { backgroundColor: color, opacity: entry.opacity ?? 1, visible: frame.shapeStyle?.visible }
+    };
+    const horizontal: ReplayShapeWireframe = {
+      id: -(entry.id * 1024 + 818), type: 'shape', x: up.x, y: this.round(down.y - width / 2),
+      width: up.width, height: width,
+      shapeStyle: { backgroundColor: color, opacity: entry.opacity ?? 1, visible: frame.shapeStyle?.visible }
+    };
+    const parts: Array<ReplayWireframe> = [vertical, horizontal];
+    for (const part of parts) part.clip = this.clip(entry, part);
+    return parts;
+  }
+
   /** Stable selected/today shapes and at most 42 independently updatable date texts. */
   public create(node: ArkUIReplayLightNode, grid: CalendarGrid, scale: number, limit: number,
     filter: (value: string) => string, allowSelection: boolean): Array<ReplayWireframe> {

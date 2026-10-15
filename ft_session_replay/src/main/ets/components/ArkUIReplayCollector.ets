@@ -927,6 +927,18 @@ export class ArkUIReplayCollector {
           frameSources.set(part.id, node);
         }
       }
+      if (node.nodeType === 'CalendarPicker' && wireframe.type === 'shape') {
+        const parts = this.calendarFrames.completeEntry(node, snapshot.nodes, index, wireframe,
+          snapshot.vpToPxScale, extraBudget);
+        extraBudget -= parts.length;
+        hasControlParts = hasControlParts || parts.length > 0;
+        for (const part of parts) {
+          retained.add(part.id);
+          part.zIndex = wireframe.zIndex;
+          wireframes.push(part);
+          frameSources.set(part.id, node);
+        }
+      }
       const calendarGrid = calendar.grids.get(node.id);
       if (calendarGrid !== undefined) {
         const parts = this.calendarFrames.create(node, calendarGrid, snapshot.vpToPxScale, extraBudget,
@@ -1714,7 +1726,11 @@ export class ArkUIReplayCollector {
     const directBackground = this.readInspectorString(inspector, ['backgroundColor', 'background']);
     const nestedBackground = directBackground === null ?
       this.readInspectorNestedString(inspector, ['background'], ['color']) : null;
-    const backgroundColor = this.normalizeColor(directBackground === null ? nestedBackground : directBackground);
+    // Divider paints its stroke, not backgroundColor. Its measured bounds
+    // already include stroke width, orientation and layout scaling.
+    const backgroundColor = nodeType === 'Divider' ?
+      this.normalizeColor(this.readOwnInspectorString(inspector, ['color'])) ?? '#00000033' :
+      this.normalizeColor(directBackground === null ? nestedBackground : directBackground);
     const reportedCornerRadius = this.readCornerRadius(inspector, vpToPxScale);
     const cornerRadius = this.resolveCornerRadius(nodeType, inspector, width, height, reportedCornerRadius);
     const opacity = this.readInspectorNumber(inspector, ['opacity']);
@@ -1814,9 +1830,9 @@ export class ArkUIReplayCollector {
       this.readInspectorNestedString(inspector, ['font'], ['style', 'fontStyle']));
     const lineHeight = this.readInspectorLength(inspector, ['lineHeight'], vpToPxScale);
     const letterSpacing = this.readInspectorLength(inspector, ['letterSpacing', 'letterSpace'], vpToPxScale);
-    const decoration = this.normalizeTextDecoration(this.readInspectorString(
-      inspector, ['textDecoration', 'decoration']
-    ));
+    const decoration = this.normalizeTextDecoration(
+      this.readInspectorNestedString(inspector, ['textDecoration', 'decoration'], ['type']) ??
+      this.readInspectorString(inspector, ['textDecoration', 'decoration']));
     if (weight !== null) style.weight = weight;
     if (fontStyle !== null) style.style = fontStyle;
     if (lineHeight !== null && lineHeight > 0) style.lineHeight = Math.round(lineHeight);

@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed clipped or transitioning components shrinking and outgoing pages remaining visible after transitions end.
 - Fixed Replay's final frame becoming blank after disabling recording, closing the last page, or returning from a page with native controls.
 - Fixed CalendarPicker dialogs missing localized date grids, selection states, navigation arrows, and native panel styles in Replay.
+- Fixed missing CalendarPicker entry outlines, step-button separators, Divider strokes, and structured text underlines in Replay without component bitmaps.
 - Fixed missing password visibility, sidebar, search, clear, and calendar navigation icons in Replay.
 - Fixed clicks after disabling Replay inheriting the same View's Replay availability, including during Router return transitions and delayed frame persistence. Action association now preserves its original recording interval across queueing and local storage.
 - Fixed incomplete recordings at storage limits or during error-triggered upload, and inconsistent playback after mixed manual/automatic captures.
