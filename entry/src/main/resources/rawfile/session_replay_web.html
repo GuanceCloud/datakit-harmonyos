@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArkWeb Replay 人工验证</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font: 16px sans-serif; color: #172033; background: #edf4ff; }
+  h1 { font-size: 21px; } button { margin: 4px; padding: 10px; border: 1px solid #789; border-radius: 6px; }
+  #sample { background: white; border: 3px solid #2463eb; padding: 20px; overflow-wrap: anywhere; }
+  #sample.changed { background: #fef3c7; border-color: #ca6800; }
+  #counter { font-size: 30px; font-weight: bold; } #status { white-space: pre-wrap; font-size: 12px; }
+  input { display: block; margin: 10px 0; padding: 8px; max-width: 100%; }
+  .scroll-marker { margin: 24px 0; padding: 24px; border: 1px dashed #789; }
+</style>
+<h1>Browser DOM 回放验证</h1>
+<p>先开启上方原生 Replay。本页使用真实 Browser SDK，不手工伪造 rrweb Record。</p>
+<p id="status" aria-live="polite">等待 Browser SDK 加载…</p>
+<button id="start">启动 Browser Replay</button>
+<button id="single">单次 DOM 更新</button>
+<button id="burst">100 次 DOM 更新</button>
+<button id="continuous">连续更新 开/关</button>
+<button id="context">order_id A/B</button>
+<button id="view">切换 Browser View</button>
+<button id="error">报告测试错误</button>
+<div id="sample">
+  <div id="counter">0</div>
+  <p id="order">order_id=A</p>
+  <label>普通输入<input value="public-demo-value"></label>
+  <label>密码输入<input type="password" value="synthetic-password"></label>
+</div>
+<div class="scroll-marker">滚动标记 TOP</div>
+<div class="scroll-marker">滚动标记 MIDDLE</div>
+<div class="scroll-marker">滚动标记 BOTTOM</div>
+<script src="https://static.guance.com/browser-sdk/v3/dataflux-rum.js"></script>
+<script>
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const status = document.getElementById('status');
+  let started = false, count = 0, order = 'A', view = 0, timer;
+  function report(message) { status.textContent = new Date().toISOString() + '\n' + message; }
+  function update() {
+    count++;
+    document.getElementById('counter').textContent = String(count);
+    document.getElementById('sample').classList.toggle('changed', count % 2 === 1);
+  }
+  function start() {
+    if (started) return;
+    const bridge = window.FTWebViewJavascriptBridge;
+    if (!bridge || !window.DATAFLUX_RUM) { report('未发现原生 Bridge 或 CDN 加载失败。请在 Demo WebView 内打开。'); return; }
+    const capabilities = bridge.getCapabilities();
+    if (!capabilities || !JSON.parse(capabilities).includes('records')) {
+      report('原生 Replay 未开启。先点原生 Replay 开/关，再重新加载本页。'); return;
+    }
+    DATAFLUX_RUM.init({
+      applicationId: params.get('appId') || 'arkweb-replay-validation',
+      datakitOrigin: params.get('datakitOrigin') || 'http://127.0.0.1',
+      service: 'arkweb-replay-validation', env: 'test', version: '1',
+      sessionSampleRate: 100, sessionReplaySampleRate: 100,
+      sessionReplayOnErrorSampleRate: 100, trackInteractions: true
+    });
+    DATAFLUX_RUM.setGlobalContextProperty('order_id', order);
+    DATAFLUX_RUM.startSessionReplayRecording();
+    started = true;
+    report('真实 Browser Replay 已启动\ncapabilities=' + capabilities + '\nprivacy=' + bridge.getPrivacyLevel());
+  }
+  document.getElementById('start').onclick = start;
+  document.getElementById('single').onclick = update;
+  document.getElementById('burst').onclick = function () {
+    let remaining = 100;
+    function tick() { update(); if (--remaining > 0) setTimeout(tick, 16); }
+    tick();
+  };
+  document.getElementById('continuous').onclick = function () {
+    if (timer) { clearInterval(timer); timer = undefined; }
+    else timer = setInterval(update, 100);
+  };
+  document.getElementById('context').onclick = function () {
+    if (!started) return;
+    order = order === 'A' ? 'B' : 'A';
+    DATAFLUX_RUM.setGlobalContextProperty('order_id', order);
+    DATAFLUX_RUM.addAction('replay-link-' + order);
+    document.getElementById('order').textContent = 'order_id=' + order;
+  };
+  document.getElementById('view').onclick = function () {
+    if (!started) return;
+    DATAFLUX_RUM.startView('replay-browser-view-' + (++view));
+    DATAFLUX_RUM.addAction('replay-new-view-' + view);
+    update();
+  };
+  document.getElementById('error').onclick = function () {
+    if (started) DATAFLUX_RUM.addError(new Error('Intentional ArkWeb Replay verification error'));
+  };
+  report('CDN 已加载。等待原生 Replay 开启，然后点“启动 Browser Replay”。');
+  if (params.get('auto') === '1') start();
+</script>
+</html>

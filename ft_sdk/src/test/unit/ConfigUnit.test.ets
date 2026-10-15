@@ -225,9 +225,11 @@ class FakeFTSDKRuntime implements FTSDKRuntime {
   }
 }
 
+interface FakeApplicationInfo { name: string; process: string; }
+
 class FakeAbilityContext {
   processName: string = 'com.ft.config.unit';
-  applicationInfo: Object = { name: 'com.ft.config.unit', process: 'com.ft.config.unit' };
+  applicationInfo: FakeApplicationInfo = { name: 'com.ft.config.unit', process: 'com.ft.config.unit' };
   filesDir: string = '/tmp/ft-sdk-config-unit/files';
   databaseDir: string = '/tmp/ft-sdk-config-unit/databases';
 }

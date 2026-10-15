@@ -186,7 +186,9 @@ export default function cacheGovernanceUnitTest() {
       action.hasReplay = false;
       action.errorCount = 2;
       const custom: CacheGovernanceReplayProperty = { value: 'preserved' };
-      action.extraAttr = { custom };
+      const extra: Record<string, Object> = {};
+      extra['custom'] = custom;
+      action.extraAttr = extra;
       await store.execute({ command: 'upsertRumView', view });
       await store.execute({ command: 'insertRumAction', actionBean: action });
       expect((await store.execute({

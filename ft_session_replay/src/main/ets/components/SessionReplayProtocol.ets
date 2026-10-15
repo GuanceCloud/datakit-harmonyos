@@ -191,6 +191,11 @@ export interface SessionReplayRecord {
   slotId?: string;
 }
 
+/** Native mobile snapshots use 10; Browser rrweb snapshots use 2. */
+export function isReplayFullSnapshot(record: SessionReplayRecord): boolean {
+  return record.slotId === undefined ? record.type === ReplayRecordType.FULL_SNAPSHOT : (record.type as number) === 2;
+}
+
 export interface FullSnapshotData {
   wireframes: Array<ReplayWireframe>;
 }
@@ -350,7 +355,7 @@ export function createAndroidReplayMobileSegment(
   );
   let hasFullSnapshot = false;
   for (let index = 0; index < orderedRecords.length; index++) {
-    if (orderedRecords[index].type === ReplayRecordType.FULL_SNAPSHOT) {
+    if (isReplayFullSnapshot(orderedRecords[index])) {
       hasFullSnapshot = true;
       break;
     }

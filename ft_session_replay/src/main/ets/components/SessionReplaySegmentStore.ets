@@ -2,7 +2,7 @@ import { replayValuesEqual } from './ReplayWireframeValues';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import {
-  FullSnapshotData, ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
+  FullSnapshotData, isReplayFullSnapshot, ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
 } from './SessionReplayProtocol';
 
 /** One durable batch of Android-compatible records for a single RUM View. */
@@ -349,7 +349,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private isCheckpoint(record: SessionReplayRecord): boolean {
-    return record.slotId === undefined ? record.type === ReplayRecordType.FULL_SNAPSHOT : (record.type as number) === 2;
+    return isReplayFullSnapshot(record);
   }
 
   private isJournalRecord(record: SessionReplayRecord): boolean {

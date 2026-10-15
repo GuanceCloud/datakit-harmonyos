@@ -8,6 +8,7 @@
  */
 
 import cachePolicyUnitTest from './unit/CachePolicyUnit.test';
+import webReplayBridgeUnitTest from './unit/WebReplayBridgeUnit.test';
 import cacheGovernanceUnitTest from './unit/CacheGovernanceUnit.test';
 import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
@@ -73,4 +74,5 @@ export default function testsuite() {
   userDataUnitTest();
   randomUserIdPersistenceUnitTest();
   deviceUUIDManagerUnitTest();
+  webReplayBridgeUnitTest();
 }

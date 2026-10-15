@@ -8,7 +8,7 @@ import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import {
   ANDROID_REPLAY_ENDPOINTS,
   HARMONY_REPLAY_SOURCE,
-  ReplayRecordType,
+  isReplayFullSnapshot,
   serializeAndroidReplayMobileSegment
 } from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
@@ -109,7 +109,7 @@ export function createSessionReplayUploadFields(
     const record = records[index];
     start = Math.min(start, record.timestamp);
     end = Math.max(end, record.timestamp);
-    if (record.type === ReplayRecordType.FULL_SNAPSHOT) {
+    if (isReplayFullSnapshot(record)) {
       hasFullSnapshot = true;
     }
   }

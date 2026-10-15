@@ -210,12 +210,14 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Browser SDK compatibility: null means the optional Replay HAR is absent. */
   public getSessionReplayPrivacyLevel(): string | null {
+    if (FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(this.sessionReplaySlotId) === null) return null;
     const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
     return options === null ? null : options.privacyLevel;
   }
 
   /** Browser SDK compatibility: records capability is exposed only with Replay. */
   public getSessionReplayCapabilities(): string | null {
+    if (FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(this.sessionReplaySlotId) === null) return null;
     const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
     return options === null ? null : JSON.stringify(options.capabilities);
   }
@@ -641,7 +643,7 @@ export class FTWebViewHandler implements JsReceiver {
             }
           }
 
-          const replayLinkContextChanged = this.updateSessionReplayWebLinkContext(tagsMap, fieldsMap);
+          const replayLinkContextChanged = this.updateSessionReplayWebLinkContext(tagsMap, fieldsMap, browserViewId ?? '');
           const container = FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(this.sessionReplaySlotId);
           const nativeViewId = container?.viewId || FTRUMInnerManager.getInstance().getActiveView()?.getId() || '';
           if (FTSessionReplayBridgeRegistry.getWebViewOptions() !== null && container !== null && nativeViewId.length > 0) {
@@ -692,7 +694,10 @@ export class FTWebViewHandler implements JsReceiver {
         }
 
       } else if (name === WEB_JS_TYPE_SESSION_REPLAY) {
-        this.handleSessionReplayWebEvent(dataJson);
+        const replayView = eventObj.view;
+        const replayViewId = replayView !== undefined && typeof replayView === 'object' &&
+          typeof replayView.id === 'string' ? replayView.id as string : '';
+        this.handleSessionReplayWebEvent(dataJson, replayViewId);
       } else if (name === WEB_JS_TYPE_TRACK) {
         // Not used in current implementation
         FTInnerLogger.d(TAG, "TRACK data received from WebView");
@@ -740,7 +745,8 @@ export class FTWebViewHandler implements JsReceiver {
    * supplies RUM identity and a handler-stable slot; it never persists or
    * parses the replay payload itself.
    */
-  private handleSessionReplayWebEvent(dataJson: Record<string, string | object> | null): void {
+  private handleSessionReplayWebEvent(dataJson: Record<string, string | object> | null,
+    browserViewId: string = ''): void {
     if (dataJson === null || !FTRUMConfigManager.getInstance().isRumEnable()) {
       return;
     }
@@ -748,10 +754,12 @@ export class FTWebViewHandler implements JsReceiver {
       return;
     }
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
-    const applicationId = rumConfig === null ? '' : rumConfig.getRumAppId();
+    if (rumConfig === null || !rumConfig.isEnableTraceWebView()) return;
+    const applicationId = rumConfig.getRumAppId();
     const sessionId = FTRUMInnerManager.getInstance().getSessionId();
-    const activeView = FTRUMInnerManager.getInstance().getActiveView();
-    const viewId = this.webViewId;
+    // Current Browser SDK sends view.id with every rrweb message. It is authoritative,
+    // including an initial Full Snapshot arriving before the first Browser RUM View.
+    const viewId = browserViewId || this.webViewId;
     if (applicationId.length === 0 || sessionId.length === 0 || viewId.length === 0 ||
       !FTSessionReplayBridgeRegistry.acceptsWebReplayData(this.sessionReplaySlotId, applicationId, sessionId, Date.now())) {
       FTInnerLogger.w(TAG, 'Ignore WebView Session Replay data without active RUM linkage.');
@@ -762,7 +770,7 @@ export class FTWebViewHandler implements JsReceiver {
       sessionId,
       viewId,
       slotId: this.sessionReplaySlotId,
-      linkContext: this.webReplayLinkContext,
+      linkContext: this.webReplayContexts.get(viewId) ?? (viewId === this.webViewId ? this.webReplayLinkContext : {}),
       payload: JSON.stringify(dataJson),
       timestamp: Date.now()
     });
@@ -833,11 +841,16 @@ export class FTWebViewHandler implements JsReceiver {
   }
 
   /** Extracts only explicitly configured RUM-link keys from Browser RUM data. */
-  private updateSessionReplayWebLinkContext(tags: Map<string, string>, fields: Map<string, string>): boolean {
-    const previousSignature = this.getSessionReplayLinkContextSignature(this.webReplayLinkContext);
+  private updateSessionReplayWebLinkContext(tags: Map<string, string>, fields: Map<string, string>,
+    eventViewId: string = ''): boolean {
+    const contextViewId = eventViewId || this.webViewId;
+    const previous = this.webReplayContexts.get(contextViewId) ??
+      (contextViewId === this.webViewId ? this.webReplayLinkContext : {});
+    const previousSignature = this.getSessionReplayLinkContextSignature(previous);
     const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
     if (linkKeys.length === 0) {
-      this.webReplayLinkContext = {};
+      if (contextViewId === this.webViewId) this.webReplayLinkContext = {};
+      this.webReplayContexts.delete(contextViewId);
       return previousSignature.length > 0;
     }
     const linkContext: Record<string, string | number | boolean> = {};
@@ -859,14 +872,14 @@ export class FTWebViewHandler implements JsReceiver {
     if (Object.keys(linkContext).length === 0) {
       return false;
     }
-    this.webReplayLinkContext = linkContext;
-    if (this.webViewId.length > 0) {
-      if (this.webReplayContexts.size >= 20 && !this.webReplayContexts.has(this.webViewId)) {
+    if (contextViewId === this.webViewId) this.webReplayLinkContext = linkContext;
+    if (contextViewId.length > 0) {
+      if (this.webReplayContexts.size >= 20 && !this.webReplayContexts.has(contextViewId)) {
         this.webReplayContexts.delete(this.webReplayContexts.keys().next().value as string);
       }
-      this.webReplayContexts.set(this.webViewId, linkContext);
+      this.webReplayContexts.set(contextViewId, linkContext);
     }
-    return previousSignature !== this.getSessionReplayLinkContextSignature(linkContext);
+    return contextViewId === this.webViewId && previousSignature !== this.getSessionReplayLinkContextSignature(linkContext);
   }
 
   private getSessionReplayLinkContextSignature(context: Record<string, string | number | boolean>): string {
