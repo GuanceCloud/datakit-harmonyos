@@ -50,6 +50,8 @@ export interface ReplayInlineRun {
   nodeType: string;
   inspectorInfo: Object | null;
   text: string;
+  /** Native parent Span, for typography fallback only. */
+  fontWeightParentId?: number;
   width?: number;
   height?: number;
   componentRasterKey?: string;
@@ -78,6 +80,8 @@ export interface ArkUIReplayLightNode {
   selectLabelOwnerId?: number;
   /** Native label fallback for an internal Button/Toggle Text with empty Inspector content. */
   buttonLabelOwnerId?: number;
+  /** Nearest native text-style owner, preserved across internal Row/Column wrappers. */
+  fontWeightOwnerId?: number;
   controlState?: number;
   controlPoints?: Array<number>;
   controlPointer?: ReplayPatternPoint;
@@ -296,11 +300,13 @@ export class SessionReplayScene {
           isSelectArrow: source.isSelectArrow,
           selectLabelOwnerId: source.selectLabelOwnerId,
           buttonLabelOwnerId: source.buttonLabelOwnerId,
+          fontWeightOwnerId: source.fontWeightOwnerId,
           controlState: source.controlState, controlParentId: source.controlParentId,
           controlPoints: source.controlPoints?.slice(),
           controlPointer: source.controlPointer === undefined ? undefined : { x: source.controlPointer.x, y: source.controlPointer.y },
           inlineRuns: source.inlineRuns?.map((run): ReplayInlineRun => ({
             id: run.id, nodeType: run.nodeType, inspectorInfo: run.inspectorInfo, text: run.text,
+            fontWeightParentId: run.fontWeightParentId,
             width: run.width, height: run.height, componentRasterKey: run.componentRasterKey })),
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,

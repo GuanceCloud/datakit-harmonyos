@@ -7,6 +7,7 @@ import { image } from '@kit.ImageKit';
 import { resourceManager } from '@kit.LocalizationKit';
 import { ReplayMarqueeAnimation } from './ReplayMarqueeAnimation';
 import { ReplayRichText } from './ReplayRichText';
+import { normalizeReplayFontWeight, readReplayFontWeight } from './ReplayFontWeight';
 import { ReplayComponentRaster, ReplayRasterOptions } from './ReplayComponentRaster';
 import { ReplayVideoCapture, ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 import { ReplayVideoWireframes } from './ReplayVideoWireframes';
@@ -825,6 +826,7 @@ export class ArkUIReplayCollector {
     const retained = new Set<number>();
     const groupStates = this.controlFrames.groupStates(snapshot.nodes);
     const calendar = this.calendarFrames.prepare(snapshot.nodes, snapshot.timestamp);
+    const fontWeights = this.resolveFontWeights(snapshot.nodes);
     const selectInspectors = new Map<number, string | null>();
     for (const node of snapshot.nodes) {
       if (node.nodeType === 'Select' || node.nodeType === 'Button' || node.nodeType === 'Toggle') {
@@ -841,6 +843,12 @@ export class ArkUIReplayCollector {
           this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null);
       retained.add(node.id);
       let wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
+      // Resolved or explicit child weights (including Normal) always win.
+      // Apply fallback after the property cache so owner-only changes stay live.
+      if (wireframe.type === 'text' && wireframe.textStyle.weight === undefined) {
+        const weight = fontWeights.get(node.id);
+        if (weight !== undefined) wireframe.textStyle.weight = weight;
+      }
       if (node.systemIconZIndex !== undefined) wireframe.zIndex = node.systemIconZIndex;
       if (node.systemIconSvg !== undefined && wireframe.type !== 'placeholder') {
         // Keep native geometry, fit, clipping, transforms and tint. Loading a
@@ -995,7 +1003,8 @@ export class ArkUIReplayCollector {
       if (node.inlineRuns !== undefined) {
         const children = this.richText.createNative(node, snapshot.vpToPxScale, extraBudget,
           (value: string, input: boolean): string => this.filterText(value, input ? 'RichEditor' : 'Text', node.width, inspector),
-          (source: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlImage(node, source, template, snapshot.vpToPxScale));
+          (source: string, template: ReplayShapeWireframe): ReplayWireframe => this.controlImage(node, source, template, snapshot.vpToPxScale),
+          fontWeights.get(node.id));
         extraBudget -= children.length;
         for (const child of children) {
           retained.add(child.id);
@@ -1081,7 +1090,8 @@ export class ArkUIReplayCollector {
     parentId: number = 0,
     grandparentId: number = 0,
     marqueeTextX?: number,
-    inheritedModalProjection?: ReplayNativeModalProjection
+    inheritedModalProjection?: ReplayNativeModalProjection,
+    fontWeightOwnerId?: number
   ): void {
     if (output.length >= nodeBudget) {
       return;
@@ -1249,6 +1259,7 @@ export class ArkUIReplayCollector {
           this.toProtocolId(grandparentId) : undefined,
         buttonLabelOwnerId: nodeType === 'Text' && (parentType === 'Button' || parentType === 'Toggle') ?
           this.toProtocolId(parentId) : undefined,
+        fontWeightOwnerId,
         isRoot,
         usedTransformedPosition,
         opacity,
@@ -1275,6 +1286,7 @@ export class ArkUIReplayCollector {
         this.activeComponentAnimations = this.activeComponentAnimations || sample.active;
       } catch (_) { textX = x; }
     }
+    const childFontWeightOwnerId = this.isFontWeightOwner(nodeType) ? this.toProtocolId(nodeId) : fontWeightOwnerId;
     while (child !== null && output.length < nodeBudget) {
       // A completed Text raster already contains its inline image children.
       if (!(componentRasterKey !== undefined && this.isMediaNode(nodeType) && nodeType !== 'Video') &&
@@ -1282,7 +1294,8 @@ export class ArkUIReplayCollector {
         !(nodeType === 'Radio' && !String(controlAttrs['indicatorType'] ?? 'TICK').toUpperCase().includes('CUSTOM')) &&
         ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
         this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
-          excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX, modalProjection);
+          excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX, modalProjection,
+          childFontWeightOwnerId);
       }
       try {
         child = child.getNextSibling();
@@ -1329,7 +1342,7 @@ export class ArkUIReplayCollector {
   private readEditorContentSignature(id: number): string | null {
     if (this.editorContentSignatures === null) {
       try {
-        const tree = this.rasterContext?.getFilteredInspectorTree(['id', 'content', 'src', 'fontSize', 'fontColor', 'fontWeight', 'fontFamily', 'fontStyle',
+        const tree = this.rasterContext?.getFilteredInspectorTree(['id', 'content', 'src', 'fontSize', 'fontColor', 'fontWeight', 'font', 'fontFamily', 'fontStyle',
           'letterSpacing', 'lineHeight', 'decoration', 'width', 'height', 'symbolColor', 'symbolColorList', 'symbolId']) ?? '';
         if (tree.length === 0 || tree.length > MAX_OVERLAY_TREE_BYTES) return null;
         this.editorContentSignatures = new Map();
@@ -1347,7 +1360,7 @@ export class ArkUIReplayCollector {
     const runs: Array<ReplayInlineRun> = [];
     for (const descriptor of descriptors) {
       const run: ReplayInlineRun = { id: descriptor.id, nodeType: descriptor.nodeType,
-        inspectorInfo: descriptor.inspectorInfo, text: descriptor.text };
+        inspectorInfo: descriptor.inspectorInfo, text: descriptor.text, fontWeightParentId: descriptor.fontWeightParentId };
       if (run.nodeType !== 'Span') {
         try {
           const image = this.rasterContext?.getFrameNodeByUniqueId(run.id);
@@ -1371,18 +1384,20 @@ export class ArkUIReplayCollector {
   }
 
   private readEditorDescriptors(node: Record<string, Object>, owner: number, depth: number,
-    signatures: Map<number, string>, count: Array<number>): void {
+    signatures: Map<number, string>, count: Array<number>, parentSpanId?: number): void {
     if (depth > 64 || count[0]++ > 4096) return;
     if ((node['$type'] === 'RichEditor' || node['$type'] === 'Text') && typeof node['$ID'] === 'number') {
       owner = node['$ID'] as number;
       signatures.set(owner, '');
       this.inlineTextRuns?.set(owner, []);
+      parentSpanId = undefined;
     }
     if (owner > 0) {
       const attrs = (node['$attrs'] ?? {}) as Record<string, Object>;
       let signature = `${node['$type']}|${node['$ID']}|`;
       for (const key of ['content', 'src', 'fontSize', 'fontColor', 'fontWeight', 'fontFamily', 'fontStyle',
         'letterSpacing', 'lineHeight', 'decoration', 'width', 'height', 'symbolColor', 'symbolColorList', 'symbolId']) signature += `${String(attrs[key] ?? '').substring(0, 4096)}|`;
+      signature += `${JSON.stringify(attrs['font'] ?? '').substring(0, 4096)}|${parentSpanId ?? ''}|`;
       signatures.set(owner, ((signatures.get(owner) ?? '') + signature).substring(0, 16384));
       const type = String(node['$type'] ?? '');
       const runs = this.inlineTextRuns?.get(owner);
@@ -1391,13 +1406,16 @@ export class ArkUIReplayCollector {
         const id = node['$ID'];
         const content = typeof attrs['content'] === 'string' ? attrs['content'] as string : '';
         if (typeof id !== 'number' || runs.length >= 64 || content.length > 4096) this.inlineTextRuns?.set(owner, null);
-        else runs.push({ id, nodeType: type, inspectorInfo: attrs, text: content });
+        else {
+          runs.push({ id, nodeType: type, inspectorInfo: attrs, text: content, fontWeightParentId: parentSpanId });
+          if (type === 'Span') parentSpanId = id;
+        }
         if (type === 'ImageSpan' || type === 'Image') return;
       }
     }
     const children = node['$children'];
     if (Array.isArray(children)) for (const child of children as Array<Object>) {
-      if (child !== null && typeof child === 'object') this.readEditorDescriptors(child as Record<string, Object>, owner, depth + 1, signatures, count);
+      if (child !== null && typeof child === 'object') this.readEditorDescriptors(child as Record<string, Object>, owner, depth + 1, signatures, count, parentSpanId);
     }
   }
 
@@ -1822,9 +1840,9 @@ export class ArkUIReplayCollector {
       size: Math.max(8, Math.min(72, Math.round(size === null || size <= 0 ? 16 : size))),
       color: color === null ? DEFAULT_TEXT_COLOR : color
     };
-    const weight = this.normalizeFontWeight((placeholder ? this.readInspectorNestedString(inspector, ['placeholderFont'], ['weight', 'fontWeight']) : null) ??
-      this.readInspectorString(inspector, ['fontWeight', 'weight']) ??
-      this.readInspectorNestedString(inspector, ['font'], ['weight', 'fontWeight']));
+    const weight = (placeholder ? normalizeReplayFontWeight(
+      this.readInspectorNestedString(inspector, ['placeholderFont'], ['weight', 'fontWeight'])) : null) ??
+      readReplayFontWeight(this.getInspectorValue(inspector));
     const fontStyle = this.normalizeFontStyle((placeholder ? this.readInspectorNestedString(inspector, ['placeholderFont'], ['style', 'fontStyle']) : null) ??
       this.readInspectorString(inspector, ['fontStyle', 'style']) ??
       this.readInspectorNestedString(inspector, ['font'], ['style', 'fontStyle']));
@@ -2767,21 +2785,32 @@ export class ArkUIReplayCollector {
     return null;
   }
 
-  private normalizeFontWeight(value: string | null): number | null {
-    if (value === null) return null;
-    const normalized = value.trim().toLowerCase();
-    const numeric = Number(normalized);
-    if (Number.isFinite(numeric) && numeric >= 100 && numeric <= 900) {
-      return Math.round(numeric / 100) * 100;
+  private isFontWeightOwner(type: string): boolean {
+    return ['Text', 'Button', 'Toggle', 'Select', 'TextInput', 'TextArea', 'Search', 'SearchField',
+      'RichEditor', 'TextPicker', 'DatePicker', 'TimePicker', 'CalendarPicker', 'TextClock', 'TextTimer', 'Hyperlink'].includes(type);
+  }
+
+  /** Follow real native ownership within a scene, never inferred screen overlap. */
+  private resolveFontWeights(nodes: Array<ArkUIReplayLightNode>): Map<number, number> {
+    const sources = new Map<number, ArkUIReplayLightNode>();
+    const weights = new Map<number, number>();
+    for (const node of nodes) {
+      sources.set(node.id, node);
+      const weight = readReplayFontWeight(node.inspectorInfo);
+      if (weight !== null) weights.set(node.id, weight);
     }
-    if (normalized.includes('thin')) return 100;
-    if (normalized.includes('light')) return 300;
-    if (normalized.includes('regular') || normalized.includes('normal')) return 400;
-    if (normalized.includes('medium')) return 500;
-    if (normalized.includes('semi') || normalized.includes('demi')) return 600;
-    if (normalized.includes('extra') || normalized.includes('black') || normalized.includes('heavy')) return 900;
-    if (normalized.includes('bold')) return 700;
-    return null;
+    for (const node of nodes) {
+      if (weights.has(node.id)) continue;
+      let ownerId = node.fontWeightOwnerId ?? node.buttonLabelOwnerId ?? node.selectLabelOwnerId;
+      for (let depth = 0; ownerId !== undefined && depth < 32; depth++) {
+        const owner = sources.get(ownerId);
+        if (owner === undefined || owner.sceneLayer !== node.sceneLayer) break;
+        const weight = weights.get(ownerId);
+        if (weight !== undefined) { weights.set(node.id, weight); break; }
+        ownerId = owner.fontWeightOwnerId ?? owner.buttonLabelOwnerId ?? owner.selectLabelOwnerId;
+      }
+    }
+    return weights;
   }
 
   private normalizeFontStyle(value: string | null): 'normal' | 'italic' | null {

@@ -1,4 +1,5 @@
 import { text } from '@kit.ArkGraphics2D';
+import { readReplayFontWeight } from './ReplayFontWeight';
 import { ArkUIReplayLightNode, ReplayInlineRun } from './SessionReplayScene';
 import { ReplayShapeWireframe, ReplayTextStyle, ReplayTextWireframe, ReplayWireframe } from './SessionReplayProtocol';
 
@@ -68,15 +69,20 @@ export class ReplayRichText {
   /** Native spans use the same typography engine with media placeholders, rather than a Text screenshot. */
   public createNative(node: ArkUIReplayLightNode, scale: number, limit: number,
     filter: (value: string, input: boolean) => string,
-    imageResolver: (source: string, frame: ReplayShapeWireframe) => ReplayWireframe): Array<ReplayWireframe> {
+    imageResolver: (source: string, frame: ReplayShapeWireframe) => ReplayWireframe,
+    inheritedFontWeight?: number): Array<ReplayWireframe> {
     if (node.inlineRuns === undefined || limit <= 0) return [];
     const attrs = this.nativeAttrs(node.inspectorInfo);
-    const base = this.nativeStyle(attrs, { family: 'sans-serif', size: 16, color: '#1F2937FF', weight: 400 }, scale);
+    const base = this.nativeStyle(attrs, { family: 'sans-serif', size: 16, color: '#1F2937FF', weight: inheritedFontWeight ?? 400 }, scale);
     const alignment = String(attrs['textAlign'] ?? '').toUpperCase();
-    const runs = node.inlineRuns.map((run): HtmlRun => ({ text: run.text,
-      style: this.nativeStyle(this.nativeAttrs(run.inspectorInfo), base, scale), input: node.nodeType === 'RichEditor',
-      image: run.nodeType === 'Span' ? undefined : run }));
-    const signature = `${JSON.stringify(node.inspectorInfo)}|${JSON.stringify(node.inlineRuns)}`;
+    const spanStyles = new Map<number, ReplayTextStyle>();
+    const runs = node.inlineRuns.map((run): HtmlRun => {
+      const parent = spanStyles.get(run.fontWeightParentId ?? 0) ?? base;
+      const style = this.nativeStyle(this.nativeAttrs(run.inspectorInfo), parent, scale);
+      spanStyles.set(run.id, style);
+      return { text: run.text, style, input: node.nodeType === 'RichEditor', image: run.nodeType === 'Span' ? undefined : run };
+    });
+    const signature = `${base.weight}|${JSON.stringify(node.inspectorInfo)}|${JSON.stringify(node.inlineRuns)}`;
     if (signature.length > 65536) return [];
     let cached = this.cache.get(node.id);
     if (cached === undefined || cached.html !== signature || cached.width !== node.width || cached.scale !== scale) {
@@ -138,11 +144,8 @@ export class ReplayRichText {
     const color = String(attrs['fontColor'] ?? '');
     if (/^#[0-9a-f]{8}$/i.test(color)) style.color = `#${color.substring(3)}${color.substring(1, 3)}`.toUpperCase();
     else if (/^#[0-9a-f]{6}$/i.test(color)) style.color = color.toUpperCase() + 'FF';
-    const weight = String(attrs['fontWeight'] ?? '');
-    if (weight.toLowerCase().includes('bold')) style.weight = 700;
-    else if (weight.toLowerCase().includes('medium')) style.weight = 500;
-    else if (weight.toLowerCase().includes('normal') || weight.toLowerCase().includes('regular')) style.weight = 400;
-    else if (/^\d{3}$/.test(weight)) style.weight = Number(weight);
+    const weight = readReplayFontWeight(attrs);
+    if (weight !== null) style.weight = weight;
     if (String(attrs['fontStyle'] ?? '').toLowerCase().includes('italic')) style.style = 'italic';
     if (typeof attrs['fontFamily'] === 'string' && (attrs['fontFamily'] as string).length > 0) style.family = String(attrs['fontFamily']);
     return style;
