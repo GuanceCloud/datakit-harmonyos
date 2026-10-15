@@ -1,9 +1,10 @@
 import { webview } from "@kit.ArkWeb";
-import { FTRUMConfig, FTWebViewHandler } from "@guancecloud/ft_sdk/Index";
+import { FTSDK, FTRUMConfig, FTWebViewHandler } from "@guancecloud/ft_sdk/Index";
 import { KEY_WEB_VIEW_URL } from "../entryability/EntryAbility";
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { FTSessionReplay } from '@guancecloud/ft_session_replay';
+import { BrowserReplayState, formatWebReplayState, NativeReplayState, WebReplayProbe } from '../utils/WebReplayDiagnostics';
 
 @Component
 struct ReplaySecondaryWebPane {
@@ -47,6 +48,15 @@ export struct WebViewPage {
   @State private secondWebVisible: boolean = true;
   @State private fixtureMode: boolean = false;
   @State private replayStatus: string = '';
+  @State private nativeReplayEnabled: boolean = false;
+  @State private replayDiagnostics: string = '';
+  @State private checkingReplay: boolean = false;
+  private readonly replayProbe: WebReplayProbe = new WebReplayProbe();
+  private browserReplayState: BrowserReplayState | null = null;
+  private browserReplayError: string = '';
+  private documentLoaded: boolean = false;
+  private replayEnabledAtLoad: boolean = false;
+  private restoreSecondWeb: boolean = false;
   private rebuildTimer: number = -1;
 
   aboutToAppear() {
@@ -57,16 +67,25 @@ export struct WebViewPage {
       this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
       this.isInitialized = true;
     }
+    this.refreshReplayDiagnostics();
   }
 
   aboutToDisappear() {
     if (this.rebuildTimer !== -1) clearTimeout(this.rebuildTimer);
     this.rebuildTimer = -1;
+    this.cancelReplayCheck();
     this.webViewHandler.clearWebController();
     this.isInitialized = false;
+    this.documentLoaded = false;
   }
 
   onPageShow() {
+    // A retained document may have evaluated Browser SDK while Replay was off.
+    // Recreate it after explicit activation elsewhere; never reload on a timer.
+    if (this.documentLoaded && !this.replayEnabledAtLoad && FTSessionReplay.getInstance().isEnabled()) {
+      this.rebuildWeb();
+      return;
+    }
     this.mainWebMounted = true;
     // Ensure handler is initialized when page becomes visible
     if (!this.isInitialized) {
@@ -75,14 +94,52 @@ export struct WebViewPage {
       this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
       this.isInitialized = true;
     }
+    if (this.restoreSecondWeb) { this.secondWebMounted = true; this.restoreSecondWeb = false; }
+    this.refreshReplayDiagnostics();
   }
 
   onPageHide() {
-    // No additional cleanup needed
+    this.cancelReplayCheck();
+    if (this.rebuildTimer !== -1) clearTimeout(this.rebuildTimer);
+    this.rebuildTimer = -1;
+  }
+
+  private cancelReplayCheck(): void {
+    this.replayProbe.cancel();
+    this.checkingReplay = false;
+    this.browserReplayState = null;
+    this.browserReplayError = '';
+  }
+
+  private refreshReplayDiagnostics(): void {
+    this.nativeReplayEnabled = FTSessionReplay.getInstance().isEnabled();
+    const native: NativeReplayState = {
+      enabled: this.nativeReplayEnabled,
+      webTracing: FTSDK.getRumConfig()?.isEnableTraceWebView() === true,
+      slotId: this.webViewHandler.getSessionReplaySlotId()
+    };
+    this.replayDiagnostics = formatWebReplayState(native, this.browserReplayState, this.browserReplayError);
+  }
+
+  private async checkReplayState(): Promise<void> {
+    if (!this.mainWebMounted || this.rebuildTimer !== -1) return;
+    const controller = this.browserTabController;
+    this.checkingReplay = true;
+    const result = await this.replayProbe.read((script: string): Promise<string> => controller.runJavaScript(script));
+    if (result === null) return;
+    this.checkingReplay = false;
+    this.browserReplayState = result.state;
+    this.browserReplayError = result.error;
+    this.refreshReplayDiagnostics();
   }
 
   private rebuildWeb(): void {
     if (this.rebuildTimer !== -1) return;
+    this.cancelReplayCheck();
+    this.documentLoaded = false;
+    // Both documents must renegotiate capabilities after Replay activation.
+    this.restoreSecondWeb = this.secondWebMounted || this.restoreSecondWeb;
+    this.secondWebMounted = false;
     this.mainWebMounted = false;
     this.webViewHandler.clearWebController();
     this.browserTabController = new webview.WebviewController();
@@ -95,8 +152,12 @@ export struct WebViewPage {
         new FTRUMConfig().setEnableTraceWebView(true), 'replay-main-web');
       this.isInitialized = true;
       this.mainWebMounted = true;
+      this.secondWebMounted = this.restoreSecondWeb;
+      this.restoreSecondWeb = false;
+      this.refreshReplayDiagnostics();
       FTSessionReplay.getInstance().notifyPageChanged();
     }, 50);
+    this.refreshReplayDiagnostics();
   }
 
   build() {
@@ -107,15 +168,17 @@ export struct WebViewPage {
         })
 
         Row({ space: 6 }) {
-          Button('Replay 开/关').fontSize(12).onClick(() => {
+          Button(this.nativeReplayEnabled ? '关闭 Replay' : '开启 Replay').fontSize(12).onClick(() => {
             const replay = FTSessionReplay.getInstance();
-            if (replay.isEnabled()) replay.disable();
+            if (replay.isEnabled()) { replay.disable(); this.cancelReplayCheck(); }
             else { replay.start(); this.rebuildWeb(); }
-            this.replayStatus = replay.isEnabled() ? 'Replay 已开启' : 'Replay 已关闭';
+            this.replayStatus = replay.isEnabled() ? '原生 Replay 已开启，Web 重新加载后请检查 Browser 状态' : '原生 Replay 已关闭';
+            this.refreshReplayDiagnostics();
           })
           Button('上传').fontSize(12).onClick(() => {
             FTSessionReplay.getInstance().flush().then((result) => {
-              this.replayStatus = `上传 ${result.uploadedSegments}，剩余 ${result.remainingSegments}`;
+              this.replayStatus = `${result.success ? '上传成功' : '上传失败'}：${result.uploadedSegments}，剩余 ${result.remainingSegments}`;
+              this.refreshReplayDiagnostics();
             }).catch((error: Error) => { this.replayStatus = error.message; });
           })
           Button('重建 Web').fontSize(12).onClick(() => this.rebuildWeb())
@@ -141,7 +204,16 @@ export struct WebViewPage {
             })
           }
         }.padding(6)
-        Text(`${this.replayStatus}  slot=${this.webViewHandler.getSessionReplaySlotId()}`)
+        Row({ space: 6 }) {
+          Button(this.checkingReplay ? '读取中…' : '检查状态').fontSize(12)
+            .id('web-replay-check-button')
+            .enabled(!this.checkingReplay && this.mainWebMounted)
+            .onClick(() => this.checkReplayState())
+          Text('只读检查，不会启动网页录制').fontSize(11)
+        }.padding(4)
+        Text(this.replayDiagnostics).id('web-replay-status').fontSize(11)
+          .width('100%').padding({ left: 12, right: 12 }).maxLines(7)
+        Text(this.replayStatus)
           .fontSize(11).maxLines(2)
 
         Row() {
@@ -167,9 +239,8 @@ export struct WebViewPage {
               this.progress = callback.newProgress
             })
             .onPageEnd(() => {
-              if (this.fixtureMode) return;
               // Handle blank page scenario - inject bridge first, then load target URL
-              if (!this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
+              if (!this.fixtureMode && !this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
                 // Ensure handler is initialized
                 if (!this.isInitialized) {
                   const rumConfig = new FTRUMConfig();
@@ -193,6 +264,9 @@ export struct WebViewPage {
                 this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
                 this.isInitialized = true;
               }
+              this.documentLoaded = true;
+              this.replayEnabledAtLoad = FTSessionReplay.getInstance().isEnabled();
+              this.checkReplayState();
             })
           }
         }
