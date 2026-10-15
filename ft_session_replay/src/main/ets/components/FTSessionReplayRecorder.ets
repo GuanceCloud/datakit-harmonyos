@@ -501,7 +501,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture {
-    const record = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale));
+    const record = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale, context));
     this.persistCapturedImageResources(context, record);
     const capture = this.createCapture(context, [record], record);
     this.appendRecordedRecords(context, capture.records, true, false, record);
@@ -516,7 +516,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture | null {
-    const fullSnapshot = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale));
+    const fullSnapshot = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale, context));
     this.persistCapturedImageResources(context, fullSnapshot);
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     if (!this.workQueue.hasPendingWork()) {
@@ -1155,9 +1155,19 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
-  private captureRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
+  private captureRootLight(uiContext: UIContext, rootId: string, scale: number,
+    context?: SessionReplayContext): ArkUIReplayLightSnapshot {
     const startedAt = Date.now();
     const snapshot = this.collectRootLight(uiContext, rootId, scale);
+    const bindingContext = context ?? this.activeContext;
+    if (bindingContext !== null) {
+      const slots = snapshot.nodes.filter((node): boolean => node.webViewSlotId !== undefined &&
+        (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height)
+        .map((node): string => node.webViewSlotId!);
+      FTSessionReplayBridgeRegistry.observeWebReplaySlots(bindingContext.applicationId, bindingContext.sessionId,
+        bindingContext.viewId, slots, snapshot.timestamp);
+    }
     this.hasActiveComponentAnimations = snapshot.hasActiveAnimations === true;
     this.componentSamplingIntervalMs = snapshot.preferredSamplingIntervalMs ?? 0;
     if (this.config.isPerformanceDiagnosticsEnabled()) snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
@@ -1210,7 +1220,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return this.captureRootLight(
         rootBinding.uiContext,
         rootBinding.rootId,
-        rootBinding.vpToPxScale
+        rootBinding.vpToPxScale,
+        context
       );
     } catch (error) {
       this.lastCaptureFailure = `ArkUI FrameNode snapshot failed: ${String(error)}`;
@@ -1326,7 +1337,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     try {
       const record = this.collector.materializeLightSnapshot(this.captureRootLight(
-        this.rootBinding.uiContext, this.rootBinding.rootId, this.rootBinding.vpToPxScale));
+        this.rootBinding.uiContext, this.rootBinding.rootId, this.rootBinding.vpToPxScale, context));
       this.persistCapturedImageResources(context, record);
       return this.createCapture(context, [record], record);
     } catch (error) {

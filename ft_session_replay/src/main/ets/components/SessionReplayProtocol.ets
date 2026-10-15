@@ -165,6 +165,15 @@ export interface ReplayImageWireframe extends ReplayWireframeBase {
   imageStyle?: ReplayImageStyle;
 }
 
+/** Studio places Browser records with the same slotId into this native rectangle. */
+export interface ReplayWebViewWireframe extends ReplayWireframeBase {
+  type: 'webview';
+  slotId: string;
+  isVisible?: boolean;
+  shapeStyle?: ReplayShapeStyle;
+  border?: ReplayShapeBorder;
+}
+
 /** Safe fallback for nodes whose visual semantics are not yet mapped. */
 export interface ReplayPlaceholderWireframe extends ReplayWireframeBase {
   type: 'placeholder';
@@ -173,7 +182,7 @@ export interface ReplayPlaceholderWireframe extends ReplayWireframeBase {
 
 /** Android mobile wireframe union used by Full Snapshot and mutation records. */
 export type ReplayWireframe = ReplayShapeWireframe | ReplayTextWireframe |
-  ReplayImageWireframe | ReplayPlaceholderWireframe;
+  ReplayImageWireframe | ReplayPlaceholderWireframe | ReplayWebViewWireframe;
 
 export interface SessionReplayRecord {
   timestamp: number;
@@ -238,7 +247,9 @@ export interface ReplayWireframeUpdate {
   mimeType?: string;
   isEmpty?: boolean;
   imageStyle?: ReplayImageStyle;
-  type: 'shape' | 'text' | 'image' | 'placeholder';
+  slotId?: string;
+  isVisible?: boolean;
+  type: 'shape' | 'text' | 'image' | 'placeholder' | 'webview';
 }
 
 /** Android's `MobileMutationData` payload (`source: 0`). */

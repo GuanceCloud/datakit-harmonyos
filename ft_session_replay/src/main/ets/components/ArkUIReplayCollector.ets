@@ -1,4 +1,5 @@
 import { ReplayPatternLock } from './ReplayPatternLock';
+import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { copyReplayWireframe } from './ReplayWireframeValues';
 import { ReplayOverlayVectors, ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode, UIContext } from '@kit.ArkUI';
@@ -665,6 +666,16 @@ export class ArkUIReplayCollector {
   private cachedWireframe(
     node: ArkUIReplayLightNode, inspector: string | null, scale: number, selectLabel: string | null
   ): ReplayWireframe {
+    if (node.nodeType === 'Web' && node.webViewSlotId !== undefined) {
+      return {
+        id: node.id, type: 'webview', slotId: node.webViewSlotId,
+        x: node.x, y: node.y, width: node.width, height: node.height,
+        permanentId: node.componentId || undefined,
+        isVisible: (node.opacity ?? 1) > 0 &&
+          (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
+          (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height
+      };
+    }
     const signature = `${node.componentId}|${node.nodeType}|${node.width}|${node.height}|${scale}|${node.isRoot}|` +
       `${node.shouldCaptureAsText}|${node.isSelectArrow}|${node.isDarkMode}|${node.componentRasterKey}|` +
       `${node.isPopupSurface}|${node.isOverlayCloseIcon}|` +
@@ -987,7 +998,7 @@ export class ArkUIReplayCollector {
           frameSources.set(part.id, node);
         }
       }
-      if (node.nodeType === 'Web' || node.nodeType === 'RichText') {
+      if (node.nodeType === 'RichText') {
         const html = this.readInspectorString(inspector, ['content']);
         if (html !== null && html.trim().length > 0) {
           const children = this.richText.create(node, html, snapshot.vpToPxScale, extraBudget,
@@ -1243,6 +1254,8 @@ export class ArkUIReplayCollector {
           this.calendarFrames.captureTheme(this.rasterContext, vpToPxScale, this.captureTimestamp) : undefined,
         inspectorInfo,
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
+        webViewSlotId: nodeType === 'Web' ?
+          FTSessionReplayBridgeRegistry.getWebReplaySlotId(this.readComponentId(node)) || undefined : undefined,
         isSelectArrow,
         isPopupSurface: parentType === 'Popup' && nodeType === 'Column' ? true : undefined,
         isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,

@@ -158,7 +158,8 @@ export class FTWebViewHandler implements JsReceiver {
   private nativeViewName: string = "";
   private messageReceiver: WebViewMessageReceiver | null = null;
   private readonly PROXY_OBJECT_NAME = "FTWebViewJavascriptBridge";
-  private readonly sessionReplaySlotId: string = `harmony-web-${++FTWebViewHandler.nextSessionReplaySlot}`;
+  private sessionReplaySlotId: string = `harmony-web-${++FTWebViewHandler.nextSessionReplaySlot}`;
+  private sessionReplayComponentId: string = '';
   private allowWebViewHost: string[] | null = null;
   private webViewId: string = '';
   private webReplayLinkContext: Record<string, string | number | boolean> = {};
@@ -219,10 +220,6 @@ export class FTWebViewHandler implements JsReceiver {
    * @returns JavaScriptProxy object with object, name, methodList, and controller
    */
   public getJavaScriptProxy(webController: webview.WebviewController): JavaScriptProxy {
-    // Initialize handler if not already done
-    if (!this.webController) {
-      this.webController = webController;
-    }
     // Get or create message receiver instance
     const receiver = this.getMessageReceiver();
     
@@ -239,7 +236,7 @@ export class FTWebViewHandler implements JsReceiver {
   /**
    * Register JS method in web view
    */
-  public setWebView(webController: webview.WebviewController, config: FTRUMConfig): void {
+  public setWebView(webController: webview.WebviewController, config: FTRUMConfig, componentId: string = ''): void {
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() called ==========`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController parameter: ${webController ? 'valid' : 'null'}`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Current webController: ${this.webController ? 'exists' : 'null'}`);
@@ -260,6 +257,16 @@ export class FTWebViewHandler implements JsReceiver {
     // If we already have a controller and it's different, clear the old one
     if (this.webController && this.webController !== webController) {
       FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Replacing existing WebController`);
+      this.clearWebController();
+    }
+
+    if (componentId.length > 0 && componentId !== this.sessionReplayComponentId) {
+      FTSessionReplayBridgeRegistry.unregisterWebReplaySlot(this.sessionReplaySlotId);
+      this.sessionReplayComponentId = componentId;
+    }
+    if (this.sessionReplayComponentId.length > 0 && !FTSessionReplayBridgeRegistry.registerWebReplaySlot(
+      this.sessionReplaySlotId, this.sessionReplayComponentId)) {
+      FTInnerLogger.w(TAG, 'Replay Web component ID is duplicated or the 20-slot limit was reached.');
     }
     
     this.webController = webController;
@@ -304,11 +311,15 @@ export class FTWebViewHandler implements JsReceiver {
     this.stopSessionReplaySnapshotTimer();
     this.sessionReplaySlotActive = false;
     FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(this.sessionReplaySlotId, false, Date.now());
+    FTSessionReplayBridgeRegistry.unregisterWebReplaySlot(this.sessionReplaySlotId);
     if (FTWebViewHandler.latestSessionReplaySlot === this.sessionReplaySlotId) {
       FTWebViewHandler.latestSessionReplaySlot = '';
     }
     this.webController = null;
     this.messageReceiver = null;
+    this.webViewId = '';
+    this.webReplayLinkContext = {};
+    this.sessionReplaySlotId = `harmony-web-${++FTWebViewHandler.nextSessionReplaySlot}`;
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController cleared`);
   }
 

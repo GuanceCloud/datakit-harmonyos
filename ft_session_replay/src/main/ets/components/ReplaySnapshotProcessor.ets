@@ -75,7 +75,7 @@ export class ReplaySnapshotProcessor {
           if (copy.height !== undefined) frame.height = copy.height;
           if (copy.clip !== undefined) frame.clip = copy.clip;
           if (copy.zIndex !== undefined) frame.zIndex = copy.zIndex;
-          if (frame.type === 'shape' || frame.type === 'text' || frame.type === 'image') {
+          if (frame.type === 'shape' || frame.type === 'text' || frame.type === 'image' || frame.type === 'webview') {
             if (copy.shapeStyle !== undefined) frame.shapeStyle = copy.shapeStyle;
             if (copy.border !== undefined) frame.border = copy.border;
           }
@@ -89,6 +89,9 @@ export class ReplaySnapshotProcessor {
             if (copy.mimeType !== undefined) frame.mimeType = copy.mimeType;
             if (copy.isEmpty !== undefined) frame.isEmpty = copy.isEmpty;
             if (copy.imageStyle !== undefined) frame.imageStyle = copy.imageStyle;
+          } else if (frame.type === 'webview') {
+            if (copy.slotId !== undefined) frame.slotId = copy.slotId;
+            if (copy.isVisible !== undefined) frame.isVisible = copy.isVisible;
           } else if (frame.type === 'placeholder' && copy.label !== undefined) frame.label = copy.label;
         }
       }
@@ -313,6 +316,9 @@ export class ReplaySnapshotProcessor {
     }
     if (current.type === 'shape') {
       this.appendShapeUpdate(update, previous as ReplayShapeWireframe, current);
+    } else if (current.type === 'webview' && previous.type === 'webview') {
+      if (previous.slotId !== current.slotId) update.slotId = current.slotId;
+      if (previous.isVisible !== current.isVisible) update.isVisible = current.isVisible;
     } else if (current.type === 'text') {
       this.appendTextUpdate(update, previous as ReplayTextWireframe, current);
     } else if (current.type === 'image') {
@@ -348,6 +354,10 @@ export class ReplaySnapshotProcessor {
     if (current.type === 'shape' && previous.type === 'shape') {
       return this.wasOptionalValueRemoved(previous.shapeStyle !== undefined, current.shapeStyle !== undefined) ||
         this.wasOptionalValueRemoved(previous.border !== undefined, current.border !== undefined);
+    }
+    if (current.type === 'webview' && previous.type === 'webview') {
+      return previous.slotId !== current.slotId ||
+        this.wasOptionalValueRemoved(previous.isVisible !== undefined, current.isVisible !== undefined);
     }
     if (current.type === 'text' && previous.type === 'text') {
       return this.wasOptionalValueRemoved(previous.shapeStyle !== undefined, current.shapeStyle !== undefined) ||

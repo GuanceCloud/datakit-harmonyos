@@ -20,7 +20,7 @@ export struct WebViewPage {
     if (this.browserTabController && !this.isInitialized) {
       const rumConfig = new FTRUMConfig();
       rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
       this.isInitialized = true;
     }
   }
@@ -34,7 +34,7 @@ export struct WebViewPage {
     if (!this.isInitialized) {
       const rumConfig = new FTRUMConfig();
       rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
       this.isInitialized = true;
     }
   }
@@ -57,6 +57,7 @@ export struct WebViewPage {
 
         Row() {
           Web({ src: this.webViewUrl, controller: this.browserTabController })
+            .id('replay-main-web')
             .width('100%')
             .layoutWeight(1)
             .javaScriptAccess(true)
@@ -74,7 +75,7 @@ export struct WebViewPage {
                 if (!this.isInitialized) {
                   const rumConfig = new FTRUMConfig();
                   rumConfig.setEnableTraceWebView(true);
-                  this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+                  this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
                   this.isInitialized = true;
                 }
 
@@ -90,7 +91,7 @@ export struct WebViewPage {
               if (!this.isInitialized) {
                 const rumConfig = new FTRUMConfig();
                 rumConfig.setEnableTraceWebView(true);
-                this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+                this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
                 this.isInitialized = true;
               }
             })

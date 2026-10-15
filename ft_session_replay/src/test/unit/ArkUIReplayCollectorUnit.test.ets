@@ -1051,9 +1051,9 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(collector.captureFrameNodeLight(asFrameNode(fitted), 2, 10000).nodes[1].x).assertEqual(20);
     });
 
-    it('renders HTML Web content as styled paragraphs with stable ids, privacy and viewport clipping', 0, () => {
+    it('renders HTML RichText as styled paragraphs with stable ids, privacy and viewport clipping', 0, () => {
       const attrs: Record<string, Object> = { 'content': '<div style="color:#2563eb;font-size:18px"><b>HTML 富文本</b><p>段落与颜色采集测试</p></div>' };
-      const root = new ReplayFrameNodeFixture(1, 10, 20, 10, 20, 300, 110).withNodeType('Web').withInspector(attrs);
+      const root = new ReplayFrameNodeFixture(1, 10, 20, 10, 20, 300, 110).withNodeType('RichText').withInspector(attrs);
       const collector = new ArkUIReplayCollector(32, new FTSessionReplayConfig()
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
       const first = collector.captureFrameNode(asFrameNode(root));
@@ -1086,7 +1086,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
     it('masks editable HTML and textarea content while preserving public rich copy', 0, () => {
       const attrs: Record<string, Object> = { 'content': '<div>Public</div><div contenteditable="true"><b>private-edit</b></div>' +
         '<textarea>private-input</textarea><span contenteditable="false">Readable</span>' };
-      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 200).withNodeType('Web').withInspector(attrs);
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 200).withNodeType('RichText').withInspector(attrs);
       for (const privacy of [TextAndInputPrivacy.MASK_SENSITIVE_INPUTS, TextAndInputPrivacy.MASK_ALL_INPUTS]) {
         const collector = new ArkUIReplayCollector(32, new FTSessionReplayConfig().setTextAndInputPrivacy(privacy));
         const data = collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData;
@@ -1101,7 +1101,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
 
     it('bounds rich text expansion and respects line height, nonbreaking spaces and clipped wraps', 0, () => {
       const attrs: Record<string, Object> = { 'content': '<p style="line-height:2;font-size:20px">A&nbsp;B 长文本多行换行采集验证</p>' };
-      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 70, 25).withNodeType('Web').withInspector(attrs);
+      const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 70, 25).withNodeType('RichText').withInspector(attrs);
       const collector = new ArkUIReplayCollector(4, new FTSessionReplayConfig()
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS));
       const frames = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;

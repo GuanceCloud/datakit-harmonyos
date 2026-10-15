@@ -1,5 +1,6 @@
 import { FTInnerLogger } from '../log/FTLogger';
 import { Utils } from '../utils/Utils';
+import { WebReplaySlotBinder, WebReplaySlotBinding } from './WebReplaySlotBinder';
 
 const TAG = 'FTSessionReplayBridge';
 
@@ -122,6 +123,32 @@ export interface FTSessionReplayBridge {
 
 /** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
 export class FTSessionReplayBridgeRegistry {
+  private static readonly webSlots: WebReplaySlotBinder = new WebReplaySlotBinder();
+
+  public static registerWebReplaySlot(slotId: string, componentId: string): boolean {
+    return FTSessionReplayBridgeRegistry.webSlots.register(slotId, componentId);
+  }
+
+  public static unregisterWebReplaySlot(slotId: string): void {
+    FTSessionReplayBridgeRegistry.webSlots.unregister(slotId);
+  }
+
+  public static getWebReplaySlotId(componentId: string): string {
+    return FTSessionReplayBridgeRegistry.webSlots.getSlotId(componentId);
+  }
+
+  public static getWebReplaySlotBinding(slotId: string): WebReplaySlotBinding | null {
+    return FTSessionReplayBridgeRegistry.webSlots.get(slotId);
+  }
+
+  public static getLatestWebReplaySlotId(): string {
+    return FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
+  }
+
+  public static observeWebReplaySlots(applicationId: string, sessionId: string, viewId: string,
+    visibleSlots: Array<string>, timestamp: number): void {
+    FTSessionReplayBridgeRegistry.webSlots.observe(applicationId, sessionId, viewId, visibleSlots, timestamp);
+  }
   private static bridge: FTSessionReplayBridge | null = null;
   private static currentViewProvider: (() => FTSessionReplayRUMContext | null) | null = null;
   private static metadataChangedCallback:
@@ -304,6 +331,7 @@ export class FTSessionReplayBridgeRegistry {
 
   public static unregister(bridge: FTSessionReplayBridge): void {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
+      FTSessionReplayBridgeRegistry.webSlots.resetBindings(Date.now());
       const interval = FTSessionReplayBridgeRegistry.activeRecording;
       if (interval !== null) interval.stoppedAt = Utils.getCurrentNanoTime();
       FTSessionReplayBridgeRegistry.activeRecording = null;
