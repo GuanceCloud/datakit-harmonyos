@@ -27,6 +27,7 @@ export struct WebViewPage {
 
   aboutToDisappear() {
     this.webViewHandler.clearWebController();
+    this.isInitialized = false;
   }
 
   onPageShow() {

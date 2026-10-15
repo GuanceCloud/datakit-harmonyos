@@ -2,6 +2,8 @@ import { describe, expect, it } from '@ohos/hypium';
 import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
 import { ArkUIReplayCollector, ArkUIReplayLightNode, ArkUIReplayLightSnapshot } from '../../main/ets/components/ArkUIReplayCollector';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
+import { FTSessionReplayRecorder } from '../../main/ets/components/FTSessionReplayRecorder';
+import { FTSessionReplayConfig } from '../../main/ets/components/FTSessionReplayConfig';
 import { FullSnapshotData, ReplayMutationData, ReplayWebViewWireframe } from '../../main/ets/components/SessionReplayProtocol';
 
 function webSnapshot(slotId: string, x: number, opacity: number = 1): ArkUIReplayLightSnapshot {
@@ -19,6 +21,33 @@ function webSnapshot(slotId: string, x: number, opacity: number = 1): ArkUIRepla
 
 export default function webReplayUnitTest() {
   describe('WebReplayUnit', () => {
+    it('gates latest slots, background, unbound identities and the exact two-second tail', 0, () => {
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      recorder.start();
+      const registry = FTSessionReplayBridgeRegistry;
+      registry.setWebReplayAppForeground(true);
+      registry.registerWebReplaySlot('lifecycle-a', 'lifecycle-web-a');
+      registry.registerWebReplaySlot('lifecycle-b', 'lifecycle-web-b');
+      expect(registry.acceptsWebReplayData('lifecycle-a', 'app', 's', 1000)).assertFalse();
+      registry.observeWebReplaySlots('app', 's', 'native', ['lifecycle-a'], 1000);
+      expect(registry.acceptsWebReplayData('lifecycle-a', 'app', 'other', 1000)).assertFalse();
+      registry.setWebReplayAppForeground(false);
+      expect(registry.acceptsWebReplayData('lifecycle-a', 'app', 's', 1100)).assertFalse();
+      registry.setWebReplayAppForeground(true);
+      registry.observeWebReplaySlots('app', 's', 'native', ['lifecycle-a', 'lifecycle-b'], 1200);
+      expect(registry.isWebReplaySlotActive('lifecycle-a')).assertFalse();
+      expect(registry.isWebReplaySlotActive('lifecycle-b')).assertTrue();
+      registry.observeWebReplaySlots('app', 's', 'native', ['lifecycle-a', 'lifecycle-b'], 1300);
+      expect(registry.acceptsWebReplayData('lifecycle-a', 'app', 's', 3199)).assertTrue();
+      expect(registry.acceptsWebReplayData('lifecycle-a', 'app', 's', 3200)).assertFalse();
+      registry.observeWebReplaySlots('app', 's', 'returned-native', ['lifecycle-a'], 3300);
+      expect(registry.isWebReplaySlotActive('lifecycle-a')).assertTrue();
+      expect(registry.getWebReplaySlotBinding('lifecycle-a')?.viewId).assertEqual('returned-native');
+      registry.unregisterWebReplaySlot('lifecycle-a');
+      registry.unregisterWebReplaySlot('lifecycle-b');
+      recorder.stop();
+    });
+
     it('binds native containers, rejects duplicate component IDs and releases old views', 0, () => {
       const registry = FTSessionReplayBridgeRegistry;
       expect(registry.registerWebReplaySlot('slot-unit-a', 'web-unit-a')).assertTrue();

@@ -42,10 +42,11 @@ export class WebReplaySlotBinder {
   public observe(applicationId: string, sessionId: string, viewId: string,
     visibleSlots: Array<string>, timestamp: number): void {
     const visible = new Set<string>(visibleSlots);
+    const previousLatest = this.latestSlotId;
     this.latestSlotId = '';
     for (const binding of this.slots.values()) {
       if (!visible.has(binding.slotId)) {
-        if (binding.active) binding.inactiveAt = timestamp;
+        if (binding.active && binding.inactiveAt === 0) binding.inactiveAt = timestamp;
         binding.active = false;
         continue;
       }
@@ -53,10 +54,23 @@ export class WebReplaySlotBinder {
       binding.sessionId = sessionId;
       binding.viewId = viewId;
       binding.active = true;
-      binding.inactiveAt = 0;
     }
     // Android uses one latest active slot; snapshot order defines paint order here.
     for (const slotId of visibleSlots) if (this.slots.get(slotId)?.active) this.latestSlotId = slotId;
+    for (const binding of this.slots.values()) {
+      if (binding.slotId === this.latestSlotId) binding.inactiveAt = 0;
+      else if (binding.slotId === previousLatest && binding.inactiveAt === 0) binding.inactiveAt = timestamp;
+    }
+  }
+
+  public getSlotIds(): Array<string> { return Array.from(this.slots.keys()); }
+
+  public accepts(slotId: string, applicationId: string, sessionId: string, timestamp: number): boolean {
+    const binding = this.slots.get(slotId);
+    if (binding === undefined || binding.viewId.length === 0 || binding.applicationId !== applicationId ||
+      binding.sessionId !== sessionId) return false;
+    if (binding.active && this.latestSlotId === slotId) return true;
+    return binding.inactiveAt > 0 && timestamp >= binding.inactiveAt && timestamp - binding.inactiveAt < 2000;
   }
 
   public getLatestSlotId(): string { return this.latestSlotId; }

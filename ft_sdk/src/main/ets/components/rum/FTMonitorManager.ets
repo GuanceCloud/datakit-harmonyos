@@ -7,6 +7,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { Utils } from '../utils/Utils';
 import { FpsUtils } from '../utils/FpsUtils';
 import { Constants } from '../Constants';
+import { FTSessionReplayBridgeRegistry } from '../sessionreplay/FTSessionReplayBridge';
 import { DetectFrequency } from '../enum/Enums';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { DeviceUtils } from '../utils/DeviceUtils';
@@ -178,6 +179,7 @@ export class FTMonitorManager {
    * that was requested before an intervening background transition.
    */
   public setAppInForeground(isForeground: boolean): void {
+    FTSessionReplayBridgeRegistry.setWebReplayAppForeground(isForeground);
     if (this.isAppInForeground === isForeground) {
       return;
     }

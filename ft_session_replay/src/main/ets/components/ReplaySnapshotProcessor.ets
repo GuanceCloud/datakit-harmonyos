@@ -17,6 +17,7 @@ import {
   ReplayWireframe,
   ReplayWireframeClip,
   ReplayWireframeUpdate,
+  ReplayWebViewWireframe,
   SessionReplayRecord
 } from './SessionReplayProtocol';
 
@@ -317,6 +318,7 @@ export class ReplaySnapshotProcessor {
     if (current.type === 'shape') {
       this.appendShapeUpdate(update, previous as ReplayShapeWireframe, current);
     } else if (current.type === 'webview' && previous.type === 'webview') {
+      this.appendShapeUpdate(update, previous, current);
       if (previous.slotId !== current.slotId) update.slotId = current.slotId;
       if (previous.isVisible !== current.isVisible) update.isVisible = current.isVisible;
     } else if (current.type === 'text') {
@@ -357,6 +359,8 @@ export class ReplaySnapshotProcessor {
     }
     if (current.type === 'webview' && previous.type === 'webview') {
       return previous.slotId !== current.slotId ||
+        this.wasOptionalValueRemoved(previous.shapeStyle !== undefined, current.shapeStyle !== undefined) ||
+        this.wasOptionalValueRemoved(previous.border !== undefined, current.border !== undefined) ||
         this.wasOptionalValueRemoved(previous.isVisible !== undefined, current.isVisible !== undefined);
     }
     if (current.type === 'text' && previous.type === 'text') {
@@ -382,8 +386,8 @@ export class ReplaySnapshotProcessor {
 
   private appendShapeUpdate(
     update: ReplayWireframeUpdate,
-    previous: ReplayShapeWireframe,
-    current: ReplayShapeWireframe
+    previous: ReplayShapeWireframe | ReplayWebViewWireframe,
+    current: ReplayShapeWireframe | ReplayWebViewWireframe
   ): void {
     if (!replayValuesEqual(previous.shapeStyle, current.shapeStyle) && current.shapeStyle !== undefined) {
       update.shapeStyle = current.shapeStyle;

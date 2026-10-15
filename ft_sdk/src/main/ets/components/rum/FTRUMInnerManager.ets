@@ -2767,6 +2767,27 @@ export class FTRUMInnerManager {
     return this.context;
   }
 
+  /** Apply only configured Browser link keys to the matching live native container. */
+  public updateWebReplayContainerContext(viewId: string, sessionId: string,
+    values: Record<string, string | number | boolean>): boolean {
+    const view = this.activeView;
+    if (view === null || view.isClose() || view.getId() !== viewId || view.getSessionId() !== sessionId) return false;
+    const allowed = FTSessionReplayBridgeRegistry.getRUMLinkKeys();
+    let changed = false;
+    for (const key of Object.keys(values)) {
+      if (allowed.indexOf(key) < 0) continue;
+      const value = values[key];
+      const current = view.getProperty()[key];
+      if (current !== undefined && String(current) === String(value)) continue;
+      if (typeof value === 'string') view.addProperty(key, new String(value));
+      else if (typeof value === 'number') view.addProperty(key, new Number(value));
+      else view.addProperty(key, new Boolean(value));
+      changed = true;
+    }
+    // The normal View summary/close path persists these properties without rewriting counters.
+    return changed;
+  }
+
   private createSessionReplayLinkContext(view: ActiveViewBean): Record<string, string | number | boolean> {
     const result: Record<string, string | number | boolean> = {};
     const linkKeys = FTSessionReplayBridgeRegistry.getRUMLinkKeys();

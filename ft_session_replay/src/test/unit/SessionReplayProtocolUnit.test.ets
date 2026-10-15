@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { FTSessionReplayWebDataContext } from '@guancecloud/ft_sdk';
+import { FTSessionReplayBridgeRegistry, FTSessionReplayWebDataContext } from '@guancecloud/ft_sdk';
 import {
   ANDROID_REPLAY_ENDPOINTS,
   createAndroidReplayMobileSegment,
@@ -470,10 +470,13 @@ export default function sessionReplayProtocolUnitTest() {
         viewId: 'browser-view',
         slotId: 'harmony-web-test',
         linkContext,
-        payload: `{"timestamp":${now},"type":10,"data":{"node":1}}`,
+        payload: `{"timestamp":${now},"type":2,"data":{"node":{"id":1}}}`,
         timestamp: now
       };
       recorder.onWebReplaySlotActive(context.slotId, true, now);
+      FTSessionReplayBridgeRegistry.registerWebReplaySlot(context.slotId, 'web-test');
+      FTSessionReplayBridgeRegistry.observeWebReplaySlots(context.applicationId, context.sessionId,
+        'native-view', [context.slotId], now);
       expect(recorder.onWebReplayData(context)).assertTrue();
       recorder.flushWebReplayData();
       const replayContext: SessionReplayContext = {
@@ -487,13 +490,15 @@ export default function sessionReplayProtocolUnitTest() {
       expect(records[0].timestamp).assertEqual(now);
 
       recorder.onWebReplaySlotActive(context.slotId, false, now);
+      FTSessionReplayBridgeRegistry.observeWebReplaySlots(context.applicationId, context.sessionId,
+        'native-view', [], now);
       const withinGrace: FTSessionReplayWebDataContext = {
         applicationId: context.applicationId,
         sessionId: context.sessionId,
         viewId: context.viewId,
         slotId: context.slotId,
         linkContext: context.linkContext,
-        payload: `{"timestamp":${now + 1000},"type":11,"data":{"source":0}}`,
+        payload: `{"timestamp":${now + 1000},"type":3,"data":{"source":0}}`,
         timestamp: now + 1000
       };
       expect(recorder.onWebReplayData(withinGrace)).assertTrue();
@@ -503,10 +508,11 @@ export default function sessionReplayProtocolUnitTest() {
         viewId: context.viewId,
         slotId: context.slotId,
         linkContext: context.linkContext,
-        payload: `{"timestamp":${now + 2000},"type":11,"data":{"source":0}}`,
+        payload: `{"timestamp":${now + 2000},"type":3,"data":{"source":0}}`,
         timestamp: now + 2000
       };
       expect(recorder.onWebReplayData(afterGrace)).assertFalse();
+      FTSessionReplayBridgeRegistry.unregisterWebReplaySlot(context.slotId);
       recorder.stop();
     });
 

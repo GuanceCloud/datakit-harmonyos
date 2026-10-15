@@ -126,13 +126,42 @@ export interface FTSessionReplayBridge {
 /** NoOp-by-default registry preventing any Replay cost for existing SDK users. */
 export class FTSessionReplayBridgeRegistry {
   private static readonly webSlots: WebReplaySlotBinder = new WebReplaySlotBinder();
+  private static readonly webSlotListeners: Map<string, () => void> = new Map();
+  private static webAppForeground: boolean = true;
 
   public static registerWebReplaySlot(slotId: string, componentId: string): boolean {
     return FTSessionReplayBridgeRegistry.webSlots.register(slotId, componentId);
   }
 
   public static unregisterWebReplaySlot(slotId: string): void {
+    FTSessionReplayBridgeRegistry.flushWebReplayData();
     FTSessionReplayBridgeRegistry.webSlots.unregister(slotId);
+    FTSessionReplayBridgeRegistry.webSlotListeners.delete(slotId);
+  }
+
+  public static setWebReplaySlotListener(slotId: string, listener: () => void): void {
+    if (FTSessionReplayBridgeRegistry.webSlots.get(slotId) !== null) {
+      FTSessionReplayBridgeRegistry.webSlotListeners.set(slotId, listener);
+    }
+  }
+
+  public static acceptsWebReplayData(slotId: string, applicationId: string, sessionId: string,
+    timestamp: number): boolean {
+    return FTSessionReplayBridgeRegistry.webAppForeground && FTSessionReplayBridgeRegistry.bridge !== null &&
+      FTSessionReplayBridgeRegistry.webSlots.accepts(slotId, applicationId, sessionId, timestamp);
+  }
+
+  public static isWebReplaySlotActive(slotId: string): boolean {
+    return FTSessionReplayBridgeRegistry.webAppForeground && FTSessionReplayBridgeRegistry.bridge !== null &&
+      FTSessionReplayBridgeRegistry.webSlots.get(slotId)?.active === true &&
+      FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId() === slotId;
+  }
+
+  public static setWebReplayAppForeground(foreground: boolean): void {
+    if (FTSessionReplayBridgeRegistry.webAppForeground === foreground) return;
+    FTSessionReplayBridgeRegistry.webAppForeground = foreground;
+    if (!foreground) FTSessionReplayBridgeRegistry.flushWebReplayData();
+    FTSessionReplayBridgeRegistry.webSlotListeners.forEach((listener): void => listener());
   }
 
   public static getWebReplaySlotId(componentId: string): string {
@@ -149,7 +178,26 @@ export class FTSessionReplayBridgeRegistry {
 
   public static observeWebReplaySlots(applicationId: string, sessionId: string, viewId: string,
     visibleSlots: Array<string>, timestamp: number): void {
+    const previousLatest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
+    const previous: Map<string, WebReplaySlotBinding> = new Map();
+    for (const slotId of FTSessionReplayBridgeRegistry.webSlots.getSlotIds()) {
+      const binding = FTSessionReplayBridgeRegistry.webSlots.get(slotId);
+      if (binding !== null) previous.set(slotId, binding);
+    }
     FTSessionReplayBridgeRegistry.webSlots.observe(applicationId, sessionId, viewId, visibleSlots, timestamp);
+    const latest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
+    previous.forEach((before, slotId): void => {
+      const after = FTSessionReplayBridgeRegistry.webSlots.get(slotId);
+      if (after === null || (before.active === after.active && before.viewId === after.viewId &&
+        before.sessionId === after.sessionId && previousLatest === latest)) return;
+      FTSessionReplayBridgeRegistry.flushWebReplayData();
+      FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(slotId, after.active && latest === slotId, timestamp);
+      // Enqueue the native frame before requesting a rebind Full Snapshot.
+      const listener = FTSessionReplayBridgeRegistry.webSlotListeners.get(slotId);
+      if (listener !== undefined) setTimeout((): void => {
+        if (FTSessionReplayBridgeRegistry.webSlotListeners.get(slotId) === listener) listener();
+      }, 0);
+    });
   }
   private static bridge: FTSessionReplayBridge | null = null;
   private static currentViewProvider: (() => FTSessionReplayRUMContext | null) | null = null;
@@ -334,6 +382,7 @@ export class FTSessionReplayBridgeRegistry {
   public static unregister(bridge: FTSessionReplayBridge): void {
     if (FTSessionReplayBridgeRegistry.bridge === bridge) {
       FTSessionReplayBridgeRegistry.webSlots.resetBindings(Date.now());
+      FTSessionReplayBridgeRegistry.webSlotListeners.forEach((listener): void => listener());
       const interval = FTSessionReplayBridgeRegistry.activeRecording;
       if (interval !== null) interval.stoppedAt = Utils.getCurrentNanoTime();
       FTSessionReplayBridgeRegistry.activeRecording = null;

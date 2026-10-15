@@ -113,7 +113,6 @@ class ReplaySamplingFrame extends FrameCallback {
  */
 export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private static readonly MAX_RECORDS_PER_VIEW: number = 2000;
-  private static readonly WEB_REPLAY_INACTIVE_GRACE_MS: number = 2_000;
 
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
@@ -146,9 +145,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private readonly errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null;
   private readonly resourceTouch: ((names: Array<string>, kind: ReplayStoreKind) => void) | null;
   private readonly imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null;
-  // Zero means active. A positive timestamp retains the Android-compatible
-  // two-second grace period after a WebView slot becomes inactive.
-  private readonly webSlotInactiveAt: Map<string, number> = new Map();
   private readonly workQueue: SessionReplayWorkQueue;
   private readonly webBatcher: WebReplayBatcher;
   private readonly pendingViewStarts: Map<string, number> = new Map();
@@ -322,7 +318,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.recordedContextsByView.clear();
       this.recordedRecordsByView.clear();
       this.promotedErrorSessions.clear();
-      this.webSlotInactiveAt.clear();
       this.pendingViewStarts.clear();
       this.endedViewStarts.clear();
       this.captureGeneration++;
@@ -823,7 +818,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   /** Accepts native-associated Browser SDK records without ArkUI conversion. */
   public onWebReplayData(context: FTSessionReplayWebDataContext): boolean {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE ||
-      !this.isWebReplaySlotWithinGracePeriod(context.slotId, context.timestamp)) {
+      !FTSessionReplayBridgeRegistry.acceptsWebReplayData(
+        context.slotId, context.applicationId, context.sessionId, context.timestamp)) {
       return false;
     }
     const record = this.parseWebReplayRecord(context.payload, context.slotId);
@@ -875,6 +871,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return false;
     }
     this.flushWebReplayData();
+    const binding = FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(context.slotId);
+    if (binding === null || binding.applicationId !== context.applicationId || binding.sessionId !== context.sessionId ||
+      binding.viewId !== context.viewId || context.browserViewId.length === 0) return false;
     const resolvedContext = this.mergeWebLinkContext(context);
     const nextContext = this.toReplayContext(resolvedContext);
     if (this.activeContext === null || !this.isSameView(this.activeContext, nextContext) ||
@@ -896,7 +895,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return;
     }
     if (!active) this.flushWebReplayData();
-    this.webSlotInactiveAt.set(slotId, active ? 0 : timestamp);
   }
 
   public isWebReplayErrorSampled(sessionId: string): boolean {
@@ -973,6 +971,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
     this.appendRecordedRecords(replayContext, capture.records, true, true);
+    FTSessionReplayBridgeRegistry.observeWebReplaySlots(context.applicationId, context.sessionId,
+      context.viewId, [], Date.now());
     // Accepted frames can finish after the route closes. Publish their final count at the FIFO boundary.
     this.workQueue.drain((): void => this.metadataNotifier.flush(viewKey)).catch((error: Error): void => {
       FTSessionReplayBridgeRegistry.logDiagnostic(`Replay View metadata drain failed: ${error.message}`, true);
@@ -1012,7 +1012,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.pendingViewStartFailure = '';
     this.stopObservation();
     this.promotedErrorSessions.clear();
-    this.webSlotInactiveAt.clear();
+    FTSessionReplayBridgeRegistry.observeWebReplaySlots(_context.applicationId, _context.sessionId, '', [], Date.now());
   }
 
   private getWebReplayPrivacyLevel(): string {
@@ -1039,14 +1039,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return Math.floor(timestamp / 1000);
     }
     return Math.floor(timestamp);
-  }
-
-  private isWebReplaySlotWithinGracePeriod(slotId: string, timestamp: number): boolean {
-    const inactiveAt = this.webSlotInactiveAt.get(slotId);
-    if (inactiveAt === undefined || inactiveAt === 0) {
-      return true;
-    }
-    return timestamp - inactiveAt < FTSessionReplayRecorder.WEB_REPLAY_INACTIVE_GRACE_MS;
   }
 
   private parseWebReplayRecord(payload: string, slotId: string): SessionReplayRecord | null {
