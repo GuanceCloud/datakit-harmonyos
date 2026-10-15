@@ -9,6 +9,8 @@ import { ReplayRichText } from './ReplayRichText';
 import { ReplayComponentRaster } from './ReplayComponentRaster';
 import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
 import { ReplayControlWireframes } from './ReplayControlWireframes';
+import { ReplayCalendarWireframes } from './ReplayCalendarWireframes';
+import { ReplaySystemIcons } from './ReplaySystemIcons';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import {
   ArkUIReplayLightNode, ArkUIReplayLightSnapshot, ArkUIReplayPageTransition,
@@ -133,6 +135,8 @@ export class ArkUIReplayCollector {
   private readonly marquee: ReplayMarqueeAnimation = new ReplayMarqueeAnimation();
   private readonly richText: ReplayRichText = new ReplayRichText();
   private readonly rasters: ReplayComponentRaster = new ReplayComponentRaster();
+  private readonly calendarFrames: ReplayCalendarWireframes = new ReplayCalendarWireframes();
+  private readonly systemIcons: ReplaySystemIcons = new ReplaySystemIcons();
   private readonly controls: ReplayNativeControlPaint = new ReplayNativeControlPaint();
   private readonly controlFrames: ReplayControlWireframes = new ReplayControlWireframes();
   private readonly controlVectorCache: Map<string, ReplayControlVectorAsset> = new Map();
@@ -218,6 +222,33 @@ export class ArkUIReplayCollector {
         this.config.getTouchPrivacy() === TouchPrivacy.SHOW));
   }
 
+  /** Only the native CalendarPicker dialog owns this paint-only, bounded subtree. */
+  private isNativeCalendarDialog(node: FrameNode, parentType: string): boolean {
+    if (parentType !== 'Dialog' || this.readNodeType(node) !== 'Column') return false;
+    const pending: Array<FrameNode> = [node];
+    let calendar = false;
+    let navigation = false;
+    for (let index = 0; index < pending.length && index < 64; index++) {
+      const current = pending[index];
+      const type = this.readNodeType(current);
+      if (this.readComponentId(current).length > 0 || this.isInputNode(type) || type === 'Web' || type === 'RichText') return false;
+      if (type === 'Calendar') calendar = true;
+      if (type === 'Image') {
+        const source = this.readOwnInspectorString(this.serializeInspectorInfo(this.readInspectorInfo(current)), ['src']);
+        if (source !== null && /^resource:\/\/\/ohos_ic_public_(?:double_)?arrow_(?:left|right)\.svg$/.test(source)) navigation = true;
+      }
+      try {
+        let child = current.getFirstChild();
+        while (child !== null) {
+          if (pending.length >= 64) return false;
+          pending.push(child);
+          child = child.getNextSibling();
+        }
+      } catch (_) { return false; }
+    }
+    return calendar && navigation;
+  }
+
   /** Starts a new lifetime for a root that was reconstructed by ArkUI. */
   public renewRootEpoch(): void {
     this.rootEpoch++;
@@ -229,6 +260,7 @@ export class ArkUIReplayCollector {
     this.rasters.clear();
     this.controls.clear();
     this.controlFrames.clear();
+    this.systemIcons.clear();
     this.controlVectorCache.clear();
     this.controlVectorBytes = 0;
     this.patterns.clear();
@@ -246,6 +278,7 @@ export class ArkUIReplayCollector {
     this.rasters.clear();
     this.controls.clear();
     this.controlFrames.clear();
+    this.systemIcons.clear();
     this.controlVectorCache.clear();
     this.controlVectorBytes = 0;
     this.patterns.clear();
@@ -674,7 +707,7 @@ export class ArkUIReplayCollector {
     return image;
   }
 
-  /** Only SDK-generated geometry enters this path; application images retain image privacy. */
+  /** Only control geometry / allowlisted system SVGs; app images retain image privacy. */
   private controlVector(svg: string, template: ReplayShapeWireframe): ReplayWireframe {
     let asset = this.controlVectorCache.get(svg);
     if (asset === undefined) {
@@ -736,6 +769,7 @@ export class ArkUIReplayCollector {
     this.pendingImageResources = [];
     const retained = new Set<number>();
     const groupStates = this.controlFrames.groupStates(snapshot.nodes);
+    const calendar = this.calendarFrames.prepare(snapshot.nodes, snapshot.timestamp);
     const selectInspectors = new Map<number, string | null>();
     for (const node of snapshot.nodes) {
       if (node.nodeType === 'Select' || node.nodeType === 'Button' || node.nodeType === 'Toggle') {
@@ -746,12 +780,44 @@ export class ArkUIReplayCollector {
       const node = snapshot.nodes[index];
       const inspector = node.nodeType === 'Select' ? selectInspectors.get(node.id) ?? null :
         this.serializeInspectorInfo(node.inspectorInfo);
-      const selectLabel = node.selectLabelOwnerId !== undefined ?
+      const selectLabel = calendar.labels.get(node.id) ?? (node.selectLabelOwnerId !== undefined ?
         this.readInspectorString(selectInspectors.get(node.selectLabelOwnerId) ?? null, ['value']) :
         node.buttonLabelOwnerId !== undefined ?
-          this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null;
+          this.readOwnInspectorString(selectInspectors.get(node.buttonLabelOwnerId) ?? null, ['label']) : null);
       retained.add(node.id);
       let wireframe = this.cachedWireframe(node, inspector, snapshot.vpToPxScale, selectLabel);
+      if (node.systemIconZIndex !== undefined) wireframe.zIndex = node.systemIconZIndex;
+      if (node.systemIconSvg !== undefined && wireframe.type !== 'placeholder') {
+        // Keep native geometry, fit, clipping, transforms and tint. Loading a
+        // static system asset does not require screenshotting the input owner.
+        const template: ReplayShapeWireframe = { id: node.id, type: 'shape', x: node.x, y: node.y,
+          width: node.width, height: node.height, permanentId: wireframe.permanentId,
+          border: wireframe.border,
+          // A resolved icon has no empty-image placeholder background.
+          shapeStyle: this.createShapeStyle('SystemIcon', inspector, false, node.width, node.height, snapshot.vpToPxScale),
+          zIndex: wireframe.zIndex };
+        const info = this.getInspectorValue(inspector);
+        const symbolColors = node.nodeType === 'SymbolGlyph' && info !== null ?
+          this.findInspectorStringArray(info, ['symbolColor', 'symbolColorList', 'fontColor']) : null;
+        const color = this.normalizeColor(this.readOwnInspectorString(inspector, ['fillColor'])) ??
+          (node.nodeType === 'SymbolGlyph' ? this.normalizeColor(symbolColors?.[0] ??
+            this.readOwnInspectorString(inspector, ['symbolColor', 'fontColor'])) : null);
+        const icon = this.controlVector(ReplaySystemIcons.tint(node.systemIconSvg, color), template);
+        if (icon.type === 'image' && wireframe.type === 'image') icon.imageStyle = wireframe.imageStyle ?? icon.imageStyle;
+        wireframe = icon;
+      }
+      if (node.nodeType === 'CalendarDialog' && wireframe.type === 'shape' && node.calendarTheme !== undefined &&
+        this.readOwnInspectorString(inspector, ['shadow'])?.toUpperCase() === 'SHADOWSTYLE.OUTERDEFAULTSM') {
+        const style = wireframe.shapeStyle ?? {};
+        style.shadow = node.calendarTheme.shadow;
+        wireframe.shapeStyle = style;
+      }
+      const calendarArrow = calendar.arrows.get(node.id);
+      if (calendarArrow !== undefined) {
+        const template: ReplayShapeWireframe = { id: node.id, type: 'shape', x: node.x, y: node.y,
+          width: node.width, height: node.height, shapeStyle: { opacity: node.opacity ?? 1 } };
+        wireframe = this.controlVector(calendarArrow, template);
+      }
       const content = snapshot.nodes[index + 1];
       const popupBackground = wireframe.type === 'shape' ? wireframe.shapeStyle?.backgroundColor : undefined;
       if (node.isPopupSurface && wireframe.type === 'shape' && content?.nodeType === 'Scroll' &&
@@ -795,6 +861,20 @@ export class ArkUIReplayCollector {
       }
       wireframes.push(wireframe);
       frameSources.set(wireframe.id, node);
+      const calendarGrid = calendar.grids.get(node.id);
+      if (calendarGrid !== undefined) {
+        const parts = this.calendarFrames.create(node, calendarGrid, snapshot.vpToPxScale, extraBudget,
+          (value: string): string => this.filterText(value, 'Text', node.width, null),
+          this.config.getTextAndInputPrivacy() === TextAndInputPrivacy.MASK_SENSITIVE_INPUTS);
+        extraBudget -= parts.length;
+        hasControlParts = hasControlParts || parts.length > 0;
+        for (const part of parts) {
+          retained.add(part.id);
+          part.zIndex = (wireframe.zIndex ?? 0) + (part.zIndex ?? 0) * 0.5;
+          wireframes.push(part);
+          frameSources.set(part.id, node);
+        }
+      }
       if (node.isSelectArrow || this.controlFrames.supports(node.nodeType, node.inspectorInfo)) {
         const attrs = this.controlFrames.attrs(node.inspectorInfo);
         const isButton = node.nodeType === 'Button' ||
@@ -946,7 +1026,9 @@ export class ArkUIReplayCollector {
     let width = 0;
     let height = 0;
     let usedTransformedPosition = false;
-    const nodeType = this.readNodeType(node);
+    // Calendar's days are native paint. Keep its surface and descendants as
+    // data; the processing queue completes only the missing semantic content.
+    const nodeType = this.isNativeCalendarDialog(node, parentType) ? 'CalendarDialog' : this.readNodeType(node);
     const isNativeModalSurface = nodeType === 'Column' && (parentType === 'AlertDialog' || parentType === 'ActionSheet');
     const modalProjection = isNativeModalSurface ? this.readNativeModalProjection(node, vpToPxScale) : inheritedModalProjection;
     try {
@@ -995,6 +1077,23 @@ export class ArkUIReplayCollector {
     // a clipping boundary. Fully clipped nodes remain present with an empty
     // clip instead of being removed and added again when they slide back in.
     const inspectorInfo = this.readInspectorInfo(node);
+    let systemIconSvg = nodeType === 'Image' ? this.systemIcons.capture(inspectorInfo) : undefined;
+    if (nodeType === 'SymbolGlyph' && parentType === 'Stack' && grandparentType === 'TextInput') {
+      try {
+        const owner = node.getParent()?.getParent();
+        if (owner !== null && owner !== undefined) systemIconSvg = this.systemIcons.capturePasswordSymbol(this.readInspectorInfo(owner));
+      } catch (_) { }
+    }
+    let systemIconZIndex: number | undefined = undefined;
+    if (nodeType === 'Image' && parentType === 'Button' && grandparentType === 'SideBarContainer') {
+      // Native zIndex is local to the Button subtree. The replay protocol is
+      // flat; without its owner's plane this Image can sit behind the content.
+      try {
+        const owner = node.getParent();
+        if (owner !== null) systemIconZIndex = this.readInspectorNumber(
+          this.serializeInspectorInfo(this.readInspectorInfo(owner)), ['zIndex', 'zOrder']) ?? undefined;
+      } catch (_) { }
+    }
     let componentRasterKey: string | undefined = undefined;
     const visible = this.intersectClipRects(ancestorClip, bounds) !== null && opacity > 0;
     const controlInfo = (inspectorInfo ?? {}) as Record<string, Object>;
@@ -1018,7 +1117,7 @@ export class ArkUIReplayCollector {
     const inlineRuns = (nodeType === 'Text' && this.config.getImagePrivacy() !== ImagePrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)) ||
       (nodeType === 'RichEditor' && String(controlAttrs['focused'] ?? 'false') !== 'true' && this.canCaptureEditorInfo(inspectorInfo)) ?
       this.captureInlineRuns(nodeId, vpToPxScale, visible) : undefined;
-    if (!isSelectArrow && !isOverlayCloseIcon && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
+    if (systemIconSvg === undefined && !isSelectArrow && !isOverlayCloseIcon && width > 0 && height > 0 && this.canCaptureImage(width, height, vpToPxScale) &&
       inlineRuns === undefined && (isNativeControl || nodeType === 'SymbolGlyph' || (nodeType === 'RichEditor' && this.canCaptureEditorInfo(inspectorInfo) &&
         !this.hasInputDescendant(node, MAX_TEXT_DESCENDANT_SEARCH_DEPTH)) || (nodeType === 'Text' &&
         this.config.getTextAndInputPrivacy() !== TextAndInputPrivacy.MASK_ALL && this.hasInlineMedia(nodeId, inspectorInfo)))) {
@@ -1046,6 +1145,10 @@ export class ArkUIReplayCollector {
         height,
         componentId: this.readComponentId(node),
         nodeType,
+        systemIconSvg,
+        systemIconZIndex,
+        calendarTheme: nodeType === 'CalendarDialog' ?
+          this.calendarFrames.captureTheme(this.rasterContext, vpToPxScale, this.captureTimestamp) : undefined,
         inspectorInfo,
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
         isSelectArrow,

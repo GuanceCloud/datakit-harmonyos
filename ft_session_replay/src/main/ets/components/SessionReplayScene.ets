@@ -1,7 +1,21 @@
 import { ReplayPatternPoint } from './ReplayPatternLock';
 import { ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode } from '@kit.ArkUI';
-import { ReplayWireframeClip } from './SessionReplayProtocol';
+import { ReplayShadow, ReplayWireframeClip } from './SessionReplayProtocol';
+
+/** Detached public system appearance tokens for native CalendarPicker paint. */
+export interface ReplayCalendarTheme {
+  locale: string;
+  primary: string;
+  accent: string;
+  selected: string;
+  selectedText: string;
+  primaryAlpha: number;
+  tertiaryAlpha: number;
+  highlightAlpha: number;
+  dayFontSize: number;
+  shadow: ReplayShadow;
+}
 
 /** Window-space vp bounds; scene records use an origin relative to these bounds. */
 export interface ArkUIReplaySceneBounds {
@@ -78,6 +92,12 @@ export interface ArkUIReplayLightNode {
   isDarkMode?: boolean;
   /** Registered PNG for a privacy-approved native symbol, inline media Text, or RichEditor. */
   componentRasterKey?: string;
+  /** Calendar-only semantic paint metadata; no pixels or private native state. */
+  calendarTheme?: ReplayCalendarTheme;
+  /** Allowlisted native control icon SVG; never input or application-image pixels. */
+  systemIconSvg?: string;
+  /** The sidebar's internal Image belongs to its elevated native control Button. */
+  systemIconZIndex?: number;
 }
 
 export interface ArkUIReplayLightSnapshot {
@@ -282,7 +302,8 @@ export class SessionReplayScene {
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
           isDarkMode: source.isDarkMode, componentRasterKey: source.componentRasterKey,
           isPopupSurface: source.isPopupSurface, popupArrowSide: source.popupArrowSide, isOverlayCloseIcon: source.isOverlayCloseIcon,
-          isNativeModalSurface: source.isNativeModalSurface
+          isNativeModalSurface: source.isNativeModalSurface, calendarTheme: source.calendarTheme,
+          systemIconSvg: source.systemIconSvg, systemIconZIndex: source.systemIconZIndex
         });
       }
     }
