@@ -3466,6 +3466,10 @@ function deduplicateUploadRows(
       continue;
     }
     const key = getUploadDedupKey(dataType, row);
+    if (key.length === 0) {
+      result.push(row);
+      continue;
+    }
     if (state.uploadingDataIds[key] === '1' || seen[key] === '1') {
       continue;
     }
@@ -3476,6 +3480,15 @@ function deduplicateUploadRows(
 }
 
 function getUploadDedupKey(dataType: string, row: SDKUploadRowDTO): string {
+  if ((row.dataString || '').startsWith('resource,')) {
+    // Resource events are independent records, even when their timestamps,
+    // URLs or trace/span IDs match. Only guard against scheduling the same
+    // cached record twice; never infer resource identity from event content.
+    if (row.uuid && row.uuid.length > 0) {
+      return `${dataType}:resource:uuid=${row.uuid}`;
+    }
+    return row.id > 0 ? `${dataType}:resource:row_id=${row.id}` : '';
+  }
   const uniqueId = extractUploadUniqueId(row.dataString || '');
   if (uniqueId.length > 0) {
     return `${dataType}:${uniqueId}`;
@@ -3497,16 +3510,6 @@ function extractUploadUniqueId(dataString: string): string {
     if (viewId && viewId[1]) {
       return updateTime && updateTime[1] ?
         `view_id=${viewId[1]}:view_update_time=${updateTime[1]}` : `view_id=${viewId[1]}`;
-    }
-  }
-  if (dataString.startsWith('resource,')) {
-    const spanId = dataString.match(/span_id=([^,\s]+)/);
-    if (spanId && spanId[1]) {
-      return `span_id=${spanId[1]}`;
-    }
-    const traceId = dataString.match(/trace_id=([^,\s]+)/);
-    if (traceId && traceId[1]) {
-      return `trace_id=${traceId[1]}`;
     }
   }
   if (dataString.startsWith('error,')) {
@@ -3552,13 +3555,19 @@ function hashUploadString(value: string): string {
 
 function markUploadRows(dataType: string, rows: SDKUploadRowDTO[], state: SDKWorkerRuntimeState): void {
   for (let i = 0; i < rows.length; i++) {
-    state.uploadingDataIds[getUploadDedupKey(dataType, rows[i])] = '1';
+    const key = getUploadDedupKey(dataType, rows[i]);
+    if (key.length > 0) {
+      state.uploadingDataIds[key] = '1';
+    }
   }
 }
 
 function unmarkUploadRows(dataType: string, rows: SDKUploadRowDTO[], state: SDKWorkerRuntimeState): void {
   for (let i = 0; i < rows.length; i++) {
-    state.uploadingDataIds[getUploadDedupKey(dataType, rows[i])] = '';
+    const key = getUploadDedupKey(dataType, rows[i]);
+    if (key.length > 0) {
+      state.uploadingDataIds[key] = '';
+    }
   }
 }
 
