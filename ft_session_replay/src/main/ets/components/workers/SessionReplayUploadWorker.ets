@@ -16,6 +16,7 @@ import { SessionReplayUploader, SessionReplayUploadResult } from '../SessionRepl
 import { FTSessionReplayConfig } from '../FTSessionReplayConfig';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from '../ReplayResourceCleanup';
 import { canStartReplayUpload } from '../SessionReplayUploadConditions';
+import { ReplayResourceAcknowledgements } from '../ReplayResourceAcknowledgements';
 
 interface ReplayUploadEvent { data: ReplayUploadWorkerMessage; }
 interface UploadRequest { id: number; }
@@ -38,6 +39,8 @@ let readyResolver: ((ready: ReplayUploadReady | null) => void) | null = null;
 let deletionRequestId: number = 0;
 let deletionResolver: ((deleted: boolean) => void) | null = null;
 let resourceDeletionResolver: ((result: ReplayResourceCleanupResult | null) => void) | null = null;
+// Keep positive acknowledgements across scheduled jobs, not across Worker lifetimes.
+const resourceAcknowledgements = new ReplayResourceAcknowledgements();
 
 port.onmessage = (event: MessageEvents): void => {
   const message = (event as Object as ReplayUploadEvent).data;
@@ -145,10 +148,10 @@ async function runNext(): Promise<void> {
       result = await uploader.uploadPending(pending);
     } else {
       if (resourceStore === null) throw new Error('Replay resource upload Worker is not initialized.');
-      notifyUploadStarted(request.id, resourceStore.list().length);
       const uploader = new SessionReplayResourceUploader(resourceStore, ready.route,
         (ids: Array<string>): Promise<ReplayResourceCleanupResult> =>
-          requestDeleteResources(ids, ready.resourceTouchEpoch));
+          requestDeleteResources(ids, ready.resourceTouchEpoch), resourceAcknowledgements,
+        (count: number): void => notifyUploadStarted(request.id, count));
       resourceResult = await uploader.uploadPending();
     }
   } catch (error) {
