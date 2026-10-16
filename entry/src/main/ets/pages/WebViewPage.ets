@@ -136,6 +136,19 @@ export struct WebViewPage {
     this.refreshReplayDiagnostics();
   }
 
+  private toggleWebSource(): void {
+    if (this.rebuildTimer !== -1) return;
+    if (this.fixtureMode && !/^https?:\/\/\S+$/i.test(this.storedWebViewUrl.trim())) {
+      this.replayStatus = '未配置网络地址，请通过 webViewUrl 设置 HTTP(S) 地址后再切换。';
+      return;
+    }
+    this.fixtureMode = !this.fixtureMode;
+    this.replayStatus = this.fixtureMode
+      ? '已切换至内置页，请手动启动 Browser Replay'
+      : '已切换至网络页，使用 webViewUrl 配置的地址';
+    this.rebuildWeb();
+  }
+
   private rebuildWeb(): void {
     if (this.rebuildTimer !== -1) return;
     this.cancelReplayCheck();
@@ -224,10 +237,8 @@ export struct WebViewPage {
           this.controlButton('重建 Web', 'web-replay-rebuild-button', () => this.rebuildWeb())
         }
         GridCol() {
-          this.controlButton('内置页', 'web-replay-fixture-button', () => {
-            this.fixtureMode = true;
-            this.rebuildWeb();
-          })
+          this.controlButton(this.fixtureMode ? '网络页' : '内置页', 'web-replay-fixture-button',
+            () => this.toggleWebSource(), this.mainWebMounted)
         }
         GridCol() {
           this.controlButton('调整区域', 'web-replay-resize-button', () => {
@@ -285,7 +296,7 @@ export struct WebViewPage {
 
   @Builder
   private webPaneHeader(title: string, visible: boolean) {
-    Text(`${title}  /  ${visible ? (this.fixtureMode ? '内置验证页' : '配置网页') : '已隐藏'}`)
+    Text(`${title}  /  ${visible ? (this.fixtureMode ? '内置验证页' : '网络页') : '已隐藏'}`)
       .width('100%')
       .fontSize(12)
       .fontWeight(FontWeight.Bold)
