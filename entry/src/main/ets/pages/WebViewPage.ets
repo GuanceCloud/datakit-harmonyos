@@ -9,6 +9,20 @@ import { BrowserReplayState, formatWebReplayState, NativeReplayState, WebReplayP
 const WEB_TEST_SPACING: number = 12;
 const WEB_TEST_BUTTON_HEIGHT: number = 44;
 
+interface WebTestControlOptions {
+  label: string;
+  buttonId: string;
+  onTap: () => void;
+  enabled: boolean;
+  primary: boolean;
+}
+
+interface WebTestPaneHeaderOptions {
+  title: string;
+  visible: boolean;
+  fixtureMode: boolean;
+}
+
 @Component
 struct ReplaySecondaryWebPane {
   url: string = 'about:blank';
@@ -176,28 +190,28 @@ export struct WebViewPage {
     this.refreshReplayDiagnostics();
   }
 
+  // A single object-literal argument keeps @State reads reactive inside the builder.
   @Builder
-  private controlButton(label: string, buttonId: string, onTap: () => void,
-    enabled: boolean = true, primary: boolean = false) {
+  private controlButton($$: WebTestControlOptions) {
     Button({ type: ButtonType.Normal }) {
-      Text(label)
+      Text($$.label)
         .width('100%')
         .fontSize(12)
         .fontWeight(FontWeight.Medium)
-        .fontColor(primary ? Color.White : '#1D4ED8')
+        .fontColor($$.primary === true ? Color.White : '#1D4ED8')
         .textAlign(TextAlign.Start)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
     }
-    .id(buttonId)
+    .id($$.buttonId)
     .width('100%')
     .height(WEB_TEST_BUTTON_HEIGHT)
     .padding(8)
     .borderRadius(8)
-    .backgroundColor(primary ? '#2563EB' : Color.White)
-    .border({ width: 1, color: primary ? '#2563EB' : '#BFDBFE' })
-    .enabled(enabled)
-    .onClick(() => onTap())
+    .backgroundColor($$.primary === true ? '#2563EB' : Color.White)
+    .border({ width: 1, color: $$.primary === true ? '#2563EB' : '#BFDBFE' })
+    .enabled($$.enabled !== false)
+    .onClick(() => $$.onTap())
   }
 
   @Builder
@@ -212,57 +226,96 @@ export struct WebViewPage {
 
       GridRow({ columns: 3, gutter: WEB_TEST_SPACING }) {
         GridCol() {
-          this.controlButton(this.nativeReplayEnabled ? '关闭 Replay' : '开启 Replay',
-            'web-replay-toggle-button', () => {
+          this.controlButton({
+            label: this.nativeReplayEnabled ? '关闭 Replay' : '开启 Replay',
+            buttonId: 'web-replay-toggle-button',
+            enabled: true, primary: true,
+            onTap: () => {
               const replay = FTSessionReplay.getInstance();
               if (replay.isEnabled()) { replay.disable(); this.cancelReplayCheck(); }
               else { replay.start(); this.rebuildWeb(); }
               this.replayStatus = replay.isEnabled() ? '原生 Replay 已开启，Web 重新加载后请检查 Browser 状态' : '原生 Replay 已关闭';
               this.refreshReplayDiagnostics();
-            }, true, true)
-        }
-        GridCol() {
-          this.controlButton('上传', 'web-replay-upload-button', () => {
-            FTSessionReplay.getInstance().flush().then((result) => {
-              this.replayStatus = `${result.success ? '上传成功' : '上传失败'}：${result.uploadedSegments}，剩余 ${result.remainingSegments}`;
-              this.refreshReplayDiagnostics();
-            }).catch((error: Error) => { this.replayStatus = error.message; });
+            }
           })
         }
         GridCol() {
-          this.controlButton(this.checkingReplay ? '读取中…' : '检查状态', 'web-replay-check-button',
-            () => this.checkReplayState(), !this.checkingReplay && this.mainWebMounted)
-        }
-        GridCol() {
-          this.controlButton('重建 Web', 'web-replay-rebuild-button', () => this.rebuildWeb())
-        }
-        GridCol() {
-          this.controlButton(this.fixtureMode ? '网络页' : '内置页', 'web-replay-fixture-button',
-            () => this.toggleWebSource(), this.mainWebMounted)
-        }
-        GridCol() {
-          this.controlButton('调整区域', 'web-replay-resize-button', () => {
-            this.compactWeb = !this.compactWeb;
-            FTSessionReplay.getInstance().notifyPageChanged();
+          this.controlButton({
+            label: '上传', buttonId: 'web-replay-upload-button',
+            enabled: true, primary: false,
+            onTap: () => {
+              FTSessionReplay.getInstance().flush().then((result) => {
+                this.replayStatus = `${result.success ? '上传成功' : '上传失败'}：${result.uploadedSegments}，剩余 ${result.remainingSegments}`;
+                this.refreshReplayDiagnostics();
+              }).catch((error: Error) => { this.replayStatus = error.message; });
+            }
           })
         }
         GridCol() {
-          this.controlButton('隐藏/显示', 'web-replay-visibility-button', () => {
-            this.mainWebVisible = !this.mainWebVisible;
-            FTSessionReplay.getInstance().notifyPageChanged();
+          this.controlButton({
+            label: this.checkingReplay ? '读取中…' : '检查状态',
+            buttonId: 'web-replay-check-button',
+            enabled: !this.checkingReplay && this.mainWebMounted,
+            primary: false,
+            onTap: () => this.checkReplayState()
           })
         }
         GridCol() {
-          this.controlButton('双 Web', 'web-replay-secondary-button', () => {
-            this.secondWebMounted = !this.secondWebMounted;
-            FTSessionReplay.getInstance().notifyPageChanged();
+          this.controlButton({
+            label: '重建 Web', buttonId: 'web-replay-rebuild-button',
+            enabled: true, primary: false,
+            onTap: () => this.rebuildWeb()
           })
         }
         GridCol() {
-          this.controlButton('第二个显隐', 'web-replay-secondary-visibility-button', () => {
-            this.secondWebVisible = !this.secondWebVisible;
-            FTSessionReplay.getInstance().notifyPageChanged();
-          }, this.secondWebMounted)
+          this.controlButton({
+            label: this.fixtureMode ? '网络页' : '内置页',
+            buttonId: 'web-replay-fixture-button',
+            enabled: this.mainWebMounted,
+            primary: false,
+            onTap: () => this.toggleWebSource()
+          })
+        }
+        GridCol() {
+          this.controlButton({
+            label: '调整区域', buttonId: 'web-replay-resize-button',
+            enabled: true, primary: false,
+            onTap: () => {
+              this.compactWeb = !this.compactWeb;
+              FTSessionReplay.getInstance().notifyPageChanged();
+            }
+          })
+        }
+        GridCol() {
+          this.controlButton({
+            label: '隐藏/显示', buttonId: 'web-replay-visibility-button',
+            enabled: true, primary: false,
+            onTap: () => {
+              this.mainWebVisible = !this.mainWebVisible;
+              FTSessionReplay.getInstance().notifyPageChanged();
+            }
+          })
+        }
+        GridCol() {
+          this.controlButton({
+            label: '双 Web', buttonId: 'web-replay-secondary-button',
+            enabled: true, primary: false,
+            onTap: () => {
+              this.secondWebMounted = !this.secondWebMounted;
+              FTSessionReplay.getInstance().notifyPageChanged();
+            }
+          })
+        }
+        GridCol() {
+          this.controlButton({
+            label: '第二个显隐', buttonId: 'web-replay-secondary-visibility-button',
+            enabled: this.secondWebMounted,
+            primary: false,
+            onTap: () => {
+              this.secondWebVisible = !this.secondWebVisible;
+              FTSessionReplay.getInstance().notifyPageChanged();
+            }
+          })
         }
       }
       .width('100%')
@@ -295,8 +348,8 @@ export struct WebViewPage {
   }
 
   @Builder
-  private webPaneHeader(title: string, visible: boolean) {
-    Text(`${title}  /  ${visible ? (this.fixtureMode ? '内置验证页' : '网络页') : '已隐藏'}`)
+  private webPaneHeader($$: WebTestPaneHeaderOptions) {
+    Text(`${$$.title}  /  ${$$.visible ? ($$.fixtureMode ? '内置验证页' : '网络页') : '已隐藏'}`)
       .width('100%')
       .fontSize(12)
       .fontWeight(FontWeight.Bold)
@@ -317,7 +370,9 @@ export struct WebViewPage {
           this.nativeControls()
 
           Column() {
-            this.webPaneHeader('WEB 01 · 主 WebView', this.mainWebVisible)
+            this.webPaneHeader({
+              title: 'WEB 01 · 主 WebView', visible: this.mainWebVisible, fixtureMode: this.fixtureMode
+            })
             Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
               .width('100%').height(2)
               .visibility(this.progress < 100 ? Visibility.Visible : Visibility.Hidden)
@@ -377,7 +432,9 @@ export struct WebViewPage {
 
           if (this.secondWebMounted) {
             Column() {
-              this.webPaneHeader('WEB 02 · 第二 WebView', this.secondWebVisible)
+              this.webPaneHeader({
+                title: 'WEB 02 · 第二 WebView', visible: this.secondWebVisible, fixtureMode: this.fixtureMode
+              })
               ReplaySecondaryWebPane({ url: this.storedWebViewUrl, useFixture: this.fixtureMode })
                 .width('100%').layoutWeight(1)
                 .visibility(this.secondWebVisible ? Visibility.Visible : Visibility.Hidden)
