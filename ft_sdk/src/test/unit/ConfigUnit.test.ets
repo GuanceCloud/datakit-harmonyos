@@ -610,7 +610,7 @@ export default function configUnitTest() {
       expect(rumConfig.isEnableTraceUserResource()).assertFalse();
       expect(rumConfig.isEnableTrackAppANR()).assertFalse();
       expect(rumConfig.isEnableTrackAppCrash()).assertFalse();
-      expect(rumConfig.isEnableTraceWebView()).assertFalse();
+      expect(rumConfig.isEnableTraceWebView()).assertTrue();
       expect(rumConfig.getBlockDurationMS()).assertEqual(1000);
       expect(rumConfig.getRumCacheLimitCount()).assertEqual(Constants.DEFAULT_DB_RUM_CACHE_NUM);
       expect(rumConfig.getRumCacheDiscardStrategy()).assertEqual(RUMCacheDiscard.DISCARD);

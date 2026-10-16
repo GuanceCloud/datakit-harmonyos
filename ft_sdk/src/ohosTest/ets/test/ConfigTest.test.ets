@@ -229,7 +229,7 @@ export default function configTest() {
     it('rumAnrSwitchShouldApply', 0, () => {
       const defaultConfig: FTRUMConfig = new FTRUMConfig();
       expect(defaultConfig.isEnableTrackAppANR()).assertFalse();
-      expect(defaultConfig.isEnableTraceWebView()).assertFalse();
+      expect(defaultConfig.isEnableTraceWebView()).assertTrue();
       expect(defaultConfig.isEnableTraceUserResource()).assertFalse();
 
       const enabledConfig: FTRUMConfig = new FTRUMConfig()
