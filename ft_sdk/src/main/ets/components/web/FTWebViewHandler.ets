@@ -59,16 +59,6 @@ class WebViewMessageReceiver implements JsReceiver {
    */
   sendEvent(event: string): void {
     if (!this.handler.isCurrentProxy(this.generation)) return;
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== sendEvent() called via proxy ==========`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] 📥 Received data from WebView (via proxy)`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Event data length: ${event ? event.length : 0}`);
-    // FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Event data (full): ${event}`);
-    try {
-      const parsed = JSON.parse(event) as Record<string, string | number | boolean | object | null>;
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Event data (parsed): ${JSON.stringify(parsed, null, 2)}`);
-    } catch (e) {
-      FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Event data is not valid JSON, raw: ${event}`);
-    }
     this.handler.handleWebViewData(event);
   }
 
@@ -78,8 +68,6 @@ class WebViewMessageReceiver implements JsReceiver {
    */
   sendEventWithCallback(event: string, callbackMethod: string): void {
     if (!this.handler.isCurrentProxy(this.generation)) return;
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== sendEventWithCallback() called via proxy ==========`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Event data length: ${event ? event.length : 0}, callback: ${callbackMethod}`);
     this.handler.sendEventWithCallback(event, callbackMethod);
   }
 
@@ -88,17 +76,15 @@ class WebViewMessageReceiver implements JsReceiver {
    * Currently not used but required by interface
    */
   addEventListener(event: string, callbackMethod: string): void {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] addEventListener called: event=${event}, callback=${callbackMethod}`);
     // Not implemented yet
   }
 
   /**
    * Get allowed webview hosts
    * Required by browser-sdk to detect if bridge is available
-   * Returns null to allow all hosts (browser-sdk expects null or undefined to enable bridge)
+   * Returns the configured host allow-list, or null when no restriction is configured.
    */
   getAllowedWebViewHosts(): string | null {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] getAllowedWebViewHosts() called - returning null to allow all hosts`);
     return this.handler.getAllowedWebViewHosts();
   }
 
@@ -172,6 +158,7 @@ export class FTWebViewHandler implements JsReceiver {
   private readonly webReplayContexts: Map<string, Record<string, string | number | boolean>> = new Map();
   private sessionReplaySnapshotTimer: number = -1;
   private sessionReplaySlotActive: boolean = false;
+  private lastWebSdkVersion: string = '';
   private readonly sessionReplaySlotListener: () => void;
   // Static Set to track processed webview action IDs to prevent duplicate processing across all instances
   // This ensures that even if the same action is received multiple times, it will only be processed once
@@ -269,12 +256,8 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Install the Bridge using global RUM configuration and automatic controller/node association. */
   public setWebView(webController: webview.WebviewController): void {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() called ==========`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController parameter: ${webController ? 'valid' : 'null'}`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Current webController: ${this.webController ? 'exists' : 'null'}`);
-    
     if (!webController) {
-      FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ WebController parameter is null, cannot set`);
+      FTInnerLogger.e(TAG, '[WEBVIEW-DEBUG] Bridge setup skipped: reason=controller_missing');
       return;
     }
     
@@ -282,13 +265,12 @@ export class FTWebViewHandler implements JsReceiver {
     if (config === null || !this.isRumWebViewEnabled()) {
       this.stopSessionReplaySnapshotTimer();
       this.sessionReplayBindingKey = '';
-      FTInnerLogger.i(TAG, '[WEBVIEW-DEBUG] WebView RUM is disabled or not initialized, skip WebView setup');
+      FTInnerLogger.d(TAG, '[WEBVIEW-DEBUG] Bridge setup skipped: reason=rum_uninitialized_or_tracing_disabled');
       return;
     }
     
     // If we already have a controller and it's different, clear the old one
     if (this.webController && this.webController !== webController) {
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Replacing existing WebController`);
       this.clearWebController();
     }
 
@@ -306,7 +288,7 @@ export class FTWebViewHandler implements JsReceiver {
       this.sessionReplayComponentRegistered =
         FTSessionReplayBridgeRegistry.registerWebReplayComponent(this.sessionReplayComponentId);
       if (!this.sessionReplayComponentRegistered) {
-        FTInnerLogger.w(TAG, 'Replay Web component ID is duplicated or the 20-slot limit was reached.');
+        FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Replay registration rejected: component=${bindingId}, reason=duplicate_component_or_slot_limit`);
       }
     }
     if (this.sessionReplayComponentRegistered) {
@@ -315,17 +297,13 @@ export class FTWebViewHandler implements JsReceiver {
     
     this.webController = webController;
     this.sessionReplaySlotActive = true;
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController assigned successfully`);
     
     // Bridge installation and Browser host verification share the installed RUM config.
     this.allowWebViewHost = config.getAllowWebViewHost();
     
-    // Register JavaScript proxy early (before page loads) so browser-sdk can detect it
-    // This is similar to Android's addJavascriptInterface which is available immediately
+    // The controller must be attached; ArkWeb applies this registration on the next load.
     this.registerJavaScriptProxy();
     this.refreshSessionReplaySnapshotTimer();
-    
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() completed ==========`);
   }
 
   /**
@@ -333,21 +311,21 @@ export class FTWebViewHandler implements JsReceiver {
    * Called when page is about to disappear or WebView is destroyed
    */
   public clearWebController(): void {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== clearWebController() called ==========`);
+    const hadController = this.webController !== null || this.sessionReplayComponentRegistered;
+    const componentId = this.sessionReplayComponentId;
+    const slotId = this.getSessionReplaySlotId();
     
     // Unregister JavaScript proxy before clearing controller
     if (this.webController && this.messageReceiver) {
       try {
         this.webController.deleteJavaScriptRegister(this.PROXY_OBJECT_NAME);
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] JavaScript proxy unregistered`);
       } catch (error) {
-        FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Error unregistering proxy: ${error}`);
+        this.logWebViewError('unregister_proxy', error as BusinessError, true);
       }
     }
     
     this.stopSessionReplaySnapshotTimer();
     this.sessionReplaySlotActive = false;
-    const slotId = this.getSessionReplaySlotId();
     if (slotId.length > 0) FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(slotId, false, Date.now());
     if (this.sessionReplayComponentRegistered) {
       FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
@@ -360,19 +338,20 @@ export class FTWebViewHandler implements JsReceiver {
     this.webViewId = '';
     this.webReplayLinkContext = {};
     this.webReplayContexts.clear();
+    this.lastWebSdkVersion = '';
     this.proxyGeneration++;
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController cleared`);
+    if (hadController) {
+      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Controller released: component=${componentId}, slot=${slotId || 'unbound'}`);
+    }
   }
 
   /**
    * Register JavaScript proxy for direct method calls from Web to Native
-   * This should be called before page loads (similar to Android's addJavascriptInterface)
+   * Call after controller attachment and before page load.
    */
   private registerJavaScriptProxy(): void {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== registerJavaScriptProxy() called ==========`);
-    
     if (!this.webController) {
-      FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ WebController is null, cannot register proxy`);
+      FTInnerLogger.e(TAG, '[WEBVIEW-DEBUG] Bridge registration failed: reason=controller_missing');
       return;
     }
     
@@ -381,28 +360,25 @@ export class FTWebViewHandler implements JsReceiver {
         this.messageReceiver = new WebViewMessageReceiver(this);
       }
       
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Registering JavaScript proxy: ${this.PROXY_OBJECT_NAME}`);
       this.webController.registerJavaScriptProxy(
         this.messageReceiver,
         this.PROXY_OBJECT_NAME,
         ["sendEvent", "sendEventWithCallback", "getAllowedWebViewHosts", "getPrivacyLevel", "getCapabilities"],
         []
       );
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ✅ JavaScript proxy registered successfully`);
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Proxy will be available as window.${this.PROXY_OBJECT_NAME}`);
+      const hosts = this.allowWebViewHost;
+      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Bridge registration succeeded: component=${this.sessionReplayComponentId}, ` +
+        `proxy=${this.PROXY_OBJECT_NAME}, hosts=${hosts === null || hosts.length === 0 ? 'all' : `allow_list(${hosts.length})`}, ` +
+        'effective=next_page_load');
     } catch (error) {
-      FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ Error registering JavaScript proxy: ${error}`);
+      this.logWebViewError('register_proxy', error as BusinessError);
     }
-    
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== registerJavaScriptProxy() completed ==========`);
   }
 
   /**
    * Send event from Web to Native
    */
   public sendEvent(event: string): void {
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] sendEvent() called without callback`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Event string length: ${event ? event.length : 0}`);
     this.sendEventWithCallback(event, null);
   }
 
@@ -410,6 +386,8 @@ export class FTWebViewHandler implements JsReceiver {
    * datakit-js in webview called channel method, processing datakit business logic related
    */
   public sendEventWithCallback(event: string, callbackMethod: string | null): void {
+    // Keep one complete, unformatted payload for every event, regardless of its entry point.
+    this.logWebViewPayload('web_to_native', event);
     try {
       // Parse JSON event
       const eventObj = JSON.parse(event) as Record<string, string | Record<string, string | object>>;
@@ -545,9 +523,9 @@ export class FTWebViewHandler implements JsReceiver {
                 ? valueStr.substring(1, valueStr.length - 1) 
                 : valueStr;
               tagsMap.set(currentKey, cleanValue);
-              // Debug: log sdk_version from webview
-              if (currentKey === Constants.KEY_SDK_VERSION) {
-                FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Web SDK version from webview tags: "${cleanValue}"`);
+              if (currentKey === Constants.KEY_SDK_VERSION && cleanValue !== this.lastWebSdkVersion) {
+                this.lastWebSdkVersion = cleanValue;
+                FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Browser SDK version changed: component=${this.sessionReplayComponentId}, version=${cleanValue}`);
               }
             }
           }
@@ -733,24 +711,21 @@ export class FTWebViewHandler implements JsReceiver {
         this.handleSessionReplayWebEvent(dataJson, replayViewId);
       } else if (name === WEB_JS_TYPE_TRACK) {
         // Not used in current implementation
-        FTInnerLogger.d(TAG, "TRACK data received from WebView");
+        FTInnerLogger.d(TAG, '[WEBVIEW-DEBUG] Event ignored: channel=track, reason=not_implemented');
       } else if (name === WEB_JS_TYPE_LOG) {
         // Not used in current implementation
-        FTInnerLogger.d(TAG, "LOG data received from WebView");
+        FTInnerLogger.d(TAG, '[WEBVIEW-DEBUG] Event ignored: channel=log, reason=not_implemented');
       } else if (name === WEB_JS_TYPE_URL_VERIFY) {
         // Not used in current implementation
-        FTInnerLogger.d(TAG, "URL_VERIFY received from WebView");
+        FTInnerLogger.d(TAG, '[WEBVIEW-DEBUG] Event ignored: channel=urlVerify, reason=not_implemented');
       } else {
         // Unknown event type
-        FTInnerLogger.w(TAG, `[WEBVIEW-WARNING] ⚠️ Received unknown event type: ${name}`);
-        FTInnerLogger.w(TAG, `[WEBVIEW-WARNING] Expected event types: "rum", "track", "log", "url_verify"`);
-        FTInnerLogger.w(TAG, `[WEBVIEW-WARNING] This event will not be processed. Please check browser-sdk configuration.`);
+        FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Event ignored: reason=unknown_channel, channel=${JSON.stringify(name)}, ` +
+          'expected=rum|session_replay|track|log|urlVerify');
       }
 
       // Handle callback if needed
-      if (callbackMethod && callbackMethod.length > 0 && this.webController) {
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Executing callback to Web...`);
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Callback method: ${callbackMethod}, tag: ${tag}`);
+      if (callbackMethod && callbackMethod.length > 0) {
         // Create object with status property (can't use indexed access in ArkTS)
         // Define interface for callback return object
         interface CallbackReturnStatus {
@@ -758,18 +733,10 @@ export class FTWebViewHandler implements JsReceiver {
         }
         const retObj: CallbackReturnStatus = { status: true };
         const retJson = JSON.stringify(retObj);
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Callback return JSON: ${retJson}`);
         this.callbackFromNative(tag, callbackMethod, retJson, "{}");
-      } else {
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] No callback needed or WebController unavailable`);
       }
-
-      FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== sendEventWithCallback() END ==========`);
-
     } catch (error) {
-      FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ Error handling WebView event: ${error}`);
-      FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] Error details: ${JSON.stringify(error)}`);
-      FTInnerLogger.e(TAG, `Error handling WebView event: ${error}`);
+      this.logWebViewError('process_event', error as BusinessError);
     }
   }
 
@@ -983,12 +950,12 @@ export class FTWebViewHandler implements JsReceiver {
         'if (typeof DATAFLUX_RUM !== "undefined" && typeof DATAFLUX_RUM.takeSubsequentFullSnapshot === "function") { DATAFLUX_RUM.takeSubsequentFullSnapshot(); }',
         (error?: BusinessError<void>): void => {
           if (error !== undefined) {
-            FTInnerLogger.w(TAG, `WebView Session Replay full-snapshot request failed: ${error.message}`);
+            this.logWebViewError('request_full_snapshot', error, true);
           }
         }
       );
     } catch (error) {
-      FTInnerLogger.w(TAG, `WebView Session Replay full-snapshot request failed: ${String(error)}`);
+      this.logWebViewError('request_full_snapshot', error as BusinessError, true);
     }
   }
 
@@ -997,15 +964,13 @@ export class FTWebViewHandler implements JsReceiver {
    */
   public addEventListener(event: string, callbackMethod: string): void {
     try {
-      FTInnerLogger.d(TAG, `addEventListener: event=${event}, callback=${callbackMethod}`);
-      
       const retJson = "{}";
       const errJson = "{}";
       const tag = Date.now().toString();
       
       this.callbackFromNative(tag, callbackMethod, retJson, errJson);
     } catch (error) {
-      FTInnerLogger.e(TAG, `Error handling event listener: ${error}`);
+      this.logWebViewError('add_event_listener', error as BusinessError);
     }
   }
 
@@ -1014,54 +979,27 @@ export class FTWebViewHandler implements JsReceiver {
    * Called from WebViewPage via onReceiveData (legacy polling method)
    */
   public handleWebViewData(data: string): void {
-    FTInnerLogger.d(TAG, ` ========== handleWebViewData() called ==========`);
-    FTInnerLogger.d(TAG, ` Data length: ${data ? data.length : 0},Raw data (full): ${data}`);
     try {
-      FTInnerLogger.d(TAG, ` ========== Receiving data from WebView ==========`);
-      FTInnerLogger.d(TAG, ` Raw data: ${data}`);
-      
-      // Parse and print detailed data structure
+      // Preserve legacy callback envelopes; regular events share the same receiver below.
       const parsedData = JSON.parse(data) as Record<string, string>;
-      const parsedKeys = Object.keys(parsedData);
-      FTInnerLogger.d(TAG, ` 📋 Parsed data structure: Keys: ${parsedKeys.join(', ')}`);
-
-      // Iterate through keys to access values (ArkTS doesn't support indexed access)
-      let callbackMethod: string | null = null;
-      let eventData: string | null = null;
-      
-      for (let i = 0; i < parsedKeys.length; i++) {
-        const key = parsedKeys[i];
-        const value = parsedData[key];
-        if (value) {
-          if (value.length > 200) {
-            FTInnerLogger.d(TAG, `   ${key}: ${value.substring(0, 200)}... (length: ${value.length})`);
-          } else {
-            FTInnerLogger.d(TAG, `   ${key}: ${value}`);
-          }
-          
-          if (key === "callbackMethod") {
-            callbackMethod = value;
-          } else if (key === "event") {
-            eventData = value;
-          }
-        }
-      }
-      
-      FTInnerLogger.d(TAG, ` Parsed data keys: ${parsedKeys.join(', ')}`);
+      const callbackMethod = parsedData.callbackMethod;
+      const eventData = parsedData.event;
       
       if (callbackMethod) {
         // Handle callback format
-        FTInnerLogger.d(TAG, ` Callback method: ${callbackMethod}, Event data: ${eventData || 'null'}`);
         if (eventData) {
           this.sendEventWithCallback(eventData, callbackMethod);
+        } else {
+          this.logWebViewPayload('web_to_native', data);
+          FTInnerLogger.w(TAG, '[WEBVIEW-DEBUG] Legacy event ignored: reason=event_missing');
         }
       } else {
         // Handle regular event format
-        FTInnerLogger.d(TAG, ` Regular event format`);
         this.sendEvent(data);
       }
     } catch (error) {
-      FTInnerLogger.e(TAG, ` Error handling WebView data: ${error}`);
+      this.logWebViewPayload('web_to_native', data);
+      this.logWebViewError('parse_legacy_envelope', error as BusinessError);
     }
   }
 
@@ -1070,33 +1008,24 @@ export class FTWebViewHandler implements JsReceiver {
    * This is used for callback execution
    */
   private callbackFromNative(requestTag: string, callBackMethod: string, retJsonString: string, errJsonString: string): void {
-    FTInnerLogger.d(TAG, ` ========== callbackFromNative() called ==========`);
-    FTInnerLogger.d(TAG, ` Callback method: ${callBackMethod}, Request tag: ${requestTag}`);
-
     if (!this.webController) {
-      FTInnerLogger.w(TAG, ` ⚠️ WebController is null, cannot execute callback`);
+      FTInnerLogger.w(TAG, '[WEBVIEW-DEBUG] Callback skipped: reason=controller_missing');
       return;
     }
 
     const separator = retJsonString.length > 0 && errJsonString.length > 0 ? "," : "";
     const jsStr = `${callBackMethod}["${requestTag}"](${retJsonString}${separator}${errJsonString})`;
     
-    FTInnerLogger.d(TAG, ` Executing JavaScript callback...`);
-
     this.webController.runJavaScript(jsStr, (err?: BusinessError<void>) => {
       if (err) {
-        FTInnerLogger.e(TAG, ` ❌ Failed to execute callback: ${callBackMethod}, error: ${err.message}`);
+        this.logWebViewError('execute_callback', err);
         
         // If error is about controller not associated, clear the controller
         const errorMsg = err.message || '';
         if (errorMsg.includes("associated") || errorMsg.includes("Init error")) {
-          FTInnerLogger.w(TAG, ` ⚠️ WebController not associated, clearing reference`);
           this.webController = null;
         }
-      } else {
-        FTInnerLogger.d(TAG, ` ✅ Callback executed successfully: ${callBackMethod}`);
       }
-      FTInnerLogger.d(TAG, ` ========== callbackFromNative() completed ==========`);
     });
   }
 
@@ -1105,18 +1034,14 @@ export class FTWebViewHandler implements JsReceiver {
    * HarmonyOS WebView may not support postMessage API with single parameter
    */
   public postMessageToWeb(message: string): void {
-    FTInnerLogger.d(TAG, ` ========== postMessageToWeb() called ==========`);
-    FTInnerLogger.d(TAG, ` Message length: ${message ? message.length : 0}`);
+    this.logWebViewPayload('native_to_web', message);
     
     if (!this.webController) {
-      FTInnerLogger.w(TAG, ` ❌ WebController is null, cannot post message`);
+      FTInnerLogger.w(TAG, '[WEBVIEW-DEBUG] Native message skipped: reason=controller_missing');
       return;
     }
 
     try {
-      FTInnerLogger.d(TAG, ` Posting message to Web via runJavaScript...`);
-      FTInnerLogger.d(TAG, ` Message content: ${message.substring(0, 200)}...`);
-      
       // Use runJavaScript to send message to Web
       // Inject message into a global variable that Web can read
       const jsCode = `
@@ -1129,16 +1054,29 @@ export class FTWebViewHandler implements JsReceiver {
       
       this.webController.runJavaScript(jsCode, (err?: BusinessError<void>) => {
         if (err) {
-          FTInnerLogger.e(TAG, ` ❌ Error posting message to Web: ${err.message}`);
-        } else {
-          FTInnerLogger.d(TAG, ` ✅ Message posted to Web successfully`);
-          FTInnerLogger.d(TAG, `Message posted to Web: ${message.substring(0, 100)}...`);
+          this.logWebViewError('post_message', err);
         }
       });
     } catch (error) {
-      FTInnerLogger.e(TAG, ` ❌ Error posting message to Web: ${error}`);
+      this.logWebViewError('post_message', error as BusinessError);
     }
-    FTInnerLogger.d(TAG, ` ========== postMessageToWeb() completed ==========`);
+  }
+
+  /** One original payload, without debug-only JSON parsing or per-field duplication. */
+  private logWebViewPayload(direction: string, payload: string): void {
+    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Payload: direction=${direction}, component=${this.sessionReplayComponentId}, ` +
+      `slot=${this.getSessionReplaySlotId() || 'unbound'}, chars=${payload ? payload.length : 0}, payload=${payload}`);
+  }
+
+  private logWebViewError(stage: string, error: BusinessError, warning: boolean = false): void {
+    const code = error?.code ?? 'unknown';
+    const message = error?.message || String(error);
+    const hint = stage === 'register_proxy' && (code === 17100001 || message.includes('associated'))
+      ? ', hint=call_setWebView_in_onControllerAttached_before_page_load' : '';
+    const diagnostic = `[WEBVIEW-DEBUG] Operation failed: stage=${stage}, component=${this.sessionReplayComponentId}, ` +
+      `slot=${this.getSessionReplaySlotId() || 'unbound'}, code=${code}, message=${message}${hint}`;
+    if (warning) FTInnerLogger.w(TAG, diagnostic);
+    else FTInnerLogger.e(TAG, diagnostic);
   }
 
   /**
