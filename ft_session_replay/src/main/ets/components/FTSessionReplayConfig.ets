@@ -36,9 +36,9 @@ export class FTSessionReplayConfig {
   // perform no polling once the motion tail has finished.
   private snapshotIntervalMs: number = 32;
   private performanceDiagnosticsEnabled: boolean = false;
-  // Mirrors Android Replay's sparse checkpoint approach: normal traffic is
-  // Incremental Snapshot records; a Full Snapshot is a periodic resync only.
-  private fullSnapshotIntervalMs: number = 30_000;
+  // Android checkpoints an observed frame after 3 seconds. This threshold
+  // does not schedule captures when an otherwise idle page produces no frames.
+  private fullSnapshotIntervalMs: number = 3_000;
   // Keep sampling after a gesture/transition signal to cover inertia and the
   // final state. Drawing notifications continue sampling longer animations.
   private motionQuietPeriodMs: number = 400;
@@ -169,12 +169,12 @@ export class FTSessionReplayConfig {
     return this.snapshotIntervalMs;
   }
 
-  /** Sets the low-frequency Full Snapshot resynchronization interval. */
+  /** Sets the frame-driven Full Snapshot threshold (minimum/default 3 seconds). */
   public setFullSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;
     }
-    this.fullSnapshotIntervalMs = Math.max(5_000, Math.min(300_000, Math.floor(intervalMs)));
+    this.fullSnapshotIntervalMs = Math.max(3_000, Math.min(300_000, Math.floor(intervalMs)));
     return this;
   }
 

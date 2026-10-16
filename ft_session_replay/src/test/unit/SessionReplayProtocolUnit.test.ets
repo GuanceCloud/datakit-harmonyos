@@ -116,7 +116,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.setSessionReplayOnErrorSampleRate(-1).getSessionReplayOnErrorSampleRate()).assertEqual(0);
       expect(config.setSnapshotIntervalMs(1).getSnapshotIntervalMs()).assertEqual(16);
       expect(config.setSnapshotIntervalMs(20000).getSnapshotIntervalMs()).assertEqual(10000);
-      expect(config.setFullSnapshotIntervalMs(1).getFullSnapshotIntervalMs()).assertEqual(5000);
+      expect(config.setFullSnapshotIntervalMs(1).getFullSnapshotIntervalMs()).assertEqual(3000);
       expect(config.setFullSnapshotIntervalMs(400000).getFullSnapshotIntervalMs()).assertEqual(300000);
       expect(config.setMotionQuietPeriodMs(1).getMotionQuietPeriodMs()).assertEqual(50);
       expect(config.setMotionQuietPeriodMs(6000).getMotionQuietPeriodMs()).assertEqual(5000);
