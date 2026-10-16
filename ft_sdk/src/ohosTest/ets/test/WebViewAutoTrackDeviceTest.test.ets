@@ -281,11 +281,9 @@ export default function webViewAutoTrackDeviceTest() {
     it('webViewHandlerShouldGateBridge', 0, () => {
       const handler = new FTWebViewHandler();
       const fakeController = new FakeWebviewController('https://webview.test/register');
-      const disabledConfig = new FTRUMConfig()
-        .setRumAppId(TEST_FAKE_RUM_ID)
-        .setEnableTraceWebView(false);
+      rumConfig.setEnableTraceWebView(false);
 
-      handler.setWebView(fakeController as Object as webview.WebviewController, disabledConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
       expect(fakeController.registerCount).assertEqual(0);
 
       const proxy = handler.getJavaScriptProxy(fakeController as Object as webview.WebviewController);
@@ -293,7 +291,8 @@ export default function webViewAutoTrackDeviceTest() {
       expect(proxy.methodList.join(',').includes('getAllowedWebViewHosts')).assertTrue();
       expect(proxy.object !== null).assertTrue();
 
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      rumConfig.setEnableTraceWebView(true);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
       expect(fakeController.registerCount).assertEqual(1);
       expect(fakeController.proxyName).assertEqual('FTWebViewJavascriptBridge');
       expect(fakeController.methodListText.includes('sendEvent')).assertTrue();
@@ -317,7 +316,7 @@ export default function webViewAutoTrackDeviceTest() {
 
       await FTRUMGlobalManager.getInstance().startView(nativeViewName);
       await WaitUtils.delay(300);
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.sendEventWithCallback(buildWebViewRumEvent(
         Constants.FT_MEASUREMENT_RUM_VIEW,
@@ -389,7 +388,7 @@ export default function webViewAutoTrackDeviceTest() {
       const errorMessage = '[503][https://webview.test/api/failed-request]';
       const handler = new FTWebViewHandler();
       const fakeController = new FakeWebviewController(resourceUrl);
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.sendEvent(buildWebViewRumEvent(
         Constants.FT_MEASUREMENT_RUM_RESOURCE,
@@ -471,7 +470,7 @@ export default function webViewAutoTrackDeviceTest() {
       const handler = new FTWebViewHandler();
       const fakeController = new FakeWebviewController('https://webview.test/legacy/callback');
       const webActionId = `legacy_webview_action_${Date.now()}`;
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.handleWebViewData(buildLegacyWebViewEvent(buildWebViewRumEvent(
         Constants.FT_MEASUREMENT_RUM_ACTION,
@@ -503,7 +502,7 @@ export default function webViewAutoTrackDeviceTest() {
         new WebViewActionFields(webActionId, 456),
         'duplicate_action_event'
       );
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.sendEvent(event);
       handler.sendEvent(event);
@@ -531,7 +530,7 @@ export default function webViewAutoTrackDeviceTest() {
     it('invalidWebViewShouldWriteNothing', 0, async () => {
       const handler = new FTWebViewHandler();
       const fakeController = new FakeWebviewController('https://webview.test/non-rum');
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.sendEventWithCallback(buildSimpleWebViewEvent('track', 'track_tag'), null);
       handler.sendEventWithCallback(buildSimpleWebViewEvent('log', 'log_tag'), null);
@@ -547,7 +546,7 @@ export default function webViewAutoTrackDeviceTest() {
     it('webViewHandlerShouldRunJavaScript', 0, () => {
       const handler = new FTWebViewHandler();
       const fakeController = new FakeWebviewController('https://webview.test/post-message');
-      handler.setWebView(fakeController as Object as webview.WebviewController, rumConfig);
+      handler.setWebView(fakeController as Object as webview.WebviewController);
 
       handler.postMessageToWeb('native-message');
       expect(fakeController.runCount).assertEqual(1);

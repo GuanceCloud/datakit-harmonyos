@@ -1,5 +1,5 @@
 import { webview } from "@kit.ArkWeb";
-import { FTSDK, FTRUMConfig, FTWebViewHandler } from "@guancecloud/ft_sdk/Index";
+import { FTSDK, FTWebViewHandler } from "@guancecloud/ft_sdk/Index";
 import { KEY_WEB_VIEW_URL } from "../entryability/EntryAbility";
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -31,7 +31,7 @@ struct ReplaySecondaryWebPane {
   private handler: FTWebViewHandler = new FTWebViewHandler();
 
   aboutToAppear() {
-    this.handler.setWebView(this.controller, new FTRUMConfig().setEnableTraceWebView(true));
+    this.handler.setWebView(this.controller);
   }
 
   aboutToDisappear() { this.handler.clearWebController(); }
@@ -79,9 +79,7 @@ export struct WebViewPage {
   aboutToAppear() {
     // Initialize WebView handler early if controller is available
     if (this.browserTabController && !this.isInitialized) {
-      const rumConfig = new FTRUMConfig();
-      rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+      this.webViewHandler.setWebView(this.browserTabController);
       this.isInitialized = true;
     }
     this.refreshReplayDiagnostics();
@@ -106,9 +104,7 @@ export struct WebViewPage {
     this.mainWebMounted = true;
     // Ensure handler is initialized when page becomes visible
     if (!this.isInitialized) {
-      const rumConfig = new FTRUMConfig();
-      rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+      this.webViewHandler.setWebView(this.browserTabController);
       this.isInitialized = true;
     }
     if (this.restoreSecondWeb) { this.secondWebMounted = true; this.restoreSecondWeb = false; }
@@ -178,8 +174,7 @@ export struct WebViewPage {
     this.isInitialized = false;
     this.rebuildTimer = setTimeout((): void => {
       this.rebuildTimer = -1;
-      this.webViewHandler.setWebView(this.browserTabController,
-        new FTRUMConfig().setEnableTraceWebView(true));
+      this.webViewHandler.setWebView(this.browserTabController);
       this.isInitialized = true;
       this.mainWebMounted = true;
       this.secondWebMounted = this.restoreSecondWeb;
@@ -397,9 +392,7 @@ export struct WebViewPage {
                     // Inject the bridge before loading the configured URL.
                     if (!this.fixtureMode && !this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
                       if (!this.isInitialized) {
-                        const rumConfig = new FTRUMConfig();
-                        rumConfig.setEnableTraceWebView(true);
-                        this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+                        this.webViewHandler.setWebView(this.browserTabController);
                         this.isInitialized = true;
                       }
 
@@ -411,9 +404,7 @@ export struct WebViewPage {
                     }
 
                     if (!this.isInitialized) {
-                      const rumConfig = new FTRUMConfig();
-                      rumConfig.setEnableTraceWebView(true);
-                      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
+                      this.webViewHandler.setWebView(this.browserTabController);
                       this.isInitialized = true;
                     }
                     this.documentLoaded = true;

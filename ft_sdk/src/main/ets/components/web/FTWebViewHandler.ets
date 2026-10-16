@@ -1,6 +1,5 @@
 import { webview } from '@kit.ArkWeb';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { FTRUMConfig } from '../Configs';
 import FTTrackInner from '../FTTrackInner';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
@@ -160,8 +159,6 @@ export const WEB_JS_DATA = "data";
 export class FTWebViewHandler implements JsReceiver {
   private static readonly SESSION_REPLAY_SNAPSHOT_INTERVAL_MS: number = 10_000;
   private webController: webview.WebviewController | null = null;
-  /** Optional per-Web opt-out; it can never override a disabled installed RUM config. */
-  private webViewSetupConfig: FTRUMConfig | null = null;
   private nativeViewName: string = "";
   private messageReceiver: WebViewMessageReceiver | null = null;
   private readonly PROXY_OBJECT_NAME = "FTWebViewJavascriptBridge";
@@ -221,8 +218,7 @@ export class FTWebViewHandler implements JsReceiver {
   private isRumWebViewEnabled(): boolean {
     const manager = FTRUMConfigManager.getInstance();
     const config = manager.getConfig();
-    const setupEnabled = this.webViewSetupConfig === null || this.webViewSetupConfig.isEnableTraceWebView();
-    return setupEnabled && manager.isRumEnable() && config !== null && config.isEnableTraceWebView();
+    return manager.isRumEnable() && config !== null && config.isEnableTraceWebView();
   }
 
   /** Browser SDK compatibility: null while WebView RUM or the optional Replay HAR is disabled. */
@@ -271,30 +267,32 @@ export class FTWebViewHandler implements JsReceiver {
     return proxy;
   }
 
-  /**
-   * Register JS method in web view
-   * componentId is an optional fallback when the Web binding compiler plugin is not enabled.
-   */
-  public setWebView(webController: webview.WebviewController, config: FTRUMConfig, componentId: string = ''): void {
+  /** Install the Bridge using global RUM configuration and automatic controller/node association. */
+  public setWebView(webController: webview.WebviewController): void {
+    this.attachWebView(webController);
+  }
+
+  /** Manual Replay fallback without the compiler plugin; componentId must match the Web node's .id(). */
+  public setWebViewWithComponentId(webController: webview.WebviewController, componentId: string): void {
+    if (componentId.trim().length === 0) {
+      FTInnerLogger.w(TAG, 'Manual WebView binding requires a non-empty component ID.');
+      return;
+    }
+    this.attachWebView(webController, componentId);
+  }
+
+  private attachWebView(webController: webview.WebviewController, componentId: string = ''): void {
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() called ==========`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController parameter: ${webController ? 'valid' : 'null'}`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Current webController: ${this.webController ? 'exists' : 'null'}`);
-    FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Config enableTraceWebView: ${config ? 'configured' : 'null'}`);
     
     if (!webController) {
       FTInnerLogger.e(TAG, `[WEBVIEW-DEBUG] ❌ WebController parameter is null, cannot set`);
       return;
     }
     
-    // The per-call config may opt out, but only installed RUM configuration can enable collection.
-    if (!config) {
-      FTInnerLogger.w(TAG, '[WEBVIEW-DEBUG] WebView setup requires a RUM config');
-      return;
-    }
-    // Global configuration is always read live; only a separate per-Web config adds a local veto.
-    // Keep that reference so changing its switch also takes effect in both directions.
-    this.webViewSetupConfig = config === FTRUMConfigManager.getInstance().getConfig() ? null : config;
-    if (!this.isRumWebViewEnabled()) {
+    const config = FTRUMConfigManager.getInstance().getConfig();
+    if (config === null || !this.isRumWebViewEnabled()) {
       this.stopSessionReplaySnapshotTimer();
       this.sessionReplayBindingKey = '';
       FTInnerLogger.i(TAG, '[WEBVIEW-DEBUG] WebView RUM is disabled or not initialized, skip WebView setup');
@@ -309,9 +307,7 @@ export class FTWebViewHandler implements JsReceiver {
 
     // An explicit component ID remains supported without the compiler plugin.
     // Otherwise the plugin writes this controller's token onto the actual Web node.
-    const retainedBindingId = this.webController === webController ? this.sessionReplayComponentId : '';
-    const bindingId = componentId.length > 0 ? componentId :
-      (retainedBindingId || FTWebViewReplayBridge.bindingId(webController));
+    const bindingId = componentId.length > 0 ? componentId : FTWebViewReplayBridge.bindingId(webController);
     if (bindingId !== this.sessionReplayComponentId) {
       if (this.sessionReplayComponentRegistered) {
         FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
@@ -335,13 +331,8 @@ export class FTWebViewHandler implements JsReceiver {
     this.sessionReplaySlotActive = true;
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController assigned successfully`);
     
-    // WebView pages often pass a lightweight tracing config solely to install
-    // the proxy. Prefer the installed RUM config's allow-list so Browser SDK
-    // host verification remains aligned with the application configuration.
-    const installedRumConfig = FTRUMConfigManager.getInstance().getConfig();
-    this.allowWebViewHost = installedRumConfig === null
-      ? config.getAllowWebViewHost()
-      : installedRumConfig.getAllowWebViewHost();
+    // Bridge installation and Browser host verification share the installed RUM config.
+    this.allowWebViewHost = config.getAllowWebViewHost();
     
     // Register JavaScript proxy early (before page loads) so browser-sdk can detect it
     // This is similar to Android's addJavascriptInterface which is available immediately
