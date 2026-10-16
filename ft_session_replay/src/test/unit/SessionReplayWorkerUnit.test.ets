@@ -18,6 +18,10 @@ import {
 import { SessionReplayWorkerOperations } from '../../main/ets/components/SessionReplayWorkerOperations';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { nextReplayUploadSchedule } from '../../main/ets/components/SessionReplayUploadQueue';
+import {
+  canStartReplayUpload,
+  isReplayBatteryHealthy
+} from '../../main/ets/components/SessionReplayUploadConditions';
 import { SessionReplayUploadResult } from '../../main/ets/components/SessionReplayUploader';
 
 function fullSnapshot(timestamp: number, childX: number): SessionReplayRecord {
@@ -256,6 +260,28 @@ export default function sessionReplayWorkerUnitTest(): void {
       const recovered = nextReplayUploadSchedule(15000, third.retryCount, failed);
       expect(recovered.delayMs).assertEqual(15000);
       expect(recovered.retryCount).assertEqual(0);
+    });
+
+    it('matches Android network and battery upload gates', 0, () => {
+      expect(canStartReplayUpload(null, true)).assertTrue();
+      expect(canStartReplayUpload(true, true)).assertTrue();
+      expect(canStartReplayUpload(false, true)).assertFalse();
+      expect(canStartReplayUpload(true, false)).assertFalse();
+      expect(isReplayBatteryHealthy({
+        batterySOC: 21, chargingStatus: 0, pluggedType: 0, isBatteryPresent: true
+      })).assertTrue();
+      expect(isReplayBatteryHealthy({
+        batterySOC: 20, chargingStatus: 0, pluggedType: 0, isBatteryPresent: true
+      })).assertFalse();
+      expect(isReplayBatteryHealthy({
+        batterySOC: 1, chargingStatus: 0, pluggedType: 1, isBatteryPresent: true
+      })).assertTrue();
+      expect(isReplayBatteryHealthy({
+        batterySOC: 1, chargingStatus: 3, pluggedType: 0, isBatteryPresent: true
+      })).assertTrue();
+      expect(isReplayBatteryHealthy({
+        batterySOC: 1, chargingStatus: 0, pluggedType: 0, isBatteryPresent: false
+      })).assertTrue();
     });
   });
 }

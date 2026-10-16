@@ -129,6 +129,32 @@ export class FTSessionReplayBridgeRegistry {
   private static readonly webSlotListeners: Map<string, () => void> = new Map();
   private static webAppForeground: boolean = true;
   private static webBindingConflict: string = '';
+  private static replayUploadNetworkAvailable: boolean | null = null;
+  private static replayUploadNetworkListener: ((available: boolean) => void) | null = null;
+
+  /** Core connectivity state shared with the optional Replay HAR. Null means not observed yet. */
+  public static getReplayUploadNetworkAvailability(): boolean | null {
+    return FTSessionReplayBridgeRegistry.replayUploadNetworkAvailable;
+  }
+
+  /** Internal listener used by Replay to wake its two upload lanes after connectivity returns. */
+  public static setReplayUploadNetworkListener(listener: ((available: boolean) => void) | null): void {
+    FTSessionReplayBridgeRegistry.replayUploadNetworkListener = listener;
+  }
+
+  /** Called by the core network monitor; exposed on the registry to avoid a core-to-HAR dependency. */
+  public static updateReplayUploadNetworkAvailability(available: boolean | null): void {
+    const previous = FTSessionReplayBridgeRegistry.replayUploadNetworkAvailable;
+    FTSessionReplayBridgeRegistry.replayUploadNetworkAvailable = available;
+    const listener = FTSessionReplayBridgeRegistry.replayUploadNetworkListener;
+    if (available !== null && available !== previous && listener !== null) {
+      try {
+        listener(available);
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Replay upload network callback failed: ${String(error)}`);
+      }
+    }
+  }
 
   public static registerWebReplayComponent(componentId: string): boolean {
     return FTSessionReplayBridgeRegistry.webSlots.register(componentId);

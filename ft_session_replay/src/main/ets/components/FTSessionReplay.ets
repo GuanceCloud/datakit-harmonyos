@@ -8,11 +8,12 @@ import { SessionReplaySamplingMode } from './SessionReplaySampler';
 import { ArkUIReplayScenePage } from './SessionReplayScene';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionReplayUploader';
-import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
+import { ReplayUploadLane, ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
 import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
+import { canStartReplayUpload, readReplayBatteryHealthy } from './SessionReplayUploadConditions';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -441,6 +442,7 @@ export class FTSessionReplay {
   private configureStorage(filesDir: string): void {
     this.uploadQueue?.close();
     this.uploadQueue = null;
+    FTSessionReplayBridgeRegistry.setReplayUploadNetworkListener(null);
     if (filesDir.trim().length === 0) {
       this.storage = null;
       this.errorSampleStorage = null;
@@ -470,18 +472,28 @@ export class FTSessionReplay {
       'error_resources'
     );
     const resourceStorage = this.resourceStorage;
-    this.uploadQueue = new SessionReplayUploadQueue(
+    const uploadQueue = new SessionReplayUploadQueue(
       filesDir, this.config.getStorageMaxBytes(), this.config.getMaxRecordsPerSegment(),
-      async (): Promise<ReplayUploadReady> => {
+      async (lane: ReplayUploadLane): Promise<ReplayUploadReady> => {
+        const networkAvailable = FTSessionReplayBridgeRegistry.getReplayUploadNetworkAvailability();
+        const batteryHealthy = readReplayBatteryHealthy();
+        const uploadAllowed = canStartReplayUpload(networkAvailable, batteryHealthy);
         let segmentIds: Array<string> | null = null;
         const recorder = this.recorder;
-        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+        if (lane === 'record' && uploadAllowed &&
+          recorder !== null && recorder.getStorageFilesDir() === filesDir) {
           segmentIds = await recorder.listPendingSegmentIds();
-        } else {
+        } else if (lane === 'record' && uploadAllowed) {
           const retiring = this.retiringRecorder;
           if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
         }
-        return { segmentIds, route: this.getUploadRoute(), resourceTouchEpoch: resourceStorage.getTouchEpoch() };
+        return {
+          segmentIds,
+          route: this.getUploadRoute(),
+          resourceTouchEpoch: resourceStorage.getTouchEpoch(),
+          networkAvailable,
+          batteryHealthy
+        };
       },
       async (id: string): Promise<boolean> => {
         const recorder = this.recorder;
@@ -515,6 +527,10 @@ export class FTSessionReplay {
         return Promise.resolve(result);
       }
     );
+    this.uploadQueue = uploadQueue;
+    FTSessionReplayBridgeRegistry.setReplayUploadNetworkListener((available: boolean): void => {
+      if (available && this.uploadQueue === uploadQueue) uploadQueue.wake();
+    });
   }
 
   private getUploadRoute(): SessionReplayUploadRoute {

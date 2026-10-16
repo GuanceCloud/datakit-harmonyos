@@ -13,6 +13,7 @@ import { SessionReplaySegmentStore, SessionReplayStoredSegment } from '../Sessio
 import { SessionReplayUploader, SessionReplayUploadResult } from '../SessionReplayUploader';
 import { FTSessionReplayConfig } from '../FTSessionReplayConfig';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from '../ReplayResourceCleanup';
+import { canStartReplayUpload } from '../SessionReplayUploadConditions';
 
 interface ReplayUploadEvent { data: ReplayUploadWorkerMessage; }
 interface UploadRequest { id: number; }
@@ -67,6 +68,14 @@ port.onmessage = (event: MessageEvents): void => {
     runNext();
     return;
   }
+  if (message.phase === 'wake') {
+    if (intervalMs <= 0) return;
+    stopSchedule();
+    retryCount = 0;
+    requests.push({ id: nextScheduledId-- });
+    runNext();
+    return;
+  }
   if (message.phase === 'ready' && message.id === readyRequestId && readyResolver !== null) {
     const resolve = readyResolver;
     readyResolver = null;
@@ -114,7 +123,13 @@ async function runNext(): Promise<void> {
   let resourceResult: SessionReplayResourceUploadResult | null = null;
   try {
     const ready = await requestReady(request.id);
-    if (lane === 'record') {
+    if (!canStartReplayUpload(ready.networkAvailable, ready.batteryHealthy)) {
+      const reason = ready.networkAvailable === false
+        ? 'Session Replay upload is paused while the network is unavailable.'
+        : 'Session Replay upload is paused while battery power is low.';
+      if (lane === 'record') result = blockedSegment(reason);
+      else resourceResult = blockedResource(reason);
+    } else if (lane === 'record') {
       if (segmentStore === null) throw new Error('Replay record upload Worker is not initialized.');
       const allowed = ready.segmentIds === null ? null : new Set<string>(ready.segmentIds);
       const pending = segmentStore.list().filter((segment: SessionReplayStoredSegment): boolean =>
@@ -218,6 +233,17 @@ function failedSegment(message: string): SessionReplayUploadResult {
 
 function failedResource(message: string): SessionReplayResourceUploadResult {
   return { success: false, code: 0, message, retryable: true, endpointBlocked: false,
+    attemptedResources: 0, uploadedResources: 0, remainingResources: resourceStore?.list().length ?? 0,
+    cleanup: replayResourceCleanup() };
+}
+
+function blockedSegment(message: string): SessionReplayUploadResult {
+  return { success: false, code: 0, message, retryable: false, endpointBlocked: false,
+    attemptedSegments: 0, uploadedSegments: 0, remainingSegments: segmentStore?.listIds().length ?? 0 };
+}
+
+function blockedResource(message: string): SessionReplayResourceUploadResult {
+  return { success: false, code: 0, message, retryable: false, endpointBlocked: false,
     attemptedResources: 0, uploadedResources: 0, remainingResources: resourceStore?.list().length ?? 0,
     cleanup: replayResourceCleanup() };
 }

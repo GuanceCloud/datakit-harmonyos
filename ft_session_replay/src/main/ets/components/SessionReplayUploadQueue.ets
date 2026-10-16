@@ -10,6 +10,8 @@ export interface ReplayUploadReady {
   segmentIds: Array<string> | null;
   route: SessionReplayUploadRoute;
   resourceTouchEpoch: number;
+  networkAvailable: boolean | null;
+  batteryHealthy: boolean;
 }
 
 export interface ReplayUploadSchedule { delayMs: number; retryCount: number; }
@@ -82,7 +84,7 @@ export class SessionReplayUploadQueue {
   private readonly filesDir: string;
   private readonly maxBytes: number;
   private readonly maxRecordsPerSegment: number;
-  private readonly prepare: () => Promise<ReplayUploadReady>;
+  private readonly prepare: (lane: ReplayUploadLane) => Promise<ReplayUploadReady>;
   private readonly removeAcknowledged: (id: string) => Promise<boolean>;
   private readonly removeResources: (ids: Array<string>, touchEpoch: number) => Promise<ReplayResourceCleanupResult>;
   private readonly pending: Map<number, PendingUpload> = new Map();
@@ -95,7 +97,7 @@ export class SessionReplayUploadQueue {
     filesDir: string,
     maxBytes: number,
     maxRecordsPerSegment: number,
-    prepare: () => Promise<ReplayUploadReady>,
+    prepare: (lane: ReplayUploadLane) => Promise<ReplayUploadReady>,
     removeAcknowledged: (id: string) => Promise<boolean>,
     removeResources: (ids: Array<string>, touchEpoch: number) => Promise<ReplayResourceCleanupResult>
   ) {
@@ -110,6 +112,12 @@ export class SessionReplayUploadQueue {
   public schedule(intervalMs: number, drainOnly: boolean = false): void {
     this.scheduleLane('record', intervalMs, drainOnly);
     this.scheduleLane('resource', intervalMs, drainOnly);
+  }
+
+  /** Immediately rechecks both independent lanes after a blocked network becomes available. */
+  public wake(): void {
+    this.wakeLane('record');
+    this.wakeLane('resource');
   }
 
   public flush(): Promise<SessionReplayUploadResult> {
@@ -162,6 +170,14 @@ export class SessionReplayUploadQueue {
     }
     this.post(lane, thread, { id: 0, phase: 'schedule', lane, intervalMs: state.intervalMs,
       drainOnly, scheduleVersion: state.scheduleVersion });
+  }
+
+  private wakeLane(lane: ReplayUploadLane): void {
+    const state = this.state(lane);
+    if (this.closed || state.intervalMs <= 0) return;
+    const thread = this.ensureThread(lane);
+    if (thread === null) return;
+    this.post(lane, thread, { id: 0, phase: 'wake', lane });
   }
 
   private ensureThread(lane: ReplayUploadLane): worker.ThreadWorker | null {
@@ -217,7 +233,7 @@ export class SessionReplayUploadQueue {
       return;
     }
     if (message.phase === 'prepare') {
-      Promise.resolve().then((): Promise<ReplayUploadReady> => this.prepare()).then((ready: ReplayUploadReady): void => {
+      Promise.resolve().then((): Promise<ReplayUploadReady> => this.prepare(lane)).then((ready: ReplayUploadReady): void => {
         FTSessionReplayBridgeRegistry.logDiagnostic(
           `Replay ${lane} upload start: requestId=${message.id}, trigger=${message.id < 0 ? 'scheduled' : 'flush'}`);
         this.post(lane, thread, { id: message.id, phase: 'ready', lane, ready });

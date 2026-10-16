@@ -45,6 +45,24 @@ function rrwebEvent(viewId: string): string {
 
 export default function webReplayBridgeUnitTest() {
   describe('WebReplayBridgeUnit', () => {
+    it('shares network availability with Replay and notifies only on transitions', 0, () => {
+      const registry = FTSessionReplayBridgeRegistry;
+      const updates: Array<boolean> = [];
+      registry.updateReplayUploadNetworkAvailability(null);
+      registry.setReplayUploadNetworkListener((available: boolean): void => updates.push(available));
+      try {
+        expect(registry.getReplayUploadNetworkAvailability()).assertNull();
+        registry.updateReplayUploadNetworkAvailability(false);
+        registry.updateReplayUploadNetworkAvailability(false);
+        registry.updateReplayUploadNetworkAvailability(true);
+        expect(updates.join(',')).assertEqual('false,true');
+        expect(registry.getReplayUploadNetworkAvailability()).assertTrue();
+      } finally {
+        registry.setReplayUploadNetworkListener(null);
+        registry.updateReplayUploadNetworkAvailability(null);
+      }
+    });
+
     it('uses Browser view.id before RUM arrives and rejects a detached JS proxy after replacement', 0, () => {
       const manager = FTRUMConfigManager.getInstance();
       const previous = manager.getConfig();
