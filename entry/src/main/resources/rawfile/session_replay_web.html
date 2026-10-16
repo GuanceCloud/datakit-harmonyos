@@ -5,17 +5,29 @@
 <title>ArkWeb Replay 人工验证</title>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 16px; font: 16px sans-serif; color: #172033; background: #edf4ff; }
-  h1 { font-size: 21px; } button { margin: 4px; padding: 10px; border: 1px solid #789; border-radius: 6px; }
-  #sample { background: white; border: 3px solid #2463eb; padding: 20px; overflow-wrap: anywhere; }
+  body { margin: 0; padding: 12px; font: 14px/1.5 sans-serif; color: #172033; background: #f0fdfa; text-align: left; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  p { margin: 12px 0; }
+  .web-label { margin: 0 0 12px; color: #0f766e; font-size: 12px; font-weight: bold; }
+  .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+  button { display: flex; align-items: center; justify-content: flex-start; width: 100%; height: 44px; margin: 0;
+    padding: 8px; border: 1px solid #5eead4; border-radius: 8px; background: white; color: #0f766e;
+    font: 600 12px/14px sans-serif; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  #start { background: #0f766e; border-color: #0f766e; color: white; }
+  #sample { background: white; border: 2px solid #14b8a6; border-radius: 8px; padding: 12px; overflow-wrap: anywhere; }
   #sample.changed { background: #fef3c7; border-color: #ca6800; }
-  #counter { font-size: 30px; font-weight: bold; } #status { white-space: pre-wrap; font-size: 12px; }
-  input { display: block; margin: 10px 0; padding: 8px; max-width: 100%; }
-  .scroll-marker { margin: 24px 0; padding: 24px; border: 1px dashed #789; }
+  #counter { font-size: 30px; font-weight: bold; }
+  #status { margin: 12px 0; padding: 12px; border: 1px solid #99f6e4; border-radius: 8px;
+    background: white; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+  input { display: block; margin: 12px 0; padding: 8px; max-width: 100%; }
+  .scroll-marker { margin: 12px 0; padding: 12px; border: 1px dashed #5eead4; border-radius: 8px; }
 </style>
+<div class="web-label">WEB · HTML / DOM 内容</div>
 <h1>Browser DOM 回放验证</h1>
 <p>先开启上方原生 Replay。本页使用真实 Browser SDK，不手工伪造 rrweb Record。</p>
 <p id="status" aria-live="polite">等待 Browser SDK 加载…</p>
+<div class="actions" role="group" aria-label="Browser 回放验证操作">
 <button id="start">启动 Browser Replay</button>
 <button id="check">检查录制状态</button>
 <button id="single">单次 DOM 更新</button>
@@ -24,6 +36,7 @@
 <button id="context">order_id A/B</button>
 <button id="view">切换 Browser View</button>
 <button id="error">报告测试错误</button>
+</div>
 <div id="sample">
   <div id="counter">0</div>
   <p id="order">order_id=A</p>

@@ -6,6 +6,9 @@ import { TestPageTheme } from '../constants/TestPageTheme';
 import { FTSessionReplay } from '@guancecloud/ft_session_replay';
 import { BrowserReplayState, formatWebReplayState, NativeReplayState, WebReplayProbe } from '../utils/WebReplayDiagnostics';
 
+const WEB_TEST_SPACING: number = 12;
+const WEB_TEST_BUTTON_HEIGHT: number = 44;
+
 @Component
 struct ReplaySecondaryWebPane {
   url: string = 'about:blank';
@@ -160,126 +163,222 @@ export struct WebViewPage {
     this.refreshReplayDiagnostics();
   }
 
-  build() {
-    NavDestination() {
-      Column() {
-        TestPageHeader({
-          title: 'WebView'
-        })
+  @Builder
+  private controlButton(label: string, buttonId: string, onTap: () => void,
+    enabled: boolean = true, primary: boolean = false) {
+    Button({ type: ButtonType.Normal }) {
+      Text(label)
+        .width('100%')
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(primary ? Color.White : '#1D4ED8')
+        .textAlign(TextAlign.Start)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .id(buttonId)
+    .width('100%')
+    .height(WEB_TEST_BUTTON_HEIGHT)
+    .padding(8)
+    .borderRadius(8)
+    .backgroundColor(primary ? '#2563EB' : Color.White)
+    .border({ width: 1, color: primary ? '#2563EB' : '#BFDBFE' })
+    .enabled(enabled)
+    .onClick(() => onTap())
+  }
 
-        Row({ space: 6 }) {
-          Button(this.nativeReplayEnabled ? '关闭 Replay' : '开启 Replay').fontSize(12).onClick(() => {
-            const replay = FTSessionReplay.getInstance();
-            if (replay.isEnabled()) { replay.disable(); this.cancelReplayCheck(); }
-            else { replay.start(); this.rebuildWeb(); }
-            this.replayStatus = replay.isEnabled() ? '原生 Replay 已开启，Web 重新加载后请检查 Browser 状态' : '原生 Replay 已关闭';
-            this.refreshReplayDiagnostics();
-          })
-          Button('上传').fontSize(12).onClick(() => {
+  @Builder
+  private nativeControls() {
+    Column({ space: WEB_TEST_SPACING }) {
+      Text('NATIVE · 原生控制')
+        .width('100%')
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#1D4ED8')
+        .textAlign(TextAlign.Start)
+
+      GridRow({ columns: 3, gutter: WEB_TEST_SPACING }) {
+        GridCol() {
+          this.controlButton(this.nativeReplayEnabled ? '关闭 Replay' : '开启 Replay',
+            'web-replay-toggle-button', () => {
+              const replay = FTSessionReplay.getInstance();
+              if (replay.isEnabled()) { replay.disable(); this.cancelReplayCheck(); }
+              else { replay.start(); this.rebuildWeb(); }
+              this.replayStatus = replay.isEnabled() ? '原生 Replay 已开启，Web 重新加载后请检查 Browser 状态' : '原生 Replay 已关闭';
+              this.refreshReplayDiagnostics();
+            }, true, true)
+        }
+        GridCol() {
+          this.controlButton('上传', 'web-replay-upload-button', () => {
             FTSessionReplay.getInstance().flush().then((result) => {
               this.replayStatus = `${result.success ? '上传成功' : '上传失败'}：${result.uploadedSegments}，剩余 ${result.remainingSegments}`;
               this.refreshReplayDiagnostics();
             }).catch((error: Error) => { this.replayStatus = error.message; });
           })
-          Button('重建 Web').fontSize(12).onClick(() => this.rebuildWeb())
-          Button('内置页').fontSize(12).onClick(() => { this.fixtureMode = true; this.rebuildWeb(); })
-        }.padding(6)
-        Row({ space: 6 }) {
-          Button('调整区域').fontSize(12).onClick(() => {
+        }
+        GridCol() {
+          this.controlButton(this.checkingReplay ? '读取中…' : '检查状态', 'web-replay-check-button',
+            () => this.checkReplayState(), !this.checkingReplay && this.mainWebMounted)
+        }
+        GridCol() {
+          this.controlButton('重建 Web', 'web-replay-rebuild-button', () => this.rebuildWeb())
+        }
+        GridCol() {
+          this.controlButton('内置页', 'web-replay-fixture-button', () => {
+            this.fixtureMode = true;
+            this.rebuildWeb();
+          })
+        }
+        GridCol() {
+          this.controlButton('调整区域', 'web-replay-resize-button', () => {
             this.compactWeb = !this.compactWeb;
             FTSessionReplay.getInstance().notifyPageChanged();
           })
-          Button('隐藏/显示').fontSize(12).onClick(() => {
+        }
+        GridCol() {
+          this.controlButton('隐藏/显示', 'web-replay-visibility-button', () => {
             this.mainWebVisible = !this.mainWebVisible;
             FTSessionReplay.getInstance().notifyPageChanged();
           })
-          Button('双 Web').fontSize(12).onClick(() => {
+        }
+        GridCol() {
+          this.controlButton('双 Web', 'web-replay-secondary-button', () => {
             this.secondWebMounted = !this.secondWebMounted;
             FTSessionReplay.getInstance().notifyPageChanged();
           })
+        }
+        GridCol() {
+          this.controlButton('第二个显隐', 'web-replay-secondary-visibility-button', () => {
+            this.secondWebVisible = !this.secondWebVisible;
+            FTSessionReplay.getInstance().notifyPageChanged();
+          }, this.secondWebMounted)
+        }
+      }
+      .width('100%')
+
+      if (this.replayStatus.length > 0) {
+        Text(this.replayStatus).width('100%').fontSize(11).lineHeight(16)
+          .fontColor('#1D4ED8').textAlign(TextAlign.Start)
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+
+      Scroll() {
+        Column({ space: WEB_TEST_SPACING }) {
+          Text(this.replayDiagnostics).id('web-replay-status')
+            .width('100%').fontSize(11).lineHeight(16)
+            .fontColor(TestPageTheme.RESULT_TEXT_COLOR).textAlign(TextAlign.Start)
+          Text('检查状态只读，不会启动网页录制')
+            .width('100%').fontSize(11).lineHeight(16)
+            .fontColor('#64748B').textAlign(TextAlign.Start)
+        }
+        .width('100%').alignItems(HorizontalAlign.Start)
+      }
+      .width('100%').height(72).padding(WEB_TEST_SPACING)
+      .align(Alignment.TopStart).scrollBar(BarState.Auto)
+      .backgroundColor(Color.White).borderRadius(8)
+    }
+    .width('100%').alignItems(HorizontalAlign.Start)
+    .padding(WEB_TEST_SPACING)
+    .backgroundColor('#EFF6FF').borderRadius(10)
+    .border({ width: 1, color: '#BFDBFE' })
+  }
+
+  @Builder
+  private webPaneHeader(title: string, visible: boolean) {
+    Text(`${title}  /  ${visible ? (this.fixtureMode ? '内置验证页' : '配置网页') : '已隐藏'}`)
+      .width('100%')
+      .fontSize(12)
+      .fontWeight(FontWeight.Bold)
+      .fontColor('#0F766E')
+      .textAlign(TextAlign.Start)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .padding(WEB_TEST_SPACING)
+      .backgroundColor('#CCFBF1')
+  }
+
+  build() {
+    NavDestination() {
+      Column() {
+        TestPageHeader({ title: 'WebView Test' })
+
+        Column({ space: WEB_TEST_SPACING }) {
+          this.nativeControls()
+
+          Column() {
+            this.webPaneHeader('WEB 01 · 主 WebView', this.mainWebVisible)
+            Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
+              .width('100%').height(2)
+              .visibility(this.progress < 100 ? Visibility.Visible : Visibility.Hidden)
+
+            Row() {
+              if (this.mainWebMounted) {
+                Web({ src: this.fixtureMode ? $rawfile('session_replay_web.html') : this.webViewUrl,
+                  controller: this.browserTabController })
+                  .id('replay-main-web')
+                  .width(this.compactWeb ? '80%' : '100%')
+                  .height('100%')
+                  .visibility(this.mainWebVisible ? Visibility.Visible : Visibility.Hidden)
+                  .javaScriptAccess(true)
+                  .domStorageAccess(true)
+                  // Keep native component IDs and bridge binding unchanged.
+                  .javaScriptProxy(this.webViewHandler.getJavaScriptProxy(this.browserTabController))
+                  .onAreaChange(() => FTSessionReplay.getInstance().notifyPageChanged())
+                  .onProgressChange((callback: OnProgressChangeEvent) => {
+                    this.progress = callback.newProgress
+                  })
+                  .onPageEnd(() => {
+                    // Inject the bridge before loading the configured URL.
+                    if (!this.fixtureMode && !this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
+                      if (!this.isInitialized) {
+                        const rumConfig = new FTRUMConfig();
+                        rumConfig.setEnableTraceWebView(true);
+                        this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+                        this.isInitialized = true;
+                      }
+
+                      const targetUrl: string = this.storedWebViewUrl || "about:blank";
+                      this.hasLoadedTargetUrl = true;
+                      this.webViewUrl = targetUrl;
+                      this.browserTabController.loadUrl(targetUrl);
+                      return;
+                    }
+
+                    if (!this.isInitialized) {
+                      const rumConfig = new FTRUMConfig();
+                      rumConfig.setEnableTraceWebView(true);
+                      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+                      this.isInitialized = true;
+                    }
+                    this.documentLoaded = true;
+                    this.replayEnabledAtLoad = FTSessionReplay.getInstance().isEnabled();
+                    this.checkReplayState();
+                  })
+              }
+            }
+            .width('100%').layoutWeight(1)
+            .padding(this.compactWeb ? WEB_TEST_SPACING : 0)
+            .backgroundColor(Color.White).clip(true)
+          }
+          .width('100%').layoutWeight(1)
+          .backgroundColor('#F0FDFA').borderRadius(10)
+          .border({ width: 1, color: '#5EEAD4' }).clip(true)
+
           if (this.secondWebMounted) {
-            Button('第二个显隐').fontSize(12).onClick(() => {
-              this.secondWebVisible = !this.secondWebVisible;
-              FTSessionReplay.getInstance().notifyPageChanged();
-            })
-          }
-        }.padding(6)
-        Row({ space: 6 }) {
-          Button(this.checkingReplay ? '读取中…' : '检查状态').fontSize(12)
-            .id('web-replay-check-button')
-            .enabled(!this.checkingReplay && this.mainWebMounted)
-            .onClick(() => this.checkReplayState())
-          Text('只读检查，不会启动网页录制').fontSize(11)
-        }.padding(4)
-        Text(this.replayDiagnostics).id('web-replay-status').fontSize(11)
-          .width('100%').padding({ left: 12, right: 12 }).maxLines(7)
-        Text(this.replayStatus)
-          .fontSize(11).maxLines(2)
-
-        Row() {
-          Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
-            .visibility(this.progress < 100 ? Visibility.Visible : Visibility.Hidden)
-        }
-
-        Row() {
-          if (this.mainWebMounted) {
-          Web({ src: this.fixtureMode ? $rawfile('session_replay_web.html') : this.webViewUrl,
-            controller: this.browserTabController })
-            .id('replay-main-web')
-            .width(this.compactWeb ? '80%' : '100%')
-            .height('100%')
-            .visibility(this.mainWebVisible ? Visibility.Visible : Visibility.Hidden)
-            .javaScriptAccess(true)
-            .domStorageAccess(true)
-            // Register JavaScript proxy for direct communication with browser-sdk
-            // browser-sdk will call window.FTWebViewJavascriptBridge.sendEvent() directly
-            .javaScriptProxy(this.webViewHandler.getJavaScriptProxy(this.browserTabController))
-            .onAreaChange(() => FTSessionReplay.getInstance().notifyPageChanged())
-            .onProgressChange((callback: OnProgressChangeEvent) => {
-              this.progress = callback.newProgress
-            })
-            .onPageEnd(() => {
-              // Handle blank page scenario - inject bridge first, then load target URL
-              if (!this.fixtureMode && !this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
-                // Ensure handler is initialized
-                if (!this.isInitialized) {
-                  const rumConfig = new FTRUMConfig();
-                  rumConfig.setEnableTraceWebView(true);
-                  this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
-                  this.isInitialized = true;
-                }
-
-                // Get target URL from StorageLink (synced from EntryAbility runtime config)
-                const targetUrl: string = this.storedWebViewUrl || "about:blank";
-                this.hasLoadedTargetUrl = true;
-                this.webViewUrl = targetUrl;
-                this.browserTabController.loadUrl(targetUrl);
-                return;
-              }
-
-              // Normal page load - ensure monitoring is initialized (only once)
-              if (!this.isInitialized) {
-                const rumConfig = new FTRUMConfig();
-                rumConfig.setEnableTraceWebView(true);
-                this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
-                this.isInitialized = true;
-              }
-              this.documentLoaded = true;
-              this.replayEnabledAtLoad = FTSessionReplay.getInstance().isEnabled();
-              this.checkReplayState();
-            })
+            Column() {
+              this.webPaneHeader('WEB 02 · 第二 WebView', this.secondWebVisible)
+              ReplaySecondaryWebPane({ url: this.storedWebViewUrl, useFixture: this.fixtureMode })
+                .width('100%').layoutWeight(1)
+                .visibility(this.secondWebVisible ? Visibility.Visible : Visibility.Hidden)
+            }
+            .width('100%').layoutWeight(1)
+            .backgroundColor('#F0FDFA').borderRadius(10)
+            .border({ width: 1, color: '#5EEAD4' }).clip(true)
           }
         }
-        .width('100%')
-        .layoutWeight(1)
-        .padding({ left: this.compactWeb ? 24 : 0, top: this.compactWeb ? 12 : 0 })
-        .clip(true)
-        .border({ width: 1, color: '#2563EB' })
-        if (this.secondWebMounted) {
-          ReplaySecondaryWebPane({ url: this.storedWebViewUrl, useFixture: this.fixtureMode })
-            .height(180)
-            .visibility(this.secondWebVisible ? Visibility.Visible : Visibility.Hidden)
-        }
+        .width('100%').layoutWeight(1)
+        .padding(WEB_TEST_SPACING)
+        .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
       .height('100%')
