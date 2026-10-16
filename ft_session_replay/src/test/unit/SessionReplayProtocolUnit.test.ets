@@ -28,8 +28,13 @@ import { FTSessionReplayRecorder } from '../../main/ets/components/FTSessionRepl
 import {
   createAndroidReplayUploadUrl,
   createSessionReplayUploadFields,
-  isRetryableReplayUploadStatus
+  isReplayUploadEndpointAvailable,
+  isValidReplayHttpUrl,
+  isRetryableReplayUploadStatus,
+  REPLAY_MAX_BATCHES_PER_UPLOAD_JOB,
+  shouldDiscardReplayUploadStatus
 } from '../../main/ets/components/SessionReplayUploader';
+import { createAndroidReplayResourceUrl } from '../../main/ets/components/SessionReplayResourceUploader';
 import { SessionReplayStoredSegment } from '../../main/ets/components/SessionReplaySegmentStore';
 
 function fullSnapshotRecord(timestamp: number, wireframes: Array<ReplayWireframe>): SessionReplayRecord {
@@ -548,10 +553,33 @@ export default function sessionReplayProtocolUnitTest() {
         .assertEqual('https://dk.example/v1/write/rum/replay?precision=ns');
       expect(createAndroidReplayUploadUrl('', 'https://dw.example/', 'token'))
         .assertEqual('https://dw.example/v1/write/rum/replay?token=token&to_headless=true&precision=ns');
+      expect(createAndroidReplayUploadUrl('localhost:9529', '', '')).assertEqual('');
+      expect(createAndroidReplayUploadUrl('', 'https://dw.example', '')).assertEqual('');
+      expect(createAndroidReplayUploadUrl('', 'https://dw.example', 'a+b/c'))
+        .assertEqual('https://dw.example/v1/write/rum/replay?token=a%2Bb%2Fc&to_headless=true&precision=ns');
+      expect(createAndroidReplayResourceUrl('ftp://dk.example', '', '', ANDROID_REPLAY_ENDPOINTS.assets, true))
+        .assertEqual('');
+      expect(createAndroidReplayResourceUrl('', 'https://dw.example', '', ANDROID_REPLAY_ENDPOINTS.assets, true))
+        .assertEqual('');
+      expect(isReplayUploadEndpointAvailable('https://dk.example', '', '')).assertTrue();
+      expect(isReplayUploadEndpointAvailable('', 'https://dw.example', 'token')).assertTrue();
+      expect(isReplayUploadEndpointAvailable('', 'https://dw.example', '')).assertFalse();
+      expect(isValidReplayHttpUrl('http://localhost:9529/base')).assertTrue();
+      expect(isValidReplayHttpUrl('https://[::1]:9529')).assertTrue();
+      expect(isValidReplayHttpUrl('file:///tmp/replay')).assertFalse();
+      expect(isValidReplayHttpUrl('https://')).assertFalse();
+      expect(isValidReplayHttpUrl('https://dk.example/replay path')).assertFalse();
+      expect(REPLAY_MAX_BATCHES_PER_UPLOAD_JOB).assertEqual(10);
       expect(isRetryableReplayUploadStatus(0)).assertTrue();
-      expect(isRetryableReplayUploadStatus(429)).assertTrue();
+      expect(isRetryableReplayUploadStatus(408)).assertFalse();
+      expect(isRetryableReplayUploadStatus(429)).assertFalse();
       expect(isRetryableReplayUploadStatus(503)).assertTrue();
       expect(isRetryableReplayUploadStatus(400)).assertFalse();
+      expect(shouldDiscardReplayUploadStatus(400)).assertTrue();
+      expect(shouldDiscardReplayUploadStatus(408)).assertTrue();
+      expect(shouldDiscardReplayUploadStatus(429)).assertTrue();
+      expect(shouldDiscardReplayUploadStatus(503)).assertFalse();
+      expect(shouldDiscardReplayUploadStatus(0, true)).assertTrue();
     });
   });
 }

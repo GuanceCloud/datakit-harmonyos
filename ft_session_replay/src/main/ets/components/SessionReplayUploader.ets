@@ -16,6 +16,7 @@ import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './Session
 const UPLOAD_CONNECT_TIMEOUT_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MS = 60_000;
 const HARMONY_REPLAY_SDK_NAME = 'df_harmonyos_rum_sdk';
+export const REPLAY_MAX_BATCHES_PER_UPLOAD_JOB: number = 10;
 
 /** Observable result of an explicit Replay flush. Failed segments remain local. */
 export interface SessionReplayUploadResult {
@@ -78,21 +79,43 @@ export function createAndroidReplayUploadUrl(
 ): string {
   const datakit = datakitUrl.trim();
   const dataway = datawayUrl.trim();
-  const host = datakit.length > 0 ? datakit : dataway;
-  if (host.length === 0) {
+  if (!isReplayUploadEndpointAvailable(datakit, dataway, clientToken)) {
     return '';
   }
+  const host = datakit.length > 0 ? datakit : dataway;
   const path = ANDROID_REPLAY_ENDPOINTS.records;
   const normalizedHost = host.endsWith('/') ? host.substring(0, host.length - 1) : host;
   if (datakit.length > 0) {
     return `${normalizedHost}/${path}?precision=ns`;
   }
-  return `${normalizedHost}/${path}?token=${clientToken}&to_headless=true&precision=ns`;
+  return `${normalizedHost}/${path}?token=${encodeURIComponent(clientToken.trim())}&to_headless=true&precision=ns`;
 }
 
-/** Android-aligned retry classification for the record intake queue. */
+/** Matches the core SDK and Android preflight rules for DataKit/Dataway endpoints. */
+export function isReplayUploadEndpointAvailable(
+  datakitUrl: string,
+  datawayUrl: string,
+  clientToken: string
+): boolean {
+  const datakit = datakitUrl.trim();
+  if (datakit.length > 0) {
+    return isValidReplayHttpUrl(datakit);
+  }
+  return isValidReplayHttpUrl(datawayUrl.trim()) && clientToken.trim().length > 0;
+}
+
+/** Rejects relative, non-HTTP(S), hostless and whitespace-containing upload URLs before I/O. */
+export function isValidReplayHttpUrl(value: string): boolean {
+  return /^https?:\/\/(?:\[[0-9a-f:.]+\]|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?))*)(?::\d+)?(?:[/?#][^\s]*)?$/i.test(value);
+}
+
+/** Android Replay retries transport/service failures, but treats every 4xx as final. */
 export function isRetryableReplayUploadStatus(code: number): boolean {
-  return code === 0 || code === 408 || code === 429 || code >= 500;
+  return code === 0 || code >= 500;
+}
+
+export function shouldDiscardReplayUploadStatus(code: number, invalid: boolean = false): boolean {
+  return invalid || (code >= 400 && code < 500);
 }
 
 /** Creates Android-aligned form fields and the newline-delimited record payload. */
@@ -166,12 +189,12 @@ export class SessionReplayUploader {
 
   public async uploadPending(readySegments?: Array<SessionReplayStoredSegment>): Promise<SessionReplayUploadResult> {
     const target = this.resolveTarget();
-    const pending = readySegments ?? this.store.list();
+    const pending = (readySegments ?? this.store.list()).slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB);
     if (pending.length === 0) {
       return this.result(true, 200, 'No pending Session Replay segments.', 0, 0);
     }
     if (target === null) {
-      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, true, true);
+      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, false, true);
     }
 
     const appVersion = this.route?.appVersion ?? this.getAppVersion();
@@ -182,6 +205,14 @@ export class SessionReplayUploader {
       attemptedSegments++;
       const status = await this.uploadSegment(target, segment, appVersion);
       if (status.code !== http.ResponseCode.OK) {
+        if (shouldDiscardReplayUploadStatus(status.code)) {
+          const removed = this.removeAcknowledged === null ? this.store.remove([segment.id]) :
+            await this.removeAcknowledged([segment.id]);
+          return this.result(false, status.code, removed
+            ? `${status.message} The non-retryable segment was discarded.`
+            : `${status.message} The non-retryable segment could not be removed.`,
+          attemptedSegments, uploadedSegments, !removed);
+        }
         return this.result(false, status.code, status.message, attemptedSegments, uploadedSegments,
           isRetryableReplayUploadStatus(status.code));
       }
@@ -198,15 +229,16 @@ export class SessionReplayUploader {
 
   private resolveTarget(): SessionReplayUploadTarget | null {
     if (this.route !== null) {
-      const url = this.route.uploadUrl.length > 0 ? this.route.uploadUrl : createAndroidReplayUploadUrl(
+      const override = this.route.uploadUrl.trim();
+      const url = override.length > 0 ? (isValidReplayHttpUrl(override) ? override : '') : createAndroidReplayUploadUrl(
         this.route.datakitUrl, this.route.datawayUrl, this.route.clientToken);
       return url.length === 0 ? null : { url, env: this.route.env };
     }
     const installedConfig = FTSDK.getSDKConfig();
     const env = installedConfig === null ? 'prod' : installedConfig.getEnv();
-    const override = this.config.getUploadUrl();
+    const override = this.config.getUploadUrl().trim();
     if (override.length > 0) {
-      return { url: override, env };
+      return isValidReplayHttpUrl(override) ? { url: override, env } : null;
     }
     if (installedConfig === null) {
       return null;

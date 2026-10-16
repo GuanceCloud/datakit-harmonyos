@@ -20,15 +20,20 @@ export interface ReplayUploadOutcome {
   endpointBlocked: boolean;
 }
 
+export const REPLAY_INVALID_ENDPOINT_RECHECK_MS: number = 5_000;
+export const REPLAY_RETRY_BASE_DELAY_MS: number = 2_500;
+export const REPLAY_RETRY_MAX_DELAY_MS: number = 30_000;
+
 export function nextReplayUploadSchedule(
   intervalMs: number, retryCount: number, result: ReplayUploadOutcome | null
 ): ReplayUploadSchedule {
   if (result === null || result.success) return { delayMs: intervalMs, retryCount: 0 };
-  if (result.endpointBlocked) return { delayMs: 60_000, retryCount: 0 };
+  if (result.endpointBlocked) return { delayMs: REPLAY_INVALID_ENDPOINT_RECHECK_MS, retryCount: 0 };
   if (!result.retryable) return { delayMs: intervalMs, retryCount: 0 };
   const nextCount = retryCount + 1;
   return {
-    delayMs: Math.min(60_000, intervalMs * Math.pow(2, Math.max(0, nextCount - 1))),
+    delayMs: Math.min(REPLAY_RETRY_MAX_DELAY_MS,
+      REPLAY_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, nextCount - 1))),
     retryCount: nextCount
   };
 }

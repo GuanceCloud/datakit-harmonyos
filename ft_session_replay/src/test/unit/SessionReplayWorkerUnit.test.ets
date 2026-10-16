@@ -234,11 +234,24 @@ export default function sessionReplayWorkerUnitTest(): void {
         endpointBlocked: false, attemptedSegments: 1, uploadedSegments: 0, remainingSegments: 1
       };
       const first = nextReplayUploadSchedule(15000, 0, failed);
-      expect(first.delayMs).assertEqual(15000);
+      expect(first.delayMs).assertEqual(2500);
       const second = nextReplayUploadSchedule(15000, first.retryCount, failed);
-      expect(second.delayMs).assertEqual(30000);
+      expect(second.delayMs).assertEqual(5000);
       const third = nextReplayUploadSchedule(15000, second.retryCount, failed);
-      expect(third.delayMs).assertEqual(60000);
+      expect(third.delayMs).assertEqual(10000);
+      const fourth = nextReplayUploadSchedule(15000, third.retryCount, failed);
+      expect(fourth.delayMs).assertEqual(20000);
+      const capped = nextReplayUploadSchedule(15000, fourth.retryCount, failed);
+      expect(capped.delayMs).assertEqual(30000);
+      const stillCapped = nextReplayUploadSchedule(15000, capped.retryCount, failed);
+      expect(stillCapped.delayMs).assertEqual(30000);
+      const blocked: SessionReplayUploadResult = {
+        success: false, code: 0, message: 'invalid endpoint', retryable: false,
+        endpointBlocked: true, attemptedSegments: 0, uploadedSegments: 0, remainingSegments: 1
+      };
+      const waitingForUrl = nextReplayUploadSchedule(15000, capped.retryCount, blocked);
+      expect(waitingForUrl.delayMs).assertEqual(5000);
+      expect(waitingForUrl.retryCount).assertEqual(0);
       failed.success = true;
       const recovered = nextReplayUploadSchedule(15000, third.retryCount, failed);
       expect(recovered.delayMs).assertEqual(15000);

@@ -4,7 +4,13 @@ import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
 import { ANDROID_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
-import { isRetryableReplayUploadStatus, SessionReplayUploadRoute } from './SessionReplayUploader';
+import {
+  isReplayUploadEndpointAvailable,
+  isRetryableReplayUploadStatus,
+  REPLAY_MAX_BATCHES_PER_UPLOAD_JOB,
+  SessionReplayUploadRoute,
+  shouldDiscardReplayUploadStatus
+} from './SessionReplayUploader';
 import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
 
 const CONNECT_TIMEOUT_MS = 60_000;
@@ -36,6 +42,7 @@ interface ResourceGroup {
 interface HttpStatus {
   code: number;
   message: string;
+  invalid?: boolean;
 }
 
 interface ResourceCheckResult {
@@ -89,7 +96,9 @@ export class SessionReplayResourceUploader {
     if (target === null) {
       return this.result(false, 0, 'No Session Replay resource upload endpoint is configured.', 0, 0, false, true);
     }
-    const groups = this.groupByRoute(pending);
+    // One durable resource descriptor is one local batch in HarmonyOS. Limit
+    // those first, then coalesce the selected batches by Android route.
+    const groups = this.groupByRoute(pending.slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB));
     let attempted = 0;
     let uploaded = 0;
     for (let index = 0; index < groups.length; index++) {
@@ -97,8 +106,12 @@ export class SessionReplayResourceUploader {
       const checked = await this.checkExisting(target, group);
       attempted += group.resources.length;
       if (checked.existing === null) {
+        const failedBefore = this.cleanup.failedResources;
+        if (shouldDiscardReplayUploadStatus(checked.status.code, checked.status.invalid === true)) {
+          await this.removeResources(group.resources.map((resource: SessionReplayStoredResource): string => resource.id));
+        }
         return this.result(false, checked.status.code, checked.status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(checked.status.code));
+          isRetryableReplayUploadStatus(checked.status.code) || this.cleanup.failedResources > failedBefore);
       }
       const existing: Array<SessionReplayStoredResource> = [];
       const missing: Array<SessionReplayStoredResource> = [];
@@ -118,8 +131,12 @@ export class SessionReplayResourceUploader {
       }
       const status = await this.uploadGroup(target, group.applicationId, group.globalContext, missing);
       if (status.code !== http.ResponseCode.OK) {
+        const failedBefore = this.cleanup.failedResources;
+        if (shouldDiscardReplayUploadStatus(status.code, status.invalid === true)) {
+          await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
+        }
         return this.result(false, status.code, status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(status.code));
+          isRetryableReplayUploadStatus(status.code) || this.cleanup.failedResources > failedBefore);
       }
       uploaded += missing.length;
       await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
@@ -221,7 +238,7 @@ export class SessionReplayResourceUploader {
         }
         const existing = this.parseExistingFiles(response.result.toString(), files);
         return existing === null
-          ? { existing: null, status: { code: 0, message: 'Session Replay resource check response was invalid.' } }
+          ? { existing: null, status: { code: 0, message: 'Session Replay resource check response was invalid.', invalid: true } }
           : { existing, status: { code: response.responseCode, message: 'Session Replay resource check succeeded.' } };
       } finally {
         request.destroy();
@@ -264,7 +281,7 @@ export class SessionReplayResourceUploader {
   ): Promise<HttpStatus> {
     const multipart = this.createMultipartPayload(applicationId, globalContext, resources);
     if (multipart === null) {
-      return { code: 0, message: 'A pending Session Replay resource could not be read from private storage.' };
+      return { code: 0, message: 'A pending Session Replay resource could not be read from private storage.', invalid: true };
     }
     try {
       const request = http.createHttp();
@@ -350,15 +367,15 @@ export function createAndroidReplayResourceUrl(
 ): string {
   const datakit = datakitUrl.trim();
   const dataway = datawayUrl.trim();
-  const host = datakit.length > 0 ? datakit : dataway;
-  if (host.length === 0) {
+  if (!isReplayUploadEndpointAvailable(datakit, dataway, clientToken)) {
     return '';
   }
+  const host = datakit.length > 0 ? datakit : dataway;
   const normalized = host.endsWith('/') ? host.substring(0, host.length - 1) : host;
   if (datakit.length > 0) {
     return useMillisecondPrecision ? `${normalized}/${endpoint}?precision=ms` : `${normalized}/${endpoint}`;
   }
-  const base = `${normalized}/${endpoint}?token=${encodeURIComponent(clientToken)}&to_headless=true`;
+  const base = `${normalized}/${endpoint}?token=${encodeURIComponent(clientToken.trim())}&to_headless=true`;
   return useMillisecondPrecision ? `${base}&precision=ms` : base;
 }
 
