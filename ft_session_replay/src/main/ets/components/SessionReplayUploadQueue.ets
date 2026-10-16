@@ -81,6 +81,8 @@ export interface ReplayUploadWorkerMessage {
   cleanup?: ReplayResourceCleanupResult;
   result?: SessionReplayUploadResult;
   resourceResult?: SessionReplayResourceUploadResult;
+  pendingItems?: number;
+  retryCount?: number;
   error?: string;
 }
 
@@ -257,12 +259,16 @@ export class SessionReplayUploadQueue {
     }
     if (message.phase === 'prepare') {
       Promise.resolve().then((): Promise<ReplayUploadReady> => this.prepare(lane)).then((ready: ReplayUploadReady): void => {
-        FTSessionReplayBridgeRegistry.logDiagnostic(
-          `Replay ${lane} upload start: requestId=${message.id}, trigger=${message.id < 0 ? 'scheduled' : 'flush'}`);
         this.post(lane, thread, { id: message.id, phase: 'ready', lane, ready });
       }).catch((error: Error): void => {
         this.post(lane, thread, { id: message.id, phase: 'ready', lane, error: String(error) });
       });
+      return;
+    }
+    if (message.phase === 'started') {
+      FTSessionReplayBridgeRegistry.logDiagnostic(
+        `Replay ${lane} upload start: requestId=${message.id}, trigger=${message.id < 0 ? 'scheduled' : 'flush'}, ` +
+        `pending=${message.pendingItems ?? 0}, retryCount=${message.retryCount ?? 0}`);
       return;
     }
     if (message.phase === 'delete' && message.segmentId !== undefined) {
@@ -341,17 +347,23 @@ export class SessionReplayUploadQueue {
     const trigger = message.id < 0 ? 'scheduled' : 'flush';
     if (message.result !== undefined) {
       const result = message.result;
+      if (result.success && result.attemptedSegments === 0 && result.uploadedSegments === 0 &&
+        result.remainingSegments === 0 && !result.retryable && !result.endpointBlocked) return;
       FTSessionReplayBridgeRegistry.logDiagnostic(
         `Replay record upload result: requestId=${message.id}, trigger=${trigger}, success=${result.success}, ` +
         `code=${result.code}, attempted=${result.attemptedSegments}, uploaded=${result.uploadedSegments}, ` +
-        `remaining=${result.remainingSegments}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}`, !result.success);
+        `remaining=${result.remainingSegments}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}, ` +
+        `retryCount=${message.retryCount ?? 0}`, !result.success);
     }
     if (message.resourceResult !== undefined) {
       const result = message.resourceResult;
+      if (result.success && result.attemptedResources === 0 && result.uploadedResources === 0 &&
+        result.remainingResources === 0 && !result.retryable && !result.endpointBlocked) return;
       FTSessionReplayBridgeRegistry.logDiagnostic(
         `Replay resource upload result: requestId=${message.id}, trigger=${trigger}, success=${result.success}, ` +
         `code=${result.code}, attempted=${result.attemptedResources}, uploaded=${result.uploadedResources}, ` +
-        `remaining=${result.remainingResources}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}`, !result.success);
+        `remaining=${result.remainingResources}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}, ` +
+        `retryCount=${message.retryCount ?? 0}`, !result.success);
     }
     if (message.error !== undefined) {
       FTSessionReplayBridgeRegistry.logDiagnostic(`Replay ${lane} upload failed: ${message.error}`, true);

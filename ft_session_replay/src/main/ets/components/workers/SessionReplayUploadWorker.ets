@@ -139,11 +139,13 @@ async function runNext(): Promise<void> {
       const allowed = ready.segmentIds === null ? null : new Set<string>(ready.segmentIds);
       const pending = segmentStore.list().filter((segment: SessionReplayStoredSegment): boolean =>
         allowed === null || allowed.has(segment.id));
+      notifyUploadStarted(request.id, pending.length);
       const uploader = new SessionReplayUploader(segmentStore, new FTSessionReplayConfig(),
         (ids: Array<string>): Promise<boolean> => requestDelete(request.id, ids[0]), ready.route);
       result = await uploader.uploadPending(pending);
     } else {
       if (resourceStore === null) throw new Error('Replay resource upload Worker is not initialized.');
+      notifyUploadStarted(request.id, resourceStore.list().length);
       const uploader = new SessionReplayResourceUploader(resourceStore, ready.route,
         (ids: Array<string>): Promise<ReplayResourceCleanupResult> =>
           requestDeleteResources(ids, ready.resourceTouchEpoch));
@@ -154,7 +156,8 @@ async function runNext(): Promise<void> {
     else resourceResult = failedResource(String(error));
   }
   port.postMessage({ id: request.id, phase: 'done', lane, result: result ?? undefined,
-    resourceResult: resourceResult ?? undefined, scheduleVersion: requestScheduleVersion } as ReplayUploadWorkerMessage);
+    resourceResult: resourceResult ?? undefined, scheduleVersion: requestScheduleVersion,
+    retryCount } as ReplayUploadWorkerMessage);
   running = false;
   const drained = lane === 'record'
     ? result?.success === true && result.remainingSegments === 0
@@ -175,6 +178,12 @@ async function runNext(): Promise<void> {
     scheduleNext(schedule.delayMs);
   }
   runNext();
+}
+
+/** Queue preparation alone is not an upload attempt, especially for an idle lane. */
+function notifyUploadStarted(id: number, pendingItems: number): void {
+  if (pendingItems <= 0) return;
+  port.postMessage({ id, phase: 'started', lane, pendingItems, retryCount } as ReplayUploadWorkerMessage);
 }
 
 function requestReady(id: number): Promise<ReplayUploadReady> {
