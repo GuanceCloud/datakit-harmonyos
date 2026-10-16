@@ -26,6 +26,9 @@ export interface SessionReplayRecordStore {
  */
 export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private static readonly VERSION: number = 1;
+  private static readonly READY_SUFFIX: string = '.ready';
+  private static readonly LEGACY_SUFFIX: string = '.json';
+  private static readonly WRITING_SUFFIX: string = '.writing';
 
   private readonly replayRoot: string;
   private readonly root: string;
@@ -95,7 +98,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
           this.lastWriteError = `Replay storage needs a Full Snapshot or exceeds the configured ${this.maxBytes}-byte quota.`;
           return false;
         }
-        this.atomicWrite(`${this.root}/${segment.id}.json`, body);
+        this.atomicWrite(`${this.root}/${segment.id}${SessionReplaySegmentStore.READY_SUFFIX}`, body);
         this.lastAppendedIds.push(segment.id);
         for (let index = 0; index < segmentRecords.length; index++) {
           if (this.isCheckpoint(segmentRecords[index])) {
@@ -117,7 +120,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     try {
       this.ensureDirectory(this.replayRoot);
       this.ensureDirectory(this.root);
-      this.atomicWrite(`${this.root}/${segment.id}.json`, JSON.stringify(segment));
+      this.atomicWrite(`${this.root}/${segment.id}${SessionReplaySegmentStore.READY_SUFFIX}`, JSON.stringify(segment));
       // If unlink is interrupted, recovery prefers the complete sealed JSON.
       try { fs.unlinkSync(`${this.root}/${segment.id}.journal`); } catch (_) { }
       this.activeSegment = null;
@@ -186,7 +189,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private refreshSizes(): void {
     this.sealedSizes.clear();
     for (const name of this.segmentFileNames()) {
-      this.sealedSizes.set(name.substring(0, name.length - 5), fs.statSync(`${this.root}/${name}`).size);
+      this.sealedSizes.set(this.segmentIdFromName(name), fs.statSync(`${this.root}/${name}`).size);
     }
   }
 
@@ -202,7 +205,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   /** Enumerates candidate batches without parsing their contents. */
   public listIds(): Array<string> {
     if (!this.flush()) throw new Error(this.lastWriteError);
-    return this.segmentFileNames().map((name: string): string => name.substring(0, name.length - '.json'.length));
+    return this.segmentFileNames().map((name: string): string => this.segmentIdFromName(name));
   }
 
   /** Reopens valid segments after process restart and removes interrupted writes. */
@@ -237,7 +240,10 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
         continue;
       }
       try {
-        fs.unlinkSync(`${this.root}/${id}.json`);
+        const readyPath = `${this.root}/${id}${SessionReplaySegmentStore.READY_SUFFIX}`;
+        const legacyPath = `${this.root}/${id}${SessionReplaySegmentStore.LEGACY_SUFFIX}`;
+        if (this.exists(readyPath)) fs.unlinkSync(readyPath);
+        if (this.exists(legacyPath)) fs.unlinkSync(legacyPath);
         this.sealedSizes.delete(id);
       } catch (_error) {
         completed = false;
@@ -429,8 +435,26 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   private recover(): void {
     const names = this.fileNames();
     for (let index = 0; index < names.length; index++) {
-      if (names[index].endsWith('.tmp')) {
+      if (names[index].endsWith('.tmp') || names[index].endsWith(SessionReplaySegmentStore.WRITING_SUFFIX)) {
         try { fs.unlinkSync(`${this.root}/${names[index]}`); } catch (_) { }
+      }
+    }
+    for (const name of this.fileNames().filter((entry: string): boolean =>
+      entry.endsWith(SessionReplaySegmentStore.LEGACY_SUFFIX)).sort()) {
+      const id = this.segmentIdFromName(name);
+      const legacyPath = `${this.root}/${name}`;
+      const readyPath = `${this.root}/${id}${SessionReplaySegmentStore.READY_SUFFIX}`;
+      try {
+        const segment = JSON.parse(fs.readTextSync(legacyPath)) as SessionReplayStoredSegment;
+        if (!this.isValidSegment(segment, name)) {
+          fs.unlinkSync(legacyPath);
+        } else if (this.exists(readyPath)) {
+          fs.unlinkSync(legacyPath);
+        } else {
+          fs.renameSync(legacyPath, readyPath);
+        }
+      } catch (_) {
+        try { fs.unlinkSync(legacyPath); } catch (_) { }
       }
     }
     for (const name of this.fileNames().filter((entry: string): boolean => entry.endsWith('.journal')).sort()) {
@@ -440,10 +464,10 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       const segment = this.readJournal(body, name);
       try {
         if (segment !== null) {
-          const jsonName = `${segment.id}.json`;
-          const sealedPath = `${this.root}/${jsonName}`;
+          const readyName = `${segment.id}${SessionReplaySegmentStore.READY_SUFFIX}`;
+          const sealedPath = `${this.root}/${readyName}`;
           let sealed = false;
-          try { sealed = this.isValidSegment(JSON.parse(fs.readTextSync(sealedPath)) as SessionReplayStoredSegment, jsonName); }
+          try { sealed = this.isValidSegment(JSON.parse(fs.readTextSync(sealedPath)) as SessionReplayStoredSegment, readyName); }
           catch (_) { }
           if (!sealed) this.atomicWrite(sealedPath, JSON.stringify(segment));
         }
@@ -536,7 +560,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private atomicWrite(path: string, body: string): void {
-    const temp = `${path}.tmp`;
+    const temp = `${path}${SessionReplaySegmentStore.WRITING_SUFFIX}`;
     const file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       // CoreFileKit's string overload is supported on the API levels used by
@@ -552,7 +576,7 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     }
     fs.renameSync(temp, path);
     const name = path.substring(path.lastIndexOf('/') + 1);
-    this.sealedSizes.set(name.substring(0, name.length - 5), this.byteLength(body));
+    this.sealedSizes.set(this.segmentIdFromName(name), this.byteLength(body));
   }
 
   private ensureDirectory(path: string): void {
@@ -585,13 +609,16 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private segmentFileNames(): Array<string> {
-    return this.fileNames().filter((name: string) => name.endsWith('.json')).sort();
+    return this.fileNames().filter((name: string): boolean =>
+      name.endsWith(SessionReplaySegmentStore.READY_SUFFIX) ||
+      name.endsWith(SessionReplaySegmentStore.LEGACY_SUFFIX)).sort();
   }
 
   private isValidSegment(segment: SessionReplayStoredSegment, name: string): boolean {
     return segment.version === SessionReplaySegmentStore.VERSION &&
       typeof segment.id === 'string' && this.isSafeSegmentId(segment.id) &&
-      name === `${segment.id}.json` && segment.context !== undefined &&
+      (name === `${segment.id}${SessionReplaySegmentStore.READY_SUFFIX}` ||
+        name === `${segment.id}${SessionReplaySegmentStore.LEGACY_SUFFIX}`) && segment.context !== undefined &&
       typeof segment.context.applicationId === 'string' && segment.context.applicationId.length > 0 &&
       typeof segment.context.sessionId === 'string' && segment.context.sessionId.length > 0 &&
       typeof segment.context.viewId === 'string' && segment.context.viewId.length > 0 &&
@@ -600,6 +627,13 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private isSafeSegmentId(id: string): boolean {
     return /^\d{13}-\d{6}(?:-[0-9a-f]{8})?$/.test(id);
+  }
+
+  private segmentIdFromName(name: string): string {
+    if (name.endsWith(SessionReplaySegmentStore.READY_SUFFIX)) {
+      return name.substring(0, name.length - SessionReplaySegmentStore.READY_SUFFIX.length);
+    }
+    return name.substring(0, name.length - SessionReplaySegmentStore.LEGACY_SUFFIX.length);
   }
 
 }

@@ -109,6 +109,20 @@ export default function sessionReplayStorageUnitTest() {
       expect(uiStore.list().length).assertEqual(2);
     });
 
+    it('publishes only ready segment files and migrates legacy batches', 0, () => {
+      const store = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 10);
+      expect(store.append(replayContext(), [replayRecord()])).assertTrue();
+      const names = fs.listFileSync(store.getRoot());
+      expect(names.length).assertEqual(1);
+      expect(names[0].endsWith('.ready')).assertTrue();
+      expect(names[0].endsWith('.writing')).assertFalse();
+      const legacy = names[0].substring(0, names[0].length - '.ready'.length) + '.json';
+      fs.renameSync(`${store.getRoot()}/${names[0]}`, `${store.getRoot()}/${legacy}`);
+      const recovered = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 10);
+      expect(recovered.list().length).assertEqual(1);
+      expect(fs.listFileSync(recovered.getRoot())[0].endsWith('.ready')).assertTrue();
+    });
+
     it('retains checkpoint and mutation dependencies when trimming and promoting an error window', 0, () => {
       const source = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 1, 'error');
       const destination = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 1);
@@ -171,6 +185,10 @@ export default function sessionReplayStorageUnitTest() {
       expect(exists(`${root}/data`)).assertTrue();
       expect(exists(`${root}/pending`)).assertTrue();
       expect(store.list().length).assertEqual(1);
+      const metadataNames = fs.listFileSync(`${root}/pending`);
+      expect(metadataNames.length).assertEqual(1);
+      expect(metadataNames[0].endsWith('.ready')).assertTrue();
+      expect(metadataNames[0].endsWith('.writing')).assertFalse();
     });
 
     it('retains resources referenced after an upload snapshot', 0, () => {

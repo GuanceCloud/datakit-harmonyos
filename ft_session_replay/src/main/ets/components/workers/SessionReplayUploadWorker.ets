@@ -1,160 +1,154 @@
-import worker, { ErrorEvent, MessageEvents, ThreadWorkerGlobalScope } from '@ohos.worker';
-import { FTSessionReplayConfig } from '../FTSessionReplayConfig';
+import worker, { MessageEvents, ThreadWorkerGlobalScope } from '@ohos.worker';
+import {
+  nextReplayUploadSchedule,
+  ReplayUploadLane,
+  ReplayUploadOutcome,
+  ReplayUploadReady,
+  ReplayUploadSchedule,
+  ReplayUploadWorkerMessage
+} from '../SessionReplayUploadQueue';
 import { SessionReplayResourceStore } from '../SessionReplayResourceStore';
 import { SessionReplayResourceUploader, SessionReplayResourceUploadResult } from '../SessionReplayResourceUploader';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from '../SessionReplaySegmentStore';
-import {
-  nextReplayUploadSchedule, ReplayUploadReady, ReplayUploadSchedule, ReplayUploadWorkerMessage
-} from '../SessionReplayUploadQueue';
 import { SessionReplayUploader, SessionReplayUploadResult } from '../SessionReplayUploader';
+import { FTSessionReplayConfig } from '../FTSessionReplayConfig';
 import { ReplayResourceCleanupResult, replayResourceCleanup } from '../ReplayResourceCleanup';
 
-interface ReplayUploadEvent {
-  data: ReplayUploadWorkerMessage;
-}
+interface ReplayUploadEvent { data: ReplayUploadWorkerMessage; }
+interface UploadRequest { id: number; }
 
-interface UploadRequest {
-  id: number;
-  resourceOnly: boolean;
-}
-
-const port: ThreadWorkerGlobalScope = worker.workerPort;
-const requests: Array<UploadRequest> = [];
+const port = worker.workerPort as ThreadWorkerGlobalScope;
+let lane: ReplayUploadLane = 'record';
 let segmentStore: SessionReplaySegmentStore | null = null;
 let resourceStore: SessionReplayResourceStore | null = null;
-let running: boolean = false;
-let scheduleTimer: number = -1;
 let intervalMs: number = 0;
 let drainOnly: boolean = false;
 let scheduleVersion: number = 0;
+let scheduleTimer: number = -1;
 let retryCount: number = 0;
+let running: boolean = false;
 let nextScheduledId: number = -1;
-let readyResolver: ((ready: ReplayUploadReady) => void) | null = null;
-let readyRejecter: ((reason: Error) => void) | null = null;
-let deletionResolver: ((success: boolean) => void) | null = null;
-let resourceDeletionResolver: ((result: ReplayResourceCleanupResult | null) => void) | null = null;
+const requests: Array<UploadRequest> = [];
 let readyRequestId: number = 0;
+let readyResolver: ((ready: ReplayUploadReady | null) => void) | null = null;
 let deletionRequestId: number = 0;
-let nextDeletionRequestId: number = 1_000_000;
+let deletionResolver: ((deleted: boolean) => void) | null = null;
+let resourceDeletionResolver: ((result: ReplayResourceCleanupResult | null) => void) | null = null;
 
 port.onmessage = (event: MessageEvents): void => {
   const message = (event as Object as ReplayUploadEvent).data;
-  try {
-    if (message.phase === 'init') {
-      segmentStore = new SessionReplaySegmentStore(message.filesDir!, message.maxBytes!,
-        message.maxRecordsPerSegment!, 'segments', false);
-      resourceStore = new SessionReplayResourceStore(message.filesDir!, message.maxBytes!, 'resources', false);
-      return;
-    }
-    if (message.phase === 'schedule') {
-      intervalMs = Math.max(0, message.intervalMs ?? 0);
-      drainOnly = message.drainOnly ?? false;
-      scheduleVersion = message.scheduleVersion ?? 0;
-      if (intervalMs === 0) {
-        for (let index = requests.length - 1; index >= 0; index--) {
-          if (requests[index].id < 0) requests.splice(index, 1);
-        }
+  if (message.phase === 'init') {
+    try {
+      lane = message.lane ?? 'record';
+      if (lane === 'record') {
+        segmentStore = new SessionReplaySegmentStore(message.filesDir!, message.maxBytes!,
+          message.maxRecordsPerSegment!, 'segments', false);
+        resourceStore = null;
+      } else {
+        resourceStore = new SessionReplayResourceStore(message.filesDir!, message.maxBytes!, 'resources', false);
+        segmentStore = null;
       }
-      scheduleNext(intervalMs);
-      return;
+    } catch (error) {
+      port.postMessage({ id: 0, phase: 'fatal', lane, error: String(error) } as ReplayUploadWorkerMessage);
     }
-    if (message.phase === 'flush') {
-      requests.push({ id: message.id, resourceOnly: message.resourceOnly ?? false });
-      runNext();
-      return;
-    }
-    if (message.phase === 'ready') {
-      if (message.id !== readyRequestId) return;
-      const resolve = readyResolver;
-      const reject = readyRejecter;
-      readyResolver = null;
-      readyRejecter = null;
-      if (message.ready !== undefined) resolve?.(message.ready);
-      else reject?.(new Error(message.error ?? 'Replay upload preparation failed.'));
-      return;
-    }
-    if (message.phase === 'deleted') {
-      if (message.id !== deletionRequestId) return;
+    return;
+  }
+  if (message.phase === 'schedule') {
+    intervalMs = Math.max(0, message.intervalMs ?? 0);
+    drainOnly = message.drainOnly ?? false;
+    scheduleVersion = message.scheduleVersion ?? 0;
+    retryCount = 0;
+    if (intervalMs <= 0) stopSchedule();
+    else scheduleNext(intervalMs);
+    return;
+  }
+  if (message.phase === 'flush') {
+    requests.push({ id: message.id });
+    runNext();
+    return;
+  }
+  if (message.phase === 'ready' && message.id === readyRequestId && readyResolver !== null) {
+    const resolve = readyResolver;
+    readyResolver = null;
+    readyRequestId = 0;
+    resolve(message.error === undefined ? (message.ready ?? null) : null);
+    return;
+  }
+  if (message.phase === 'deleted' && message.id === deletionRequestId) {
+    if (deletionResolver !== null) {
       const resolve = deletionResolver;
-      const resolveResource = resourceDeletionResolver;
       deletionResolver = null;
+      deletionRequestId = 0;
+      resolve(message.deleted === true);
+    } else if (resourceDeletionResolver !== null) {
+      const resolve = resourceDeletionResolver;
       resourceDeletionResolver = null;
-      resolve?.(message.deleted ?? false);
-      resolveResource?.(message.cleanup ?? null);
+      deletionRequestId = 0;
+      resolve(message.cleanup ?? null);
     }
-  } catch (error) {
-    port.postMessage({ id: message.id, phase: message.phase === 'init' ? 'fatal' : 'done',
-      error: String(error) } as ReplayUploadWorkerMessage);
   }
 };
 
-port.onmessageerror = (_event: MessageEvents): void => {};
-port.onerror = (_event: ErrorEvent): void => {};
-
 function scheduleNext(delayMs: number): void {
-  if (scheduleTimer !== -1) {
-    clearTimeout(scheduleTimer);
-    scheduleTimer = -1;
-  }
+  stopSchedule();
   if (intervalMs <= 0) return;
   scheduleTimer = setTimeout((): void => {
     scheduleTimer = -1;
-    requests.push({ id: nextScheduledId--, resourceOnly: false });
+    requests.push({ id: nextScheduledId-- });
     runNext();
   }, Math.max(0, delayMs));
 }
 
+function stopSchedule(): void {
+  if (scheduleTimer !== -1) clearTimeout(scheduleTimer);
+  scheduleTimer = -1;
+}
+
 async function runNext(): Promise<void> {
   if (running || requests.length === 0) return;
-  const request = requests.shift();
-  if (request === undefined) return;
-  if (scheduleTimer !== -1) {
-    clearTimeout(scheduleTimer);
-    scheduleTimer = -1;
-  }
   running = true;
+  stopSchedule();
+  const request = requests.shift()!;
   const requestScheduleVersion = scheduleVersion;
   let result: SessionReplayUploadResult | null = null;
   let resourceResult: SessionReplayResourceUploadResult | null = null;
   try {
-    if (segmentStore === null || resourceStore === null) throw new Error('Replay upload Worker is not initialized.');
     const ready = await requestReady(request.id);
-    const resources = new SessionReplayResourceUploader(resourceStore, ready.route,
-      (ids: Array<string>): Promise<ReplayResourceCleanupResult> => requestDeleteResources(ids, ready.resourceTouchEpoch));
-    resourceResult = await resources.uploadPending();
-    if (request.resourceOnly) {
-      result = null;
-    } else if (!resourceResult.success) {
-      result = {
-        success: false, code: resourceResult.code, message: resourceResult.message,
-        retryable: resourceResult.retryable, endpointBlocked: resourceResult.endpointBlocked,
-        attemptedSegments: 0, uploadedSegments: 0, remainingSegments: segmentStore.list().length
-      };
-    } else {
+    if (lane === 'record') {
+      if (segmentStore === null) throw new Error('Replay record upload Worker is not initialized.');
       const allowed = ready.segmentIds === null ? null : new Set<string>(ready.segmentIds);
       const pending = segmentStore.list().filter((segment: SessionReplayStoredSegment): boolean =>
         allowed === null || allowed.has(segment.id));
       const uploader = new SessionReplayUploader(segmentStore, new FTSessionReplayConfig(),
         (ids: Array<string>): Promise<boolean> => requestDelete(request.id, ids[0]), ready.route);
       result = await uploader.uploadPending(pending);
+    } else {
+      if (resourceStore === null) throw new Error('Replay resource upload Worker is not initialized.');
+      const uploader = new SessionReplayResourceUploader(resourceStore, ready.route,
+        (ids: Array<string>): Promise<ReplayResourceCleanupResult> =>
+          requestDeleteResources(ids, ready.resourceTouchEpoch));
+      resourceResult = await uploader.uploadPending();
     }
   } catch (error) {
-    const message = String(error);
-    if (request.resourceOnly) resourceResult = failedResource(message);
-    else result = failedSegment(message);
+    if (lane === 'record') result = failedSegment(String(error));
+    else resourceResult = failedResource(String(error));
   }
-  port.postMessage({
-    id: request.id, phase: 'done', result: result ?? undefined,
-    resourceResult: resourceResult ?? undefined,
-    scheduleVersion: requestScheduleVersion
-  } as ReplayUploadWorkerMessage);
+  port.postMessage({ id: request.id, phase: 'done', lane, result: result ?? undefined,
+    resourceResult: resourceResult ?? undefined, scheduleVersion: requestScheduleVersion } as ReplayUploadWorkerMessage);
   running = false;
-  if (drainOnly && requestScheduleVersion === scheduleVersion && result?.success === true && result.remainingSegments === 0 &&
-    resourceResult?.success === true && resourceResult.remainingResources === 0) {
-    intervalMs = 0;
-  }
+  const drained = lane === 'record'
+    ? result?.success === true && result.remainingSegments === 0
+    : resourceResult?.success === true && resourceResult.remainingResources === 0;
+  if (drainOnly && requestScheduleVersion === scheduleVersion && drained) intervalMs = 0;
   if (intervalMs > 0 && requests.length === 0) {
-    const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(intervalMs, retryCount, result);
+    let outcome: ReplayUploadOutcome | null = null;
+    if (lane === 'record' && result !== null) {
+      outcome = { success: result.success, retryable: result.retryable, endpointBlocked: result.endpointBlocked };
+    } else if (lane === 'resource' && resourceResult !== null) {
+      outcome = { success: resourceResult.success, retryable: resourceResult.retryable,
+        endpointBlocked: resourceResult.endpointBlocked };
+    }
+    const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(intervalMs, retryCount, outcome);
     retryCount = schedule.retryCount;
     scheduleNext(schedule.delayMs);
   }
@@ -163,58 +157,57 @@ async function runNext(): Promise<void> {
 
 function requestReady(id: number): Promise<ReplayUploadReady> {
   return new Promise<ReplayUploadReady>((resolve: (ready: ReplayUploadReady) => void,
-    reject: (reason: Error) => void): void => {
+    reject: (error: Error) => void): void => {
     readyRequestId = id;
     const timer = setTimeout((): void => {
       if (readyRequestId !== id || readyResolver === null) return;
       readyResolver = null;
-      readyRejecter = null;
-      reject(new Error('Replay upload preparation timed out.'));
+      readyRequestId = 0;
+      reject(new Error('Replay upload preparation timed out after 30 seconds.'));
     }, 30_000);
-    readyResolver = (ready: ReplayUploadReady): void => {
+    readyResolver = (ready: ReplayUploadReady | null): void => {
       clearTimeout(timer);
-      resolve(ready);
+      if (ready === null) reject(new Error('Replay upload preparation failed.'));
+      else resolve(ready);
     };
-    readyRejecter = (reason: Error): void => {
-      clearTimeout(timer);
-      reject(reason);
-    };
-    port.postMessage({ id, phase: 'prepare' } as ReplayUploadWorkerMessage);
+    port.postMessage({ id, phase: 'prepare', lane } as ReplayUploadWorkerMessage);
   });
 }
 
-function requestDelete(_id: number, segmentId: string): Promise<boolean> {
-  return new Promise<boolean>((resolve: (success: boolean) => void): void => {
-    const commandId = ++nextDeletionRequestId;
+function requestDelete(id: number, segmentId: string): Promise<boolean> {
+  return new Promise<boolean>((resolve: (deleted: boolean) => void): void => {
+    const commandId = id * 1_000_000 - 1;
     deletionRequestId = commandId;
     const timer = setTimeout((): void => {
       if (deletionRequestId !== commandId || deletionResolver === null) return;
       deletionResolver = null;
+      deletionRequestId = 0;
       resolve(false);
     }, 30_000);
-    deletionResolver = (success: boolean): void => {
+    deletionResolver = (deleted: boolean): void => {
       clearTimeout(timer);
-      resolve(success);
+      resolve(deleted);
     };
-    port.postMessage({ id: commandId, phase: 'delete', segmentId } as ReplayUploadWorkerMessage);
+    port.postMessage({ id: commandId, phase: 'delete', lane, segmentId } as ReplayUploadWorkerMessage);
   });
 }
 
-function requestDeleteResources(resourceIds: Array<string>, resourceTouchEpoch: number): Promise<ReplayResourceCleanupResult> {
+function requestDeleteResources(resourceIds: Array<string>, touchEpoch: number): Promise<ReplayResourceCleanupResult> {
   return new Promise<ReplayResourceCleanupResult>((resolve: (result: ReplayResourceCleanupResult) => void): void => {
-    const commandId = ++nextDeletionRequestId;
+    const commandId = nextScheduledId-- * 1_000_000 - 2;
     deletionRequestId = commandId;
     const timer = setTimeout((): void => {
       if (deletionRequestId !== commandId || resourceDeletionResolver === null) return;
       resourceDeletionResolver = null;
+      deletionRequestId = 0;
       resolve(replayResourceCleanup(0, 0, resourceIds.length, 'Replay resource cleanup timed out after 30 seconds.'));
     }, 30_000);
     resourceDeletionResolver = (result: ReplayResourceCleanupResult | null): void => {
       clearTimeout(timer);
       resolve(result ?? replayResourceCleanup(0, 0, resourceIds.length, 'Replay resource cleanup returned no result.'));
     };
-    port.postMessage({ id: commandId, phase: 'deleteResource', resourceIds,
-      resourceTouchEpoch } as ReplayUploadWorkerMessage);
+    port.postMessage({ id: commandId, phase: 'deleteResource', lane, resourceIds,
+      resourceTouchEpoch: touchEpoch } as ReplayUploadWorkerMessage);
   });
 }
 

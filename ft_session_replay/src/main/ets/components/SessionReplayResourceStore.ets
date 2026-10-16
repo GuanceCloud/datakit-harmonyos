@@ -24,6 +24,9 @@ export interface SessionReplayStoredResource {
  */
 export class SessionReplayResourceStore {
   private static readonly VERSION: number = 1;
+  private static readonly READY_SUFFIX: string = '.ready';
+  private static readonly LEGACY_SUFFIX: string = '.json';
+  private static readonly WRITING_SUFFIX: string = '.writing';
   private readonly replayRoot: string;
   private readonly root: string;
   private readonly dataRoot: string;
@@ -70,7 +73,7 @@ export class SessionReplayResourceStore {
       const fileName = knownHash ?? sha256(data);
       const routeKey = this.getRouteKey(context);
       const id = `${fileName}-${routeKey}`;
-      const metadataPath = `${this.metadataRoot}/${id}.json`;
+      const metadataPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
       if (this.exists(metadataPath) && this.exists(`${this.dataRoot}/${fileName}.bin`)) {
         this.markTouched(fileName);
         return fileName;
@@ -169,12 +172,14 @@ export class SessionReplayResourceStore {
         if (result.reason.length === 0) result.reason = 'Invalid resource id.';
         continue;
       }
-      const path = `${this.metadataRoot}/${id}.json`;
+      const path = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
+      const legacyPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.LEGACY_SUFFIX}`;
       const resource = retained.get(id);
       const fileName = id.substring(0, 64);
       try {
         // A previous acknowledgement may already have removed either file.
         if (this.exists(path)) fs.unlinkSync(path);
+        if (this.exists(legacyPath)) fs.unlinkSync(legacyPath);
         retained.delete(id);
         if (resource !== undefined) references.set(fileName, (references.get(fileName) ?? 1) - 1);
         if ((references.get(fileName) ?? 0) === 0) {
@@ -271,6 +276,7 @@ export class SessionReplayResourceStore {
 
   private recover(): void {
     this.removeTempFiles(this.root);
+    this.migrateLegacyMetadata();
     this.list();
     this.removeOrphanedData();
   }
@@ -359,7 +365,9 @@ export class SessionReplayResourceStore {
 
   private isValidResource(resource: SessionReplayStoredResource, name: string): boolean {
     return resource.version === SessionReplayResourceStore.VERSION &&
-      typeof resource.id === 'string' && this.isSafeId(resource.id) && name === `${resource.id}.json` &&
+      typeof resource.id === 'string' && this.isSafeId(resource.id) &&
+      (name === `${resource.id}${SessionReplayResourceStore.READY_SUFFIX}` ||
+        name === `${resource.id}${SessionReplayResourceStore.LEGACY_SUFFIX}`) &&
       typeof resource.fileName === 'string' && this.isSafeFileName(resource.fileName) &&
       typeof resource.createdAt === 'number' && Number.isFinite(resource.createdAt) &&
       typeof resource.size === 'number' && Number.isInteger(resource.size) && resource.size > 0 && resource.size <= this.maxBytes &&
@@ -405,7 +413,9 @@ export class SessionReplayResourceStore {
   }
 
   private metadataFileNames(): Array<string> {
-    try { return fs.listFileSync(this.metadataRoot).filter((name: string): boolean => name.endsWith('.json')).sort(); }
+    try { return fs.listFileSync(this.metadataRoot).filter((name: string): boolean =>
+      name.endsWith(SessionReplayResourceStore.READY_SUFFIX) ||
+      name.endsWith(SessionReplayResourceStore.LEGACY_SUFFIX)).sort(); }
     catch (_error) { return []; }
   }
 
@@ -422,7 +432,8 @@ export class SessionReplayResourceStore {
       try {
         if (fs.statSync(path).isDirectory()) {
           this.removeTempFiles(path);
-        } else if (names[index].endsWith('.tmp')) {
+        } else if (names[index].endsWith('.tmp') ||
+          names[index].endsWith(SessionReplayResourceStore.WRITING_SUFFIX)) {
           fs.unlinkSync(path);
         }
       } catch (_) { }
@@ -434,7 +445,7 @@ export class SessionReplayResourceStore {
   }
 
   private atomicWriteBytes(path: string, bytes: Uint8Array): void {
-    const temp = `${path}.tmp`;
+    const temp = `${path}${SessionReplayResourceStore.WRITING_SUFFIX}`;
     const file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       let offset = 0;
@@ -450,6 +461,21 @@ export class SessionReplayResourceStore {
       fs.closeSync(file);
     }
     fs.renameSync(temp, path);
+  }
+
+  private migrateLegacyMetadata(): void {
+    let names: Array<string> = [];
+    try { names = fs.listFileSync(this.metadataRoot); } catch (_) { return; }
+    for (const name of names) {
+      if (!name.endsWith(SessionReplayResourceStore.LEGACY_SUFFIX)) continue;
+      const id = name.substring(0, name.length - SessionReplayResourceStore.LEGACY_SUFFIX.length);
+      const legacyPath = `${this.metadataRoot}/${name}`;
+      const readyPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
+      try {
+        if (this.exists(readyPath)) fs.unlinkSync(legacyPath);
+        else fs.renameSync(legacyPath, readyPath);
+      } catch (_) { }
+    }
   }
 }
 
