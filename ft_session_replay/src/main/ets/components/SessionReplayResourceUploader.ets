@@ -28,6 +28,11 @@ export interface SessionReplayResourceUploadResult {
   /** Unacknowledged assets only; locally retained confirmed bytes are not an upload backlog. */
   remainingResources: number;
   cleanup: ReplayResourceCleanupResult;
+  existingResources?: number;
+  transferredResources?: number;
+  cachedResources?: number;
+  localResources?: number;
+  resourceIdSample?: Array<string>;
 }
 
 interface ResourceUploadTarget {
@@ -86,6 +91,10 @@ export class SessionReplayResourceUploader {
   private readonly acknowledgements: ReplayResourceAcknowledgements;
   private readonly onAttempt: ((count: number) => void) | null;
   private cleanup: ReplayResourceCleanupResult = replayResourceCleanup();
+  private existingResources: number = 0;
+  private transferredResources: number = 0;
+  private cachedResources: number = 0;
+  private resourceIdSample: Array<string> = [];
 
   constructor(
     store: SessionReplayResourceStore,
@@ -103,6 +112,10 @@ export class SessionReplayResourceUploader {
 
   public async uploadPending(): Promise<SessionReplayResourceUploadResult> {
     this.cleanup = replayResourceCleanup();
+    this.existingResources = 0;
+    this.transferredResources = 0;
+    this.cachedResources = 0;
+    this.resourceIdSample = [];
     const stored = this.store.list();
     if (stored.length === 0) {
       return this.result(true, http.ResponseCode.OK, 'No pending Session Replay resources.', 0, 0);
@@ -119,6 +132,8 @@ export class SessionReplayResourceUploader {
       if (this.acknowledgements.has(resource.id)) cached.push(resource.id);
       else pending.push(resource);
     }
+    this.cachedResources = cached.length;
+    this.resourceIdSample = cached.slice(0, 3);
     // Retry only local housekeeping for confirmed assets. A new frame may keep
     // the bytes alive or recreate their descriptor without requiring another HTTP request.
     await this.removeResources(cached);
@@ -126,10 +141,12 @@ export class SessionReplayResourceUploader {
       return this.result(true, http.ResponseCode.OK, 'No unacknowledged Session Replay resources.', 0, 0,
         this.cleanup.failedResources > 0);
     }
-    this.onAttempt?.(pending.length);
     // One durable resource descriptor is one local batch in HarmonyOS. Limit
     // those first, then coalesce the selected batches by Android route.
-    const groups = this.groupByRoute(pending.slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB));
+    const selected = pending.slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB);
+    this.resourceIdSample = selected.slice(0, 3).map((resource: SessionReplayStoredResource): string => resource.id);
+    this.onAttempt?.(selected.length);
+    const groups = this.groupByRoute(selected);
     let attempted = 0;
     let uploaded = 0;
     for (let index = 0; index < groups.length; index++) {
@@ -157,6 +174,7 @@ export class SessionReplayResourceUploader {
       }
       // Availability is acknowledged remotely even if local housekeeping must wait.
       uploaded += existing.length;
+      this.existingResources += existing.length;
       this.acknowledgements.remember(existing.map((resource: SessionReplayStoredResource): string => resource.id));
       await this.removeResources(existing.map((resource: SessionReplayStoredResource): string => resource.id));
       if (missing.length === 0) {
@@ -173,6 +191,7 @@ export class SessionReplayResourceUploader {
             this.cleanup.failedResources > failedBefore));
       }
       uploaded += missing.length;
+      this.transferredResources += missing.length;
       this.acknowledgements.remember(missing.map((resource: SessionReplayStoredResource): string => resource.id));
       await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
     }
@@ -378,17 +397,23 @@ export class SessionReplayResourceUploader {
     retryable: boolean = false,
     endpointBlocked: boolean = false
   ): SessionReplayResourceUploadResult {
+    const local = this.store.list();
     return {
       success,
       code,
       message,
-      retryable,
+      retryable: retryable || this.cleanup.failedResources > 0,
       endpointBlocked,
       attemptedResources,
       uploadedResources,
-      remainingResources: this.store.list().filter((resource: SessionReplayStoredResource): boolean =>
+      remainingResources: local.filter((resource: SessionReplayStoredResource): boolean =>
         !this.acknowledgements.has(resource.id)).length,
-      cleanup: this.cleanup
+      cleanup: this.cleanup,
+      existingResources: this.existingResources,
+      transferredResources: this.transferredResources,
+      cachedResources: this.cachedResources,
+      localResources: local.length,
+      resourceIdSample: this.resourceIdSample
     };
   }
 }

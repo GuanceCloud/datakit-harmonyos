@@ -20,6 +20,8 @@ export interface ReplayUploadOutcome {
   success: boolean;
   retryable: boolean;
   endpointBlocked: boolean;
+  /** Only newly acknowledged work should accelerate the next upload check. */
+  madeProgress?: boolean;
 }
 
 export const REPLAY_INVALID_ENDPOINT_RECHECK_MS: number = 5_000;
@@ -43,7 +45,8 @@ export function nextReplayUploadSchedule(
   if (result?.endpointBlocked === true) {
     return { delayMs: REPLAY_INVALID_ENDPOINT_RECHECK_MS, retryCount: 0 };
   }
-  if (result !== null && !result.success && result.retryable) {
+  // Remote acknowledgement can succeed while local cleanup still needs a retry.
+  if (result?.retryable === true) {
     const nextCount = retryCount + 1;
     return {
       delayMs: Math.min(REPLAY_RETRY_MAX_DELAY_MS,
@@ -51,7 +54,7 @@ export function nextReplayUploadSchedule(
       retryCount: nextCount
     };
   }
-  if (result?.success === true) {
+  if (result?.success === true && result.madeProgress !== false) {
     return {
       delayMs: Math.max(Math.floor(current * REPLAY_NORMAL_DECREASE_FACTOR), REPLAY_NORMAL_MIN_DELAY_MS),
       retryCount: 0
@@ -83,6 +86,7 @@ export interface ReplayUploadWorkerMessage {
   resourceResult?: SessionReplayResourceUploadResult;
   pendingItems?: number;
   retryCount?: number;
+  nextDelayMs?: number;
   error?: string;
 }
 
@@ -300,7 +304,8 @@ export class SessionReplayUploadQueue {
   }
 
   private isDrained(lane: ReplayUploadLane, message: ReplayUploadWorkerMessage): boolean {
-    if (lane === 'resource') return message.resourceResult?.success === true && message.resourceResult.remainingResources === 0;
+    if (lane === 'resource') return message.resourceResult?.success === true &&
+      message.resourceResult.remainingResources === 0 && message.resourceResult.cleanup.failedResources === 0;
     return message.result?.success === true && message.result.remainingSegments === 0;
   }
 
@@ -353,7 +358,7 @@ export class SessionReplayUploadQueue {
         `Replay record upload result: requestId=${message.id}, trigger=${trigger}, success=${result.success}, ` +
         `code=${result.code}, attempted=${result.attemptedSegments}, uploaded=${result.uploadedSegments}, ` +
         `remaining=${result.remainingSegments}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}, ` +
-        `retryCount=${message.retryCount ?? 0}`, !result.success);
+        `retryCount=${message.retryCount ?? 0}, nextDelayMs=${message.nextDelayMs ?? 'none'}`, !result.success);
     }
     if (message.resourceResult !== undefined) {
       const result = message.resourceResult;
@@ -361,9 +366,17 @@ export class SessionReplayUploadQueue {
         result.remainingResources === 0 && !result.retryable && !result.endpointBlocked) return;
       FTSessionReplayBridgeRegistry.logDiagnostic(
         `Replay resource upload result: requestId=${message.id}, trigger=${trigger}, success=${result.success}, ` +
-        `code=${result.code}, attempted=${result.attemptedResources}, uploaded=${result.uploadedResources}, ` +
-        `remaining=${result.remainingResources}, retryable=${result.retryable}, endpointBlocked=${result.endpointBlocked}, ` +
-        `retryCount=${message.retryCount ?? 0}`, !result.success);
+        `code=${result.code}, attempted=${result.attemptedResources}, confirmed=${result.uploadedResources}, ` +
+        `existing=${result.existingResources ?? 0}, transferred=${result.transferredResources ?? 0}, ` +
+        `cached=${result.cachedResources ?? 0}, remaining=${result.remainingResources}, ` +
+        `local=${result.localResources ?? result.remainingResources}, ` +
+        `cleanupDeleted=${result.cleanup.deletedResources}, cleanupDeferred=${result.cleanup.deferredResources}, ` +
+        `cleanupFailed=${result.cleanup.failedResources}, retryable=${result.retryable}, ` +
+        `endpointBlocked=${result.endpointBlocked}, retryCount=${message.retryCount ?? 0}, ` +
+        `nextDelayMs=${message.nextDelayMs ?? 'none'}, resourceSample=${result.resourceIdSample?.join('|') || 'none'}` +
+        (result.cleanup.reason.length > 0 ? `, cleanupReason=${JSON.stringify(result.cleanup.reason)}` : '') +
+        (!result.success ? `, message=${JSON.stringify(result.message)}` : ''),
+        !result.success || result.cleanup.failedResources > 0);
     }
     if (message.error !== undefined) {
       FTSessionReplayBridgeRegistry.logDiagnostic(`Replay ${lane} upload failed: ${message.error}`, true);

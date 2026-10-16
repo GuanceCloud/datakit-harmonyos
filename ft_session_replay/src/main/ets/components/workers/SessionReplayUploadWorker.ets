@@ -158,24 +158,29 @@ async function runNext(): Promise<void> {
     if (lane === 'record') result = failedSegment(String(error));
     else resourceResult = failedResource(String(error));
   }
-  port.postMessage({ id: request.id, phase: 'done', lane, result: result ?? undefined,
-    resourceResult: resourceResult ?? undefined, scheduleVersion: requestScheduleVersion,
-    retryCount } as ReplayUploadWorkerMessage);
-  running = false;
   const drained = lane === 'record'
     ? result?.success === true && result.remainingSegments === 0
-    : resourceResult?.success === true && resourceResult.remainingResources === 0;
+    : resourceResult?.success === true && resourceResult.remainingResources === 0 &&
+      resourceResult.cleanup.failedResources === 0;
   if (drainOnly && requestScheduleVersion === scheduleVersion && drained) intervalMs = 0;
+  let schedule: ReplayUploadSchedule | null = null;
   if (intervalMs > 0 && requests.length === 0) {
     let outcome: ReplayUploadOutcome | null = null;
     if (lane === 'record' && result !== null && !(result.success && result.attemptedSegments === 0)) {
-      outcome = { success: result.success, retryable: result.retryable, endpointBlocked: result.endpointBlocked };
+      outcome = { success: result.success, retryable: result.retryable, endpointBlocked: result.endpointBlocked,
+        madeProgress: result.uploadedSegments > 0 };
     } else if (lane === 'resource' && resourceResult !== null &&
-      !(resourceResult.success && resourceResult.attemptedResources === 0)) {
+      !(resourceResult.success && resourceResult.attemptedResources === 0 && !resourceResult.retryable)) {
       outcome = { success: resourceResult.success, retryable: resourceResult.retryable,
-        endpointBlocked: resourceResult.endpointBlocked };
+        endpointBlocked: resourceResult.endpointBlocked, madeProgress: resourceResult.uploadedResources > 0 };
     }
-    const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(currentDelayMs, retryCount, outcome);
+    schedule = nextReplayUploadSchedule(currentDelayMs, retryCount, outcome);
+  }
+  port.postMessage({ id: request.id, phase: 'done', lane, result: result ?? undefined,
+    resourceResult: resourceResult ?? undefined, scheduleVersion: requestScheduleVersion,
+    retryCount, nextDelayMs: schedule?.delayMs } as ReplayUploadWorkerMessage);
+  running = false;
+  if (schedule !== null) {
     currentDelayMs = schedule.delayMs;
     retryCount = schedule.retryCount;
     scheduleNext(schedule.delayMs);
