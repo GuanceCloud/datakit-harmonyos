@@ -1137,19 +1137,45 @@ class FTTrackInner {
     this.logCompletedDataWrite(writeResult, groups, uuidSample);
   }
 
-  private logCompletedDataWrite(writeResult: SyncDataWriteResult, groups: string, uuidSample: string): void {
-    FTLogSeparator.data(TAG, "数据入库");
+  private logCompletedDataWrite(writeResult: SyncDataWriteResult, groups: DataWriteLogGroup[], uuidSample: string): void {
+    const parts: string[] = [];
+    const sources: Set<string> = new Set();
+    for (const group of groups) {
+      parts.push(`${group.measurement}/${group.dataType}:${group.count}`);
+      if (group.dataType === DataType.RUM_WEBVIEW.toString()) {
+        sources.add('webview');
+      } else if (group.dataType === DataType.RUM_APP.toString() ||
+        group.dataType.startsWith(`${DataType.RUM_APP.toString()}_`)) {
+        sources.add('native');
+      } else {
+        sources.add('sdk');
+      }
+    }
+    const sourceNames = Array.from(sources).sort();
+    const source = sourceNames.length === 1 ? sourceNames[0] : 'mixed';
+    let stages = `source=${source},stage=db_write,`;
+    // WebView RUM reaches this path after rumWebView's receive/sampling gates.
+    // These are stage markers for the written batch, not original JS counts,
+    // a guarantee that every record was inserted, or Browser Replay state.
+    if (source === 'webview') {
+      stages += 'receive=accepted,sampling=pass,';
+    } else if (sources.has('webview')) {
+      stages += `sources=${sourceNames.join('|')},webview_receive=accepted,webview_sampling=pass,`;
+    } else if (source === 'mixed') {
+      stages += `sources=${sourceNames.join('|')},`;
+    }
+    FTLogSeparator.data(TAG, source === 'webview' ? 'WebView RUM 处理结果' : '数据入库');
     FTInnerLogger.d(TAG,
-      `syncDataBackground:batch requested=${writeResult.requested},inserted=${writeResult.inserted},` +
+      `syncDataBackground:batch ${stages}requested=${writeResult.requested},inserted=${writeResult.inserted},` +
         `updated=${writeResult.updated},dropped=${writeResult.dropped},duplicate=${writeResult.duplicateSkipped},` +
-        `groups=${groups},uuid_sample=${uuidSample}`);
+        `groups=${parts.join('|')},uuid_sample=${uuidSample}`);
   }
 
   private buildDraftWriteLogGroups(
     fallbackMeasurement: string,
     fallbackDataType: DataType,
     drafts: SDKSyncDataDraftDTO[]
-  ): string {
+  ): DataWriteLogGroup[] {
     const groups: DataWriteLogGroup[] = [];
     for (let i = 0; i < drafts.length; i++) {
       const draft = drafts[i];
@@ -1169,11 +1195,7 @@ class FTTrackInner {
       }
     }
 
-    const parts: string[] = [];
-    for (let i = 0; i < groups.length; i++) {
-      parts.push(`${groups[i].measurement}/${groups[i].dataType}:${groups[i].count}`);
-    }
-    return parts.join('|');
+    return groups;
   }
 
   private buildDraftUuidSample(drafts: SDKSyncDataDraftDTO[], maxCount: number): string {
@@ -1187,7 +1209,7 @@ class FTTrackInner {
     return samples.join('|');
   }
 
-  private buildSyncDataWriteLogGroups(records: SyncData[]): string {
+  private buildSyncDataWriteLogGroups(records: SyncData[]): DataWriteLogGroup[] {
     const groups: DataWriteLogGroup[] = [];
     for (let i = 0; i < records.length; i++) {
       const record = records[i];
@@ -1207,11 +1229,7 @@ class FTTrackInner {
       }
     }
 
-    const parts: string[] = [];
-    for (let i = 0; i < groups.length; i++) {
-      parts.push(`${groups[i].measurement}/${groups[i].dataType}:${groups[i].count}`);
-    }
-    return parts.join('|');
+    return groups;
   }
 
   private buildSyncDataUuidSample(records: SyncData[], maxCount: number): string {
