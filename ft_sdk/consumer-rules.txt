@@ -560,7 +560,6 @@ setUrl
 setValue
 setViewTrackingHandler
 setWebView
-setWebViewWithComponentId
 shutDown
 singleFileMaxSize
 spanId

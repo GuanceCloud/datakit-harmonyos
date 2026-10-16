@@ -5,6 +5,7 @@ import { FTRUMConfig } from '../../main/ets/components/Configs';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../../main/ets/components/rum/FTRUMInnerManager';
 import { FTWebViewHandler } from '../../main/ets/components/web/FTWebViewHandler';
+import { FTWebViewReplayBridge } from '../../main/ets/components/web/FTWebViewReplayBridge';
 import { FTSessionReplayBridge, FTSessionReplayBridgeRegistry, FTSessionReplayRUMContext,
   FTSessionReplayErrorContext, FTSessionReplaySessionContext, FTSessionReplayViewMetadata,
   FTSessionReplayWebDataContext, FTSessionReplayWebViewOptions } from '../../main/ets/components/sessionreplay/FTSessionReplayBridge';
@@ -56,20 +57,22 @@ export default function webReplayBridgeUnitTest() {
       const handler = new FTWebViewHandler();
       try {
         const controller = new ReplayControllerFixture() as Object as webview.WebviewController;
-        handler.setWebViewWithComponentId(controller, 'bridge-test-web');
+        handler.setWebView(controller);
+        const componentId = FTWebViewReplayBridge.bindingId(controller);
         expect(handler.getSessionReplaySlotId()).assertEqual('');
         // Declarative proxy registration happens before a native frame exists.
         const oldReceiver = handler.getMessageReceiver();
         const sessionId = FTRUMInnerManager.getInstance().getSessionId();
         registry.observeWebReplaySlots('bridge-app', sessionId, 'native-container',
-          [{ componentId: 'bridge-test-web', slotId: '1000000126' }], Date.now());
+          [{ componentId, slotId: '1000000126' }], Date.now());
         expect(handler.getSessionReplaySlotId()).assertEqual('1000000126');
         oldReceiver.sendEvent(rrwebEvent('browser-before-rum'));
         expect(bridge.views.join(',')).assertEqual('browser-before-rum');
         expect(bridge.slots[0]).assertEqual('1000000126');
-        handler.setWebViewWithComponentId(new ReplayControllerFixture() as Object as webview.WebviewController, 'bridge-test-web');
+        const replacement = new ReplayControllerFixture() as Object as webview.WebviewController;
+        handler.setWebView(replacement);
         registry.observeWebReplaySlots('bridge-app', sessionId, 'native-container',
-          [{ componentId: 'bridge-test-web', slotId: '1000000127' }], Date.now());
+          [{ componentId: FTWebViewReplayBridge.bindingId(replacement), slotId: '1000000127' }], Date.now());
         oldReceiver.sendEvent(rrwebEvent('stale-browser'));
         handler.getMessageReceiver().sendEvent(rrwebEvent('replacement-browser'));
         expect(bridge.views.join(',')).assertEqual('browser-before-rum,replacement-browser');
@@ -97,11 +100,12 @@ export default function webReplayBridgeUnitTest() {
       registry.register(bridge);
       registry.setWebReplayAppForeground(true);
       try {
-        handler.setWebViewWithComponentId(controller as Object as webview.WebviewController, 'binding-test-web');
+        handler.setWebView(controller as Object as webview.WebviewController);
+        const componentId = FTWebViewReplayBridge.bindingId(controller);
         const session = FTRUMInnerManager.getInstance().getSessionId();
         const observe = (slotId: string, view: string = 'native'): void => {
           registry.observeWebReplaySlots('binding-app', session, view,
-            [{ componentId: 'binding-test-web', slotId }], Date.now());
+            [{ componentId, slotId }], Date.now());
         };
         observe('1001');
         await new Promise<void>((resolve): void => { setTimeout(resolve, 10); });
@@ -142,18 +146,20 @@ export default function webReplayBridgeUnitTest() {
       }
     });
 
-    it('does not let a duplicate handler unregister the original component', 0, () => {
+    it('does not let a duplicate handler unregister the original controller binding', 0, () => {
       const manager = FTRUMConfigManager.getInstance();
       const previous = manager.getConfig();
       manager.initWithConfig(new FTRUMConfig().setRumAppId('duplicate-app').setEnableTraceWebView(true));
       const owner = new FTWebViewHandler();
       const duplicate = new FTWebViewHandler();
+      const controller = new ReplayControllerFixture() as Object as webview.WebviewController;
+      const componentId = FTWebViewReplayBridge.bindingId(controller);
       const registry = FTSessionReplayBridgeRegistry;
       try {
-        owner.setWebViewWithComponentId(new ReplayControllerFixture() as Object as webview.WebviewController, 'duplicate-web');
-        duplicate.setWebViewWithComponentId(new ReplayControllerFixture() as Object as webview.WebviewController, 'duplicate-web');
+        owner.setWebView(controller);
+        duplicate.setWebView(controller);
         duplicate.clearWebController();
-        expect(registry.getWebReplayComponentBinding('duplicate-web') !== null).assertTrue();
+        expect(registry.getWebReplayComponentBinding(componentId) !== null).assertTrue();
         expect(duplicate.getSessionReplayCapabilities()).assertNull();
       } finally {
         owner.clearWebController();

@@ -2508,10 +2508,9 @@ export class ArkUIReplayCollector {
         return token;
       }
     } catch (_) {
-      // Preserve explicit component-ID integration when the marker is unavailable.
+      // A missing/unreadable plugin marker must not bind through a business component ID.
     }
-    const componentId = this.readComponentId(node);
-    return FTSessionReplayBridgeRegistry.getWebReplayComponentBinding(componentId) !== null ? componentId : undefined;
+    return undefined;
   }
 
   private readComponentId(node: FrameNode): string {

@@ -269,19 +269,6 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Install the Bridge using global RUM configuration and automatic controller/node association. */
   public setWebView(webController: webview.WebviewController): void {
-    this.attachWebView(webController);
-  }
-
-  /** Manual Replay fallback without the compiler plugin; componentId must match the Web node's .id(). */
-  public setWebViewWithComponentId(webController: webview.WebviewController, componentId: string): void {
-    if (componentId.trim().length === 0) {
-      FTInnerLogger.w(TAG, 'Manual WebView binding requires a non-empty component ID.');
-      return;
-    }
-    this.attachWebView(webController, componentId);
-  }
-
-  private attachWebView(webController: webview.WebviewController, componentId: string = ''): void {
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() called ==========`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] WebController parameter: ${webController ? 'valid' : 'null'}`);
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Current webController: ${this.webController ? 'exists' : 'null'}`);
@@ -305,9 +292,8 @@ export class FTWebViewHandler implements JsReceiver {
       this.clearWebController();
     }
 
-    // An explicit component ID remains supported without the compiler plugin.
-    // Otherwise the plugin writes this controller's token onto the actual Web node.
-    const bindingId = componentId.length > 0 ? componentId : FTWebViewReplayBridge.bindingId(webController);
+    // The compiler plugin writes this controller's token onto the actual Web node.
+    const bindingId = FTWebViewReplayBridge.bindingId(webController);
     if (bindingId !== this.sessionReplayComponentId) {
       if (this.sessionReplayComponentRegistered) {
         FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
