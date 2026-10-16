@@ -1709,21 +1709,20 @@ class FTTrackInner {
     collectType: CollectType = CollectType.ALL,
     draftUuid?: string
   ): void {
-    FTInnerLogger.d(TAG, `TAG ========== rumWebView() called ==========`);
-    FTInnerLogger.d(TAG, `TAG Measurement: ${measurement},Time: ${time}, Collect type: ${collectType}`);
-
     // Host only applies the sampling decision. WebView tag/field/package
     // normalization is finalized inside EVENT_CONSUMER.
     const sessionId = tags.get(Constants.KEY_RUM_SESSION_ID);
-    FTInnerLogger.d(TAG, `TAG Session ID: ${sessionId}`);
+    const willCollect = !!sessionId && this.dataHelper.checkSessionWillCollect(sessionId);
+    const summary = `[WEBVIEW-DEBUG] RUM sampling: measurement=${measurement}, ` +
+      `view=${tags.get(Constants.KEY_RUM_VIEW_ID) || 'missing'}, session=${sessionId || 'missing'}, ` +
+      `timeNs=${time}, requestedCollectType=${collectType}`;
 
-    if (sessionId && this.dataHelper.checkSessionWillCollect(sessionId)) {
-      FTInnerLogger.d(TAG, `TAG Session will collect, calling syncDataBackground`);
+    if (willCollect) {
+      FTInnerLogger.d(TAG, `${summary}, result=pass`);
       this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null, draftUuid);
     } else {
-      const willCollect = sessionId ? this.dataHelper.checkSessionWillCollect(sessionId) : false;
       FTInnerLogger.w(TAG,
-        `TAG Session will not collect: sessionId=${sessionId}, willCollect=${willCollect}`);
+        `${summary}, result=drop, reason=${sessionId ? 'session_not_collected' : 'session_missing'}`);
     }
   }
 

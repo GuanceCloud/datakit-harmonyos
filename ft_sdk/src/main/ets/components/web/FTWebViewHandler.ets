@@ -4,6 +4,7 @@ import FTTrackInner from '../FTTrackInner';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import { FTInnerLogger } from '../log/FTLogger';
+import { FTLogSeparator } from '../log/FTLogSeparator';
 import { DataType } from '../enum/Enums';
 import { CollectType } from '../rum/enum/RUMEnums';
 import { JsReceiver } from './WebAppInterface';
@@ -368,7 +369,8 @@ export class FTWebViewHandler implements JsReceiver {
       FTInnerLogger.e(TAG, '[WEBVIEW-DEBUG] Bridge registration failed: reason=controller_missing');
       return;
     }
-    
+
+    FTLogSeparator.data(TAG, 'WebView 通道注册');
     try {
       if (!this.messageReceiver) {
         this.messageReceiver = new WebViewMessageReceiver(this);
@@ -400,11 +402,10 @@ export class FTWebViewHandler implements JsReceiver {
    * datakit-js in webview called channel method, processing datakit business logic related
    */
   public sendEventWithCallback(event: string, callbackMethod: string | null): void {
-    // Keep one complete, unformatted payload for every event, regardless of its entry point.
-    this.logWebViewPayload('web_to_native', event);
+    let eventObj: Record<string, string | Record<string, string | object>> | null = null;
     try {
       // Parse JSON event
-      const eventObj = JSON.parse(event) as Record<string, string | Record<string, string | object>>;
+      eventObj = JSON.parse(event) as Record<string, string | Record<string, string | object>>;
       
       // Get properties using safe access (ArkTS doesn't support indexed access)
       let name: string = "";
@@ -426,6 +427,24 @@ export class FTWebViewHandler implements JsReceiver {
       }
       if (tagValue && typeof tagValue === 'string') {
         tag = tagValue;
+      }
+
+      if (name === WEB_JS_TYPE_RUM) {
+        // Final RUM bodies are already printed by UPLOAD BODY PREVIEW. Keep only
+        // scalar receive context here; receipt is not proof of persistence/upload.
+        const measurement = typeof dataJson?.measurement === 'string' ? dataJson.measurement : 'webview';
+        const tags = dataJson?.tags as Record<string, string> | undefined;
+        const viewId = typeof tags?.view_id === 'string' ? tags.view_id : '';
+        const fields = dataJson?.fields as Record<string, string | number | boolean | object> | undefined;
+        const viewUpdate = fields?.view_update_time;
+        const update = measurement === Constants.FT_MEASUREMENT_RUM_VIEW
+          ? `, viewUpdate=${typeof viewUpdate === 'number' || typeof viewUpdate === 'string' ? viewUpdate : 'missing'}` : '';
+        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] RUM received: channel=rum, measurement=${measurement}, ` +
+          `view=${viewId || 'missing'}${update}, component=${this.sessionReplayComponentId}, ` +
+          `slot=${this.getSessionReplaySlotId() || 'unbound'}, chars=${event.length}`);
+      } else {
+        // DOM Replay has a separate upload path, so retain its complete payload.
+        this.logWebViewPayload('web_to_native', event);
       }
 
       // All receiver paths converge here, including declarative javaScriptProxy and legacy envelopes.
@@ -750,6 +769,8 @@ export class FTWebViewHandler implements JsReceiver {
         this.callbackFromNative(tag, callbackMethod, retJson, "{}");
       }
     } catch (error) {
+      // Direct proxy callers also need the original input when JSON decoding fails.
+      if (eventObj === null) this.logWebViewPayload('web_to_native', event);
       this.logWebViewError('process_event', error as BusinessError);
     }
   }
