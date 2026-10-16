@@ -256,7 +256,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         const accepted = this.appendRecordedRecords(context, records);
         if (accepted) this.lastCapture = this.createCapture(context, records, null);
         FTSessionReplayBridgeRegistry.logDiagnostic(
-          `Replay Web batch: view=${context.viewId}, slot=${records[0]?.slotId}, records=${records.length}, reason=${reason}, accepted=${accepted}`);
+          `Replay Web batch: view=${context.viewId}, slot=${records[0]?.slotId}, records=${records.length}, reason=${reason}, localAccepted=${accepted}`);
         return accepted;
       },
       (context: SessionReplayContext): (() => void) =>

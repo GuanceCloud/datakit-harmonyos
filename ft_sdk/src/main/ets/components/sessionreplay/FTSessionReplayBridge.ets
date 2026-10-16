@@ -148,8 +148,15 @@ export class FTSessionReplayBridgeRegistry {
 
   public static acceptsWebReplayData(slotId: string, applicationId: string, sessionId: string,
     timestamp: number): boolean {
-    return FTSessionReplayBridgeRegistry.webAppForeground && FTSessionReplayBridgeRegistry.bridge !== null &&
-      FTSessionReplayBridgeRegistry.webSlots.accepts(slotId, applicationId, sessionId, timestamp);
+    return FTSessionReplayBridgeRegistry.getWebReplayRejectionReason(slotId, applicationId, sessionId, timestamp).length === 0;
+  }
+
+  /** Shares the exact acceptance gates with forwarding, rather than guessing from a generic failure. */
+  public static getWebReplayRejectionReason(slotId: string, applicationId: string, sessionId: string,
+    timestamp: number): string {
+    if (!FTSessionReplayBridgeRegistry.webAppForeground) return 'app_background';
+    if (FTSessionReplayBridgeRegistry.bridge === null) return 'replay_bridge_unavailable';
+    return FTSessionReplayBridgeRegistry.webSlots.getRejectionReason(slotId, applicationId, sessionId, timestamp);
   }
 
   public static isWebReplaySlotActive(slotId: string): boolean {
@@ -192,7 +199,7 @@ export class FTSessionReplayBridgeRegistry {
     FTSessionReplayBridgeRegistry.webSlots.observe(applicationId, sessionId, viewId, visibleSlots, timestamp);
     const conflict = FTSessionReplayBridgeRegistry.webSlots.getConflictedComponentIds().join(',');
     if (conflict.length > 0 && conflict !== FTSessionReplayBridgeRegistry.webBindingConflict) {
-      FTInnerLogger.w(TAG, `Replay Web binding rejected: controller/component matches multiple nodes or slot owners: ${conflict}`);
+      FTInnerLogger.w(TAG, `[WEBVIEW-DEBUG] Replay Web binding rejected: reason=ambiguous_node_or_slot_owner, components=${conflict}`);
     }
     FTSessionReplayBridgeRegistry.webBindingConflict = conflict;
     const latest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
@@ -388,12 +395,13 @@ export class FTSessionReplayBridgeRegistry {
     }
   }
 
-  /** Optional HAR diagnostics use the core logger's configured level. */
+  /** Web diagnostics share the JS Bridge filter and the core logger's configured level. */
   public static logDiagnostic(message: string, warning: boolean = false): void {
+    const diagnostic = message.startsWith('Replay Web') ? `[WEBVIEW-DEBUG] ${message}` : message;
     if (warning) {
-      FTInnerLogger.w(TAG, message);
+      FTInnerLogger.w(TAG, diagnostic);
     } else {
-      FTInnerLogger.d(TAG, message);
+      FTInnerLogger.d(TAG, diagnostic);
     }
   }
 
@@ -492,7 +500,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       return bridge.getWebViewOptions();
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView options callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView options callback failed: ${String(error)}`, true);
       return null;
     }
   }
@@ -505,7 +513,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       return bridge.onWebReplayData(context);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView data callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView data callback failed: ${String(error)}`, true);
       return false;
     }
   }
@@ -515,7 +523,7 @@ export class FTSessionReplayBridgeRegistry {
     if (bridge === null || bridge.flushWebReplayData === undefined) return true;
     try { return bridge.flushWebReplayData(); }
     catch (error) {
-      FTInnerLogger.w(TAG, `Replay Web batch flush failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay Web batch flush failed: ${String(error)}`, true);
       return false;
     }
   }
@@ -528,7 +536,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       return bridge.onWebReplayError(context);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView error callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView error callback failed: ${String(error)}`, true);
       return false;
     }
   }
@@ -578,7 +586,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       return bridge.onWebReplayContextChanged(context);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView context callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView context callback failed: ${String(error)}`, true);
       return false;
     }
   }
@@ -591,7 +599,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       bridge.onWebReplaySlotActive(slotId, active, timestamp);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView slot callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView slot callback failed: ${String(error)}`, true);
     }
   }
 
@@ -603,7 +611,7 @@ export class FTSessionReplayBridgeRegistry {
     try {
       return bridge.isWebReplayErrorSampled(sessionId);
     } catch (error) {
-      FTInnerLogger.w(TAG, `Replay WebView sampling callback failed: ${String(error)}`);
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay WebView sampling callback failed: ${String(error)}`, true);
       return false;
     }
   }

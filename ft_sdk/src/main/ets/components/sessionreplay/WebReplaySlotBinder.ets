@@ -109,11 +109,20 @@ export class WebReplaySlotBinder {
   public getConflictedComponentIds(): Array<string> { return Array.from(this.conflicts).sort(); }
 
   public accepts(slotId: string, applicationId: string, sessionId: string, timestamp: number): boolean {
+    return this.getRejectionReason(slotId, applicationId, sessionId, timestamp).length === 0;
+  }
+
+  /** Empty means accepted, including the existing two-second inactive-slot drain grace. */
+  public getRejectionReason(slotId: string, applicationId: string, sessionId: string, timestamp: number): string {
     const binding = this.get(slotId);
-    if (binding === null || binding.viewId.length === 0 || binding.applicationId !== applicationId ||
-      binding.sessionId !== sessionId) return false;
-    if (binding.active && this.latestSlotId === slotId) return true;
-    return binding.inactiveAt > 0 && timestamp >= binding.inactiveAt && timestamp - binding.inactiveAt < 2000;
+    if (binding === null) return 'slot_unbound';
+    if (binding.viewId.length === 0) return 'native_view_missing';
+    if (binding.applicationId !== applicationId) return 'application_mismatch';
+    if (binding.sessionId !== sessionId) return 'session_mismatch';
+    if (binding.active && this.latestSlotId === slotId) return '';
+    if (binding.inactiveAt > 0 && timestamp >= binding.inactiveAt && timestamp - binding.inactiveAt < 2000) return '';
+    return binding.inactiveAt > 0 && timestamp - binding.inactiveAt >= 2000
+      ? 'slot_drain_grace_expired' : 'slot_inactive';
   }
 
   public getLatestSlotId(): string { return this.latestSlotId; }
