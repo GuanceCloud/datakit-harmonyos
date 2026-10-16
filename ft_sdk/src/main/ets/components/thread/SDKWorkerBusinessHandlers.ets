@@ -42,6 +42,7 @@ import {
   SDKUploadRoundStartDTO,
   SDKUploadRoundStartResultDTO,
   SDKUploadRowDTO,
+  SDKUploadSkippedRowDTO,
   SDKWorkerCommand,
   SDKWorkerErrorPayload,
   SDKWorkerPayload,
@@ -2877,6 +2878,7 @@ interface SDKUploadPreparedRows {
   rows: SDKUploadRowDTO[];
   needsPersistence: boolean;
   deduplicatedRows: SDKUploadRowDTO[];
+  skippedRows: SDKUploadSkippedRowDTO[];
   packageId: string;
   bodySelection: SDKUploadBodySelection;
   deferredRows: number;
@@ -2895,7 +2897,8 @@ function prepareUploadRows(
   requestedPackageId: string,
   state: SDKWorkerRuntimeState
 ): SDKUploadPreparedRows {
-  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const skippedRows: SDKUploadSkippedRowDTO[] = [];
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state, skippedRows);
   const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
   let packageId = requestedPackageId || findPersistedUploadPackageId(pageRows);
   let candidateRows: SDKUploadRowDTO[] = [];
@@ -2929,6 +2932,7 @@ function prepareUploadRows(
     rows: preparedRows,
     needsPersistence: haveUploadRowsChanged(sourceRows, preparedRows),
     deduplicatedRows,
+    skippedRows,
     packageId,
     bodySelection,
     deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
@@ -2950,7 +2954,8 @@ function preparePersistedUploadRows(
   packageId: string,
   state: SDKWorkerRuntimeState
 ): SDKUploadPreparedRows {
-  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const skippedRows: SDKUploadSkippedRowDTO[] = [];
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state, skippedRows);
   const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
   const bodySelection = selectUploadRowsForBody(pageRows, packageId);
   const sourceRows = bodySelection.rows;
@@ -2959,6 +2964,7 @@ function preparePersistedUploadRows(
     rows: sourceRows,
     needsPersistence: false,
     deduplicatedRows,
+    skippedRows,
     packageId,
     bodySelection,
     deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
@@ -2996,6 +3002,7 @@ function handleUploadPreparePage(
     queriedRows: inputRows.length,
     acceptedRows: prepared.rows.length,
     duplicateRows: Math.max(0, inputRows.length - prepared.deduplicatedRows.length),
+    skippedRows: prepared.skippedRows,
     deferredRows: prepared.deferredRows,
     packageId: prepared.packageId,
     bodyLength: body.length,
@@ -3053,6 +3060,7 @@ async function handleUploadExecutePage(
       queriedRows: rows.length,
       acceptedRows: 0,
       duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+      skippedRows: preparedRows.skippedRows,
       deferredRows: preparedRows.deferredRows,
       packageId: preparedRows.packageId,
       bodyLength: 0,
@@ -3173,6 +3181,7 @@ async function handleUploadExecutePage(
     queriedRows: rows.length,
     acceptedRows: acceptedRows.length,
     duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+    skippedRows: preparedRows.skippedRows,
     deferredRows,
     packageId,
     bodyLength: body.length,
@@ -3456,13 +3465,15 @@ function getUploadMaxPages(dataType: string): number {
 function deduplicateUploadRows(
   dataType: string,
   rows: SDKUploadRowDTO[],
-  state: SDKWorkerRuntimeState
+  state: SDKWorkerRuntimeState,
+  skippedRows: SDKUploadSkippedRowDTO[]
 ): SDKUploadRowDTO[] {
   const result: SDKUploadRowDTO[] = [];
   const seen: SDKStringRecord = {};
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row) {
+      skippedRows.push({ rowId: 0, uuid: '', measurement: 'unknown', key: '', reason: 'invalid_row' });
       continue;
     }
     const key = getUploadDedupKey(dataType, row);
@@ -3471,6 +3482,14 @@ function deduplicateUploadRows(
       continue;
     }
     if (state.uploadingDataIds[key] === '1' || seen[key] === '1') {
+      const separator = (row.dataString || '').indexOf(',');
+      skippedRows.push({
+        rowId: row.id,
+        uuid: row.uuid || '',
+        measurement: separator > 0 ? row.dataString.substring(0, separator) : 'unknown',
+        key,
+        reason: state.uploadingDataIds[key] === '1' ? 'already_uploading' : 'same_key_in_batch'
+      });
       continue;
     }
     seen[key] = '1';

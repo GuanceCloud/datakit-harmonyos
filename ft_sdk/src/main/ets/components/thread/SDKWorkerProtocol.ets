@@ -484,6 +484,15 @@ export interface SDKUploadRowDTO {
   customDataType?: string;
 }
 
+/** Metadata only: excluded records are not present in UPLOAD BODY PREVIEW. */
+export interface SDKUploadSkippedRowDTO {
+  rowId: number;
+  uuid: string;
+  measurement: string;
+  key: string;
+  reason: string;
+}
+
 export interface SDKUploadPageDTO {
   dataType: string;
   rows: SDKUploadRowDTO[];
@@ -598,6 +607,7 @@ export interface SDKUploadPreparePageResultDTO {
   queriedRows: number;
   acceptedRows: number;
   duplicateRows: number;
+  skippedRows: SDKUploadSkippedRowDTO[];
   deferredRows: number;
   packageId: string;
   bodyLength: number;
@@ -638,6 +648,7 @@ export interface SDKUploadExecutePageResultDTO {
   queriedRows: number;
   acceptedRows: number;
   duplicateRows: number;
+  skippedRows: SDKUploadSkippedRowDTO[];
   deferredRows: number;
   packageId: string;
   bodyLength: number;
