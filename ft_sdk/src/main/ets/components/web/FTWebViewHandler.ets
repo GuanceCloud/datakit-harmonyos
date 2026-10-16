@@ -160,6 +160,8 @@ export const WEB_JS_DATA = "data";
 export class FTWebViewHandler implements JsReceiver {
   private static readonly SESSION_REPLAY_SNAPSHOT_INTERVAL_MS: number = 10_000;
   private webController: webview.WebviewController | null = null;
+  /** Optional per-Web opt-out; it can never override a disabled installed RUM config. */
+  private webViewSetupConfig: FTRUMConfig | null = null;
   private nativeViewName: string = "";
   private messageReceiver: WebViewMessageReceiver | null = null;
   private readonly PROXY_OBJECT_NAME = "FTWebViewJavascriptBridge";
@@ -215,16 +217,24 @@ export class FTWebViewHandler implements JsReceiver {
   /** A detached document must never forward events into a replacement controller's slot. */
   public isCurrentProxy(generation: number): boolean { return generation === this.proxyGeneration; }
 
-  /** Browser SDK compatibility: null means the optional Replay HAR is absent. */
+  /** Android checks the current installed RUM configuration again for every incoming event. */
+  private isRumWebViewEnabled(): boolean {
+    const manager = FTRUMConfigManager.getInstance();
+    const config = manager.getConfig();
+    const setupEnabled = this.webViewSetupConfig === null || this.webViewSetupConfig.isEnableTraceWebView();
+    return setupEnabled && manager.isRumEnable() && config !== null && config.isEnableTraceWebView();
+  }
+
+  /** Browser SDK compatibility: null while WebView RUM or the optional Replay HAR is disabled. */
   public getSessionReplayPrivacyLevel(): string | null {
-    if (!this.sessionReplayComponentRegistered) return null;
+    if (!this.isRumWebViewEnabled() || !this.sessionReplayComponentRegistered) return null;
     const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
     return options === null ? null : options.privacyLevel;
   }
 
   /** Browser SDK compatibility: records capability is exposed only with Replay. */
   public getSessionReplayCapabilities(): string | null {
-    if (!this.sessionReplayComponentRegistered) return null;
+    if (!this.isRumWebViewEnabled() || !this.sessionReplayComponentRegistered) return null;
     const options = FTSessionReplayBridgeRegistry.getWebViewOptions();
     return options === null ? null : JSON.stringify(options.capabilities);
   }
@@ -243,6 +253,7 @@ export class FTWebViewHandler implements JsReceiver {
   /**
    * Get JavaScript proxy for WebView component
    * Used by WebViewPage to register proxy via .javaScriptProxy() decorator
+   * Exposing this object does not bypass the current installed RUM collection switch.
    * @param webController WebView controller
    * @returns JavaScriptProxy object with object, name, methodList, and controller
    */
@@ -275,10 +286,18 @@ export class FTWebViewHandler implements JsReceiver {
       return;
     }
     
-    // Check if WebView tracking is enabled (aligned with Android: FTWebViewHandler.setWebView)
-    // Android logic: if (config.isRumEnable() && config.isEnableTraceWebView())
-    if (!config || !config.isEnableTraceWebView()) {
-      FTInnerLogger.i(TAG, `[WEBVIEW-DEBUG] WebView tracking is disabled in RUM config, skip WebView setup`);
+    // The per-call config may opt out, but only installed RUM configuration can enable collection.
+    if (!config) {
+      FTInnerLogger.w(TAG, '[WEBVIEW-DEBUG] WebView setup requires a RUM config');
+      return;
+    }
+    // Global configuration is always read live; only a separate per-Web config adds a local veto.
+    // Keep that reference so changing its switch also takes effect in both directions.
+    this.webViewSetupConfig = config === FTRUMConfigManager.getInstance().getConfig() ? null : config;
+    if (!this.isRumWebViewEnabled()) {
+      this.stopSessionReplaySnapshotTimer();
+      this.sessionReplayBindingKey = '';
+      FTInnerLogger.i(TAG, '[WEBVIEW-DEBUG] WebView RUM is disabled or not initialized, skip WebView setup');
       return;
     }
     
@@ -438,6 +457,16 @@ export class FTWebViewHandler implements JsReceiver {
       }
       if (tagValue && typeof tagValue === 'string') {
         tag = tagValue;
+      }
+
+      // All receiver paths converge here, including declarative javaScriptProxy and legacy envelopes.
+      // Do not acknowledge a rejected RUM/Replay event as successfully collected. Other channels
+      // remain independent, as on Android (for example a separately enabled WebView Log channel).
+      if ((name === WEB_JS_TYPE_RUM || name === WEB_JS_TYPE_SESSION_REPLAY) && !this.isRumWebViewEnabled()) {
+        this.stopSessionReplaySnapshotTimer();
+        this.sessionReplayBindingKey = '';
+        FTInnerLogger.d(TAG, 'Ignore WebView RUM/Replay event: WebView tracing is disabled or RUM is not initialized.');
+        return;
       }
 
       if (name === WEB_JS_TYPE_RUM) {
@@ -774,14 +803,14 @@ export class FTWebViewHandler implements JsReceiver {
    */
   private handleSessionReplayWebEvent(dataJson: Record<string, string | object> | null,
     browserViewId: string = ''): void {
-    if (dataJson === null || !FTRUMConfigManager.getInstance().isRumEnable()) {
+    if (dataJson === null || !this.isRumWebViewEnabled()) {
       return;
     }
     if (!this.sessionReplaySlotActive || this.webController === null) {
       return;
     }
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
-    if (rumConfig === null || !rumConfig.isEnableTraceWebView()) return;
+    if (rumConfig === null) return;
     const applicationId = rumConfig.getRumAppId();
     const sessionId = FTRUMInnerManager.getInstance().getSessionId();
     // Current Browser SDK sends view.id with every rrweb message. It is authoritative,
@@ -809,7 +838,7 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Promotes the Browser Replay error window after Browser RUM reports an Error. */
   private notifySessionReplayWebError(): void {
-    if (!FTRUMConfigManager.getInstance().isRumEnable() || !this.sessionReplaySlotActive) {
+    if (!this.isRumWebViewEnabled() || !this.sessionReplaySlotActive) {
       return;
     }
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
@@ -839,7 +868,7 @@ export class FTWebViewHandler implements JsReceiver {
    * the new context.
    */
   private notifySessionReplayWebContextChanged(): void {
-    if (!FTRUMConfigManager.getInstance().isRumEnable() || !this.sessionReplaySlotActive) {
+    if (!this.isRumWebViewEnabled() || !this.sessionReplaySlotActive) {
       return;
     }
     const activeView = FTRUMInnerManager.getInstance().getActiveView();
@@ -921,7 +950,7 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Keeps Android's ten-second Browser full-snapshot cadence for error samples. */
   private refreshSessionReplaySnapshotTimer(): void {
-    if (this.webController === null || !this.sessionReplaySlotActive ||
+    if (!this.isRumWebViewEnabled() || this.webController === null || !this.sessionReplaySlotActive ||
       !FTSessionReplayBridgeRegistry.isWebReplaySlotActive(this.getSessionReplaySlotId())) {
       this.stopSessionReplaySnapshotTimer();
       return;
@@ -933,7 +962,7 @@ export class FTWebViewHandler implements JsReceiver {
     }
     if (this.sessionReplaySnapshotTimer !== -1) return;
     this.sessionReplaySnapshotTimer = setInterval((): void => {
-      if (this.webController === null || !this.sessionReplaySlotActive ||
+      if (!this.isRumWebViewEnabled() || this.webController === null || !this.sessionReplaySlotActive ||
         !FTSessionReplayBridgeRegistry.isWebReplaySlotActive(this.getSessionReplaySlotId()) ||
         !FTSessionReplayBridgeRegistry.isWebReplayErrorSampled(FTRUMInnerManager.getInstance().getSessionId())) {
         this.stopSessionReplaySnapshotTimer();
@@ -955,8 +984,8 @@ export class FTWebViewHandler implements JsReceiver {
     const slotId = this.getSessionReplaySlotId();
     const binding = FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(slotId);
     const config = FTRUMConfigManager.getInstance().getConfig();
-    if (this.webController === null || !this.sessionReplaySlotActive || config === null ||
-      !config.isEnableTraceWebView() || binding === null ||
+    if (!this.isRumWebViewEnabled() || this.webController === null || !this.sessionReplaySlotActive ||
+      config === null || binding === null ||
       binding.applicationId !== config.getRumAppId() ||
       binding.sessionId !== FTRUMInnerManager.getInstance().getSessionId() ||
       !FTSessionReplayBridgeRegistry.isWebReplaySlotActive(slotId)) {
@@ -971,7 +1000,7 @@ export class FTWebViewHandler implements JsReceiver {
   }
 
   private requestSessionReplayFullSnapshot(): void {
-    if (this.webController === null) return;
+    if (!this.isRumWebViewEnabled() || this.webController === null) return;
     try {
       this.webController.runJavaScript(
         'if (typeof DATAFLUX_RUM !== "undefined" && typeof DATAFLUX_RUM.takeSubsequentFullSnapshot === "function") { DATAFLUX_RUM.takeSubsequentFullSnapshot(); }',
