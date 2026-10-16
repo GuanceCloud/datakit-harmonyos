@@ -128,6 +128,7 @@ export class FTSessionReplayBridgeRegistry {
   private static readonly webSlots: WebReplaySlotBinder = new WebReplaySlotBinder();
   private static readonly webSlotListeners: Map<string, () => void> = new Map();
   private static webAppForeground: boolean = true;
+  private static webBindingConflict: string = '';
 
   public static registerWebReplayComponent(componentId: string): boolean {
     return FTSessionReplayBridgeRegistry.webSlots.register(componentId);
@@ -189,6 +190,11 @@ export class FTSessionReplayBridgeRegistry {
       if (binding !== null) previous.set(componentId, binding);
     }
     FTSessionReplayBridgeRegistry.webSlots.observe(applicationId, sessionId, viewId, visibleSlots, timestamp);
+    const conflict = FTSessionReplayBridgeRegistry.webSlots.getConflictedComponentIds().join(',');
+    if (conflict.length > 0 && conflict !== FTSessionReplayBridgeRegistry.webBindingConflict) {
+      FTInnerLogger.w(TAG, `Replay Web binding rejected: controller/component matches multiple nodes or slot owners: ${conflict}`);
+    }
+    FTSessionReplayBridgeRegistry.webBindingConflict = conflict;
     const latest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
     previous.forEach((before, componentId): void => {
       const after = FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId);

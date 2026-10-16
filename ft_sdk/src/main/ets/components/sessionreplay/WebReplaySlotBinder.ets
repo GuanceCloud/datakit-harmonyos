@@ -18,6 +18,7 @@ export interface WebReplaySlotObservation {
 export class WebReplaySlotBinder {
   private readonly slots: Map<string, WebReplaySlotBinding> = new Map();
   private latestSlotId: string = '';
+  private conflicts: Set<string> = new Set();
 
   public register(componentId: string): boolean {
     if (componentId.trim().length === 0 || this.slots.has(componentId) || this.slots.size >= 20) return false;
@@ -52,15 +53,35 @@ export class WebReplaySlotBinder {
   public observe(applicationId: string, sessionId: string, viewId: string,
     visibleSlots: Array<WebReplaySlotObservation>, timestamp: number): void {
     const visible: Map<string, string> = new Map();
+    const owners: Map<string, string> = new Map();
+    this.conflicts.clear();
     for (const observation of visibleSlots) {
       const id = Number(observation.slotId);
-      if (Number.isSafeInteger(id) && id > 0 && String(id) === observation.slotId) {
+      if (this.slots.has(observation.componentId) && Number.isSafeInteger(id) && id > 0 && String(id) === observation.slotId) {
+        const previous = visible.get(observation.componentId);
+        const owner = owners.get(observation.slotId);
+        if (previous !== undefined && previous !== observation.slotId) this.conflicts.add(observation.componentId);
+        if (owner !== undefined && owner !== observation.componentId) {
+          this.conflicts.add(owner);
+          this.conflicts.add(observation.componentId);
+        }
         visible.set(observation.componentId, observation.slotId);
+        owners.set(observation.slotId, observation.componentId);
       }
     }
     const previousLatest = this.latestSlotId;
     this.latestSlotId = '';
     for (const binding of this.slots.values()) {
+      if (this.conflicts.has(binding.componentId)) {
+        // Ambiguous matches must not retain an old slot, including its drain grace period.
+        binding.slotId = '';
+        binding.applicationId = '';
+        binding.sessionId = '';
+        binding.viewId = '';
+        binding.active = false;
+        binding.inactiveAt = 0;
+        continue;
+      }
       const slotId = visible.get(binding.componentId);
       if (slotId === undefined) {
         if (binding.active && binding.inactiveAt === 0) binding.inactiveAt = timestamp;
@@ -73,7 +94,7 @@ export class WebReplaySlotBinder {
       binding.slotId = slotId;
       binding.active = true;
     }
-    // Android uses one latest active slot; snapshot order defines paint order here.
+    // Preserve the single-active-slot policy; snapshot order defines paint order here.
     for (const observation of visibleSlots) {
       const binding = this.slots.get(observation.componentId);
       if (binding?.active && binding.slotId === observation.slotId) this.latestSlotId = binding.slotId;
@@ -85,6 +106,7 @@ export class WebReplaySlotBinder {
   }
 
   public getComponentIds(): Array<string> { return Array.from(this.slots.keys()); }
+  public getConflictedComponentIds(): Array<string> { return Array.from(this.conflicts).sort(); }
 
   public accepts(slotId: string, applicationId: string, sessionId: string, timestamp: number): boolean {
     const binding = this.get(slotId);
@@ -105,6 +127,7 @@ export class WebReplaySlotBinder {
   /** Keep registration for restart, but discard all old RUM associations. */
   public resetBindings(timestamp: number): void {
     this.latestSlotId = '';
+    this.conflicts.clear();
     for (const binding of this.slots.values()) {
       binding.applicationId = '';
       binding.sessionId = '';

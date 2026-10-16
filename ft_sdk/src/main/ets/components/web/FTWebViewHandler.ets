@@ -11,6 +11,7 @@ import { JsReceiver } from './WebAppInterface';
 import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTSessionReplayBridgeRegistry } from '../sessionreplay/FTSessionReplayBridge';
+import { FTWebViewReplayBridge } from './FTWebViewReplayBridge';
 
 const TAG = "FTWebViewHandler";
 
@@ -286,13 +287,16 @@ export class FTWebViewHandler implements JsReceiver {
       this.clearWebController();
     }
 
-    if (componentId.length > 0 && componentId !== this.sessionReplayComponentId) {
+    // An explicit component ID remains supported without the compiler plugin.
+    // Otherwise the plugin writes this controller's token onto the actual Web node.
+    const bindingId = componentId.length > 0 ? componentId : FTWebViewReplayBridge.bindingId(webController);
+    if (bindingId !== this.sessionReplayComponentId) {
       if (this.sessionReplayComponentRegistered) {
         FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
       }
       this.sessionReplayComponentRegistered = false;
       this.sessionReplayBindingKey = '';
-      this.sessionReplayComponentId = componentId;
+      this.sessionReplayComponentId = bindingId;
     }
     if (this.sessionReplayComponentId.length > 0 && !this.sessionReplayComponentRegistered) {
       this.sessionReplayComponentRegistered =
@@ -350,6 +354,7 @@ export class FTWebViewHandler implements JsReceiver {
       FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
     }
     this.sessionReplayComponentRegistered = false;
+    this.sessionReplayComponentId = '';
     this.sessionReplayBindingKey = '';
     this.webController = null;
     this.messageReceiver = null;

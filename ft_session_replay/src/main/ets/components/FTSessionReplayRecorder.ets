@@ -1180,7 +1180,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height);
       const slots: Array<WebReplaySlotObservation> = [];
       for (const node of visibleWebNodes) {
-        slots.push({ componentId: node.componentId, slotId: String(node.id) });
+        slots.push({ componentId: node.webViewBindingId ?? node.componentId, slotId: String(node.id) });
       }
       FTSessionReplayBridgeRegistry.observeWebReplaySlots(bindingContext.applicationId, bindingContext.sessionId,
         bindingContext.viewId, slots, snapshot.timestamp);

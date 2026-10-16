@@ -1,5 +1,5 @@
 import { ReplayPatternLock } from './ReplayPatternLock';
-import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
+import { FTSessionReplayBridgeRegistry, FTWebViewReplayBridge } from '@guancecloud/ft_sdk';
 import { copyReplayWireframe } from './ReplayWireframeValues';
 import { ReplayOverlayVectors, ReplayPopupArrowSide } from './ReplayOverlayVectors';
 import { FrameNode, UIContext } from '@kit.ArkUI';
@@ -1242,6 +1242,7 @@ export class ArkUIReplayCollector {
       this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
     }
     if (width > 0 && height > 0) {
+      const webViewBindingId = nodeType === 'Web' ? this.readWebViewBindingId(node) : undefined;
       output.push({
         id: this.toProtocolId(nodeId),
         x,
@@ -1258,9 +1259,8 @@ export class ArkUIReplayCollector {
         shouldCaptureAsText: inlineRuns === undefined && this.shouldCaptureAsText(node, nodeType, inspectorInfo),
         // Registration precedes the first native capture; derive its slot here
         // from the same node ID used to serialize the wireframe, not an alias.
-        webViewSlotId: nodeType === 'Web' &&
-          FTSessionReplayBridgeRegistry.getWebReplayComponentBinding(this.readComponentId(node)) !== null ?
-          String(this.toProtocolId(nodeId)) : undefined,
+        webViewSlotId: webViewBindingId !== undefined ? String(this.toProtocolId(nodeId)) : undefined,
+        webViewBindingId,
         isSelectArrow,
         isPopupSurface: parentType === 'Popup' && nodeType === 'Column' ? true : undefined,
         isOverlayCloseIcon: isOverlayCloseIcon ? true : undefined,
@@ -2499,6 +2499,19 @@ export class ArkUIReplayCollector {
     // the top/bottom meanings of the separate VerticalAlign enum.
     if (/center|middle|start|end|left|right/.test(normalized)) return 'center';
     return null;
+  }
+
+  private readWebViewBindingId(node: FrameNode): string | undefined {
+    try {
+      const token = node.getCustomProperty(FTWebViewReplayBridge.PROPERTY);
+      if (typeof token === 'string' && FTSessionReplayBridgeRegistry.getWebReplayComponentBinding(token) !== null) {
+        return token;
+      }
+    } catch (_) {
+      // Preserve explicit component-ID integration when the marker is unavailable.
+    }
+    const componentId = this.readComponentId(node);
+    return FTSessionReplayBridgeRegistry.getWebReplayComponentBinding(componentId) !== null ? componentId : undefined;
   }
 
   private readComponentId(node: FrameNode): string {

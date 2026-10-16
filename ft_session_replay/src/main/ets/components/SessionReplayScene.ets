@@ -70,6 +70,8 @@ export interface ArkUIReplayLightNode {
   shouldCaptureAsText: boolean;
   /** Resolved on UI thread; the Worker cannot consult the core slot registry. */
   webViewSlotId?: string;
+  /** Internal controller/node join key; never used as wireframe.id or permanentId. */
+  webViewBindingId?: string;
   /** Native Select spinner, rendered from a fixed safe vector instead of its platform font. */
   isSelectArrow?: boolean;
   /** Native bubble outline and sheet close glyph have paint outside ordinary Inspector styles. */
@@ -300,6 +302,7 @@ export class SessionReplayScene {
           componentId: source.componentId, nodeType: source.nodeType, inspectorInfo: source.inspectorInfo,
           shouldCaptureAsText: source.shouldCaptureAsText, isRoot: source.isRoot,
           webViewSlotId: source.webViewSlotId,
+          webViewBindingId: source.webViewBindingId,
           isSelectArrow: source.isSelectArrow,
           selectLabelOwnerId: source.selectLabelOwnerId,
           buttonLabelOwnerId: source.buttonLabelOwnerId,
