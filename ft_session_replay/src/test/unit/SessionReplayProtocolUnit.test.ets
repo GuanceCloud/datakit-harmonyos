@@ -34,7 +34,10 @@ import {
   REPLAY_MAX_BATCHES_PER_UPLOAD_JOB,
   shouldDiscardReplayUploadStatus
 } from '../../main/ets/components/SessionReplayUploader';
-import { createAndroidReplayResourceUrl } from '../../main/ets/components/SessionReplayResourceUploader';
+import {
+  createAndroidReplayResourceUrl,
+  isRetryableReplayResourceFailure
+} from '../../main/ets/components/SessionReplayResourceUploader';
 import { SessionReplayStoredSegment } from '../../main/ets/components/SessionReplaySegmentStore';
 
 function fullSnapshotRecord(timestamp: number, wireframes: Array<ReplayWireframe>): SessionReplayRecord {
@@ -121,8 +124,9 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.setStorageMaxBytes(200 * 1024 * 1024).getStorageMaxBytes()).assertEqual(100 * 1024 * 1024);
       expect(config.setMaxRecordsPerSegment(0).getMaxRecordsPerSegment()).assertEqual(1);
       expect(config.setMaxRecordsPerSegment(1000).getMaxRecordsPerSegment()).assertEqual(500);
-      expect(config.setUploadIntervalMs(1).getUploadIntervalMs()).assertEqual(1000);
-      expect(config.setUploadIntervalMs(500000).getUploadIntervalMs()).assertEqual(300000);
+      expect(config.getUploadIntervalMs()).assertEqual(2500);
+      expect(config.setUploadIntervalMs(1).getUploadIntervalMs()).assertEqual(500);
+      expect(config.setUploadIntervalMs(500000).getUploadIntervalMs()).assertEqual(5000);
       expect(config.setUploadIntervalMs(0).getUploadIntervalMs()).assertEqual(0);
       expect(config.getErrorSampleWindowMs()).assertEqual(60000);
     });
@@ -571,10 +575,17 @@ export default function sessionReplayProtocolUnitTest() {
       expect(isValidReplayHttpUrl('https://dk.example/replay path')).assertFalse();
       expect(REPLAY_MAX_BATCHES_PER_UPLOAD_JOB).assertEqual(10);
       expect(isRetryableReplayUploadStatus(0)).assertTrue();
+      expect(isRetryableReplayUploadStatus(204)).assertTrue();
+      expect(isRetryableReplayUploadStatus(302)).assertTrue();
       expect(isRetryableReplayUploadStatus(408)).assertFalse();
       expect(isRetryableReplayUploadStatus(429)).assertFalse();
       expect(isRetryableReplayUploadStatus(503)).assertTrue();
       expect(isRetryableReplayUploadStatus(400)).assertFalse();
+      expect(isRetryableReplayUploadStatus(200)).assertFalse();
+      // A malformed resource check response is invalid even though its transport code is zero.
+      expect(isRetryableReplayUploadStatus(0, true)).assertFalse();
+      expect(isRetryableReplayResourceFailure(0, true, false)).assertFalse();
+      expect(isRetryableReplayResourceFailure(0, true, true)).assertTrue();
       expect(shouldDiscardReplayUploadStatus(400)).assertTrue();
       expect(shouldDiscardReplayUploadStatus(408)).assertTrue();
       expect(shouldDiscardReplayUploadStatus(429)).assertTrue();

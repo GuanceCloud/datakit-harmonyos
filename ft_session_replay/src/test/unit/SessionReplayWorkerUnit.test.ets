@@ -17,7 +17,10 @@ import {
 } from '../../main/ets/components/SessionReplayWorkQueue';
 import { SessionReplayWorkerOperations } from '../../main/ets/components/SessionReplayWorkerOperations';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
-import { nextReplayUploadSchedule } from '../../main/ets/components/SessionReplayUploadQueue';
+import {
+  nextReplayUploadSchedule,
+  replayInitialUploadDelayMs
+} from '../../main/ets/components/SessionReplayUploadQueue';
 import {
   canStartReplayUpload,
   isReplayBatteryHealthy
@@ -232,34 +235,41 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(operations.appendRecords(context, [viewEnd], 'none', true)).assertFalse();
     });
 
-    it('backs off retryable scheduled uploads and resets after success', 0, () => {
+    it('starts immediately and matches Android adaptive and retry delays', 0, () => {
       const failed: SessionReplayUploadResult = {
         success: false, code: 503, message: 'retry', retryable: true,
         endpointBlocked: false, attemptedSegments: 1, uploadedSegments: 0, remainingSegments: 1
       };
-      const first = nextReplayUploadSchedule(15000, 0, failed);
+      expect(replayInitialUploadDelayMs(2500)).assertEqual(0);
+      expect(replayInitialUploadDelayMs(0)).assertEqual(-1);
+      const first = nextReplayUploadSchedule(2500, 0, failed);
       expect(first.delayMs).assertEqual(2500);
-      const second = nextReplayUploadSchedule(15000, first.retryCount, failed);
+      const second = nextReplayUploadSchedule(first.delayMs, first.retryCount, failed);
       expect(second.delayMs).assertEqual(5000);
-      const third = nextReplayUploadSchedule(15000, second.retryCount, failed);
+      const third = nextReplayUploadSchedule(second.delayMs, second.retryCount, failed);
       expect(third.delayMs).assertEqual(10000);
-      const fourth = nextReplayUploadSchedule(15000, third.retryCount, failed);
+      const fourth = nextReplayUploadSchedule(third.delayMs, third.retryCount, failed);
       expect(fourth.delayMs).assertEqual(20000);
-      const capped = nextReplayUploadSchedule(15000, fourth.retryCount, failed);
+      const capped = nextReplayUploadSchedule(fourth.delayMs, fourth.retryCount, failed);
       expect(capped.delayMs).assertEqual(30000);
-      const stillCapped = nextReplayUploadSchedule(15000, capped.retryCount, failed);
+      const stillCapped = nextReplayUploadSchedule(capped.delayMs, capped.retryCount, failed);
       expect(stillCapped.delayMs).assertEqual(30000);
       const blocked: SessionReplayUploadResult = {
         success: false, code: 0, message: 'invalid endpoint', retryable: false,
         endpointBlocked: true, attemptedSegments: 0, uploadedSegments: 0, remainingSegments: 1
       };
-      const waitingForUrl = nextReplayUploadSchedule(15000, capped.retryCount, blocked);
+      const waitingForUrl = nextReplayUploadSchedule(capped.delayMs, capped.retryCount, blocked);
       expect(waitingForUrl.delayMs).assertEqual(5000);
       expect(waitingForUrl.retryCount).assertEqual(0);
       failed.success = true;
-      const recovered = nextReplayUploadSchedule(15000, third.retryCount, failed);
-      expect(recovered.delayMs).assertEqual(15000);
+      const recovered = nextReplayUploadSchedule(third.delayMs, third.retryCount, failed);
+      expect(recovered.delayMs).assertEqual(9000);
       expect(recovered.retryCount).assertEqual(0);
+      const success = nextReplayUploadSchedule(2500, 0, failed);
+      expect(success.delayMs).assertEqual(2250);
+      expect(nextReplayUploadSchedule(success.delayMs, 0, null).delayMs).assertEqual(2475);
+      expect(nextReplayUploadSchedule(500, 0, failed).delayMs).assertEqual(500);
+      expect(nextReplayUploadSchedule(5000, 0, null).delayMs).assertEqual(5000);
     });
 
     it('matches Android network and battery upload gates', 0, () => {

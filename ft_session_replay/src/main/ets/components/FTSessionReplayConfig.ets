@@ -44,9 +44,9 @@ export class FTSessionReplayConfig {
   private motionQuietPeriodMs: number = 400;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
-  // Android-like background draining cadence. Zero opts out and leaves flush()
-  // as the only upload trigger.
-  private uploadIntervalMs: number = 15_000;
+  // Android starts at 2.5 seconds, then adapts normal polling between 0.5 and
+  // 5 seconds. Zero opts out and leaves flush() as the only upload trigger.
+  private uploadIntervalMs: number = 2_500;
   // Android's error-sampled Replay keeps only the one-minute pre-error window
   // until an error promotes it to the normal upload queue.
   private errorSampleWindowMs: number = 60_000;
@@ -235,14 +235,14 @@ export class FTSessionReplayConfig {
   }
 
   /**
-   * Schedules automatic draining of durable Replay segments. Set to zero to
-   * disable automatic network activity and use `flush()` explicitly instead.
+   * Sets the initial normal polling delay. Runtime scheduling adapts it between
+   * 500 and 5000 ms like Android. Set zero to use `flush()` explicitly instead.
    */
   public setUploadIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;
     }
-    this.uploadIntervalMs = intervalMs <= 0 ? 0 : Math.max(1000, Math.min(300000, Math.floor(intervalMs)));
+    this.uploadIntervalMs = intervalMs <= 0 ? 0 : Math.max(500, Math.min(5000, Math.floor(intervalMs)));
     return this;
   }
 

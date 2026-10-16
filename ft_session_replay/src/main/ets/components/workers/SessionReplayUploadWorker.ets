@@ -1,11 +1,13 @@
 import worker, { MessageEvents, ThreadWorkerGlobalScope } from '@ohos.worker';
 import {
   nextReplayUploadSchedule,
+  replayInitialUploadDelayMs,
   ReplayUploadLane,
   ReplayUploadOutcome,
   ReplayUploadReady,
   ReplayUploadSchedule,
-  ReplayUploadWorkerMessage
+  ReplayUploadWorkerMessage,
+  REPLAY_RETRY_BASE_DELAY_MS
 } from '../SessionReplayUploadQueue';
 import { SessionReplayResourceStore } from '../SessionReplayResourceStore';
 import { SessionReplayResourceUploader, SessionReplayResourceUploadResult } from '../SessionReplayResourceUploader';
@@ -23,6 +25,7 @@ let lane: ReplayUploadLane = 'record';
 let segmentStore: SessionReplaySegmentStore | null = null;
 let resourceStore: SessionReplayResourceStore | null = null;
 let intervalMs: number = 0;
+let currentDelayMs: number = REPLAY_RETRY_BASE_DELAY_MS;
 let drainOnly: boolean = false;
 let scheduleVersion: number = 0;
 let scheduleTimer: number = -1;
@@ -56,11 +59,13 @@ port.onmessage = (event: MessageEvents): void => {
   }
   if (message.phase === 'schedule') {
     intervalMs = Math.max(0, message.intervalMs ?? 0);
+    currentDelayMs = intervalMs > 0 ? intervalMs : REPLAY_RETRY_BASE_DELAY_MS;
     drainOnly = message.drainOnly ?? false;
     scheduleVersion = message.scheduleVersion ?? 0;
     retryCount = 0;
-    if (intervalMs <= 0) stopSchedule();
-    else scheduleNext(intervalMs);
+    const initialDelayMs = replayInitialUploadDelayMs(intervalMs);
+    if (initialDelayMs < 0) stopSchedule();
+    else scheduleNext(initialDelayMs);
     return;
   }
   if (message.phase === 'flush') {
@@ -157,13 +162,15 @@ async function runNext(): Promise<void> {
   if (drainOnly && requestScheduleVersion === scheduleVersion && drained) intervalMs = 0;
   if (intervalMs > 0 && requests.length === 0) {
     let outcome: ReplayUploadOutcome | null = null;
-    if (lane === 'record' && result !== null) {
+    if (lane === 'record' && result !== null && !(result.success && result.attemptedSegments === 0)) {
       outcome = { success: result.success, retryable: result.retryable, endpointBlocked: result.endpointBlocked };
-    } else if (lane === 'resource' && resourceResult !== null) {
+    } else if (lane === 'resource' && resourceResult !== null &&
+      !(resourceResult.success && resourceResult.attemptedResources === 0)) {
       outcome = { success: resourceResult.success, retryable: resourceResult.retryable,
         endpointBlocked: resourceResult.endpointBlocked };
     }
-    const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(intervalMs, retryCount, outcome);
+    const schedule: ReplayUploadSchedule = nextReplayUploadSchedule(currentDelayMs, retryCount, outcome);
+    currentDelayMs = schedule.delayMs;
     retryCount = schedule.retryCount;
     scheduleNext(schedule.delayMs);
   }

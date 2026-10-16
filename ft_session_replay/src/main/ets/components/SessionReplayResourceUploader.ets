@@ -65,6 +65,13 @@ interface ResourceCheckResponseBody {
   content?: object;
 }
 
+/** Invalid resource payloads are final unless their local cleanup itself failed. */
+export function isRetryableReplayResourceFailure(
+  code: number, invalid: boolean, cleanupFailed: boolean
+): boolean {
+  return cleanupFailed || isRetryableReplayUploadStatus(code, invalid);
+}
+
 /**
  * Android-compatible asset check and multipart uploader. Resources are grouped
  * by `wgt_id`, checked first, and their private files are removed only after a
@@ -111,7 +118,8 @@ export class SessionReplayResourceUploader {
           await this.removeResources(group.resources.map((resource: SessionReplayStoredResource): string => resource.id));
         }
         return this.result(false, checked.status.code, checked.status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(checked.status.code) || this.cleanup.failedResources > failedBefore);
+          isRetryableReplayResourceFailure(checked.status.code, checked.status.invalid === true,
+            this.cleanup.failedResources > failedBefore));
       }
       const existing: Array<SessionReplayStoredResource> = [];
       const missing: Array<SessionReplayStoredResource> = [];
@@ -136,7 +144,8 @@ export class SessionReplayResourceUploader {
           await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
         }
         return this.result(false, status.code, status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(status.code) || this.cleanup.failedResources > failedBefore);
+          isRetryableReplayResourceFailure(status.code, status.invalid === true,
+            this.cleanup.failedResources > failedBefore));
       }
       uploaded += missing.length;
       await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));

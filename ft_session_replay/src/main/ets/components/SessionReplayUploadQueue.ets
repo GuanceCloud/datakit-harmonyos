@@ -25,18 +25,41 @@ export interface ReplayUploadOutcome {
 export const REPLAY_INVALID_ENDPOINT_RECHECK_MS: number = 5_000;
 export const REPLAY_RETRY_BASE_DELAY_MS: number = 2_500;
 export const REPLAY_RETRY_MAX_DELAY_MS: number = 30_000;
+export const REPLAY_NORMAL_MIN_DELAY_MS: number = 500;
+export const REPLAY_NORMAL_MAX_DELAY_MS: number = 5_000;
+const REPLAY_NORMAL_DECREASE_FACTOR: number = 0.90;
+const REPLAY_NORMAL_INCREASE_FACTOR: number = 1.10;
+
+/** Android executes the first scheduled upload immediately; zero disables scheduling. */
+export function replayInitialUploadDelayMs(configuredDelayMs: number): number {
+  return configuredDelayMs > 0 ? 0 : -1;
+}
 
 export function nextReplayUploadSchedule(
-  intervalMs: number, retryCount: number, result: ReplayUploadOutcome | null
+  currentDelayMs: number, retryCount: number, result: ReplayUploadOutcome | null
 ): ReplayUploadSchedule {
-  if (result === null || result.success) return { delayMs: intervalMs, retryCount: 0 };
-  if (result.endpointBlocked) return { delayMs: REPLAY_INVALID_ENDPOINT_RECHECK_MS, retryCount: 0 };
-  if (!result.retryable) return { delayMs: intervalMs, retryCount: 0 };
-  const nextCount = retryCount + 1;
+  const current = Number.isFinite(currentDelayMs) && currentDelayMs > 0
+    ? currentDelayMs : REPLAY_RETRY_BASE_DELAY_MS;
+  if (result?.endpointBlocked === true) {
+    return { delayMs: REPLAY_INVALID_ENDPOINT_RECHECK_MS, retryCount: 0 };
+  }
+  if (result !== null && !result.success && result.retryable) {
+    const nextCount = retryCount + 1;
+    return {
+      delayMs: Math.min(REPLAY_RETRY_MAX_DELAY_MS,
+        REPLAY_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, nextCount - 1))),
+      retryCount: nextCount
+    };
+  }
+  if (result?.success === true) {
+    return {
+      delayMs: Math.max(Math.floor(current * REPLAY_NORMAL_DECREASE_FACTOR), REPLAY_NORMAL_MIN_DELAY_MS),
+      retryCount: 0
+    };
+  }
   return {
-    delayMs: Math.min(REPLAY_RETRY_MAX_DELAY_MS,
-      REPLAY_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, nextCount - 1))),
-    retryCount: nextCount
+    delayMs: Math.min(Math.floor(current * REPLAY_NORMAL_INCREASE_FACTOR), REPLAY_NORMAL_MAX_DELAY_MS),
+    retryCount: 0
   };
 }
 

@@ -109,9 +109,10 @@ export function isValidReplayHttpUrl(value: string): boolean {
   return /^https?:\/\/(?:\[[0-9a-f:.]+\]|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?))*)(?::\d+)?(?:[/?#][^\s]*)?$/i.test(value);
 }
 
-/** Android Replay retries transport/service failures, but treats every 4xx as final. */
-export function isRetryableReplayUploadStatus(code: number): boolean {
-  return code === 0 || code >= 500;
+/** Android Replay retries every non-200 response except 4xx; invalid local payloads are final. */
+export function isRetryableReplayUploadStatus(code: number, invalid: boolean = false): boolean {
+  if (invalid || code === http.ResponseCode.OK) return false;
+  return code < 400 || code >= 500;
 }
 
 export function shouldDiscardReplayUploadStatus(code: number, invalid: boolean = false): boolean {
