@@ -429,20 +429,9 @@ export class FTWebViewHandler implements JsReceiver {
         tag = tagValue;
       }
 
-      if (name === WEB_JS_TYPE_RUM) {
-        // Final RUM bodies are already printed by UPLOAD BODY PREVIEW. Keep only
-        // scalar receive context here; receipt is not proof of persistence/upload.
-        const measurement = typeof dataJson?.measurement === 'string' ? dataJson.measurement : 'webview';
-        const tags = dataJson?.tags as Record<string, string> | undefined;
-        const viewId = typeof tags?.view_id === 'string' ? tags.view_id : '';
-        const fields = dataJson?.fields as Record<string, string | number | boolean | object> | undefined;
-        const viewUpdate = fields?.view_update_time;
-        const update = measurement === Constants.FT_MEASUREMENT_RUM_VIEW
-          ? `, viewUpdate=${typeof viewUpdate === 'number' || typeof viewUpdate === 'string' ? viewUpdate : 'missing'}` : '';
-        FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] RUM received: channel=rum, measurement=${measurement}, ` +
-          `view=${viewId || 'missing'}${update}, component=${this.sessionReplayComponentId}, ` +
-          `slot=${this.getSessionReplaySlotId() || 'unbound'}, chars=${event.length}`);
-      } else {
+      // Successful RUM processing is summarized by syncDataBackground:batch;
+      // its final request body remains visible in UPLOAD BODY PREVIEW.
+      if (name !== WEB_JS_TYPE_RUM) {
         // DOM Replay has a separate upload path, so retain its complete payload.
         this.logWebViewPayload('web_to_native', event);
       }

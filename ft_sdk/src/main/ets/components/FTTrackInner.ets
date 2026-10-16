@@ -1713,16 +1713,16 @@ class FTTrackInner {
     // normalization is finalized inside EVENT_CONSUMER.
     const sessionId = tags.get(Constants.KEY_RUM_SESSION_ID);
     const willCollect = !!sessionId && this.dataHelper.checkSessionWillCollect(sessionId);
-    const summary = `[WEBVIEW-DEBUG] RUM sampling: measurement=${measurement}, ` +
-      `view=${tags.get(Constants.KEY_RUM_VIEW_ID) || 'missing'}, session=${sessionId || 'missing'}, ` +
-      `timeNs=${time}, requestedCollectType=${collectType}`;
 
     if (willCollect) {
-      FTInnerLogger.d(TAG, `${summary}, result=pass`);
+      // Normal-path diagnostics are emitted once per completed DB batch.
       this.syncDataBackground(DataType.RUM_WEBVIEW, time, measurement, tags, fields, null, draftUuid);
     } else {
       FTInnerLogger.w(TAG,
-        `${summary}, result=drop, reason=${sessionId ? 'session_not_collected' : 'session_missing'}`);
+        `[WEBVIEW-DEBUG] RUM ignored: channel=rum, stage=sampling, measurement=${measurement}, ` +
+          `view=${tags.get(Constants.KEY_RUM_VIEW_ID) || 'missing'}, session=${sessionId || 'missing'}, ` +
+          `timeNs=${time}, requestedCollectType=${collectType}, result=drop, ` +
+          `reason=${sessionId ? 'session_not_collected' : 'session_missing'}`);
     }
   }
 
