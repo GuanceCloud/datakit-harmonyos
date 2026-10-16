@@ -30,10 +30,6 @@ struct ReplaySecondaryWebPane {
   private controller: WebviewController = new webview.WebviewController();
   private handler: FTWebViewHandler = new FTWebViewHandler();
 
-  aboutToAppear() {
-    this.handler.setWebView(this.controller);
-  }
-
   aboutToDisappear() { this.handler.clearWebController(); }
 
   build() {
@@ -43,7 +39,7 @@ struct ReplaySecondaryWebPane {
       .height('100%')
       .javaScriptAccess(true)
       .domStorageAccess(true)
-      .javaScriptProxy(this.handler.getJavaScriptProxy(this.controller))
+      .onControllerAttached(() => this.handler.setWebView(this.controller))
       .onAreaChange(() => FTSessionReplay.getInstance().notifyPageChanged())
   }
 }
@@ -53,11 +49,8 @@ struct ReplaySecondaryWebPane {
 export struct WebViewPage {
   browserTabController: WebviewController = new webview.WebviewController();
   @State progress: number = 0;
-  @State webViewUrl: string = "about:blank";
   @StorageLink(KEY_WEB_VIEW_URL) storedWebViewUrl: string = "about:blank";
   private webViewHandler: FTWebViewHandler = new FTWebViewHandler();
-  private isInitialized: boolean = false;
-  private hasLoadedTargetUrl: boolean = false;
   @State private mainWebMounted: boolean = true;
   @State private compactWeb: boolean = false;
   @State private mainWebVisible: boolean = true;
@@ -76,21 +69,11 @@ export struct WebViewPage {
   private restoreSecondWeb: boolean = false;
   private rebuildTimer: number = -1;
 
-  aboutToAppear() {
-    // Initialize WebView handler early if controller is available
-    if (this.browserTabController && !this.isInitialized) {
-      this.webViewHandler.setWebView(this.browserTabController);
-      this.isInitialized = true;
-    }
-    this.refreshReplayDiagnostics();
-  }
-
   aboutToDisappear() {
     if (this.rebuildTimer !== -1) clearTimeout(this.rebuildTimer);
     this.rebuildTimer = -1;
     this.cancelReplayCheck();
     this.webViewHandler.clearWebController();
-    this.isInitialized = false;
     this.documentLoaded = false;
   }
 
@@ -102,11 +85,6 @@ export struct WebViewPage {
       return;
     }
     this.mainWebMounted = true;
-    // Ensure handler is initialized when page becomes visible
-    if (!this.isInitialized) {
-      this.webViewHandler.setWebView(this.browserTabController);
-      this.isInitialized = true;
-    }
     if (this.restoreSecondWeb) { this.secondWebMounted = true; this.restoreSecondWeb = false; }
     this.refreshReplayDiagnostics();
   }
@@ -169,13 +147,9 @@ export struct WebViewPage {
     this.mainWebMounted = false;
     this.webViewHandler.clearWebController();
     this.browserTabController = new webview.WebviewController();
-    this.webViewUrl = 'about:blank';
-    this.hasLoadedTargetUrl = false;
-    this.isInitialized = false;
+    this.progress = 0;
     this.rebuildTimer = setTimeout((): void => {
       this.rebuildTimer = -1;
-      this.webViewHandler.setWebView(this.browserTabController);
-      this.isInitialized = true;
       this.mainWebMounted = true;
       this.secondWebMounted = this.restoreSecondWeb;
       this.restoreSecondWeb = false;
@@ -374,7 +348,7 @@ export struct WebViewPage {
 
             Row() {
               if (this.mainWebMounted) {
-                Web({ src: this.fixtureMode ? $rawfile('session_replay_web.html') : this.webViewUrl,
+                Web({ src: this.fixtureMode ? $rawfile('session_replay_web.html') : (this.storedWebViewUrl || 'about:blank'),
                   controller: this.browserTabController })
                   .id('replay-main-web')
                   .width(this.compactWeb ? '80%' : '100%')
@@ -382,31 +356,12 @@ export struct WebViewPage {
                   .visibility(this.mainWebVisible ? Visibility.Visible : Visibility.Hidden)
                   .javaScriptAccess(true)
                   .domStorageAccess(true)
-                  // Keep native component IDs and bridge binding unchanged.
-                  .javaScriptProxy(this.webViewHandler.getJavaScriptProxy(this.browserTabController))
+                  .onControllerAttached(() => this.webViewHandler.setWebView(this.browserTabController))
                   .onAreaChange(() => FTSessionReplay.getInstance().notifyPageChanged())
                   .onProgressChange((callback: OnProgressChangeEvent) => {
                     this.progress = callback.newProgress
                   })
                   .onPageEnd(() => {
-                    // Inject the bridge before loading the configured URL.
-                    if (!this.fixtureMode && !this.hasLoadedTargetUrl && this.webViewUrl === "about:blank") {
-                      if (!this.isInitialized) {
-                        this.webViewHandler.setWebView(this.browserTabController);
-                        this.isInitialized = true;
-                      }
-
-                      const targetUrl: string = this.storedWebViewUrl || "about:blank";
-                      this.hasLoadedTargetUrl = true;
-                      this.webViewUrl = targetUrl;
-                      this.browserTabController.loadUrl(targetUrl);
-                      return;
-                    }
-
-                    if (!this.isInitialized) {
-                      this.webViewHandler.setWebView(this.browserTabController);
-                      this.isInitialized = true;
-                    }
                     this.documentLoaded = true;
                     this.replayEnabledAtLoad = FTSessionReplay.getInstance().isEnabled();
                     this.checkReplayState();
