@@ -183,7 +183,7 @@ function createSourceKey(id: string): string {
  * Replay is an optional HAR. Do not make existing console/cold-launch plugin
  * consumers fail compilation by emitting an import they did not declare.
  */
-function hasSessionReplayRuntime(id: string): boolean {
+export function hasRuntimeDependency(id: string, packageName: string): boolean {
   const normalized = id.replace(/\\/g, '/');
   const sourceMarker = '/src/main/ets/';
   const sourceIndex = normalized.indexOf(sourceMarker);
@@ -191,7 +191,8 @@ function hasSessionReplayRuntime(id: string): boolean {
     return false;
   }
   const moduleRoot = normalized.slice(0, sourceIndex);
-  const cached = replayRuntimeAvailability.get(moduleRoot);
+  const cacheKey = `${moduleRoot}:${packageName}`;
+  const cached = replayRuntimeAvailability.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
@@ -204,11 +205,12 @@ function hasSessionReplayRuntime(id: string): boolean {
     const fileSystem = nodeRequire('fs');
     const packagePath = path.join(moduleRoot, 'oh-package.json5');
     const packageText = fileSystem.readFileSync(packagePath, 'utf8').toString();
-    available = /["']@guancecloud\/ft_session_replay["']\s*:/.test(packageText);
+    const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    available = new RegExp(`["']${escapedName}["']\\s*:`).test(packageText);
   } catch (_) {
     available = false;
   }
-  replayRuntimeAvailability.set(moduleRoot, available);
+  replayRuntimeAvailability.set(cacheKey, available);
   return available;
 }
 
@@ -504,7 +506,8 @@ function addLifecycleInjection(
  * here so the transform works with the compiler's ArkTS source reader.
  */
 export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, code: string): string {
-  if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) || !hasSessionReplayRuntime(id)) {
+  if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
+    !hasRuntimeDependency(id, REPLAY_BRIDGE_IMPORT)) {
     return code;
   }
 

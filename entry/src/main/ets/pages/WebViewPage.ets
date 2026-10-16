@@ -31,7 +31,7 @@ struct ReplaySecondaryWebPane {
   private handler: FTWebViewHandler = new FTWebViewHandler();
 
   aboutToAppear() {
-    this.handler.setWebView(this.controller, new FTRUMConfig().setEnableTraceWebView(true), 'replay-secondary-web');
+    this.handler.setWebView(this.controller, new FTRUMConfig().setEnableTraceWebView(true));
   }
 
   aboutToDisappear() { this.handler.clearWebController(); }
@@ -81,7 +81,7 @@ export struct WebViewPage {
     if (this.browserTabController && !this.isInitialized) {
       const rumConfig = new FTRUMConfig();
       rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
       this.isInitialized = true;
     }
     this.refreshReplayDiagnostics();
@@ -108,7 +108,7 @@ export struct WebViewPage {
     if (!this.isInitialized) {
       const rumConfig = new FTRUMConfig();
       rumConfig.setEnableTraceWebView(true);
-      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
       this.isInitialized = true;
     }
     if (this.restoreSecondWeb) { this.secondWebMounted = true; this.restoreSecondWeb = false; }
@@ -179,7 +179,7 @@ export struct WebViewPage {
     this.rebuildTimer = setTimeout((): void => {
       this.rebuildTimer = -1;
       this.webViewHandler.setWebView(this.browserTabController,
-        new FTRUMConfig().setEnableTraceWebView(true), 'replay-main-web');
+        new FTRUMConfig().setEnableTraceWebView(true));
       this.isInitialized = true;
       this.mainWebMounted = true;
       this.secondWebMounted = this.restoreSecondWeb;
@@ -399,7 +399,7 @@ export struct WebViewPage {
                       if (!this.isInitialized) {
                         const rumConfig = new FTRUMConfig();
                         rumConfig.setEnableTraceWebView(true);
-                        this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+                        this.webViewHandler.setWebView(this.browserTabController, rumConfig);
                         this.isInitialized = true;
                       }
 
@@ -413,7 +413,7 @@ export struct WebViewPage {
                     if (!this.isInitialized) {
                       const rumConfig = new FTRUMConfig();
                       rumConfig.setEnableTraceWebView(true);
-                      this.webViewHandler.setWebView(this.browserTabController, rumConfig, 'replay-main-web');
+                      this.webViewHandler.setWebView(this.browserTabController, rumConfig);
                       this.isInitialized = true;
                     }
                     this.documentLoaded = true;

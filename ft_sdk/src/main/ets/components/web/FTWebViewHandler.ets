@@ -262,6 +262,7 @@ export class FTWebViewHandler implements JsReceiver {
 
   /**
    * Register JS method in web view
+   * componentId is an optional fallback when the Web binding compiler plugin is not enabled.
    */
   public setWebView(webController: webview.WebviewController, config: FTRUMConfig, componentId: string = ''): void {
     FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] ========== setWebView() called ==========`);
@@ -289,7 +290,9 @@ export class FTWebViewHandler implements JsReceiver {
 
     // An explicit component ID remains supported without the compiler plugin.
     // Otherwise the plugin writes this controller's token onto the actual Web node.
-    const bindingId = componentId.length > 0 ? componentId : FTWebViewReplayBridge.bindingId(webController);
+    const retainedBindingId = this.webController === webController ? this.sessionReplayComponentId : '';
+    const bindingId = componentId.length > 0 ? componentId :
+      (retainedBindingId || FTWebViewReplayBridge.bindingId(webController));
     if (bindingId !== this.sessionReplayComponentId) {
       if (this.sessionReplayComponentRegistered) {
         FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(this.sessionReplayComponentId);
