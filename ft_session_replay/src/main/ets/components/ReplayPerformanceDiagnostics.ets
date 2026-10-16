@@ -24,11 +24,16 @@ export class ReplayPerformanceDiagnostics {
   private intervalCount: number = 0;
   private intervals: number = 0;
   private maxInterval: number = 0;
+  private captureCauses: Record<string, number> = {};
 
   public record(result: ReplayWorkerResult | null, queuedAt: number): void {
     const timings = result?.timings;
     if (result === null || timings === undefined) return;
     this.count++;
+    // Counts describe sampled frames after coalescing, not raw UI callback counts.
+    const triggers = result.captureTriggers?.join('+') || 'unspecified';
+    const cause = `${triggers}->${result.captureReason || 'unknown'}`;
+    this.captureCauses[cause] = (this.captureCauses[cause] ?? 0) + 1;
     if (result.stored && result.records.length > 0) this.effective++;
     this.nodes += result.wireframeCount;
     this.handoff += timings.handoffMs ?? 0;
@@ -66,7 +71,8 @@ export class ReplayPerformanceDiagnostics {
       `writeMsMax=${this.maxWrite}, workerMsAvg=${this.average(this.worker)}, workerMsMax=${this.maxWorker}, ` +
       `effectiveIntervalMsAvg=${this.intervalCount === 0 ? 0 : Math.round(this.intervals / this.intervalCount)}, ` +
       `effectiveIntervalMsMax=${this.maxInterval}, queueDepth=${depth}, maxQueueDepth=${maxDepth}, ` +
-      `coalesced=${coalesced}, deferred=${deferred}, expired=${expired}, failures=${failures}`);
+      `coalesced=${coalesced}, deferred=${deferred}, expired=${expired}, failures=${failures}, ` +
+      `captureCauses=${this.formatCaptureCauses()}`);
     this.count = 0;
     this.effective = 0;
     this.nodes = 0;
@@ -86,7 +92,13 @@ export class ReplayPerformanceDiagnostics {
     this.intervalCount = 0;
     this.intervals = 0;
     this.maxInterval = 0;
+    this.captureCauses = {};
     this.lastReportAt = Date.now();
+  }
+
+  private formatCaptureCauses(): string {
+    return Object.keys(this.captureCauses).sort()
+      .map((key: string): string => `${key}:${this.captureCauses[key]}`).join('|') || 'none';
   }
 
   private average(total: number): number {

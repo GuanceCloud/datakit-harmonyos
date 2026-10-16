@@ -47,6 +47,8 @@ export interface ReplayWorkerCapture {
   previousViewport: ReplayViewport | null;
   lastFullSnapshotAt: number;
   storeKind: ReplayStoreKind;
+  /** Diagnostic metadata only; never serialized into Replay records. */
+  captureTriggers?: Array<string>;
 }
 
 export interface ReplayWorkerCommit extends ReplayWorkerCapture {
@@ -82,6 +84,8 @@ export interface ReplayWorkerResult {
   segmentIds: Array<string>;
   resourceNames?: Array<string>;
   timings?: ReplayWorkerTimings;
+  captureTriggers?: Array<string>;
+  captureReason?: string;
 }
 
 export interface ReplayWorkerMessage {

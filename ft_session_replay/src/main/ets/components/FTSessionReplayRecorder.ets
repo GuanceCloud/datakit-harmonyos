@@ -158,6 +158,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
   private captureDeferred: boolean = false;
+  private readonly pendingCaptureTriggers: Set<string> = new Set();
   private motionUntil: number = 0;
   private hasActiveComponentAnimations: boolean = false;
   private componentSamplingIntervalMs: number = 0;
@@ -192,11 +193,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private drawObserverContext: UIContext | null = null;
   private readonly drawListener = (): void => {
     this.collector.invalidateNativeControlPaint();
-    this.notifyPageChanged();
+    this.requestPageCapture('draw');
   };
   private readonly rasterLayoutListener = (): void => {
     this.collector.invalidateComponentRasters();
-    this.notifyPageChanged();
+    this.requestPageCapture('layout');
   };
   private lastFullSnapshotAt: number = 0;
   private observedViewport: SessionReplayViewportBounds | null = null;
@@ -720,12 +721,22 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
    * layout/state change. It coalesces many draws into one detached snapshot.
    */
   public notifyPageChanged(): void {
+    this.requestPageCapture('page_changed');
+  }
+
+  private requestPageCapture(trigger: string): void {
+    this.noteCaptureTrigger(trigger);
     this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
   }
 
+  private noteCaptureTrigger(trigger: string): void {
+    if (this.config.isPerformanceDiagnosticsEnabled()) this.pendingCaptureTriggers.add(trigger);
+  }
+
   /** Keeps captures running through motion, including its settled final frame. */
   public notifyMotion(): void {
+    this.noteCaptureTrigger('motion');
     this.motionUntil = Date.now() + this.config.getMotionQuietPeriodMs();
     this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
@@ -733,6 +744,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** A navigation boundary starts the same continuous motion capture. */
   public notifyTransition(): void {
+    this.noteCaptureTrigger('transition');
     this.notifyMotion();
   }
 
@@ -1154,6 +1166,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         storeKind: targetStore === this.store && targetStore !== null ? 'main' :
           (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none')
       };
+      if (this.config.isPerformanceDiagnosticsEnabled()) {
+        capture.captureTriggers = kind === 'start' || kind === 'full' ? [kind] :
+          (this.pendingCaptureTriggers.size > 0 ? Array.from(this.pendingCaptureTriggers).sort() : [kind]);
+      }
+      this.pendingCaptureTriggers.clear();
       this.workQueue.enqueue(kind, snapshot, capture,
         (result: ReplayWorkerResult | null, error: string): void => {
           try {
@@ -1663,6 +1680,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private stopObservation(): void {
+    this.pendingCaptureTriggers.clear();
     this.hasActiveComponentAnimations = false;
     this.componentSamplingIntervalMs = 0;
     this.samplingFrameEpoch++;
@@ -1738,6 +1756,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       clearTimeout(this.mutationCaptureTimer);
       this.mutationCaptureTimer = -1;
       const settled = this.motionUntil > 0 && Date.now() >= this.motionUntil && !this.hasSamplingSceneMotion();
+      if (this.hasActiveComponentAnimations) this.noteCaptureTrigger('animation');
+      if (this.hasSceneMotion()) this.noteCaptureTrigger('scene_motion');
+      if (Date.now() < this.motionUntil) this.noteCaptureTrigger('motion_tail');
       if (settled) this.motionUntil = 0;
       this.captureActiveViewMutation(settled ? 'settled' : 'automatic');
       if (Date.now() < this.motionUntil || this.hasSamplingSceneMotion()) this.scheduleAutomaticCapture();

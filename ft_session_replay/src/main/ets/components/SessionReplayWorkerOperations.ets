@@ -130,7 +130,7 @@ export class SessionReplayWorkerOperations {
     const commit: ReplayWorkerCommit = {
       context: capture.context, snapshot: materialized.record, viewport: capture.viewport,
       previousViewport: capture.previousViewport, lastFullSnapshotAt: capture.lastFullSnapshotAt,
-      storeKind: capture.storeKind
+      storeKind: capture.storeKind, captureTriggers: capture.captureTriggers
     };
     const resourceDoneAt = this.diagnosticsEnabled ? Date.now() : 0;
     const result = this.process(kind, commit);
@@ -158,6 +158,7 @@ export class SessionReplayWorkerOperations {
       (commit.storeKind === 'error' ? this.errorStore : null);
     const contextKey = `${commit.storeKind}|${this.viewKey(commit.context)}`;
     let records: Array<SessionReplayRecord> = [];
+    let captureReason = 'unchanged';
     // An old View's accepted frames may finish after the UI has switched to
     // another View. Checkpoints and viewport belong to this ordered Worker
     // baseline, rather than the active page's completion callbacks.
@@ -165,6 +166,7 @@ export class SessionReplayWorkerOperations {
     let lastFullSnapshotAt = sameContext ? this.lastFullSnapshotAt : 0;
     const previousViewport = sameContext ? this.viewport : commit.previousViewport;
     if (kind === 'start') {
+      captureReason = 'view_start';
       this.processor.reset();
       this.needsFullSnapshot = false;
       records = this.processor.createViewStartRecords(
@@ -174,23 +176,35 @@ export class SessionReplayWorkerOperations {
       );
       lastFullSnapshotAt = snapshot.timestamp;
     } else if (kind === 'full') {
+      captureReason = 'forced_full';
       this.processor.setFullSnapshotBaseline(snapshot);
       records = [snapshot];
       lastFullSnapshotAt = snapshot.timestamp;
     } else if (this.viewportChanged(previousViewport, viewport)) {
+      captureReason = 'viewport_change';
       const next = viewport as ReplayViewport;
       records = [this.processor.createViewportResizeRecord(next.width, next.height, snapshot.timestamp), snapshot];
       this.processor.setFullSnapshotBaseline(snapshot);
       lastFullSnapshotAt = snapshot.timestamp;
-    } else if (!this.processor.hasBaseline() || this.baselineContextKey !== contextKey ||
-      this.needsFullSnapshot || store?.requiresFullSnapshot(commit.context) || lastFullSnapshotAt === 0 ||
-      snapshot.timestamp - lastFullSnapshotAt >= this.fullSnapshotIntervalMs) {
-      records = [snapshot];
-      this.processor.setFullSnapshotBaseline(snapshot);
-      lastFullSnapshotAt = snapshot.timestamp;
     } else {
-      const mutation = this.processor.createMutationRecord(snapshot);
-      if (mutation !== null) records = [mutation];
+      const fullReason = !this.processor.hasBaseline() ? 'baseline_missing' :
+        this.baselineContextKey !== contextKey ? 'context_change' :
+        this.needsFullSnapshot ? 'write_recovery' :
+        store?.requiresFullSnapshot(commit.context) ? 'storage_checkpoint' :
+        lastFullSnapshotAt === 0 ? 'baseline_missing' :
+        snapshot.timestamp - lastFullSnapshotAt >= this.fullSnapshotIntervalMs ? 'periodic_full' : '';
+      if (fullReason.length > 0) {
+        captureReason = fullReason;
+        records = [snapshot];
+        this.processor.setFullSnapshotBaseline(snapshot);
+        lastFullSnapshotAt = snapshot.timestamp;
+      } else {
+        const mutation = this.processor.createMutationRecord(snapshot);
+        if (mutation !== null) {
+          records = [mutation];
+          captureReason = 'mutation';
+        }
+      }
     }
 
     const diffDoneAt = this.diagnosticsEnabled ? Date.now() : 0;
@@ -201,6 +215,7 @@ export class SessionReplayWorkerOperations {
       // Quota eviction can require a new checkpoint. Recover this same frame,
       // even if the page never draws again after the failed mutation write.
       records = [snapshot];
+      captureReason = 'write_recovery';
       stored = store.append(commit.context, records);
       if (stored) {
         this.processor.setFullSnapshotBaseline(snapshot);
@@ -234,6 +249,8 @@ export class SessionReplayWorkerOperations {
       segmentIds: store === null || records.length === 0 ? [] : store.getLastAppendedIds()
     };
     if (this.diagnosticsEnabled) {
+      result.captureTriggers = commit.captureTriggers;
+      result.captureReason = captureReason;
       const effective = stored && records.length > 0;
       result.timings = {
         startedAt: processingAt, collectionMs: 0, materializeMs: 0, resourceMs: 0,
