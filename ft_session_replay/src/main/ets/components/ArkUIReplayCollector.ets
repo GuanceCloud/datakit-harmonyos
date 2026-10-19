@@ -1236,7 +1236,8 @@ export class ArkUIReplayCollector {
         `${String(attrs['fontSize'] ?? '')}|${String(attrs['fontWeight'] ?? '')}|` +
         `${String(attrs['fontFamily'] ?? '')}|${String(attrs['fontStyle'] ?? '')}|${String(attrs['textAlign'] ?? '')}`;
       const state = this.rasters.request(visible ? this.rasterContext : null, nodeId, this.readComponentId(node), signature,
-        width * height * vpToPxScale * vpToPxScale, nodeType === 'RichEditor' || isNativeControl ? 1048576 : 262144,
+        width * height * vpToPxScale * vpToPxScale,
+        nodeType === 'RichEditor' || isNativeControl ? 1048576 : 262144,
         editorContent !== null || isNativeControl);
       componentRasterKey = state.key;
       this.activeComponentAnimations = this.activeComponentAnimations || state.pending;
@@ -1650,19 +1651,19 @@ export class ArkUIReplayCollector {
       shapeStyle: this.createShapeStyle(nodeType, inspector, false, width, height, vpToPxScale),
       isEmpty: true
     };
-    if (rasterKey !== undefined && this.controls.isSupported(nodeType)) {
+    if (rasterKey !== undefined && (this.controls.isSupported(nodeType) || this.isMediaNode(nodeType))) {
       // The native bitmap owns the track, background, border and shadow.
       // Painting Inspector chrome beneath transparent pixels doubles alpha.
       image.shapeStyle = undefined;
     }
     const border = this.createBorder(nodeType, inspector, vpToPxScale);
-    if (border !== null && (rasterKey === undefined || !this.controls.isSupported(nodeType))) {
+    if (border !== null && (rasterKey === undefined || (!this.controls.isSupported(nodeType) && !this.isMediaNode(nodeType)))) {
       image.border = border;
     }
     if (componentId.length > 0) {
       image.permanentId = componentId;
     }
-    const imageStyle = this.createImageStyle(inspector);
+    const imageStyle = rasterKey !== undefined && this.isMediaNode(nodeType) ? { objectFit: 'fill' } as ReplayImageStyle : this.createImageStyle(inspector);
     if (imageStyle !== undefined) {
       image.imageStyle = imageStyle;
     }

@@ -45,6 +45,7 @@ export interface ArkUIReplayDefaultTransition {
   translateXRatio: number;
 }
 
+/** Virtual native spans, with image snapshots scoped to the immutable media leaf. */
 export interface ReplayInlineRun {
   id: number;
   nodeType: string;
@@ -86,6 +87,7 @@ export interface ArkUIReplayLightNode {
   buttonLabelOwnerId?: number;
   /** Nearest native text-style owner, preserved across internal Row/Column wrappers. */
   fontWeightOwnerId?: number;
+  /** Semantic controls carry scalar presentation state, never component PNG bytes. */
   controlState?: number;
   controlPoints?: Array<number>;
   controlPointer?: ReplayPatternPoint;
@@ -307,13 +309,12 @@ export class SessionReplayScene {
           selectLabelOwnerId: source.selectLabelOwnerId,
           buttonLabelOwnerId: source.buttonLabelOwnerId,
           fontWeightOwnerId: source.fontWeightOwnerId,
-          controlState: source.controlState, controlParentId: source.controlParentId,
-          controlPoints: source.controlPoints?.slice(),
-          controlPointer: source.controlPointer === undefined ? undefined : { x: source.controlPointer.x, y: source.controlPointer.y },
-          inlineRuns: source.inlineRuns?.map((run): ReplayInlineRun => ({
+          controlState: source.controlState, controlPoints: source.controlPoints?.slice(), inlineRuns: source.inlineRuns?.map((run): ReplayInlineRun => ({
             id: run.id, nodeType: run.nodeType, inspectorInfo: run.inspectorInfo, text: run.text,
             fontWeightParentId: run.fontWeightParentId,
             width: run.width, height: run.height, componentRasterKey: run.componentRasterKey })),
+          controlPointer: source.controlPointer === undefined ? undefined : { x: source.controlPointer.x, y: source.controlPointer.y },
+          controlParentId: source.controlParentId,
           usedTransformedPosition: source.usedTransformedPosition,
           opacity: (source.opacity ?? 1) * opacity, clip,
           sceneLayer: this.pageLayers.get(page.key), isPageSurface: source.isPageSurface,
