@@ -5,11 +5,15 @@ import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayRecorder, SessionReplayCapture } from './FTSessionReplayRecorder';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
 import { SessionReplaySamplingMode } from './SessionReplaySampler';
+import { ArkUIReplayScenePage } from './SessionReplayScene';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 import { SessionReplayUploadResult, SessionReplayUploadRoute } from './SessionReplayUploader';
-import { ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
+import { ReplayUploadLane, ReplayUploadReady, SessionReplayUploadQueue } from './SessionReplayUploadQueue';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import { SessionReplayResourceUploadResult } from './SessionReplayResourceUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup } from './ReplayResourceCleanup';
+import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
+import { canStartReplayUpload, readReplayBatteryHealthy } from './SessionReplayUploadConditions';
 
 /**
  * Process-wide entry point for the optional Session Replay HAR.
@@ -25,6 +29,7 @@ export class FTSessionReplay {
   // callback here avoids a core-to-bridge import cycle while allowing delayed
   // consent/remote-config activation to bind an already visible page.
   private static autoRootRefreshHandler: (() => void) | null = null;
+  private static autoRootTransitionEndHandler: ((key: string) => Array<string>) | null = null;
 
   private config: FTSessionReplayConfig = new FTSessionReplayConfig();
   private recorder: FTSessionReplayRecorder | null = null;
@@ -47,6 +52,10 @@ export class FTSessionReplay {
   /** Internal contract for the Hvigor-generated Session Replay root bridge. */
   public static setAutoRootRefreshHandler(handler: (() => void) | null): void {
     FTSessionReplay.autoRootRefreshHandler = handler;
+  }
+
+  public static setAutoRootTransitionEndHandler(handler: ((key: string) => Array<string>) | null): void {
+    FTSessionReplay.autoRootTransitionEndHandler = handler;
   }
 
   /**
@@ -77,12 +86,13 @@ export class FTSessionReplay {
       this.config,
       this.storage,
       this.errorSampleStorage,
-      (sessionId: string, timestamp: number): boolean => {
-        if (resourceStorage === null || errorResourceStorage === null) return false;
-        return errorResourceStorage.promoteSessionWindow(sessionId, timestamp, errorWindowMs, resourceStorage);
-      },
+      null,
       (context: SessionReplayContext, data: Uint8Array, mimeType: string): string | null =>
-        this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType)
+        this.queueRecorderResource(recorder, resourceStorage, errorResourceStorage, errorWindowMs, context, data, mimeType),
+      (names: Array<string>, kind: string): void => {
+        const store = kind === 'error' ? errorResourceStorage : resourceStorage;
+        for (const name of names) store?.markTouched(name);
+      }
     );
     recorder.start();
     this.recorder = recorder;
@@ -143,12 +153,15 @@ export class FTSessionReplay {
   public registerRoot(
     uiContext: UIContext,
     rootId: string,
-    vpToPxScale: number = 1
+    vpToPxScale: number = 1,
+    captureScene: boolean = false,
+    sceneRootIds: Array<string> = [],
+    scenePages: Array<ArkUIReplayScenePage> = []
   ): boolean {
     if (this.recorder === null) {
       return false;
     }
-    this.recorder.registerRoot(uiContext, rootId, vpToPxScale);
+    this.recorder.registerRoot(uiContext, rootId, vpToPxScale, captureScene, sceneRootIds, scenePages);
     return true;
   }
 
@@ -212,9 +225,6 @@ export class FTSessionReplay {
       !recorder.isErrorSampledSessionPromoted(context.sessionId);
     const store = isDeferredErrorSample ? errorResourceStorage : resourceStorage;
     const fileName = store === null ? null : store.put(context, bytes, mimeType);
-    if (fileName !== null && isDeferredErrorSample) {
-      errorResourceStorage?.pruneBefore(Date.now() - errorWindowMs);
-    }
     return fileName;
   }
 
@@ -245,6 +255,23 @@ export class FTSessionReplay {
     this.recorder?.unregisterImageAsset(componentId);
   }
 
+  /** Opt in to local/API 20+ network source keyframes. Times are in seconds. */
+  public registerVideoSource(componentId: string, source: string, poster?: ResourceStr): void {
+    this.recorder?.registerVideoSource(componentId, source, poster);
+  }
+
+  /** Prefer the player's own Surface/decoder when it can supply an owned PixelMap. */
+  public registerVideoFrameProvider(componentId: string, provider: ReplayVideoFrameProvider): void {
+    this.recorder?.registerVideoFrameProvider(componentId, provider);
+  }
+
+  public updateVideoState(componentId: string, state: ReplayVideoState): void {
+    this.recorder?.updateVideoState(componentId, state);
+  }
+
+  /** Release the decoder and callback when the player is removed. */
+  public unregisterVideoSource(componentId: string): void { this.recorder?.unregisterVideoSource(componentId); }
+
   /** Lists error-sampled assets awaiting a same-session RUM Error promotion. */
   public getDeferredErrorResources(): Array<SessionReplayStoredResource> {
     return this.errorSampleResourceStorage === null ? [] : this.errorSampleResourceStorage.list();
@@ -256,7 +283,7 @@ export class FTSessionReplay {
   }
 
   /**
-   * Sends durable segments to the Android-compatible Replay intake. Segments
+   * Sends durable segments to the HarmonyOS-compatible Replay intake. Segments
    * are deleted only after HTTP 200; any failure leaves them for a later call.
    */
   public flush(): Promise<SessionReplayUploadResult> {
@@ -326,7 +353,7 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveViewport(width, height, scale);
   }
 
-  /** Records a physical-px viewport/rotation boundary and a fresh Full Snapshot when possible. */
+  /** Native capture determines resize dimensions; physical-px inputs are a fallback when unavailable. */
   public recordViewportResize(width: number, height: number): SessionReplayCapture | null {
     return this.recorder === null ? null : this.recorder.recordActiveViewportResize(width, height);
   }
@@ -341,6 +368,21 @@ export class FTSessionReplay {
     return this.recorder === null ? null : this.recorder.recordActiveTouch(pointerEventType, pointerId, x, y);
   }
 
+  /** Forwards ArkUI touch events using their window-relative vp coordinates. */
+  public recordTouchEvent(event: TouchEvent): void {
+    this.recorder?.recordTouchEvent(event);
+  }
+
+  /** Captures a PatternLock's own touch callback when its native recognizer consumes ancestor events. */
+  public recordPatternTouch(componentId: string, event: TouchEvent): void {
+    this.recorder?.recordPatternTouch(componentId, event);
+  }
+
+  /** Synchronizes PatternLock completion or an application-owned controller reset; indexes are 0..8. */
+  public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
+    this.recorder?.updatePatternLockState(componentId, points, completed);
+  }
+
   /**
    * Signals that the active ArkUI page produced a stable visual/layout change.
    * It is intentionally a signal rather than a capture call: the recorder
@@ -351,14 +393,43 @@ export class FTSessionReplay {
     this.recorder?.notifyPageChanged();
   }
 
-  /** Defers collection until a scrolling gesture has settled. */
+  /** Marks motion for continuous capture and a final settled frame. */
   public notifyScroll(): void {
     this.recorder?.notifyMotion();
   }
 
-  /** Defers collection until an animation or page transition has settled. */
+  /** Captures animation/transition frames and their final state. */
   public notifyTransition(): void {
     this.recorder?.notifyTransition();
+  }
+
+  /** Runtime endpoint for compiler-injected native page-transition progress. */
+  public updatePageTransition(rootId: string, entering: boolean, progress: number,
+    slide?: SlideEffect, opacity?: number, sceneKey?: string): void {
+    if (!Number.isFinite(progress)) return;
+    this.recorder?.updatePageTransition(sceneKey ?? rootId,
+      { entering, progress: Math.max(0, Math.min(1, progress)), slide, opacity });
+  }
+
+  /** Forward actual custom Navigation progress; uniqueId comes from NavDestinationInfo. */
+  public updateNavigationTransition(uniqueId: number, entering: boolean, progress: number,
+    slide?: SlideEffect, opacity?: number): void {
+    if (!Number.isFinite(uniqueId) || uniqueId <= 0) return;
+    this.updatePageTransition(`navigation:${uniqueId}`, entering, progress, slide, opacity);
+    if (!entering && progress >= 1) this.finishPageTransition(`navigation:${uniqueId}`);
+  }
+
+  /** Call from the actual completion/cancellation callback of a custom transition. */
+  public finishPageTransition(key: string): void {
+    this.recorder?.finishPageTransition(key);
+    const released = FTSessionReplay.autoRootTransitionEndHandler?.(key) ?? [];
+    for (const pageKey of released) this.recorder?.finishPageTransition(pageKey);
+    this.recorder?.releaseScenePages(released);
+  }
+
+  public finishNavigationTransition(uniqueId: number): void {
+    if (!Number.isFinite(uniqueId) || uniqueId <= 0) return;
+    this.finishPageTransition(`navigation:${uniqueId}`);
   }
 
   private requireRecorder(): FTSessionReplayRecorder {
@@ -371,6 +442,7 @@ export class FTSessionReplay {
   private configureStorage(filesDir: string): void {
     this.uploadQueue?.close();
     this.uploadQueue = null;
+    FTSessionReplayBridgeRegistry.setReplayUploadNetworkListener(null);
     if (filesDir.trim().length === 0) {
       this.storage = null;
       this.errorSampleStorage = null;
@@ -400,18 +472,28 @@ export class FTSessionReplay {
       'error_resources'
     );
     const resourceStorage = this.resourceStorage;
-    this.uploadQueue = new SessionReplayUploadQueue(
+    const uploadQueue = new SessionReplayUploadQueue(
       filesDir, this.config.getStorageMaxBytes(), this.config.getMaxRecordsPerSegment(),
-      async (): Promise<ReplayUploadReady> => {
+      async (lane: ReplayUploadLane): Promise<ReplayUploadReady> => {
+        const networkAvailable = FTSessionReplayBridgeRegistry.getReplayUploadNetworkAvailability();
+        const batteryHealthy = readReplayBatteryHealthy();
+        const uploadAllowed = canStartReplayUpload(networkAvailable, batteryHealthy);
         let segmentIds: Array<string> | null = null;
         const recorder = this.recorder;
-        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+        if (lane === 'record' && uploadAllowed &&
+          recorder !== null && recorder.getStorageFilesDir() === filesDir) {
           segmentIds = await recorder.listPendingSegmentIds();
-        } else {
+        } else if (lane === 'record' && uploadAllowed) {
           const retiring = this.retiringRecorder;
           if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
         }
-        return { segmentIds, route: this.getUploadRoute(), resourceTouchEpoch: resourceStorage.getTouchEpoch() };
+        return {
+          segmentIds,
+          route: this.getUploadRoute(),
+          resourceTouchEpoch: resourceStorage.getTouchEpoch(),
+          networkAvailable,
+          batteryHealthy
+        };
       },
       async (id: string): Promise<boolean> => {
         const recorder = this.recorder;
@@ -422,11 +504,33 @@ export class FTSessionReplay {
         if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
         return segmentStorage.remove([id]);
       },
-      (ids: Array<string>, touchEpoch: number): Promise<boolean> => {
-        if (resourceStorage.wasTouchedAfter(ids, touchEpoch)) return Promise.resolve(false);
-        return Promise.resolve(resourceStorage.remove(ids));
+      async (ids: Array<string>, touchEpoch: number): Promise<ReplayResourceCleanupResult> => {
+        let recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          return recorder.removeUploadedResources(ids,
+            (id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
+        }
+        const retiring = this.retiringRecorder;
+        if (retiring !== null && retiring.getStorageFilesDir() === filesDir) await retiring.drainWrites();
+        // Enabling Replay while the old recorder drained may have installed a new owner.
+        recorder = this.recorder;
+        if (recorder !== null && recorder.getStorageFilesDir() === filesDir) {
+          return recorder.removeUploadedResources(ids,
+            (id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
+        }
+        const removable = ids.filter((id: string): boolean => !resourceStorage.wasTouchedAfter([id], touchEpoch));
+        const result = resourceStorage.removeAcknowledged(removable);
+        result.deferredResources = ids.length - removable.length;
+        if (result.reason.length === 0 && result.deferredResources > 0) {
+          result.reason = 'Resources were reused after upload started.';
+        }
+        return Promise.resolve(result);
       }
     );
+    this.uploadQueue = uploadQueue;
+    FTSessionReplayBridgeRegistry.setReplayUploadNetworkListener((available: boolean): void => {
+      if (available && this.uploadQueue === uploadQueue) uploadQueue.wake();
+    });
   }
 
   private getUploadRoute(): SessionReplayUploadRoute {
@@ -456,7 +560,8 @@ export class FTSessionReplay {
         endpointBlocked: false,
         attemptedResources: 0,
         uploadedResources: 0,
-        remainingResources: 0
+        remainingResources: 0,
+        cleanup: replayResourceCleanup()
       };
     }
     if (this.resourceUploadInFlight) {
@@ -468,7 +573,8 @@ export class FTSessionReplay {
         endpointBlocked: false,
         attemptedResources: 0,
         uploadedResources: 0,
-        remainingResources: 0
+        remainingResources: 0,
+        cleanup: replayResourceCleanup()
       };
     }
     this.resourceUploadInFlight = true;

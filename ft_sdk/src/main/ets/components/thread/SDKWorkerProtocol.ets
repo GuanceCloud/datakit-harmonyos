@@ -232,6 +232,8 @@ export interface SDKRumResourceContextDTO {
   actionName: string;
   /** Host-side fallback for semantic events when the Worker line context is unavailable. */
   rumAppId?: string;
+  /** Committed Replay availability for this original session and View. */
+  hasReplay?: boolean;
 }
 
 export interface SDKRumResourceParamsDTO {
@@ -349,6 +351,8 @@ export interface SDKRumCompletedActionDTO {
   viewReferrer: string;
   duration: number;
   hasReplay?: boolean;
+  /** Immutable recording interval at event occurrence; empty explicitly excludes Replay. */
+  replayRecordingId?: string;
   errorCount: number;
   longTaskCount: number;
   resourceCount: number;
@@ -480,6 +484,15 @@ export interface SDKUploadRowDTO {
   customDataType?: string;
 }
 
+/** Metadata only: excluded records are not present in UPLOAD BODY PREVIEW. */
+export interface SDKUploadSkippedRowDTO {
+  rowId: number;
+  uuid: string;
+  measurement: string;
+  key: string;
+  reason: string;
+}
+
 export interface SDKUploadPageDTO {
   dataType: string;
   rows: SDKUploadRowDTO[];
@@ -594,6 +607,7 @@ export interface SDKUploadPreparePageResultDTO {
   queriedRows: number;
   acceptedRows: number;
   duplicateRows: number;
+  skippedRows: SDKUploadSkippedRowDTO[];
   deferredRows: number;
   packageId: string;
   bodyLength: number;
@@ -634,6 +648,7 @@ export interface SDKUploadExecutePageResultDTO {
   queriedRows: number;
   acceptedRows: number;
   duplicateRows: number;
+  skippedRows: SDKUploadSkippedRowDTO[];
   deferredRows: number;
   packageId: string;
   bodyLength: number;

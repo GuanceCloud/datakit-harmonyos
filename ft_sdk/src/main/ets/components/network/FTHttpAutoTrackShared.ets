@@ -38,6 +38,7 @@ export interface FTResourceTimingPhase {
 export interface FTResourceTiming {
   performanceMetrics: Map<string, number>;
   dnsPhase?: FTResourceTimingPhase;
+  /** Full connection interval, including TLS when available, matching Android. */
   tcpPhase?: FTResourceTimingPhase;
   sslPhase?: FTResourceTimingPhase;
   ttfbTime?: number;
@@ -141,7 +142,10 @@ export function createFTResourceTimingFromCumulative(
     : undefined;
 
   timing.dnsPhase = createTimingPhase(0, dnsEndTime);
-  timing.tcpPhase = createTimingPhase(dnsEndTime, connectEndTime);
+  // resourceTCP/resource_connect_time retain their legacy names but cover the
+  // full connection interval. SSL remains a separately reported subphase.
+  const connectionEndTime = tlsEndTime !== undefined ? tlsEndTime : connectEndTime;
+  timing.tcpPhase = createTimingPhase(dnsEndTime, connectionEndTime);
   timing.sslPhase = createTimingPhase(connectEndTime, tlsEndTime);
   appendPhaseMetric(timing.performanceMetrics, 'resourceDNS', timing.dnsPhase);
   appendPhaseMetric(timing.performanceMetrics, 'resourceTCP', timing.tcpPhase);

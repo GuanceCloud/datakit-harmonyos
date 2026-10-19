@@ -123,7 +123,10 @@ export class FTRUMConfigManager {
 
     // User data
     if (userData) {
-      tags[Constants.KEY_RUM_USER_ID] = userData.getId() || userDataManager.getRandomUserId();
+      const userId = userData.getId() || userDataManager.getRandomUserId();
+      if (userId.length > 0) {
+        tags[Constants.KEY_RUM_USER_ID] = userId;
+      }
 
       if (userData.getName()) {
         tags[Constants.KEY_RUM_USER_NAME] = userData.getName();
@@ -147,7 +150,10 @@ export class FTRUMConfigManager {
         }
       }
     } else {
-      tags[Constants.KEY_RUM_USER_ID] = userDataManager.getRandomUserId();
+      const userId = userDataManager.getRandomUserId();
+      if (userId.length > 0) {
+        tags[Constants.KEY_RUM_USER_ID] = userId;
+      }
     }
     return tags;
   }

@@ -1,4 +1,4 @@
-import { UIContext } from '@kit.ArkUI';
+import { FrameCallback, FrameNode, UIContext, uiObserver } from '@kit.ArkUI';
 import window from '@ohos.window';
 import {
   FTSessionReplayBridge,
@@ -10,29 +10,41 @@ import {
   FTSessionReplayWebErrorContext,
   FTSessionReplayWebContextChange,
   FTSessionReplayWebViewOptions,
-  FTSessionReplayViewMetadata
+  FTSessionReplayViewMetadata,
+  WebReplaySlotObservation
 } from '@guancecloud/ft_sdk';
 import {
   ArkUIReplayCollector,
   ArkUIReplayLightSnapshot,
+  ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds,
+  ArkUIReplayScenePage,
   CapturedReplayImageResource
 } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
+import { ReplaySnapshotFilter } from './ReplaySnapshotFilter';
+import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
+import { ReplayResourceCleanupResult } from './ReplayResourceCleanup';
+import { WebReplayBatcher } from './WebReplayBatcher';
+import { ReplayMetadataNotifier } from './ReplayMetadataNotifier';
 import {
-  ReplayWorkerCommit,
+  ReplayWorkerCapture,
   ReplayWorkerResult,
+  ReplaySnapshotKind,
   ReplayStoreKind,
   ReplayViewport,
   REPLAY_STALE_QUEUE_REASON,
+  REPLAY_COALESCED_REASON,
   SessionReplayWorkQueue
 } from './SessionReplayWorkQueue';
 import {
   createReplayEnvelope,
   FullSnapshotData,
   ReplayImageWireframe,
+  ReplayPointerInteractionData,
   ReplayRecordType,
   serializeReplayEnvelope,
   SessionReplayContext,
@@ -53,6 +65,27 @@ interface SessionReplayRootBinding {
   uiContext: UIContext;
   rootId: string;
   vpToPxScale: number;
+  captureScene: boolean;
+  sceneRoot: FrameNode | null;
+  sceneRootIds: Array<string>;
+  // null uses root IDs; an explicit empty list means all scene pages exited
+  // and collection must retain the last renderable frame until View End.
+  scenePages: Array<ArkUIReplayScenePage> | null;
+}
+
+interface ReplayNavigationPage {
+  key: string;
+  root: FrameNode;
+  parentKey: string;
+  visible: boolean;
+  retained: boolean;
+  paintOrder: number;
+  releaseTimer: number;
+}
+
+interface ReplayTouchPoint {
+  x: number;
+  y: number;
 }
 
 /** The normalized bounds of the currently visible native root. */
@@ -64,22 +97,37 @@ interface BrowserReplayRecord {
   data?: object;
 }
 
+class ReplaySamplingFrame extends FrameCallback {
+  private readonly callback: () => void;
+  constructor(callback: () => void) {
+    super();
+    this.callback = callback;
+  }
+  // Collect after layout/paint. willDraw still sees the pending timer and
+  // cannot rearm collection for the frame requested by Replay itself.
+  public onFrame(_frameTimeInNano: number): void {}
+  public onIdle(_timeLeftInNano: number): void { this.callback(); }
+}
+
 /**
  * Recorder for ArkUI and ArkWeb collection, RUM linkage, and durable replay
  * segments.
  */
 export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private static readonly MAX_RECORDS_PER_VIEW: number = 2000;
-  private static readonly WEB_REPLAY_INACTIVE_GRACE_MS: number = 2_000;
 
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
+  private readonly snapshotFilter: ReplaySnapshotFilter = new ReplaySnapshotFilter();
+  private baselineContextKey: string = '';
+  private readonly pendingManualBaseline: Array<SessionReplayRecord> = [];
   private readonly sampler: SessionReplaySampler;
   private readonly store: SessionReplaySegmentStore | null;
   private readonly errorSampleStore: SessionReplaySegmentStore | null;
   private rootBinding: SessionReplayRootBinding | null = null;
   private isStarted: boolean = false;
+  private recordingId: string = '';
   // Stop seals input immediately while accepted detached snapshots finish.
   private isStopping: boolean = false;
   private lastCapture: SessionReplayCapture | null = null;
@@ -91,24 +139,68 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   // Retain one sampled View-start until the generated page root completes its
   // first layout, then create the normal Meta/Focus/Full-Snapshot sequence.
   private pendingViewStartContext: FTSessionReplayRUMContext | null = null;
+  private pendingViewStartFailure: string = '';
   private readonly viewMetadata: Map<string, FTSessionReplayViewMetadata> = new Map();
+  private readonly metadataNotifier: ReplayMetadataNotifier = new ReplayMetadataNotifier();
   private readonly recordedContextsByView: Map<string, SessionReplayContext> = new Map();
   private readonly recordedRecordsByView: Map<string, Array<SessionReplayRecord>> = new Map();
   private readonly promotedErrorSessions: Set<string> = new Set();
   private readonly errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null;
+  private readonly resourceTouch: ((names: Array<string>, kind: ReplayStoreKind) => void) | null;
   private readonly imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null;
-  // Zero means active. A positive timestamp retains the Android-compatible
-  // two-second grace period after a WebView slot becomes inactive.
-  private readonly webSlotInactiveAt: Map<string, number> = new Map();
   private readonly workQueue: SessionReplayWorkQueue;
+  private readonly webBatcher: WebReplayBatcher;
   private readonly pendingViewStarts: Map<string, number> = new Map();
   private readonly endedViewStarts: Map<string, number> = new Map();
-  // Every root/view transition invalidates detached snapshots already waiting
-  // in the queue. This keeps a page transition from writing a stale frame.
+  // Generations protect the current UI shadow, while accepted immutable frames
+  // keep their original View and finish in FIFO order through a transition.
   private captureGeneration: number = 0;
+  private samplingFrameEpoch: number = 0;
+  private nextSamplingDeadline: number = 0;
   private mutationCaptureTimer: number = -1;
   private viewportCaptureTimer: number = -1;
+  private captureDeferred: boolean = false;
+  private readonly pendingCaptureTriggers: Set<string> = new Set();
   private motionUntil: number = 0;
+  private hasActiveComponentAnimations: boolean = false;
+  private componentSamplingIntervalMs: number = 0;
+  private readonly activePointers: Map<number, ReplayTouchPoint> = new Map();
+  private readonly pageTransitions: Map<string, ArkUIReplayPageTransition> = new Map();
+  private readonly navigationPages: Map<string, ReplayNavigationPage> = new Map();
+  private nextNavigationPaintOrder: number = 0;
+  private transitionObserverContext: UIContext | null = null;
+  private sceneViewport: ArkUIReplaySceneBounds | null = null;
+  private readonly routerTransitionListener = (_info: uiObserver.RouterPageInfo): void => {
+    this.captureActiveViewMutation();
+    this.notifyTransition();
+  };
+  private readonly navigationSwitchListener = (info: uiObserver.NavDestinationSwitchInfo): void => {
+    const from = info.from === 'navBar' ? null : this.ensureNavigationPage(info.from);
+    const to = info.to === 'navBar' ? null : this.ensureNavigationPage(info.to);
+    if (from !== null) this.retainNavigationPage(from);
+    if (to !== null) {
+      if (to.releaseTimer !== -1) clearTimeout(to.releaseTimer);
+      to.releaseTimer = -1;
+      to.visible = true;
+      to.retained = false;
+    }
+    if (info.operation === NavigationOperation.POP && from !== null) from.paintOrder = ++this.nextNavigationPaintOrder;
+    else if (to !== null) to.paintOrder = ++this.nextNavigationPaintOrder;
+    this.captureActiveViewMutation();
+    this.notifyTransition();
+  };
+  private readonly navigationStateListener = (info: uiObserver.NavDestinationInfo): void => {
+    this.onNavigationPageState(info);
+  };
+  private drawObserverContext: UIContext | null = null;
+  private readonly drawListener = (): void => {
+    this.collector.invalidateNativeControlPaint();
+    this.requestPageCapture('draw');
+  };
+  private readonly rasterLayoutListener = (): void => {
+    this.collector.invalidateComponentRasters();
+    this.requestPageCapture('layout');
+  };
   private lastFullSnapshotAt: number = 0;
   private observedViewport: SessionReplayViewportBounds | null = null;
   // Kept separately because an IME can reduce the root's layout height or
@@ -119,11 +211,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private nativeWindow: window.Window | null = null;
   private windowObserverEpoch: number = 0;
   private readonly windowSizeChangeListener = (_size: window.Size): void => {
+    this.refreshWindowSceneViewport();
     this.scheduleViewportCapture();
   };
   private readonly keyboardHeightChangeListener = (height: number): void => {
     this.keyboardHeightPx = Number.isFinite(height) && height > 0 ? Math.round(height) : 0;
     this.keyboardResizesRoot = null;
+    this.refreshWindowSceneViewport();
+    this.scheduleViewportCapture();
+  };
+  private readonly avoidAreaChangeListener = (): void => {
+    this.refreshWindowSceneViewport();
     this.scheduleViewportCapture();
   };
 
@@ -132,7 +230,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     store: SessionReplaySegmentStore | null = null,
     errorSampleStore: SessionReplaySegmentStore | null = null,
     errorSampleResourcePromoter: ((sessionId: string, timestamp: number) => boolean) | null = null,
-    imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null = null
+    imageResourceWriter: ((context: SessionReplayContext, data: Uint8Array, mimeType: string) => string | null) | null = null,
+    resourceTouch: ((names: Array<string>, kind: ReplayStoreKind) => void) | null = null
   ) {
     this.config = config;
     this.collector = new ArkUIReplayCollector(config.getMaxNodesPerSnapshot(), config);
@@ -141,6 +240,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     this.errorSampleStore = errorSampleStore;
     this.errorSampleResourcePromoter = errorSampleResourcePromoter;
     this.imageResourceWriter = imageResourceWriter;
+    this.resourceTouch = resourceTouch;
     this.workQueue = new SessionReplayWorkQueue({
       filesDir: store?.getFilesDir() ?? errorSampleStore?.getFilesDir() ?? '',
       maxNodes: config.getMaxNodesPerSnapshot(),
@@ -149,7 +249,28 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       fullSnapshotIntervalMs: config.getFullSnapshotIntervalMs(),
       errorSampleWindowMs: config.getErrorSampleWindowMs(),
       textPrivacy: config.getTextAndInputPrivacy(),
-      imagePrivacy: config.getImagePrivacy()
+      captureVisiblePassword: config.isCaptureVisiblePasswordEnabled(),
+      imagePrivacy: config.getImagePrivacy(),
+      touchPrivacy: config.getTouchPrivacy(),
+      diagnosticsEnabled: config.isPerformanceDiagnosticsEnabled()
+    });
+    this.webBatcher = new WebReplayBatcher(
+      (context: SessionReplayContext, records: Array<SessionReplayRecord>, reason: string): boolean => {
+        const accepted = this.appendRecordedRecords(context, records);
+        if (accepted) this.lastCapture = this.createCapture(context, records, null);
+        FTSessionReplayBridgeRegistry.logDiagnostic(
+          `Replay Web batch: view=${context.viewId}, slot=${records[0]?.slotId}, records=${records.length}, reason=${reason}, localAccepted=${accepted}`);
+        return accepted;
+      },
+      (context: SessionReplayContext): (() => void) =>
+        FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context)));
+    this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array, mimeType: string): void => {
+      this.snapshotFilter.invalidate();
+      this.workQueue.registerImageAsset(key, bytes, mimeType);
+      this.notifyPageChanged();
+    }, (key: string): void => {
+      this.snapshotFilter.invalidate();
+      this.workQueue.unregisterImageAsset(key);
     });
   }
 
@@ -159,7 +280,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return;
     }
     this.isStarted = true;
-    FTSessionReplayBridgeRegistry.register(this);
+    this.recordingId = FTSessionReplayBridgeRegistry.register(this);
   }
 
   /** Stops RUM lifecycle capture without changing the core SDK. */
@@ -168,11 +289,22 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.workQueue.close();
       return;
     }
+    // Seal association before final capture/drain. Late metadata still carries
+    // this recorder's ID, but cannot attach clicks from after this boundary.
+    this.flushWebReplayData();
     FTSessionReplayBridgeRegistry.unregister(this);
+    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
+    this.finishTouchPointers();
     this.isStarted = false;
     this.isStopping = true;
+    this.collector.clearVideoSources();
     this.pendingViewStartContext = null;
+    this.pendingViewStartFailure = '';
     this.unbindWindowViewportObserver();
+    this.unbindTransitionObserver();
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
     this.stopObservation();
     // Do not advance the generation or clear the active context here: an
     // accepted snapshot may be materializing or committing in the Worker.
@@ -184,6 +316,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     this.workQueue.close();
     this.workQueue.drain().then((): void => {
+      this.metadataNotifier.flush();
+      const failure = this.workQueue.getLastFailure();
+      if (failure.length > 0) FTSessionReplayBridgeRegistry.logDiagnostic(`Replay stop seal failed: ${failure}`, true);
       this.rootBinding = null;
       this.activeContext = null;
       this.resetViewportObservation();
@@ -191,7 +326,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.recordedContextsByView.clear();
       this.recordedRecordsByView.clear();
       this.promotedErrorSessions.clear();
-      this.webSlotInactiveAt.clear();
       this.pendingViewStarts.clear();
       this.endedViewStarts.clear();
       this.captureGeneration++;
@@ -204,27 +338,68 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public registerRoot(
     uiContext: UIContext,
     rootId: string,
-    vpToPxScale: number = 1
+    vpToPxScale: number = 1,
+    captureScene: boolean = false,
+    sceneRootIds: Array<string> = [],
+    scenePages: Array<ArkUIReplayScenePage> = []
   ): void {
     if (this.isStopping) return;
     const current = this.rootBinding;
+    const sceneRoot = captureScene ? this.collector.findSceneRoot(uiContext, rootId) : null;
+    const pageRoots = captureScene ? sceneRootIds.slice() : [];
+    const pages = captureScene && scenePages.length > 0 ? scenePages.slice() : null;
     if (current !== null && current.uiContext === uiContext && current.rootId === rootId &&
-      current.vpToPxScale === vpToPxScale) {
+      current.vpToPxScale === vpToPxScale && current.captureScene === captureScene) {
+      const changed = current.sceneRootIds.join('\n') !== pageRoots.join('\n');
+      current.sceneRootIds = pageRoots;
+      current.scenePages = pages;
       this.capturePendingViewStart();
+      if (changed) this.notifyTransition();
+      return;
+    }
+    if (current !== null && sceneRoot !== null && current.sceneRoot !== null &&
+      sceneRoot.getUniqueId() === current.sceneRoot.getUniqueId() && current.vpToPxScale === vpToPxScale &&
+      this.sameWindow(current.uiContext, uiContext)) {
+      this.rootBinding = { uiContext, rootId, vpToPxScale, captureScene, sceneRoot, sceneRootIds: pageRoots, scenePages: pages };
+      this.bindTransitionObserver(uiContext);
+      this.capturePendingViewStart();
+      if (this.activeContext !== null) this.startObservation();
+      this.notifyTransition();
+      return;
+    }
+    if (current !== null && captureScene && current.captureScene &&
+      current.vpToPxScale === vpToPxScale && this.sameWindow(current.uiContext, uiContext)) {
+      this.rootBinding = { uiContext, rootId, vpToPxScale, captureScene, sceneRoot, sceneRootIds: pageRoots, scenePages: pages };
+      this.bindTransitionObserver(uiContext);
+      this.capturePendingViewStart();
+      if (this.activeContext !== null) this.startObservation();
+      this.notifyTransition();
       return;
     }
     this.captureGeneration++;
-    this.workQueue.clear();
+    this.stopObservation();
+    this.processor.reset();
+    this.baselineContextKey = '';
     this.unbindWindowViewportObserver();
+    this.unbindTransitionObserver();
+    this.sceneViewport = null;
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
     const binding: SessionReplayRootBinding = {
       uiContext,
       rootId,
-      vpToPxScale
+      vpToPxScale,
+      captureScene,
+      sceneRoot,
+      sceneRootIds: pageRoots,
+      scenePages: pages
     };
     this.rootBinding = binding;
     this.resetViewportObservation();
     this.lastFullSnapshotAt = 0;
     this.bindWindowViewportObserver(uiContext);
+    this.bindTransitionObserver(uiContext);
     this.capturePendingViewStart();
     if (this.activeContext !== null) {
       this.startObservation();
@@ -234,12 +409,18 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public unregisterRoot(): void {
     if (this.isStopping) return;
     this.captureGeneration++;
-    this.workQueue.clear();
+    this.stopObservation();
+    this.processor.reset();
+    this.baselineContextKey = '';
     this.rootBinding = null;
     this.lastFullSnapshotAt = 0;
     this.resetViewportObservation();
     this.unbindWindowViewportObserver();
-    this.stopObservation();
+    this.unbindTransitionObserver();
+    this.sceneViewport = null;
+    this.clearNavigationPages();
+    this.pageTransitions.clear();
+    this.collector.clearScene();
   }
 
   public getLastCapture(): SessionReplayCapture | null {
@@ -253,19 +434,32 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   /** Waits for all Replay batches accepted before this call to reach disk. */
   public drainWrites(): Promise<void> {
-    return this.workQueue.drain();
+    this.flushWebReplayData();
+    return this.workQueue.drain((): void => this.metadataNotifier.flush());
   }
 
   public withWriteBarrier(action: () => void): Promise<void> {
-    return this.workQueue.drain(action);
+    this.flushWebReplayData();
+    return this.workQueue.drain((): void => {
+      this.metadataNotifier.flush();
+      action();
+    });
   }
 
   public getStorageFilesDir(): string {
     return this.store?.getFilesDir() ?? this.errorSampleStore?.getFilesDir() ?? '';
   }
 
+  public removeUploadedResources(ids: Array<string>, canRemove: (id: string) => boolean): Promise<ReplayResourceCleanupResult> {
+    return this.workQueue.removeResources(ids, canRemove);
+  }
+
   public listPendingSegmentIds(): Promise<Array<string>> {
-    return this.workQueue.listPendingIds();
+    this.flushWebReplayData();
+    return this.workQueue.listPendingIds().then((ids: Array<string>): Array<string> => {
+      this.metadataNotifier.flush();
+      return ids;
+    });
   }
 
   public removeUploadedSegments(ids: Array<string>): Promise<boolean> {
@@ -289,6 +483,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public registerImageAsset(componentId: string, data: ArrayBuffer | Uint8Array, mimeType: string = 'image/png'): boolean {
     const registered = this.collector.registerImageAsset(componentId, data, mimeType);
     if (registered) {
+      this.snapshotFilter.invalidate();
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
       this.workQueue.registerImageAsset(componentId, bytes, mimeType);
     }
@@ -296,8 +491,29 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   public unregisterImageAsset(componentId: string): void {
+    this.snapshotFilter.invalidate();
     this.collector.unregisterImageAsset(componentId);
     this.workQueue.unregisterImageAsset(componentId);
+  }
+
+  public registerVideoSource(componentId: string, source: string, poster?: ResourceStr): void {
+    this.collector.registerVideoSource(componentId, source, poster);
+    this.notifyMotion();
+  }
+
+  public registerVideoFrameProvider(componentId: string, provider: ReplayVideoFrameProvider): void {
+    this.collector.registerVideoFrameProvider(componentId, provider);
+    this.notifyMotion();
+  }
+
+  public updateVideoState(componentId: string, state: ReplayVideoState): void {
+    this.collector.updateVideoState(componentId, state);
+    this.notifyPageChanged();
+  }
+
+  public unregisterVideoSource(componentId: string): void {
+    this.collector.unregisterVideoSource(componentId);
+    this.notifyPageChanged();
   }
 
   public captureFullSnapshot(
@@ -306,29 +522,35 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture {
-    const record = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
+    const record = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale, context));
     this.persistCapturedImageResources(context, record);
     const capture = this.createCapture(context, [record], record);
-    this.appendRecordedRecords(context, capture.records);
+    this.appendRecordedRecords(context, capture.records, true, false, record);
     this.lastCapture = capture;
     return capture;
   }
 
-  /** Captures only structural changes using Android's mutation record grammar. */
+  /** Falls back to a checkpoint while earlier captures are still being committed. */
   public captureIncrementalSnapshot(
     uiContext: UIContext,
     rootId: string,
     context: SessionReplayContext,
     vpToPxScale: number = 1
   ): SessionReplayCapture | null {
-    const fullSnapshot = this.collector.captureFullSnapshot(uiContext, rootId, vpToPxScale);
+    const fullSnapshot = this.collector.materializeLightSnapshot(this.captureRootLight(uiContext, rootId, vpToPxScale, context));
     this.persistCapturedImageResources(context, fullSnapshot);
-    const mutation = this.processor.createMutationRecord(fullSnapshot);
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    if (!this.workQueue.hasPendingWork()) {
+      this.processor.applyCommittedRecords(this.pendingManualBaseline);
+      this.pendingManualBaseline.splice(0);
+    }
+    const mutation = !this.workQueue.hasPendingWork() && this.processor.hasBaseline() &&
+      this.baselineContextKey === key ? this.processor.createMutationRecord(fullSnapshot) : fullSnapshot;
     if (mutation === null) {
       return null;
     }
     const capture = this.createCapture(context, [mutation], fullSnapshot);
-    this.appendRecordedRecords(context, capture.records);
+    this.appendRecordedRecords(context, capture.records, true, false, fullSnapshot);
     this.lastCapture = capture;
     return capture;
   }
@@ -344,11 +566,22 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
       return null;
     }
+    if (this.activeContext !== null && this.isSameReplayContext(this.activeContext, context))
+      this.collector.recordControlTouch(pointerEventType, pointerId, x, y);
+    if (this.captureDeferred && pointerEventType !== 'move' && this.activeContext !== null &&
+      this.isSameReplayContext(this.activeContext, context)) this.captureActiveViewMutation('settled');
     const record = this.processor.createPointerRecord(pointerEventType, pointerId, x, y);
     const capture = this.createCapture(context, [record], null);
     this.appendRecordedRecords(context, capture.records);
     this.lastCapture = capture;
     return capture;
+  }
+
+  /** Native controllers retain private paint state; this hook covers programmatic reset and completion. */
+  public updatePatternLockState(componentId: string, points: Array<number>, completed: boolean = true): void {
+    if (!this.isStarted || this.activeContext === null) return;
+    this.collector.updatePatternLockState(componentId, points, completed);
+    this.notifyPageChanged();
   }
 
   /** Emits a Focus record for the currently recorded native RUM View. */
@@ -373,28 +606,33 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   /**
-   * Emits Android's resize mutation and follows it with a Full Snapshot when
-   * a root is still available, so later mutations use the rotated layout as
-   * their baseline.
+   * Emits HarmonyOS's resize mutation and follows it with a Full Snapshot when
+   * a root is still available. Use the captured native viewport for both
+   * records; a caller's stale or synthetic dimensions must not resize the
+   * persistent page scene. Inputs are a fallback when capture is unavailable.
    */
   public recordActiveViewportResize(width: number, height: number): SessionReplayCapture | null {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) {
       return null;
     }
+    if (this.captureDeferred) this.captureActiveViewMutation('settled');
     const activeContext = this.activeContext;
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
     }
-    const records: Array<SessionReplayRecord> = [
-      this.processor.createViewportResizeRecord(this.normalizePhysicalLength(width), this.normalizePhysicalLength(height))
-    ];
-    let fullSnapshot: SessionReplayRecord | null = null;
+    this.refreshWindowSceneViewport();
     const snapshotCapture = this.captureWithRegisteredRoot(activeContext);
-    if (snapshotCapture !== null) {
-      fullSnapshot = snapshotCapture.record;
+    const fullSnapshot = snapshotCapture?.record ?? null;
+    const viewport = fullSnapshot === null ? null : this.getViewportBounds(fullSnapshot);
+    const records: Array<SessionReplayRecord> = [
+      this.processor.createViewportResizeRecord(
+        viewport?.width ?? this.normalizePhysicalLength(width),
+        viewport?.height ?? this.normalizePhysicalLength(height),
+        fullSnapshot?.timestamp ?? Date.now())
+    ];
+    if (fullSnapshot !== null) {
       records.push(fullSnapshot);
-      this.processor.setFullSnapshotBaseline(fullSnapshot);
-      this.observedViewport = this.getViewportBounds(fullSnapshot);
+      this.observedViewport = viewport;
       this.lastFullSnapshotAt = fullSnapshot.timestamp;
     }
     return this.appendActiveProtocolRecords(records, fullSnapshot);
@@ -411,12 +649,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       !Number.isFinite(x) || !Number.isFinite(y)) {
       return null;
     }
+    if (this.activeContext !== null) this.collector.recordControlTouch(pointerEventType, Math.floor(pointerId),
+      this.normalizePhysicalLength(x) - this.sceneOriginX(), this.normalizePhysicalLength(y) - this.sceneOriginY());
     const capture = this.appendActiveProtocolRecords([
       this.processor.createPointerRecord(
         pointerEventType,
         Math.floor(pointerId),
-        this.normalizePhysicalLength(x),
-        this.normalizePhysicalLength(y)
+        this.normalizePhysicalLength(x) - this.sceneOriginX(),
+        this.normalizePhysicalLength(y) - this.sceneOriginY()
       )
     ], null);
     if (pointerEventType === 'move') {
@@ -427,23 +667,136 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return capture;
   }
 
+  public recordPatternTouch(componentId: string, event: TouchEvent): void {
+    const binding = this.rootBinding;
+    if (!this.isStarted || this.activeContext === null || binding === null) return;
+    this.collector.preparePatternLock(binding.uiContext, componentId, binding.vpToPxScale, this.sceneOriginX(), this.sceneOriginY());
+    this.recordTouchEvent(event);
+  }
+
+  /** ArkUI events already contain window-space vp coordinates. */
+  public recordTouchEvent(event: TouchEvent): void {
+    if (!this.isStarted || this.activeContext === null || event === undefined || event === null) return;
+    this.notifyMotion();
+    if (this.config.getTouchPrivacy() !== TouchPrivacy.SHOW) {
+      this.activePointers.clear();
+      return;
+    }
+    const changed = event.changedTouches.length > 0 ? event.changedTouches : event.touches;
+    const records: Array<SessionReplayRecord> = [];
+    const timestamp = Date.now();
+    const type = event.type === TouchType.Down ? 'down' : event.type === TouchType.Move ? 'move' : 'up';
+    if (event.type !== TouchType.Down && event.type !== TouchType.Move &&
+      event.type !== TouchType.Up && event.type !== TouchType.Cancel) return;
+    for (let index = 0; index < changed.length; index++) {
+      const point = changed[index];
+      if (!Number.isFinite(point.id) || !Number.isFinite(point.windowX) || !Number.isFinite(point.windowY)) continue;
+      const id = Math.floor(point.id);
+      const position: ReplayTouchPoint = { x: Math.round((point.windowX - this.sceneOriginX()) * 100) / 100,
+        y: Math.round((point.windowY - this.sceneOriginY()) * 100) / 100 };
+      const previous = this.activePointers.get(id);
+      if (type === 'down' && previous?.x === position.x && previous?.y === position.y) continue;
+      if (type === 'up' && previous === undefined) continue;
+      if (type === 'move' && previous === undefined) continue;
+      if (type === 'move' && previous?.x === position.x && previous?.y === position.y) continue;
+      this.collector.recordControlTouch(event.type === TouchType.Cancel ? 'cancel' : type, id, position.x, position.y);
+      records.push(this.processor.createPointerRecord(type, id, position.x, position.y, timestamp));
+      if (type === 'up') this.activePointers.delete(id);
+      else this.activePointers.set(id, position);
+    }
+    if (event.type === TouchType.Cancel) {
+      this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+        this.collector.recordControlTouch('cancel', id, point.x, point.y);
+        records.push(this.processor.createPointerRecord('up', id, point.x, point.y, timestamp));
+      });
+      this.activePointers.clear();
+    }
+    if (records.length > 0) this.appendActiveProtocolRecords(records, null);
+  }
+
+  private finishTouchPointers(): void {
+    const records: Array<SessionReplayRecord> = [];
+    this.activePointers.forEach((point: ReplayTouchPoint, id: number): void => {
+      this.collector.recordControlTouch('cancel', id, point.x, point.y);
+      records.push(this.processor.createPointerRecord('up', id, point.x, point.y));
+    });
+    this.activePointers.clear();
+    if (records.length > 0) this.appendActiveProtocolRecords(records, null);
+  }
+
   /**
    * Generated page instrumentation and integration code call this after a
    * layout/state change. It coalesces many draws into one detached snapshot.
    */
   public notifyPageChanged(): void {
+    this.requestPageCapture('page_changed');
+  }
+
+  private requestPageCapture(trigger: string): void {
+    this.noteCaptureTrigger(trigger);
+    this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
   }
 
-  /** Marks scrolling/animation/transition activity and waits for it to settle. */
+  private noteCaptureTrigger(trigger: string): void {
+    if (this.config.isPerformanceDiagnosticsEnabled()) this.pendingCaptureTriggers.add(trigger);
+  }
+
+  /** Keeps captures running through motion, including its settled final frame. */
   public notifyMotion(): void {
+    this.noteCaptureTrigger('motion');
     this.motionUntil = Date.now() + this.config.getMotionQuietPeriodMs();
+    this.expediteMediaCapture();
     this.scheduleAutomaticCapture();
   }
 
-  /** A navigation boundary keeps the final stable frame but skips intermediates. */
+  /** A navigation boundary starts the same continuous motion capture. */
   public notifyTransition(): void {
+    this.noteCaptureTrigger('transition');
     this.notifyMotion();
+  }
+
+  public updatePageTransition(rootId: string, transition: ArkUIReplayPageTransition): void {
+    this.pageTransitions.set(rootId, transition);
+    const navigationPage = this.navigationPages.get(rootId);
+    if (navigationPage !== undefined && !transition.entering && transition.progress < 1) {
+      this.retainNavigationPage(navigationPage);
+    }
+    this.notifyTransition();
+    // Preserve the actual callback boundary even when the ordinary sampling
+    // timer would run only after a short transition has already finished.
+    if (transition.progress === 0 || transition.progress === 1) this.captureActiveViewMutation('settled');
+  }
+
+  public finishPageTransition(key: string): void {
+    this.pageTransitions.delete(key);
+    const page = this.navigationPages.get(key);
+    if (page !== undefined && !page.visible) {
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+      this.navigationPages.delete(key);
+    }
+    this.notifyTransition();
+  }
+
+  /** Release Router pages independently of the incoming root's layout readiness. */
+  public releaseScenePages(keys: Array<string>): void {
+    if (keys.length === 0) return;
+    const binding = this.rootBinding;
+    if (binding !== null && binding.captureScene) {
+      const released = new Set<string>(keys);
+      binding.scenePages = this.getRootScenePages(binding).filter((page: ArkUIReplayScenePage): boolean => {
+        if (!released.has(page.key) && !released.has(page.rootId)) return true;
+        this.pageTransitions.delete(page.key);
+        this.pageTransitions.delete(page.rootId);
+        return false;
+      });
+      binding.sceneRootIds = binding.scenePages.map((page: ArkUIReplayScenePage): string => page.rootId);
+    }
+    // Queue removal under the current View even if its new root is still
+    // laying out. If the last page exited, the collector rejects the synthetic
+    // scene-only snapshot so Replay retains the previous visible frame.
+    this.captureActiveViewMutation('settled');
+    this.notifyTransition();
   }
 
   /** Converts public physical-pixel viewport and touch inputs into Replay vp units. */
@@ -472,7 +825,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.sampler.decide(sessionId);
   }
 
-  /** Supplies Android-compatible Browser SDK initialization values. */
+  /** Supplies HarmonyOS-compatible Browser SDK initialization values. */
   public getWebViewOptions(): FTSessionReplayWebViewOptions | null {
     if (!this.isStarted) {
       return null;
@@ -486,7 +839,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   /** Accepts native-associated Browser SDK records without ArkUI conversion. */
   public onWebReplayData(context: FTSessionReplayWebDataContext): boolean {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE ||
-      !this.isWebReplaySlotWithinGracePeriod(context.slotId, context.timestamp)) {
+      !FTSessionReplayBridgeRegistry.acceptsWebReplayData(
+        context.slotId, context.applicationId, context.sessionId, context.timestamp)) {
       return false;
     }
     const record = this.parseWebReplayRecord(context.payload, context.slotId);
@@ -501,19 +855,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (Object.keys(context.linkContext).length > 0) {
       replayContext.globalContext = context.linkContext;
     }
-    const capture = this.createCapture(replayContext, [record], null);
-    if (!this.appendRecordedRecords(replayContext, capture.records)) {
-      return false;
-    }
-    this.lastCapture = capture;
-    return true;
+    return this.webBatcher.add(replayContext, record);
   }
+
+  public flushWebReplayData(): boolean { return this.webBatcher.flush(); }
 
   /** Browser RUM Errors promote only the matching error-sampled session. */
   public onWebReplayError(context: FTSessionReplayWebErrorContext): boolean {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     if (this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR) {
       return true;
     }
@@ -525,6 +877,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     return this.sampler.decide(context.sessionId) !== SessionReplaySamplingMode.ERROR ||
       this.promoteErrorSampledSession(context.sessionId, this.toEpochMilliseconds(context.timestamp));
   }
@@ -538,6 +891,10 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
+    const binding = FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(context.slotId);
+    if (binding === null || binding.applicationId !== context.applicationId || binding.sessionId !== context.sessionId ||
+      binding.viewId !== context.viewId || context.browserViewId.length === 0) return false;
     const resolvedContext = this.mergeWebLinkContext(context);
     const nextContext = this.toReplayContext(resolvedContext);
     if (this.activeContext === null || !this.isSameView(this.activeContext, nextContext) ||
@@ -546,7 +903,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     const previousContext = this.activeContext;
     this.captureGeneration++;
-    this.workQueue.clear();
     this.activeContext = nextContext;
     if (!this.queueFullSnapshotFromRUMContext(resolvedContext)) {
       this.activeContext = previousContext;
@@ -559,7 +915,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (slotId.length === 0) {
       return;
     }
-    this.webSlotInactiveAt.set(slotId, active ? 0 : timestamp);
+    if (!active) this.flushWebReplayData();
   }
 
   public isWebReplayErrorSampled(sessionId: string): boolean {
@@ -571,7 +927,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.promotedErrorSessions.has(sessionId);
   }
 
-  /** Returns Android-compatible Replay counters for the current RUM View. */
+  /** Returns HarmonyOS-compatible Replay counters for the current RUM View. */
   public getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
     const metadata = this.viewMetadata.get(this.getViewMetadataKey(context));
     if (metadata === undefined) {
@@ -585,7 +941,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return {
       hasReplay: metadata.hasReplay,
       recordsCount: metadata.recordsCount,
-      sampledOnError: metadata.sampledOnError
+      sampledOnError: metadata.sampledOnError,
+      recordingId: this.recordingId
     };
   }
 
@@ -593,25 +950,41 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     if (this.queueViewStartedFromRUMContext(context)) {
       this.pendingViewStartContext = null;
+      this.pendingViewStartFailure = '';
       return true;
     }
     this.pendingViewStartContext = context;
+    this.pendingViewStartFailure = this.lastCaptureFailure;
+    FTSessionReplayBridgeRegistry.logDiagnostic(
+      `Replay View start waiting for root: session=${context.sessionId}, view=${context.viewId}, reason=${this.pendingViewStartFailure}`);
     return false;
   }
 
   public onViewStopped(context: FTSessionReplayRUMContext): void {
     if (!this.isStarted) return;
+    this.flushWebReplayData();
     const replayContext = this.toReplayContext(context);
     if (this.pendingViewStartContext !== null &&
       this.isSameView(this.toReplayContext(this.pendingViewStartContext), replayContext)) {
+      FTSessionReplayBridgeRegistry.logDiagnostic(
+        `Replay View ended before first root snapshot: session=${context.sessionId}, view=${context.viewId}, reason=${this.pendingViewStartFailure}`,
+        true);
       this.pendingViewStartContext = null;
+      this.pendingViewStartFailure = '';
     }
     if (this.activeContext === null || !this.isSameView(this.activeContext, replayContext)) {
       return;
     }
+    if (this.captureDeferred || this.mutationCaptureTimer !== -1) this.captureActiveViewMutation('settled');
+    this.finishTouchPointers();
     const viewKey = this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId);
+    if (this.pendingViewStarts.has(viewKey)) {
+      FTSessionReplayBridgeRegistry.logDiagnostic(
+        `Replay View ended with first frame pending: session=${context.sessionId}, view=${context.viewId}`);
+    }
     if (this.pendingViewStarts.get(viewKey) === this.captureGeneration) {
       this.endedViewStarts.set(viewKey, this.captureGeneration);
     }
@@ -619,9 +992,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     const capture = this.createCapture(replayContext, [record], null);
     this.lastCapture = capture;
     this.appendRecordedRecords(replayContext, capture.records, true, true);
+    FTSessionReplayBridgeRegistry.observeWebReplaySlots(context.applicationId, context.sessionId,
+      context.viewId, [], Date.now());
+    // Accepted frames can finish after the route closes. Publish their final count at the FIFO boundary.
+    this.workQueue.drain((): void => this.metadataNotifier.flush(viewKey)).catch((error: Error): void => {
+      FTSessionReplayBridgeRegistry.logDiagnostic(`Replay View metadata drain failed: ${error.message}`, true);
+    });
     this.activeContext = null;
     this.captureGeneration++;
-    this.workQueue.clear(true);
     this.stopObservation();
     this.processor.reset();
   }
@@ -630,6 +1008,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!this.isStarted || this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.NONE) {
       return false;
     }
+    this.flushWebReplayData();
     const replayContext = this.toReplayContext(context);
     let accepted: boolean;
     if (this.activeContext === null || !this.isSameReplayContext(this.activeContext, replayContext)) {
@@ -645,14 +1024,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
 
   public onSessionRenewed(_context: FTSessionReplaySessionContext): void {
     if (!this.isStarted) return;
+    this.flushWebReplayData();
+    this.finishTouchPointers();
     this.renewRootEpoch();
     this.activeContext = null;
     this.captureGeneration++;
-    this.workQueue.clear();
     this.pendingViewStartContext = null;
+    this.pendingViewStartFailure = '';
     this.stopObservation();
     this.promotedErrorSessions.clear();
-    this.webSlotInactiveAt.clear();
+    FTSessionReplayBridgeRegistry.observeWebReplaySlots(_context.applicationId, _context.sessionId, '', [], Date.now());
   }
 
   private getWebReplayPrivacyLevel(): string {
@@ -679,14 +1060,6 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return Math.floor(timestamp / 1000);
     }
     return Math.floor(timestamp);
-  }
-
-  private isWebReplaySlotWithinGracePeriod(slotId: string, timestamp: number): boolean {
-    const inactiveAt = this.webSlotInactiveAt.get(slotId);
-    if (inactiveAt === undefined || inactiveAt === 0) {
-      return true;
-    }
-    return timestamp - inactiveAt < FTSessionReplayRecorder.WEB_REPLAY_INACTIVE_GRACE_MS;
   }
 
   private parseWebReplayRecord(payload: string, slotId: string): SessionReplayRecord | null {
@@ -731,21 +1104,24 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (lightSnapshot === null) {
       return false;
     }
+    if (this.activeContext !== null && !this.isSameView(this.activeContext, replayContext)) this.finishTouchPointers();
     this.captureGeneration++;
-    this.workQueue.clear(this.endedViewStarts.size > 0);
     this.processor.reset();
-    this.resetViewportObservation();
+    this.resetViewportObservation(true);
     this.lastFullSnapshotAt = 0;
     this.activeContext = replayContext;
     const generation = this.captureGeneration;
     const contextSnapshot = this.copyReplayContext(replayContext);
     this.pendingViewStarts.set(
       this.getViewKey(replayContext.applicationId, replayContext.sessionId, replayContext.viewId), generation);
-    this.workQueue.enqueue('start', lightSnapshot,
-      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources, true),
-      (result: ReplayWorkerResult | null, error: string): void =>
-        this.completeWorkerSnapshot('start', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    const queuedAt = Date.now();
+    FTSessionReplayBridgeRegistry.logDiagnostic(
+      `Replay first frame queued: session=${context.sessionId}, view=${context.viewId}, frameTime=${lightSnapshot.timestamp}, nodes=${lightSnapshot.nodes.length}`);
+    this.enqueueWorkerSnapshot('start', lightSnapshot, contextSnapshot, generation, context, promoteErrorAt, queuedAt);
+    // A short page transition can finish before the first frame is saved.
+    // Keep observing while that write is pending; the FIFO places subsequent
+    // automatic frames after the View's start checkpoint.
+    if (this.isCurrentCapture(replayContext, generation)) this.startObservation();
     return true;
   }
 
@@ -758,6 +1134,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     if (this.queueViewStartedFromRUMContext(pending)) {
       this.pendingViewStartContext = null;
+      this.pendingViewStartFailure = '';
+    } else {
+      this.pendingViewStartFailure = this.lastCaptureFailure;
     }
   }
 
@@ -773,15 +1152,111 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     const generation = this.captureGeneration;
     const contextSnapshot = this.copyReplayContext(replayContext);
-    this.workQueue.enqueue('full', lightSnapshot,
-      (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-        this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
-      (result: ReplayWorkerResult | null, error: string): void =>
-        this.completeWorkerSnapshot('full', contextSnapshot, generation, result, error, context, promoteErrorAt));
+    this.enqueueWorkerSnapshot('full', lightSnapshot, contextSnapshot, generation, context, promoteErrorAt);
     return true;
   }
 
+  private enqueueWorkerSnapshot(
+    kind: ReplaySnapshotKind,
+    snapshot: ArkUIReplayLightSnapshot,
+    context: SessionReplayContext,
+    generation: number,
+    rumContext: FTSessionReplayRUMContext | null,
+    promoteErrorAt: number | null,
+    queuedAt: number = Date.now()
+  ): void {
+    const targetStore = this.getStoreForContext(context);
+    const capture: ReplayWorkerCapture = {
+      context, viewport: this.getRootViewport(snapshot.nodes[0]?.width, snapshot.nodes[0]?.height), previousViewport: this.observedViewport,
+      lastFullSnapshotAt: this.lastFullSnapshotAt,
+      storeKind: targetStore === this.store && targetStore !== null ? 'main' :
+        (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none')
+    };
+    if (this.snapshotFilter.canSkip(kind, snapshot, capture, generation, !this.workQueue.hasPendingWork())) {
+      this.pendingCaptureTriggers.clear();
+      return;
+    }
+    const filterRevision = this.snapshotFilter.getRevision();
+    const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
+    try {
+      if (this.config.isPerformanceDiagnosticsEnabled()) {
+        capture.captureTriggers = kind === 'start' || kind === 'full' ? [kind] :
+          (this.pendingCaptureTriggers.size > 0 ? Array.from(this.pendingCaptureTriggers).sort() : [kind]);
+      }
+      this.pendingCaptureTriggers.clear();
+      this.workQueue.enqueue(kind, snapshot, capture,
+        (result: ReplayWorkerResult | null, error: string): void => {
+          try {
+            if (this.isCurrentCapture(context, generation)) {
+              if (result?.stored === true) this.snapshotFilter.acknowledge(snapshot, capture, generation, filterRevision);
+              else this.snapshotFilter.invalidate();
+            }
+            this.completeWorkerSnapshot(kind, context, generation, result, error, rumContext, promoteErrorAt, queuedAt);
+          } finally {
+            completePersistence();
+          }
+        });
+    } catch (error) {
+      this.snapshotFilter.invalidate();
+      completePersistence();
+      throw new Error(String(error));
+    }
+  }
+
   /** UI-only validation and FrameNode read shared by automatic lifecycle paths. */
+  private captureRootLight(uiContext: UIContext, rootId: string, scale: number,
+    context?: SessionReplayContext): ArkUIReplayLightSnapshot {
+    const startedAt = Date.now();
+    const snapshot = this.collectRootLight(uiContext, rootId, scale);
+    const bindingContext = context ?? this.activeContext;
+    if (bindingContext !== null) {
+      const visibleWebNodes = snapshot.nodes.filter((node): boolean => node.webViewSlotId !== undefined &&
+        (node.opacity ?? 1) > 0 && (node.clip?.left ?? 0) + (node.clip?.right ?? 0) < node.width &&
+        (node.clip?.top ?? 0) + (node.clip?.bottom ?? 0) < node.height);
+      const slots: Array<WebReplaySlotObservation> = [];
+      for (const node of visibleWebNodes) {
+        const bindingId = node.webViewBindingId;
+        if (bindingId !== undefined) {
+          slots.push({ componentId: bindingId, slotId: String(node.id) });
+        }
+      }
+      FTSessionReplayBridgeRegistry.observeWebReplaySlots(bindingContext.applicationId, bindingContext.sessionId,
+        bindingContext.viewId, slots, snapshot.timestamp);
+    }
+    this.hasActiveComponentAnimations = snapshot.hasActiveAnimations === true;
+    this.componentSamplingIntervalMs = snapshot.preferredSamplingIntervalMs ?? 0;
+    if (this.config.isPerformanceDiagnosticsEnabled()) snapshot.collectionDurationMs = Math.max(0, Date.now() - startedAt);
+    return snapshot;
+  }
+
+  private collectRootLight(uiContext: UIContext, rootId: string, scale: number): ArkUIReplayLightSnapshot {
+    const binding = this.rootBinding;
+    if (binding !== null && binding.rootId === rootId &&
+      (binding.captureScene || this.navigationPages.size > 0)) {
+      // The scene canvas and its clips must share the same visible window
+      // bounds during IME animation, before the detached frame reaches Worker.
+      this.refreshWindowSceneViewport();
+      const pages = this.getScenePages(binding);
+      if (this.sceneViewport === null) {
+        const root = uiContext.getFrameNodeById(rootId);
+        if (root !== null) {
+          const position = root.getPositionToWindow();
+          const size = root.getMeasuredSize();
+          if (size.width > 0 && size.height > 0) this.sceneViewport = {
+            x: position.x, y: position.y, width: size.width / scale, height: size.height / scale
+          };
+        }
+      }
+      const pageIds = pages.map((page: ArkUIReplayScenePage): string => page.rootId);
+      return this.collector.captureSceneLight(uiContext, pageIds, scale, Date.now(),
+        this.pageTransitions, this.sceneViewport, pages);
+    }
+    if (binding !== null && binding.rootId === rootId && binding.sceneRoot !== null && binding.sceneRoot.isAttached()) {
+      return this.collector.captureFrameNodeLight(binding.sceneRoot, scale);
+    }
+    return this.collector.captureLightSnapshot(uiContext, rootId, scale);
+  }
+
   private captureLightSnapshotForContext(context: SessionReplayContext): ArkUIReplayLightSnapshot | null {
     if (!this.isStarted) {
       this.lastCaptureFailure = 'Session Replay recorder is not started.';
@@ -797,10 +1272,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return null;
     }
     try {
-      return this.collector.captureLightSnapshot(
+      return this.captureRootLight(
         rootBinding.uiContext,
         rootBinding.rootId,
-        rootBinding.vpToPxScale
+        rootBinding.vpToPxScale,
+        context
       );
     } catch (error) {
       this.lastCaptureFailure = `ArkUI FrameNode snapshot failed: ${String(error)}`;
@@ -808,88 +1284,76 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
   }
 
-  private prepareWorkerSnapshot(
-    context: SessionReplayContext,
-    generation: number,
-    snapshot: SessionReplayRecord,
-    resources: Array<CapturedReplayImageResource>,
-    allowEndedStart: boolean = false
-  ): ReplayWorkerCommit | null {
-    if (!this.isCurrentCapture(context, generation) &&
-      !(allowEndedStart && this.isEndedStart(context, generation))) return null;
-    this.persistCapturedImageResources(context, snapshot, resources);
-    if (!this.isCurrentCapture(context, generation) &&
-      !(allowEndedStart && this.isEndedStart(context, generation))) return null;
-    const targetStore = this.getStoreForContext(context);
-    const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
-      (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
-    const commit: ReplayWorkerCommit = {
-      context,
-      snapshot,
-      viewport: this.getViewportBounds(snapshot),
-      previousViewport: this.observedViewport,
-      lastFullSnapshotAt: this.lastFullSnapshotAt,
-      storeKind
-    };
-    return commit;
-  }
-
   private completeWorkerSnapshot(
-    kind: 'start' | 'full' | 'automatic',
+    kind: ReplaySnapshotKind,
     context: SessionReplayContext,
     generation: number,
     result: ReplayWorkerResult | null,
     error: string,
     rumContext: FTSessionReplayRUMContext | null,
-    promoteErrorAt: number | null
+    promoteErrorAt: number | null,
+    queuedAt: number = 0
   ): void {
+    if (error === REPLAY_COALESCED_REASON) return;
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
     const endedStart = kind === 'start' && this.isEndedStart(context, generation);
+    const currentCapture = this.isCurrentCapture(context, generation);
     if (kind === 'start' && this.pendingViewStarts.get(key) === generation) this.pendingViewStarts.delete(key);
     if (endedStart) this.endedViewStarts.delete(key);
-    if (!this.isCurrentCapture(context, generation) && !endedStart) {
-      if (result !== null) this.removeWorkerSegments(result);
-      return;
-    }
     if (result === null || !result.stored) {
+      if (currentCapture) this.baselineContextKey = '';
       this.lastCaptureFailure = result === null ? error : result.writeError;
-      if (kind !== 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
+      if (kind !== 'automatic') {
         FTSessionReplayBridgeRegistry.logDiagnostic(
           `Replay ${kind} snapshot failed: session=${context.sessionId}, view=${context.viewId}, reason=${this.lastCaptureFailure}`,
           true);
       }
       if (result !== null) this.removeWorkerSegments(result);
-      if (kind === 'automatic' && error !== REPLAY_STALE_QUEUE_REASON) {
+      if (currentCapture && (kind === 'automatic' || kind === 'settled') && error !== REPLAY_STALE_QUEUE_REASON) {
         this.lastFullSnapshotAt = 0;
       }
-      if (this.isStarted && kind === 'start' && !endedStart && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
+      if (currentCapture && this.isStarted && kind === 'start' && result === null && error === REPLAY_STALE_QUEUE_REASON && rumContext !== null) {
         this.queueViewStartedFromRUMContext(rumContext, promoteErrorAt);
       }
+      if (currentCapture && this.isStarted && (kind === 'automatic' || kind === 'settled') &&
+        (error === REPLAY_STALE_QUEUE_REASON || Date.now() < this.motionUntil)) this.scheduleAutomaticCapture();
       return;
+    }
+    this.resourceTouch?.(result.resourceNames ?? [], result.storeKind);
+    if (currentCapture) {
+      if (this.baselineContextKey !== key) {
+        this.processor.reset();
+        this.pendingManualBaseline.splice(0);
+      }
+      this.baselineContextKey = key;
+      this.pendingManualBaseline.push(...result.records);
+      if (this.pendingManualBaseline.length > FTSessionReplayRecorder.MAX_RECORDS_PER_VIEW) {
+        this.pendingManualBaseline.splice(0);
+        this.processor.reset();
+      }
     }
     if (result.records.length === 0) return;
     const capture = this.createCaptureFromWorker(context, result);
     this.appendRecordedRecords(context, result.records, false);
     this.lastCapture = capture;
     this.lastCaptureFailure = '';
-    if (!endedStart) {
+    if (currentCapture) {
       this.lastFullSnapshotAt = result.lastFullSnapshotAt;
       this.observedViewport = result.viewport;
     }
     if (kind === 'start') {
       FTSessionReplayBridgeRegistry.logDiagnostic(
-        `Replay first frame saved: session=${context.sessionId}, view=${context.viewId}, records=${result.records.length}, segments=${result.segmentIds.length}`);
+        `Replay first frame saved: session=${context.sessionId}, view=${context.viewId}, records=${result.records.length}, segments=${result.segmentIds.length}, elapsedMs=${Math.max(0, Date.now() - queuedAt)}`);
     }
     if (kind === 'start' && rumContext !== null) {
       this.recordViewMetadata(rumContext, result.records.length);
-      if (!endedStart) this.startObservation();
     } else {
       this.recordReplayMetadata(context, result.records.length);
     }
     if (promoteErrorAt !== null && this.sampler.decide(context.sessionId) === SessionReplaySamplingMode.ERROR) {
       this.promoteErrorSampledSession(context.sessionId, promoteErrorAt);
     } else if (result.storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
-      this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
+      this.enqueueReplayPromotion(context.sessionId, Date.now(),
         (success: boolean, failure: string): void => {
           if (!success) this.lastCaptureFailure = failure;
         });
@@ -927,11 +1391,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       return null;
     }
     try {
-      const record = this.collector.captureFullSnapshot(
-        this.rootBinding.uiContext,
-        this.rootBinding.rootId,
-        this.rootBinding.vpToPxScale
-      );
+      const record = this.collector.materializeLightSnapshot(this.captureRootLight(
+        this.rootBinding.uiContext, this.rootBinding.rootId, this.rootBinding.vpToPxScale, context));
       this.persistCapturedImageResources(context, record);
       return this.createCapture(context, [record], record);
     } catch (error) {
@@ -1021,11 +1482,11 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       sampledOnError
     });
     this.recordedContextsByView.set(key, this.copyReplayContext(context));
-    this.notifyReplayMetadata(context);
+    this.notifyReplayMetadata(context, existing === undefined || existing.sampledOnError !== sampledOnError);
   }
 
-  private notifyReplayMetadata(context: SessionReplayContext): void {
-    const rumContext: FTSessionReplayRUMContext = {
+  private createReplayRUMContext(context: SessionReplayContext): FTSessionReplayRUMContext {
+    return {
       applicationId: context.applicationId,
       sessionId: context.sessionId,
       viewId: context.viewId,
@@ -1034,7 +1495,14 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       linkContext: context.globalContext ?? {},
       timestamp: Date.now() * 1000000
     };
-    FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext));
+  }
+
+  private notifyReplayMetadata(context: SessionReplayContext, immediate: boolean = true): void {
+    const rumContext = this.createReplayRUMContext(context);
+    const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
+    this.metadataNotifier.notify(key, immediate,
+      (): void => FTSessionReplayBridgeRegistry.notifyViewMetadataChanged(rumContext, this.getViewMetadata(rumContext)),
+      (): (() => void) => FTSessionReplayBridgeRegistry.beginViewPersistence(rumContext));
   }
 
   private getViewMetadataKey(context: FTSessionReplayRUMContext): string {
@@ -1049,44 +1517,74 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     context: SessionReplayContext,
     records: Array<SessionReplayRecord>,
     persist: boolean = true,
-    requiresStart: boolean = false
+    requiresStart: boolean = false,
+    baselineSnapshot: SessionReplayRecord | null = null
   ): boolean {
     if (records.length === 0) {
       return true;
     }
     const key = this.getViewKey(context.applicationId, context.sessionId, context.viewId);
-    const current = this.recordedRecordsByView.get(key) ?? [];
-    for (let index = 0; index < records.length; index++) {
-      current.push(records[index]);
+    // Native manual snapshots join the in-memory stream at commit time too,
+    // so an earlier automatic frame cannot appear after a later manual one.
+    if (!persist || baselineSnapshot === null) {
+      const current = this.recordedRecordsByView.get(key) ?? [];
+      for (let index = 0; index < records.length; index++) current.push(records[index]);
+      const overflow = current.length - FTSessionReplayRecorder.MAX_RECORDS_PER_VIEW;
+      if (overflow > 0) current.splice(0, overflow);
+      this.recordedRecordsByView.set(key, current);
     }
-    const overflow = current.length - FTSessionReplayRecorder.MAX_RECORDS_PER_VIEW;
-    if (overflow > 0) {
-      current.splice(0, overflow);
-    }
-    this.recordedRecordsByView.set(key, current);
     if (!persist) {
       return true;
     }
+    // Manual records can change the Worker's baseline without an automatic UI handoff.
+    if (baselineSnapshot !== null) this.snapshotFilter.invalidate();
     const targetStore = this.getStoreForContext(context);
     const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
       (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
-    const accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
-      (success: boolean, failure: string): void => {
-        if (!success) {
-          this.lastCaptureFailure = failure;
-          return;
-        }
-        this.recordReplayMetadata(context, records.length);
-        // Stop can queue View End before an earlier Error snapshot promotes
-        // the session. Move that already-targeted error batch as well.
-        if (storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
-          this.workQueue.enqueuePromotion(context.sessionId, Date.now(),
-            (promoted: boolean, promotionFailure: string): void => {
-              if (!promoted) this.lastCaptureFailure = promotionFailure;
-            });
-        }
-      }, requiresStart);
-    if (!accepted) this.lastCaptureFailure = 'Session Replay Worker did not accept the record batch.';
+    const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
+    let accepted = false;
+    try {
+      accepted = this.workQueue.enqueueRecords(this.copyReplayContext(context), records, storeKind,
+        (success: boolean, failure: string, writtenRecords?: Array<SessionReplayRecord>): void => {
+          try {
+            if (!success) {
+              this.lastCaptureFailure = failure;
+              this.baselineContextKey = '';
+              return;
+            }
+            const committedRecords = writtenRecords ?? records;
+            if (baselineSnapshot !== null) {
+              this.appendRecordedRecords(context, committedRecords, false);
+              this.pendingManualBaseline.splice(0);
+              this.processor.setFullSnapshotBaseline(baselineSnapshot);
+              this.baselineContextKey = key;
+              if (committedRecords.some((record: SessionReplayRecord): boolean =>
+                record.type === ReplayRecordType.FULL_SNAPSHOT && record.slotId === undefined)) {
+                this.lastFullSnapshotAt = baselineSnapshot.timestamp;
+              }
+            }
+            this.recordReplayMetadata(context, committedRecords.length);
+            // Stop can queue View End before an earlier Error snapshot promotes
+            // the session. Move that already-targeted error batch as well.
+            if (storeKind === 'error' && this.promotedErrorSessions.has(context.sessionId)) {
+              this.enqueueReplayPromotion(context.sessionId, Date.now(),
+                (promoted: boolean, promotionFailure: string): void => {
+                  if (!promoted) this.lastCaptureFailure = promotionFailure;
+                });
+            }
+          } finally {
+            completePersistence();
+          }
+        }, requiresStart, baselineSnapshot,
+        baselineSnapshot === null ? null : this.getViewportBounds(baselineSnapshot));
+    } finally {
+      // enqueueRecords can reject before invoking its completion callback.
+      if (!accepted) completePersistence();
+    }
+    if (!accepted) {
+      this.lastCaptureFailure = 'Session Replay Worker did not accept the record batch.';
+      this.baselineContextKey = '';
+    }
     return accepted;
   }
 
@@ -1095,12 +1593,18 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     records: Array<SessionReplayRecord>,
     fullSnapshot: SessionReplayRecord | null
   ): SessionReplayCapture | null {
+    const onlyPointerMoves = records.every((record: SessionReplayRecord): boolean => {
+      const data = record.data as ReplayPointerInteractionData;
+      return record.slotId === undefined && record.type === ReplayRecordType.INCREMENTAL_SNAPSHOT &&
+        data.source === 9 && data.pointerEventType === 'move';
+    });
+    if (this.captureDeferred && !onlyPointerMoves) this.captureActiveViewMutation('settled');
     const activeContext = this.activeContext;
     if (activeContext === null || !this.canRecordActiveContext(activeContext)) {
       return null;
     }
     const capture = this.createCapture(activeContext, records, fullSnapshot);
-    if (!this.appendRecordedRecords(activeContext, capture.records, true, true)) {
+    if (!this.appendRecordedRecords(activeContext, capture.records, true, true, fullSnapshot)) {
       return null;
     }
     this.lastCapture = capture;
@@ -1131,7 +1635,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.errorSampleResourcePromoter(sessionId, timestamp);
     if (!resourcesPromoted) return false;
     this.promotedErrorSessions.add(sessionId);
-    const accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
+    const accepted = this.enqueueReplayPromotion(sessionId, timestamp,
       (success: boolean, failure: string): void => {
         if (!success) {
           this.lastCaptureFailure = failure;
@@ -1146,18 +1650,70 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return accepted;
   }
 
+  private enqueueReplayPromotion(
+    sessionId: string,
+    timestamp: number,
+    finish: (success: boolean, failure: string) => void
+  ): boolean {
+    const completions: Array<() => void> = [];
+    this.recordedContextsByView.forEach((context: SessionReplayContext): void => {
+      if (context.sessionId === sessionId) {
+        completions.push(FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context)));
+      }
+    });
+    const completePersistence = (): void => {
+      for (let index = 0; index < completions.length; index++) completions[index]();
+    };
+    let accepted = false;
+    try {
+      accepted = this.workQueue.enqueuePromotion(sessionId, timestamp,
+        (success: boolean, failure: string, resources?: Array<string>): void => {
+          this.resourceTouch?.(resources ?? [], 'main');
+          try {
+            finish(success, failure);
+          } finally {
+            completePersistence();
+          }
+        });
+    } finally {
+      if (!accepted) completePersistence();
+    }
+    return accepted;
+  }
+
   private startObservation(): void {
     this.stopObservation();
     if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
       return;
     }
-    // Collection is signal-driven. A View start's Full Snapshot already owns
-    // the baseline; this only asks for a coalesced incremental check after the
-    // page has completed any immediate layout work.
+    // Drawing also covers text/style changes that do not resize the root and
+    // works independently of application-owned onAreaChange/onTouch callbacks.
+    const uiContext = this.rootBinding.uiContext;
+    try {
+      uiContext.getUIObserver().on('willDraw', this.drawListener);
+      this.drawObserverContext = uiContext;
+      try { uiContext.getUIObserver().on('didLayout', this.rasterLayoutListener); } catch (_) {}
+    } catch (_) {
+      // Explicit page notifications remain available on unsupported contexts.
+    }
     this.notifyPageChanged();
   }
 
   private stopObservation(): void {
+    this.snapshotFilter.invalidate();
+    this.pendingCaptureTriggers.clear();
+    this.hasActiveComponentAnimations = false;
+    this.componentSamplingIntervalMs = 0;
+    this.samplingFrameEpoch++;
+    this.nextSamplingDeadline = 0;
+    const uiContext = this.drawObserverContext;
+    this.drawObserverContext = null;
+    if (uiContext !== null) {
+      try {
+        uiContext.getUIObserver().off('willDraw', this.drawListener);
+        try { uiContext.getUIObserver().off('didLayout', this.rasterLayoutListener); } catch (_) {}
+      } catch (_) { }
+    }
     if (this.mutationCaptureTimer !== -1) {
       clearTimeout(this.mutationCaptureTimer);
       this.mutationCaptureTimer = -1;
@@ -1168,55 +1724,109 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
   }
 
-  private captureActiveViewMutation(): void {
+  private captureActiveViewMutation(kind: 'automatic' | 'transition' | 'settled' = 'automatic'): void {
     const context = this.activeContext;
     const rootBinding = this.rootBinding;
     if (!this.isStarted || context === null || rootBinding === null) {
       return;
     }
+    const timestamp = Date.now();
+    const defaultInFlight = kind === 'automatic' && this.getRootScenePages(rootBinding)
+      .some((page: ArkUIReplayScenePage): boolean => {
+        const transition = page.defaultTransition;
+        return transition !== undefined && timestamp >= transition.startedAt &&
+          timestamp < transition.startedAt + transition.durationMs;
+      });
+    const sampleKind: ReplaySnapshotKind = defaultInFlight ? 'transition' : kind;
+    if (!this.workQueue.shouldCapture(context, sampleKind)) {
+      this.captureDeferred = true;
+      this.scheduleAutomaticCapture();
+      return;
+    }
     try {
-      // This is the only automatic code that runs in an ArkUI callback. It
-      // reads FrameNode into a detached handoff and immediately returns. The
-      // Replay Worker materializes and diffs it, then writes the record batch.
-      const lightSnapshot = this.collector.captureLightSnapshot(
-        rootBinding.uiContext,
-        rootBinding.rootId,
-        rootBinding.vpToPxScale
-      );
+      const lightSnapshot = this.captureRootLight(rootBinding.uiContext, rootBinding.rootId, rootBinding.vpToPxScale);
+      this.captureDeferred = false;
       const generation = this.captureGeneration;
       const contextSnapshot = this.copyReplayContext(context);
-      this.workQueue.enqueue('automatic', lightSnapshot,
-        (snapshot: SessionReplayRecord, resources: Array<CapturedReplayImageResource>): ReplayWorkerCommit | null =>
-          this.prepareWorkerSnapshot(contextSnapshot, generation, snapshot, resources),
-        (result: ReplayWorkerResult | null, error: string): void =>
-          this.completeWorkerSnapshot('automatic', contextSnapshot, generation, result, error, null, null));
+      this.enqueueWorkerSnapshot(sampleKind,
+        lightSnapshot, contextSnapshot, generation, null, null);
     } catch (_error) {
       // A root can disappear between an ArkUI lifecycle callback and capture.
       // The next page-change signal will retry after its layout has settled.
     }
   }
 
-  /** Coalesces change notifications and drops intermediate motion frames. */
+  /** Samples motion at the configured interval, retaining a final frame too. */
   private scheduleAutomaticCapture(): void {
     if (!this.isStarted || this.rootBinding === null || this.activeContext === null) {
       return;
     }
-    if (this.mutationCaptureTimer !== -1) {
-      clearTimeout(this.mutationCaptureTimer);
-    }
+    // Keep the first deadline so neither drawing nor pointer moves postpone it.
+    if (this.mutationCaptureTimer !== -1) return;
     const now = Date.now();
-    const motionDelay = Math.max(0, this.motionUntil - now);
-    const delay = Math.max(this.config.getSnapshotIntervalMs(), motionDelay);
-    this.mutationCaptureTimer = setTimeout((): void => {
+    const interval = now >= this.motionUntil && !this.hasSceneMotion() ?
+      Math.max(this.config.getSnapshotIntervalMs(), this.componentSamplingIntervalMs) : this.config.getSnapshotIntervalMs();
+    const next = this.nextSamplingDeadline === 0 ? now + interval : this.nextSamplingDeadline + interval;
+    // Anchor to deadlines rather than frame completion; never burst to catch up.
+    this.nextSamplingDeadline = next <= now ? now + interval : next;
+    const delay = this.nextSamplingDeadline - now;
+    const epoch = ++this.samplingFrameEpoch;
+    const run = (): void => {
+      if (epoch !== this.samplingFrameEpoch || this.mutationCaptureTimer === -1) return;
+      this.samplingFrameEpoch++;
+      clearTimeout(this.mutationCaptureTimer);
       this.mutationCaptureTimer = -1;
-      // A continuous Scroll/animation keeps extending motionUntil. Do not
-      // traverse the root until it becomes stable.
-      if (Date.now() < this.motionUntil) {
-        this.scheduleAutomaticCapture();
-        return;
-      }
-      this.captureActiveViewMutation();
-    }, delay);
+      const settled = this.motionUntil > 0 && Date.now() >= this.motionUntil && !this.hasSamplingSceneMotion();
+      if (this.hasActiveComponentAnimations) this.noteCaptureTrigger('animation');
+      if (this.hasSceneMotion()) this.noteCaptureTrigger('scene_motion');
+      if (Date.now() < this.motionUntil) this.noteCaptureTrigger('motion_tail');
+      if (settled) this.motionUntil = 0;
+      this.captureActiveViewMutation(settled ? 'settled' : 'automatic');
+      if (Date.now() < this.motionUntil || this.hasSamplingSceneMotion()) this.scheduleAutomaticCapture();
+      if (this.mutationCaptureTimer === -1) this.nextSamplingDeadline = 0;
+    };
+    try {
+      this.rootBinding.uiContext.postDelayedFrameCallback(new ReplaySamplingFrame(run), delay);
+      // An idle/detached surface may not produce a display frame. Keep a
+      // bounded fallback for its final state; the epoch prevents duplicates.
+      this.mutationCaptureTimer = setTimeout(run, delay + 32);
+    } catch (_) {
+      this.mutationCaptureTimer = setTimeout(run, delay);
+    }
+  }
+
+  private hasSamplingSceneMotion(): boolean {
+    if (this.hasActiveComponentAnimations) return true;
+    return this.hasSceneMotion();
+  }
+
+  private hasSceneMotion(): boolean {
+    if (this.hasRetainedScenePages()) return true;
+    const binding = this.rootBinding;
+    const now = Date.now();
+    return binding !== null && this.getRootScenePages(binding).some((page: ArkUIReplayScenePage): boolean => {
+      const transition = page.defaultTransition;
+      return transition !== undefined && now >= transition.startedAt && now < transition.startedAt + transition.durationMs;
+    });
+  }
+
+  /** User/draw signals must not wait behind a one-second video-only timer. */
+  private expediteMediaCapture(): void {
+    if (this.componentSamplingIntervalMs <= 0 || this.mutationCaptureTimer === -1 ||
+      this.nextSamplingDeadline - Date.now() <= this.config.getSnapshotIntervalMs()) return;
+    this.samplingFrameEpoch++;
+    clearTimeout(this.mutationCaptureTimer);
+    this.mutationCaptureTimer = -1;
+    this.nextSamplingDeadline = 0;
+  }
+
+  private hasRetainedScenePages(): boolean {
+    if (this.rootBinding?.scenePages?.some((page: ArkUIReplayScenePage): boolean => page.retained)) return true;
+    let retained = false;
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      if (page.retained) retained = true;
+    });
+    return retained;
   }
 
   private isCurrentCapture(context: SessionReplayContext, generation: number): boolean {
@@ -1246,6 +1856,204 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return result;
   }
 
+  private sameWindow(left: UIContext, right: UIContext): boolean {
+    if (left === right) return true;
+    try {
+      const id = left.getWindowId();
+      return id !== undefined && id === right.getWindowId();
+    } catch (_) { return false; }
+  }
+
+  private usesSceneCoordinates(): boolean {
+    return this.rootBinding !== null &&
+      (this.rootBinding.captureScene || this.navigationPages.size > 0);
+  }
+
+  private sceneOriginX(): number {
+    return this.usesSceneCoordinates() ? (this.sceneViewport?.x ?? 0) : 0;
+  }
+
+  private sceneOriginY(): number {
+    return this.usesSceneCoordinates() ? (this.sceneViewport?.y ?? 0) : 0;
+  }
+
+  private bindTransitionObserver(uiContext: UIContext): void {
+    if (this.transitionObserverContext === uiContext) return;
+    this.unbindTransitionObserver();
+    this.transitionObserverContext = uiContext;
+    try {
+      const observer = uiContext.getUIObserver();
+      // Subscribe independently: an unavailable event must not disable others.
+      try { observer.on('routerPageUpdate', this.routerTransitionListener); } catch (_) { }
+      try { observer.on('navDestinationSwitch', this.navigationSwitchListener); } catch (_) { }
+      try { observer.on('navDestinationUpdate', this.navigationStateListener); } catch (_) { }
+    } catch (_) { }
+  }
+
+  private unbindTransitionObserver(): void {
+    const context = this.transitionObserverContext;
+    this.transitionObserverContext = null;
+    if (context === null) return;
+    try {
+      const observer = context.getUIObserver();
+      try { observer.off('routerPageUpdate', this.routerTransitionListener); } catch (_) { }
+      try { observer.off('navDestinationSwitch', this.navigationSwitchListener); } catch (_) { }
+      try { observer.off('navDestinationUpdate', this.navigationStateListener); } catch (_) { }
+    } catch (_) { }
+  }
+
+  private ensureNavigationPage(info: uiObserver.NavDestinationInfo): ReplayNavigationPage | null {
+    const binding = this.rootBinding;
+    if (binding === null || info.uniqueId === undefined) return null;
+    const key = `navigation:${info.uniqueId}`;
+    const existing = this.navigationPages.get(key);
+    if (existing !== undefined) return existing;
+    try {
+      const root = binding.uiContext.getFrameNodeByUniqueId(info.uniqueId);
+      if (root === null) return null;
+      const parentKey = this.findNavigationHost(root, binding);
+      if (parentKey === null) return null;
+      const page: ReplayNavigationPage = {
+        key, root, parentKey, visible: true, retained: false,
+        paintOrder: ++this.nextNavigationPaintOrder, releaseTimer: -1
+      };
+      this.navigationPages.set(key, page);
+      return page;
+    } catch (_) { return null; }
+  }
+
+  private findNavigationHost(root: FrameNode, binding: SessionReplayRootBinding): string | null {
+    if (binding.scenePages === null) return binding.rootId;
+    let current: FrameNode | null = root;
+    for (let depth = 0; depth < 64 && current !== null; depth++) {
+      try {
+        const id = current.getUniqueId();
+        const host = binding.scenePages.find((page: ArkUIReplayScenePage): boolean => page.root?.getUniqueId() === id);
+        if (host !== undefined) return host.key;
+        current = current.getParent();
+      } catch (_) { break; }
+    }
+    // A destination on a not-yet-registered Router page must not be attached
+    // to the previous page just because its lifecycle observer ran first.
+    return null;
+  }
+
+  private onNavigationPageState(info: uiObserver.NavDestinationInfo): void {
+    const page = this.ensureNavigationPage(info);
+    if (page === null) { this.notifyTransition(); return; }
+    const state = info.state;
+    if (state === uiObserver.NavDestinationState.ON_WILL_HIDE ||
+      state === uiObserver.NavDestinationState.ON_WILL_DISAPPEAR) {
+      this.retainNavigationPage(page);
+      this.captureActiveViewMutation();
+    } else if (state === uiObserver.NavDestinationState.ON_HIDDEN ||
+      state === uiObserver.NavDestinationState.ON_DISAPPEAR) {
+      page.visible = false;
+      const progress = this.pageTransitions.get(page.key);
+      if (progress === undefined || progress.progress >= 1) {
+        if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+        this.navigationPages.delete(page.key);
+      }
+    } else if (state === uiObserver.NavDestinationState.ON_WILL_SHOW ||
+      state === uiObserver.NavDestinationState.ON_SHOWN || state === uiObserver.NavDestinationState.ON_APPEAR) {
+      page.visible = true;
+      page.retained = false;
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+      page.releaseTimer = -1;
+    }
+    this.notifyTransition();
+  }
+
+  private retainNavigationPage(page: ReplayNavigationPage): void {
+    page.visible = false;
+    page.retained = true;
+    if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+    page.releaseTimer = setTimeout((): void => {
+      page.releaseTimer = -1;
+      if (this.navigationPages.get(page.key) !== page || page.visible) return;
+      this.navigationPages.delete(page.key);
+      this.pageTransitions.delete(page.key);
+      this.notifyTransition();
+    }, 10000);
+  }
+
+  private clearNavigationPages(): void {
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+    });
+    this.navigationPages.clear();
+  }
+
+  private getRootScenePages(binding: SessionReplayRootBinding): Array<ArkUIReplayScenePage> {
+    return binding.scenePages ??
+      (binding.sceneRootIds.length > 0 ? binding.sceneRootIds : [binding.rootId])
+        .map((id: string): ArkUIReplayScenePage => {
+          return { key: id, rootId: id, root: binding.uiContext.getFrameNodeById(id), retained: false };
+        });
+  }
+
+  private getScenePages(binding: SessionReplayRootBinding): Array<ArkUIReplayScenePage> {
+    const roots = this.getRootScenePages(binding);
+    const result: Array<ArkUIReplayScenePage> = [];
+    this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+      const host = this.findNavigationHost(page.root, binding);
+      if (host !== null) page.parentKey = host;
+    });
+    const rootKeys = new Set<string>();
+    for (const root of roots) {
+      rootKeys.add(root.key);
+      result.push(root);
+      const children: Array<ReplayNavigationPage> = [];
+      this.navigationPages.forEach((page: ReplayNavigationPage): void => {
+        if (page.parentKey === root.key && (page.visible || page.retained)) children.push(page);
+      });
+      children.sort((left: ReplayNavigationPage, right: ReplayNavigationPage): number => left.paintOrder - right.paintOrder);
+      for (const page of children) result.push({ key: page.key, rootId: page.key, root: page.root,
+        retained: page.retained, parentKey: root.key, paintOrder: page.paintOrder });
+    }
+    this.navigationPages.forEach((page: ReplayNavigationPage, key: string): void => {
+      if (!rootKeys.has(page.parentKey)) {
+        if (page.releaseTimer !== -1) clearTimeout(page.releaseTimer);
+        this.navigationPages.delete(key);
+        this.pageTransitions.delete(key);
+      }
+    });
+    return result;
+  }
+
+  private refreshWindowSceneViewport(): void {
+    const nativeWindow = this.nativeWindow;
+    const binding = this.rootBinding;
+    if (nativeWindow === null || binding === null) return;
+    try {
+      const rect = nativeWindow.getWindowProperties().drawableRect;
+      const scale = binding.vpToPxScale > 0 ? binding.vpToPxScale : 1;
+      if (![rect.left, rect.top, rect.width, rect.height].every((value: number): boolean => Number.isFinite(value)) ||
+        rect.width <= 0 || rect.height <= 0) return;
+      this.sceneViewport = { x: rect.left / scale, y: rect.top / scale,
+        width: rect.width / scale, height: rect.height / scale };
+      const keyboard = nativeWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_KEYBOARD).bottomRect;
+      if (keyboard.width > 0 && keyboard.height > 0 && keyboard.top > rect.top &&
+        keyboard.left < rect.left + rect.width && keyboard.left + keyboard.width > rect.left) {
+        this.sceneViewport.height = Math.min(this.sceneViewport.height, (keyboard.top - rect.top) / scale);
+      }
+    } catch (_) { }
+  }
+
+  private attachWindowViewportObserver(nativeWindow: window.Window, epoch: number): void {
+    if (epoch !== this.windowObserverEpoch || this.rootBinding === null) return;
+    try {
+      const windowId = this.rootBinding.uiContext.getWindowId();
+      if (windowId !== undefined && windowId !== nativeWindow.getWindowProperties().id) return;
+    } catch (_) { }
+    this.nativeWindow = nativeWindow;
+    this.refreshWindowSceneViewport();
+    try { nativeWindow.on('windowSizeChange', this.windowSizeChangeListener); } catch (_) { }
+    try { nativeWindow.on('keyboardHeightChange', this.keyboardHeightChangeListener); } catch (_) { }
+    try { nativeWindow.on('avoidAreaChange', this.avoidAreaChangeListener); } catch (_) { }
+    this.scheduleViewportCapture();
+  }
+
   /** Reads the root's already normalized viewport dimensions from a snapshot. */
   private getViewportBounds(snapshot: SessionReplayRecord): SessionReplayViewportBounds | null {
     if (snapshot.type !== ReplayRecordType.FULL_SNAPSHOT) {
@@ -1255,11 +2063,19 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (data.wireframes.length === 0) {
       return null;
     }
-    const root = data.wireframes[0];
+    return this.getRootViewport(data.wireframes[0].width, data.wireframes[0].height);
+  }
+
+  private getRootViewport(width: number | undefined, height: number | undefined): SessionReplayViewportBounds | null {
+    if (width === undefined || height === undefined) return null;
+    const root: ReplayViewport = { width, height };
     if (!Number.isFinite(root.width) || !Number.isFinite(root.height) || root.width <= 0 || root.height <= 0) {
       return null;
     }
     const rootBounds: SessionReplayViewportBounds = { width: root.width, height: root.height };
+    // collectRootLight already clips a scene to the native keyboard boundary.
+    // Deducting its height here again leaves Meta/Resize and Full out of sync.
+    if (this.usesSceneCoordinates()) return rootBounds;
     let viewport = rootBounds;
     if (this.keyboardHeightPx > 0) {
       if (this.keyboardResizesRoot === null) {
@@ -1291,19 +2107,16 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }
     const epoch = ++this.windowObserverEpoch;
     try {
+      const name = uiContext.getWindowName();
+      if (name !== undefined) {
+        this.attachWindowViewportObserver(window.findWindow(name), epoch);
+        return;
+      }
+    } catch (_) { }
+    try {
       window.getLastWindow(hostContext)
         .then((nativeWindow: window.Window): void => {
-          if (epoch !== this.windowObserverEpoch || this.rootBinding === null) {
-            return;
-          }
-          this.nativeWindow = nativeWindow;
-          try {
-            nativeWindow.on('windowSizeChange', this.windowSizeChangeListener);
-            nativeWindow.on('keyboardHeightChange', this.keyboardHeightChangeListener);
-          } catch (_) {
-            // Compiler-injected root change callbacks remain available when a
-            // host window does not expose viewport events.
-          }
+          this.attachWindowViewportObserver(nativeWindow, epoch);
         })
         .catch((): void => {
           // A page can be detached while its UIContext is resolving a window.
@@ -1320,12 +2133,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (nativeWindow === null) {
       return;
     }
-    try {
-      nativeWindow.off('windowSizeChange', this.windowSizeChangeListener);
-      nativeWindow.off('keyboardHeightChange', this.keyboardHeightChangeListener);
-    } catch (_) {
-      // The window can already be destroyed during an Ability transition.
-    }
+    try { nativeWindow.off('windowSizeChange', this.windowSizeChangeListener); } catch (_) { }
+    try { nativeWindow.off('keyboardHeightChange', this.keyboardHeightChangeListener); } catch (_) { }
+    try { nativeWindow.off('avoidAreaChange', this.avoidAreaChangeListener); } catch (_) { }
   }
 
   /** Defers until ArkUI has applied the new window or IME layout. */
@@ -1339,11 +2149,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     }, 16);
   }
 
-  private resetViewportObservation(): void {
+  private resetViewportObservation(preserveWindowState: boolean = false): void {
     this.observedViewport = null;
-    this.observedRootViewport = null;
-    this.keyboardHeightPx = 0;
-    this.keyboardResizesRoot = null;
+    if (!preserveWindowState) {
+      this.observedRootViewport = null;
+      this.keyboardHeightPx = 0;
+      this.keyboardResizesRoot = null;
+    }
   }
 
   /**
@@ -1391,6 +2203,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         if (image.shapeStyle !== undefined) masked.shapeStyle = image.shapeStyle;
         if (image.border !== undefined) masked.border = image.border;
         if (image.permanentId !== undefined) masked.permanentId = image.permanentId;
+        if (image.clip !== undefined) masked.clip = image.clip;
+        if (image.zIndex !== undefined) masked.zIndex = image.zIndex;
         data.wireframes[index] = masked;
       } else {
         wireframe.resourceId = resourceId;

@@ -284,19 +284,20 @@ export class FTDBManager extends DBManager {
 
   /**
    * Extract unique identifier from line protocol data string for deduplication
-   * @param dataType Data type
-   * @param dataString Line protocol data string
-   * @returns Unique identifier string, or null if cannot extract
-   */
-  /**
-   * Extract unique identifier from line protocol data string for deduplication
-   * Strategy: Priority 1) Business ID (action_id, view_id, etc.), Priority 2) timestamp
+   * Resource events bypass semantic deduplication; other measurements retain
+   * their existing business-ID/timestamp rules.
    * @param dataType Data type
    * @param dataString Line protocol data string
    * @returns Unique identifier string, or null if cannot extract
    */
   private extractUniqueId(dataType: DataType, dataString: string): string | null {
     try {
+      // Each resource is an independent event, as in Android persistence.
+      // Shared timestamps, URLs and trace/span IDs do not identify duplicates.
+      if (dataString.startsWith('resource,')) {
+        return null;
+      }
+
       // For action data: extract action_id (priority 1)
       if (dataString.startsWith('action,')) {
         const actionIdMatch = dataString.match(/action_id=([^,\s]+)/);
@@ -310,18 +311,6 @@ export class FTDBManager extends DBManager {
         const viewIdMatch = dataString.match(/view_id=([^,\s]+)/);
         if (viewIdMatch && viewIdMatch[1]) {
           return `view_id=${viewIdMatch[1]}`;
-        }
-      }
-
-      // For resource data: extract span_id or trace_id (priority 1)
-      if (dataString.startsWith('resource,')) {
-        const spanIdMatch = dataString.match(/span_id=([^,\s]+)/);
-        if (spanIdMatch && spanIdMatch[1]) {
-          return `span_id=${spanIdMatch[1]}`;
-        }
-        const traceIdMatch = dataString.match(/trace_id=([^,\s]+)/);
-        if (traceIdMatch && traceIdMatch[1]) {
-          return `trace_id=${traceIdMatch[1]}`;
         }
       }
 
@@ -367,8 +356,7 @@ export class FTDBManager extends DBManager {
         }
       }
 
-      // Priority 2: Use timestamp as fallback for all data types
-      // All line protocol data ends with timestamp, so this is a reliable fallback
+      // Legacy fallback for non-resource measurements only.
       const timestampMatch = dataString.match(/\s(\d+)$/);
       if (timestampMatch && timestampMatch[1]) {
         return `timestamp=${timestampMatch[1]}`;

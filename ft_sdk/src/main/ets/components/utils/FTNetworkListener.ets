@@ -6,6 +6,7 @@ import { DeviceUtils } from './DeviceUtils';
 import { FTInnerLogger } from '../log/FTLogger';
 import { SyncTaskManager } from '../SyncTaskManager';
 import { SDKRumResourceNetworkSnapshotDTO } from '../thread/SDKWorkerProtocol';
+import { FTSessionReplayBridgeRegistry } from '../sessionreplay/FTSessionReplayBridge';
 
 const TAG = "FTNetworkListener";
 
@@ -381,6 +382,7 @@ export class FTNetworkListener {
       snapshot.signalStrength = cachedWifiSignal;
     }
     this.resourceNetworkSnapshot = snapshot;
+    FTSessionReplayBridgeRegistry.updateReplayUploadNetworkAvailability(true);
     if (isWifi) {
       this.refreshWifiSignal(netId, this.networkRevision);
     }
@@ -543,12 +545,14 @@ export class FTNetworkListener {
     this.currentNetworkIsWifi = false;
     this.wifiSignalRefreshRevision = 0;
     this.resourceNetworkSnapshot = { available: false };
+    FTSessionReplayBridgeRegistry.updateReplayUploadNetworkAvailability(false);
   }
 
   private resumePendingUploadAfterNetworkRecovery(reason: string): void {
     // SyncTaskManager coalesces duplicate platform callbacks and delays the
     // recovery request briefly, allowing HarmonyOS to finish route setup.
     FTInnerLogger.i(TAG, `Network recovery (${reason}); scheduling pending upload`);
+    FTSessionReplayBridgeRegistry.updateReplayUploadNetworkAvailability(true);
     SyncTaskManager.getInstance().updateNetworkAvailability(true, true);
   }
 

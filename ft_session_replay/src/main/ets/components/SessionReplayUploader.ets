@@ -6,16 +6,17 @@ import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import {
-  ANDROID_REPLAY_ENDPOINTS,
+  HARMONY_REPLAY_ENDPOINTS,
   HARMONY_REPLAY_SOURCE,
-  ReplayRecordType,
-  serializeAndroidReplayMobileSegment
+  isReplayFullSnapshot,
+  serializeHarmonyReplayMobileSegment
 } from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 
 const UPLOAD_CONNECT_TIMEOUT_MS = 60_000;
 const UPLOAD_READ_TIMEOUT_MS = 60_000;
 const HARMONY_REPLAY_SDK_NAME = 'df_harmonyos_rum_sdk';
+export const REPLAY_MAX_BATCHES_PER_UPLOAD_JOB: number = 10;
 
 /** Observable result of an explicit Replay flush. Failed segments remain local. */
 export interface SessionReplayUploadResult {
@@ -29,7 +30,7 @@ export interface SessionReplayUploadResult {
   remainingSegments: number;
 }
 
-/** Android-compatible multipart fields generated for one durable Replay segment. */
+/** HarmonyOS-compatible multipart fields generated for one durable Replay segment. */
 export interface SessionReplayUploadFields {
   fields: Map<string, string>;
   rawSegment: string;
@@ -68,34 +69,57 @@ interface SessionReplayRequestHeaders {
 }
 
 /**
- * Resolves the Android Replay intake route using the same DataKit/Dataway URL
+ * Resolves the HarmonyOS Replay intake route using the same DataKit/Dataway URL
  * grammar as the core SDK's telemetry uploader.
  */
-export function createAndroidReplayUploadUrl(
+export function createHarmonyReplayUploadUrl(
   datakitUrl: string,
   datawayUrl: string,
   clientToken: string
 ): string {
   const datakit = datakitUrl.trim();
   const dataway = datawayUrl.trim();
-  const host = datakit.length > 0 ? datakit : dataway;
-  if (host.length === 0) {
+  if (!isReplayUploadEndpointAvailable(datakit, dataway, clientToken)) {
     return '';
   }
-  const path = ANDROID_REPLAY_ENDPOINTS.records;
+  const host = datakit.length > 0 ? datakit : dataway;
+  const path = HARMONY_REPLAY_ENDPOINTS.records;
   const normalizedHost = host.endsWith('/') ? host.substring(0, host.length - 1) : host;
   if (datakit.length > 0) {
     return `${normalizedHost}/${path}?precision=ns`;
   }
-  return `${normalizedHost}/${path}?token=${clientToken}&to_headless=true&precision=ns`;
+  return `${normalizedHost}/${path}?token=${encodeURIComponent(clientToken.trim())}&to_headless=true&precision=ns`;
 }
 
-/** Android-aligned retry classification for the record intake queue. */
-export function isRetryableReplayUploadStatus(code: number): boolean {
-  return code === 0 || code === 408 || code === 429 || code >= 500;
+/** Matches the core SDK and HarmonyOS preflight rules for DataKit/Dataway endpoints. */
+export function isReplayUploadEndpointAvailable(
+  datakitUrl: string,
+  datawayUrl: string,
+  clientToken: string
+): boolean {
+  const datakit = datakitUrl.trim();
+  if (datakit.length > 0) {
+    return isValidReplayHttpUrl(datakit);
+  }
+  return isValidReplayHttpUrl(datawayUrl.trim()) && clientToken.trim().length > 0;
 }
 
-/** Creates Android-aligned form fields and the newline-delimited record payload. */
+/** Rejects relative, non-HTTP(S), hostless and whitespace-containing upload URLs before I/O. */
+export function isValidReplayHttpUrl(value: string): boolean {
+  return /^https?:\/\/(?:\[[0-9a-f:.]+\]|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?))*)(?::\d+)?(?:[/?#][^\s]*)?$/i.test(value);
+}
+
+/** HarmonyOS Replay retries every non-200 response except 4xx; invalid local payloads are final. */
+export function isRetryableReplayUploadStatus(code: number, invalid: boolean = false): boolean {
+  if (invalid || code === http.ResponseCode.OK) return false;
+  return code < 400 || code >= 500;
+}
+
+export function shouldDiscardReplayUploadStatus(code: number, invalid: boolean = false): boolean {
+  return invalid || (code >= 400 && code < 500);
+}
+
+/** Creates HarmonyOS-aligned form fields and the newline-delimited record payload. */
 export function createSessionReplayUploadFields(
   segment: SessionReplayStoredSegment,
   env: string,
@@ -109,13 +133,13 @@ export function createSessionReplayUploadFields(
     const record = records[index];
     start = Math.min(start, record.timestamp);
     end = Math.max(end, record.timestamp);
-    if (record.type === ReplayRecordType.FULL_SNAPSHOT) {
+    if (isReplayFullSnapshot(record)) {
       hasFullSnapshot = true;
     }
   }
-  // Android converts its persisted EnrichedRecord to MobileSegment here. The
+  // HarmonyOS converts its persisted EnrichedRecord to MobileSegment here. The
   // Studio player expects this final structure, not the persisted envelope.
-  const rawSegment = `${serializeAndroidReplayMobileSegment(segment.context, records)}\n`;
+  const rawSegment = `${serializeHarmonyReplayMobileSegment(segment.context, records)}\n`;
   const fields = new Map<string, string>();
   fields.set('start', String(start));
   fields.set('end', String(end));
@@ -144,7 +168,7 @@ export function createSessionReplayUploadFields(
 
 /**
  * Uploads durable segments one by one. A file is removed only after the
- * Replay endpoint returns HTTP 200, matching Android's acknowledgement rule.
+ * Replay endpoint returns HTTP 200, matching HarmonyOS's acknowledgement rule.
  */
 export class SessionReplayUploader {
   private readonly store: SessionReplaySegmentStore;
@@ -166,12 +190,12 @@ export class SessionReplayUploader {
 
   public async uploadPending(readySegments?: Array<SessionReplayStoredSegment>): Promise<SessionReplayUploadResult> {
     const target = this.resolveTarget();
-    const pending = readySegments ?? this.store.list();
+    const pending = (readySegments ?? this.store.list()).slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB);
     if (pending.length === 0) {
       return this.result(true, 200, 'No pending Session Replay segments.', 0, 0);
     }
     if (target === null) {
-      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, true, true);
+      return this.result(false, 0, 'No Replay upload endpoint is configured.', 0, 0, false, true);
     }
 
     const appVersion = this.route?.appVersion ?? this.getAppVersion();
@@ -182,6 +206,14 @@ export class SessionReplayUploader {
       attemptedSegments++;
       const status = await this.uploadSegment(target, segment, appVersion);
       if (status.code !== http.ResponseCode.OK) {
+        if (shouldDiscardReplayUploadStatus(status.code)) {
+          const removed = this.removeAcknowledged === null ? this.store.remove([segment.id]) :
+            await this.removeAcknowledged([segment.id]);
+          return this.result(false, status.code, removed
+            ? `${status.message} The non-retryable segment was discarded.`
+            : `${status.message} The non-retryable segment could not be removed.`,
+          attemptedSegments, uploadedSegments, !removed);
+        }
         return this.result(false, status.code, status.message, attemptedSegments, uploadedSegments,
           isRetryableReplayUploadStatus(status.code));
       }
@@ -198,20 +230,21 @@ export class SessionReplayUploader {
 
   private resolveTarget(): SessionReplayUploadTarget | null {
     if (this.route !== null) {
-      const url = this.route.uploadUrl.length > 0 ? this.route.uploadUrl : createAndroidReplayUploadUrl(
+      const override = this.route.uploadUrl.trim();
+      const url = override.length > 0 ? (isValidReplayHttpUrl(override) ? override : '') : createHarmonyReplayUploadUrl(
         this.route.datakitUrl, this.route.datawayUrl, this.route.clientToken);
       return url.length === 0 ? null : { url, env: this.route.env };
     }
     const installedConfig = FTSDK.getSDKConfig();
     const env = installedConfig === null ? 'prod' : installedConfig.getEnv();
-    const override = this.config.getUploadUrl();
+    const override = this.config.getUploadUrl().trim();
     if (override.length > 0) {
-      return { url: override, env };
+      return isValidReplayHttpUrl(override) ? { url: override, env } : null;
     }
     if (installedConfig === null) {
       return null;
     }
-    const url = createAndroidReplayUploadUrl(
+    const url = createHarmonyReplayUploadUrl(
       installedConfig.getDatakitUrl(),
       installedConfig.getDatawayUrl(),
       installedConfig.getClientToken()

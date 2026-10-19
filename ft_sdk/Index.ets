@@ -156,6 +156,8 @@ export {
 
 export { JsReceiver } from './src/main/ets/components/web/WebAppInterface';
 export { FTWebViewHandler } from './src/main/ets/components/web/FTWebViewHandler';
+// Runtime contract for the Hvigor Web-to-FrameNode transform; not a slot-ID API.
+export { FTWebViewReplayBridge } from './src/main/ets/components/web/FTWebViewReplayBridge';
 
 // Optional Session Replay HAR bridge. The core SDK keeps a no-op registry until
 // a replay module explicitly registers a bridge implementation.
@@ -171,6 +173,7 @@ export {
   FTSessionReplayWebViewOptions,
   FTSessionReplayViewMetadata
 } from './src/main/ets/components/sessionreplay/FTSessionReplayBridge';
+export { WebReplaySlotObservation } from './src/main/ets/components/sessionreplay/WebReplaySlotBinder';
 
 // ============================================================================
 // Network Auto Track Helpers

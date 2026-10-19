@@ -14,7 +14,6 @@ struct SessionReplayPocPage {
   @State showMutationProbe: boolean = false;
   @State replayEnabled: boolean = false;
   @State uploadInFlight: boolean = false;
-  private bridgeViewActive: boolean = false;
   private readonly replay: FTSessionReplay = FTSessionReplay.getInstance();
 
   aboutToAppear(): void {
@@ -24,31 +23,9 @@ struct SessionReplayPocPage {
     }
   }
 
-  aboutToDisappear(): void {
-    if (!this.bridgeViewActive) {
-      return;
-    }
-    FTRUMGlobalManager.getInstance().stopView()
-      .then(() => {
-        this.bridgeViewActive = false;
-      })
-      .catch(() => {
-        this.bridgeViewActive = false;
-      });
-  }
-
   private toggleReplay(): void {
     if (this.replayEnabled) {
-      if (this.bridgeViewActive) {
-        FTRUMGlobalManager.getInstance().stopView()
-          .then(() => {
-            this.bridgeViewActive = false;
-            this.disableReplay();
-          })
-          .catch(() => this.disableReplay());
-      } else {
-        this.disableReplay();
-      }
+      this.disableReplay();
       return;
     }
     if (!this.requireRUMBridge()) {
@@ -109,7 +86,7 @@ struct SessionReplayPocPage {
         sessionId: capture.envelope.session_id,
         viewId: capture.envelope.view_id
       }).length;
-      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; durable resources: ${this.replay.getStoredResources().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; durable resources: ${this.replay.getStoredResources().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload}`;
     }, 200);
   }
 
@@ -122,7 +99,7 @@ struct SessionReplayPocPage {
           applicationId: capture.envelope.application_id,
           sessionId: capture.envelope.session_id,
           viewId: capture.envelope.view_id
-        }).length}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
+        }).length}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload}`;
         return;
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
@@ -134,7 +111,7 @@ struct SessionReplayPocPage {
       this.result = `${source} was ignored. Enable Replay and start the RUM View bridge first.`;
       return;
     }
-    this.result = `${source} captured.\n${payload.substring(0, 600)}`;
+    this.result = `${source} captured.\n${payload}`;
   }
 
   private recordFocusLoss(): void {
@@ -145,11 +122,6 @@ struct SessionReplayPocPage {
   private recordViewportResize(): void {
     const capture = this.replay.recordViewportResize(vp2px(720), vp2px(360));
     this.showLifecycleSignal('Viewport resize signal', capture === null ? null : capture.payload);
-  }
-
-  private recordTouchSignal(): void {
-    const capture = this.replay.recordTouch('down', 1, vp2px(120), vp2px(160));
-    this.showLifecycleSignal('Touch signal', capture === null ? null : capture.payload);
   }
 
   private uploadDurableSegments(): void {
@@ -172,206 +144,162 @@ struct SessionReplayPocPage {
       });
   }
 
+  onPageShow(): void {
+    this.replayEnabled = this.replay.isEnabled();
+  }
+
+  private captureViewBridge(): void {
+    if (!this.requireRUMBridge()) return;
+    FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
+      .then(() => {
+        this.showBridgeCapture('RUM View bridge');
+      })
+      .catch((error: Error) => {
+        this.result = `RUM View bridge failed: ${error.message}`;
+      });
+  }
+
+  private captureErrorBridge(): void {
+    if (!this.requireRUMBridge()) return;
+    FTRUMGlobalManager.getInstance().addError(
+      'SessionReplayPocError', 'Manual bridge verification error', ErrorType.CUSTOM, AppState.RUN
+    );
+    this.showBridgeCapture('RUM Error bridge');
+  }
+
+  private captureFullSnapshot(): void {
+    try {
+      const globalContext: SessionReplayGlobalContext = {};
+      globalContext['wgt_id'] = 'harmony-poc';
+      const context: SessionReplayContext = {
+        applicationId: 'harmony-session-replay-poc',
+        sessionId: 'poc-session-id',
+        viewId: 'poc-view-id',
+        globalContext
+      };
+      const capture = this.replay.captureFullSnapshot(
+        this.getUIContext(), 'session-replay-poc-root', context, vp2px(1)
+      );
+      this.result = `Captured ${capture.wireframeCount} wireframes.\n${capture.payload}`;
+    } catch (error) {
+      this.result = `Capture failed: ${String(error)}`;
+    }
+  }
+
+  private captureIncrementalMutation(): void {
+    const previousCapture = this.replay.getLastCapture();
+    if (previousCapture === null) {
+      this.result = 'Capture through the RUM View Bridge first to establish a Full Snapshot baseline.';
+      return;
+    }
+    this.showMutationProbe = !this.showMutationProbe;
+    setTimeout(() => {
+      try {
+        const context: SessionReplayContext = {
+          applicationId: previousCapture.envelope.application_id,
+          sessionId: previousCapture.envelope.session_id,
+          viewId: previousCapture.envelope.view_id
+        };
+        const capture = this.replay.captureIncrementalSnapshot(
+          this.getUIContext(), 'session-replay-poc-root', context, vp2px(1)
+        );
+        this.result = capture === null
+          ? 'No structural mutation detected after the baseline.'
+          : `Mutation captured with type ${capture.record.type}.\n${capture.payload}`;
+      } catch (error) {
+        this.result = `Mutation capture failed: ${String(error)}`;
+      }
+    }, 80);
+  }
+
+  @Builder
+  private sectionTitle(title: string, description: string) {
+    Column({ space: 6 }) {
+      Text(title).fontSize(18).fontWeight(FontWeight.Medium)
+      Text(description).fontSize(13).fontColor('#64748B')
+    }
+    .width('100%').alignItems(HorizontalAlign.Start)
+  }
+
   build() {
     Column() {
+      Row({ space: 12 }) {
+        Button('返回').height(36).onClick(() => router.back())
+        Text('Session Replay 功能测试').fontSize(21).fontWeight(FontWeight.Bold).layoutWeight(1)
+      }
+      .width('100%').padding(16).backgroundColor(Color.White)
       Scroll() {
         Column({ space: 16 }) {
-          Text('Session Replay Demo')
-            .fontSize(24)
-            .fontWeight(FontWeight.Bold)
-          Image($r('app.media.startIcon'))
-            .id('session-replay-poc-image')
-            .width(72)
-            .height(72)
-            .objectFit(ImageFit.Contain)
-          Text('API 12 FrameNode collection → Android replay envelope')
-            .fontSize(14)
-            .fontColor('#666666')
-          Column({ space: 8 }) {
-            Text('功能说明')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-            Text('采集 ArkUI / ArkWeb 的页面结构和增量变化，并关联 RUM View、错误、焦点、视口及触摸信号，生成可上传到 Studio 的会话回放数据。')
-              .fontSize(14)
-              .fontColor('#444444')
-          }
-          .width('90%')
-          .padding(14)
-          .backgroundColor('#EEF6FF')
-          .borderRadius(10)
-          Column({ space: 8 }) {
-            Text('如何开启会话回放')
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-            Text('1. 使用非空 appId 启动 Demo，然后点击 Enable Session Replay 手动开启。\n2. 点击 Capture through RUM View Bridge 建立关联的 RUM View。\n3. 使用其他采集按钮验证记录；配置 DataKit / Dataway 后点击 Upload Durable Replay Segments 上传。')
-              .fontSize(14)
-              .fontColor('#444444')
-            Text('提示：此验证页面将触摸隐私设为 SHOW；生产环境建议保留默认 HIDE。')
-              .fontSize(12)
-              .fontColor('#9A6700')
-          }
-          .width('90%')
-          .padding(14)
-          .backgroundColor('#FFF8E6')
-          .borderRadius(10)
+          this.sectionTitle('录制与上传', '开启会话回放 → 进入复杂组件采集测试页操作 → 返回本页上传 → 在 Studio 对照回放。')
           Text(this.replayEnabled ? '当前状态：会话回放已开启' : '当前状态：会话回放未开启')
-            .width('90%')
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
+            .id('session-replay-status')
+            .width('100%').fontSize(14).fontWeight(FontWeight.Medium)
             .fontColor(this.replayEnabled ? '#15803D' : '#B91C1C')
           Button(this.replayEnabled ? 'Disable Session Replay' : 'Enable Session Replay')
-            .width('90%')
-            .height(48)
+            .id('session-replay-enable-button')
+            .width('100%').height(48)
             .backgroundColor(this.replayEnabled ? '#B91C1C' : '#15803D')
             .onClick(() => this.toggleReplay())
+          Button(this.uploadInFlight ? 'Uploading Replay Segments...' : 'Upload Durable Replay Segments')
+            .id('session-replay-upload-button')
+            .width('100%').height(48).enabled(!this.uploadInFlight)
+            .onClick(() => this.uploadDurableSegments())
+          Button('复杂组件采集测试页')
+            .id('session-replay-transition-button')
+            .width('100%').height(48).backgroundColor('#0E7490')
+            .onClick(() => router.pushUrl({ url: 'pages/SessionReplayTransitionPage' }))
+          Divider()
+          this.sectionTitle('RUM 关联与快照', '使用非空 appId 启动 Demo；分别验证 View、错误关联、完整快照和增量快照。')
           Button('Capture through RUM View Bridge')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => {
-              if (!this.requireRUMBridge()) {
-                return;
-              }
-              FTRUMGlobalManager.getInstance().startView('session-replay-poc-bridge')
-                .then(() => {
-                  this.bridgeViewActive = true;
-                  this.showBridgeCapture('RUM View bridge');
-                })
-                .catch((error: Error) => {
-                  this.result = `RUM View bridge failed: ${error.message}`;
-                });
-            })
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.captureViewBridge())
           Button('Capture through RUM Error Bridge')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => {
-              if (!this.requireRUMBridge()) {
-                return;
-              }
-              FTRUMGlobalManager.getInstance().addError(
-                'SessionReplayPocError',
-                'Manual bridge verification error',
-                ErrorType.CUSTOM,
-                AppState.RUN
-              );
-              this.showBridgeCapture('RUM Error bridge');
-            })
-          Button('Toggle Layout for Automatic Observation')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => this.triggerAutomaticObservation())
-          Button('Emit Focus Loss Signal')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => this.recordFocusLoss())
-          Button('Emit Viewport Resize Signal')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => this.recordViewportResize())
-          Button('Emit Touch Signal')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => this.recordTouchSignal())
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.captureErrorBridge())
+          Button('Capture Full Snapshot')
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.captureFullSnapshot())
           Button('Capture Incremental Mutation')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => {
-              const previousCapture = this.replay.getLastCapture();
-              if (previousCapture === null) {
-                this.result = 'Capture through the RUM View Bridge first to establish a Full Snapshot baseline.';
-                return;
-              }
-              this.showMutationProbe = !this.showMutationProbe;
-              setTimeout(() => {
-                try {
-                  const context: SessionReplayContext = {
-                    applicationId: previousCapture.envelope.application_id,
-                    sessionId: previousCapture.envelope.session_id,
-                    viewId: previousCapture.envelope.view_id
-                  };
-                  const capture = this.replay.captureIncrementalSnapshot(
-                    this.getUIContext(),
-                    'session-replay-poc-root',
-                    context,
-                    vp2px(1)
-                  );
-                  this.result = capture === null
-                    ? 'No structural mutation detected after the baseline.'
-                    : `Mutation captured with type ${capture.record.type}.\n${capture.payload.substring(0, 600)}`;
-                } catch (error) {
-                  this.result = `Mutation capture failed: ${String(error)}`;
-                }
-              }, 80);
-            })
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.captureIncrementalMutation())
+          Image($r('app.media.startIcon'))
+            .id('session-replay-poc-image').width(48).height(48).objectFit(ImageFit.Contain)
           if (this.showMutationProbe) {
             Text('Incremental layout probe')
-              .fontSize(16)
-              .padding(12)
-              .backgroundColor('#DDF4FF')
+              .id('session-replay-functional-mutation')
+              .width('100%').padding(12).backgroundColor('#DDF4FF')
           }
-          Button('Capture Full Snapshot')
-            .width('90%')
-            .height(48)
-            .enabled(this.replayEnabled)
-            .onClick(() => {
-              try {
-                const globalContext: SessionReplayGlobalContext = {};
-                globalContext['wgt_id'] = 'harmony-poc';
-                const context: SessionReplayContext = {
-                  applicationId: 'harmony-session-replay-poc',
-                  sessionId: 'poc-session-id',
-                  viewId: 'poc-view-id',
-                  globalContext
-                };
-                const capture = this.replay.captureFullSnapshot(
-                  this.getUIContext(),
-                  'session-replay-poc-root',
-                  context,
-                  vp2px(1)
-                );
-                this.result = `Captured ${capture.wireframeCount} wireframes.\n${capture.payload.substring(0, 600)}`;
-              } catch (error) {
-                this.result = `Capture failed: ${String(error)}`;
-              }
-            })
-          Button(this.uploadInFlight ? 'Uploading Replay Segments...' : 'Upload Durable Replay Segments')
-            .width('90%')
-            .height(48)
-            .enabled(!this.uploadInFlight)
-            .onClick(() => this.uploadDurableSegments())
+          Divider()
+          this.sectionTitle('自动观察与生命周期', '验证布局变化、焦点丢失、视口变化及默认 Router 页面切换。')
+          Button('Toggle Layout for Automatic Observation')
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.triggerAutomaticObservation())
+          Button('Emit Focus Loss Signal')
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.recordFocusLoss())
+          Button('Emit Viewport Resize Signal')
+            .width('100%').height(48).enabled(this.replayEnabled)
+            .onClick(() => this.recordViewportResize())
+          Button('Default Router Transition')
+            .id('session-replay-default-transition-button')
+            .width('100%').height(48)
+            .onClick(() => router.pushUrl({ url: 'pages/SessionReplayDefaultTransitionPage' }))
           Column({ space: 8 }) {
-            Text('验证输出')
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-            Text(this.result)
-              .width('100%')
-              .fontSize(12)
-              .fontColor('#333333')
+            Text('验证输出').fontSize(16).fontWeight(FontWeight.Medium)
+            Text(this.result).width('100%').fontSize(12).fontColor('#333333')
           }
-          .width('90%')
-          .padding(12)
-          .backgroundColor('#F6F8FA')
-          .borderRadius(10)
-          Button('Back')
-            .width('90%')
-            .height(44)
-            .onClick(() => router.back())
+          .width('100%').padding(14).backgroundColor('#EEF6FF').borderRadius(10)
         }
-        .width('100%')
-        .padding(20)
-        .alignItems(HorizontalAlign.Center)
+        .width('100%').padding(20).alignItems(HorizontalAlign.Start)
       }
-      .width('100%')
-      .layoutWeight(1)
+      .width('100%').layoutWeight(1)
     }
     .id('session-replay-poc-root')
-    .width('100%')
-    .height('100%')
+    .width('100%').height('100%').backgroundColor('#F8FAFC')
   }
+
+  // pageTransition(): void {
+  //   PageTransitionEnter({ type: RouteType.None, duration: 0 })
+  //   PageTransitionExit({ type: RouteType.None, duration: 0 })
+  // }
 }

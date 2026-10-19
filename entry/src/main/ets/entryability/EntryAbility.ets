@@ -438,6 +438,7 @@ export default class EntryAbility extends UIAbility {
         })
         .setEnv(EnvType.GRAY)
         .setServiceName('HarmonyOS-Test-App')
+        .setEnableAccessDeviceID(true)
         // Official cache governance configuration.
         .enableLimitWithCacheSize(30 * 1024 * 1024)
         .setCacheDiscard('discard')
@@ -502,6 +503,7 @@ export default class EntryAbility extends UIAbility {
       }
       const rumConfig = new FTRUMConfig()
         .setRumAppId(appId)
+        .setEnableTraceWebView(true)
         .setEnableTrackAppCrash(true)  // JS and native crash monitoring
         .setSessionSamplingRate(Number(this.runtimeConfig.sessionSamplingRate))
         .setSessionOnErrorSamplingRate(Number(this.runtimeConfig.sessionOnErrorSamplingRate))
@@ -526,18 +528,21 @@ export default class EntryAbility extends UIAbility {
       const sessionReplayConfig = new FTSessionReplayConfig()
         .setSampleRate(1)
         .setSessionReplayOnErrorSampleRate(0)
+        // .setUploadIntervalMs(0)
+        // .setSnapshotIntervalMs(16)
         // Preserve ordinary demo copy and local assets while keeping text-input
         // privacy on. The library defaults remain MASK_ALL/MASK_ALL for apps
         // that do not explicitly select this validation profile.
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
+        // Demo passwords are synthetic; replay the explicit eye-toggle state.
+        .setCaptureVisiblePassword(true)
         .setImagePrivacy(ImagePrivacy.MASK_NONE)
         .setTouchPrivacy(TouchPrivacy.SHOW)
         .setDelayInit(true);
       FTSessionReplay.getInstance().init(sessionReplayConfig, context.filesDir);
-      FTSDK.installRUMConfig(rumConfig);
-      DemoLogger.i(LOG_TAG, 'Session Replay configured for manual start');
 
-      // Bind user data using new UserData class with persistence
+      // RUM readiness can immediately emit a cached cold-launch result. Bind
+      // the demo identity first so ApplicationLaunch captures the same user.
       const userData = new UserData();
       userData.setId("harmonyos.guance.userid");
       userData.setName("harmonyos_user_guance_test");
@@ -545,6 +550,9 @@ export default class EntryAbility extends UIAbility {
       userData.addExt("ft_key", "ft_value");
 
       FTSDK.bindRumUserData(userData);
+
+      FTSDK.installRUMConfig(rumConfig);
+      DemoLogger.i(LOG_TAG, 'Session Replay configured for manual start');
 
       // Initialize trace configuration
       const traceConfig = new FTTraceConfig()

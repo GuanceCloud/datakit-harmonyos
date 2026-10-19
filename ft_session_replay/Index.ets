@@ -11,11 +11,11 @@ export {
   TouchPrivacy
 } from './src/main/ets/components/FTSessionReplayConfig';
 export {
-  ANDROID_REPLAY_ENDPOINTS,
+  HARMONY_REPLAY_ENDPOINTS,
   HARMONY_REPLAY_SOURCE,
-  AndroidReplayEndpoints,
-  AndroidReplayEntityReference,
-  AndroidReplayMobileSegment,
+  HarmonyReplayEndpoints,
+  HarmonyReplayEntityReference,
+  HarmonyReplayMobileSegment,
   FullSnapshotData,
   ReplayFocusData,
   ReplayImageWireframe,
@@ -40,21 +40,26 @@ export {
   SessionReplayRecord,
   ReplayWireframe,
   ReplayWireframeBase,
+  ReplayWireframeClip,
   ReplayWireframeUpdate,
   createReplayEnvelope,
   serializeReplayEnvelope,
-  createAndroidReplayMobileSegment,
-  serializeAndroidReplayMobileSegment
+  createHarmonyReplayMobileSegment,
+  serializeHarmonyReplayMobileSegment
 } from './src/main/ets/components/SessionReplayProtocol';
 export {
   ArkUIReplayCollector,
   ArkUIReplayLightNode,
   ArkUIReplayLightSnapshot,
+  ArkUIReplayPageTransition,
+  ArkUIReplaySceneBounds,
+  ArkUIReplayScenePage,
   CapturedReplayImageResource
 } from './src/main/ets/components/ArkUIReplayCollector';
 export { ReplaySnapshotProcessor } from './src/main/ets/components/ReplaySnapshotProcessor';
 export { SessionReplaySampler, SessionReplaySamplingMode } from './src/main/ets/components/SessionReplaySampler';
 export { FTSessionReplay } from './src/main/ets/components/FTSessionReplay';
+export { ReplayVideoState, ReplayVideoFrameProvider } from './src/main/ets/components/ReplayVideoCapture';
 // Runtime contract used only by the Guance Hvigor Replay page-root transform.
 // Applications should use FTSessionReplay for initialization and configuration.
 export { FTSessionReplayAutoRootBridge } from './src/main/ets/components/FTSessionReplayAutoRootBridge';
@@ -67,7 +72,7 @@ export {
   SessionReplayUploader,
   SessionReplayUploadFields,
   SessionReplayUploadResult,
-  createAndroidReplayUploadUrl,
+  createHarmonyReplayUploadUrl,
   createSessionReplayUploadFields,
   isRetryableReplayUploadStatus
 } from './src/main/ets/components/SessionReplayUploader';
@@ -78,6 +83,7 @@ export {
 export {
   SessionReplayResourceUploader,
   SessionReplayResourceUploadResult,
-  createAndroidReplayResourceUrl
+  createHarmonyReplayResourceUrl
 } from './src/main/ets/components/SessionReplayResourceUploader';
 export { FTSessionReplayRecorder, SessionReplayCapture } from './src/main/ets/components/FTSessionReplayRecorder';
+export { ReplayResourceCleanupResult } from './src/main/ets/components/ReplayResourceCleanup';

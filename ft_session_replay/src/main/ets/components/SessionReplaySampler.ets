@@ -8,7 +8,7 @@ export enum SessionReplaySamplingMode {
 }
 
 /**
- * Deterministic session sampler aligned with Android's regular-then-error
+ * Deterministic session sampler aligned with HarmonyOS's regular-then-error
  * decision order. A session never switches mode during its lifetime.
  */
 export class SessionReplaySampler {

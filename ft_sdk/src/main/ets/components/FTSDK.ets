@@ -37,6 +37,7 @@ import { FTRUMConfigManager } from "./rum/FTRUMConfigManager";
 import { FTMonitorManager } from "./rum/FTMonitorManager";
 import { DeviceUtils } from "./utils/DeviceUtils";
 import { DeviceUUIDManager } from "./utils/DeviceUUIDManager";
+import { SDKProcessGuard } from "./utils/SDKProcessGuard";
 import { AppUtils } from "./utils/AppUtils";
 import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
@@ -420,6 +421,10 @@ export class FTSDK {
         return;
       }
 
+      if (!SDKProcessGuard.canInstall(sdkConfig.isOnlySupportMainProcess(), context)) {
+        return;
+      }
+
       FTSDK.resetInitializationSeparatorState();
       FTLogSeparator.initialization(TAG, "FTSDK 初始化开始");
 
@@ -430,19 +435,6 @@ export class FTSDK {
       } else {
         FTInnerLogger.w(TAG, "Context is not UIAbilityContext, Utils.init() skipped");
       }
-
-      // if (ftSDKConfig.isOnlySupportMainProcess()) {
-      //   const currentProcessName = Utils.getCurrentProcessName();
-      //   const packageName = context.getPackageName();
-      //
-      //   if (packageName && packageName !== currentProcessName) {
-      //     FTInnerLogger.e(
-      //       "FTManager",
-      //       `SDK can only run in main process, current process is ${currentProcessName}. To run in non-main process, call FTSDKConfig.setOnlySupportMainProcess(false)`
-      //     );
-      //     return;
-      //   }
-      // }
 
       FTSDK.ftSdk = new FTSDK(sdkConfig);
       FTSDK.ftSdk.initFTConfig(sdkConfig);
@@ -460,7 +452,7 @@ export class FTSDK {
     // Get context from Utils (unified context management)
     const context = getFTSDKRuntime().getAbilityContext();
 
-    // Android applies persisted remote configuration before the SDK's dependent
+    // Apply persisted remote configuration before the SDK's dependent
     // managers are initialized. Preferences has a synchronous HarmonyOS API,
     // which lets us preserve that startup ordering without changing FTSDK.install.
     if (config.isRemoteConfiguration()) {
@@ -538,9 +530,16 @@ export class FTSDK {
     // Initialize base configuration
     if (context) {
       FTTrackInner.getInstance().initBaseConfig(config, context);
+      DeviceUUIDManager.getInstance().setRestoreListenerInternal((): void => {
+        // Recovery can finish after a runtime switch or SDK reinstall. Always
+        // recompute using the currently installed configuration.
+        const currentConfig = FTSDK.getInstalledConfig();
+        if (currentConfig !== null) {
+          FTSDK.updateDeviceUUIDContext(currentConfig);
+        }
+      });
       FTRUMInnerManager.getInstance().initContext(context);
       FTCrashFreeDurationManager.getInstance().initialize(context, AppState.RUN);
-      this.refreshRandomDeviceUUIDContext(config);
       FTSDK.initRemoteDataFilters(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");
@@ -592,6 +591,10 @@ export class FTSDK {
 
   static installTraceConfig(traceConfig: FTTraceConfig): void {
     try {
+      if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+        FTInnerLogger.e(TAG, 'installTraceConfig failed: FTSDK.install not call');
+        return;
+      }
       // 1. Set service name (from base configuration)
       if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
         traceConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
@@ -619,6 +622,10 @@ export class FTSDK {
   }
 
   static installRUMConfig(rumConfig: FTRUMConfig): void {
+    if (!FTSDK.ftSdk || !FTSDK.ftSdk.ftSDKConfig) {
+      FTInnerLogger.e(TAG, 'installRUMConfig failed: FTSDK.install not call');
+      return;
+    }
     FTSDK.uiPhaseResolved = false;
     if (FTSDK.ftSdk && FTSDK.ftSdk.ftSDKConfig) {
       rumConfig.setServiceName(FTSDK.ftSdk.ftSDKConfig.getServiceName());
@@ -826,7 +833,7 @@ export class FTSDK {
     FTRUMInnerManager.shutdownInternal();
     FTLogger.resetBatchStateInternal();
 
-    // Release network listener (similar to Android)
+    // Release the HarmonyOS network listener.
     FTNetworkListener.release();
     FTInnerLogFileManager.getInstance().shutdown(true);
     FTInnerLogger.d(TAG, "FTSDK shut down, network listener released");
@@ -927,7 +934,11 @@ export class FTSDK {
 
     // Add device information (using ODID - Huawei recommended)
     const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
-    hashMap.set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    if (deviceUUID.length > 0) {
+      hashMap.set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+    } else {
+      hashMap.delete(Constants.KEY_DEVICE_UUID);
+    }
     hashMap.set(Constants.KEY_APPLICATION_UUID, new String(FTSDK.PACKAGE_UUID));
 
     let pkgJson = JSON.stringify(this.getInnerPkgInfoHashMap(config));
@@ -935,23 +946,6 @@ export class FTSDK {
     hashMap.set(Constants.KEY_SDK_PACKAGE_INFO, new String(pkgJson));
     hashMap.set(Constants.KEY_SDK_VERSION, new String(BuildProfile.HAR_VERSION));
 
-  }
-
-  /**
-   * Privacy-mode UUID is restored asynchronously. Refresh the dynamic tag once
-   * it is available so data created after restoration uses the persisted value.
-   */
-  private refreshRandomDeviceUUIDContext(config: FTSDKConfig): void {
-    if (config.isAccessODIDEnabled()) {
-      return;
-    }
-    DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
-      const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
-      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
-      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
-    }).catch((error: Error) => {
-      FTInnerLogger.w(TAG, `Failed to refresh random device UUID context: ${error.message}`);
-    });
   }
 
   private static getNativeCrashVersion(): string {
@@ -1004,7 +998,7 @@ export class FTSDK {
     if (nativeVersion.length > 0) {
       pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_NATIVE] = nativeVersion;
     }
-    // Merge user-defined pkgInfo from config (similar to Android: pkgInfo.putAll(config.getPkgInfo()))
+    // Merge user-defined pkgInfo from the SDK configuration.
     const userPkgInfo = config.getPkgInfo();
     if (userPkgInfo && userPkgInfo.size > 0) {
       const userPkgInfoKeys = Array.from(userPkgInfo.keys());
@@ -1296,7 +1290,7 @@ export class FTSDK {
     FTSDK.updateDeviceUUIDContext(config);
   }
 
-  /** Apply only the Android-supported live remote-configuration fields. */
+  /** Apply the live remote-configuration fields supported by the HarmonyOS SDK. */
   private static applyRemoteConfigHotUpdate(bean: RemoteConfigBean): void {
     const sdk = FTSDK.ftSdk;
     const baseConfig = sdk === null ? null : sdk.ftSDKConfig;
@@ -1477,18 +1471,12 @@ export class FTSDK {
 
   private static updateDeviceUUIDContext(config: FTSDKConfig): void {
     const deviceUUID = DeviceUUIDManager.getInstance().getDeviceUUID(config.isAccessODIDEnabled());
-    config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
-    FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
-    if (!config.isAccessODIDEnabled()) {
-      DeviceUUIDManager.getInstance().waitForPreferencesReady().then(() => {
-        if (!config.isAccessODIDEnabled()) {
-          const persistedUUID = DeviceUUIDManager.getInstance().getDeviceUUID(false);
-          config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(persistedUUID));
-          FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, persistedUUID);
-        }
-      }).catch((error: Error) => {
-        FTInnerLogger.w(TAG, `Failed to refresh privacy device UUID: ${error.message}`);
-      });
+    if (deviceUUID.length > 0) {
+      config.getGlobalContext().set(Constants.KEY_DEVICE_UUID, new String(deviceUUID));
+      FTTrackInner.getInstance().appendGlobalContextKeyValue(Constants.KEY_DEVICE_UUID, deviceUUID);
+    } else {
+      config.getGlobalContext().delete(Constants.KEY_DEVICE_UUID);
+      FTTrackInner.getInstance().removeGlobalContextKeyInternal(Constants.KEY_DEVICE_UUID);
     }
   }
 

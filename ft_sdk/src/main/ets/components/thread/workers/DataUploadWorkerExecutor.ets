@@ -17,6 +17,7 @@ import {
   SDKUploadRoundStartDTO,
   SDKUploadRoundStartResultDTO,
   SDKUploadRowDTO,
+  SDKUploadSkippedRowDTO,
   SDKTaskPriority,
   SDKWorkerCommand,
   SDKWorkerPayload,
@@ -237,6 +238,7 @@ export class DataUploadWorkerExecutor {
         const deleted = await this.deleteRemoteFilteredRows(
           capabilities,
           dataType,
+          roundId,
           remoteFilterResult.filteredRows,
           state
         );
@@ -264,10 +266,7 @@ export class DataUploadWorkerExecutor {
         prepareRequest as Object as SDKWorkerPayload
       ) as Object as SDKUploadPreparePageResultDTO;
       state.metrics.computeMs += Math.max(0, prepared.computeMs);
-      if (prepared.duplicateRows > 0) {
-        FTInnerLogger.w(TAG,
-          `Deduplication filtered out ${prepared.duplicateRows} duplicate record(s) for ${dataType}`);
-      }
+      this.logUploadRowSkips(dataType, roundId, prepared.packageId, 'prepare', prepared.skippedRows);
       if (!prepared.rows || prepared.rows.length === 0 || !prepared.shouldExecute) {
         const hasBlockedCachedRows = prepared.queriedRows > 0 || prepared.deferredRows > 0 ||
           prepared.bodyLimitReached || prepared.transportLimitReached;
@@ -315,6 +314,7 @@ export class DataUploadWorkerExecutor {
       ) as Object as SDKUploadExecutePageResultDTO;
       state.metrics.computeMs += Math.max(0, executed.computeMs);
       state.metrics.httpMs += Math.max(0, executed.httpResult.elapsedMs);
+      this.logUploadRowSkips(dataType, roundId, executed.packageId, 'execute', executed.skippedRows);
 
       // An empty execution has no Worker-side pending page and therefore no
       // attempt to acknowledge. This can happen when a concurrently filtered
@@ -408,6 +408,7 @@ export class DataUploadWorkerExecutor {
   private async deleteRemoteFilteredRows(
     capabilities: DataUploadWorkerCapabilities,
     dataType: DataType,
+    roundId: string,
     rows: DataUploadRow[],
     state: DataUploadConsumeState
   ): Promise<boolean> {
@@ -424,7 +425,16 @@ export class DataUploadWorkerExecutor {
       if (result.affectedRows < rows.length) {
         throw new Error(`Remote filter DB commit affected ${result.affectedRows}/${rows.length} rows`);
       }
-      FTInnerLogger.i(TAG, `Remote data filter removed ${rows.length} cached ${dataType} record(s)`);
+      FTInnerLogger.i(TAG, '-------------------------- 上传记录筛选 --------------------------');
+      FTInnerLogger.i(TAG,
+        `uploadSelection:stage=remote_filter,type=${dataType},round_id=${roundId},` +
+        `reason=configured_filter,result=deleted,rows=${rows.length}`);
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        FTInnerLogger.i(TAG,
+          `uploadSelection:measurement=${this.getUploadMeasurement(row.dataString)},` +
+          `uuid=${row.uuid || 'missing'},row_id=${row.id},reason=configured_filter,result=deleted`);
+      }
       return true;
     } catch (error) {
       FTInnerLogger.e(TAG, `Remote data filter cleanup failed: ${dataType}, error=${error as string}`);
@@ -603,6 +613,36 @@ export class DataUploadWorkerExecutor {
     if (result) {
       state.metrics.dbWriteQueueWaitMs += Math.max(0, result.dbLaneWaitMs);
     }
+  }
+
+  private logUploadRowSkips(
+    dataType: DataType,
+    roundId: string,
+    packageId: string,
+    stage: string,
+    skippedRows: SDKUploadSkippedRowDTO[]
+  ): void {
+    if (!skippedRows || skippedRows.length === 0) {
+      return;
+    }
+    FTInnerLogger.w(TAG, '-------------------------- 上传记录筛选 --------------------------');
+    FTInnerLogger.w(TAG,
+      `uploadSelection:stage=${stage},type=${dataType},round_id=${roundId},` +
+      `pkg_id=${packageId || 'unassigned'},skipped=${skippedRows.length}`);
+    for (let i = 0; i < skippedRows.length; i++) {
+      const row = skippedRows[i];
+      // A skip describes this request only, not server-side filtering or a
+      // permanent cache deletion. In-flight records are handled by their owner.
+      const result = row.reason === 'already_uploading' ? 'owned_by_inflight_request' : 'skipped_from_request';
+      FTInnerLogger.w(TAG,
+        `uploadSelection:measurement=${row.measurement},uuid=${row.uuid || 'missing'},row_id=${row.rowId},` +
+        `reason=${row.reason},result=${result},key=${JSON.stringify(row.key)}`);
+    }
+  }
+
+  private getUploadMeasurement(dataString: string): string {
+    const separator = (dataString || '').indexOf(',');
+    return separator > 0 ? dataString.substring(0, separator) : 'unknown';
   }
 
   private logPreparedUpload(

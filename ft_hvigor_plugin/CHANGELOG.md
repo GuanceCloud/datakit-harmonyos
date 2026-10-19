@@ -1,13 +1,11 @@
 # Changelog
 
-## [0.1.2-alpha01] - 2026-09-29
+## [0.1.2-alpha01] - 2026-10-19
 
-- Added automatic Session Replay root registration for `@Entry` ArkUI pages.
-  The compiler now injects opaque page-instance tokens and page visibility
-  callbacks in memory, while the optional Replay HAR centrally selects the
-  latest visible, laid-out root.
-- Preserved existing page root IDs and skipped Replay source transformation
-  entirely when the HAP does not declare `@guancecloud/ft_session_replay`.
+- Added automatic page registration and lifecycle tracking for supported ArkUI `@Entry` pages. After adding `@guancecloud/ft_session_replay` to the HAP and initializing `FTSessionReplay`, applications no longer need to register visible page roots manually.
+- Added automatic ArkWeb component association for Session Replay, linking supported Web content to the correct Replay page without manual component IDs or controller registration.
+- Added automatic touch capture for Session Replay, removing the need to forward page touch events manually. Touch coordinates are recorded only when `TouchPrivacy.SHOW` is configured.
+- Added Router transition capture for `PageTransitionEnter/Exit` slide and opacity animations and default Router page changes. Default system transition playback may be approximate.
 
 ## [0.1.1] - 2026-09-14
 

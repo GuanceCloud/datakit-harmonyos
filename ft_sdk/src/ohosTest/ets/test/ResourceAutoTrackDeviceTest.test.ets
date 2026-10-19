@@ -1220,7 +1220,8 @@ export default function resourceAutoTrackDeviceTest() {
       expect(dnsTiming['start']).assertEqual(0);
       expect(dnsTiming['duration']).assertEqual(10000000);
       expect(tcpTiming['start']).assertEqual(10000000);
-      expect(tcpTiming['duration']).assertEqual(20000000);
+      expect(tcpTiming['duration']).assertEqual(70000000);
+      expect(point.fields.get('resource_tcp')).assertEqual(70000000);
       expect(sslTiming['start']).assertEqual(30000000);
       expect(sslTiming['duration']).assertEqual(50000000);
       // NetworkKit's firstSend/firstReceive are wire points, so the 20ms

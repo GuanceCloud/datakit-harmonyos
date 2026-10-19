@@ -7,15 +7,13 @@
  * - Fallback to UDID (deviceInfo.udid) if ODID not available
  * - Fallback to random UUID if both not available
  * - Privacy mode support (disable system ID access)
- * - Persistence across app uninstall/reinstall
+ * - Random UUID persistence across app restarts while application data is retained
  */
-import preferences from '@ohos.data.preferences';
-import { common } from '@kit.AbilityKit';
-import { util } from '@kit.ArkTS';
+import { Context } from '@kit.AbilityKit';
 import { FTInnerLogger } from '../log/FTLogger';
 import { Utils } from './Utils';
-import { Constants } from '../Constants';
 import deviceInfo from '@ohos.deviceInfo';
+import { DeviceUUIDStorage, DeviceUUIDStorageFactory, PreferencesDeviceUUIDStorage } from './DeviceUUIDStorage';
 
 const TAG = "DeviceUUIDManager";
 
@@ -26,13 +24,23 @@ const TAG = "DeviceUUIDManager";
  */
 export class DeviceUUIDManager {
   private static instance: DeviceUUIDManager | null = null;
-  private preferencesStore: preferences.Preferences | null = null;
+  private static storageFactory: DeviceUUIDStorageFactory =
+    (context: Context): DeviceUUIDStorage => new PreferencesDeviceUUIDStorage(context);
+  private context: Context | null = null;
+  private storage: DeviceUUIDStorage | null = null;
   private deviceUUID: string = "";
   private randomUUID: string = ""; // Cached random UUID (for privacy mode)
   private isInitialized: boolean = false;
-  private preferencesInitPromise: Promise<void> | null = null;
-  // Constants
-  private static readonly PREFERENCES_NAME = 'ftSDKDeviceFile';
+  private persistedUUID: string = '';
+  private persistenceInFlight: boolean = false;
+  private persistencePromise: Promise<void> = Promise.resolve();
+  private persistenceRetryTimer: number | null = null;
+  private persistenceRetries: number = 0;
+  private restoreRetryTimer: number | null = null;
+  private restoreRetries: number = 0;
+  private restoreListener: (() => void) | null = null;
+  private released: boolean = false;
+  private static readonly MAX_PERSISTENCE_RETRIES: number = 3;
 
   private constructor() {
     // Private constructor to enforce singleton pattern
@@ -49,118 +57,171 @@ export class DeviceUUIDManager {
     return DeviceUUIDManager.instance;
   }
 
-  /**
-   * Initialize the DeviceUUIDManager with the application context
-   * @param context The UIAbilityContext of the application
-   */
-  public init(context: common.UIAbilityContext): void {
+  /** Restore the UUID before the SDK publishes its first device tags. */
+  public init(context: Context): void {
     if (this.isInitialized) {
       return;
     }
-    this.isInitialized = true;
-    this.preferencesInitPromise = this.initializePreferences(context);
-  }
-
-  /** Internal readiness fence used to refresh derived SDK tags after async restore. */
-  public waitForPreferencesReady(): Promise<void> {
-    return this.preferencesInitPromise || Promise.resolve();
-  }
-
-  private async initializePreferences(context: common.UIAbilityContext): Promise<void> {
+    this.context = context;
     try {
-      const store = await preferences.getPreferences(context, { name: DeviceUUIDManager.PREFERENCES_NAME });
-      this.preferencesStore = store;
-      await this.loadRandomUUIDFromPreferences(store);
-    } catch (error) {
-      FTInnerLogger.e(TAG, ` Failed to initialize DeviceUUIDManager: ${error}`);
-    }
-  }
-
-  /**
-   * Initialize random UUID (aligned with Android LocalUUIDManager.initRandomUUID())
-   * Creates and saves random UUID if it doesn't exist in preferences
-   * Synchronously sets memory cache, then asynchronously saves to preferences
-   */
-  public initRandomUUID(): void {
-    const existingUUID = this.getRandomUUID();
-    if (Utils.isEmpty(existingUUID)) {
-      // Generate UUID and remove dashes (aligned with Android Utils.randomUUID())
-      const uuid = Utils.generateUUID();
-      this.randomUUID = "ft.rd_" + uuid;
-
-      // Asynchronously save to preferences (aligned with Android SharedPreferences.apply())
-      this.saveRandomUUIDToPreferences().catch((err: ESObject) => {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        FTInnerLogger.e(TAG, ` Failed to save random UUID: ${errorMsg}`);
-      });
-    }
-  }
-
-  /**
-   * Save random UUID to preferences (asynchronous, aligned with Android SharedPreferences.apply())
-   */
-  private async saveRandomUUIDToPreferences(): Promise<void> {
-    if (this.preferencesStore && Utils.isNotEmpty(this.randomUUID)) {
-      try {
-        await this.preferencesStore.put(Constants.FT_RANDOM_USER_ID, this.randomUUID);
-        await this.preferencesStore.flush();
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        FTInnerLogger.e(TAG, ` Failed to save random UUID: ${errorMsg}`);
+      if (this.storage === null) {
+        this.storage = DeviceUUIDManager.storageFactory(context);
       }
-    }
-  }
-
-  /**
-   * Load random UUID from preferences asynchronously (called during init)
-   */
-  private async loadRandomUUIDFromPreferences(store: preferences.Preferences): Promise<void> {
-    try {
-      const storedUUID = await store.get(Constants.FT_RANDOM_USER_ID, "");
-      if (storedUUID !== null && storedUUID !== undefined) {
-        const uuidString = typeof storedUUID === 'string' ? storedUUID : String(storedUUID);
-        if (Utils.isNotEmpty(uuidString)) {
-          this.randomUUID = uuidString;
-          if (this.deviceUUID.startsWith('ft.rd_')) {
-            this.deviceUUID = uuidString;
-          }
-          return;
+      const previousUUID = this.randomUUID;
+      const storedUUID = this.storage.load();
+      if (Utils.isNotEmpty(storedUUID)) {
+        this.randomUUID = storedUUID;
+        if (this.deviceUUID.startsWith('ft.rd_')) {
+          this.deviceUUID = storedUUID;
         }
+      } else if (Utils.isEmpty(this.randomUUID)) {
+        // Successful absence is the only condition that permits generation.
+        // Generate here so timer-driven recovery can refresh device tags too.
+        this.randomUUID = 'ft.rd_' + Utils.generateUUID();
+      }
+      // A failed read must remain retryable and must not overwrite an identity
+      // that may still exist on disk with a temporary memory UUID.
+      this.isInitialized = true;
+      this.restoreRetries = 0;
+      if (this.restoreRetryTimer !== null) {
+        clearTimeout(this.restoreRetryTimer);
+        this.restoreRetryTimer = null;
       }
       if (Utils.isNotEmpty(this.randomUUID)) {
-        await this.saveRandomUUIDToPreferences();
+        this.persistRandomUUID();
       }
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      FTInnerLogger.e(TAG, ` Failed to load random UUID from preferences: ${errorMsg}`);
+      if (previousUUID !== this.randomUUID && this.restoreListener !== null) {
+        try {
+          this.restoreListener();
+        } catch (error) {
+          FTInnerLogger.w(TAG, `Failed to refresh restored device UUID tags: ${error}`);
+        }
+      }
+    } catch (error) {
+      this.storage = null;
+      FTInnerLogger.e(TAG, ` Failed to initialize DeviceUUIDManager: ${error}`);
+      this.scheduleRestoreRetry();
     }
+  }
+
+  /**
+   * Generate only when no restored or in-memory UUID exists.
+   */
+  public initRandomUUID(): void {
+    this.getRandomUUID();
+  }
+
+  /**
+   * Commit the file before returning the UUID, then repair Preferences with
+   * bounded retries. Each attempt keeps the same UUID.
+   */
+  private persistRandomUUID(): void {
+    if (!this.isInitialized || this.storage === null || this.released ||
+      Utils.isEmpty(this.randomUUID) || this.persistedUUID === this.randomUUID ||
+      this.persistenceInFlight || this.persistenceRetryTimer !== null) {
+      return;
+    }
+    const uuid = this.randomUUID;
+    let fileSaved = false;
+    try {
+      this.storage.save(uuid);
+      fileSaved = true;
+    } catch (error) {
+      FTInnerLogger.e(TAG, ` Failed to save device UUID file: ${error}`);
+    }
+    this.persistenceInFlight = true;
+    this.persistencePromise = this.storage.flushPreferences(uuid).then((): void => {
+      if (fileSaved) {
+        this.persistedUUID = uuid;
+        this.persistenceRetries = 0;
+      } else {
+        this.schedulePersistenceRetry();
+      }
+    }).catch((error: Error): void => {
+      FTInnerLogger.e(TAG, ` Failed to save random UUID Preferences: ${error}`);
+      this.schedulePersistenceRetry();
+    }).finally((): void => {
+      this.persistenceInFlight = false;
+    });
+  }
+
+  private schedulePersistenceRetry(): void {
+    if (this.released || this.persistenceRetries >= DeviceUUIDManager.MAX_PERSISTENCE_RETRIES ||
+      this.persistenceRetryTimer !== null) {
+      return;
+    }
+    const delayMs = 250 * Math.pow(2, this.persistenceRetries++);
+    this.persistenceRetryTimer = setTimeout((): void => {
+      this.persistenceRetryTimer = null;
+      this.persistRandomUUID();
+    }, delayMs);
+  }
+
+  private scheduleRestoreRetry(): void {
+    if (this.released || this.context === null || this.restoreRetryTimer !== null ||
+      this.restoreRetries >= DeviceUUIDManager.MAX_PERSISTENCE_RETRIES) {
+      return;
+    }
+    this.restoreRetryTimer = setTimeout((): void => {
+      this.restoreRetryTimer = null;
+      if (!this.released && this.context !== null) {
+        this.init(this.context);
+      }
+    }, 250 * Math.pow(2, this.restoreRetries++));
+  }
+
+  /** Only fault recovery needs a later tag refresh; normal restoration is synchronous. */
+  public setRestoreListenerInternal(listener: () => void): void {
+    this.restoreListener = listener;
+  }
+
+  /** Internal test seams; never exported from the public SDK entry point. */
+  public waitForPersistenceInternal(): Promise<void> {
+    return this.persistencePromise;
+  }
+
+  public static setStorageFactoryInternal(factory: DeviceUUIDStorageFactory): void {
+    DeviceUUIDManager.resetStateInternal();
+    DeviceUUIDManager.storageFactory = factory;
+  }
+
+  public static resetStateInternal(): void {
+    const instance = DeviceUUIDManager.instance;
+    if (instance !== null) {
+      instance.released = true;
+      if (instance.persistenceRetryTimer !== null) {
+        clearTimeout(instance.persistenceRetryTimer);
+      }
+      if (instance.restoreRetryTimer !== null) {
+        clearTimeout(instance.restoreRetryTimer);
+      }
+      instance.restoreListener = null;
+    }
+    DeviceUUIDManager.instance = null;
+    DeviceUUIDManager.storageFactory =
+      (context: Context): DeviceUUIDStorage => new PreferencesDeviceUUIDStorage(context);
   }
 
   /**
    * Get random UUID (aligned with Android LocalUUIDManager.getRandomUUID())
    * If local cache exists, get from local; otherwise create new one
    * Format: ft.rd_ + 32-char UUID (without dashes)
-   * Note: This is synchronous - UUID should be pre-loaded in init() or created here if missing
+   * init() restores the persisted value synchronously before SDK data is created.
    * @returns Random UUID string
    */
   public getRandomUUID(): string {
-    // Check memory cache first (aligned with Android)
-    if (Utils.isNotEmpty(this.randomUUID)) {
-      return this.randomUUID;
+    if (!this.isInitialized && this.context !== null) {
+      this.init(this.context);
     }
-
-    // On first install, or when no cache is available, create a random UUID synchronously.
-    FTInnerLogger.d(TAG, `Random UUID not found in cache; creating a new one`);
-    // Generate UUID synchronously and save asynchronously (same logic as initRandomUUID)
-    const uuid = Utils.generateUUID();
-    this.randomUUID = "ft.rd_" + uuid;
-
-    // Asynchronously save to preferences
-    this.saveRandomUUIDToPreferences().catch((err: ESObject) => {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      FTInnerLogger.e(TAG, ` Failed to save random UUID: ${errorMsg}`);
-    });
-
+    // Until a read succeeds, neither absence nor the stored identity is known.
+    // Collectors omit the tag instead of publishing a temporary identity.
+    if (!this.isInitialized) {
+      return '';
+    }
+    if (Utils.isEmpty(this.randomUUID)) {
+      this.randomUUID = "ft.rd_" + Utils.generateUUID();
+    }
+    this.persistRandomUUID();
     return this.randomUUID;
   }
 

@@ -1,5 +1,9 @@
 import { FTCacheFiles, FTCacheMutation } from './FTCacheFiles';
-import { FTDBTaskPoolRequest, FTDBTaskPoolResponse } from './FTDBTaskPoolExecutor';
+import {
+  FTDBTaskPoolReplayUpdateResult,
+  FTDBTaskPoolRequest,
+  FTDBTaskPoolResponse
+} from './FTDBTaskPoolExecutor';
 import { ViewBeanJSON } from './bean/ViewBean';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { Constants } from '../Constants';
@@ -76,18 +80,46 @@ export class FTRumFileStore {
       case 'updateRumViewReplay': {
         const metadata = request.replayMetadata;
         response.value = false;
-        if (view && view.sessionId === request.replaySessionId && metadata && metadata.hasReplay &&
-          Number.isFinite(metadata.recordsCount) && metadata.recordsCount > 0) {
+        const replayUpdate: FTDBTaskPoolReplayUpdateResult = {
+          changed: false,
+          viewSummaryChanged: false,
+          actionSummaryChanged: false
+        };
+        response.replayUpdate = replayUpdate;
+        if (!request.viewId || !request.replaySessionId || !metadata || !metadata.hasReplay ||
+          !Number.isFinite(metadata.recordsCount) || metadata.recordsCount <= 0) {
+          break;
+        }
+        if (view && view.sessionId === request.replaySessionId) {
           const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
           const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
           if (view.hasReplay !== true || count !== view.recordsCount || sampledOnError !== view.sampledOnReplayError) {
+            const shouldUpdateViewSummary = view.hasReplay !== true ||
+              sampledOnError !== view.sampledOnReplayError || view.isClose;
             view.hasReplay = true;
             view.recordsCount = count;
             view.sampledOnReplayError = sampledOnError;
-            view.viewUpdateTime++;
-            view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
+            if (shouldUpdateViewSummary) {
+              view.viewUpdateTime++;
+              view.dataUpdateTime = Math.max(now, view.dataUpdateTime + 1, view.dataUploadTime + 1);
+            }
             this.put(changes, 'view', view.id, view);
             response.value = true;
+            replayUpdate.changed = true;
+            replayUpdate.viewSummaryChanged = shouldUpdateViewSummary;
+          }
+        }
+        // Keep Actions independently replayable after their original View is
+        // acknowledged and removed, or the recorder is disabled.
+        for (const candidate of this.actions()) {
+          if (candidate.sessionId === request.replaySessionId && candidate.viewId === request.viewId &&
+            candidate.hasReplay !== true && (candidate.replayRecordingId === undefined ||
+            (candidate.replayRecordingId.length > 0 && candidate.replayRecordingId === metadata.recordingId))) {
+            candidate.hasReplay = true;
+            this.put(changes, 'action', candidate.id, candidate);
+            response.value = true;
+            replayUpdate.changed = true;
+            replayUpdate.actionSummaryChanged = true;
           }
         }
         break;
@@ -307,9 +339,6 @@ export class FTRumFileStore {
     for (const key of Object.keys(source)) {
       if (key === Constants.KEY_RUM_PROPERTY) { view.property = source[key] as Record<string, object>; }
       else if (key === Constants.KEY_RUM_TAGS) { view.tags = source[key] as Record<string, string>; }
-      else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
-        view.collectType = parseCollectType(String(source[key]));
-      }
       else if (key === Constants.KEY_HAS_REPLAY) {
         const marker = source[key] as ReplayViewMarker;
         view.hasReplay = view.hasReplay === true || marker.value === true;
@@ -317,7 +346,9 @@ export class FTRumFileStore {
         view.recordsCount = Math.max(view.recordsCount || 0, Number.isFinite(count) ? Math.floor(count) : 0);
         view.sampledOnReplayError = view.sampledOnReplayError === true || marker.sampledOnReplayError === true;
       }
-      else { extra[key] = source[key]; }
+      else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+        view.collectType = parseCollectType(String(source[key]));
+      } else { extra[key] = source[key]; }
     }
     view.extraAttr = extra;
   }

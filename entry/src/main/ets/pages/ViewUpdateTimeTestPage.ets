@@ -32,8 +32,6 @@ export struct ViewUpdateTimeTestPage {
 
   aboutToDisappear() {
     try {
-      FTRUMGlobalManager.getInstance().stopView({});
-      this.addTestResult("✅ View stopped automatically on page disappear");
     } catch (error) {
       this.addTestResult(`❌ Failed to stop view: ${error}`);
     }

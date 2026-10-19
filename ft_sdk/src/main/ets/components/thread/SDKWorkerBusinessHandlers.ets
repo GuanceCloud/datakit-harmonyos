@@ -42,6 +42,7 @@ import {
   SDKUploadRoundStartDTO,
   SDKUploadRoundStartResultDTO,
   SDKUploadRowDTO,
+  SDKUploadSkippedRowDTO,
   SDKWorkerCommand,
   SDKWorkerErrorPayload,
   SDKWorkerPayload,
@@ -999,6 +1000,15 @@ function prepareRumAppLineRecords(
   mergeStringRecords(tags, event.tags || {});
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
   mergeStringRecords(fields, lineContext.rumStaticFields);
+  // Native RUM Replay availability must survive global custom context.
+  if (event.measurement === Constants.FT_MEASUREMENT_RUM_VIEW ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_LONG_TASK ||
+    event.measurement === Constants.FT_MEASUREMENT_RUM_ERROR) {
+    // The serializer omits empty fields; ArkTS does not support object delete.
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = event.fields?.[Constants.KEY_SESSION_HAS_REPLAY] === 'true' ? 'true' : '';
+  }
   return {
     tags,
     fields,
@@ -1162,6 +1172,7 @@ function processRumErrorCommand(
   fields[Constants.KEY_RUM_ERROR_MESSAGE] = command.message || '';
   fields[Constants.KEY_RUM_ERROR_STACK] = command.log || '';
   mergeStringRecords(fields, normalizeRumPropertyRecord(command.property || {}));
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = context.hasReplay === true ? 'true' : '';
 
   const event: SDKRumEventDTO = {
     eventType: 'rum.error',
@@ -1462,6 +1473,13 @@ function mergeResourceContext(resource: SDKRumWorkerResourceState, context: SDKR
   resource.context.viewReferrer = resource.context.viewReferrer || context.viewReferrer;
   resource.context.actionId = resource.context.actionId || context.actionId;
   resource.context.actionName = resource.context.actionName || context.actionName;
+  resource.context.rumAppId = resource.context.rumAppId || context.rumAppId;
+  // Completion may observe the first committed frame after startResource.
+  // Never promote a Resource with a later page or session's Replay metadata.
+  if (context.hasReplay === true && resource.context.rumAppId === context.rumAppId &&
+    resource.context.sessionId === context.sessionId && resource.context.viewId === context.viewId) {
+    resource.context.hasReplay = true;
+  }
 }
 
 function applyResourceParams(resource: SDKRumWorkerResourceState, params: SDKRumResourceParamsDTO): void {
@@ -1800,6 +1818,7 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
   if (resource.requestErrorStack.length > 0) {
     fields[Constants.KEY_RUM_ERROR_STACK] = resource.requestErrorStack;
   }
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = resource.context.hasReplay === true ? 'true' : '';
   return {
     eventType: 'rum.error',
     name: fields[Constants.KEY_RUM_ERROR_MESSAGE],
@@ -1936,6 +1955,7 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   if (resource.connectionReuse !== undefined) {
     fields[Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE] = String(resource.connectionReuse);
   }
+  fields[Constants.KEY_SESSION_HAS_REPLAY] = resource.context.hasReplay === true ? 'true' : '';
   return fields;
 }
 
@@ -2183,8 +2203,12 @@ function appendCompletedActionDraft(
   fields[Constants.KEY_RUM_ACTION_ERROR_COUNT] = String(action.errorCount || 0);
   fields[Constants.KEY_RUM_ACTION_LONG_TASK_COUNT] = String(action.longTaskCount || 0);
   fields[Constants.KEY_RUM_ACTION_RESOURCE_COUNT] = String(action.resourceCount || 0);
-  if (action.hasReplay === true) {
+  if (action.hasReplay === true && action.replayRecordingId !== '') {
     fields[Constants.KEY_HAS_REPLAY] = 'true';
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = 'true';
+  } else {
+    fields[Constants.KEY_HAS_REPLAY] = '';
+    fields[Constants.KEY_SESSION_HAS_REPLAY] = '';
   }
   if (action.actionType === Constants.ACTION_TYPE_LAUNCH_COLD) {
     copyColdLaunchPropertiesToFields(action.properties || {}, fields);
@@ -2854,6 +2878,7 @@ interface SDKUploadPreparedRows {
   rows: SDKUploadRowDTO[];
   needsPersistence: boolean;
   deduplicatedRows: SDKUploadRowDTO[];
+  skippedRows: SDKUploadSkippedRowDTO[];
   packageId: string;
   bodySelection: SDKUploadBodySelection;
   deferredRows: number;
@@ -2872,7 +2897,8 @@ function prepareUploadRows(
   requestedPackageId: string,
   state: SDKWorkerRuntimeState
 ): SDKUploadPreparedRows {
-  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const skippedRows: SDKUploadSkippedRowDTO[] = [];
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state, skippedRows);
   const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
   let packageId = requestedPackageId || findPersistedUploadPackageId(pageRows);
   let candidateRows: SDKUploadRowDTO[] = [];
@@ -2906,6 +2932,7 @@ function prepareUploadRows(
     rows: preparedRows,
     needsPersistence: haveUploadRowsChanged(sourceRows, preparedRows),
     deduplicatedRows,
+    skippedRows,
     packageId,
     bodySelection,
     deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
@@ -2927,7 +2954,8 @@ function preparePersistedUploadRows(
   packageId: string,
   state: SDKWorkerRuntimeState
 ): SDKUploadPreparedRows {
-  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state);
+  const skippedRows: SDKUploadSkippedRowDTO[] = [];
+  const deduplicatedRows = deduplicateUploadRows(dataType, rows, state, skippedRows);
   const pageRows = deduplicatedRows.slice(0, state.uploadRoundPageSize);
   const bodySelection = selectUploadRowsForBody(pageRows, packageId);
   const sourceRows = bodySelection.rows;
@@ -2936,6 +2964,7 @@ function preparePersistedUploadRows(
     rows: sourceRows,
     needsPersistence: false,
     deduplicatedRows,
+    skippedRows,
     packageId,
     bodySelection,
     deferredRows: Math.max(0, deduplicatedRows.length - sourceRows.length) + (queryHasMore ? 1 : 0)
@@ -2973,6 +3002,7 @@ function handleUploadPreparePage(
     queriedRows: inputRows.length,
     acceptedRows: prepared.rows.length,
     duplicateRows: Math.max(0, inputRows.length - prepared.deduplicatedRows.length),
+    skippedRows: prepared.skippedRows,
     deferredRows: prepared.deferredRows,
     packageId: prepared.packageId,
     bodyLength: body.length,
@@ -3030,6 +3060,7 @@ async function handleUploadExecutePage(
       queriedRows: rows.length,
       acceptedRows: 0,
       duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+      skippedRows: preparedRows.skippedRows,
       deferredRows: preparedRows.deferredRows,
       packageId: preparedRows.packageId,
       bodyLength: 0,
@@ -3150,6 +3181,7 @@ async function handleUploadExecutePage(
     queriedRows: rows.length,
     acceptedRows: acceptedRows.length,
     duplicateRows: Math.max(0, rows.length - deduplicatedRows.length),
+    skippedRows: preparedRows.skippedRows,
     deferredRows,
     packageId,
     bodyLength: body.length,
@@ -3433,17 +3465,31 @@ function getUploadMaxPages(dataType: string): number {
 function deduplicateUploadRows(
   dataType: string,
   rows: SDKUploadRowDTO[],
-  state: SDKWorkerRuntimeState
+  state: SDKWorkerRuntimeState,
+  skippedRows: SDKUploadSkippedRowDTO[]
 ): SDKUploadRowDTO[] {
   const result: SDKUploadRowDTO[] = [];
   const seen: SDKStringRecord = {};
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row) {
+      skippedRows.push({ rowId: 0, uuid: '', measurement: 'unknown', key: '', reason: 'invalid_row' });
       continue;
     }
     const key = getUploadDedupKey(dataType, row);
+    if (key.length === 0) {
+      result.push(row);
+      continue;
+    }
     if (state.uploadingDataIds[key] === '1' || seen[key] === '1') {
+      const separator = (row.dataString || '').indexOf(',');
+      skippedRows.push({
+        rowId: row.id,
+        uuid: row.uuid || '',
+        measurement: separator > 0 ? row.dataString.substring(0, separator) : 'unknown',
+        key,
+        reason: state.uploadingDataIds[key] === '1' ? 'already_uploading' : 'same_key_in_batch'
+      });
       continue;
     }
     seen[key] = '1';
@@ -3453,6 +3499,15 @@ function deduplicateUploadRows(
 }
 
 function getUploadDedupKey(dataType: string, row: SDKUploadRowDTO): string {
+  if ((row.dataString || '').startsWith('resource,')) {
+    // Resource events are independent records, even when their timestamps,
+    // URLs or trace/span IDs match. Only guard against scheduling the same
+    // cached record twice; never infer resource identity from event content.
+    if (row.uuid && row.uuid.length > 0) {
+      return `${dataType}:resource:uuid=${row.uuid}`;
+    }
+    return row.id > 0 ? `${dataType}:resource:row_id=${row.id}` : '';
+  }
   const uniqueId = extractUploadUniqueId(row.dataString || '');
   if (uniqueId.length > 0) {
     return `${dataType}:${uniqueId}`;
@@ -3474,16 +3529,6 @@ function extractUploadUniqueId(dataString: string): string {
     if (viewId && viewId[1]) {
       return updateTime && updateTime[1] ?
         `view_id=${viewId[1]}:view_update_time=${updateTime[1]}` : `view_id=${viewId[1]}`;
-    }
-  }
-  if (dataString.startsWith('resource,')) {
-    const spanId = dataString.match(/span_id=([^,\s]+)/);
-    if (spanId && spanId[1]) {
-      return `span_id=${spanId[1]}`;
-    }
-    const traceId = dataString.match(/trace_id=([^,\s]+)/);
-    if (traceId && traceId[1]) {
-      return `trace_id=${traceId[1]}`;
     }
   }
   if (dataString.startsWith('error,')) {
@@ -3529,13 +3574,19 @@ function hashUploadString(value: string): string {
 
 function markUploadRows(dataType: string, rows: SDKUploadRowDTO[], state: SDKWorkerRuntimeState): void {
   for (let i = 0; i < rows.length; i++) {
-    state.uploadingDataIds[getUploadDedupKey(dataType, rows[i])] = '1';
+    const key = getUploadDedupKey(dataType, rows[i]);
+    if (key.length > 0) {
+      state.uploadingDataIds[key] = '1';
+    }
   }
 }
 
 function unmarkUploadRows(dataType: string, rows: SDKUploadRowDTO[], state: SDKWorkerRuntimeState): void {
   for (let i = 0; i < rows.length; i++) {
-    state.uploadingDataIds[getUploadDedupKey(dataType, rows[i])] = '';
+    const key = getUploadDedupKey(dataType, rows[i]);
+    if (key.length > 0) {
+      state.uploadingDataIds[key] = '';
+    }
   }
 }
 

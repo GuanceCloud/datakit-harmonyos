@@ -5,7 +5,7 @@ const { OhosPluginId } = require('@ohos/hvigor-ohos-plugin');
 
 /**
  * Returns the HAP-level Hvigor plugin used to instrument console/HiLog calls,
- * cold-launch lifecycle boundaries, and Session Replay page roots before
+ * cold-launch lifecycle boundaries, Session Replay page roots and Web bindings before
  * ArkTS compilation.
  *
  * This package intentionally contains build tooling only. Applications still

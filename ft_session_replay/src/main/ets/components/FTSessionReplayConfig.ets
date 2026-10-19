@@ -1,25 +1,25 @@
-/** Fine-grained text and input masking values aligned with Android Replay. */
+/** Fine-grained text and input masking values aligned with HarmonyOS Replay. */
 export enum TextAndInputPrivacy {
   MASK_SENSITIVE_INPUTS = 'mask_sensitive_inputs',
   MASK_ALL_INPUTS = 'mask_all_inputs',
   MASK_ALL = 'mask_all'
 }
 
-/** Fine-grained image masking values aligned with Android Replay. */
+/** Fine-grained image masking values aligned with HarmonyOS Replay. */
 export enum ImagePrivacy {
   MASK_ALL = 'mask_all',
   MASK_LARGE_ONLY = 'mask_large_only',
   MASK_NONE = 'mask_none'
 }
 
-/** Touch masking values aligned with Android Replay. */
+/** Touch masking values aligned with HarmonyOS Replay. */
 export enum TouchPrivacy {
   HIDE = 'hide',
   SHOW = 'show'
 }
 
 /**
- * Session Replay configuration that preserves Android's sampling and privacy
+ * Session Replay configuration that preserves HarmonyOS's sampling and privacy
  * vocabulary. The collector reads only whitelisted visual fields and applies
  * these policies before any text or image bytes are retained or uploaded.
  */
@@ -27,29 +27,31 @@ export class FTSessionReplayConfig {
   private sampleRate: number = 1;
   private sessionReplayOnErrorSampleRate: number = 0;
   private textAndInputPrivacy: TextAndInputPrivacy = TextAndInputPrivacy.MASK_ALL;
+  private captureVisiblePassword: boolean = false;
   private imagePrivacy: ImagePrivacy = ImagePrivacy.MASK_ALL;
   private touchPrivacy: TouchPrivacy = TouchPrivacy.HIDE;
   private rumLinkKeys: Array<string> = [];
   private maxNodesPerSnapshot: number = 1500;
-  // Debounce for a coalesced UI-change signal. This is not a polling period:
-  // no FrameNode capture occurs until a page/root change is reported.
-  private snapshotIntervalMs: number = 64;
-  // Mirrors Android Replay's sparse checkpoint approach: normal traffic is
-  // Incremental Snapshot records; a Full Snapshot is a periodic resync only.
-  private fullSnapshotIntervalMs: number = 30_000;
-  // During scrolling, animations and page transitions retain only the final
-  // settled frame instead of serializing every intermediate frame.
+  // Drawing and motion are sampled at about 30 fps by default. Idle pages
+  // perform no polling once the motion tail has finished.
+  private snapshotIntervalMs: number = 32;
+  private performanceDiagnosticsEnabled: boolean = false;
+  // Changed frames checkpoint after 3 seconds. Unchanged frames never emit
+  // periodic records, even if FPS monitoring keeps the drawing pipeline active.
+  private fullSnapshotIntervalMs: number = 3_000;
+  // Keep sampling after a gesture/transition signal to cover inertia and the
+  // final state. Drawing notifications continue sampling longer animations.
   private motionQuietPeriodMs: number = 400;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
-  // Android-like background draining cadence. Zero opts out and leaves flush()
-  // as the only upload trigger.
-  private uploadIntervalMs: number = 15_000;
-  // Android's error-sampled Replay keeps only the one-minute pre-error window
+  // HarmonyOS starts at 2.5 seconds, then adapts normal polling between 0.5 and
+  // 5 seconds. Zero opts out and leaves flush() as the only upload trigger.
+  private uploadIntervalMs: number = 2_500;
+  // HarmonyOS's error-sampled Replay keeps only the one-minute pre-error window
   // until an error promotes it to the normal upload queue.
   private errorSampleWindowMs: number = 60_000;
   // Optional absolute Replay intake URL. When omitted, the installed core SDK's
-  // DataKit or Dataway endpoint is used with Android's Replay path.
+  // DataKit or Dataway endpoint is used with HarmonyOS's Replay path.
   private uploadUrl: string = '';
   private delayInit: boolean = false;
 
@@ -78,6 +80,20 @@ export class FTSessionReplayConfig {
 
   public getTextAndInputPrivacy(): TextAndInputPrivacy {
     return this.textAndInputPrivacy;
+  }
+
+  /**
+   * Opts into plaintext for TextInput passwords explicitly shown by the page.
+   * Bind showPassword to state synchronized by onSecurityStateChange.
+   * Defaults to false; MASK_ALL_INPUTS and MASK_ALL always retain masking.
+   */
+  public setCaptureVisiblePassword(capture: boolean): FTSessionReplayConfig {
+    this.captureVisiblePassword = capture;
+    return this;
+  }
+
+  public isCaptureVisiblePasswordEnabled(): boolean {
+    return this.captureVisiblePassword;
   }
 
   public setImagePrivacy(privacy: ImagePrivacy): FTSessionReplayConfig {
@@ -139,16 +155,26 @@ export class FTSessionReplayConfig {
     return this;
   }
 
+  /** Enables bounded aggregate timing logs for profiling; disabled by default. */
+  public setPerformanceDiagnosticsEnabled(enabled: boolean): FTSessionReplayConfig {
+    this.performanceDiagnosticsEnabled = enabled;
+    return this;
+  }
+
+  public isPerformanceDiagnosticsEnabled(): boolean {
+    return this.performanceDiagnosticsEnabled;
+  }
+
   public getSnapshotIntervalMs(): number {
     return this.snapshotIntervalMs;
   }
 
-  /** Sets the low-frequency Full Snapshot resynchronization interval. */
+  /** Sets the Full Snapshot threshold for changed frames (minimum/default 3 seconds). */
   public setFullSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;
     }
-    this.fullSnapshotIntervalMs = Math.max(5_000, Math.min(300_000, Math.floor(intervalMs)));
+    this.fullSnapshotIntervalMs = Math.max(3_000, Math.min(300_000, Math.floor(intervalMs)));
     return this;
   }
 
@@ -209,14 +235,14 @@ export class FTSessionReplayConfig {
   }
 
   /**
-   * Schedules automatic draining of durable Replay segments. Set to zero to
-   * disable automatic network activity and use `flush()` explicitly instead.
+   * Sets the initial normal polling delay. Runtime scheduling adapts it between
+   * 500 and 5000 ms like HarmonyOS. Set zero to use `flush()` explicitly instead.
    */
   public setUploadIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;
     }
-    this.uploadIntervalMs = intervalMs <= 0 ? 0 : Math.max(1000, Math.min(300000, Math.floor(intervalMs)));
+    this.uploadIntervalMs = intervalMs <= 0 ? 0 : Math.max(500, Math.min(5000, Math.floor(intervalMs)));
     return this;
   }
 

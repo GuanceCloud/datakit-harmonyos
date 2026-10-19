@@ -383,15 +383,15 @@ export class ViewBean {
       });
       obj[Constants.KEY_RUM_PROPERTY] = this.property;
       obj[Constants.KEY_RUM_TAGS] = this.tags;
-      if (this.collectType !== null) {
-        obj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
-      }
       const replayMarker: ReplayMarker = {
         value: this.hasReplay,
         recordsCount: this.recordsCount,
         sampledOnReplayError: this.sampledOnReplayError
       };
       obj[Constants.KEY_HAS_REPLAY] = replayMarker;
+      if (this.collectType !== null) {
+        obj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
+      }
       return JSON.stringify(obj);
     } catch (error) {
       return "{}";
@@ -423,13 +423,13 @@ export class ViewBean {
               const tagKey = tagKeys[j];
               this.tags[tagKey] = String(tagsObj[tagKey]);
             }
-          } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
-            this.collectType = parseCollectType(String(value));
           } else if (key === Constants.KEY_HAS_REPLAY) {
             const replayMarker = value as ReplayMarker;
             this.hasReplay = replayMarker.value === true;
             this.recordsCount = replayMarker.recordsCount === undefined ? 0 : Math.max(0, Math.floor(replayMarker.recordsCount));
             this.sampledOnReplayError = replayMarker.sampledOnReplayError === true;
+          } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+            this.collectType = parseCollectType(String(value));
           } else {
             this.extraAttr.set(key, value);
           }

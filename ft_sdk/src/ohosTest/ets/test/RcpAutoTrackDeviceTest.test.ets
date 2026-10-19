@@ -486,7 +486,7 @@ export default function rcpAutoTrackDeviceTest() {
         'resource_type=network',
         'resource_size=1024',
         'resource_dns=10000000',
-        'resource_tcp=20000000',
+        'resource_tcp=70000000',
         'resource_ssl=50000000',
         'resource_ttfb=50000000',
         'resource_first_byte=50000000',
@@ -502,7 +502,7 @@ export default function rcpAutoTrackDeviceTest() {
 
       expect(record !== null).assertTrue();
       assertResourceTimingField(record, 'resource_dns_time', 0, 10000000);
-      assertResourceTimingField(record, 'resource_connect_time', 10000000, 20000000);
+      assertResourceTimingField(record, 'resource_connect_time', 10000000, 70000000);
       assertResourceTimingField(record, 'resource_ssl_time', 30000000, 50000000);
       // The redirect span is not a RUM phase. The TLS-to-preTransfer gap must
       // remain visible instead of shifting the following phases left.

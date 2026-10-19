@@ -12,6 +12,13 @@ import traceAutoTrackUITest from './TraceAutoTrackUITest.test';
 import axiosPerformanceTimingE2ETest from './AxiosPerformanceTimingE2ETest.test';
 import rumUploadE2EUITest from './RumUploadE2EUITest.test';
 import stressLogTimestampSequencerTest from './StressLogTimestampSequencer.test';
+import sessionReplayMutationUITest from './SessionReplayMutationUITest.test';
+import sessionReplayStyleUITest from './SessionReplayStyleUITest.test';
+import sessionReplayInputUITest from './SessionReplayInputUITest.test';
+import sessionReplayControlUITest from './SessionReplayControlUITest.test';
+import sessionReplayUploadStateTest from './SessionReplayUploadStateTest.test';
+import sessionReplayOverlayUITest from './SessionReplayOverlayUITest.test';
+import sessionReplayMediaUITest from './SessionReplayMediaUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
@@ -28,4 +35,11 @@ export default function testsuite() {
   rumUploadE2EUITest();
   stressLogTimestampSequencerTest();
   nativeWorkerIntegrationUITest();
+  sessionReplayMutationUITest();
+  sessionReplayStyleUITest();
+  sessionReplayInputUITest();
+  sessionReplayControlUITest();
+  sessionReplayUploadStateTest();
+  sessionReplayOverlayUITest();
+  sessionReplayMediaUITest();
 }

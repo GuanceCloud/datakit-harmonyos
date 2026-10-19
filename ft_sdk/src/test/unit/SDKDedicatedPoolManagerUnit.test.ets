@@ -1041,9 +1041,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         viewReferrer: 'root',
         actionId: 'error-action',
         actionName: 'tap',
-        rumAppId: 'gc_app_harmonyos_demo'
+        rumAppId: 'gc_app_harmonyos_demo',
+        hasReplay: true
       };
       const errorProperty = new Object() as SDKPropertyRecord;
+      const customReplayFlag: SDKCompletedActionPropertyTestValue = { value: 'false' };
+      errorProperty['session_has_replay'] = customReplayFlag;
       const customError = new Object() as SDKCompletedActionPropertyTestValue;
       customError.value = 'normalized';
       errorProperty['custom_error'] = customError;
@@ -1068,8 +1071,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       errorCommand.deviceTags['memory_total'] = '8GB';
       errorCommand.deviceTags['locale'] = 'zh-Hans-CN';
       errorCommand.time = 500;
+      const lineContext = createRumWorkerLineContext();
+      lineContext.rumStaticFields['session_has_replay'] = 'false';
       const batch: SDKRumErrorCommandBatchDTO = {
-        lineContext: createRumWorkerLineContext(),
+        lineContext,
         commands: [errorCommand, errorCommand]
       };
       const response = await executeWorkerCommandForUnit({
@@ -1096,6 +1101,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(line.includes('foreground_crash_free_duration=123i')).assertTrue();
       expect(line.includes('background_crash_free_duration=456i')).assertTrue();
       expect(line.includes('stack-line')).assertTrue();
+      expect(line.includes('session_has_replay=true')).assertTrue();
+      expect(line.includes('session_has_replay="true"')).assertFalse();
       expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
 
       // Without shared context, preserve the error timeline and counters while
@@ -1128,6 +1135,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         expect(events[0].customDataType).assertEqual('rum_app_error_sampled');
         expect(events[0].tags?.['memory_total']).assertEqual('8GB');
         expect(events[0].fields?.['custom_error']).assertEqual('normalized');
+        expect(events[0].fields?.['session_has_replay']).assertEqual('true');
         expect(events[0].fields?.['foreground_crash_free_duration']).assertEqual('123');
         expect(events[0].fields?.['background_crash_free_duration']).assertEqual('456');
         expect(events[1].uuid).assertEqual('later-raw-error-uuid');
@@ -1141,6 +1149,26 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         }
         expect(viewErrors).assertEqual(2);
         expect(actionErrors).assertEqual(2);
+      }
+
+      // Custom context cannot create availability without committed Replay.
+      context.hasReplay = false;
+      customReplayFlag.value = 'true';
+      lineContext.rumStaticFields['session_has_replay'] = 'true';
+      const unavailableResponse = handleSDKWorkerRequest({
+        id: 'error-without-committed-replay',
+        pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_ERROR_COMMAND_BATCH,
+        priority: 7, createdAt: 1,
+        payload: batch as Object as SDKWorkerPayload
+      }, createSDKWorkerRuntimeStateWithBackend(
+        SDKDedicatedPoolType.EVENT_CONSUMER, 'UnavailableErrorReplayWorker', 'unit-worker'));
+      expect(unavailableResponse.ok).assertTrue();
+      const unavailableDrafts = getPayloadArray(unavailableResponse.payload, 'syncDrafts');
+      expect(unavailableDrafts.length).assertEqual(2);
+      for (const draft of unavailableDrafts) {
+        const unavailableLine = String((draft as Record<string, object>)['dataString']);
+        expect(unavailableLine.includes('session_has_replay=')).assertFalse();
       }
     });
 
@@ -1788,7 +1816,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         viewReferrer: 'root',
         actionId: 'action-first',
         actionName: 'first tap',
-        rumAppId: 'gc_app_harmonyos_demo'
+        rumAppId: 'gc_app_harmonyos_demo',
+        hasReplay: true
       };
       const laterContext: SDKRumResourceContextDTO = {
         sessionId: 'session-later-action',
@@ -1797,8 +1826,12 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         viewReferrer: 'FirstActionView',
         actionId: 'action-later',
         actionName: 'later tap',
-        rumAppId: 'gc_app_harmonyos_demo'
+        rumAppId: 'gc_app_harmonyos_demo',
+        hasReplay: false
       };
+      const resourceProperty = new Object() as SDKPropertyRecord;
+      const customReplayFlag: SDKCompletedActionPropertyTestValue = { value: 'false' };
+      resourceProperty['session_has_replay'] = customReplayFlag;
       const params: SDKRumResourceParamsDTO = {
         url: 'https://example.com/late-response',
         requestHeader: '',
@@ -1813,7 +1846,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         resourceType: 'network',
         requestErrorStack: '',
         requestErrorMsg: '',
-        property: new Object() as SDKPropertyRecord
+        property: resourceProperty
       };
       const netStatus: SDKRumResourceNetStatusDTO = {
         dnsTime: 0,
@@ -1831,8 +1864,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         holeRequestTime: 10,
         resourceHostIP: ''
       };
+      const lineContext = createRumWorkerLineContext();
+      lineContext.rumStaticFields['session_has_replay'] = 'false';
       const batch: SDKRumResourceCommandBatchDTO = {
-        lineContext: createRumWorkerLineContext(),
+        lineContext,
         commands: [{
           commandType: 'start',
           resourceId: 'late-resource',
@@ -1887,6 +1922,10 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(errorLine.includes('battery_use="80"')).assertFalse();
       expect(resourceLine.includes('memory_total=8GB')).assertFalse();
       expect(resourceLine.includes('locale=zh-Hans-CN')).assertFalse();
+      for (const line of [resourceLine, errorLine]) {
+        expect(line.includes('session_has_replay=true')).assertTrue();
+        expect(line.includes('session_has_replay="true"')).assertFalse();
+      }
       expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
 
       // A custom LineDataModifier disables the line context. Both events must
@@ -1915,11 +1954,40 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         for (const event of events) {
           expect(event.tags?.['resource_id']).assertEqual('late-resource-draft');
           expect(event.tags?.['action_id']).assertEqual('action-first');
+          expect(event.fields?.['session_has_replay']).assertEqual('true');
           expect(event.customDataType).assertEqual('rum_app_error_sampled');
           expect(event.time).assertEqual(event.measurement === 'resource' ? 10 : 20);
         }
         expect(getPayloadArray(rawResponse.payload, 'completedResourceIds')[0]).assertEqual('late-resource');
         expect(state.rumResources.size).assertEqual(0);
+      }
+
+      // Only the original View can promote a request after its first frame.
+      startContext.hasReplay = false;
+      laterContext.hasReplay = true;
+      customReplayFlag.value = 'true';
+      lineContext.rumStaticFields['session_has_replay'] = 'true';
+      for (let matchesOriginalView = 0; matchesOriginalView < 2; matchesOriginalView++) {
+        if (matchesOriginalView === 1) {
+          laterContext.sessionId = startContext.sessionId;
+          laterContext.viewId = startContext.viewId;
+        }
+        const lateReplayResponse = handleSDKWorkerRequest({
+          id: `resource-late-replay-${matchesOriginalView}`,
+          pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH,
+          priority: 7, createdAt: 1,
+          payload: batch as Object as SDKWorkerPayload
+        }, createSDKWorkerRuntimeStateWithBackend(
+          SDKDedicatedPoolType.EVENT_CONSUMER, 'LateResourceReplayWorker', 'unit-worker'));
+        expect(lateReplayResponse.ok).assertTrue();
+        const lateReplayDrafts = getPayloadArray(lateReplayResponse.payload, 'syncDrafts');
+        expect(lateReplayDrafts.length).assertEqual(2);
+        for (const draft of lateReplayDrafts) {
+          const lateReplayLine = String((draft as Record<string, object>)['dataString']);
+          expect(lateReplayLine.includes('session_has_replay=')).assertEqual(matchesOriginalView === 1);
+          expect(lateReplayLine.includes('action_id=action-first')).assertTrue();
+        }
       }
 
       rawBatch.commands[1].shouldCollect = false;
@@ -2151,6 +2219,8 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const properties = new Object() as Record<string, object>;
       properties['custom_text'] = customText;
       properties['custom_json'] = customJson;
+      const customReplayFlag: SDKCompletedActionPropertyTestValue = { value: 'false' };
+      properties['session_has_replay'] = customReplayFlag;
       properties['duration'] = new String('must-not-override-sdk-duration');
       const launchType: SDKCompletedActionPropertyTestValue = { value: 'foreground' };
       properties['app_launch_type'] = launchType;
@@ -2176,6 +2246,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       completedAction.errorCount = 1;
       completedAction.longTaskCount = 2;
       completedAction.resourceCount = 3;
+      completedAction.hasReplay = true;
       completedAction.properties = properties;
 
       const batch: SDKRumCompletedActionBatchDTO = {
@@ -2184,6 +2255,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       const lineContext = createRumWorkerLineContext();
       lineContext.rumStaticFields['duration'] = 'must-not-override-sdk-duration-from-context';
       lineContext.rumStaticFields['app_launch_type'] = 'must-not-override-cold-launch-type';
+      lineContext.rumStaticFields['session_has_replay'] = 'false';
       batch.lineContext = lineContext;
       const response = await executeWorkerCommandForUnit({
         id: 'rum-completed-action',
@@ -2210,12 +2282,16 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(String(fields['action_long_task_count'])).assertEqual('2');
       expect(String(fields['action_resource_count'])).assertEqual('3');
       expect(String(fields['custom_text'])).assertEqual('fast');
+      expect(String(fields['session_has_replay'])).assertEqual('true');
+      expect(String(fields['has_replay'])).assertEqual('true');
       expect(String(fields['custom_json']).includes('nested')).assertTrue();
       expect(String(fields['app_launch_type'])).assertEqual('foreground');
       expect(String(fields['app_pre_application_init_time'])).assertEqual('{"start":0,"duration":20}');
       const syncDrafts = getPayloadArray(response.payload, 'syncDrafts');
       const lineProtocol = String((syncDrafts[0] as Record<string, object>)['dataString']);
       expect(lineProtocol.includes('app_launch_type="foreground"')).assertTrue();
+      expect(lineProtocol.includes('session_has_replay=true')).assertTrue();
+      expect(lineProtocol.includes('session_has_replay="true"')).assertFalse();
       expect(getPayloadArray(response.payload, 'rawEvents').length).assertEqual(0);
 
       completedAction.customDataType = 'rum_app_error_sampled';
@@ -2241,6 +2317,7 @@ export default function sdkDedicatedPoolManagerUnitTest() {
         expect(events[0].tags?.['action_id']).assertEqual('action-1');
         expect(events[0].tags?.['env']).assertEqual('test');
         expect(events[0].fields?.['duration']).assertEqual('42');
+        expect(events[0].fields?.['session_has_replay']).assertEqual('true');
         expect(events[0].fields?.['app_launch_type']).assertEqual('foreground');
         expect(events[0].fields?.['app_pre_application_init_time']).assertEqual('{"start":0,"duration":20}');
         const deltas = getPayloadArray(rawResponse.payload, 'deltas') as Object as SDKRumCounterDeltaDTO[];

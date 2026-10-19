@@ -4,6 +4,11 @@ import { FTRumFileStore, FTRumStoreAccess } from '../../main/ets/components/db/F
 import { FTDBTaskPoolRumCounterDeltaDTO } from '../../main/ets/components/db/FTDBTaskPoolExecutor';
 import { ViewBeanJSON } from '../../main/ets/components/db/bean/ViewBean';
 import { ActionBeanJSON } from '../../main/ets/components/db/bean/ActionBean';
+import { FTSessionReplayBridgeRegistry, FTSessionReplayRUMContext, FTSessionReplayViewMetadata } from '../../main/ets/components/sessionreplay/FTSessionReplayBridge';
+
+interface CacheGovernanceReplayProperty {
+  value: string;
+}
 
 class MemoryAggregateAccess implements FTRumStoreAccess {
   readonly records: Map<string, string> = new Map<string, string>();
@@ -43,8 +48,96 @@ function newAction(id: string = 'a', viewId: string = 'v'): ActionBeanJSON {
   };
 }
 
+function replayContext(viewId: string = 'v'): FTSessionReplayRUMContext {
+  return { applicationId: 'app', sessionId: 's', viewId,
+    viewName: 'view', viewReferrer: '', linkContext: {}, timestamp: 1 };
+}
+
 export default function cacheGovernanceUnitTest() {
   describe('CacheGovernanceUnitTest', () => {
+    it('keeps a closed View until delayed Replay metadata can create its final summary', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      await store.execute({ command: 'upsertRumView', view: newView() });
+      await store.execute({ command: 'closeRumView', viewId: 'v', now: 100 });
+      const summary = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      const completeCapture = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      let acknowledged = false;
+      const acknowledge = FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'v').then(async () => {
+        acknowledged = true;
+        return (await store.execute({ command: 'acknowledgeView', view: summary })).value;
+      });
+      await Promise.resolve();
+      expect(acknowledged).assertFalse();
+      // The first frame finishes before the separate RUM metadata write.
+      const completeMetadata = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      completeCapture();
+      await Promise.resolve();
+      expect(acknowledged).assertFalse();
+      await store.execute({ command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }, now: 101 });
+      completeMetadata();
+      expect(await acknowledge).assertFalse();
+      const finalSummary = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      expect(finalSummary.hasReplay).assertTrue();
+      expect(finalSummary.recordsCount).assertEqual(4);
+      expect(finalSummary.viewUpdateTime > summary.viewUpdateTime).assertTrue();
+      expect((await store.execute({ command: 'acknowledgeView', view: finalSummary })).value).assertTrue();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view).assertNull();
+    });
+
+    it('releases a failed capture without fabricating Replay on its closed View', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      await store.execute({ command: 'upsertRumView', view: newView() });
+      await store.execute({ command: 'closeRumView', viewId: 'v', now: 100 });
+      const summary = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      const completeCapture = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      const acknowledge = FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'v').then(async () => {
+        return (await store.execute({ command: 'acknowledgeView', view: summary })).value;
+      });
+      expect(summary.hasReplay === true).assertFalse();
+      completeCapture();
+      completeCapture();
+      expect(await acknowledge).assertTrue();
+      expect((await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view).assertNull();
+    });
+
+    it('waits for the original View End without blocking other Views or sessions', 0, async () => {
+      const completeCapture = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      const completeViewEnd = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      let drained = false;
+      const wait = FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'v').then(() => { drained = true; });
+      await FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'other');
+      await FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 'other-session', 'v');
+      await FTSessionReplayBridgeRegistry.waitForViewPersistence('other-app', 's', 'v');
+      completeCapture();
+      await Promise.resolve();
+      expect(drained).assertFalse();
+      completeViewEnd();
+      await wait;
+      expect(drained).assertTrue();
+    });
+
+    it('SDK reset releases old waits and isolates completion from new work with the same identity', 0, async () => {
+      const provider = (): FTSessionReplayRUMContext | null => null;
+      FTSessionReplayBridgeRegistry.bindRUMCallbacks(provider,
+        (_context: FTSessionReplayRUMContext, _metadata: FTSessionReplayViewMetadata): void => {});
+      const finishOld = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      const oldWait = FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'v');
+      FTSessionReplayBridgeRegistry.clearRUMCallbacks(provider);
+      const finishNew = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext());
+      await oldWait;
+      let drained = false;
+      const newWait = FTSessionReplayBridgeRegistry.waitForViewPersistence('app', 's', 'v').then(() => { drained = true; });
+      finishOld();
+      await Promise.resolve();
+      expect(drained).assertFalse();
+      finishNew();
+      await newWait;
+      expect(drained).assertTrue();
+    });
+
     it('encodes UTF-8 physical bytes with a verifiable envelope', 0, () => {
       const body = '缓存';
       const envelope = JSON.parse(FTCacheFiles.encode(body)) as FTCacheEnvelope;
@@ -83,6 +176,140 @@ export default function cacheGovernanceUnitTest() {
       expect(current !== null && current !== undefined).assertTrue();
       expect((await store.execute({ command: 'acknowledgeView', view: current! })).value).assertTrue();
       expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
+    });
+
+    it('retains committed Action Replay after the original View is removed', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      const action = newAction();
+      action.hasReplay = false;
+      action.errorCount = 2;
+      const custom: CacheGovernanceReplayProperty = { value: 'preserved' };
+      const extra: Record<string, Object> = {};
+      extra['custom'] = custom;
+      action.extraAttr = extra;
+      await store.execute({ command: 'upsertRumView', view });
+      await store.execute({ command: 'insertRumAction', actionBean: action });
+      expect((await store.execute({
+        command: 'updateRumViewReplay', viewId: view.id, replaySessionId: view.sessionId,
+        replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }, now: 100
+      })).value).assertTrue();
+      await store.execute({ command: 'closeRumView', viewId: view.id, now: 101 });
+      const closed = (await store.execute({ command: 'queryRumViewById', viewId: view.id })).view;
+      await store.execute({ command: 'acknowledgeView', view: closed! });
+      expect((await store.execute({ command: 'queryRumViewById', viewId: view.id })).view).assertNull();
+      await store.execute({ command: 'closeRumAction', actionId: action.id, duration: 1380000000 });
+      const restored = (await new FTRumFileStore(access).execute({ command: 'querySumAction' })).actions!;
+      expect(restored.length).assertEqual(1);
+      expect(restored[0].hasReplay).assertTrue();
+      expect(restored[0].actionDuration).assertEqual(1380000000);
+      expect(restored[0].errorCount).assertEqual(2);
+      expect(JSON.stringify(restored[0].extraAttr)).assertEqual(JSON.stringify(action.extraAttr));
+    });
+
+    it('promotes only original Actions even when the View row is already gone', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const original = newAction('original');
+      const otherSession = newAction('other-session');
+      otherSession.sessionId = 'other-s';
+      const otherView = newAction('other-view', 'other-v');
+      for (const action of [original, otherSession, otherView]) {
+        access.records.set(access.path('action', action.id), JSON.stringify(action));
+      }
+      const promotion = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }
+      });
+      expect(promotion.value).assertTrue();
+      expect(promotion.replayUpdate!.viewSummaryChanged).assertFalse();
+      expect(promotion.replayUpdate!.actionSummaryChanged).assertTrue();
+      const restored = (await store.execute({ command: 'exportRumState' })).actions!;
+      expect(restored.find((a: ActionBeanJSON) => a.id === 'original')!.hasReplay).assertTrue();
+      expect(restored.find((a: ActionBeanJSON) => a.id === 'other-session')!.hasReplay === true).assertFalse();
+      expect(restored.find((a: ActionBeanJSON) => a.id === 'other-view')!.hasReplay === true).assertFalse();
+      expect((await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }
+      })).value).assertFalse();
+    });
+
+    it('persists active Replay record growth without invalidating the View summary', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      await store.execute({ command: 'upsertRumView', view: newView() });
+
+      const first = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 1, sampledOnError: false }, now: 100
+      });
+      expect(first.replayUpdate!.changed).assertTrue();
+      expect(first.replayUpdate!.viewSummaryChanged).assertTrue();
+      const firstView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+
+      const growth = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 2, sampledOnError: false }, now: 101
+      });
+      expect(growth.replayUpdate!.changed).assertTrue();
+      expect(growth.replayUpdate!.viewSummaryChanged).assertFalse();
+      expect(growth.replayUpdate!.actionSummaryChanged).assertFalse();
+      const activeView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      expect(activeView.recordsCount).assertEqual(2);
+      expect(activeView.viewUpdateTime).assertEqual(firstView.viewUpdateTime);
+      expect(activeView.dataUpdateTime).assertEqual(firstView.dataUpdateTime);
+
+      await store.execute({ command: 'closeRumView', viewId: 'v', now: 102 });
+      const closedView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      const finalGrowth = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 3, sampledOnError: false }, now: 103
+      });
+      expect(finalGrowth.replayUpdate!.viewSummaryChanged).assertTrue();
+      const finalView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      expect(finalView.recordsCount).assertEqual(3);
+      expect(finalView.viewUpdateTime > closedView.viewUpdateTime).assertTrue();
+    });
+
+    it('rejects invalid or uncommitted Replay without changing stored Actions', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const action = newAction();
+      access.records.set(access.path('action', action.id), JSON.stringify(action));
+      for (const count of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect((await store.execute({
+          command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+          replayMetadata: { hasReplay: true, recordsCount: count, sampledOnError: false }
+        })).value).assertFalse();
+      }
+      expect((await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: false, recordsCount: 4, sampledOnError: false }
+      })).value).assertFalse();
+      expect(access.read('action', action.id)).assertEqual(JSON.stringify(action));
+    });
+
+    it('commits Replay View and Action promotion together or keeps both unchanged', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      const view = newView();
+      const action = newAction();
+      await store.execute({ command: 'upsertRumView', view });
+      await store.execute({ command: 'insertRumAction', actionBean: action });
+      const viewBefore = access.read('view', view.id);
+      const actionBefore = access.read('action', action.id);
+      access.acceptWrites = false;
+      let rejected = false;
+      try {
+        await store.execute({
+          command: 'updateRumViewReplay', viewId: view.id, replaySessionId: view.sessionId,
+          replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }
+        });
+      } catch (_) { rejected = true; }
+      expect(rejected).assertTrue();
+      expect(access.read('view', view.id)).assertEqual(viewBefore);
+      expect(access.read('action', action.id)).assertEqual(actionBefore);
     });
 
     it('keeps a recovered closed view until its Error counter is re-emitted', 0, async () => {

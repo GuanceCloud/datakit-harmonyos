@@ -8,6 +8,7 @@ import { CollectType, parseCollectType } from '../../rum/enum/RUMEnums';
 
 interface ReplayMarker {
   value: boolean;
+  recordingId?: string;
 }
 
 export interface ActionBeanJSON {
@@ -16,6 +17,7 @@ export interface ActionBeanJSON {
   actionDuration: number;
   isClose: boolean;
   hasReplay?: boolean;
+  replayRecordingId?: string;
   errorCount: number;
   longTaskCount: number;
   resourceCount: number;
@@ -57,6 +59,8 @@ export class ActionBean {
 
   /** Whether this Action is associated with a captured Session Replay record. */
   private hasReplay: boolean = false;
+  /** Empty excludes this event; undefined is a legacy cached Action. */
+  private replayRecordingId: string | undefined = undefined;
 
   /**
    * Error count
@@ -145,6 +149,8 @@ export class ActionBean {
 
   public isHasReplay(): boolean { return this.hasReplay; }
   public setHasReplay(hasReplay: boolean): void { this.hasReplay = hasReplay; }
+  public getReplayRecordingId(): string | undefined { return this.replayRecordingId; }
+  public setReplayRecordingId(recordingId: string | undefined): void { this.replayRecordingId = recordingId; }
 
   public getErrorCount(): number { return this.errorCount; }
   public setErrorCount(errorCount: number): void { this.errorCount = errorCount; }
@@ -214,11 +220,11 @@ export class ActionBean {
       this.extraAttr.forEach((value, key) => {
         extraAttrObj[key] = value;
       });
+      const replayMarker: ReplayMarker = { value: this.hasReplay, recordingId: this.replayRecordingId };
+      extraAttrObj[Constants.KEY_HAS_REPLAY] = replayMarker;
       if (this.collectType !== null) {
         extraAttrObj[Constants.KEY_RUM_COLLECT_TYPE] = this.collectType;
       }
-      const replayMarker: ReplayMarker = { value: this.hasReplay };
-      extraAttrObj[Constants.KEY_HAS_REPLAY] = replayMarker;
       return JSON.stringify(extraAttrObj);
     } catch (error) {
       return "{}";
@@ -238,11 +244,12 @@ export class ActionBean {
         const keys = ActionBean.getObjectKeys(obj);
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
-          if (key === Constants.KEY_RUM_COLLECT_TYPE) {
-            this.collectType = parseCollectType(String(obj[key]));
-          } else if (key === Constants.KEY_HAS_REPLAY) {
+          if (key === Constants.KEY_HAS_REPLAY) {
             const replayMarker = obj[key] as ReplayMarker;
             this.hasReplay = replayMarker.value === true;
+            this.replayRecordingId = replayMarker.recordingId;
+          } else if (key === Constants.KEY_RUM_COLLECT_TYPE) {
+            this.collectType = parseCollectType(String(obj[key]));
           } else {
             this.extraAttr.set(key, obj[key] as object);
           }
@@ -354,6 +361,7 @@ export class ActionBean {
       actionDuration: this.actionDuration,
       isClose: this.isClose,
       hasReplay: this.hasReplay,
+      replayRecordingId: this.replayRecordingId,
       errorCount: this.errorCount,
       longTaskCount: this.longTaskCount,
       resourceCount: this.resourceCount,
@@ -379,6 +387,7 @@ export class ActionBean {
     actionBean.actionDuration = json.actionDuration || 0;
     actionBean.isClose = json.isClose || false;
     actionBean.hasReplay = json.hasReplay === true;
+    actionBean.replayRecordingId = json.replayRecordingId;
     actionBean.errorCount = json.errorCount || 0;
     actionBean.longTaskCount = json.longTaskCount || 0;
     actionBean.resourceCount = json.resourceCount || 0;
@@ -410,6 +419,7 @@ export class ActionBean {
     cloned.actionDuration = this.actionDuration;
     cloned.isClose = this.isClose;
     cloned.hasReplay = this.hasReplay;
+    cloned.replayRecordingId = this.replayRecordingId;
     cloned.errorCount = this.errorCount;
     cloned.longTaskCount = this.longTaskCount;
     cloned.resourceCount = this.resourceCount;

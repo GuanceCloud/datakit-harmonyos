@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArkWeb Replay 人工验证</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; font: 14px/1.5 sans-serif; color: #172033; background: #f0fdfa; text-align: left; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  p { margin: 12px 0; }
+  .web-label { margin: 0 0 12px; color: #0f766e; font-size: 12px; font-weight: bold; }
+  .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+  button { display: flex; align-items: center; justify-content: flex-start; width: 100%; height: 44px; margin: 0;
+    padding: 8px; border: 1px solid #5eead4; border-radius: 8px; background: white; color: #0f766e;
+    font: 600 12px/14px sans-serif; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  #start { background: #0f766e; border-color: #0f766e; color: white; }
+  #sample { background: white; border: 2px solid #14b8a6; border-radius: 8px; padding: 12px; overflow-wrap: anywhere; }
+  #sample.changed { background: #fef3c7; border-color: #ca6800; }
+  #counter { font-size: 30px; font-weight: bold; }
+  #status { margin: 12px 0; padding: 12px; border: 1px solid #99f6e4; border-radius: 8px;
+    background: white; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+  input { display: block; margin: 12px 0; padding: 8px; max-width: 100%; }
+  .scroll-marker { margin: 12px 0; padding: 12px; border: 1px dashed #5eead4; border-radius: 8px; }
+</style>
+<div class="web-label">WEB · HTML / DOM 内容</div>
+<h1>Browser DOM 回放验证</h1>
+<p>先开启上方原生 Replay。本页使用真实 Browser SDK，不手工伪造 rrweb Record。</p>
+<p id="status" aria-live="polite">等待 Browser SDK 加载…</p>
+<div class="actions" role="group" aria-label="Browser 回放验证操作">
+<button id="start">启动 Browser Replay</button>
+<button id="check">检查录制状态</button>
+<button id="single">单次 DOM 更新</button>
+<button id="burst">100 次 DOM 更新</button>
+<button id="continuous">连续更新 开/关</button>
+<button id="context">order_id A/B</button>
+<button id="view">切换 Browser View</button>
+<button id="error">报告测试错误</button>
+</div>
+<div id="sample">
+  <div id="counter">0</div>
+  <p id="order">order_id=A</p>
+  <label>普通输入<input value="public-demo-value"></label>
+  <label>密码输入<input type="password" value="synthetic-password"></label>
+</div>
+<div class="scroll-marker">滚动标记 TOP</div>
+<div class="scroll-marker">滚动标记 MIDDLE</div>
+<div class="scroll-marker">滚动标记 BOTTOM</div>
+<script>
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const status = document.getElementById('status');
+  const startButton = document.getElementById('start');
+  let started = false, initialized = false, starting = false, sdkLoad;
+  let count = 0, order = 'A', view = 0, timer;
+  function report(message) { status.textContent = new Date().toISOString() + '\n' + message; }
+  function capabilities() {
+    const raw = window.FTWebViewJavascriptBridge?.getCapabilities?.();
+    const value = raw ? JSON.parse(raw) : [];
+    return Array.isArray(value) ? value : [];
+  }
+  function requireNativeReplay() {
+    if (!capabilities().includes('records')) {
+      throw new Error('原生 Replay 未就绪。先开启原生 Replay；若 SDK 已提前加载，请点“重建 Web”再启动。');
+    }
+  }
+  // Browser SDK decides native Replay support when its script is evaluated.
+  // Loading it while native Replay is off can create a permanent no-op recorder.
+  function loadSDK() {
+    if (window.DATAFLUX_RUM && typeof DATAFLUX_RUM.init === 'function') return Promise.resolve();
+    if (sdkLoad) return sdkLoad;
+    sdkLoad = new Promise(function (resolve, reject) {
+      const script = document.createElement('script');
+      const timeout = setTimeout(function () { finish(new Error('Browser SDK 加载超时，请检查网络后重试。')); }, 10000);
+      function finish(error) {
+        clearTimeout(timeout);
+        script.onload = script.onerror = null;
+        if (error) { script.remove(); reject(error); }
+        else resolve();
+      }
+      script.src = 'https://static.guance.com/browser-sdk/v3/dataflux-rum.js';
+      script.onload = function () {
+        finish(typeof window.DATAFLUX_RUM?.init === 'function' ? null : new Error('Browser SDK 接口不可用。'));
+      };
+      script.onerror = function () { finish(new Error('Browser SDK 加载失败，请检查网络后重试。')); };
+      document.head.appendChild(script);
+    }).catch(function (error) { sdkLoad = undefined; throw error; });
+    return sdkLoad;
+  }
+  function waitForRecording() {
+    const deadline = Date.now() + 5000;
+    return new Promise(function (resolve, reject) {
+      function check() {
+        try {
+          requireNativeReplay();
+          if (typeof DATAFLUX_RUM.isRecording !== 'function') throw new Error('Browser SDK 缺少 isRecording()，无法确认启动结果。');
+          if (DATAFLUX_RUM.isRecording()) { resolve(); return; }
+          if (Date.now() >= deadline) throw new Error('Browser recording=false。请检查采样/控制台，或重建 Web 后重试；调用启动接口不代表录制成功。');
+          setTimeout(check, 100);
+        } catch (error) { reject(error); }
+      }
+      check();
+    });
+  }
+  function describeState() {
+    const currentCapabilities = capabilities();
+    const nativeReady = currentCapabilities.includes('records');
+    const recording = window.DATAFLUX_RUM?.isRecording?.() === true;
+    return 'Native Bridge=' + (nativeReady ? '就绪' : '未就绪') + '\nBrowser recording=' + recording +
+      '\ncapabilities=' + JSON.stringify(currentCapabilities) + '\nprivacy=' + window.FTWebViewJavascriptBridge?.getPrivacyLevel?.() +
+      '\nvisibility=' + document.visibilityState + '\nfocused=' + document.hasFocus() +
+      (recording && !nativeReady ? '\nBrowser 仍在录制，但原生 Replay 不接收；请检查原生开关。' : '');
+  }
+  function update() {
+    count++;
+    document.getElementById('counter').textContent = String(count);
+    document.getElementById('sample').classList.toggle('changed', count % 2 === 1);
+  }
+  async function start() {
+    if (starting) return;
+    starting = true;
+    startButton.disabled = true;
+    try {
+      requireNativeReplay();
+      report('原生 Replay 就绪，正在加载 Browser SDK…');
+      await loadSDK();
+      requireNativeReplay();
+      if (!initialized) {
+        DATAFLUX_RUM.init({
+          applicationId: params.get('appId') || 'arkweb-replay-validation',
+          datakitOrigin: params.get('datakitOrigin') || 'http://127.0.0.1',
+          service: 'arkweb-replay-validation', env: 'test', version: '1',
+          sessionSampleRate: 100, sessionReplaySampleRate: 100,
+          sessionReplayOnErrorSampleRate: 100, trackInteractions: true
+        });
+        initialized = true;
+        DATAFLUX_RUM.setGlobalContextProperty('order_id', order);
+      }
+      DATAFLUX_RUM.startSessionReplayRecording();
+      report('已请求启动，等待 Browser recording=true…');
+      await waitForRecording();
+      started = true;
+      report('真实 Browser Replay 已启动\n' + describeState());
+    } catch (error) {
+      started = false;
+      report('未确认 Browser Replay 启动成功\n' + String(error.message || error));
+    } finally {
+      starting = false;
+      startButton.disabled = false;
+    }
+  }
+  document.getElementById('start').onclick = start;
+  document.getElementById('check').onclick = function () {
+    try { report(describeState()); } catch (error) { report('读取状态失败：' + String(error.message || error)); }
+  };
+  document.getElementById('single').onclick = update;
+  document.getElementById('burst').onclick = function () {
+    let remaining = 100;
+    function tick() { update(); if (--remaining > 0) setTimeout(tick, 16); }
+    tick();
+  };
+  document.getElementById('continuous').onclick = function () {
+    if (timer) { clearInterval(timer); timer = undefined; }
+    else timer = setInterval(update, 100);
+  };
+  document.getElementById('context').onclick = function () {
+    if (!started) return;
+    order = order === 'A' ? 'B' : 'A';
+    DATAFLUX_RUM.setGlobalContextProperty('order_id', order);
+    DATAFLUX_RUM.addAction('replay-link-' + order);
+    document.getElementById('order').textContent = 'order_id=' + order;
+  };
+  document.getElementById('view').onclick = function () {
+    if (!started) return;
+    DATAFLUX_RUM.startView('replay-browser-view-' + (++view));
+    DATAFLUX_RUM.addAction('replay-new-view-' + view);
+    update();
+  };
+  document.getElementById('error').onclick = function () {
+    if (started) DATAFLUX_RUM.addError(new Error('Intentional ArkWeb Replay verification error'));
+  };
+  report('Browser SDK 尚未加载。先开启原生 Replay，再点“启动 Browser Replay”。');
+  if (params.get('auto') === '1') start();
+</script>
+</html>

@@ -13,6 +13,7 @@ import {
 } from './ft-console-log-transform';
 import { transformColdLaunchSource } from './ft-cold-launch-transform';
 import { transformSessionReplaySource } from './ft-session-replay-transform';
+import { transformWebReplaySource } from './ft-web-replay-transform';
 
 declare const require: {
   main: {
@@ -46,7 +47,8 @@ const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
 const SOURCE_TRANSFORMS: SourceTransformDefinition[] = [
   { id: 'guance-console-log-transform', transform: transformConsoleLogSource },
   { id: 'guance-cold-launch-transform', transform: transformColdLaunchSource },
-  { id: 'guance-session-replay-root-transform', transform: transformSessionReplaySource }
+  { id: 'guance-session-replay-root-transform', transform: transformSessionReplaySource },
+  { id: 'guance-web-replay-transform', transform: transformWebReplaySource }
 ];
 
 let registeredFileSystem: any = null;

@@ -29,6 +29,7 @@ interface RootExpression {
   idExpression: string | null;
   hasAreaChange: boolean;
   hasTouch: boolean;
+  touchArgument?: SourceRange;
 }
 
 interface EntryStruct {
@@ -182,7 +183,7 @@ function createSourceKey(id: string): string {
  * Replay is an optional HAR. Do not make existing console/cold-launch plugin
  * consumers fail compilation by emitting an import they did not declare.
  */
-function hasSessionReplayRuntime(id: string): boolean {
+export function hasRuntimeDependency(id: string, packageName: string): boolean {
   const normalized = id.replace(/\\/g, '/');
   const sourceMarker = '/src/main/ets/';
   const sourceIndex = normalized.indexOf(sourceMarker);
@@ -190,7 +191,8 @@ function hasSessionReplayRuntime(id: string): boolean {
     return false;
   }
   const moduleRoot = normalized.slice(0, sourceIndex);
-  const cached = replayRuntimeAvailability.get(moduleRoot);
+  const cacheKey = `${moduleRoot}:${packageName}`;
+  const cached = replayRuntimeAvailability.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
@@ -203,11 +205,12 @@ function hasSessionReplayRuntime(id: string): boolean {
     const fileSystem = nodeRequire('fs');
     const packagePath = path.join(moduleRoot, 'oh-package.json5');
     const packageText = fileSystem.readFileSync(packagePath, 'utf8').toString();
-    available = /["']@guancecloud\/ft_session_replay["']\s*:/.test(packageText);
+    const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    available = new RegExp(`["']${escapedName}["']\\s*:`).test(packageText);
   } catch (_) {
     available = false;
   }
-  replayRuntimeAvailability.set(moduleRoot, available);
+  replayRuntimeAvailability.set(cacheKey, available);
   return available;
 }
 
@@ -342,6 +345,7 @@ function findRootExpression(code: string, buildBodyStart: number, buildBodyEnd: 
   let idExpression: string | null = null;
   let hasAreaChange = false;
   let hasTouch = false;
+  let touchArgument: SourceRange | undefined;
 
   // Consume the root's chained modifiers. The next token outside that chain is
   // a sibling statement or the build-method closing brace.
@@ -373,10 +377,11 @@ function findRootExpression(code: string, buildBodyStart: number, buildBodyEnd: 
     }
     if (code.slice(modifierName.start, modifierName.end) === 'onTouch') {
       hasTouch = true;
+      touchArgument = { start: afterModifier + 1, end: modifierEnd };
     }
     cursor = modifierEnd + 1;
   }
-  return { end: cursor, idExpression, hasAreaChange, hasTouch };
+  return { end: cursor, idExpression, hasAreaChange, hasTouch, touchArgument };
 }
 
 function applyInjections(code: string, injections: Injection[]): string {
@@ -394,10 +399,76 @@ function applyInjections(code: string, injections: Injection[]): string {
   return transformed;
 }
 
+function addTransitionInjections(code: string, injections: Injection[], entry: EntryStruct,
+  bridgeName: string, tokenField: string, rootExpression: string): void {
+  const method = findTopLevelMethod(code, entry.bodyStart, entry.bodyEnd, 'pageTransition');
+  if (method === null) {
+    const indentation = `${lineIndentation(code, entry.bodyEnd)}  `;
+    // An empty effect list keeps ArkUI's default transition. The method is
+    // invoked by the real Router animation, including its outgoing page.
+    injections.push({ position: entry.bodyEnd, content: `\n${indentation}pageTransition(): void {\n` +
+      `${indentation}  if (${bridgeName}.defaultTransitionStarted(this.${tokenField})) {}\n${indentation}}\n` });
+    return;
+  }
+  let cursor = method.bodyStart + 1;
+  let nextSpec = 0;
+  while (cursor < method.bodyEnd) {
+    const character = code[cursor];
+    if (character === '"' || character === '\'' || character === '`') {
+      cursor = skipString(code, cursor, method.bodyEnd);
+      continue;
+    }
+    if (character === '/' && (code[cursor + 1] === '/' || code[cursor + 1] === '*')) {
+      cursor = skipTrivia(code, cursor, method.bodyEnd);
+      continue;
+    }
+    const identifier = readIdentifier(code, cursor, method.bodyEnd);
+    if (identifier === null) { cursor++; continue; }
+    cursor = identifier.end;
+    const name = code.slice(identifier.start, identifier.end);
+    if (name !== 'PageTransitionEnter' && name !== 'PageTransitionExit') continue;
+    const argumentsStart = skipTrivia(code, cursor, method.bodyEnd);
+    if (code[argumentsStart] !== '(') continue;
+    const argumentsEnd = findMatching(code, argumentsStart, method.bodyEnd, '(', ')');
+    if (argumentsEnd < 0) continue;
+    const entering = name === 'PageTransitionEnter';
+    const callbackName = entering ? 'onEnter' : 'onExit';
+    const spec = JSON.stringify(`transition-${nextSpec++}`);
+    const prefix = `this.${tokenField}, ${rootExpression}, ${spec}, ${entering}`;
+    let callback: SourceRange | undefined;
+    cursor = argumentsEnd + 1;
+    while (cursor < method.bodyEnd) {
+      const start = skipTrivia(code, cursor, method.bodyEnd);
+      if (code[start] !== '.') break;
+      const modifier = readIdentifier(code, start + 1, method.bodyEnd);
+      if (modifier === null) break;
+      const open = skipTrivia(code, modifier.end, method.bodyEnd);
+      if (code[open] !== '(') break;
+      const close = findMatching(code, open, method.bodyEnd, '(', ')');
+      if (close < 0) break;
+      const modifierName = code.slice(modifier.start, modifier.end);
+      if (modifierName === 'slide' || modifierName === 'opacity') {
+        const hook = modifierName === 'slide' ? 'transitionSlide' : 'transitionOpacity';
+        injections.push({ position: open + 1,
+          content: `${bridgeName}.${hook}(this.${tokenField}, ${spec}, ` });
+        injections.push({ position: close, content: ')' });
+      } else if (modifierName === callbackName) callback = { start: open + 1, end: close };
+      cursor = close + 1;
+    }
+    if (callback !== undefined) {
+      injections.push({ position: callback.start, content: `${bridgeName}.wrapTransition(${prefix}, ` });
+      injections.push({ position: callback.end, content: ')' });
+    } else {
+      injections.push({ position: cursor,
+        content: `.${callbackName}((type: RouteType, progress: number) => { ${bridgeName}.transitionProgress(${prefix}, progress); })` });
+    }
+  }
+}
+
 function lifecycleCall(bridgeName: string, tokenField: string, method: 'pageShown' | 'pageHidden' | 'pageDisposed',
-  rootExpression: string): string {
+  rootExpression: string, observeDefaultTransition: boolean): string {
   if (method === 'pageShown') {
-    return `${bridgeName}.pageShown(this.getUIContext(), this.${tokenField}, ${rootExpression}, vp2px(1));`;
+    return `${bridgeName}.pageShown(this.getUIContext(), this.${tokenField}, ${rootExpression}, vp2px(1), ${observeDefaultTransition});`;
   }
   return `${bridgeName}.${method}(this.${tokenField});`;
 }
@@ -414,7 +485,8 @@ function addLifecycleInjection(
   rootExpression: string
 ): void {
   const existing = findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, methodName);
-  const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression);
+  const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression,
+    findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, 'pageTransition') === null);
   if (existing !== null) {
     const indentation = `${lineIndentation(code, existing.nameStart)}  `;
     injections.push({ position: existing.bodyStart + 1, content: `\n${indentation}${call}` });
@@ -434,7 +506,8 @@ function addLifecycleInjection(
  * here so the transform works with the compiler's ArkTS source reader.
  */
 export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, code: string): string {
-  if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) || !hasSessionReplayRuntime(id)) {
+  if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
+    !hasRuntimeDependency(id, REPLAY_BRIDGE_IMPORT)) {
     return code;
   }
 
@@ -477,14 +550,17 @@ export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, cod
         content: `.onAreaChange(() => { ${bridgeName}.pageChanged(this.${tokenField}); })`
       });
     }
-    // A root-level touch signal lets the recorder postpone a Scroll's
-    // intermediate frames and collect one settled position. As above, leave
-    // an application's existing callback untouched.
+    // Preserve application callbacks and their event propagation behavior.
+    // The bridge forwards real pointer coordinates independently of drawing.
     if (!root.hasTouch) {
       injections.push({
         position: root.end,
-        content: `.onTouch(() => { ${bridgeName}.pageInMotion(this.${tokenField}); })`
+        content: `.onTouch((event: TouchEvent) => { ${bridgeName}.pageTouch(this.${tokenField}, event); })`
       });
+    } else if (root.touchArgument !== undefined) {
+      injections.push({ position: root.touchArgument.start,
+        content: `${bridgeName}.wrapTouch(this.${tokenField}, ` });
+      injections.push({ position: root.touchArgument.end, content: ')' });
     }
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
       'onPageShow', 'pageShown', rootExpression);
@@ -492,6 +568,7 @@ export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, cod
       'onPageHide', 'pageHidden', rootExpression);
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
       'aboutToDisappear', 'pageDisposed', rootExpression);
+    addTransitionInjections(code, injections, entry, bridgeName, tokenField, rootExpression);
   });
 
   if (injections.length === 0) {

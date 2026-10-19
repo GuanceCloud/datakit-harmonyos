@@ -2,9 +2,17 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
-import { ANDROID_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
+import { HARMONY_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
-import { isRetryableReplayUploadStatus, SessionReplayUploadRoute } from './SessionReplayUploader';
+import {
+  isReplayUploadEndpointAvailable,
+  isRetryableReplayUploadStatus,
+  REPLAY_MAX_BATCHES_PER_UPLOAD_JOB,
+  SessionReplayUploadRoute,
+  shouldDiscardReplayUploadStatus
+} from './SessionReplayUploader';
+import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
+import { ReplayResourceAcknowledgements } from './ReplayResourceAcknowledgements';
 
 const CONNECT_TIMEOUT_MS = 60_000;
 const READ_TIMEOUT_MS = 60_000;
@@ -15,8 +23,16 @@ export interface SessionReplayResourceUploadResult {
   retryable: boolean;
   endpointBlocked: boolean;
   attemptedResources: number;
+  /** Includes resources positively confirmed by the existence endpoint. */
   uploadedResources: number;
+  /** Unacknowledged assets only; locally retained confirmed bytes are not an upload backlog. */
   remainingResources: number;
+  cleanup: ReplayResourceCleanupResult;
+  existingResources?: number;
+  transferredResources?: number;
+  cachedResources?: number;
+  localResources?: number;
+  resourceIdSample?: Array<string>;
 }
 
 interface ResourceUploadTarget {
@@ -33,6 +49,7 @@ interface ResourceGroup {
 interface HttpStatus {
   code: number;
   message: string;
+  invalid?: boolean;
 }
 
 interface ResourceCheckResult {
@@ -55,36 +72,81 @@ interface ResourceCheckResponseBody {
   content?: object;
 }
 
+/** Invalid resource payloads are final unless their local cleanup itself failed. */
+export function isRetryableReplayResourceFailure(
+  code: number, invalid: boolean, cleanupFailed: boolean
+): boolean {
+  return cleanupFailed || isRetryableReplayUploadStatus(code, invalid);
+}
+
 /**
- * Android-compatible asset check and multipart uploader. Resources are grouped
+ * HarmonyOS-compatible asset check and multipart uploader. Resources are grouped
  * by `wgt_id`, checked first, and their private files are removed only after a
  * server acknowledgement or a positive existence response.
  */
 export class SessionReplayResourceUploader {
   private readonly store: SessionReplayResourceStore;
   private readonly route: SessionReplayUploadRoute | null;
-  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null;
+  private readonly removeAcknowledged: ((ids: Array<string>) => Promise<ReplayResourceCleanupResult>) | null;
+  private readonly acknowledgements: ReplayResourceAcknowledgements;
+  private readonly onAttempt: ((count: number) => void) | null;
+  private cleanup: ReplayResourceCleanupResult = replayResourceCleanup();
+  private existingResources: number = 0;
+  private transferredResources: number = 0;
+  private cachedResources: number = 0;
+  private resourceIdSample: Array<string> = [];
 
   constructor(
     store: SessionReplayResourceStore,
     route: SessionReplayUploadRoute | null = null,
-    removeAcknowledged: ((ids: Array<string>) => Promise<boolean>) | null = null
+    removeAcknowledged: ((ids: Array<string>) => Promise<ReplayResourceCleanupResult>) | null = null,
+    acknowledgements: ReplayResourceAcknowledgements = new ReplayResourceAcknowledgements(),
+    onAttempt: ((count: number) => void) | null = null
   ) {
     this.store = store;
     this.route = route;
     this.removeAcknowledged = removeAcknowledged;
+    this.acknowledgements = acknowledgements;
+    this.onAttempt = onAttempt;
   }
 
   public async uploadPending(): Promise<SessionReplayResourceUploadResult> {
-    const pending = this.store.list();
-    if (pending.length === 0) {
+    this.cleanup = replayResourceCleanup();
+    this.existingResources = 0;
+    this.transferredResources = 0;
+    this.cachedResources = 0;
+    this.resourceIdSample = [];
+    const stored = this.store.list();
+    if (stored.length === 0) {
       return this.result(true, http.ResponseCode.OK, 'No pending Session Replay resources.', 0, 0);
     }
     const target = this.resolveTarget();
     if (target === null) {
+      this.acknowledgements.setScope('');
       return this.result(false, 0, 'No Session Replay resource upload endpoint is configured.', 0, 0, false, true);
     }
-    const groups = this.groupByRoute(pending);
+    this.acknowledgements.setScope(JSON.stringify([target.checkUrl, target.uploadUrl]));
+    const pending: Array<SessionReplayStoredResource> = [];
+    const cached: Array<string> = [];
+    for (const resource of stored) {
+      if (this.acknowledgements.has(resource.id)) cached.push(resource.id);
+      else pending.push(resource);
+    }
+    this.cachedResources = cached.length;
+    this.resourceIdSample = cached.slice(0, 3);
+    // Retry only local housekeeping for confirmed assets. A new frame may keep
+    // the bytes alive or recreate their descriptor without requiring another HTTP request.
+    await this.removeResources(cached);
+    if (pending.length === 0) {
+      return this.result(true, http.ResponseCode.OK, 'No unacknowledged Session Replay resources.', 0, 0,
+        this.cleanup.failedResources > 0);
+    }
+    // One durable resource descriptor is one local batch in HarmonyOS. Limit
+    // those first, then coalesce the selected batches by HarmonyOS route.
+    const selected = pending.slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB);
+    this.resourceIdSample = selected.slice(0, 3).map((resource: SessionReplayStoredResource): string => resource.id);
+    this.onAttempt?.(selected.length);
+    const groups = this.groupByRoute(selected);
     let attempted = 0;
     let uploaded = 0;
     for (let index = 0; index < groups.length; index++) {
@@ -92,8 +154,13 @@ export class SessionReplayResourceUploader {
       const checked = await this.checkExisting(target, group);
       attempted += group.resources.length;
       if (checked.existing === null) {
+        const failedBefore = this.cleanup.failedResources;
+        if (shouldDiscardReplayUploadStatus(checked.status.code, checked.status.invalid === true)) {
+          await this.removeResources(group.resources.map((resource: SessionReplayStoredResource): string => resource.id));
+        }
         return this.result(false, checked.status.code, checked.status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(checked.status.code));
+          isRetryableReplayResourceFailure(checked.status.code, checked.status.invalid === true,
+            this.cleanup.failedResources > failedBefore));
       }
       const existing: Array<SessionReplayStoredResource> = [];
       const missing: Array<SessionReplayStoredResource> = [];
@@ -105,26 +172,33 @@ export class SessionReplayResourceUploader {
           missing.push(resource);
         }
       }
-      if (existing.length > 0 && !await this.removeResources(
-        existing.map((resource: SessionReplayStoredResource): string => resource.id))) {
-        return this.result(false, 0, 'Session Replay resource check succeeded but local cleanup failed.', attempted, uploaded, true);
-      }
+      // Availability is acknowledged remotely even if local housekeeping must wait.
+      uploaded += existing.length;
+      this.existingResources += existing.length;
+      this.acknowledgements.remember(existing.map((resource: SessionReplayStoredResource): string => resource.id));
+      await this.removeResources(existing.map((resource: SessionReplayStoredResource): string => resource.id));
       if (missing.length === 0) {
-        uploaded += existing.length;
         continue;
       }
       const status = await this.uploadGroup(target, group.applicationId, group.globalContext, missing);
       if (status.code !== http.ResponseCode.OK) {
+        const failedBefore = this.cleanup.failedResources;
+        if (shouldDiscardReplayUploadStatus(status.code, status.invalid === true)) {
+          await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
+        }
         return this.result(false, status.code, status.message, attempted, uploaded,
-          isRetryableReplayUploadStatus(status.code));
+          isRetryableReplayResourceFailure(status.code, status.invalid === true,
+            this.cleanup.failedResources > failedBefore));
       }
-      if (!await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id))) {
-        return this.result(false, 0, 'Session Replay resource endpoint acknowledged data but local cleanup failed.',
-          attempted, uploaded, true);
-      }
-      uploaded += existing.length + missing.length;
+      uploaded += missing.length;
+      this.transferredResources += missing.length;
+      this.acknowledgements.remember(missing.map((resource: SessionReplayStoredResource): string => resource.id));
+      await this.removeResources(missing.map((resource: SessionReplayStoredResource): string => resource.id));
     }
-    return this.result(true, http.ResponseCode.OK, 'Session Replay resources uploaded.', attempted, uploaded);
+    const retained = this.cleanup.deferredResources + this.cleanup.failedResources;
+    return this.result(true, http.ResponseCode.OK, retained > 0
+      ? 'Session Replay resources acknowledged; local cleanup remains pending.'
+      : 'Session Replay resources uploaded.', attempted, uploaded, this.cleanup.failedResources > 0);
   }
 
   private resolveTarget(): ResourceUploadTarget | null {
@@ -135,17 +209,30 @@ export class SessionReplayResourceUploader {
     const datakitUrl = this.route?.datakitUrl ?? installedConfig!.getDatakitUrl();
     const datawayUrl = this.route?.datawayUrl ?? installedConfig!.getDatawayUrl();
     const clientToken = this.route?.clientToken ?? installedConfig!.getClientToken();
-    const checkUrl = createAndroidReplayResourceUrl(
-      datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assetCheck, false
+    const checkUrl = createHarmonyReplayResourceUrl(
+      datakitUrl, datawayUrl, clientToken, HARMONY_REPLAY_ENDPOINTS.assetCheck, false
     );
-    const uploadUrl = createAndroidReplayResourceUrl(
-      datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assets, true
+    const uploadUrl = createHarmonyReplayResourceUrl(
+      datakitUrl, datawayUrl, clientToken, HARMONY_REPLAY_ENDPOINTS.assets, true
     );
     return checkUrl.length === 0 || uploadUrl.length === 0 ? null : { checkUrl, uploadUrl };
   }
 
-  private async removeResources(ids: Array<string>): Promise<boolean> {
-    return this.removeAcknowledged === null ? this.store.remove(ids) : await this.removeAcknowledged(ids);
+  private async removeResources(ids: Array<string>): Promise<void> {
+    if (ids.length === 0) return;
+    let result: ReplayResourceCleanupResult;
+    try {
+      result = this.removeAcknowledged === null ? this.store.removeAcknowledged(ids) : await this.removeAcknowledged(ids);
+    } catch (error) {
+      result = replayResourceCleanup(0, 0, ids.length,
+        `Resource cleanup request failed: ${replayResourceCleanupError(error as Error)}`);
+    }
+    this.cleanup.deletedResources += result.deletedResources;
+    this.cleanup.deferredResources += result.deferredResources;
+    this.cleanup.failedResources += result.failedResources;
+    if (result.reason.length > 0 && (this.cleanup.reason.length === 0 || result.failedResources > 0)) {
+      this.cleanup.reason = result.reason;
+    }
   }
 
   private groupByRoute(resources: Array<SessionReplayStoredResource>): Array<ResourceGroup> {
@@ -205,7 +292,7 @@ export class SessionReplayResourceUploader {
         }
         const existing = this.parseExistingFiles(response.result.toString(), files);
         return existing === null
-          ? { existing: null, status: { code: 0, message: 'Session Replay resource check response was invalid.' } }
+          ? { existing: null, status: { code: 0, message: 'Session Replay resource check response was invalid.', invalid: true } }
           : { existing, status: { code: response.responseCode, message: 'Session Replay resource check succeeded.' } };
       } finally {
         request.destroy();
@@ -248,7 +335,7 @@ export class SessionReplayResourceUploader {
   ): Promise<HttpStatus> {
     const multipart = this.createMultipartPayload(applicationId, globalContext, resources);
     if (multipart === null) {
-      return { code: 0, message: 'A pending Session Replay resource could not be read from private storage.' };
+      return { code: 0, message: 'A pending Session Replay resource could not be read from private storage.', invalid: true };
     }
     try {
       const request = http.createHttp();
@@ -310,21 +397,29 @@ export class SessionReplayResourceUploader {
     retryable: boolean = false,
     endpointBlocked: boolean = false
   ): SessionReplayResourceUploadResult {
+    const local = this.store.list();
     return {
       success,
       code,
       message,
-      retryable,
+      retryable: retryable || this.cleanup.failedResources > 0,
       endpointBlocked,
       attemptedResources,
       uploadedResources,
-      remainingResources: this.store.list().length
+      remainingResources: local.filter((resource: SessionReplayStoredResource): boolean =>
+        !this.acknowledgements.has(resource.id)).length,
+      cleanup: this.cleanup,
+      existingResources: this.existingResources,
+      transferredResources: this.transferredResources,
+      cachedResources: this.cachedResources,
+      localResources: local.length,
+      resourceIdSample: this.resourceIdSample
     };
   }
 }
 
-/** Builds Android's DataKit/Dataway resource endpoint URLs. */
-export function createAndroidReplayResourceUrl(
+/** Builds HarmonyOS's DataKit/Dataway resource endpoint URLs. */
+export function createHarmonyReplayResourceUrl(
   datakitUrl: string,
   datawayUrl: string,
   clientToken: string,
@@ -333,15 +428,15 @@ export function createAndroidReplayResourceUrl(
 ): string {
   const datakit = datakitUrl.trim();
   const dataway = datawayUrl.trim();
-  const host = datakit.length > 0 ? datakit : dataway;
-  if (host.length === 0) {
+  if (!isReplayUploadEndpointAvailable(datakit, dataway, clientToken)) {
     return '';
   }
+  const host = datakit.length > 0 ? datakit : dataway;
   const normalized = host.endsWith('/') ? host.substring(0, host.length - 1) : host;
   if (datakit.length > 0) {
     return useMillisecondPrecision ? `${normalized}/${endpoint}?precision=ms` : `${normalized}/${endpoint}`;
   }
-  const base = `${normalized}/${endpoint}?token=${encodeURIComponent(clientToken)}&to_headless=true`;
+  const base = `${normalized}/${endpoint}?token=${encodeURIComponent(clientToken.trim())}&to_headless=true`;
   return useMillisecondPrecision ? `${base}&precision=ms` : base;
 }
 

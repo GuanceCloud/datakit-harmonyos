@@ -27,6 +27,8 @@
     "pages/LocalDataFilterTestPage",
     "pages/DataModifierTestPage",
     "pages/InnerLogFileTestPage",
-    "pages/SessionReplayPocPage"
+    "pages/SessionReplayPocPage",
+    "pages/SessionReplayTransitionPage",
+    "pages/SessionReplayDefaultTransitionPage"
   ]
 }

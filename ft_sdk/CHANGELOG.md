@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.18-alpha04] - 2026-10-19
+
+- Added core SDK support for the optional `@guancecloud/ft_session_replay` module, including the ArkWeb bridge and Replay entry points for associated RUM data while recording is active.
+- Changed automatically collected HTTPS Resource timings so `resource_tcp` and `resource_connect_time` include the SSL/TLS handshake.
+- Fixed RUM user attribution after initialization or account changes, preventing restored or newly bound user information from being mixed in View data.
+- Fixed random device IDs and anonymous RUM user IDs changing after an app restart, keeping identities stable while application data is retained.
+- Fixed `setOnlySupportMainProcess(true)` being ignored during installation. Secondary processes now skip SDK, RUM, and Trace initialization; call `setOnlySupportMainProcess(false)` only when those processes also require monitoring.
+- Fixed `ApplicationLaunch`, page, and `BackgroundView` Views remaining open across lifecycle transitions, and prevented duplicate hot-launch Views.
+
 ## [0.1.18-alpha03] - 2026-09-30
 - Added the optional Session Replay bridge for View, Error, session, and WebView events, including persisted Replay metadata and prior-process crash recovery context.
 - Fixed Navigation Views resuming as their outer Router page after a foreground return, and restored the Router page View when a NavDestination returns to `navBar`.
@@ -21,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.18-alpha02] - 2026-09-24
 - Fixed `setActionTrackingHandler` for automatic click and cold/hot launch Actions: `HandlerAction` customizes the Action, `null` suppresses it, and `undefined` keeps SDK defaults. For clicks, handler properties override only same-named component properties; suppressing a cold-launch Action still completes startup lifecycle and remote data-filter initialization.
 - Fixed cold/hot launch Action attribution to a dedicated `ApplicationLaunch` View instead of the foreground page View.
-- Added percentage sampling for RUM sessions, error-session supplemental sampling, Logs, and Trace through the `sessionSamplingRate`, `sessionOnErrorSamplingRate`, `logSamplingRate`, and `traceSamplingRate` local APIs and remote keys. Rates accept finite decimals in `[0,100]` (`0.1` means 0.1%); normal sampling defaults to `100` and error-session supplemental sampling to `0`. Valid new remote keys take precedence, including explicit `0`; invalid updates retain the previous valid setting, and cached and hot updates are supported. The Demo migrates saved `[0,1]` preferences without changing their effective sampling. Session Replay sampling is not exposed by this SDK.
+- Added percentage sampling for RUM sessions, error-session supplemental sampling, Logs, and Trace through the `sessionSamplingRate`, `sessionOnErrorSamplingRate`, `logSamplingRate`, and `traceSamplingRate` local APIs and remote keys. Rates accept finite decimals in `[0,100]` (`0.1` means 0.1%); normal sampling defaults to `100` and error-session supplemental sampling to `0`. Valid new remote keys take precedence, including explicit `0`; invalid updates retain the previous valid setting, and cached and hot updates are supported. The Demo migrates saved `[0,1]` preferences without changing their effective sampling. This version does not expose Session Replay sampling.
 - Deprecated the legacy `[0,1]` `setSamplingRate` / `getSamplingRate` methods, RUM `setSessionErrorSampleRate` / `getSessionErrorSampleRate`, and remote keys `rumSampleRate`, `rumSessionOnErrorSampleRate`, `logSampleRate`, and `traceSampleRate`. They remain available with their original units, defaults, and behavior (`1` means 100%); use the corresponding percentage APIs and keys for new integrations (`1` means 1%).
 - Fixed Action and View records from an active session being reported as ordinary RUM data after that session failed normal sampling. They now wait for error-triggered reporting when error-session sampling accepts the session, or are discarded when it rejects the session.
 - Fixed error-sampled View records aging out based on when the View began. Their local retention time now follows the latest Error, or the View snapshot time if no Error has occurred; the reported View time remains its start time.

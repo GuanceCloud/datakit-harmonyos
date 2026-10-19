@@ -95,7 +95,7 @@ export class FTRUMConfig {
   private enableTraceUserAction: boolean = false;
   private enableTraceUserView: boolean = false;
   private enableTraceUserResource: boolean = false;
-  private enableTraceWebView: boolean = false;
+  private enableTraceWebView: boolean = true;
   private enableResourceHostIP: boolean = false;
   private allowWebViewHost: Array<string> | null = null;
   // Monitor data
@@ -344,6 +344,11 @@ export class FTRUMConfig {
     return this.enableTraceWebView;
   }
 
+  /**
+   * Enables native-bridge forwarding of Browser RUM and Browser Replay (default true, as on Android).
+   * A disabled installed RUM config rejects new Web events even when a JS proxy already exists.
+   * Does not disable native RUM/Replay or delete data accepted before this switch was disabled.
+   */
   public setEnableTraceWebView(enableTraceWebView: boolean): FTRUMConfig {
     this.enableTraceWebView = enableTraceWebView;
     return this;

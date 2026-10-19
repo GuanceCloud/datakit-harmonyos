@@ -2,6 +2,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import cryptoFramework from '@ohos.security.cryptoFramework';
 import { util } from '@kit.ArkTS';
 import { SessionReplayContext } from './SessionReplayProtocol';
+import { ReplayResourceCleanupResult, replayResourceCleanup, replayResourceCleanupError } from './ReplayResourceCleanup';
 
 /** One private-file resource that may be referenced by a Replay record. */
 export interface SessionReplayStoredResource {
@@ -18,11 +19,14 @@ export interface SessionReplayStoredResource {
  * Durable content-addressed Replay resource storage.
  *
  * Resource bytes are retained once per SHA-256 file name; metadata is retained
- * once per backend route (`wgt_id`). This matches Android's resource check
+ * once per backend route (`wgt_id`). This matches HarmonyOS's resource check
  * routing while avoiding duplicate private-file copies of identical content.
  */
 export class SessionReplayResourceStore {
   private static readonly VERSION: number = 1;
+  private static readonly READY_SUFFIX: string = '.ready';
+  private static readonly LEGACY_SUFFIX: string = '.json';
+  private static readonly WRITING_SUFFIX: string = '.writing';
   private readonly replayRoot: string;
   private readonly root: string;
   private readonly dataRoot: string;
@@ -50,9 +54,13 @@ export class SessionReplayResourceStore {
     if (recoverOnInit) this.recover();
   }
 
-  /** Persists bytes and returns their content-addressed file name, or null on failure. */
-  public put(context: SessionReplayContext, data: Uint8Array, mimeType: string = 'application/octet-stream'): string | null {
-    if (!this.isValidContext(context) || data.byteLength === 0) {
+  /** Persists bytes and returns their content-addressed file name, or null on failure.
+   * knownHash is reserved for Worker-owned immutable bytes already hashed here.
+   */
+  public put(context: SessionReplayContext, data: Uint8Array, mimeType: string = 'application/octet-stream',
+    knownHash?: string): string | null {
+    if (!this.isValidContext(context) || data.byteLength === 0 ||
+      (knownHash !== undefined && !this.isSafeFileName(knownHash))) {
       return null;
     }
     try {
@@ -62,11 +70,11 @@ export class SessionReplayResourceStore {
       this.ensureDirectory(this.root);
       this.ensureDirectory(this.dataRoot);
       this.ensureDirectory(this.metadataRoot);
-      const fileName = sha256(data);
+      const fileName = knownHash ?? sha256(data);
       const routeKey = this.getRouteKey(context);
       const id = `${fileName}-${routeKey}`;
-      const metadataPath = `${this.metadataRoot}/${id}.json`;
-      if (this.exists(metadataPath)) {
+      const metadataPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
+      if (this.exists(metadataPath) && this.exists(`${this.dataRoot}/${fileName}.bin`)) {
         this.markTouched(fileName);
         return fileName;
       }
@@ -146,34 +154,56 @@ export class SessionReplayResourceStore {
 
   /** Removes acknowledged metadata and unreferenced content-addressed byte files. */
   public remove(ids: Array<string>): boolean {
-    let complete = true;
-    const fileNames: Array<string> = [];
-    for (let index = 0; index < ids.length; index++) {
-      const id = ids[index];
+    return this.removeAcknowledged(ids).failedResources === 0;
+  }
+
+  public removeAcknowledged(ids: Array<string>): ReplayResourceCleanupResult {
+    const result = replayResourceCleanup();
+    const resources = this.list();
+    const retained = new Map<string, SessionReplayStoredResource>();
+    const references = new Map<string, number>();
+    for (const resource of resources) {
+      retained.set(resource.id, resource);
+      references.set(resource.fileName, (references.get(resource.fileName) ?? 0) + 1);
+    }
+    for (const id of new Set<string>(ids)) {
       if (!this.isSafeId(id)) {
-        complete = false;
+        result.failedResources++;
+        if (result.reason.length === 0) result.reason = 'Invalid resource id.';
         continue;
       }
-      const path = `${this.metadataRoot}/${id}.json`;
+      const path = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
+      const legacyPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.LEGACY_SUFFIX}`;
+      const resource = retained.get(id);
+      const fileName = id.substring(0, 64);
       try {
-        const resource = JSON.parse(fs.readTextSync(path)) as SessionReplayStoredResource;
-        if (this.isSafeFileName(resource.fileName)) {
-          fileNames.push(resource.fileName);
+        // A previous acknowledgement may already have removed either file.
+        if (this.exists(path)) fs.unlinkSync(path);
+        if (this.exists(legacyPath)) fs.unlinkSync(legacyPath);
+        retained.delete(id);
+        if (resource !== undefined) references.set(fileName, (references.get(fileName) ?? 1) - 1);
+        if ((references.get(fileName) ?? 0) === 0) {
+          const dataPath = this.getDataPath(fileName);
+          try {
+            if (this.exists(dataPath)) fs.unlinkSync(dataPath);
+          } catch (error) {
+            // Keep a retryable descriptor when byte cleanup fails after metadata deletion.
+            if (resource !== undefined) {
+              this.atomicWriteText(path, JSON.stringify(resource));
+              retained.set(id, resource);
+              references.set(fileName, 1);
+            }
+            throw new Error(replayResourceCleanupError(error as Error));
+          }
+          this.lastTouched.delete(fileName);
         }
-        fs.unlinkSync(path);
-      } catch (_error) {
-        complete = false;
+        result.deletedResources++;
+      } catch (error) {
+        result.failedResources++;
+        if (result.reason.length === 0) result.reason = `Resource file cleanup failed: ${replayResourceCleanupError(error as Error)}`;
       }
     }
-    const remaining = this.list();
-    for (let index = 0; index < fileNames.length; index++) {
-      const fileName = fileNames[index];
-      if (!remaining.some((resource: SessionReplayStoredResource): boolean => resource.fileName === fileName)) {
-        try { fs.unlinkSync(this.getDataPath(fileName)); } catch (_error) { complete = false; }
-        this.lastTouched.delete(fileName);
-      }
-    }
-    return complete;
+    return result;
   }
 
   public getRoot(): string {
@@ -193,15 +223,15 @@ export class SessionReplayResourceStore {
     return false;
   }
 
-  private markTouched(fileName: string): void {
+  public markTouched(fileName: string): void {
     this.lastTouched.set(fileName, ++this.touchEpoch);
   }
 
   /** Drops unpromoted resource assets older than an error-sampling cutoff. */
-  public pruneBefore(timestamp: number): void {
+  public pruneBefore(timestamp: number, retained: Set<string> | null = null): void {
     const resources = this.list();
     for (let index = 0; index < resources.length; index++) {
-      if (resources[index].createdAt < timestamp) {
+      if (resources[index].createdAt < timestamp && !retained?.has(resources[index].fileName)) {
         this.remove([resources[index].id]);
       }
     }
@@ -216,7 +246,8 @@ export class SessionReplayResourceStore {
     sessionId: string,
     timestamp: number,
     windowMs: number,
-    destination: SessionReplayResourceStore
+    destination: SessionReplayResourceStore,
+    retained: Set<string> | null = null
   ): boolean {
     const cutoff = timestamp - Math.max(0, windowMs);
     const resources = this.list();
@@ -225,7 +256,7 @@ export class SessionReplayResourceStore {
       if (resource.context.sessionId !== sessionId) {
         continue;
       }
-      if (resource.createdAt < cutoff) {
+      if (resource.createdAt < cutoff && !retained?.has(resource.fileName)) {
         if (!this.remove([resource.id])) {
           return false;
         }
@@ -239,12 +270,13 @@ export class SessionReplayResourceStore {
         return false;
       }
     }
-    this.pruneBefore(cutoff);
+    this.pruneBefore(cutoff, retained);
     return true;
   }
 
   private recover(): void {
     this.removeTempFiles(this.root);
+    this.migrateLegacyMetadata();
     this.list();
     this.removeOrphanedData();
   }
@@ -333,7 +365,9 @@ export class SessionReplayResourceStore {
 
   private isValidResource(resource: SessionReplayStoredResource, name: string): boolean {
     return resource.version === SessionReplayResourceStore.VERSION &&
-      typeof resource.id === 'string' && this.isSafeId(resource.id) && name === `${resource.id}.json` &&
+      typeof resource.id === 'string' && this.isSafeId(resource.id) &&
+      (name === `${resource.id}${SessionReplayResourceStore.READY_SUFFIX}` ||
+        name === `${resource.id}${SessionReplayResourceStore.LEGACY_SUFFIX}`) &&
       typeof resource.fileName === 'string' && this.isSafeFileName(resource.fileName) &&
       typeof resource.createdAt === 'number' && Number.isFinite(resource.createdAt) &&
       typeof resource.size === 'number' && Number.isInteger(resource.size) && resource.size > 0 && resource.size <= this.maxBytes &&
@@ -379,7 +413,9 @@ export class SessionReplayResourceStore {
   }
 
   private metadataFileNames(): Array<string> {
-    try { return fs.listFileSync(this.metadataRoot).filter((name: string): boolean => name.endsWith('.json')).sort(); }
+    try { return fs.listFileSync(this.metadataRoot).filter((name: string): boolean =>
+      name.endsWith(SessionReplayResourceStore.READY_SUFFIX) ||
+      name.endsWith(SessionReplayResourceStore.LEGACY_SUFFIX)).sort(); }
     catch (_error) { return []; }
   }
 
@@ -396,7 +432,8 @@ export class SessionReplayResourceStore {
       try {
         if (fs.statSync(path).isDirectory()) {
           this.removeTempFiles(path);
-        } else if (names[index].endsWith('.tmp')) {
+        } else if (names[index].endsWith('.tmp') ||
+          names[index].endsWith(SessionReplayResourceStore.WRITING_SUFFIX)) {
           fs.unlinkSync(path);
         }
       } catch (_) { }
@@ -408,7 +445,7 @@ export class SessionReplayResourceStore {
   }
 
   private atomicWriteBytes(path: string, bytes: Uint8Array): void {
-    const temp = `${path}.tmp`;
+    const temp = `${path}${SessionReplayResourceStore.WRITING_SUFFIX}`;
     const file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       let offset = 0;
@@ -425,9 +462,24 @@ export class SessionReplayResourceStore {
     }
     fs.renameSync(temp, path);
   }
+
+  private migrateLegacyMetadata(): void {
+    let names: Array<string> = [];
+    try { names = fs.listFileSync(this.metadataRoot); } catch (_) { return; }
+    for (const name of names) {
+      if (!name.endsWith(SessionReplayResourceStore.LEGACY_SUFFIX)) continue;
+      const id = name.substring(0, name.length - SessionReplayResourceStore.LEGACY_SUFFIX.length);
+      const legacyPath = `${this.metadataRoot}/${name}`;
+      const readyPath = `${this.metadataRoot}/${id}${SessionReplayResourceStore.READY_SUFFIX}`;
+      try {
+        if (this.exists(readyPath)) fs.unlinkSync(legacyPath);
+        else fs.renameSync(legacyPath, readyPath);
+      } catch (_) { }
+    }
+  }
 }
 
-function sha256(bytes: Uint8Array): string {
+export function sha256(bytes: Uint8Array): string {
   const md = cryptoFramework.createMd('SHA256');
   md.updateSync({ data: bytes });
   const digest = md.digestSync().data;
