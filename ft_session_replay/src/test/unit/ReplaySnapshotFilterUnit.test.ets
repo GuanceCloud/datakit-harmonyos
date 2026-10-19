@@ -1,14 +1,17 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ReplaySnapshotFilter } from '../../main/ets/components/ReplaySnapshotFilter';
-import { ArkUIReplayLightSnapshot } from '../../main/ets/components/SessionReplayScene';
+import { SessionReplayGlobalContext } from '../../main/ets/components/SessionReplayProtocol';
+import { ArkUIReplayLightNode, ArkUIReplayLightSnapshot } from '../../main/ets/components/SessionReplayScene';
 import { ReplayWorkerCapture } from '../../main/ets/components/SessionReplayWorkQueue';
 
 function lightSnapshot(timestamp: number, x: number = 0): ArkUIReplayLightSnapshot {
-  return { timestamp, vpToPxScale: 1, nodes: [{
+  const inspector: Record<string, Object> = { 'backgroundColor': '#ffffff' };
+  const node: ArkUIReplayLightNode = {
     id: 1, x, y: 0, width: 100, height: 100, componentId: 'root', nodeType: 'Column',
-    inspectorInfo: { backgroundColor: '#ffffff' }, shouldCaptureAsText: false,
+    inspectorInfo: inspector, shouldCaptureAsText: false,
     isRoot: true, usedTransformedPosition: false
-  }] };
+  };
+  return { timestamp, vpToPxScale: 1, nodes: [node] };
 }
 
 function captureContext(): ReplayWorkerCapture {
@@ -56,7 +59,9 @@ export default function replaySnapshotFilterUnitTest(): void {
       capture.context.viewId = 'next-view';
       expect(filter.canSkip('automatic', same, capture, 1, true)).assertFalse();
       capture.context.viewId = 'view';
-      capture.context.globalContext = { theme: 'dark' };
+      const globalContext: SessionReplayGlobalContext = {};
+      globalContext['theme'] = 'dark';
+      capture.context.globalContext = globalContext;
       expect(filter.canSkip('automatic', same, capture, 1, true)).assertFalse();
       capture.context.globalContext = undefined;
       capture.storeKind = 'error';

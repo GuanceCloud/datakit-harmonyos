@@ -1,5 +1,3 @@
-import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';
-import { Context } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { describe, beforeEach, afterEach, expect, it } from '@ohos/hypium';
 import { FullSnapshotData, ReplayMetaData, ReplayMutationData, ReplayPlaceholderWireframe, ReplayRecordType, SessionReplayContext, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
@@ -8,6 +6,9 @@ import { SessionReplayResourceStore } from '../../main/ets/components/SessionRep
 import { SessionReplaySegmentStore } from '../../main/ets/components/SessionReplaySegmentStore';
 
 let testSequence: number = 0;
+// SHA-256 of [1, 2, 3]; bypass the unavailable Previewer crypto implementation
+// without weakening the content-addressed resource invariant.
+const TEST_RESOURCE_HASH: string = '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81';
 
 function exists(path: string): boolean {
   try {
@@ -79,8 +80,9 @@ export default function sessionReplayStorageUnitTest() {
     let testRoot: string;
 
     beforeEach(() => {
-      const context = AbilityDelegatorRegistry.getAbilityDelegator().getAppContext() as Context;
-      testRoot = `${context.filesDir}/ft_session_replay_storage_test_${Date.now()}_${testSequence++}`;
+      // Local Test maps CoreFileKit to the in-memory mock under src/mock;
+      // use a stable absolute root without depending on an Ability context.
+      testRoot = `/tmp/ft_session_replay_storage_test_${Date.now()}_${testSequence++}`;
       fs.mkdirSync(testRoot);
     });
 
@@ -203,7 +205,7 @@ export default function sessionReplayStorageUnitTest() {
       expect(exists(`${root}/pending`)).assertTrue();
 
       removeTree(`${testRoot}/ft_session_replay`);
-      const resourceId = store.put(replayContext(), new Uint8Array([1, 2, 3]), 'image/png');
+      const resourceId = store.put(replayContext(), new Uint8Array([1, 2, 3]), 'image/png', TEST_RESOURCE_HASH);
       expect(resourceId !== null).assertTrue();
       expect(exists(`${root}/data`)).assertTrue();
       expect(exists(`${root}/pending`)).assertTrue();
@@ -217,11 +219,11 @@ export default function sessionReplayStorageUnitTest() {
     it('retains resources referenced after an upload snapshot', 0, () => {
       const store = new SessionReplayResourceStore(testRoot, 1024 * 1024);
       const bytes = new Uint8Array([1, 2, 3]);
-      expect(store.put(replayContext(), bytes, 'image/png') !== null).assertTrue();
+      expect(store.put(replayContext(), bytes, 'image/png', TEST_RESOURCE_HASH) !== null).assertTrue();
       const id = store.list()[0].id;
       const uploadEpoch = store.getTouchEpoch();
       expect(store.wasTouchedAfter([id], uploadEpoch)).assertFalse();
-      expect(store.put(replayContext(), bytes, 'image/png') !== null).assertTrue();
+      expect(store.put(replayContext(), bytes, 'image/png', TEST_RESOURCE_HASH) !== null).assertTrue();
       expect(store.wasTouchedAfter([id], uploadEpoch)).assertTrue();
     });
   });

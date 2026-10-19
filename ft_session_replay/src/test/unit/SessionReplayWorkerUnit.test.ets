@@ -313,6 +313,7 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(waitingForUrl.delayMs).assertEqual(5000);
       expect(waitingForUrl.retryCount).assertEqual(0);
       failed.success = true;
+      failed.retryable = false;
       const recovered = nextReplayUploadSchedule(third.delayMs, third.retryCount, failed);
       expect(recovered.delayMs).assertEqual(9000);
       expect(recovered.retryCount).assertEqual(0);

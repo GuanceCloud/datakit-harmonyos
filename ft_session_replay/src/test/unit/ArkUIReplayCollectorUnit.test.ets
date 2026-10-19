@@ -1,12 +1,12 @@
 import { ReplayControlVectors } from '../../main/ets/components/ReplayControlVectors';
 import { ReplayPatternLock } from '../../main/ets/components/ReplayPatternLock';
 import { FrameNode, UIContext } from '@kit.ArkUI';
-import { util } from '@kit.ArkTS';
-import { FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
+import { FTSessionReplayBridgeRegistry, FTWebViewReplayBridge } from '@guancecloud/ft_sdk';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkUIReplayCollector } from '../../main/ets/components/ArkUIReplayCollector';
 import { ReplayNativeControlPaint } from '../../main/ets/components/ReplayNativeControlPaint';
 import { ReplayControlWireframes } from '../../main/ets/components/ReplayControlWireframes';
+import { ReplayOverlayVectors } from '../../main/ets/components/ReplayOverlayVectors';
 import { FTSessionReplayConfig, ImagePrivacy, TextAndInputPrivacy, TouchPrivacy } from '../../main/ets/components/FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FullSnapshotData, ReplayImageWireframe, ReplayMutationData, ReplayShapeWireframe, ReplayTextWireframe, ReplayWebViewWireframe, ReplayWireframe, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
@@ -68,6 +68,7 @@ class ReplayFrameNodeFixture {
   private visible: boolean = true;
   private nodeType: string = 'Column';
   private inspectorInfo: Object = new EmptyInspectorInfo();
+  private readonly customProperties: Map<string, Object> = new Map();
 
   constructor(
     id: number,
@@ -146,6 +147,11 @@ class ReplayFrameNodeFixture {
 
   public withInspector(info: Object): ReplayFrameNodeFixture { this.inspectorInfo = info; return this; }
   public withNodeType(nodeType: string): ReplayFrameNodeFixture { this.nodeType = nodeType; return this; }
+  public withCustomProperty(name: string, value: Object): ReplayFrameNodeFixture {
+    this.customProperties.set(name, value);
+    return this;
+  }
+  public getCustomProperty(name: string): Object | undefined { return this.customProperties.get(name); }
   public isVisible(): boolean { return this.visible; }
   public getOpacity(): number { return 1; }
   public hide(): void { this.visible = false; }
@@ -215,24 +221,30 @@ function findWireframe(wireframes: Array<ReplayWireframe>, id: number): ReplayWi
   return null;
 }
 
+function pngBytes(): Uint8Array {
+  return new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+}
+
 export default function arkUIReplayCollectorUnitTest(): void {
   describe('ArkUIReplayCollectorUnit', () => {
     it('recognizes a registered Web on its first capture before any slot has been observed', 0, () => {
       const registry = FTSessionReplayBridgeRegistry;
-      const node = new ReplayFrameNodeFixture(126, 0, 0, 0, 0, 320, 200).withNodeType('Web');
+      const bindingId = '__guance_web_controller_test_126';
+      const node = new ReplayFrameNodeFixture(126, 0, 0, 0, 0, 320, 200).withNodeType('Web')
+        .withCustomProperty(FTWebViewReplayBridge.PROPERTY, bindingId);
       const collector = new ArkUIReplayCollector();
-      registry.registerWebReplayComponent('fixture-126');
+      registry.registerWebReplayComponent(bindingId);
       try {
-        expect(registry.getWebReplaySlotId('fixture-126')).assertEqual('');
+        expect(registry.getWebReplaySlotId(bindingId)).assertEqual('');
         const first = collector.captureFrameNode(asFrameNode(node));
         const web = (first.data as FullSnapshotData).wireframes[0] as ReplayWebViewWireframe;
         expect(web.type).assertEqual('webview');
         expect(web.slotId).assertEqual(String(web.id));
         registry.observeWebReplaySlots('app', 's', 'native',
-          [{ componentId: 'fixture-126', slotId: String(web.id) }], first.timestamp);
-        expect(registry.getWebReplaySlotId('fixture-126')).assertEqual(String(web.id));
+          [{ componentId: bindingId, slotId: String(web.id) }], first.timestamp);
+        expect(registry.getWebReplaySlotId(bindingId)).assertEqual(String(web.id));
       } finally {
-        registry.unregisterWebReplayComponent('fixture-126');
+        registry.unregisterWebReplayComponent(bindingId);
       }
     });
 
@@ -314,7 +326,8 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const vector = (first.data as FullSnapshotData).wireframes[1] as ReplayImageWireframe;
       expect(vector.mimeType).assertEqual('svg+xml'); expect(vector.isEmpty).assertFalse();
       const assets = collector.takeCapturedImageResources(); expect(assets.length).assertEqual(1);
-      const source = Array.from(assets[0].bytes).map((byte: number): string => String.fromCharCode(byte)).join('');
+      expect(assets[0].mimeType).assertEqual('image/svg+xml');
+      const source = ReplayOverlayVectors.popup(150, 64, { x: 8, y: 8, width: 134, height: 48 }, '#FFFFFFFF');
       expect(source.includes('<rect')).assertTrue(); expect(source.includes('<path')).assertTrue();
       expect(source.includes('rx="20"')).assertTrue();
       const repeated = collector.materializeLightSnapshot(snapshot);
@@ -771,8 +784,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE));
       const snapshot = (): Array<ReplayWireframe> => (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
       expect((findWireframe(snapshot(), 2) as ReplayImageWireframe).isEmpty).assertTrue();
-      collector.registerImageAsset('fixture-2', new util.Base64Helper().decodeSync(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      collector.registerImageAsset('fixture-2', pngBytes());
       const after = snapshot();
       expect((findWireframe(after, 2) as ReplayImageWireframe).isEmpty).assertFalse();
       expect((findWireframe(after, 3) as ReplayTextWireframe).textStyle.color).assertEqual('#112233FF');
@@ -804,8 +816,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
         .setImagePrivacy(ImagePrivacy.MASK_NONE).setTouchPrivacy(TouchPrivacy.SHOW);
       const collector = new ArkUIReplayCollector(1500, config);
-      collector.registerImageAsset('pattern-raster', new util.Base64Helper().decodeSync(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      collector.registerImageAsset('pattern-raster', pngBytes());
       const light = collector.captureFrameNodeLight(asFrameNode(root));
       light.nodes[0].componentRasterKey = 'pattern-raster';
       expect((collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes[0].type).assertEqual('shape');
@@ -872,8 +883,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
         .setImagePrivacy(ImagePrivacy.MASK_NONE);
       const collector = new ArkUIReplayCollector(1500, config);
-      collector.registerImageAsset('control-raster', new util.Base64Helper().decodeSync(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII='));
+      collector.registerImageAsset('control-raster', pngBytes());
       const light = collector.captureFrameNodeLight(asFrameNode(root));
       light.nodes[0].componentRasterKey = 'control-raster';
       const shapes = (collector.materializeLightSnapshot(light).data as FullSnapshotData).wireframes;
@@ -977,7 +987,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
       const config = new FTSessionReplayConfig().setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS)
         .setImagePrivacy(ImagePrivacy.MASK_NONE);
       const collector = new ArkUIReplayCollector(1500, config);
-      const png = new util.Base64Helper().decodeSync('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII=');
+      const png = pngBytes();
       collector.registerImageAsset('inline-raster', png, 'image/png');
       const light = collector.captureFrameNodeLight(asFrameNode(root), 2);
       light.nodes[0].componentRasterKey = 'inline-raster';
@@ -1734,7 +1744,7 @@ export default function arkUIReplayCollectorUnitTest(): void {
     it('uses Replay MIME subtypes while keeping the uploaded image resource MIME complete', 0, () => {
       const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 20, 20).withNodeType('Image');
       const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig().setImagePrivacy(ImagePrivacy.MASK_NONE));
-      const png = new util.Base64Helper().decodeSync('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL9sAAAAASUVORK5CYII=');
+      const png = pngBytes();
       expect(collector.registerImageAsset('fixture-1', png, 'image/png')).assertTrue();
       const first = collector.captureFrameNode(asFrameNode(root));
       const image = (first.data as FullSnapshotData).wireframes[0] as ReplayImageWireframe;
