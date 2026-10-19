@@ -7,6 +7,6 @@
   "repository": "https://github.com/GuanceCloud/datakit-harmonyos.git",
   "license": "Apache-2.0",
   "dependencies": {
-    "@guancecloud/ft_sdk": "tag:latest"
+    "@guancecloud/ft_sdk": ">=0.1.18-alpha04"
   }
 }

@@ -520,7 +520,7 @@ FTSDK.setDatakitUrl('https://datakit.example.com')
 // Or: FTSDK.setDatawayUrl('https://dataway.example.com', 'CLIENT_TOKEN')
 ```
 
-Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. Switching to a valid runtime endpoint also refreshes remote configuration immediately; an in-flight response from the old endpoint is ignored. `FTSDK.setEnableAccessDeviceID(...)` can switch the runtime `device_uuid` between the system identifier (when available) and the SDK's privacy UUID.
+Use `FTSDK.updateRemoteConfig()` for an interval-respecting manual refresh, or pass `0` as the first argument to the overload to force a fetch. Switching to a valid runtime endpoint also refreshes remote configuration immediately; an in-flight response from the old endpoint is ignored.
 
 ### Remote sampling keys
 
@@ -547,6 +547,18 @@ removed and the local setting becomes effective again. A valid remote sampling
 value overrides both local API forms. The protocol continues to use only the
 four HarmonyOS-supported RUM/Log/Trace keys above; Replay keys are not
 implemented by this SDK.
+
+## Device ID and Process Scope
+
+Access to the system device ID is disabled by default. The SDK instead uses an
+app-private `device_uuid` that remains stable across normal restarts. Enable the
+system identifier with `.setEnableAccessDeviceID(true)` on `FTSDKConfig` before
+installation, or switch at runtime with `FTSDK.setEnableAccessDeviceID(...)`.
+
+By default, the SDK initializes only in the application's main process. Calls
+to `FTSDK.install(...)` from secondary processes are ignored. To initialize the
+SDK in secondary processes, call `.setOnlySupportMainProcess(false)` on
+`FTSDKConfig` before `FTSDK.install(...)`.
 
 ## Update the Reporting Endpoint at Runtime
 

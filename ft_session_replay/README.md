@@ -182,10 +182,50 @@ const replayConfig = new FTSessionReplayConfig()
 multi-finger down/move/up positions. `enableLinkRUMKeys(...)` selects the RUM
 context fields included in Replay.
 
-For unmasked bundle, file, or network images, call
-`registerImageAsset(componentIdOrSource, bytes, mimeType)` before the next
-capture. Use `unregisterImageAsset(...)` when the asset is no longer needed.
-Data-URI images can be collected directly.
+Visible `Image` components using bundle, file, network, PixelMap, or drawable
+sources are captured automatically.
+
+`ImageAnimator`, `QRCode`, `Canvas`, and `Shape` components are also captured
+automatically. On API 12–14, assign a stable `.id()` to captured components.
+Captured media follows `ImagePrivacy`; drawing components are hidden when
+`TextAndInputPrivacy.MASK_ALL` is enabled.
+
+If an image cannot be captured automatically, provide it with
+`registerImageAsset(componentIdOrSource, bytes, mimeType)` and call
+`unregisterImageAsset(...)` when it is no longer needed.
+
+### Video
+
+To capture an ArkUI `Video`, assign a stable `.id()`, register its source and
+poster, forward playback events, and unregister it when the player disappears:
+
+```ts
+const replay = FTSessionReplay.getInstance()
+replay.registerVideoSource('player', videoUrl, $r('app.media.video_cover'))
+
+Video({ src: videoUrl, previewUri: $r('app.media.video_cover') })
+  .id('player')
+
+// Forward changes from the corresponding Video callbacks.
+replay.updateVideoState('player', { currentTime, duration, playing, buffering })
+
+// When the player is removed:
+replay.unregisterVideoSource('player')
+```
+
+Replay records the poster, playback state, timeline, and periodic keyframes; it
+does not record audio or a continuous video stream. Local file keyframes require
+API 12+. HTTP(S) keyframes require API 20+ and may make additional network
+requests. Authenticated and DRM streams retain the poster. Video frames follow
+`ImagePrivacy`; source URLs and authentication data are not stored in Replay.
+
+For a custom player or `XComponent(SURFACE)`, register a frame provider:
+
+```ts
+replay.registerVideoFrameProvider('player', async (_timeSeconds) => {
+  return image.createPixelMapFromSurface(surfaceId, surfaceRegion)
+})
+```
 
 ## Recording Control
 
@@ -228,6 +268,7 @@ Replay follows the active RUM Session and View. After a frame is saved,
 associated native Views, Actions, Resources, Long Tasks, and Errors report
 `session_has_replay=true`. Views and Actions also retain `has_replay`.
 These are SDK-managed fields; custom context cannot override Replay availability.
+Starting or stopping Replay does not affect RUM collection.
 
 When automatic RUM View tracking is enabled, avoid also calling `startView()`
 for the same page. ArkWeb recording uses the core SDK's `FTWebViewHandler`
@@ -279,9 +320,13 @@ Custom Router integrations use `updatePageTransition(...)` and
 
 ## Notes
 
-- ArkUI Replay reconstructs component properties; some native animation
-  frames, inherited text colors, and automatically resized button labels
-  may differ from the original screen.
+- Native animations, text styles, automatically resized labels, popup placement,
+  and material blur may not exactly match the original screen in Replay.
+- `RichText` captures text, paragraphs, and basic text styles only. It does not
+  capture HTML images, external styles, scripts, or complex Web layouts.
+- `PatternLock` replay requires forwarding touch and state changes through
+  `recordPatternTouch(...)` and `updatePatternLockState(...)`. Configure
+  `TextAndInputPrivacy.MASK_SENSITIVE_INPUTS` and `TouchPrivacy.SHOW` to capture it.
 - The package declares no permissions. Its core SDK dependency supplies
   the normal permissions needed for network uploads and monitoring.
 

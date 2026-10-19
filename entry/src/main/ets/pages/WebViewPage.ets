@@ -34,7 +34,6 @@ struct ReplaySecondaryWebPane {
 
   build() {
     Web({ src: this.useFixture ? $rawfile('session_replay_web.html') : this.url, controller: this.controller })
-      .id('replay-secondary-web')
       .width('100%')
       .height('100%')
       .javaScriptAccess(true)
@@ -350,7 +349,6 @@ export struct WebViewPage {
               if (this.mainWebMounted) {
                 Web({ src: this.fixtureMode ? $rawfile('session_replay_web.html') : (this.storedWebViewUrl || 'about:blank'),
                   controller: this.browserTabController })
-                  .id('replay-main-web')
                   .width(this.compactWeb ? '80%' : '100%')
                   .height('100%')
                   .visibility(this.mainWebVisible ? Visibility.Visible : Visibility.Hidden)

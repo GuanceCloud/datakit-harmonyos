@@ -86,7 +86,7 @@ struct SessionReplayPocPage {
         sessionId: capture.envelope.session_id,
         viewId: capture.envelope.view_id
       }).length;
-      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; durable resources: ${this.replay.getStoredResources().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
+      this.result = `${source} captured ${capture.wireframeCount} wireframes; buffered records: ${totalRecords}; durable segments: ${this.replay.getStoredSegments().length}; durable resources: ${this.replay.getStoredResources().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload}`;
     }, 200);
   }
 
@@ -99,7 +99,7 @@ struct SessionReplayPocPage {
           applicationId: capture.envelope.application_id,
           sessionId: capture.envelope.session_id,
           viewId: capture.envelope.view_id
-        }).length}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload.substring(0, 600)}`;
+        }).length}; durable segments: ${this.replay.getStoredSegments().length}; deferred error segments: ${this.replay.getDeferredErrorSegments().length}.\n${capture.payload}`;
         return;
       }
       this.result = 'No automatic mutation was observed. Keep Replay enabled, capture through the RUM View Bridge, then try again.';
@@ -111,7 +111,7 @@ struct SessionReplayPocPage {
       this.result = `${source} was ignored. Enable Replay and start the RUM View bridge first.`;
       return;
     }
-    this.result = `${source} captured.\n${payload.substring(0, 600)}`;
+    this.result = `${source} captured.\n${payload}`;
   }
 
   private recordFocusLoss(): void {
@@ -180,7 +180,7 @@ struct SessionReplayPocPage {
       const capture = this.replay.captureFullSnapshot(
         this.getUIContext(), 'session-replay-poc-root', context, vp2px(1)
       );
-      this.result = `Captured ${capture.wireframeCount} wireframes.\n${capture.payload.substring(0, 600)}`;
+      this.result = `Captured ${capture.wireframeCount} wireframes.\n${capture.payload}`;
     } catch (error) {
       this.result = `Capture failed: ${String(error)}`;
     }
@@ -205,7 +205,7 @@ struct SessionReplayPocPage {
         );
         this.result = capture === null
           ? 'No structural mutation detected after the baseline.'
-          : `Mutation captured with type ${capture.record.type}.\n${capture.payload.substring(0, 600)}`;
+          : `Mutation captured with type ${capture.record.type}.\n${capture.payload}`;
       } catch (error) {
         this.result = `Mutation capture failed: ${String(error)}`;
       }
