@@ -186,6 +186,13 @@ export interface FTDBTaskPoolReplayMetadata {
   recordingId?: string;
 }
 
+/** Describes which RUM summaries became stale after persisting Replay metadata. */
+export interface FTDBTaskPoolReplayUpdateResult {
+  changed: boolean;
+  viewSummaryChanged: boolean;
+  actionSummaryChanged: boolean;
+}
+
 export interface FTDBTaskPoolRequest {
   cache?: FTCacheSettings;
   command: string;
@@ -255,6 +262,7 @@ export interface FTDBTaskPoolResponse {
   actionCounts?: FTDBTaskPoolActionCountsDTO | null;
   closeAction?: FTDBTaskPoolCloseActionResponse;
   pendingResource?: FTDBTaskPoolPendingRumResourceDTO | null;
+  replayUpdate?: FTDBTaskPoolReplayUpdateResult;
   strings?: string[];
   dbLaneWaitMs?: number;
   errorMessage?: string;
@@ -641,7 +649,7 @@ export class FTDBTaskPoolExecutor {
     viewId: string,
     sessionId: string,
     metadata: FTDBTaskPoolReplayMetadata
-  ): Promise<boolean> {
+  ): Promise<FTDBTaskPoolReplayUpdateResult> {
     const response = await FTDBTaskPoolExecutor.execute(context, {
       command: FTDBTaskPoolCommand.UPDATE_RUM_VIEW_REPLAY,
       viewId,
@@ -649,7 +657,11 @@ export class FTDBTaskPoolExecutor {
       replayMetadata: metadata,
       now: Date.now()
     });
-    return response.value === true;
+    if (response.replayUpdate !== undefined) {
+      return response.replayUpdate;
+    }
+    const changed = response.value === true;
+    return { changed, viewSummaryChanged: changed, actionSummaryChanged: false };
   }
 
   public static async closeRumView(

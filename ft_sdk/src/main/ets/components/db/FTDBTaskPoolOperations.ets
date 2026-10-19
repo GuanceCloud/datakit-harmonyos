@@ -15,7 +15,7 @@ import {
 } from '../thread/SDKWorkerProtocol';
 import { FTCacheCoordinator } from './FTCacheCoordinator';
 import { FTDBTaskPoolRequest as CacheRequest, FTDBTaskPoolResponse as CacheResponse,
-  FTDBTaskPoolReplayMetadata } from './FTDBTaskPoolExecutor';
+  FTDBTaskPoolReplayMetadata, FTDBTaskPoolReplayUpdateResult } from './FTDBTaskPoolExecutor';
 
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
 const TRANSACTION_LIMIT_COUNT: number = 10;
@@ -254,6 +254,7 @@ interface FTDBTaskPoolResponse {
   actionCounts?: FTDBTaskPoolActionCountsDTO | null;
   closeAction?: FTDBTaskPoolCloseActionResponse;
   pendingResource?: FTDBTaskPoolPendingRumResourceDTO | null;
+  replayUpdate?: FTDBTaskPoolReplayUpdateResult;
   strings?: string[];
   dbLaneWaitMs?: number;
   errorMessage?: string;
@@ -485,8 +486,14 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
         return okResponse(undefined, request.view ? await upsertRumViewInTaskPool(rdbStore, request.view) : false);
       case FTDBTaskPoolCommand.UPDATE_RUM_VIEW:
         return okResponse(undefined, request.view ? await updateRumViewInTaskPool(rdbStore, request.view) : false);
-      case FTDBTaskPoolCommand.UPDATE_RUM_VIEW_REPLAY:
-        return okResponse(undefined, await updateRumViewReplayInTaskPool(rdbStore, request));
+      case FTDBTaskPoolCommand.UPDATE_RUM_VIEW_REPLAY: {
+        const replayUpdate = await updateRumViewReplayInTaskPool(rdbStore, request);
+        return {
+          ok: true,
+          value: replayUpdate.changed,
+          replayUpdate
+        } as FTDBTaskPoolResponse as Object;
+      }
       case FTDBTaskPoolCommand.CLOSE_RUM_VIEW:
         return okResponse(undefined, await closeRumViewInTaskPool(
           rdbStore,
@@ -2111,31 +2118,48 @@ async function closeRumViewInTaskPool(
 async function updateRumViewReplayInTaskPool(
   rdbStore: relationalStore.RdbStore,
   request: FTDBTaskPoolRequest
-): Promise<boolean> {
+): Promise<FTDBTaskPoolReplayUpdateResult> {
+  const unchanged: FTDBTaskPoolReplayUpdateResult = {
+    changed: false,
+    viewSummaryChanged: false,
+    actionSummaryChanged: false
+  };
   const metadata = request.replayMetadata;
   if (metadata === undefined || !metadata.hasReplay || !Number.isFinite(metadata.recordsCount) ||
     metadata.recordsCount <= 0 || !request.replaySessionId || !request.viewId) {
-    return false;
+    return unchanged;
   }
   rdbStore.beginTransaction();
   try {
     let changed = false;
+    let viewSummaryChanged = false;
+    let actionSummaryChanged = false;
     const view = await queryRumViewByIdInTaskPool(rdbStore, request.viewId);
     if (view !== null && view.sessionId === request.replaySessionId) {
       const count = Math.max(view.recordsCount || 0, Math.floor(metadata.recordsCount));
       const sampledOnError = view.sampledOnReplayError === true || metadata.sampledOnError;
       if (view.hasReplay !== true || count !== view.recordsCount || sampledOnError !== view.sampledOnReplayError) {
+        const shouldUpdateViewSummary = view.hasReplay !== true ||
+          sampledOnError !== view.sampledOnReplayError || view.isClose;
         view.hasReplay = true;
         view.recordsCount = count;
         view.sampledOnReplayError = sampledOnError;
         const values = {} as relationalStore.ValuesBucket;
         values[FTSQL.RUM_COLUMN_EXTRA_ATTR] = stringifyViewExtraAttr(view);
-        values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
-        values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(request.now || Date.now(), view.dataUpdateTime + 1, view.dataUploadTime + 1);
+        if (shouldUpdateViewSummary) {
+          values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
+          values[FTSQL.RUM_DATA_UPDATE_TIME] = Math.max(
+            request.now || Date.now(),
+            view.dataUpdateTime + 1,
+            view.dataUploadTime + 1
+          );
+        }
         const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
         predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
         predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, view.sessionId);
-        changed = await rdbStore.update(values, predicates) > 0;
+        const viewUpdated = await rdbStore.update(values, predicates) > 0;
+        changed = viewUpdated;
+        viewSummaryChanged = viewUpdated && shouldUpdateViewSummary;
       }
     }
 
@@ -2175,10 +2199,11 @@ async function updateRumViewReplayInTaskPool(
       predicates.equalTo(FTSQL.RUM_COLUMN_SESSION_ID, request.replaySessionId);
       predicates.equalTo(FTSQL.RUM_COLUMN_VIEW_ID, request.viewId);
       const updated = await rdbStore.update(values, predicates);
+      actionSummaryChanged = updated > 0 || actionSummaryChanged;
       changed = updated > 0 || changed;
     }
     rdbStore.commit();
-    return changed;
+    return { changed, viewSummaryChanged, actionSummaryChanged };
   } catch (error) {
     rdbStore.rollBack();
     throw new Error(String(error));

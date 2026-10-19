@@ -218,10 +218,13 @@ export default function cacheGovernanceUnitTest() {
       for (const action of [original, otherSession, otherView]) {
         access.records.set(access.path('action', action.id), JSON.stringify(action));
       }
-      expect((await store.execute({
+      const promotion = await store.execute({
         command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
         replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }
-      })).value).assertTrue();
+      });
+      expect(promotion.value).assertTrue();
+      expect(promotion.replayUpdate!.viewSummaryChanged).assertFalse();
+      expect(promotion.replayUpdate!.actionSummaryChanged).assertTrue();
       const restored = (await store.execute({ command: 'exportRumState' })).actions!;
       expect(restored.find((a: ActionBeanJSON) => a.id === 'original')!.hasReplay).assertTrue();
       expect(restored.find((a: ActionBeanJSON) => a.id === 'other-session')!.hasReplay === true).assertFalse();
@@ -230,6 +233,43 @@ export default function cacheGovernanceUnitTest() {
         command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
         replayMetadata: { hasReplay: true, recordsCount: 4, sampledOnError: false }
       })).value).assertFalse();
+    });
+
+    it('persists active Replay record growth without invalidating the View summary', 0, async () => {
+      const access = new MemoryAggregateAccess();
+      const store = new FTRumFileStore(access);
+      await store.execute({ command: 'upsertRumView', view: newView() });
+
+      const first = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 1, sampledOnError: false }, now: 100
+      });
+      expect(first.replayUpdate!.changed).assertTrue();
+      expect(first.replayUpdate!.viewSummaryChanged).assertTrue();
+      const firstView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+
+      const growth = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 2, sampledOnError: false }, now: 101
+      });
+      expect(growth.replayUpdate!.changed).assertTrue();
+      expect(growth.replayUpdate!.viewSummaryChanged).assertFalse();
+      expect(growth.replayUpdate!.actionSummaryChanged).assertFalse();
+      const activeView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      expect(activeView.recordsCount).assertEqual(2);
+      expect(activeView.viewUpdateTime).assertEqual(firstView.viewUpdateTime);
+      expect(activeView.dataUpdateTime).assertEqual(firstView.dataUpdateTime);
+
+      await store.execute({ command: 'closeRumView', viewId: 'v', now: 102 });
+      const closedView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      const finalGrowth = await store.execute({
+        command: 'updateRumViewReplay', viewId: 'v', replaySessionId: 's',
+        replayMetadata: { hasReplay: true, recordsCount: 3, sampledOnError: false }, now: 103
+      });
+      expect(finalGrowth.replayUpdate!.viewSummaryChanged).assertTrue();
+      const finalView = (await store.execute({ command: 'queryRumViewById', viewId: 'v' })).view!;
+      expect(finalView.recordsCount).assertEqual(3);
+      expect(finalView.viewUpdateTime > closedView.viewUpdateTime).assertTrue();
     });
 
     it('rejects invalid or uncommitted Replay without changing stored Actions', 0, async () => {

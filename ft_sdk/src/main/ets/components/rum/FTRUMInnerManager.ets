@@ -18,6 +18,7 @@ import FTTrackInner from '../FTTrackInner';
 import {
   FTDBTaskPoolExecutor,
   FTDBTaskPoolReplayMetadata,
+  FTDBTaskPoolReplayUpdateResult,
   FTDBTaskPoolPendingRumResourceDTO,
   FTDBTaskPoolRumCounterDeltaDTO
 } from '../db/FTDBTaskPoolExecutor';
@@ -475,6 +476,7 @@ export class FTRUMInnerManager {
   
   // Timer for debouncing generateRumData calls (aligned with Android: mHandler.removeCallbacks)
   private rumDataGenerateTimer: number | null = null;
+  private rumDataGenerateViewSummary: boolean = false;
   
   // Set to track processed action IDs to prevent duplicate inserts
   // This ensures that even if an action is queried multiple times, it will only be inserted once
@@ -1846,8 +1848,9 @@ export class FTRUMInnerManager {
    * Use debounce mechanism to avoid too frequent refresh (aligned with Android: mHandler.removeCallbacks)
    * Android: mHandler.removeCallbacks(mRUMGenerateRunner); mHandler.postDelayed(mRUMGenerateRunner, 100);
    */
-  private generateRumData(): void {
+  private generateRumData(includeViewSummary: boolean = true): void {
     try {
+      this.rumDataGenerateViewSummary = this.rumDataGenerateViewSummary || includeViewSummary;
       // Remove previous timer if exists (aligned with Android: mHandler.removeCallbacks)
       if (this.rumDataGenerateTimer !== null) {
         clearTimeout(this.rumDataGenerateTimer);
@@ -1858,8 +1861,12 @@ export class FTRUMInnerManager {
       this.rumDataGenerateTimer = setTimeout(async () => {
         try {
           this.rumDataGenerateTimer = null;
+          const shouldGenerateViewSummary = this.rumDataGenerateViewSummary;
+          this.rumDataGenerateViewSummary = false;
           await this.generateActionSum();
-          await this.generateViewSum();
+          if (shouldGenerateViewSummary) {
+            await this.generateViewSum();
+          }
         } catch (error) {
           FTInnerLogger.e(TAG, `Error generating RUM data: ${error}`);
         }
@@ -2413,6 +2420,7 @@ export class FTRUMInnerManager {
       clearTimeout(this.rumDataGenerateTimer);
       this.rumDataGenerateTimer = null;
     }
+    this.rumDataGenerateViewSummary = false;
     if (this.rumCounterFlushTimer !== null) {
       clearTimeout(this.rumCounterFlushTimer);
       this.rumCounterFlushTimer = null;
@@ -3116,9 +3124,14 @@ export class FTRUMInnerManager {
       // removed. Full aggregate writes would overwrite atomic RUM counters.
       const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(replayContext);
       FTDBTaskPoolExecutor.updateRumViewReplay(context, replayContext.viewId, replayContext.sessionId, replayMetadata)
-        .then((updated: boolean): void => {
-          if (updated && this.context === context) {
-            this.generateRumData();
+        .then((update: FTDBTaskPoolReplayUpdateResult): void => {
+          if (this.context !== context) {
+            return;
+          }
+          if (update.viewSummaryChanged) {
+            this.generateRumData(true);
+          } else if (update.actionSummaryChanged) {
+            this.generateRumData(false);
           }
         })
         .catch((error: Error): void => {
@@ -5975,6 +5988,7 @@ export class FTRUMInnerManager {
         clearTimeout(this.rumDataGenerateTimer);
         this.rumDataGenerateTimer = null;
       }
+      this.rumDataGenerateViewSummary = false;
 
       if (this.rumCounterFlushTimer) {
         clearTimeout(this.rumCounterFlushTimer);
