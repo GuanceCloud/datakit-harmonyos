@@ -7,6 +7,7 @@ REGISTRY="${OHPM_REGISTRY:-https://ohpm.openharmony.cn/ohpm/}"
 PRODUCT_NAME="${PRODUCT_NAME:-default}"
 FT_SDK_PRODUCT_NAME="${FT_SDK_PRODUCT_NAME:-ft_sdk}"
 FT_SDK_EXT_PRODUCT_NAME="${FT_SDK_EXT_PRODUCT_NAME:-ft_sdk_ext}"
+FT_SESSION_REPLAY_PRODUCT_NAME="${FT_SESSION_REPLAY_PRODUCT_NAME:-default}"
 FT_NATIVE_PRODUCT_NAME="${FT_NATIVE_PRODUCT_NAME:-ft_native}"
 BUILD_TARGET="${BUILD_TARGET:-default}"
 BUILD_MODE="${BUILD_MODE:-debug}"
@@ -25,12 +26,13 @@ if [[ "$BUILD_MODE" != "release" && "$BUILD_MODE" != "debug" ]]; then
   exit 1
 fi
 
-if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
-  echo "Usage: $0 [agent|ft_sdk_ext|native|all]"
+if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_sdk_ext" && "$MODULE_TYPE" != "ft_session_replay" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
+  echo "Usage: $0 [agent|ft_sdk_ext|ft_session_replay|native|all]"
   echo "  agent: build and publish ft_sdk + ft_sdk_ext"
   echo "  ft_sdk_ext: build and publish ft_sdk_ext only"
+  echo "  ft_session_replay: build and publish ft_session_replay only"
   echo "  native: build and publish ft_native"
-  echo "  all: build and publish ft_sdk + ft_sdk_ext + ft_native"
+  echo "  all: build and publish ft_sdk + ft_sdk_ext + ft_session_replay + ft_native"
   exit 1
 fi
 
@@ -48,6 +50,8 @@ if [[ -n "${OHPM_BIN:-}" ]]; then
   fi
 elif command -v ohpm >/dev/null 2>&1; then
   OHPM_BIN="$(command -v ohpm)"
+elif [[ -x "/Applications/evEco-Studio-26.app/Contents/tools/ohpm/bin/ohpm" ]]; then
+  OHPM_BIN="/Applications/evEco-Studio-26.app/Contents/tools/ohpm/bin/ohpm"
 elif [[ -x "/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm" ]]; then
   OHPM_BIN="/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm"
 else
@@ -66,6 +70,8 @@ fi
 
 if [[ -n "${HARMONY_OS_HVIGOR_PATH:-}" ]]; then
   HVIGOR_JS="$HARMONY_OS_HVIGOR_PATH"
+elif [[ -f "/Applications/evEco-Studio-26.app/Contents/tools/hvigor/bin/hvigorw.js" ]]; then
+  HVIGOR_JS="/Applications/evEco-Studio-26.app/Contents/tools/hvigor/bin/hvigorw.js"
 elif [[ -f "/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw.js" ]]; then
   HVIGOR_JS="/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw.js"
 else
@@ -354,6 +360,9 @@ product_for_module() {
     ft_sdk_ext)
       echo "$FT_SDK_EXT_PRODUCT_NAME"
       ;;
+    ft_session_replay)
+      echo "$FT_SESSION_REPLAY_PRODUCT_NAME"
+      ;;
     ft_native)
       echo "$FT_NATIVE_PRODUCT_NAME"
       ;;
@@ -491,12 +500,16 @@ main() {
     ft_sdk_ext)
       publish_module "ft_sdk_ext"
       ;;
+    ft_session_replay)
+      publish_module "ft_session_replay"
+      ;;
     native)
       publish_module "ft_native"
       ;;
     all)
       publish_module "ft_sdk"
       publish_module "ft_sdk_ext"
+      publish_module "ft_session_replay"
       publish_module "ft_native"
       ;;
   esac

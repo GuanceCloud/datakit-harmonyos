@@ -11,10 +11,12 @@ if [[ "$BUILD_MODE" != "release" && "$BUILD_MODE" != "debug" ]]; then
     exit 1
 fi
 
-if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "native" ]]; then
-    echo "Usage: $0 [agent|native]"
+if [[ "$MODULE_TYPE" != "agent" && "$MODULE_TYPE" != "ft_session_replay" && "$MODULE_TYPE" != "native" && "$MODULE_TYPE" != "all" ]]; then
+    echo "Usage: $0 [agent|ft_session_replay|native|all]"
     echo "  agent: Publish ft_sdk.har and ft_sdk_ext.har (default)"
+    echo "  ft_session_replay: Publish ft_session_replay.har"
     echo "  native: Publish ft_native.har"
+    echo "  all: Publish ft_sdk.har, ft_sdk_ext.har, ft_session_replay.har and ft_native.har"
     exit 1
 fi
 
@@ -30,9 +32,15 @@ echo "Publishing module type: $MODULE_TYPE (build mode: $BUILD_MODE)"
 if [ "$MODULE_TYPE" == "agent" ]; then
     # Agent modules are published together.
     MODULE_NAMES=("ft_sdk" "ft_sdk_ext")
+elif [ "$MODULE_TYPE" == "ft_session_replay" ]; then
+    # Session Replay module.
+    MODULE_NAMES=("ft_session_replay")
 elif [ "$MODULE_TYPE" == "native" ]; then
     # Native module (ft_native)
     MODULE_NAMES=("ft_native")
+elif [ "$MODULE_TYPE" == "all" ]; then
+    # Publish all SDK modules in dependency order.
+    MODULE_NAMES=("ft_sdk" "ft_sdk_ext" "ft_session_replay" "ft_native")
 fi
 OSS_UTIL_PATH=~/ossutilmac64
 
@@ -43,6 +51,9 @@ product_for_module() {
             ;;
         ft_sdk_ext)
             echo "ft_sdk_ext"
+            ;;
+        ft_session_replay)
+            echo "default"
             ;;
         ft_native)
             echo "ft_native"
