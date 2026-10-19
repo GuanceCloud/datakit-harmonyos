@@ -283,7 +283,7 @@ export class FTSessionReplay {
   }
 
   /**
-   * Sends durable segments to the Android-compatible Replay intake. Segments
+   * Sends durable segments to the HarmonyOS-compatible Replay intake. Segments
    * are deleted only after HTTP 200; any failure leaves them for a later call.
    */
   public flush(): Promise<SessionReplayUploadResult> {

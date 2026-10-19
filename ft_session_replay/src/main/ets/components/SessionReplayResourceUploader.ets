@@ -2,7 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
-import { ANDROID_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
+import { HARMONY_REPLAY_ENDPOINTS, SessionReplayContext } from './SessionReplayProtocol';
 import { SessionReplayResourceStore, SessionReplayStoredResource } from './SessionReplayResourceStore';
 import {
   isReplayUploadEndpointAvailable,
@@ -80,7 +80,7 @@ export function isRetryableReplayResourceFailure(
 }
 
 /**
- * Android-compatible asset check and multipart uploader. Resources are grouped
+ * HarmonyOS-compatible asset check and multipart uploader. Resources are grouped
  * by `wgt_id`, checked first, and their private files are removed only after a
  * server acknowledgement or a positive existence response.
  */
@@ -142,7 +142,7 @@ export class SessionReplayResourceUploader {
         this.cleanup.failedResources > 0);
     }
     // One durable resource descriptor is one local batch in HarmonyOS. Limit
-    // those first, then coalesce the selected batches by Android route.
+    // those first, then coalesce the selected batches by HarmonyOS route.
     const selected = pending.slice(0, REPLAY_MAX_BATCHES_PER_UPLOAD_JOB);
     this.resourceIdSample = selected.slice(0, 3).map((resource: SessionReplayStoredResource): string => resource.id);
     this.onAttempt?.(selected.length);
@@ -209,11 +209,11 @@ export class SessionReplayResourceUploader {
     const datakitUrl = this.route?.datakitUrl ?? installedConfig!.getDatakitUrl();
     const datawayUrl = this.route?.datawayUrl ?? installedConfig!.getDatawayUrl();
     const clientToken = this.route?.clientToken ?? installedConfig!.getClientToken();
-    const checkUrl = createAndroidReplayResourceUrl(
-      datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assetCheck, false
+    const checkUrl = createHarmonyReplayResourceUrl(
+      datakitUrl, datawayUrl, clientToken, HARMONY_REPLAY_ENDPOINTS.assetCheck, false
     );
-    const uploadUrl = createAndroidReplayResourceUrl(
-      datakitUrl, datawayUrl, clientToken, ANDROID_REPLAY_ENDPOINTS.assets, true
+    const uploadUrl = createHarmonyReplayResourceUrl(
+      datakitUrl, datawayUrl, clientToken, HARMONY_REPLAY_ENDPOINTS.assets, true
     );
     return checkUrl.length === 0 || uploadUrl.length === 0 ? null : { checkUrl, uploadUrl };
   }
@@ -418,8 +418,8 @@ export class SessionReplayResourceUploader {
   }
 }
 
-/** Builds Android's DataKit/Dataway resource endpoint URLs. */
-export function createAndroidReplayResourceUrl(
+/** Builds HarmonyOS's DataKit/Dataway resource endpoint URLs. */
+export function createHarmonyReplayResourceUrl(
   datakitUrl: string,
   datawayUrl: string,
   clientToken: string,

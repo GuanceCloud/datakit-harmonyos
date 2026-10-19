@@ -5,7 +5,7 @@ import { ArkUIReplayCollector, ArkUIReplayLightNode, ArkUIReplayLightSnapshot } 
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import { FTSessionReplayRecorder } from '../../main/ets/components/FTSessionReplayRecorder';
 import { FTSessionReplayConfig } from '../../main/ets/components/FTSessionReplayConfig';
-import { createAndroidReplayMobileSegment, FullSnapshotData, ReplayMutationData, ReplayRecordType,
+import { createHarmonyReplayMobileSegment, FullSnapshotData, ReplayMutationData, ReplayRecordType,
   ReplayWebViewWireframe, SessionReplayContext, SessionReplayRecord } from '../../main/ets/components/SessionReplayProtocol';
 import { createSessionReplayUploadFields } from '../../main/ets/components/SessionReplayUploader';
 import { SessionReplayStoredSegment } from '../../main/ets/components/SessionReplaySegmentStore';
@@ -34,10 +34,10 @@ export default function webReplayUnitTest() {
       const segment: SessionReplayStoredSegment = {
         version: 1, id: 'browser-unit', createdAt: browserFull.timestamp, context, records: [browserFull]
       };
-      expect(createAndroidReplayMobileSegment(context, segment.records).has_full_snapshot).assertTrue();
+      expect(createHarmonyReplayMobileSegment(context, segment.records).has_full_snapshot).assertTrue();
       expect(createSessionReplayUploadFields(segment, 'test', '1').fields.get('has_full_snapshot')).assertEqual('true');
       browserFull.type = 3 as ReplayRecordType;
-      expect(createAndroidReplayMobileSegment(context, segment.records).has_full_snapshot).assertFalse();
+      expect(createHarmonyReplayMobileSegment(context, segment.records).has_full_snapshot).assertFalse();
       expect(createSessionReplayUploadFields(segment, 'test', '1').fields.get('has_full_snapshot')).assertEqual('false');
     });
 

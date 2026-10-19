@@ -76,7 +76,7 @@ export class WebReplayBatcher {
     batch.bytes += bytes;
     if (batch.records.length >= 20 || batch.bytes >= 256 * 1024) return this.flush('size');
     if (this.timer !== -1) this.clock.cancel(this.timer);
-    // Android's 500ms debounce plus a 1s maximum residence time prevents slow streams starving.
+    // HarmonyOS's 500ms debounce plus a 1s maximum residence time prevents slow streams starving.
     this.timer = this.clock.schedule((): void => { this.flush('timeout'); },
       Math.max(0, Math.min(500, 1000 - (this.clock.now() - batch.startedAt))));
     return true;

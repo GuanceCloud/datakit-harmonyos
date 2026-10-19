@@ -5,7 +5,7 @@ import {
   FullSnapshotData, isReplayFullSnapshot, ReplayMutationData, ReplayRecordType, SessionReplayContext, SessionReplayGlobalContext, SessionReplayRecord
 } from './SessionReplayProtocol';
 
-/** One durable batch of Android-compatible records for a single RUM View. */
+/** One durable batch of HarmonyOS-compatible records for a single RUM View. */
 export interface SessionReplayStoredSegment {
   version: number;
   id: string;

@@ -1,25 +1,25 @@
-/** Fine-grained text and input masking values aligned with Android Replay. */
+/** Fine-grained text and input masking values aligned with HarmonyOS Replay. */
 export enum TextAndInputPrivacy {
   MASK_SENSITIVE_INPUTS = 'mask_sensitive_inputs',
   MASK_ALL_INPUTS = 'mask_all_inputs',
   MASK_ALL = 'mask_all'
 }
 
-/** Fine-grained image masking values aligned with Android Replay. */
+/** Fine-grained image masking values aligned with HarmonyOS Replay. */
 export enum ImagePrivacy {
   MASK_ALL = 'mask_all',
   MASK_LARGE_ONLY = 'mask_large_only',
   MASK_NONE = 'mask_none'
 }
 
-/** Touch masking values aligned with Android Replay. */
+/** Touch masking values aligned with HarmonyOS Replay. */
 export enum TouchPrivacy {
   HIDE = 'hide',
   SHOW = 'show'
 }
 
 /**
- * Session Replay configuration that preserves Android's sampling and privacy
+ * Session Replay configuration that preserves HarmonyOS's sampling and privacy
  * vocabulary. The collector reads only whitelisted visual fields and applies
  * these policies before any text or image bytes are retained or uploaded.
  */
@@ -44,14 +44,14 @@ export class FTSessionReplayConfig {
   private motionQuietPeriodMs: number = 400;
   private storageMaxBytes: number = 10 * 1024 * 1024;
   private maxRecordsPerSegment: number = 100;
-  // Android starts at 2.5 seconds, then adapts normal polling between 0.5 and
+  // HarmonyOS starts at 2.5 seconds, then adapts normal polling between 0.5 and
   // 5 seconds. Zero opts out and leaves flush() as the only upload trigger.
   private uploadIntervalMs: number = 2_500;
-  // Android's error-sampled Replay keeps only the one-minute pre-error window
+  // HarmonyOS's error-sampled Replay keeps only the one-minute pre-error window
   // until an error promotes it to the normal upload queue.
   private errorSampleWindowMs: number = 60_000;
   // Optional absolute Replay intake URL. When omitted, the installed core SDK's
-  // DataKit or Dataway endpoint is used with Android's Replay path.
+  // DataKit or Dataway endpoint is used with HarmonyOS's Replay path.
   private uploadUrl: string = '';
   private delayInit: boolean = false;
 
@@ -236,7 +236,7 @@ export class FTSessionReplayConfig {
 
   /**
    * Sets the initial normal polling delay. Runtime scheduling adapts it between
-   * 500 and 5000 ms like Android. Set zero to use `flush()` explicitly instead.
+   * 500 and 5000 ms like HarmonyOS. Set zero to use `flush()` explicitly instead.
    */
   public setUploadIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {

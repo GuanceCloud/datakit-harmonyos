@@ -22,7 +22,7 @@ import {
 } from './SessionReplayProtocol';
 
 /**
- * Converts privacy-safe ArkUI wireframes into the Android mobile record grammar.
+ * Converts privacy-safe ArkUI wireframes into the HarmonyOS mobile record grammar.
  * The recorder and Worker advance this baseline only along their ordered
  * record stream; a reset requires a Full Snapshot before another mutation.
  */

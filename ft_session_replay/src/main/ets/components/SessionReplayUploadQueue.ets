@@ -32,7 +32,7 @@ export const REPLAY_NORMAL_MAX_DELAY_MS: number = 5_000;
 const REPLAY_NORMAL_DECREASE_FACTOR: number = 0.90;
 const REPLAY_NORMAL_INCREASE_FACTOR: number = 1.10;
 
-/** Android executes the first scheduled upload immediately; zero disables scheduling. */
+/** HarmonyOS executes the first scheduled upload immediately; zero disables scheduling. */
 export function replayInitialUploadDelayMs(configuredDelayMs: number): number {
   return configuredDelayMs > 0 ? 0 : -1;
 }

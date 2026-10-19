@@ -6,10 +6,10 @@ import { FTSDK } from '@guancecloud/ft_sdk';
 import BuildProfile from '../../../../BuildProfile';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import {
-  ANDROID_REPLAY_ENDPOINTS,
+  HARMONY_REPLAY_ENDPOINTS,
   HARMONY_REPLAY_SOURCE,
   isReplayFullSnapshot,
-  serializeAndroidReplayMobileSegment
+  serializeHarmonyReplayMobileSegment
 } from './SessionReplayProtocol';
 import { SessionReplaySegmentStore, SessionReplayStoredSegment } from './SessionReplaySegmentStore';
 
@@ -30,7 +30,7 @@ export interface SessionReplayUploadResult {
   remainingSegments: number;
 }
 
-/** Android-compatible multipart fields generated for one durable Replay segment. */
+/** HarmonyOS-compatible multipart fields generated for one durable Replay segment. */
 export interface SessionReplayUploadFields {
   fields: Map<string, string>;
   rawSegment: string;
@@ -69,10 +69,10 @@ interface SessionReplayRequestHeaders {
 }
 
 /**
- * Resolves the Android Replay intake route using the same DataKit/Dataway URL
+ * Resolves the HarmonyOS Replay intake route using the same DataKit/Dataway URL
  * grammar as the core SDK's telemetry uploader.
  */
-export function createAndroidReplayUploadUrl(
+export function createHarmonyReplayUploadUrl(
   datakitUrl: string,
   datawayUrl: string,
   clientToken: string
@@ -83,7 +83,7 @@ export function createAndroidReplayUploadUrl(
     return '';
   }
   const host = datakit.length > 0 ? datakit : dataway;
-  const path = ANDROID_REPLAY_ENDPOINTS.records;
+  const path = HARMONY_REPLAY_ENDPOINTS.records;
   const normalizedHost = host.endsWith('/') ? host.substring(0, host.length - 1) : host;
   if (datakit.length > 0) {
     return `${normalizedHost}/${path}?precision=ns`;
@@ -91,7 +91,7 @@ export function createAndroidReplayUploadUrl(
   return `${normalizedHost}/${path}?token=${encodeURIComponent(clientToken.trim())}&to_headless=true&precision=ns`;
 }
 
-/** Matches the core SDK and Android preflight rules for DataKit/Dataway endpoints. */
+/** Matches the core SDK and HarmonyOS preflight rules for DataKit/Dataway endpoints. */
 export function isReplayUploadEndpointAvailable(
   datakitUrl: string,
   datawayUrl: string,
@@ -109,7 +109,7 @@ export function isValidReplayHttpUrl(value: string): boolean {
   return /^https?:\/\/(?:\[[0-9a-f:.]+\]|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?))*)(?::\d+)?(?:[/?#][^\s]*)?$/i.test(value);
 }
 
-/** Android Replay retries every non-200 response except 4xx; invalid local payloads are final. */
+/** HarmonyOS Replay retries every non-200 response except 4xx; invalid local payloads are final. */
 export function isRetryableReplayUploadStatus(code: number, invalid: boolean = false): boolean {
   if (invalid || code === http.ResponseCode.OK) return false;
   return code < 400 || code >= 500;
@@ -119,7 +119,7 @@ export function shouldDiscardReplayUploadStatus(code: number, invalid: boolean =
   return invalid || (code >= 400 && code < 500);
 }
 
-/** Creates Android-aligned form fields and the newline-delimited record payload. */
+/** Creates HarmonyOS-aligned form fields and the newline-delimited record payload. */
 export function createSessionReplayUploadFields(
   segment: SessionReplayStoredSegment,
   env: string,
@@ -137,9 +137,9 @@ export function createSessionReplayUploadFields(
       hasFullSnapshot = true;
     }
   }
-  // Android converts its persisted EnrichedRecord to MobileSegment here. The
+  // HarmonyOS converts its persisted EnrichedRecord to MobileSegment here. The
   // Studio player expects this final structure, not the persisted envelope.
-  const rawSegment = `${serializeAndroidReplayMobileSegment(segment.context, records)}\n`;
+  const rawSegment = `${serializeHarmonyReplayMobileSegment(segment.context, records)}\n`;
   const fields = new Map<string, string>();
   fields.set('start', String(start));
   fields.set('end', String(end));
@@ -168,7 +168,7 @@ export function createSessionReplayUploadFields(
 
 /**
  * Uploads durable segments one by one. A file is removed only after the
- * Replay endpoint returns HTTP 200, matching Android's acknowledgement rule.
+ * Replay endpoint returns HTTP 200, matching HarmonyOS's acknowledgement rule.
  */
 export class SessionReplayUploader {
   private readonly store: SessionReplaySegmentStore;
@@ -231,7 +231,7 @@ export class SessionReplayUploader {
   private resolveTarget(): SessionReplayUploadTarget | null {
     if (this.route !== null) {
       const override = this.route.uploadUrl.trim();
-      const url = override.length > 0 ? (isValidReplayHttpUrl(override) ? override : '') : createAndroidReplayUploadUrl(
+      const url = override.length > 0 ? (isValidReplayHttpUrl(override) ? override : '') : createHarmonyReplayUploadUrl(
         this.route.datakitUrl, this.route.datawayUrl, this.route.clientToken);
       return url.length === 0 ? null : { url, env: this.route.env };
     }
@@ -244,7 +244,7 @@ export class SessionReplayUploader {
     if (installedConfig === null) {
       return null;
     }
-    const url = createAndroidReplayUploadUrl(
+    const url = createHarmonyReplayUploadUrl(
       installedConfig.getDatakitUrl(),
       installedConfig.getDatawayUrl(),
       installedConfig.getClientToken()

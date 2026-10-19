@@ -19,13 +19,13 @@ import { SessionReplayWorkerOperations } from '../../main/ets/components/Session
 import { ReplaySnapshotProcessor } from '../../main/ets/components/ReplaySnapshotProcessor';
 import {
   nextReplayUploadSchedule,
+  ReplayUploadOutcome,
   replayInitialUploadDelayMs
 } from '../../main/ets/components/SessionReplayUploadQueue';
 import {
   canStartReplayUpload,
   isReplayBatteryHealthy
 } from '../../main/ets/components/SessionReplayUploadConditions';
-import { SessionReplayUploadResult } from '../../main/ets/components/SessionReplayUploader';
 
 function fullSnapshot(timestamp: number, childX: number): SessionReplayRecord {
   const root: ReplayPlaceholderWireframe = {
@@ -288,10 +288,9 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(operations.appendRecords(context, [viewEnd], 'none', true)).assertFalse();
     });
 
-    it('starts immediately and matches Android adaptive and retry delays', 0, () => {
-      const failed: SessionReplayUploadResult = {
-        success: false, code: 503, message: 'retry', retryable: true,
-        endpointBlocked: false, attemptedSegments: 1, uploadedSegments: 0, remainingSegments: 1
+    it('starts immediately and matches HarmonyOS adaptive and retry delays', 0, () => {
+      const failed: ReplayUploadOutcome = {
+        success: false, retryable: true, endpointBlocked: false
       };
       expect(replayInitialUploadDelayMs(2500)).assertEqual(0);
       expect(replayInitialUploadDelayMs(0)).assertEqual(-1);
@@ -307,9 +306,8 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(capped.delayMs).assertEqual(30000);
       const stillCapped = nextReplayUploadSchedule(capped.delayMs, capped.retryCount, failed);
       expect(stillCapped.delayMs).assertEqual(30000);
-      const blocked: SessionReplayUploadResult = {
-        success: false, code: 0, message: 'invalid endpoint', retryable: false,
-        endpointBlocked: true, attemptedSegments: 0, uploadedSegments: 0, remainingSegments: 1
+      const blocked: ReplayUploadOutcome = {
+        success: false, retryable: false, endpointBlocked: true
       };
       const waitingForUrl = nextReplayUploadSchedule(capped.delayMs, capped.retryCount, blocked);
       expect(waitingForUrl.delayMs).assertEqual(5000);
@@ -325,7 +323,7 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(nextReplayUploadSchedule(5000, 0, null).delayMs).assertEqual(5000);
     });
 
-    it('matches Android network and battery upload gates', 0, () => {
+    it('matches HarmonyOS network and battery upload gates', 0, () => {
       expect(canStartReplayUpload(null, true)).assertTrue();
       expect(canStartReplayUpload(true, true)).assertTrue();
       expect(canStartReplayUpload(false, true)).assertFalse();

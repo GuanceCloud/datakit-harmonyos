@@ -606,7 +606,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   /**
-   * Emits Android's resize mutation and follows it with a Full Snapshot when
+   * Emits HarmonyOS's resize mutation and follows it with a Full Snapshot when
    * a root is still available. Use the captured native viewport for both
    * records; a caller's stale or synthetic dimensions must not resize the
    * persistent page scene. Inputs are a fallback when capture is unavailable.
@@ -825,7 +825,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.sampler.decide(sessionId);
   }
 
-  /** Supplies Android-compatible Browser SDK initialization values. */
+  /** Supplies HarmonyOS-compatible Browser SDK initialization values. */
   public getWebViewOptions(): FTSessionReplayWebViewOptions | null {
     if (!this.isStarted) {
       return null;
@@ -927,7 +927,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     return this.promotedErrorSessions.has(sessionId);
   }
 
-  /** Returns Android-compatible Replay counters for the current RUM View. */
+  /** Returns HarmonyOS-compatible Replay counters for the current RUM View. */
   public getViewMetadata(context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
     const metadata = this.viewMetadata.get(this.getViewMetadataKey(context));
     if (metadata === undefined) {

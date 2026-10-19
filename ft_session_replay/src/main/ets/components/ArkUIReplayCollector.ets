@@ -91,7 +91,7 @@ interface ReplayInsets {
 
 /**
  * Window-space clipping rectangle used while collecting a snapshot. It is
- * serialized as Android clipping insets, separately from each node's original
+ * serialized as HarmonyOS clipping insets, separately from each node's original
  * position and measured size.
  */
 interface ReplayClipRect {
@@ -116,7 +116,7 @@ export interface CapturedReplayImageResource {
  * Captures a privacy-filtered, visual ArkUI snapshot from a registered root.
  *
  * FrameNode deliberately exposes layout rather than pixels. This collector
- * maps the stable public fields into Android mobile `shape`, `text` and
+ * maps the stable public fields into HarmonyOS mobile `shape`, `text` and
  * `image` wireframes. The inspector is consulted only for a small, whitelisted
  * set of visual attributes; inspector JSON itself is never persisted or sent.
  */
@@ -669,7 +669,7 @@ export class ArkUIReplayCollector {
     if (node.nodeType === 'Web' && node.webViewSlotId !== undefined) {
       return {
         // Studio keys the embedded Browser player by the serialized native id,
-        // not by the wireframe's slotId field. Match Android's id/slot identity.
+        // not by the wireframe's slotId field. Match HarmonyOS's id/slot identity.
         id: node.id, type: 'webview', slotId: String(node.id),
         x: node.x, y: node.y, width: node.width, height: node.height,
         permanentId: node.componentId || undefined,
@@ -1898,7 +1898,7 @@ export class ArkUIReplayCollector {
   }
 
   /**
-   * `textPosition` is already understood by Studio's Android wireframe
+   * `textPosition` is already understood by Studio's HarmonyOS wireframe
    * renderer. Supplying the native insets and alignment fixes the common
    * top-left/default-layout fallback without extending the wire protocol.
    */
@@ -2785,14 +2785,14 @@ export class ArkUIReplayCollector {
     if (six !== null) return `#${six[1].toUpperCase()}FF`;
     const eight = /^#([0-9a-f]{8})$/i.exec(color);
     if (eight !== null) {
-      // ArkUI serializes #AARRGGBB, while the Android replay renderer uses
+      // ArkUI serializes #AARRGGBB, while the HarmonyOS replay renderer uses
       // #RRGGBBAA. Leaving this unchanged swaps opacity and color channels.
       const argb = eight[1].toUpperCase();
       return `#${argb.substring(2)}${argb.substring(0, 2)}`;
     }
     const hex = /^0x([0-9a-f]{8})$/i.exec(color);
     if (hex !== null) {
-      // ArkUI's 0xAARRGGBB becomes the Android Replay renderer's #RRGGBBAA.
+      // ArkUI's 0xAARRGGBB becomes the HarmonyOS Replay renderer's #RRGGBBAA.
       const argb = hex[1].toUpperCase();
       return `#${argb.substring(2)}${argb.substring(0, 2)}`;
     }

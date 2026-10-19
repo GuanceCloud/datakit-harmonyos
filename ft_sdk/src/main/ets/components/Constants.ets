@@ -73,7 +73,7 @@ export class Constants {
    * View root name
    */
   static readonly VIEW_NAME_ROOT = "root";
-  /** Synthetic View used by cold and hot launch Actions, matching Android. */
+  /** Synthetic View used by HarmonyOS cold and hot launch Actions. */
   static readonly VIEW_NAME_APPLICATION_LAUNCH = "ApplicationLaunch";
   static readonly VIEW_NAME_BACKGROUND = "BackgroundView";
   static readonly VIEW_NAME_ROOT_FALLBACK = "RootView";
@@ -154,7 +154,7 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_SPAN_ID = "span_id";
   static readonly KEY_RUM_RESOURCE_REQUEST_HEADER = "request_header";
   static readonly KEY_RUM_RESOURCE_RESPONSE_HEADER = "response_header";
-  /** Resource network snapshot fields (aligned with Android). */
+  /** HarmonyOS Resource network snapshot fields. */
   static readonly KEY_RUM_RESOURCE_NETWORK_AVAILABLE = "network_available";
   static readonly KEY_RUM_RESOURCE_NETWORK_VALIDATED = "network_validated";
   static readonly KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS = "network_downlink_kbps";
@@ -243,15 +243,15 @@ export class Constants {
    */
   static readonly MINI_DB_LOG_CACHE_NUM = 1000;
   /**
-   * Default RUM cache limit (aligned with Android: DEFAULT_DB_RUM_CACHE_NUM = 100_000)
+   * Default RUM cache limit.
    */
   static readonly DEFAULT_DB_RUM_CACHE_NUM = 100000;
   /**
-   * Minimum RUM cache limit (aligned with Android: MINI_DB_RUM_CACHE_NUM = 10_000)
+   * Minimum RUM cache limit.
    */
   static readonly MINI_DB_RUM_CACHE_NUM = 10000;
   /**
-   * Database old cache remove count (aligned with Android: DB_OLD_CACHE_REMOVE_COUNT = 100)
+   * Number of old database records removed during cache cleanup.
    */
   static readonly DB_OLD_CACHE_REMOVE_COUNT = 100;
   /**
@@ -574,15 +574,15 @@ export class Constants {
    */
   static readonly KEY_SESSION_ERROR_TIMESTAMP = "session_error_timestamp";
   /**
-   * Resource download time (aligned with Android: KEY_RUM_DOWNLOAD_TIME)
+   * Resource download duration field.
    */
   static readonly KEY_RUM_DOWNLOAD_TIME = "resource_download_time";
   /**
-   * Session rum sampling rate (aligned with Android: KEY_SESSION_SAMPLE_RATE)
+   * RUM session sampling rate field.
    */
   static readonly KEY_SESSION_SAMPLE_RATE = "session_sample_rate";
   /**
-   * Session error sampling rate (aligned with Android: KEY_SESSION_ON_ERROR_SAMPLE_RATE)
+   * RUM error-session sampling rate field.
    */
   static readonly KEY_SESSION_ON_ERROR_SAMPLE_RATE = "session_on_error_sample_rate";
 

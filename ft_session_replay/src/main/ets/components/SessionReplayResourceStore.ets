@@ -19,7 +19,7 @@ export interface SessionReplayStoredResource {
  * Durable content-addressed Replay resource storage.
  *
  * Resource bytes are retained once per SHA-256 file name; metadata is retained
- * once per backend route (`wgt_id`). This matches Android's resource check
+ * once per backend route (`wgt_id`). This matches HarmonyOS's resource check
  * routing while avoiding duplicate private-file copies of identical content.
  */
 export class SessionReplayResourceStore {

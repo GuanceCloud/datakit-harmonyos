@@ -1,8 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { FTSessionReplayBridgeRegistry, FTSessionReplayWebDataContext } from '@guancecloud/ft_sdk';
 import {
-  ANDROID_REPLAY_ENDPOINTS,
-  createAndroidReplayMobileSegment,
+  HARMONY_REPLAY_ENDPOINTS,
+  createHarmonyReplayMobileSegment,
   createReplayEnvelope,
   FullSnapshotData,
   ReplayImageWireframe,
@@ -26,7 +26,7 @@ import { SessionReplaySampler, SessionReplaySamplingMode } from '../../main/ets/
 import { FTSessionReplay } from '../../main/ets/components/FTSessionReplay';
 import { FTSessionReplayRecorder } from '../../main/ets/components/FTSessionReplayRecorder';
 import {
-  createAndroidReplayUploadUrl,
+  createHarmonyReplayUploadUrl,
   createSessionReplayUploadFields,
   isReplayUploadEndpointAvailable,
   isValidReplayHttpUrl,
@@ -35,7 +35,7 @@ import {
   shouldDiscardReplayUploadStatus
 } from '../../main/ets/components/SessionReplayUploader';
 import {
-  createAndroidReplayResourceUrl,
+  createHarmonyReplayResourceUrl,
   isRetryableReplayResourceFailure
 } from '../../main/ets/components/SessionReplayResourceUploader';
 import { SessionReplayStoredSegment } from '../../main/ets/components/SessionReplaySegmentStore';
@@ -76,7 +76,7 @@ function applyPlaceholderMutation(
 
 export default function sessionReplayProtocolUnitTest() {
   describe('SessionReplayProtocolUnit', () => {
-    it('serializes the Android enriched-record envelope', 0, () => {
+    it('serializes the HarmonyOS enriched-record envelope', 0, () => {
       const root: ReplayPlaceholderWireframe = {
         id: 1000000001, x: 0, y: 0, width: 1080, height: 2400,
         type: 'placeholder', label: 'ArkUI:Column', permanentId: 'session-replay-poc-root'
@@ -86,27 +86,27 @@ export default function sessionReplayProtocolUnitTest() {
       globalContext['wgt_id'] = 'demo';
       globalContext['release'] = 1;
       const context: SessionReplayContext = {
-        applicationId: 'android-compatible-app',
+        applicationId: 'harmony-compatible-app',
         sessionId: 'session-id',
         viewId: 'view-id',
         globalContext
       };
 
       const envelope = createReplayEnvelope(context, records);
-      expect(envelope.application_id).assertEqual('android-compatible-app');
+      expect(envelope.application_id).assertEqual('harmony-compatible-app');
       expect(envelope.session_id).assertEqual('session-id');
       expect(envelope.view_id).assertEqual('view-id');
       expect(envelope.records[0].type).assertEqual(10);
       expect(envelope.records[0].data !== undefined).assertTrue();
       const payload = serializeReplayEnvelope(context, records);
-      expect(payload.includes('"application_id":"android-compatible-app"')).assertTrue();
+      expect(payload.includes('"application_id":"harmony-compatible-app"')).assertTrue();
       expect(payload.includes('"wireframes"')).assertTrue();
     });
 
-    it('uses Android replay endpoints and safe privacy defaults', 0, () => {
-      expect(ANDROID_REPLAY_ENDPOINTS.records).assertEqual('v1/write/rum/replay');
-      expect(ANDROID_REPLAY_ENDPOINTS.assets).assertEqual('v1/write/rum/replay_assets');
-      expect(ANDROID_REPLAY_ENDPOINTS.assetCheck).assertEqual('v1/check/rum/replay_assets');
+    it('uses HarmonyOS replay endpoints and safe privacy defaults', 0, () => {
+      expect(HARMONY_REPLAY_ENDPOINTS.records).assertEqual('v1/write/rum/replay');
+      expect(HARMONY_REPLAY_ENDPOINTS.assets).assertEqual('v1/write/rum/replay_assets');
+      expect(HARMONY_REPLAY_ENDPOINTS.assetCheck).assertEqual('v1/check/rum/replay_assets');
 
       const config = new FTSessionReplayConfig();
       expect(config.getTextAndInputPrivacy()).assertEqual(TextAndInputPrivacy.MASK_ALL);
@@ -172,7 +172,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(payload.includes('"objectFit":"contain"')).assertTrue();
     });
 
-    it('converts the persisted envelope into Studio\'s Android mobile segment', 0, () => {
+    it('converts the persisted envelope into Studio\'s HarmonyOS mobile segment', 0, () => {
       const meta: ReplayMetaData = { width: 100, height: 100 };
       const older: SessionReplayRecord = {
         timestamp: 1700000000000, type: ReplayRecordType.META, data: meta
@@ -183,7 +183,7 @@ export default function sessionReplayProtocolUnitTest() {
       const context: SessionReplayContext = {
         applicationId: 'app-id', sessionId: 'session-id', viewId: 'view-id', globalContext
       };
-      const segment = createAndroidReplayMobileSegment(context, [newer, older]);
+      const segment = createHarmonyReplayMobileSegment(context, [newer, older]);
       expect(segment.application.id).assertEqual('app-id');
       expect(segment.session.id).assertEqual('session-id');
       expect(segment.view.id).assertEqual('view-id');
@@ -195,7 +195,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(segment.records[0].timestamp).assertEqual(1700000000000);
     });
 
-    it('uses Android native record types for view lifecycle and mutations', 0, () => {
+    it('uses HarmonyOS native record types for view lifecycle and mutations', 0, () => {
       const processor = new ReplaySnapshotProcessor();
       const firstRoot: ReplayPlaceholderWireframe = {
         id: 1, x: 0, y: 0, width: 100, height: 100,
@@ -358,7 +358,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(data.updates[0].clip?.left).assertEqual(0);
     });
 
-    it('preserves native text insets and alignment in Android wireframes', 0, () => {
+    it('preserves native text insets and alignment in HarmonyOS wireframes', 0, () => {
       const processor = new ReplaySnapshotProcessor();
       const centeredText: ReplayTextWireframe = {
         id: 8, x: 0, y: 0, width: 200, height: 64, type: 'text', text: 'Buy now',
@@ -525,7 +525,7 @@ export default function sessionReplayProtocolUnitTest() {
       recorder.stop();
     });
 
-    it('creates Android-compatible multipart Replay fields and intake URLs', 0, () => {
+    it('creates HarmonyOS-compatible multipart Replay fields and intake URLs', 0, () => {
       const record = fullSnapshotRecord(1700000000000, []);
       const globalContext: SessionReplayGlobalContext = {};
       globalContext['release'] = 1;
@@ -553,17 +553,17 @@ export default function sessionReplayProtocolUnitTest() {
       expect(fields.rawSegment.includes('"application":{"id":"app-id"}')).assertTrue();
       expect(fields.rawSegment.includes('"source":"harmonyos"')).assertTrue();
       expect(fields.rawSegment.includes('"application_id"')).assertFalse();
-      expect(createAndroidReplayUploadUrl('https://dk.example', '', ''))
+      expect(createHarmonyReplayUploadUrl('https://dk.example', '', ''))
         .assertEqual('https://dk.example/v1/write/rum/replay?precision=ns');
-      expect(createAndroidReplayUploadUrl('', 'https://dw.example/', 'token'))
+      expect(createHarmonyReplayUploadUrl('', 'https://dw.example/', 'token'))
         .assertEqual('https://dw.example/v1/write/rum/replay?token=token&to_headless=true&precision=ns');
-      expect(createAndroidReplayUploadUrl('localhost:9529', '', '')).assertEqual('');
-      expect(createAndroidReplayUploadUrl('', 'https://dw.example', '')).assertEqual('');
-      expect(createAndroidReplayUploadUrl('', 'https://dw.example', 'a+b/c'))
+      expect(createHarmonyReplayUploadUrl('localhost:9529', '', '')).assertEqual('');
+      expect(createHarmonyReplayUploadUrl('', 'https://dw.example', '')).assertEqual('');
+      expect(createHarmonyReplayUploadUrl('', 'https://dw.example', 'a+b/c'))
         .assertEqual('https://dw.example/v1/write/rum/replay?token=a%2Bb%2Fc&to_headless=true&precision=ns');
-      expect(createAndroidReplayResourceUrl('ftp://dk.example', '', '', ANDROID_REPLAY_ENDPOINTS.assets, true))
+      expect(createHarmonyReplayResourceUrl('ftp://dk.example', '', '', HARMONY_REPLAY_ENDPOINTS.assets, true))
         .assertEqual('');
-      expect(createAndroidReplayResourceUrl('', 'https://dw.example', '', ANDROID_REPLAY_ENDPOINTS.assets, true))
+      expect(createHarmonyReplayResourceUrl('', 'https://dw.example', '', HARMONY_REPLAY_ENDPOINTS.assets, true))
         .assertEqual('');
       expect(isReplayUploadEndpointAvailable('https://dk.example', '', '')).assertTrue();
       expect(isReplayUploadEndpointAvailable('', 'https://dw.example', 'token')).assertTrue();

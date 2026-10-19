@@ -452,7 +452,7 @@ export class FTSDK {
     // Get context from Utils (unified context management)
     const context = getFTSDKRuntime().getAbilityContext();
 
-    // Android applies persisted remote configuration before the SDK's dependent
+    // Apply persisted remote configuration before the SDK's dependent
     // managers are initialized. Preferences has a synchronous HarmonyOS API,
     // which lets us preserve that startup ordering without changing FTSDK.install.
     if (config.isRemoteConfiguration()) {
@@ -833,7 +833,7 @@ export class FTSDK {
     FTRUMInnerManager.shutdownInternal();
     FTLogger.resetBatchStateInternal();
 
-    // Release network listener (similar to Android)
+    // Release the HarmonyOS network listener.
     FTNetworkListener.release();
     FTInnerLogFileManager.getInstance().shutdown(true);
     FTInnerLogger.d(TAG, "FTSDK shut down, network listener released");
@@ -998,7 +998,7 @@ export class FTSDK {
     if (nativeVersion.length > 0) {
       pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_NATIVE] = nativeVersion;
     }
-    // Merge user-defined pkgInfo from config (similar to Android: pkgInfo.putAll(config.getPkgInfo()))
+    // Merge user-defined pkgInfo from the SDK configuration.
     const userPkgInfo = config.getPkgInfo();
     if (userPkgInfo && userPkgInfo.size > 0) {
       const userPkgInfoKeys = Array.from(userPkgInfo.keys());
@@ -1290,7 +1290,7 @@ export class FTSDK {
     FTSDK.updateDeviceUUIDContext(config);
   }
 
-  /** Apply only the Android-supported live remote-configuration fields. */
+  /** Apply the live remote-configuration fields supported by the HarmonyOS SDK. */
   private static applyRemoteConfigHotUpdate(bean: RemoteConfigBean): void {
     const sdk = FTSDK.ftSdk;
     const baseConfig = sdk === null ? null : sdk.ftSDKConfig;

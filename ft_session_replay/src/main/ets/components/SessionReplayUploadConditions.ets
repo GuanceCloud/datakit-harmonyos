@@ -2,7 +2,7 @@ import { batteryInfo } from '@kit.BasicServicesKit';
 
 export const REPLAY_MIN_UPLOAD_BATTERY_SOC: number = 20;
 
-/** Primitive battery snapshot used to keep the Android-aligned rule testable. */
+/** Primitive battery snapshot used to keep the HarmonyOS-aligned rule testable. */
 export interface ReplayBatteryState {
   batterySOC: number;
   chargingStatus: number;
@@ -11,7 +11,7 @@ export interface ReplayBatteryState {
 }
 
 /**
- * Android uploads above 20% or whenever external power is present, charging is
+ * HarmonyOS uploads above 20% or whenever external power is present, charging is
  * active/full, or the device has no battery (for example, some TVs/emulators).
  */
 export function isReplayBatteryHealthy(state: ReplayBatteryState): boolean {
@@ -24,7 +24,7 @@ export function isReplayBatteryHealthy(state: ReplayBatteryState): boolean {
     !state.isBatteryPresent || charging;
 }
 
-/** Platform read failures are unknown state and fail open, as Android does before its first battery broadcast. */
+/** Platform read failures are unknown state and fail open, as HarmonyOS does before its first battery broadcast. */
 export function readReplayBatteryHealthy(): boolean {
   try {
     return isReplayBatteryHealthy({
