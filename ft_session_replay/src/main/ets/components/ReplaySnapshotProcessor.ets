@@ -138,6 +138,13 @@ export class ReplaySnapshotProcessor {
   }
 
   public createMutationRecord(fullSnapshot: SessionReplayRecord): SessionReplayRecord | null {
+    const mutation = this.diffMutationRecord(fullSnapshot);
+    this.setFullSnapshotBaseline(fullSnapshot);
+    return mutation;
+  }
+
+  /** Compares with the committed baseline without advancing it before a durable write. */
+  public diffMutationRecord(fullSnapshot: SessionReplayRecord): SessionReplayRecord | null {
     const data = fullSnapshot.data as FullSnapshotData;
     const currentWireframes = data.wireframes;
     const previousById = new Map<number, ReplayWireframe>();
@@ -186,7 +193,6 @@ export class ReplaySnapshotProcessor {
         removes.push({ id: previous.id });
       }
     }
-    this.setFullSnapshotBaseline(fullSnapshot);
     if (adds.length === 0 && removes.length === 0 && updates.length === 0) {
       return null;
     }

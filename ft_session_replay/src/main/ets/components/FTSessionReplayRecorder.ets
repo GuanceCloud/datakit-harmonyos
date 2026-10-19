@@ -23,6 +23,7 @@ import {
 } from './ArkUIReplayCollector';
 import { FTSessionReplayConfig, TextAndInputPrivacy, TouchPrivacy } from './FTSessionReplayConfig';
 import { ReplaySnapshotProcessor } from './ReplaySnapshotProcessor';
+import { ReplaySnapshotFilter } from './ReplaySnapshotFilter';
 import { ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 import { SessionReplaySampler, SessionReplaySamplingMode } from './SessionReplaySampler';
 import { SessionReplaySegmentStore } from './SessionReplaySegmentStore';
@@ -118,6 +119,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   private readonly config: FTSessionReplayConfig;
   private readonly collector: ArkUIReplayCollector;
   private readonly processor: ReplaySnapshotProcessor = new ReplaySnapshotProcessor();
+  private readonly snapshotFilter: ReplaySnapshotFilter = new ReplaySnapshotFilter();
   private baselineContextKey: string = '';
   private readonly pendingManualBaseline: Array<SessionReplayRecord> = [];
   private readonly sampler: SessionReplaySampler;
@@ -263,9 +265,13 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       (context: SessionReplayContext): (() => void) =>
         FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context)));
     this.collector.setComponentRasterCallbacks((key: string, bytes: Uint8Array, mimeType: string): void => {
+      this.snapshotFilter.invalidate();
       this.workQueue.registerImageAsset(key, bytes, mimeType);
       this.notifyPageChanged();
-    }, (key: string): void => this.workQueue.unregisterImageAsset(key));
+    }, (key: string): void => {
+      this.snapshotFilter.invalidate();
+      this.workQueue.unregisterImageAsset(key);
+    });
   }
 
   /** Enables RUM lifecycle capture through the core NoOp bridge registry. */
@@ -477,6 +483,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   public registerImageAsset(componentId: string, data: ArrayBuffer | Uint8Array, mimeType: string = 'image/png'): boolean {
     const registered = this.collector.registerImageAsset(componentId, data, mimeType);
     if (registered) {
+      this.snapshotFilter.invalidate();
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
       this.workQueue.registerImageAsset(componentId, bytes, mimeType);
     }
@@ -484,6 +491,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   public unregisterImageAsset(componentId: string): void {
+    this.snapshotFilter.invalidate();
     this.collector.unregisterImageAsset(componentId);
     this.workQueue.unregisterImageAsset(componentId);
   }
@@ -1157,15 +1165,20 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     promoteErrorAt: number | null,
     queuedAt: number = Date.now()
   ): void {
+    const targetStore = this.getStoreForContext(context);
+    const capture: ReplayWorkerCapture = {
+      context, viewport: this.getRootViewport(snapshot.nodes[0]?.width, snapshot.nodes[0]?.height), previousViewport: this.observedViewport,
+      lastFullSnapshotAt: this.lastFullSnapshotAt,
+      storeKind: targetStore === this.store && targetStore !== null ? 'main' :
+        (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none')
+    };
+    if (this.snapshotFilter.canSkip(kind, snapshot, capture, generation, !this.workQueue.hasPendingWork())) {
+      this.pendingCaptureTriggers.clear();
+      return;
+    }
+    const filterRevision = this.snapshotFilter.getRevision();
     const completePersistence = FTSessionReplayBridgeRegistry.beginViewPersistence(this.createReplayRUMContext(context));
     try {
-      const targetStore = this.getStoreForContext(context);
-      const capture: ReplayWorkerCapture = {
-        context, viewport: this.getRootViewport(snapshot.nodes[0]?.width, snapshot.nodes[0]?.height), previousViewport: this.observedViewport,
-        lastFullSnapshotAt: this.lastFullSnapshotAt,
-        storeKind: targetStore === this.store && targetStore !== null ? 'main' :
-          (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none')
-      };
       if (this.config.isPerformanceDiagnosticsEnabled()) {
         capture.captureTriggers = kind === 'start' || kind === 'full' ? [kind] :
           (this.pendingCaptureTriggers.size > 0 ? Array.from(this.pendingCaptureTriggers).sort() : [kind]);
@@ -1174,12 +1187,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       this.workQueue.enqueue(kind, snapshot, capture,
         (result: ReplayWorkerResult | null, error: string): void => {
           try {
+            if (this.isCurrentCapture(context, generation)) {
+              if (result?.stored === true) this.snapshotFilter.acknowledge(snapshot, capture, generation, filterRevision);
+              else this.snapshotFilter.invalidate();
+            }
             this.completeWorkerSnapshot(kind, context, generation, result, error, rumContext, promoteErrorAt, queuedAt);
           } finally {
             completePersistence();
           }
         });
     } catch (error) {
+      this.snapshotFilter.invalidate();
       completePersistence();
       throw new Error(String(error));
     }
@@ -1518,6 +1536,8 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
     if (!persist) {
       return true;
     }
+    // Manual records can change the Worker's baseline without an automatic UI handoff.
+    if (baselineSnapshot !== null) this.snapshotFilter.invalidate();
     const targetStore = this.getStoreForContext(context);
     const storeKind: ReplayStoreKind = targetStore === this.store && targetStore !== null ? 'main' :
       (targetStore === this.errorSampleStore && targetStore !== null ? 'error' : 'none');
@@ -1680,6 +1700,7 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
   }
 
   private stopObservation(): void {
+    this.snapshotFilter.invalidate();
     this.pendingCaptureTriggers.clear();
     this.hasActiveComponentAnimations = false;
     this.componentSamplingIntervalMs = 0;

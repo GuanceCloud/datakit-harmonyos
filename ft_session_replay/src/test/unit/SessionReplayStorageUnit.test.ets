@@ -143,6 +143,29 @@ export default function sessionReplayStorageUnitTest() {
       expect(source.list().length).assertEqual(0);
     });
 
+    it('retains an active static scene for an error after the entire frame stream predates the window', 0, () => {
+      const source = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 1, 'static_error');
+      const destination = new SessionReplaySegmentStore(testRoot, 1024 * 1024, 1, 'static_promoted');
+      const context = replayContext();
+      const processor = new ReplaySnapshotProcessor();
+      const first = checkpoint(1000, 'static');
+      expect(source.append(context, processor.createViewStartRecords(first))).assertTrue();
+      expect(source.append(context, [processor.createMutationRecord(checkpoint(2000, 'static', 20))!])).assertTrue();
+      const closed: SessionReplayContext = {
+        applicationId: context.applicationId, sessionId: context.sessionId, viewId: 'closed-view'
+      };
+      expect(source.append(closed, [checkpoint(1000, 'closed'), processor.createViewEndRecord(2000)])).assertTrue();
+
+      source.pruneBefore(60000);
+      assertStoredState(source, context.viewId, 'static', 20);
+      expect(source.list().some((segment): boolean => segment.context.viewId === closed.viewId)).assertFalse();
+      expect(source.promoteSessionWindow(context.sessionId, 120000, 60000, destination)).assertTrue();
+      assertStoredState(destination, context.viewId, 'static', 20);
+      expect(destination.list().some((segment): boolean =>
+        segment.records.some((record): boolean => record.type === ReplayRecordType.META))).assertTrue();
+      expect(source.list().length).assertEqual(0);
+    });
+
     it('rejects an orphan mutation during quota eviction and recovers without changing another View', 0, () => {
       const quota = 1024 * 1024;
       const store = new SessionReplaySegmentStore(testRoot, quota, 100);

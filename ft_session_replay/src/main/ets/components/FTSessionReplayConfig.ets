@@ -36,8 +36,8 @@ export class FTSessionReplayConfig {
   // perform no polling once the motion tail has finished.
   private snapshotIntervalMs: number = 32;
   private performanceDiagnosticsEnabled: boolean = false;
-  // Android checkpoints an observed frame after 3 seconds. This threshold
-  // does not schedule captures when an otherwise idle page produces no frames.
+  // Changed frames checkpoint after 3 seconds. Unchanged frames never emit
+  // periodic records, even if FPS monitoring keeps the drawing pipeline active.
   private fullSnapshotIntervalMs: number = 3_000;
   // Keep sampling after a gesture/transition signal to cover inertia and the
   // final state. Drawing notifications continue sampling longer animations.
@@ -169,7 +169,7 @@ export class FTSessionReplayConfig {
     return this.snapshotIntervalMs;
   }
 
-  /** Sets the frame-driven Full Snapshot threshold (minimum/default 3 seconds). */
+  /** Sets the Full Snapshot threshold for changed frames (minimum/default 3 seconds). */
   public setFullSnapshotIntervalMs(intervalMs: number): FTSessionReplayConfig {
     if (!Number.isFinite(intervalMs)) {
       return this;

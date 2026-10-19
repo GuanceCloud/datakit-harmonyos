@@ -373,6 +373,8 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
     const checkpoints = new Map<string, number>();
     const starts = new Map<string, number>();
     const initialization = new Map<string, Map<number, number>>();
+    const streamViews = new Map<string, string>();
+    const closedViews = new Set<string>();
     const selected = new Set<number>();
     let ordinal = 0;
     for (let index = 0; index < segments.length; index++) {
@@ -380,6 +382,10 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
       for (let recordIndex = 0; recordIndex < segment.records.length; recordIndex++, ordinal++) {
         const record = segment.records[recordIndex];
         const key = this.streamKey(segment.context, record);
+        const viewKey = `${segment.context.applicationId}|${segment.context.sessionId}|${segment.context.viewId}`;
+        streamViews.set(key, viewKey);
+        if (record.type === ReplayRecordType.VIEW_END && record.slotId === undefined) closedViews.add(viewKey);
+        else if (record.type === ReplayRecordType.FULL_SNAPSHOT && record.slotId === undefined) closedViews.delete(viewKey);
         if (this.isCheckpoint(record)) checkpoints.set(key, ordinal);
         if (record.type === ReplayRecordType.META || record.type === ReplayRecordType.FOCUS ||
           record.type === ReplayRecordType.VIEWPORT) {
@@ -393,6 +399,14 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
         }
       }
     }
+    // An active static page has no heartbeat records inside the window. Keep
+    // its latest checkpoint and dependent mutations so an Error still has a scene.
+    checkpoints.forEach((checkpoint: number, key: string): void => {
+      if (!starts.has(key) && !closedViews.has(streamViews.get(key) ?? '')) {
+        starts.set(key, checkpoint);
+        initialization.get(key)?.forEach((value: number): void => { selected.add(value); });
+      }
+    });
     ordinal = 0;
     for (let index = 0; index < segments.length; index++) {
       const segment = segments[index];

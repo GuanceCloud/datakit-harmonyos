@@ -43,10 +43,10 @@ function fullSnapshot(timestamp: number, childX: number): SessionReplayRecord {
   return snapshot;
 }
 
-function newOperations(): SessionReplayWorkerOperations {
+function newOperations(fullSnapshotIntervalMs: number = 30000): SessionReplayWorkerOperations {
   const options: ReplayWorkerOptions = {
     filesDir: '', maxNodes: 100, maxBytes: 1024 * 1024, maxRecordsPerSegment: 100,
-    fullSnapshotIntervalMs: 30000, errorSampleWindowMs: 60000,
+    fullSnapshotIntervalMs, errorSampleWindowMs: 60000,
     textPrivacy: TextAndInputPrivacy.MASK_ALL, imagePrivacy: ImagePrivacy.MASK_ALL
   };
   return new SessionReplayWorkerOperations(options);
@@ -125,6 +125,59 @@ export default function sessionReplayWorkerUnitTest(): void {
       expect(mutation.removes[0].id).assertEqual(2);
       expect(mutation.adds.length).assertEqual(0);
       expect(settled.lastFullSnapshotAt).assertEqual(1000);
+    });
+
+    it('does not emit periodic records for unchanged frames across a long idle interval', 0, () => {
+      const operations = newOperations(3000);
+      const commit = automaticCommit(1000, 0);
+      operations.process('start', commit);
+      for (const timestamp of [4000, 7000, 10000, 61000]) {
+        commit.snapshot = fullSnapshot(timestamp, 0);
+        const unchanged = operations.process('automatic', commit);
+        expect(unchanged.records.length).assertEqual(0);
+        expect(unchanged.payload).assertEqual('');
+        expect(unchanged.lastFullSnapshotAt).assertEqual(1000);
+        expect(unchanged.stored).assertTrue();
+      }
+      commit.snapshot = fullSnapshot(61100, 5);
+      const changed = operations.process('automatic', commit);
+      expect(changed.records.length).assertEqual(1);
+      expect(changed.records[0].type).assertEqual(ReplayRecordType.FULL_SNAPSHOT);
+      commit.snapshot = fullSnapshot(61200, 10);
+      const mutation = operations.process('automatic', commit);
+      expect(mutation.records[0].type).assertEqual(ReplayRecordType.INCREMENTAL_SNAPSHOT);
+      expect((mutation.records[0].data as ReplayMutationData).updates[0].x).assertEqual(10);
+    });
+
+    it('uses visual diff equivalence without advancing the baseline during comparison', 0, () => {
+      const processor = new ReplaySnapshotProcessor();
+      processor.setFullSnapshotBaseline(fullSnapshot(1000, 0));
+      const equivalent = fullSnapshot(4000, 0);
+      (equivalent.data as FullSnapshotData).wireframes[1].clip = { top: 0, right: 0, bottom: 0, left: 0 };
+      expect(processor.diffMutationRecord(equivalent) === null).assertTrue();
+      const changed = fullSnapshot(4100, 10);
+      expect(processor.diffMutationRecord(changed) !== null).assertTrue();
+      expect(processor.diffMutationRecord(changed) !== null).assertTrue();
+      processor.setFullSnapshotBaseline(changed);
+      expect(processor.diffMutationRecord(changed) === null).assertTrue();
+      const operations = newOperations(3000);
+      const commit = automaticCommit(1000, 0);
+      operations.process('start', commit);
+      commit.snapshot = equivalent;
+      expect(operations.process('automatic', commit).records.length).assertEqual(0);
+    });
+
+    it('retains explicit full and viewport checkpoints for otherwise identical content', 0, () => {
+      const operations = newOperations(3000);
+      const commit = automaticCommit(1000, 0);
+      operations.process('start', commit);
+      commit.snapshot = fullSnapshot(4000, 0);
+      expect(operations.process('full', commit).records[0].type).assertEqual(ReplayRecordType.FULL_SNAPSHOT);
+      commit.snapshot = fullSnapshot(4100, 0);
+      commit.viewport = { width: 100, height: 80 };
+      const resized = operations.process('automatic', commit);
+      expect(resized.records.length).assertEqual(2);
+      expect(resized.records[1].type).assertEqual(ReplayRecordType.FULL_SNAPSHOT);
     });
 
     it('keeps queued frames incremental when UI checkpoint hints are stale', 0, () => {

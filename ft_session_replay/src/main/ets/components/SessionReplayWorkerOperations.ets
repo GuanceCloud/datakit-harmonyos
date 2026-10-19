@@ -177,32 +177,35 @@ export class SessionReplayWorkerOperations {
       lastFullSnapshotAt = snapshot.timestamp;
     } else if (kind === 'full') {
       captureReason = 'forced_full';
-      this.processor.setFullSnapshotBaseline(snapshot);
       records = [snapshot];
       lastFullSnapshotAt = snapshot.timestamp;
     } else if (this.viewportChanged(previousViewport, viewport)) {
       captureReason = 'viewport_change';
       const next = viewport as ReplayViewport;
       records = [this.processor.createViewportResizeRecord(next.width, next.height, snapshot.timestamp), snapshot];
-      this.processor.setFullSnapshotBaseline(snapshot);
       lastFullSnapshotAt = snapshot.timestamp;
     } else {
       const fullReason = !this.processor.hasBaseline() ? 'baseline_missing' :
         this.baselineContextKey !== contextKey ? 'context_change' :
         this.needsFullSnapshot ? 'write_recovery' :
         store?.requiresFullSnapshot(commit.context) ? 'storage_checkpoint' :
-        lastFullSnapshotAt === 0 ? 'baseline_missing' :
-        snapshot.timestamp - lastFullSnapshotAt >= this.fullSnapshotIntervalMs ? 'periodic_full' : '';
+        lastFullSnapshotAt === 0 ? 'baseline_missing' : '';
       if (fullReason.length > 0) {
         captureReason = fullReason;
         records = [snapshot];
-        this.processor.setFullSnapshotBaseline(snapshot);
         lastFullSnapshotAt = snapshot.timestamp;
       } else {
-        const mutation = this.processor.createMutationRecord(snapshot);
+        const mutation = this.processor.diffMutationRecord(snapshot);
         if (mutation !== null) {
-          records = [mutation];
-          captureReason = 'mutation';
+          // Time alone is not a visual change. Idle frames never create periodic records.
+          if (snapshot.timestamp - lastFullSnapshotAt >= this.fullSnapshotIntervalMs) {
+            records = [snapshot];
+            captureReason = 'periodic_full';
+            lastFullSnapshotAt = snapshot.timestamp;
+          } else {
+            records = [mutation];
+            captureReason = 'mutation';
+          }
         }
       }
     }
@@ -218,7 +221,6 @@ export class SessionReplayWorkerOperations {
       captureReason = 'write_recovery';
       stored = store.append(commit.context, records);
       if (stored) {
-        this.processor.setFullSnapshotBaseline(snapshot);
         lastFullSnapshotAt = snapshot.timestamp;
       }
     }
@@ -230,7 +232,10 @@ export class SessionReplayWorkerOperations {
       this.baselineContextKey = contextKey;
       this.lastFullSnapshotAt = lastFullSnapshotAt;
       this.viewport = viewport === null ? null : { width: viewport.width, height: viewport.height };
-      if (records.length > 0) this.needsFullSnapshot = false;
+      if (records.length > 0) {
+        this.processor.setFullSnapshotBaseline(snapshot);
+        this.needsFullSnapshot = false;
+      }
     }
     this.pruneErrorStore(store, stored && records.length > 0);
     if (stored && records.some((record: SessionReplayRecord): boolean =>
