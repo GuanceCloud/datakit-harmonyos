@@ -111,7 +111,8 @@ jobs:
             'hvigorCompile/ft-cold-launch-transform.ts',
             'hvigorCompile/ft-console-log-transform.ts',
             'hvigorCompile/ft-session-replay-transform.ts',
-            'hvigorCompile/ft-source-transform-host.ts'
+            'hvigorCompile/ft-source-transform-host.ts',
+            'hvigorCompile/ft-web-replay-transform.ts'
           ].sort();
           assert.equal(pack.name, '@cloudcare/hvigor-ohos-plugin');
           assert.equal(pack.version, process.env.EXPECTED_VERSION);

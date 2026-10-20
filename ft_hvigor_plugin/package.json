@@ -1,6 +1,6 @@
 {
   "name": "@cloudcare/hvigor-ohos-plugin",
-  "version": "0.1.2-alpha01",
+  "version": "0.1.2-alpha.1",
   "description": "Guance HarmonyOS Hvigor plugin for console, cold-launch, Session Replay page roots, and Web controller binding.",
   "main": "index.js",
   "files": [
