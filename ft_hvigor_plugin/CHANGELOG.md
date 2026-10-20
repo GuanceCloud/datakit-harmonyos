@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.2-alpha01] - 2026-10-19
+## [0.1.2-alpha.1] - 2026-10-19
 
 - Added automatic page registration and lifecycle tracking for supported ArkUI `@Entry` pages. After adding `@guancecloud/ft_session_replay` to the HAP and initializing `FTSessionReplay`, applications no longer need to register visible page roots manually.
 - Added automatic ArkWeb component association for Session Replay, linking supported Web content to the correct Replay page without manual component IDs or controller registration.
