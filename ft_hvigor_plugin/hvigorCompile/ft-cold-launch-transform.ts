@@ -13,7 +13,13 @@ declare const require: {
 declare const __dirname: string;
 
 type TypeScriptApi = any;
-type AbilityClassKind = 'stage' | 'ui' | 'other';
+type AbilityClassKind = 'stage' | 'ui' | 'other' | 'intent' | 'legacyIntent';
+
+interface LaunchParameterTypes {
+  want: string;
+  abilityConstant: string;
+  needed: boolean;
+}
 
 interface ColdLaunchInjection {
   position: number;
@@ -45,14 +51,14 @@ function collectIdentifierNames(ts: TypeScriptApi, sourceFile: any): Set<string>
   return identifiers;
 }
 
-function selectBridgeName(identifiers: Set<string>): string {
-  const baseName = '__ftColdLaunchBridge';
+function selectIdentifierName(identifiers: Set<string>, baseName: string): string {
   let bridgeName = baseName;
   let suffix = 1;
   while (identifiers.has(bridgeName)) {
     bridgeName = `${baseName}${suffix}`;
     suffix++;
   }
+  identifiers.add(bridgeName);
   return bridgeName;
 }
 
@@ -83,6 +89,12 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
 }
 
 function classifyAbilityBaseName(name: string): AbilityClassKind | null {
+  if (name === 'InsightIntentEntryExecutor') {
+    return 'intent';
+  }
+  if (name === 'InsightIntentExecutor') {
+    return 'legacyIntent';
+  }
   if (name === 'AbilityStage') {
     return 'stage';
   }
@@ -103,7 +115,7 @@ function collectAbilityBindings(ts: TypeScriptApi, sourceFile: any): Map<string,
       return;
     }
     const moduleName = statement.moduleSpecifier.text;
-    if (!moduleName.startsWith('@ohos.app.ability/') && moduleName !== '@kit.AbilityKit') {
+    if (!moduleName.startsWith('@ohos.app.ability.') && moduleName !== '@kit.AbilityKit') {
       return;
     }
     const importClause = statement.importClause;
@@ -166,6 +178,25 @@ function blockIndentation(code: string, block: any): string {
   return (match ? match[0] : '') + '  ';
 }
 
+function intentDecoratorString(ts: TypeScriptApi, declaration: any, field: string): string {
+  const decorators = ts.canHaveDecorators && ts.canHaveDecorators(declaration)
+    ? (ts.getDecorators(declaration) || []) : (declaration.decorators || []);
+  for (const decorator of decorators) {
+    const call = decorator.expression;
+    if (!ts.isCallExpression(call) || call.arguments.length === 0 ||
+      !ts.isObjectLiteralExpression(call.arguments[0])) {
+      continue;
+    }
+    for (const property of call.arguments[0].properties) {
+      if (ts.isPropertyAssignment(property) && property.name && property.name.text === field &&
+        ts.isStringLiteral(property.initializer)) {
+        return JSON.stringify(property.initializer.text);
+      }
+    }
+  }
+  return "''";
+}
+
 function collectWindowStageParameterNames(ts: TypeScriptApi, sourceFile: any, method: any): Set<string> {
   const names = new Set<string>();
   method.parameters.forEach((parameter: any) => {
@@ -211,7 +242,8 @@ function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, cod
 }
 
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
-  bridgeName: string, pluginVersion: string): ColdLaunchInjection[] {
+  bridgeName: string, pluginVersion: string, identifiers: Set<string>,
+  launchTypes: LaunchParameterTypes): ColdLaunchInjection[] {
   const injections: ColdLaunchInjection[] = [];
   const abilityBindings = collectAbilityBindings(ts, sourceFile);
   const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
@@ -224,19 +256,76 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       return;
     }
     let hasOnCreate = false;
+    let hasOnForeground = false;
+    let hasOnBackground = false;
+    let hasOnNewWant = false;
     node.members.forEach((member: any) => {
       if (!ts.isMethodDeclaration(member) || !member.body || !member.name || !ts.isIdentifier(member.name)) {
         return;
       }
       const indentation = methodIndentation(code, member);
       const position = member.body.getStart(sourceFile) + 1;
+      if (kind === 'intent' || kind === 'legacyIntent') {
+        let mode: string | null = null;
+        if (kind === 'intent' && member.name.text === 'onExecute') {
+          mode = 'this.executeMode';
+        } else if (kind === 'legacyIntent' && member.name.text === 'onExecuteInUIAbilityForegroundMode') {
+          mode = '0';
+        } else if (kind === 'legacyIntent' && member.name.text === 'onExecuteInUIAbilityBackgroundMode') {
+          mode = '1';
+        }
+        if (mode !== null) {
+          const intentName = kind === 'intent' ? intentDecoratorString(ts, node, 'intentName') :
+            (member.parameters.length > 0 && ts.isIdentifier(member.parameters[0].name)
+              ? member.parameters[0].name.text : "''");
+          const abilityName = kind === 'intent' ? intentDecoratorString(ts, node, 'abilityName') : "''";
+          injections.push({ position, content: `\n${indentation}${bridgeName}.recordInsightIntentExecute(` +
+            `${mode}, ${intentName}, this.context, ${abilityName});` });
+        }
+        return;
+      }
       if (member.name.text === 'onCreate') {
         hasOnCreate = true;
         let content = `\n${indentation}${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
         if (kind === 'ui') {
-          content += `\n${indentation}${bridgeName}.recordFirstUIAbilityCreate();`;
+          const parameters = member.parameters;
+          let wantName = parameters.length > 0 && ts.isIdentifier(parameters[0].name)
+            ? parameters[0].name.text : 'undefined';
+          let launchParamName = parameters.length > 1 && ts.isIdentifier(parameters[1].name)
+            ? parameters[1].name.text : 'undefined';
+          // Even an onCreate() that ignores both parameters must pass the
+          // actual system reason to the SDK. Add typed optional parameters
+          // to the in-memory source without changing the application's file.
+          if (parameters.length < 2) {
+            launchTypes.needed = true;
+            const added: string[] = [];
+            if (parameters.length === 0) {
+              wantName = selectIdentifierName(identifiers, '__ftLaunchWant');
+              added.push(`${wantName}?: ${launchTypes.want}`);
+            }
+            launchParamName = selectIdentifierName(identifiers, '__ftLaunchParam');
+            added.push(`${launchParamName}?: ${launchTypes.abilityConstant}.LaunchParam`);
+            const beforeClose = code.lastIndexOf(')', member.body.getStart(sourceFile));
+            const separator = parameters.length > 0 && !parameters.hasTrailingComma ? ', ' : '';
+            injections.push({ position: beforeClose, content: separator + added.join(', ') });
+          }
+          content += `\n${indentation}${bridgeName}.recordFirstUIAbilityCreate(${launchParamName}, ${wantName}, this);`;
         }
         injections.push({ position, content });
+        return;
+      }
+      if (kind === 'ui' && (member.name.text === 'onForeground' || member.name.text === 'onBackground' ||
+        member.name.text === 'onNewWant')) {
+        if (member.name.text === 'onForeground') {
+          hasOnForeground = true;
+        } else if (member.name.text === 'onBackground') {
+          hasOnBackground = true;
+        } else {
+          hasOnNewWant = true;
+        }
+        const hook = member.name.text === 'onForeground' ? 'recordUIAbilityForeground' :
+          (member.name.text === 'onBackground' ? 'recordUIAbilityBackground' : 'recordUIAbilityNewWant');
+        injections.push({ position, content: `\n${indentation}${bridgeName}.${hook}(this);` });
         return;
       }
       if (kind !== 'ui' || member.name.text !== 'onWindowStageCreate' || member.parameters.length === 0) {
@@ -273,6 +362,33 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
           `${indentation}  }\n`
       });
     }
+    if (kind === 'ui' && !hasOnCreate) {
+      launchTypes.needed = true;
+      const indentation = classIndentation(code, node);
+      const wantName = selectIdentifierName(identifiers, '__ftLaunchWant');
+      const paramName = selectIdentifierName(identifiers, '__ftLaunchParam');
+      injections.push({
+        position: node.end - 1,
+        content: `\n${indentation}  onCreate(${wantName}: ${launchTypes.want}, ` +
+          `${paramName}: ${launchTypes.abilityConstant}.LaunchParam): void {\n` +
+          `${indentation}    ${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});\n` +
+          `${indentation}    ${bridgeName}.recordFirstUIAbilityCreate(${paramName}, ${wantName}, this);\n` +
+          `${indentation}  }\n`
+      });
+    }
+    if (kind === 'ui') {
+      const indentation = classIndentation(code, node);
+      for (const [method, hook, exists] of [
+        ['onForeground', 'recordUIAbilityForeground', hasOnForeground],
+        ['onBackground', 'recordUIAbilityBackground', hasOnBackground],
+        ['onNewWant', 'recordUIAbilityNewWant', hasOnNewWant]
+      ]) {
+        if (!exists) {
+          injections.push({ position: node.end - 1, content: `\n${indentation}  ${method}(): void {\n` +
+            `${indentation}    ${bridgeName}.${hook}(this);\n${indentation}  }\n` });
+        }
+      }
+    }
   });
   return injections;
 }
@@ -298,15 +414,23 @@ export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: s
     return code;
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const bridgeName = selectBridgeName(collectIdentifierNames(ts, sourceFile));
+  const identifiers = collectIdentifierNames(ts, sourceFile);
+  const bridgeName = selectIdentifierName(identifiers, '__ftColdLaunchBridge');
+  const launchTypes: LaunchParameterTypes = {
+    want: selectIdentifierName(identifiers, '__ftLaunchWantType'),
+    abilityConstant: selectIdentifierName(identifiers, '__ftLaunchAbilityConstant'),
+    needed: false
+  };
   const version = getPluginVersion();
-  const injections = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version);
+  const injections = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version, identifiers, launchTypes);
   if (injections.length === 0) {
     return code;
   }
   const insertionOffset = findImportInsertionOffset(ts, sourceFile);
   const bridgeImport = `\n${COLD_LAUNCH_TRANSFORM_MARKER}\n` +
-    `import { FTColdLaunchBridge as ${bridgeName} } from '${COLD_LAUNCH_BRIDGE_IMPORT}';\n`;
+    `import { FTColdLaunchBridge as ${bridgeName} } from '${COLD_LAUNCH_BRIDGE_IMPORT}';\n` +
+    (launchTypes.needed ? `import { Want as ${launchTypes.want}, AbilityConstant as ${launchTypes.abilityConstant} } ` +
+      `from '@kit.AbilityKit';\n` : '');
   const transformedCode = applyColdLaunchInjections(code, injections);
   return transformedCode.slice(0, insertionOffset) + bridgeImport + transformedCode.slice(insertionOffset);
 }

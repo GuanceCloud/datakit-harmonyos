@@ -41,7 +41,7 @@ import { SDKProcessGuard } from "./utils/SDKProcessGuard";
 import { AppUtils } from "./utils/AppUtils";
 import { ApplicationUUIDGenerator } from "./utils/ApplicationUUIDGenerator";
 import { FTAbilityLifecycleListener } from "./monitor/FTAbilityLifecycleListener";
-import { FTAppLaunchTracker } from "./monitor/FTAppLaunchTracker";
+import { FTAppLaunchSource, FTAppLaunchTracker } from "./monitor/FTAppLaunchTracker";
 import { FTAppStartCounter } from "./monitor/FTAppStartCounter";
 import { FTCrashFreeDurationManager } from "./monitor/FTCrashFreeDurationManager";
 import { FTUIBlockManager } from "./monitor/FTUIBlockManager";
@@ -57,6 +57,15 @@ const TAG = "FTSDK"
 
 interface FTApplicationContextProvider {
   getApplicationContext(): Object;
+}
+
+interface FTAppLaunchParameters {
+  launchReason?: number;
+}
+
+interface FTAppLaunchWant {
+  abilityName?: string;
+  parameters?: Record<string, Object>;
 }
 
 interface FTRunningProcessInformation {
@@ -139,9 +148,29 @@ export class FTSDK {
   }
 
   /** Records entry into the first UIAbility.onCreate(). */
-  public static recordAppFirstUIAbilityCreate(): void {
+  public static recordAppFirstUIAbilityCreate(launchParam?: Object, want?: Object, ability?: Object): void {
     FTSDK.recordInitialLifecycleSignal();
-    FTAppLaunchTracker.getInstance().recordFirstUIAbilityCreated();
+    const tracker = FTAppLaunchTracker.getInstance();
+    const reason = (launchParam as FTAppLaunchParameters | undefined)?.launchReason;
+    if (typeof reason === 'number') {
+      const launchWant = want as FTAppLaunchWant | undefined;
+      const parameters = launchWant?.parameters;
+      // Only system intent identity makes a mode in the initial Want an
+      // intent source. A mode-only extra on an ordinary Want is insufficient.
+      const intentMode = parameters?.['ohos.insightIntent.executeParam.mode'];
+      const intentName = parameters?.['ohos.insightIntent.executeParam.name'];
+      const intentId = parameters?.['ohos.insightIntent.executeParam.id'];
+      const source: FTAppLaunchSource = {
+        ability: ability,
+        abilityName: launchWant?.abilityName ?? '',
+        intentName: typeof intentName === 'string' ? intentName : '',
+        intentId: typeof intentId === 'string' ? intentId.trim() :
+          (typeof intentId === 'number' && Number.isSafeInteger(intentId) && intentId > 0 ? String(intentId) : '')
+      };
+      const callToForeground = parameters?.['ohos.aafwk.param.callAbilityToForeground'] === true;
+      tracker.recordLaunchReason(reason, typeof intentMode === 'number' ? intentMode : undefined, callToForeground, source);
+    }
+    tracker.recordFirstUIAbilityCreated();
   }
 
   /**
@@ -677,9 +706,8 @@ export class FTSDK {
       }
     }
 
-    // RUM readiness never completes a cold launch. The launch state machine
-    // caches application, UIAbility, and first-frame boundaries until it can report exactly once after both prerequisites
-    // (RUM ready and a valid terminal boundary) are available.
+    // Both launch types require the same process's first frame. Background
+    // classification is preserved while waiting, including any headless runtime.
     FTAppLaunchTracker.getInstance().markRumReady(rumConfig.isEnableTraceUserAction());
     FTAppStartCounter.getInstance().setInited(true);
 
@@ -1407,8 +1435,8 @@ export class FTSDK {
       // Remote filtering is control-plane work, not part of cold-start data
       // collection. Preserve the active config until the cold-launch Action is
       // submitted or filtered, except for a background-only process: its Action
-      // waits for a later UI frame, so unblock control-plane work
-      // as soon as the no-UI lifecycle round has settled.
+      // awaits a future UI frame, so unblock control-plane work as soon
+      // as the no-UI lifecycle round has settled.
       let settled: boolean = false;
       let removeFinishListener: () => void = (): void => {};
       let removeBackgroundListener: () => void = (): void => {};

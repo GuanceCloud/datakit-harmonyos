@@ -19,6 +19,10 @@ interface FTColdLaunchWindowStage {
   getMainWindowSync(): FTColdLaunchMainWindow;
 }
 
+interface FTColdLaunchIntentContext {
+  instanceId?: number | string;
+}
+
 /**
  * Runtime contract for the Hvigor compiler plugin.
  *
@@ -41,8 +45,31 @@ export class FTColdLaunchBridge {
     FTSDK.recordAppApplicationInit(context);
   }
 
-  public static recordFirstUIAbilityCreate(): void {
-    FTSDK.recordAppFirstUIAbilityCreate();
+  public static recordFirstUIAbilityCreate(launchParam?: Object, want?: Object, ability?: Object): void {
+    FTSDK.recordAppFirstUIAbilityCreate(launchParam, want, ability);
+  }
+
+  /** Compiler hook for real InsightIntent execution, not a host override of launch type. */
+  public static recordInsightIntentExecute(executeMode: number, intentName: string = '', context?: Object,
+    abilityName: string = ''): void {
+    // instanceId is optional on older systems. Structural typing keeps the
+    // core HAR independent of the API 23 InsightIntentContext declaration.
+    const instanceId = (context as FTColdLaunchIntentContext | undefined)?.instanceId;
+    const intentId = typeof instanceId === 'string' ? instanceId.trim() :
+      (typeof instanceId === 'number' && Number.isSafeInteger(instanceId) && instanceId > 0 ? String(instanceId) : '');
+    FTAppLaunchTracker.getInstance().recordInsightIntentExecute(executeMode, intentName, intentId, abilityName);
+  }
+
+  public static recordUIAbilityForeground(ability: Object): void {
+    FTAppLaunchTracker.getInstance().recordUIAbilityForeground(ability);
+  }
+
+  public static recordUIAbilityNewWant(ability: Object): void {
+    FTAppLaunchTracker.getInstance().recordUIAbilityNewWant(ability);
+  }
+
+  public static recordUIAbilityBackground(ability: Object): void {
+    FTAppLaunchTracker.getInstance().recordUIAbilityBackground(ability);
   }
 
   /** Internal callback hook for instrumented and SDK-owned launch flows. */

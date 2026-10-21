@@ -1,5 +1,6 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context, common } from '@kit.AbilityKit';
+import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { UIContext } from '@kit.ArkUI';
 import window from '@ohos.window';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
@@ -107,10 +108,14 @@ class DeviceProcessInformation {
  */
 class DeviceLaunchApplicationContext {
   private stateCallback: DeviceApplicationStateCallback | null = null;
+  private readonly initialState: number;
+
+  constructor(initialState: number = 1) {
+    this.initialState = initialState;
+  }
 
   public getRunningProcessInformation(): Promise<Array<DeviceProcessInformation>> {
-    // appManager.ProcessState.FOREGROUND
-    return Promise.resolve([new DeviceProcessInformation(1)]);
+    return Promise.resolve([new DeviceProcessInformation(this.initialState)]);
   }
 
   public on(type: string, callback: DeviceApplicationStateCallback): void {
@@ -351,6 +356,97 @@ export default function ftSDKLifecycleDeviceTest() {
       expect(runtime.initNavigationTrackerCount).assertEqual(2);
       expect(runtime.anrManager.initializeCount).assertEqual(2);
       expect(runtime.anrManager.startMonitoringCount).assertEqual(2);
+    });
+
+    it('backgroundIntentCreatesAbilityButWaitsForFirstUiFrame', 0, async () => {
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.recordAppApplicationInit(new DeviceLaunchStageContext(new DeviceLaunchApplicationContext(1)));
+      FTSDK.recordAppFirstUIAbilityCreate(
+        { launchReason: AbilityConstant.LaunchReason.START_ABILITY },
+        { abilityName: 'EntryAbility', parameters: {
+          'ohos.insightIntent.executeParam.mode': 1,
+          'ohos.insightIntent.executeParam.name': 'BackgroundLaunchDiagnostic',
+          'ohos.insightIntent.executeParam.id': '17'
+        } }, new DeviceLifecycleUIContext());
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true));
+      await WaitUtils.delay(30);
+      const pending = FTAppLaunchTracker.getInstance().getSnapshot();
+      expect(pending.firstUIAbilityUptimeNs > 0).assertTrue();
+      expect(pending.launchType).assertEqual('background');
+      expect(pending.firstFrameUptimeNs).assertEqual(0);
+      expect(pending.reported).assertFalse();
+
+      FTSDK.recordAppLaunchApplicationForeground();
+      FTSDK.recordAppFirstUIAbilityCreate({ launchReason: AbilityConstant.LaunchReason.START_ABILITY });
+      FTSDK.recordAppLaunchWindowForeground();
+      FTSDK.recordAppFirstFrame();
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action_type=launch_cold', 'app_launch_type="background"'
+      ]);
+      expect(record !== null).assertTrue();
+      expect(FTAppLaunchTracker.getInstance().getSnapshot().launchReason)
+        .assertEqual(AbilityConstant.LaunchReason.START_ABILITY);
+    });
+
+    it('foregroundReasonIgnoresIntentModeExtrasOnOrdinaryWant', 0, async () => {
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.recordAppApplicationInit(new DeviceLaunchStageContext(new DeviceLaunchApplicationContext(3)));
+      FTSDK.recordAppFirstUIAbilityCreate(
+        { launchReason: AbilityConstant.LaunchReason.START_ABILITY },
+        { parameters: { 'ohos.insightIntent.executeParam.mode': 1 } });
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true));
+      await WaitUtils.delay(30);
+      FTSDK.recordAppFirstFrame();
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action_type=launch_cold', 'app_launch_type="foreground"'
+      ]);
+      expect(record !== null).assertTrue();
+    });
+
+    it('backgroundColdLaunchWaitsForSameProcessFirstFrameAndDoesNotRepeat', 0, async () => {
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setDebug(true).setAutoSync(false), context);
+      FTSDK.recordAppApplicationInit(new DeviceLaunchStageContext(new DeviceLaunchApplicationContext(3)));
+      FTSDK.installRUMConfig(new FTRUMConfig()
+        .setRumAppId(TEST_FAKE_RUM_ID)
+        .setEnableTraceUserAction(true));
+
+      await WaitUtils.delay(100);
+      const pending = FTAppLaunchTracker.getInstance().getSnapshot();
+      expect(pending.backgroundLaunchDetected).assertTrue();
+      expect(pending.firstUIAbilityUptimeNs).assertEqual(0);
+      expect(pending.firstFrameUptimeNs).assertEqual(0);
+      expect(pending.reported).assertFalse();
+      const beforeFrame = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(beforeFrame.filter((item) => item.getDataString().includes('action_type=launch_cold')).length)
+        .assertEqual(0);
+
+      FTSDK.recordAppLaunchApplicationForeground();
+      FTSDK.recordAppFirstUIAbilityCreate();
+      await WaitUtils.delay(10);
+      FTSDK.recordAppFirstFrame();
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, [
+        'action_type=launch_cold',
+        'app_launch_type="background"',
+        'app_application_init_time=',
+        'app_first_frame_init_time=',
+        `view_name=${Constants.VIEW_NAME_APPLICATION_LAUNCH}`
+      ]);
+      expect(record !== null).assertTrue();
+      const snapshot = FTAppLaunchTracker.getInstance().getSnapshot();
+      expect(snapshot.firstUIAbilityUptimeNs > 0).assertTrue();
+      expect(snapshot.firstFrameUptimeNs > 0).assertTrue();
+      expect(snapshot.reported).assertTrue();
+
+      FTSDK.recordAppFirstUIAbilityCreate();
+      FTSDK.recordAppFirstFrame();
+      await WaitUtils.delay(300);
+      const records = await DBAssert.querySyncData([DataType.RUM_APP]);
+      expect(records.filter((item) => item.getDataString().includes('action_type=launch_cold')).length)
+        .assertEqual(1);
     });
 
     it('foregroundColdLaunchCanBeFilteredByActionHandler', 0, async () => {

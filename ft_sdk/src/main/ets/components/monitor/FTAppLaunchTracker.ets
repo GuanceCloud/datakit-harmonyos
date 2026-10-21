@@ -1,4 +1,5 @@
 import { systemDateTime } from '@kit.BasicServicesKit';
+import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
@@ -8,6 +9,9 @@ import { resolveAutomaticLaunchAction } from '../rum/handler/FTAutomaticActionHa
 import { Utils } from '../utils/Utils';
 
 const TAG = 'FTAppLaunchTracker';
+// PRELOAD was introduced in API 20. Its stable value is usable without
+// requiring the newer enum member in the core HAR's API 12 declarations.
+const LAUNCH_REASON_PRELOAD = 11;
 
 export type FTAppLaunchType = 'foreground' | 'background';
 export type FTAppLaunchInitialVisibility = 'foreground' | 'background' | 'unknown';
@@ -28,6 +32,14 @@ export interface FTAppLaunchReporter {
   report(action: FTAppLaunchAction): boolean | 'filtered';
 }
 
+/** Internal identity supplied by compiler-injected lifecycle calls. */
+export interface FTAppLaunchSource {
+  ability?: Object;
+  abilityName?: string;
+  intentName?: string;
+  intentId?: string;
+}
+
 export interface FTAppLaunchSnapshot {
   appStartUptimeNs: number;
   applicationInitUptimeNs: number;
@@ -36,7 +48,10 @@ export interface FTAppLaunchSnapshot {
   launchType: FTAppLaunchType | null;
   initialVisibility: FTAppLaunchInitialVisibility;
   initialLifecycleRoundComplete: boolean;
-  backgroundLaunchPendingUi: boolean;
+  backgroundLaunchDetected: boolean;
+  launchReason: number | null;
+  insightIntentExecuteMode: number | null;
+  sourceResolutionPending: boolean;
   rumReady: boolean;
   reported: boolean;
   finished: boolean;
@@ -114,12 +129,17 @@ export class FTAppLaunchTracker {
   private initialVisibility: FTAppLaunchInitialVisibility = 'unknown';
   private initialVisibilityCaptured: boolean = false;
   private initialLifecycleRoundComplete: boolean = false;
-  /**
-   * The process completed its initial lifecycle round as background-only.
-   * Keep this classification until a later UI first frame without emitting a
-   * no-UI Action.
-   */
-  private backgroundLaunchPendingUi: boolean = false;
+  private backgroundLaunchDetected: boolean = false;
+  private launchReason: number | null = null;
+  private insightIntentExecuteMode: number | null = null;
+  private firstLaunchAbility: Object | null = null;
+  private firstLaunchAbilityName: string = '';
+  private initialIntentName: string = '';
+  private initialIntentId: string = '';
+  private initialDispatchOpen: boolean = false;
+  private initialDispatchInvalidated: boolean = false;
+  private sourceResolutionPending: boolean = false;
+  private expectsInitialIntent: boolean = false;
   private reportSubmittedListeners: Array<() => void> = [];
   private finishedListeners: Array<() => void> = [];
   private backgroundLaunchDetectedListeners: Array<() => void> = [];
@@ -204,6 +224,7 @@ export class FTAppLaunchTracker {
     this.initialVisibilityCaptured = true;
     if (visibility === 'foreground') {
       this.applicationForegroundObserved = true;
+      this.resolveForegroundFallback();
     }
     this.resolveBackgroundLaunchIfNeeded();
   }
@@ -214,6 +235,12 @@ export class FTAppLaunchTracker {
       return;
     }
     this.initialLifecycleRoundComplete = true;
+    if (this.initialDispatchOpen && !this.expectsInitialIntent && this.launchType === 'background') {
+      // Ordinary CALL/preload entries may stay in the background without a
+      // foreground transition. Their quiescent first round confirms the reason.
+      this.closeInitialDispatch('initial_background_round');
+    }
+    this.resolveForegroundFallback();
     this.resolveBackgroundLaunchIfNeeded();
   }
 
@@ -222,32 +249,162 @@ export class FTAppLaunchTracker {
     this.completeInitialLifecycleRound();
   }
 
+  /**
+   * Captures the first system launch reason in this process. UIAbility creation
+   * is a timing boundary only: CALL and background intents also create one.
+   * A previously settled headless background origin belongs to the process,
+   * so a later UIAbility's START_ABILITY must not replace it.
+   */
+  public recordLaunchReason(reason: number, intentMode?: number, callToForeground: boolean = false,
+    source?: FTAppLaunchSource): void {
+    if (source?.ability && this.firstLaunchAbility !== null && source.ability !== this.firstLaunchAbility) {
+      this.closeInitialDispatch('another_ui_ability');
+    }
+    if (this.finished || this.launchReason !== null || !Number.isInteger(reason) || reason < 0) {
+      return;
+    }
+    this.launchReason = reason;
+    if (this.backgroundLaunchDetected) {
+      return;
+    }
+    this.firstLaunchAbility = source?.ability ?? null;
+    this.firstLaunchAbilityName = source?.abilityName ?? '';
+    this.initialIntentName = source?.intentName ?? '';
+    this.initialIntentId = source?.intentId ?? '';
+    this.initialDispatchOpen = this.firstLaunchAbility !== null;
+    this.expectsInitialIntent = reason === AbilityConstant.LaunchReason.INSIGHT_INTENT ||
+      this.initialIntentName.length > 0 || this.initialIntentId.length > 0;
+    this.sourceResolutionPending = this.initialDispatchOpen || this.expectsInitialIntent;
+    FTInnerLogger.d(TAG, `Launch source received: reason=${reason}, mode=${intentMode}, ` +
+      `ability=${this.firstLaunchAbilityName}, intent=${this.initialIntentName}, pending=${this.sourceResolutionPending}`);
+    if (this.expectsInitialIntent) {
+      // Some systems deliver START_ABILITY even for an intent. Initial Want
+      // identity and the real executor callback can resolve that same launch.
+      this.launchType = null;
+      if (intentMode === 0 || intentMode === 1) {
+        this.acceptInitialIntentMode(intentMode);
+      }
+      return;
+    }
+    if (reason === AbilityConstant.LaunchReason.CALL) {
+      this.setLaunchType(callToForeground ? 'foreground' : 'background');
+    } else if (reason === AbilityConstant.LaunchReason.AUTO_STARTUP ||
+      reason === AbilityConstant.LaunchReason.PREPARE_CONTINUATION || reason === LAUNCH_REASON_PRELOAD) {
+      this.setLaunchType('background');
+    } else if (reason === AbilityConstant.LaunchReason.START_ABILITY ||
+      reason === AbilityConstant.LaunchReason.CONTINUATION ||
+      reason === AbilityConstant.LaunchReason.APP_RECOVERY || reason === AbilityConstant.LaunchReason.SHARE) {
+      this.setLaunchType('foreground');
+    }
+  }
+
+  /** Real system executor mode, also supplied by the compiler-injected executor hook. */
+  public recordInsightIntentExecute(mode?: number, intentName: string = '', intentId: string = '',
+    abilityName: string = ''): void {
+    let ignored = '';
+    const exactInitialId = this.initialIntentId.length > 0 && intentId === this.initialIntentId;
+    if (this.finished) {
+      ignored = 'launch_finished';
+    } else if (mode !== 0 && mode !== 1) {
+      ignored = 'unsupported_mode';
+    } else if (this.insightIntentExecuteMode !== null) {
+      ignored = 'mode_already_resolved';
+    } else if (this.backgroundLaunchDetected) {
+      ignored = 'background_origin_already_settled';
+    } else if (this.firstLaunchAbilityName.length > 0 && abilityName.length > 0 &&
+      this.firstLaunchAbilityName !== abilityName) {
+      ignored = 'ability_mismatch';
+    } else if (this.initialIntentName.length > 0 && intentName.length > 0 &&
+      this.initialIntentName !== intentName) {
+      ignored = 'intent_name_mismatch';
+    } else if (this.initialIntentId.length > 0 && intentId.length > 0 && !exactInitialId) {
+      ignored = 'intent_id_mismatch';
+    } else if (this.initialDispatchInvalidated && !exactInitialId) {
+      ignored = 'initial_dispatch_closed';
+    } else if (!this.initialDispatchOpen && !this.expectsInitialIntent && !exactInitialId) {
+      ignored = 'no_initial_launch_association';
+    }
+    FTInnerLogger.d(TAG, `Intent launch mode received: mode=${mode}, reason=${this.launchReason}, ` +
+      `intent=${intentName}, ability=${abilityName}, accepted=${ignored.length === 0}, ` +
+      `ignored=${ignored || 'none'}, firstFrame=${this.firstFrameUptimeNs > 0}`);
+    if (ignored.length > 0 || (mode !== 0 && mode !== 1)) {
+      return;
+    }
+    this.acceptInitialIntentMode(mode);
+  }
+
+  private acceptInitialIntentMode(mode: number): void {
+    // insightIntent.ExecuteMode values: UI_ABILITY_FOREGROUND=0, UI_ABILITY_BACKGROUND=1.
+    // Avoid importing the API 20 executor classes into the baseline core HAR.
+    this.insightIntentExecuteMode = mode;
+    this.expectsInitialIntent = true;
+    this.sourceResolutionPending = false;
+    this.setLaunchType(mode === 0 ? 'foreground' : 'background');
+  }
+
+  /** Initial foreground dispatch follows its intent executor, when one exists. */
+  public recordUIAbilityForeground(ability: Object): void {
+    if (ability !== this.firstLaunchAbility || this.finished) {
+      return;
+    }
+    this.applicationForegroundObserved = true;
+    // The initial executor starts before this lifecycle callback. A later
+    // callback needs an exact initial intent ID; warm background intents can
+    // execute without onNewWant and must not attach to the pending launch.
+    this.closeInitialDispatch('initial_foreground');
+  }
+
+  /** A new Want belongs to a later invocation, even if first-frame/RUM is still pending. */
+  public recordUIAbilityNewWant(ability: Object): void {
+    if (ability === this.firstLaunchAbility) {
+      this.closeInitialDispatch('new_want');
+    }
+  }
+
+  public recordUIAbilityBackground(ability: Object): void {
+    if (ability === this.firstLaunchAbility) {
+      this.closeInitialDispatch('initial_background');
+    }
+  }
+
+  private closeInitialDispatch(reason: string): void {
+    if (!this.initialDispatchOpen || this.finished) {
+      return;
+    }
+    this.initialDispatchOpen = false;
+    this.initialDispatchInvalidated = true;
+    if (!this.expectsInitialIntent || this.insightIntentExecuteMode !== null) {
+      this.sourceResolutionPending = false;
+    }
+    FTInnerLogger.d(TAG, `Initial launch dispatch closed: cause=${reason}, pending=${this.sourceResolutionPending}`);
+    this.resolveForegroundFallback();
+    if (!this.sourceResolutionPending && this.launchType === 'background' && !this.backgroundLaunchDetected) {
+      this.setLaunchType('background');
+    }
+    this.tryReport();
+  }
+
   /** Records entry into the first UIAbility.onCreate(). */
   public recordFirstUIAbilityCreated(uptimeNs: number = this.clock.nowUptimeNs()): void {
-    if (this.firstUIAbilityUptimeNs > 0 || uptimeNs <= 0) {
+    if (this.finished || this.firstUIAbilityUptimeNs > 0 || uptimeNs <= 0) {
       return;
     }
     this.firstUIAbilityUptimeNs = uptimeNs;
-    this.launchType = this.resolveUiLaunchType();
     this.tryReport();
   }
 
   /** Records the first rendered frame observed by the API 22 extension. */
   public recordFirstFrame(uptimeNs: number = this.clock.nowUptimeNs()): void {
-    if (this.firstFrameUptimeNs > 0 || uptimeNs <= 0) {
+    if (this.finished || this.firstFrameUptimeNs > 0 || uptimeNs <= 0) {
       return;
     }
     this.firstFrameUptimeNs = uptimeNs;
-    this.launchType = this.resolveUiLaunchType();
     this.tryReport();
   }
 
   public recordApplicationForeground(): void {
     this.applicationForegroundObserved = true;
-    if (!this.backgroundLaunchPendingUi &&
-      (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved)) {
-      this.launchType = 'foreground';
-    }
+    this.resolveForegroundFallback();
   }
 
   public recordApplicationBackground(): void {
@@ -257,10 +414,7 @@ export class FTAppLaunchTracker {
   /** Window SHOWN/ACTIVE is a foreground corroboration signal. */
   public recordWindowForeground(): void {
     this.windowForegroundObserved = true;
-    if (!this.backgroundLaunchPendingUi &&
-      (this.firstUIAbilityUptimeNs > 0 || this.applicationForegroundObserved)) {
-      this.launchType = 'foreground';
-    }
+    this.resolveForegroundFallback();
   }
 
   /** RUM can become ready after application, UIAbility, or first-frame boundaries are recorded. */
@@ -278,7 +432,10 @@ export class FTAppLaunchTracker {
       launchType: this.launchType,
       initialVisibility: this.initialVisibility,
       initialLifecycleRoundComplete: this.initialLifecycleRoundComplete,
-      backgroundLaunchPendingUi: this.backgroundLaunchPendingUi,
+      backgroundLaunchDetected: this.backgroundLaunchDetected,
+      launchReason: this.launchReason,
+      insightIntentExecuteMode: this.insightIntentExecuteMode,
+      sourceResolutionPending: this.sourceResolutionPending,
       rumReady: this.rumReady,
       reported: this.reported,
       finished: this.finished
@@ -323,12 +480,12 @@ export class FTAppLaunchTracker {
   }
 
   /**
-   * Invoked when a background component has completed the initial no-UI
-   * lifecycle round. This is intentionally separate from Action submission:
-   * a later UI first frame is required before the launch Action is submitted.
+   * Invoked when a background source is identified by its system launch reason,
+   * intent mode, or the extension process-state fallback. Action submission
+   * still requires the same process's first UI frame and RUM readiness.
    */
   public onBackgroundLaunchDetected(listener: () => void): () => void {
-    if (this.backgroundLaunchPendingUi) {
+    if (this.backgroundLaunchDetected) {
       listener();
       return (): void => {};
     }
@@ -348,23 +505,43 @@ export class FTAppLaunchTracker {
   }
 
   private resolveBackgroundLaunchIfNeeded(): void {
-    if (this.finished || this.backgroundLaunchPendingUi ||
+    if (this.finished || this.backgroundLaunchDetected ||
+      this.sourceResolutionPending || this.expectsInitialIntent ||
+      this.launchType === 'foreground' ||
       this.initialVisibility !== 'background' || !this.initialLifecycleRoundComplete) {
       return;
     }
-    if (this.firstUIAbilityUptimeNs > 0 || this.windowForegroundObserved || this.applicationForegroundObserved) {
+    if (this.windowForegroundObserved || this.applicationForegroundObserved) {
       return;
     }
-    this.backgroundLaunchPendingUi = true;
-    FTInnerLogger.d(TAG, 'Background launch detected; waiting for the first UI frame');
-    this.notifyBackgroundLaunchDetected();
+    this.setLaunchType('background');
+  }
+
+  private resolveForegroundFallback(): void {
+    if (!this.finished && this.launchType === null && this.initialLifecycleRoundComplete &&
+      !this.sourceResolutionPending && !this.expectsInitialIntent &&
+      (this.applicationForegroundObserved || this.windowForegroundObserved)) {
+      this.setLaunchType('foreground');
+    }
+  }
+
+  private setLaunchType(type: FTAppLaunchType): void {
+    this.launchType = type;
+    if (type === 'background' && !this.backgroundLaunchDetected && !this.sourceResolutionPending) {
+      this.backgroundLaunchDetected = true;
+      FTInnerLogger.d(TAG, 'Background launch detected; waiting for the same process first UI frame and RUM readiness');
+      this.notifyBackgroundLaunchDetected();
+    }
+    FTInnerLogger.d(TAG, `Cold launch origin: reason=${this.launchReason}, intentMode=${this.insightIntentExecuteMode}, ` +
+      `type=${type}, confirmed=${!this.sourceResolutionPending}`);
+    this.tryReport();
   }
 
   private tryReport(): void {
     if (this.finished) {
       return;
     }
-    if (!this.rumReady || !this.launchType) {
+    if (!this.rumReady || !this.launchType || this.sourceResolutionPending) {
       return;
     }
 
@@ -378,6 +555,11 @@ export class FTAppLaunchTracker {
     }
     this.finished = true;
     this.reported = result === true;
+    // The instance is needed only while correlating the initial dispatch.
+    // Do not retain the UIAbility and its Context for the SDK's lifetime.
+    this.firstLaunchAbility = null;
+    this.initialDispatchOpen = false;
+    this.initialDispatchInvalidated = true;
     FTInnerLogger.d(TAG,
       `Cold launch action finished=${this.finished}, submitted=${this.reported}, type=${this.launchType}, durationMs=${action.durationNs / 1_000_000}`);
     if (this.reported) {
@@ -425,8 +607,9 @@ export class FTAppLaunchTracker {
   }
 
   private buildAction(): FTAppLaunchAction | null {
-    // Both foreground and background-originated launches finish on the first
-    // UI frame. A process that remains background-only emits no launch Action.
+    // Background classification does not finish timing. A later UI in this
+    // process ends the launch at its real first frame, including all time
+    // spent running in the background. Never synthesize a frame for headless work.
     const total = this.createPhase(this.appStartUptimeNs, this.firstFrameUptimeNs);
     if (!total) {
       return null;
@@ -436,10 +619,6 @@ export class FTAppLaunchTracker {
       startEpochNs: this.appStartEpochNs,
       properties: this.buildProperties()
     };
-  }
-
-  private resolveUiLaunchType(): FTAppLaunchType {
-    return this.backgroundLaunchPendingUi ? 'background' : 'foreground';
   }
 
   private buildProperties(): Record<string, object> {
@@ -476,7 +655,7 @@ export class FTAppLaunchTracker {
   }
 
   private createPhase(start: number, end: number): FTAppLaunchPhase | null {
-    if (start <= 0 || end <= start) {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) {
       return null;
     }
     return {
