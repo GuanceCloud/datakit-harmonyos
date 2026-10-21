@@ -83,6 +83,9 @@ export class FTSDK {
   // transformed application code. Leave this unset when no plugin transformed
   // the application so sdk_pkg_info never claims a plugin that is not present.
   private static hvigorPluginVersion: string | null = null;
+  // The optional Session Replay HAR registers its own version during
+  // initialization, keeping the core package independent from the optional HAR.
+  private static sessionReplayVersion: string | null = null;
   private static anrDetectManager: FTSDKAnrManager | null = null;
   private static rumConfig: FTRUMConfig | null = null;
   private static uiFeaturesInitialized: boolean = false;
@@ -208,6 +211,7 @@ export class FTSDK {
     FTSDK.cachedPACKAGE_UUID = null;
     FTSDK.nativeCrashVersion = null;
     FTSDK.hvigorPluginVersion = null;
+    FTSDK.sessionReplayVersion = null;
     FTCrashFreeDurationManager.resetInstanceInternal();
   }
 
@@ -879,6 +883,21 @@ export class FTSDK {
   }
 
   /**
+   * Internal entry point called by the optional Session Replay HAR during
+   * initialization. Registration may happen before or after core SDK install;
+   * an installed SDK refreshes its global package information immediately.
+   */
+  static registerSessionReplayVersion(version: string): void {
+    const normalizedVersion = version ? version.trim() : '';
+    if (normalizedVersion.length === 0 || FTSDK.sessionReplayVersion === normalizedVersion) {
+      return;
+    }
+
+    FTSDK.sessionReplayVersion = normalizedVersion;
+    FTSDK.updateSdkPackageInfo();
+  }
+
+  /**
    * Dynamically set RUM global tag
    * @param globalContext RUM global context map
    */
@@ -997,6 +1016,9 @@ export class FTSDK {
     const nativeVersion = FTSDK.getNativeCrashVersion();
     if (nativeVersion.length > 0) {
       pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_NATIVE] = nativeVersion;
+    }
+    if (FTSDK.sessionReplayVersion !== null && FTSDK.sessionReplayVersion.length > 0) {
+      pkgInfo[Constants.KEY_RUM_SDK_PACKAGE_REPLAY] = FTSDK.sessionReplayVersion;
     }
     // Merge user-defined pkgInfo from the SDK configuration.
     const userPkgInfo = config.getPkgInfo();

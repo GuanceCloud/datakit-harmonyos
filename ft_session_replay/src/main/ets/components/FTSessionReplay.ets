@@ -1,6 +1,7 @@
 import { UIContext } from '@kit.ArkUI';
 import { bundleManager } from '@kit.AbilityKit';
 import { FTSDK, FTSessionReplayBridgeRegistry } from '@guancecloud/ft_sdk';
+import BuildProfile from '../../../../BuildProfile';
 import { FTSessionReplayConfig } from './FTSessionReplayConfig';
 import { FTSessionReplayRecorder, SessionReplayCapture } from './FTSessionReplayRecorder';
 import { SessionReplayContext, SessionReplayRecord } from './SessionReplayProtocol';
@@ -66,6 +67,7 @@ export class FTSessionReplay {
     this.disable();
     this.config = config;
     this.configureStorage(filesDir);
+    FTSDK.registerSessionReplayVersion(BuildProfile.HAR_VERSION);
     if (!config.isDelayInit()) {
       this.start();
     }
@@ -107,6 +109,7 @@ export class FTSessionReplay {
 
   /** Convenience form for applications that enable Replay during startup. */
   public enable(config?: FTSessionReplayConfig, filesDir: string = ''): void {
+    FTSDK.registerSessionReplayVersion(BuildProfile.HAR_VERSION);
     if (config !== undefined) {
       if (this.recorder !== null) {
         this.disable();

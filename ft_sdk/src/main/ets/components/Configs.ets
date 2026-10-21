@@ -1422,7 +1422,7 @@ export class FTSDKConfig {
   /**
    * Add SDK package info (for sdk_pkg_info field)
    * Similar to Android's addPkgInfo method
-   * @param key Package info key (e.g., "agent", "track", "native", "web")
+   * @param key Package info key (e.g., "agent", "track", "native", "replay", "web")
    * @param value Package version value
    * @returns FTSDKConfig instance for chaining
    */

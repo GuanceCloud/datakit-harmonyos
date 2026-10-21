@@ -471,7 +471,7 @@ export class Constants {
   static readonly KEY_RUM_CUSTOM_KEYS = "custom_keys";
 
   /**
-   * SDK package info (JSON string containing agent, track, native, web versions)
+   * SDK package info (JSON string containing agent, track, native, replay, web versions)
    */
   static readonly KEY_SDK_PACKAGE_INFO = "sdk_pkg_info";
   /**
@@ -486,6 +486,10 @@ export class Constants {
    * ft-native module release version
    */
   static readonly KEY_RUM_SDK_PACKAGE_NATIVE = "native";
+  /**
+   * ft-session-replay module release version
+   */
+  static readonly KEY_RUM_SDK_PACKAGE_REPLAY = "replay";
   /**
    * Web view uses web sdk release version
    */

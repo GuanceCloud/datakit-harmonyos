@@ -420,6 +420,37 @@ export default function configUnitTest() {
       expect(upgradedRumLine.includes('"track":"0.1.1"')).assertTrue();
     });
 
+    it('sessionReplayVersionShouldRegisterBeforeOrAfterSdkInstall', 0, () => {
+      FTSDK.registerSessionReplayVersion(' 0.1.0-alpha01 ');
+      const initialConfig = FTSDKConfig.builder(TEST_FAKE_URL);
+      SdkInternalTestAccess.setRuntime(new FakeFTSDKRuntime());
+      FTSDK.install(initialConfig, createFakeContext());
+
+      const initialInfo = JSON.parse(
+        String(initialConfig.getGlobalContext().get(Constants.KEY_SDK_PACKAGE_INFO))
+      ) as Record<string, string>;
+      expect(initialInfo[Constants.KEY_RUM_SDK_PACKAGE_REPLAY]).assertEqual('0.1.0-alpha01');
+
+      FTSDK.installLogConfig(new FTLoggerConfig());
+      FTSDK.installRUMConfig(new FTRUMConfig().setRumAppId(TEST_FAKE_RUM_ID));
+      FTSDK.registerSessionReplayVersion('0.1.0-alpha02');
+
+      const refreshedInfo = JSON.parse(
+        String(initialConfig.getGlobalContext().get(Constants.KEY_SDK_PACKAGE_INFO))
+      ) as Record<string, string>;
+      expect(refreshedInfo[Constants.KEY_RUM_SDK_PACKAGE_REPLAY]).assertEqual('0.1.0-alpha02');
+
+      const helper = FTTrackInner.getInstance().getDataHelper();
+      const fields = new Map<string, string>();
+      fields.set('message', 'replay-package-info');
+      const logLine = helper.getBodyContent('custom_log', new Map<string, string>(), fields,
+        1234567890, DataType.LOG, 'replay-package-log');
+      const rumLine = helper.getBodyContent('rum_action', new Map<string, string>(), fields,
+        1234567890, DataType.RUM_APP, 'replay-package-rum');
+      expect(logLine.includes('"replay":"0.1.0-alpha02"')).assertTrue();
+      expect(rumLine.includes('"replay":"0.1.0-alpha02"')).assertTrue();
+    });
+
     it('resourceUrlHandlerShouldUseAndroidFilterSemantics', 0, () => {
       const handler = new TestResourceUrlHandler();
       const config = new FTRUMConfig().setResourceUrlHandler(handler);
