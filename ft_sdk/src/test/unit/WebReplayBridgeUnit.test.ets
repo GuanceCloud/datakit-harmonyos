@@ -13,6 +13,7 @@ import { FTSessionReplayBridge, FTSessionReplayBridgeRegistry, FTSessionReplayRU
 class ReplayBridgeFixture implements FTSessionReplayBridge {
   public views: Array<string> = [];
   public slots: Array<string> = [];
+  public payloads: Array<string> = [];
   public getRUMLinkKeys(): Array<string> { return []; }
   public getViewMetadata(_context: FTSessionReplayRUMContext): FTSessionReplayViewMetadata {
     return { hasReplay: false, recordsCount: 0, sampledOnError: false };
@@ -25,6 +26,7 @@ class ReplayBridgeFixture implements FTSessionReplayBridge {
   public onWebReplayData(context: FTSessionReplayWebDataContext): boolean {
     this.views.push(context.viewId);
     this.slots.push(context.slotId);
+    this.payloads.push(context.payload);
     return true;
   }
 }
@@ -156,6 +158,44 @@ export default function webReplayBridgeUnitTest() {
         observe('2001', 'next-native');
         await new Promise<void>((resolve): void => { setTimeout(resolve, 10); });
         expect(controller.snapshotRequests).assertEqual(6);
+      } finally {
+        handler.clearWebController();
+        registry.unregister(bridge);
+        if (previous !== null) manager.initWithConfig(previous);
+        else FTRUMConfigManager.resetStateInternal();
+      }
+    });
+
+    it('publishes native Web viewport changes without requesting another DOM snapshot', 0, async () => {
+      const manager = FTRUMConfigManager.getInstance();
+      const previous = manager.getConfig();
+      manager.initWithConfig(new FTRUMConfig().setRumAppId('viewport-app').setEnableTraceWebView(true));
+      const registry = FTSessionReplayBridgeRegistry;
+      const bridge = new ReplayBridgeFixture();
+      const handler = new FTWebViewHandler();
+      const controller = new ReplayControllerFixture();
+      registry.register(bridge);
+      registry.setWebReplayAppForeground(true);
+      try {
+        handler.setWebView(controller as Object as webview.WebviewController);
+        const componentId = FTWebViewReplayBridge.bindingId(controller);
+        const session = FTRUMInnerManager.getInstance().getSessionId();
+        registry.observeWebReplaySlots('viewport-app', session, 'native-view',
+          [{ componentId, slotId: '3001', width: 320, height: 480 }], Date.now());
+        await new Promise<void>((resolve): void => { setTimeout(resolve, 10); });
+        handler.getMessageReceiver().sendEvent(rrwebEvent('browser-view'));
+        expect(bridge.payloads.length).assertEqual(1);
+        registry.observeWebReplaySlots('viewport-app', session, 'native-view',
+          [{ componentId, slotId: '3001', width: 320, height: 560 }], Date.now() + 1);
+        await new Promise<void>((resolve): void => { setTimeout(resolve, 10); });
+        expect(controller.snapshotRequests).assertEqual(1);
+        expect(bridge.payloads.length).assertEqual(2);
+        const resize = JSON.parse(bridge.payloads[1]) as Record<string, number | Record<string, number>>;
+        expect(resize.type as number).assertEqual(3);
+        const data = resize.data as Record<string, number>;
+        expect(data.source).assertEqual(4);
+        expect(data.width).assertEqual(320);
+        expect(data.height).assertEqual(560);
       } finally {
         handler.clearWebController();
         registry.unregister(bridge);

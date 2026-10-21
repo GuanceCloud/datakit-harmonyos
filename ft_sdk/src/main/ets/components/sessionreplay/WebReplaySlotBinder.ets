@@ -4,6 +4,8 @@ export interface WebReplaySlotBinding {
   applicationId: string;
   sessionId: string;
   viewId: string;
+  width: number;
+  height: number;
   active: boolean;
   inactiveAt: number;
 }
@@ -12,6 +14,9 @@ export interface WebReplaySlotBinding {
 export interface WebReplaySlotObservation {
   componentId: string;
   slotId: string;
+  /** Native Web wireframe dimensions in Replay/CSS viewport units. */
+  width?: number;
+  height?: number;
 }
 
 /** Scalar identities only: no ArkUI nodes or Web controllers are retained. */
@@ -23,7 +28,8 @@ export class WebReplaySlotBinder {
   public register(componentId: string): boolean {
     if (componentId.trim().length === 0 || this.slots.has(componentId) || this.slots.size >= 20) return false;
     this.slots.set(componentId, {
-      slotId: '', componentId, applicationId: '', sessionId: '', viewId: '', active: false, inactiveAt: 0
+      slotId: '', componentId, applicationId: '', sessionId: '', viewId: '', width: 0, height: 0,
+      active: false, inactiveAt: 0
     });
     return true;
   }
@@ -44,7 +50,7 @@ export class WebReplaySlotBinder {
     const binding = this.slots.get(componentId);
     return binding === undefined ? null : {
       slotId: binding.slotId, componentId: binding.componentId, applicationId: binding.applicationId,
-      sessionId: binding.sessionId, viewId: binding.viewId,
+      sessionId: binding.sessionId, viewId: binding.viewId, width: binding.width, height: binding.height,
       active: binding.active, inactiveAt: binding.inactiveAt
     };
   }
@@ -52,7 +58,7 @@ export class WebReplaySlotBinder {
   /** Native collection, rather than proxy registration, establishes visibility. */
   public observe(applicationId: string, sessionId: string, viewId: string,
     visibleSlots: Array<WebReplaySlotObservation>, timestamp: number): void {
-    const visible: Map<string, string> = new Map();
+    const visible: Map<string, WebReplaySlotObservation> = new Map();
     const owners: Map<string, string> = new Map();
     this.conflicts.clear();
     for (const observation of visibleSlots) {
@@ -60,12 +66,12 @@ export class WebReplaySlotBinder {
       if (this.slots.has(observation.componentId) && Number.isSafeInteger(id) && id > 0 && String(id) === observation.slotId) {
         const previous = visible.get(observation.componentId);
         const owner = owners.get(observation.slotId);
-        if (previous !== undefined && previous !== observation.slotId) this.conflicts.add(observation.componentId);
+        if (previous !== undefined && previous.slotId !== observation.slotId) this.conflicts.add(observation.componentId);
         if (owner !== undefined && owner !== observation.componentId) {
           this.conflicts.add(owner);
           this.conflicts.add(observation.componentId);
         }
-        visible.set(observation.componentId, observation.slotId);
+        visible.set(observation.componentId, observation);
         owners.set(observation.slotId, observation.componentId);
       }
     }
@@ -78,12 +84,14 @@ export class WebReplaySlotBinder {
         binding.applicationId = '';
         binding.sessionId = '';
         binding.viewId = '';
+        binding.width = 0;
+        binding.height = 0;
         binding.active = false;
         binding.inactiveAt = 0;
         continue;
       }
-      const slotId = visible.get(binding.componentId);
-      if (slotId === undefined) {
+      const observation = visible.get(binding.componentId);
+      if (observation === undefined) {
         if (binding.active && binding.inactiveAt === 0) binding.inactiveAt = timestamp;
         binding.active = false;
         continue;
@@ -91,7 +99,9 @@ export class WebReplaySlotBinder {
       binding.applicationId = applicationId;
       binding.sessionId = sessionId;
       binding.viewId = viewId;
-      binding.slotId = slotId;
+      binding.slotId = observation.slotId;
+      binding.width = this.normalizeDimension(observation.width);
+      binding.height = this.normalizeDimension(observation.height);
       binding.active = true;
     }
     // Preserve the single-active-slot policy; snapshot order defines paint order here.
@@ -142,8 +152,14 @@ export class WebReplaySlotBinder {
       binding.sessionId = '';
       binding.viewId = '';
       binding.slotId = '';
+      binding.width = 0;
+      binding.height = 0;
       binding.active = false;
       binding.inactiveAt = timestamp;
     }
+  }
+
+  private normalizeDimension(value: number | undefined): number {
+    return value !== undefined && Number.isFinite(value) && value > 0 ? value : 0;
   }
 }

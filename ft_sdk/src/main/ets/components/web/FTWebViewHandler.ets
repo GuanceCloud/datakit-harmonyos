@@ -23,6 +23,18 @@ interface WebViewIgnoredEventLog {
   slotId: string;
 }
 
+interface WebReplayViewportResizeData {
+  source: number;
+  width: number;
+  height: number;
+}
+
+interface WebReplayViewportResizeRecord {
+  timestamp: number;
+  type: number;
+  data: WebReplayViewportResizeData;
+}
+
 /**
  * JavaScriptProxy interface for HarmonyOS WebView
  * Used by .javaScriptProxy() decorator to register JavaScript-to-Native bridge
@@ -160,6 +172,9 @@ export class FTWebViewHandler implements JsReceiver {
   private sessionReplayComponentId: string = '';
   private sessionReplayComponentRegistered: boolean = false;
   private sessionReplayBindingKey: string = '';
+  private sessionReplayViewportKey: string = '';
+  private sessionReplayBrowserViewId: string = '';
+  private sessionReplayHasBrowserRecords: boolean = false;
   private allowWebViewHost: string[] | null = null;
   private webViewId: string = '';
   private webReplayLinkContext: Record<string, string | number | boolean> = {};
@@ -279,6 +294,7 @@ export class FTWebViewHandler implements JsReceiver {
     if (config === null || !this.isRumWebViewEnabled()) {
       this.stopSessionReplaySnapshotTimer();
       this.sessionReplayBindingKey = '';
+      this.sessionReplayViewportKey = '';
       this.logIgnoredWebViewEvent('setup', this.getRumWebViewDisabledReason());
       return;
     }
@@ -347,6 +363,9 @@ export class FTWebViewHandler implements JsReceiver {
     this.sessionReplayComponentRegistered = false;
     this.sessionReplayComponentId = '';
     this.sessionReplayBindingKey = '';
+    this.sessionReplayViewportKey = '';
+    this.sessionReplayBrowserViewId = '';
+    this.sessionReplayHasBrowserRecords = false;
     this.webController = null;
     this.messageReceiver = null;
     this.webViewId = '';
@@ -769,23 +788,23 @@ export class FTWebViewHandler implements JsReceiver {
    * supplies RUM identity and String(native wireframe.id); it never persists or
    * parses the replay payload itself.
    */
-  private handleSessionReplayWebEvent(dataJson: Record<string, string | object> | null,
-    browserViewId: string = ''): void {
+  private handleSessionReplayWebEvent(dataJson: Record<string, string | number | object> | null,
+    browserViewId: string = ''): boolean {
     if (dataJson === null) {
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, 'data_missing', true);
-      return;
+      return false;
     }
     if (!this.isRumWebViewEnabled()) {
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, this.getRumWebViewDisabledReason());
-      return;
+      return false;
     }
     if (!this.sessionReplaySlotActive || this.webController === null) {
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY,
         this.webController === null ? 'controller_missing' : 'controller_inactive');
-      return;
+      return false;
     }
     const rumConfig = FTRUMConfigManager.getInstance().getConfig();
-    if (rumConfig === null) return;
+    if (rumConfig === null) return false;
     const applicationId = rumConfig.getRumAppId();
     const sessionId = FTRUMInnerManager.getInstance().getSessionId();
     // Current Browser SDK sends view.id with every rrweb message. It is authoritative,
@@ -797,14 +816,14 @@ export class FTWebViewHandler implements JsReceiver {
       const reason = applicationId.length === 0 ? 'application_missing' :
         (sessionId.length === 0 ? 'session_missing' : 'browser_view_missing');
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, reason, true);
-      return;
+      return false;
     }
     const rejection = FTSessionReplayBridgeRegistry.getWebReplayRejectionReason(slotId, applicationId, sessionId, timestamp);
     if (rejection.length > 0) {
       // Normal transitions (background, initial binding, inactive drain) are debug diagnostics.
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, rejection,
         rejection === 'application_mismatch' || rejection === 'session_mismatch');
-      return;
+      return false;
     }
     const accepted = FTSessionReplayBridgeRegistry.notifyWebReplayData({
       applicationId,
@@ -817,8 +836,12 @@ export class FTWebViewHandler implements JsReceiver {
     });
     if (!accepted) {
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, 'recorder_rejected');
+    } else {
+      this.sessionReplayHasBrowserRecords = true;
+      this.sessionReplayBrowserViewId = viewId;
     }
     this.refreshSessionReplaySnapshotTimer();
+    return accepted;
   }
 
   /** Promotes the Browser Replay error window after Browser RUM reports an Error. */
@@ -975,13 +998,38 @@ export class FTWebViewHandler implements JsReceiver {
       binding.sessionId !== FTRUMInnerManager.getInstance().getSessionId() ||
       !FTSessionReplayBridgeRegistry.isWebReplaySlotActive(slotId)) {
       this.sessionReplayBindingKey = '';
+      this.sessionReplayViewportKey = '';
       return;
     }
     const key = `${binding.applicationId}|${binding.sessionId}|${binding.viewId}|${slotId}`;
-    if (key === this.sessionReplayBindingKey) return;
+    const viewportKey = binding.width > 0 && binding.height > 0 ? `${slotId}|${binding.width}|${binding.height}` : '';
+    if (key === this.sessionReplayBindingKey) {
+      if (viewportKey.length > 0 && viewportKey !== this.sessionReplayViewportKey) {
+        this.sessionReplayViewportKey = viewportKey;
+        this.publishSessionReplayViewportResize(binding.width, binding.height);
+      }
+      return;
+    }
     // Record before calling JS: the synchronous proxy can reenter this handler.
     this.sessionReplayBindingKey = key;
+    this.sessionReplayViewportKey = viewportKey;
     this.requestSessionReplayFullSnapshot();
+  }
+
+  /** Keeps nested Browser Replay sized to the native Web wireframe after ArkUI relayout. */
+  private publishSessionReplayViewportResize(width: number, height: number): void {
+    if (!this.sessionReplayHasBrowserRecords || this.sessionReplayBrowserViewId.length === 0 ||
+      !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+    const viewport = new Object() as WebReplayViewportResizeData;
+    viewport.source = 4;
+    viewport.width = width;
+    viewport.height = height;
+    const record = new Object() as WebReplayViewportResizeRecord;
+    record.timestamp = Date.now();
+    record.type = 3;
+    record.data = viewport;
+    this.handleSessionReplayWebEvent(
+      record as Object as Record<string, string | number | object>, this.sessionReplayBrowserViewId);
   }
 
   private requestSessionReplayFullSnapshot(): void {

@@ -231,19 +231,25 @@ export class FTSessionReplayBridgeRegistry {
     const latest = FTSessionReplayBridgeRegistry.webSlots.getLatestSlotId();
     previous.forEach((before, componentId): void => {
       const after = FTSessionReplayBridgeRegistry.webSlots.getComponent(componentId);
-      if (after === null || (before.active === after.active && before.viewId === after.viewId &&
-        before.sessionId === after.sessionId && before.applicationId === after.applicationId &&
-        before.slotId === after.slotId && previousLatest === latest)) return;
-      FTSessionReplayBridgeRegistry.flushWebReplayData();
-      if (before.slotId.length > 0 && before.slotId !== after.slotId) {
-        FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(before.slotId, false, timestamp);
+      if (after === null) return;
+      const bindingChanged = before.active !== after.active || before.viewId !== after.viewId ||
+        before.sessionId !== after.sessionId || before.applicationId !== after.applicationId ||
+        before.slotId !== after.slotId || previousLatest !== latest;
+      const viewportChanged = before.width !== after.width || before.height !== after.height;
+      if (!bindingChanged && !viewportChanged) return;
+      if (bindingChanged) {
+        FTSessionReplayBridgeRegistry.flushWebReplayData();
+        if (before.slotId.length > 0 && before.slotId !== after.slotId) {
+          FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(before.slotId, false, timestamp);
+        }
+        if (after.slotId.length > 0) {
+          FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(after.slotId, after.active && latest === after.slotId, timestamp);
+          FTSessionReplayBridgeRegistry.logDiagnostic(
+            `Replay Web binding: component=${componentId}, wireframeId=${after.slotId}, slot=${after.slotId}, view=${after.viewId}, active=${after.active && latest === after.slotId}`);
+        }
       }
-      if (after.slotId.length > 0) {
-        FTSessionReplayBridgeRegistry.notifyWebReplaySlotActive(after.slotId, after.active && latest === after.slotId, timestamp);
-        FTSessionReplayBridgeRegistry.logDiagnostic(
-          `Replay Web binding: component=${componentId}, wireframeId=${after.slotId}, slot=${after.slotId}, view=${after.viewId}, active=${after.active && latest === after.slotId}`);
-      }
-      // Enqueue the native frame before requesting a rebind Full Snapshot.
+      // Enqueue the native frame before requesting a rebind Full Snapshot or
+      // publishing the matching Browser viewport resize.
       const listener = FTSessionReplayBridgeRegistry.webSlotListeners.get(componentId);
       if (listener !== undefined) setTimeout((): void => {
         if (FTSessionReplayBridgeRegistry.webSlotListeners.get(componentId) === listener) listener();

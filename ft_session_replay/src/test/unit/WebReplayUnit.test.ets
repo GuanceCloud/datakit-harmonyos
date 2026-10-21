@@ -131,6 +131,46 @@ export default function webReplayUnitTest() {
       expect(shadow.createMutationRecord(moved)).assertNull();
     });
 
+    it('normalizes Browser Meta and resize heights to the native Web wireframe', 0, () => {
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      const registry = FTSessionReplayBridgeRegistry;
+      const componentId = 'viewport-normalization-web';
+      const slotId = '1000000320';
+      const now = Date.now();
+      const context: SessionReplayContext = { applicationId: 'viewport-app', sessionId: 'viewport-session',
+        viewId: 'browser-view' };
+      recorder.start();
+      registry.setWebReplayAppForeground(true);
+      registry.registerWebReplayComponent(componentId);
+      try {
+        registry.observeWebReplaySlots(context.applicationId, context.sessionId, 'native-view',
+          [{ componentId, slotId, width: 320, height: 560 }], now);
+        const meta: FTSessionReplayWebDataContext = {
+          applicationId: context.applicationId, sessionId: context.sessionId, viewId: context.viewId,
+          slotId, linkContext: {}, timestamp: now,
+          payload: `{"timestamp":${now},"type":4,"data":{"width":320,"height":480,"href":"https://example.test"}}`
+        };
+        const resize: FTSessionReplayWebDataContext = {
+          applicationId: context.applicationId, sessionId: context.sessionId, viewId: context.viewId,
+          slotId, linkContext: {}, timestamp: now + 1,
+          payload: `{"timestamp":${now + 1},"type":3,"data":{"source":4,"width":320,"height":500}}`
+        };
+        expect(recorder.onWebReplayData(meta)).assertTrue();
+        expect(recorder.onWebReplayData(resize)).assertTrue();
+        recorder.flushWebReplayData();
+        const records = recorder.getRecordedRecords(context);
+        expect(records.length).assertEqual(2);
+        const metaViewport = records[0].data as Record<string, string | number>;
+        const resizedViewport = records[1].data as Record<string, number>;
+        expect(metaViewport.height as number).assertEqual(560);
+        expect(resizedViewport.source).assertEqual(4);
+        expect(resizedViewport.height).assertEqual(560);
+      } finally {
+        registry.unregisterWebReplayComponent(componentId);
+        recorder.stop();
+      }
+    });
+
     it('persists Browser records with the native wireframe ID and rejects retired IDs', 0, () => {
       const collector = new ArkUIReplayCollector();
       const first = collector.materializeLightSnapshot(webSnapshot('ignored-alias', 0, 1, 1000000126));

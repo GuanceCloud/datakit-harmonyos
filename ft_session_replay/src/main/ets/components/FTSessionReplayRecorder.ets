@@ -97,6 +97,12 @@ interface BrowserReplayRecord {
   data?: object;
 }
 
+interface BrowserReplayViewportData {
+  source?: number;
+  width?: number;
+  height?: number;
+}
+
 class ReplaySamplingFrame extends FrameCallback {
   private readonly callback: () => void;
   constructor(callback: () => void) {
@@ -1074,6 +1080,17 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
         typeof data !== 'object' || Array.isArray(data)) {
         return null;
       }
+      const binding = FTSessionReplayBridgeRegistry.getWebReplaySlotBinding(slotId);
+      if (binding !== null && binding.width > 0 && binding.height > 0 &&
+        (type === 4 || (type === 3 && (data as BrowserReplayViewportData).source === 4))) {
+        // ArkWeb can retain a stale VisualViewport height after its ArkUI Web
+        // node is resized. Studio scales nested DOM Replay from Browser Meta /
+        // ViewportResize records, so use the native container geometry that
+        // owns this slot instead of leaving an empty strip in the wireframe.
+        const viewport = data as BrowserReplayViewportData;
+        viewport.width = binding.width;
+        viewport.height = binding.height;
+      }
       return {
         timestamp,
         type: type as ReplayRecordType,
@@ -1217,7 +1234,9 @@ export class FTSessionReplayRecorder implements FTSessionReplayBridge {
       for (const node of visibleWebNodes) {
         const bindingId = node.webViewBindingId;
         if (bindingId !== undefined) {
-          slots.push({ componentId: bindingId, slotId: String(node.id) });
+          slots.push({
+            componentId: bindingId, slotId: String(node.id), width: node.width, height: node.height
+          });
         }
       }
       FTSessionReplayBridgeRegistry.observeWebReplaySlots(bindingContext.applicationId, bindingContext.sessionId,
