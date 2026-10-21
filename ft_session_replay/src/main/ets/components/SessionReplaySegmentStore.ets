@@ -179,6 +179,9 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
 
   private checksum(value: string): number {
     const bytes = util.TextEncoder.create('utf-8').encodeInto(value);
+    if (bytes.byteLength === 0 && value.length > 0) {
+      return this.utf8Stats(value)[1];
+    }
     let hash = 2166136261;
     for (let index = 0; index < bytes.length; index++) {
       hash = Math.imul(hash ^ bytes[index], 16777619) >>> 0;
@@ -611,7 +614,48 @@ export class SessionReplaySegmentStore implements SessionReplayRecordStore {
   }
 
   private byteLength(value: string): number {
-    return util.TextEncoder.create('utf-8').encodeInto(value).byteLength;
+    const bytes = util.TextEncoder.create('utf-8').encodeInto(value);
+    return bytes.byteLength > 0 || value.length === 0 ? bytes.byteLength : this.utf8Stats(value)[0];
+  }
+
+  /** Previewer stubs may return an empty TextEncoder result; keep byte accounting deterministic. */
+  private utf8Stats(value: string): [number, number] {
+    let length = 0;
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index++) {
+      let codePoint = value.charCodeAt(index);
+      if (codePoint >= 0xd800 && codePoint <= 0xdbff && index + 1 < value.length) {
+        const low = value.charCodeAt(index + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
+          index++;
+        } else {
+          codePoint = 0xfffd;
+        }
+      } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        codePoint = 0xfffd;
+      }
+      if (codePoint <= 0x7f) {
+        hash = Math.imul(hash ^ codePoint, 16777619);
+        length++;
+      } else if (codePoint <= 0x7ff) {
+        hash = Math.imul(hash ^ (0xc0 | (codePoint >> 6)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 2;
+      } else if (codePoint <= 0xffff) {
+        hash = Math.imul(hash ^ (0xe0 | (codePoint >> 12)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 6) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 3;
+      } else {
+        hash = Math.imul(hash ^ (0xf0 | (codePoint >> 18)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 12) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | ((codePoint >> 6) & 0x3f)), 16777619);
+        hash = Math.imul(hash ^ (0x80 | (codePoint & 0x3f)), 16777619);
+        length += 4;
+      }
+    }
+    return [length, hash >>> 0];
   }
 
   private fileNames(): Array<string> {

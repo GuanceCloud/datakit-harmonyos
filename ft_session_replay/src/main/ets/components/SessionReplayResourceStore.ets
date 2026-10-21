@@ -441,7 +441,38 @@ export class SessionReplayResourceStore {
   }
 
   private atomicWriteText(path: string, value: string): void {
-    this.atomicWriteBytes(path, util.TextEncoder.create('utf-8').encodeInto(value));
+    const encoded = util.TextEncoder.create('utf-8').encodeInto(value);
+    this.atomicWriteBytes(path, encoded.byteLength > 0 || value.length === 0 ? encoded : this.encodeUtf8(value));
+  }
+
+  /** Fallback for Local Test/Previewer runtimes whose TextEncoder stub returns no bytes. */
+  private encodeUtf8(value: string): Uint8Array {
+    const bytes: Array<number> = [];
+    for (let index = 0; index < value.length; index++) {
+      let codePoint = value.charCodeAt(index);
+      if (codePoint >= 0xd800 && codePoint <= 0xdbff && index + 1 < value.length) {
+        const low = value.charCodeAt(index + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
+          index++;
+        } else {
+          codePoint = 0xfffd;
+        }
+      } else if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        codePoint = 0xfffd;
+      }
+      if (codePoint <= 0x7f) {
+        bytes.push(codePoint);
+      } else if (codePoint <= 0x7ff) {
+        bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+      } else if (codePoint <= 0xffff) {
+        bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+      } else {
+        bytes.push(0xf0 | (codePoint >> 18), 0x80 | ((codePoint >> 12) & 0x3f),
+          0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+      }
+    }
+    return new Uint8Array(bytes);
   }
 
   private atomicWriteBytes(path: string, bytes: Uint8Array): void {

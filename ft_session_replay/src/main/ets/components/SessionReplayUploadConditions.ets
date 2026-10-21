@@ -1,6 +1,9 @@
 import { batteryInfo } from '@kit.BasicServicesKit';
 
 export const REPLAY_MIN_UPLOAD_BATTERY_SOC: number = 20;
+const REPLAY_BATTERY_PLUGGED_NONE: number = 0;
+const REPLAY_BATTERY_CHARGING: number = 1;
+const REPLAY_BATTERY_FULL: number = 3;
 
 /** Primitive battery snapshot used to keep the HarmonyOS-aligned rule testable. */
 export interface ReplayBatteryState {
@@ -15,11 +18,11 @@ export interface ReplayBatteryState {
  * active/full, or the device has no battery (for example, some TVs/emulators).
  */
 export function isReplayBatteryHealthy(state: ReplayBatteryState): boolean {
-  const externallyPowered = state.pluggedType === batteryInfo.BatteryPluggedType.AC ||
-    state.pluggedType === batteryInfo.BatteryPluggedType.USB ||
-    state.pluggedType === batteryInfo.BatteryPluggedType.WIRELESS;
-  const charging = state.chargingStatus === batteryInfo.BatteryChargeState.ENABLE ||
-    state.chargingStatus === batteryInfo.BatteryChargeState.FULL;
+  // Battery enums have stable numeric wire values. Using those values here
+  // also keeps this pure predicate independent of incomplete local-test mocks.
+  const externallyPowered = state.pluggedType > REPLAY_BATTERY_PLUGGED_NONE;
+  const charging = state.chargingStatus === REPLAY_BATTERY_CHARGING ||
+    state.chargingStatus === REPLAY_BATTERY_FULL;
   return state.batterySOC > REPLAY_MIN_UPLOAD_BATTERY_SOC || externallyPowered ||
     !state.isBatteryPresent || charging;
 }

@@ -267,6 +267,8 @@ export class ReplayRichText {
     let y = 0;
     for (const block of blocks) {
       y += block.margin;
+      const blockY = y;
+      const blockStart = result.length;
       try {
         const builder = new text.ParagraphBuilder({ align: block.alignment === 'center' ? text.TextAlign.CENTER :
           block.alignment === 'right' ? text.TextAlign.RIGHT : text.TextAlign.LEFT }, text.FontCollection.getGlobalInstance());
@@ -322,17 +324,29 @@ export class ReplayRichText {
           }
         }
         y += paragraph.getHeight() / scale;
+        // Local-test and older typography stubs may return no glyph boxes
+        // without throwing. Preserve visible, privacy-filtered text just as we
+        // do when the native typography module is unavailable altogether.
+        if (result.length === blockStart && block.runs.length > 0) {
+          if (block.runs.some((run): boolean => run.image !== undefined)) return [];
+          y = this.appendFallbackBlock(block, width, blockY, result);
+        }
       } catch (_) {
         if (block.runs.some((run): boolean => run.image !== undefined)) return [];
-        // Keep visible, filtered text on runtimes without the native typography module.
-        for (const run of block.runs) {
-          const height = run.style.lineHeight ?? run.style.size * 1.2;
-          result.push({ text: run.text, style: copyStyle(run.style), input: run.input, x: 0, y, width, height });
-          y += height;
-        }
+        y = this.appendFallbackBlock(block, width, blockY, result);
       }
     }
     return result;
+  }
+
+  /** Keeps text available when native paragraph geometry is unsupported. */
+  private appendFallbackBlock(block: HtmlBlock, width: number, y: number, result: Array<RichFragment>): number {
+    for (const run of block.runs) {
+      const height = run.style.lineHeight ?? run.style.size * 1.2;
+      result.push({ text: run.text, style: copyStyle(run.style), input: run.input, x: 0, y, width, height });
+      y += height;
+    }
+    return y;
   }
 
   private length(value: string, parent: number): number | null {
