@@ -49,6 +49,21 @@ export function initializeDemoColdLaunchRum(
   return initializationInFlight;
 }
 
+/** Validate the persisted configuration the next background process will read. */
+export async function getDemoColdLaunchConfigurationIssue(context: Context): Promise<string> {
+  const settings = await readSettings(context);
+  if (settings.appId.length === 0) {
+    return '请先通过启动参数配置并持久化 appId';
+  }
+  if (settings.datawayUrl.length > 0 && settings.clientToken.length === 0) {
+    return '已保存 Dataway 地址，但缺少 clientToken';
+  }
+  if (settings.datawayUrl.length === 0 && settings.datakitUrl.length === 0) {
+    return '请先通过启动参数配置并持久化 DataKit 或 Dataway 上传地址';
+  }
+  return '';
+}
+
 async function initialize(context: Context, source: string, want?: Want): Promise<void> {
   try {
     const settings = await readSettings(context, want);
@@ -138,5 +153,7 @@ function createSdkConfig(settings: ColdLaunchRumSettings): FTSDKConfig {
   }
   return config
     .setDebug(true)
+    // This bootstrap is also used by independent ExtensionAbility processes.
+    .setOnlySupportMainProcess(false)
     .setServiceName('HarmonyOS-Test-App');
 }

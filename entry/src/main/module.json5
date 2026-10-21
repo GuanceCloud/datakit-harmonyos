@@ -53,6 +53,13 @@
 
     "extensionAbilities": [
       {
+        "name": "BackgroundLaunchWorkSchedulerAbility",
+        "srcEntry": "./ets/workscheduler/BackgroundLaunchWorkSchedulerAbility.ets",
+        "type": "workScheduler",
+        "exported": false,
+        "description": "No-UI WorkScheduler cold-launch verification"
+      },
+      {
         "name": "StressServiceAbility",
         "srcEntry": "./ets/serviceability/StressServiceAbility.ets",
         "type": "appService",

@@ -63,6 +63,20 @@ struct Index {
           .borderRadius(8)
 
           List() {
+            // Separate-process WorkScheduler background-launch diagnostics
+            ListItem() {
+              Button() {
+                Text("WorkScheduler Background Launch")
+              }.width(CommonConstants.FULL_PERCENT)
+              .fontColor(Color.White)
+              .height(50)
+              .backgroundColor('#1D4ED8')
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/BackgroundLaunchWorkSchedulerPage' })
+              })
+            }
+            .margin({ bottom: 10 })
+
             // Unified RUM data test page
             ListItem() {
               Button() {

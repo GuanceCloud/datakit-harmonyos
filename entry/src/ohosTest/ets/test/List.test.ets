@@ -1,4 +1,5 @@
 import entryTestConfigTest from './EntryTestConfig.test';
+import launchDiagnosticIntentTest from './LaunchDiagnosticIntent.test';
 import nativeWorkerIntegrationUITest from './NativeWorkerIntegrationUITest.test';
 import abilityTest from './Ability.test';
 import dbTest from './DBTest.test';
@@ -22,6 +23,7 @@ import sessionReplayMediaUITest from './SessionReplayMediaUITest.test';
 
 export default function testsuite() {
   entryTestConfigTest();
+  launchDiagnosticIntentTest();
   abilityTest();
   dbTest();
   rumAutoViewUITest();

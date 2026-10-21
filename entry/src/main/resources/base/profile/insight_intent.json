@@ -1,0 +1,10 @@
+{
+  "insightIntentsSrcEntry": [
+    {
+      "srcEntry": "./ets/insightintents/ForegroundLaunchDiagnosticIntent.ets"
+    },
+    {
+      "srcEntry": "./ets/insightintents/BackgroundLaunchDiagnosticIntent.ets"
+    }
+  ]
+}

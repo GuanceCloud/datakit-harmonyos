@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
+    "pages/BackgroundLaunchWorkSchedulerPage",
     "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",
     "pages/NavigationStackDemoPage",

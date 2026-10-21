@@ -2,6 +2,7 @@ import { systemDateTime } from '@kit.BasicServicesKit';
 import { FTSDK } from '../FTSDK';
 import { FTConsoleLogBridge } from '../log/FTConsoleLogBridge';
 import { FTInnerLogger } from '../log/FTLogger';
+import { FTAppLaunchTracker } from './FTAppLaunchTracker';
 
 const TAG = 'FTColdLaunchBridge';
 
@@ -47,6 +48,29 @@ export class FTColdLaunchBridge {
   /** Internal callback hook for instrumented and SDK-owned launch flows. */
   public static onFirstFrameRecorded(listener: () => void): void {
     FTColdLaunchBridge.firstFrameListeners.push(listener);
+  }
+
+  /**
+   * Internal diagnostic hook for the repository demo. It reports the SDK's
+   * real no-UI background-launch classification without fabricating a
+   * UIAbility or first-frame boundary. Classification is not submission:
+   * the Action still waits for a real first frame in this process.
+   */
+  public static onBackgroundLaunchDetected(listener: () => void): () => void {
+    return FTAppLaunchTracker.getInstance().onBackgroundLaunchDetected(listener);
+  }
+
+  /** Internal demo hook: accepted by the RUM pipeline, not a server acknowledgement. */
+  public static onColdLaunchReported(
+    listener: (launchType: 'foreground' | 'background') => void
+  ): () => void {
+    const tracker = FTAppLaunchTracker.getInstance();
+    return tracker.onReportSubmitted((): void => {
+      const launchType = tracker.getSnapshot().launchType;
+      if (launchType !== null) {
+        listener(launchType);
+      }
+    });
   }
 
   /**
