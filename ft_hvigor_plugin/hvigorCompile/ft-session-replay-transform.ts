@@ -19,6 +19,8 @@ interface SourceRange {
 
 interface MethodRange {
   nameStart: number;
+  memberStart: number;
+  node: any;
   bodyStart: number;
   bodyEnd: number;
 }
@@ -32,8 +34,8 @@ interface RootExpression {
 }
 
 interface EntryStruct {
-  bodyStart: number;
   bodyEnd: number;
+  methods: Map<string, MethodRange>;
 }
 
 interface Injection {
@@ -44,105 +46,10 @@ interface Injection {
 const REPLAY_BRIDGE_IMPORT = '@guancecloud/ft_session_replay';
 const REPLAY_ROOT_TRANSFORM_MARKER = '/* guance-session-replay-root-transform:instrumented */';
 
-function isIdentifierStart(character: string): boolean {
-  return /[A-Za-z_$]/.test(character);
-}
-
-function isIdentifierPart(character: string): boolean {
-  return /[A-Za-z0-9_$]/.test(character);
-}
-
-function skipTrivia(code: string, start: number, end: number): number {
-  let cursor = start;
-  while (cursor < end) {
-    const character = code[cursor];
-    if (/\s/.test(character)) {
-      cursor++;
-      continue;
-    }
-    if (character === '/' && code[cursor + 1] === '/') {
-      const lineEnd = code.indexOf('\n', cursor + 2);
-      cursor = lineEnd < 0 ? end : lineEnd + 1;
-      continue;
-    }
-    if (character === '/' && code[cursor + 1] === '*') {
-      const commentEnd = code.indexOf('*/', cursor + 2);
-      cursor = commentEnd < 0 ? end : commentEnd + 2;
-      continue;
-    }
-    break;
-  }
-  return cursor;
-}
-
-function skipString(code: string, start: number, end: number): number {
-  const quote = code[start];
-  let cursor = start + 1;
-  while (cursor < end) {
-    if (code[cursor] === '\\') {
-      cursor += 2;
-      continue;
-    }
-    if (code[cursor] === quote) {
-      return cursor + 1;
-    }
-    cursor++;
-  }
-  return end;
-}
-
-/** Finds a closing delimiter while ignoring comments and string literals. */
-function findMatching(code: string, open: number, end: number, openChar: string, closeChar: string): number {
-  let depth = 0;
-  let cursor = open;
-  while (cursor < end) {
-    const character = code[cursor];
-    if (character === '"' || character === '\'' || character === '`') {
-      cursor = skipString(code, cursor, end);
-      continue;
-    }
-    if (character === '/' && code[cursor + 1] === '/') {
-      const lineEnd = code.indexOf('\n', cursor + 2);
-      cursor = lineEnd < 0 ? end : lineEnd + 1;
-      continue;
-    }
-    if (character === '/' && code[cursor + 1] === '*') {
-      const commentEnd = code.indexOf('*/', cursor + 2);
-      cursor = commentEnd < 0 ? end : commentEnd + 2;
-      continue;
-    }
-    if (character === openChar) {
-      depth++;
-    } else if (character === closeChar) {
-      depth--;
-      if (depth === 0) {
-        return cursor;
-      }
-    }
-    cursor++;
-  }
-  return -1;
-}
-
-function readIdentifier(code: string, start: number, end: number): SourceRange | null {
-  if (start >= end || !isIdentifierStart(code[start])) {
-    return null;
-  }
-  let cursor = start + 1;
-  while (cursor < end && isIdentifierPart(code[cursor])) {
-    cursor++;
-  }
-  return { start, end: cursor };
-}
-
 function lineIndentation(code: string, position: number): string {
   const lineStart = code.lastIndexOf('\n', position) + 1;
   const match = code.slice(lineStart, position).match(/^\s*/);
   return match === null ? '' : match[0];
-}
-
-function lineStart(code: string, position: number): number {
-  return code.lastIndexOf('\n', position) + 1;
 }
 
 function collectIdentifiers(code: string): Set<string> {
@@ -189,165 +96,67 @@ function findImportInsertionOffset(ts: TypeScriptApi, id: string, code: string):
   return offset;
 }
 
-function collectEntryStructs(code: string): EntryStruct[] {
+/** Structs, decorators and members must come from the ArkTS parser, never text matches. */
+function collectEntryStructs(ts: TypeScriptApi, source: any): EntryStruct[] {
   const entries: EntryStruct[] = [];
-  const entryDecorator = /@Entry\b/g;
-  let decoratorMatch: RegExpExecArray | null;
-  while ((decoratorMatch = entryDecorator.exec(code)) !== null) {
-    const nextDecorator = code.indexOf('@Entry', decoratorMatch.index + '@Entry'.length);
-    const searchEnd = nextDecorator < 0 ? code.length : nextDecorator;
-    const structExpression = /\bstruct\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\{/g;
-    structExpression.lastIndex = decoratorMatch.index + '@Entry'.length;
-    const structMatch = structExpression.exec(code);
-    if (structMatch === null || structMatch.index >= searchEnd) {
-      continue;
-    }
-    const bodyStart = code.indexOf('{', structMatch.index);
-    const bodyEnd = findMatching(code, bodyStart, code.length, '{', '}');
-    if (bodyEnd < 0) {
-      continue;
-    }
-    entries.push({ bodyStart, bodyEnd });
-    entryDecorator.lastIndex = bodyEnd + 1;
-  }
+  source.statements.forEach((node: any) => {
+    if (!ts.isStructDeclaration(node)) return;
+    const decorators = ts.getDecorators ? ts.getDecorators(node) || [] : node.decorators || [];
+    const isEntry = decorators.some((decorator: any) => {
+      const expression = ts.isCallExpression(decorator.expression)
+        ? decorator.expression.expression : decorator.expression;
+      return ts.isIdentifier(expression) && expression.text === 'Entry';
+    });
+    if (!isEntry) return;
+    const methods = new Map<string, MethodRange>();
+    node.members.forEach((member: any) => {
+      if (ts.isMethodDeclaration(member) && member.body && ts.isIdentifier(member.name)) {
+        methods.set(member.name.text, { nameStart: member.name.getStart(source),
+          memberStart: member.getStart(source), node: member,
+          bodyStart: member.body.getStart(source), bodyEnd: member.body.end - 1 });
+      }
+    });
+    entries.push({ bodyEnd: node.end - 1, methods });
+  });
   return entries;
 }
 
-function findTopLevelMethod(code: string, bodyStart: number, bodyEnd: number, methodName: string): MethodRange | null {
-  let cursor = bodyStart + 1;
-  let depth = 0;
-  while (cursor < bodyEnd) {
-    const character = code[cursor];
-    if (character === '"' || character === '\'' || character === '`') {
-      cursor = skipString(code, cursor, bodyEnd);
-      continue;
-    }
-    if (character === '/' && (code[cursor + 1] === '/' || code[cursor + 1] === '*')) {
-      cursor = skipTrivia(code, cursor, bodyEnd);
-      continue;
-    }
-    if (character === '{') {
-      depth++;
-      cursor++;
-      continue;
-    }
-    if (character === '}') {
-      depth--;
-      cursor++;
-      continue;
-    }
-    if (depth !== 0 || !isIdentifierStart(character)) {
-      cursor++;
-      continue;
-    }
-    const identifier = readIdentifier(code, cursor, bodyEnd);
-    if (identifier === null) {
-      cursor++;
-      continue;
-    }
-    cursor = identifier.end;
-    if (code.slice(identifier.start, identifier.end) !== methodName) {
-      continue;
-    }
-    let afterName = skipTrivia(code, identifier.end, bodyEnd);
-    if (code[afterName] !== '(') {
-      continue;
-    }
-    const parametersEnd = findMatching(code, afterName, bodyEnd, '(', ')');
-    if (parametersEnd < 0) {
-      continue;
-    }
-    afterName = skipTrivia(code, parametersEnd + 1, bodyEnd);
-    if (code[afterName] === ':') {
-      afterName++;
-      while (afterName < bodyEnd && code[afterName] !== '{' && code[afterName] !== ';') {
-        if (code[afterName] === '"' || code[afterName] === '\'' || code[afterName] === '`') {
-          afterName = skipString(code, afterName, bodyEnd);
-        } else {
-          afterName++;
-        }
-      }
-    }
-    afterName = skipTrivia(code, afterName, bodyEnd);
-    if (code[afterName] !== '{') {
-      continue;
-    }
-    const methodEnd = findMatching(code, afterName, bodyEnd, '{', '}');
-    if (methodEnd < 0) {
-      continue;
-    }
-    return { nameStart: identifier.start, bodyStart: afterName, bodyEnd: methodEnd };
+function componentChain(ts: TypeScriptApi, expression: any): { base: any; modifiers: any[] } {
+  const modifiers: any[] = [];
+  let base = expression;
+  while (ts.isCallExpression(base) && ts.isPropertyAccessExpression(base.expression)) {
+    modifiers.unshift(base);
+    base = base.expression.expression;
   }
-  return null;
+  return { base, modifiers };
 }
 
-function findRootExpression(code: string, buildBodyStart: number, buildBodyEnd: number): RootExpression | null {
-  let cursor = skipTrivia(code, buildBodyStart + 1, buildBodyEnd);
-  if (code.slice(cursor, cursor + 6) === 'return' && !isIdentifierPart(code[cursor + 6] || '')) {
-    cursor = skipTrivia(code, cursor + 6, buildBodyEnd);
-  }
-  const component = readIdentifier(code, cursor, buildBodyEnd);
-  if (component === null) {
-    return null;
-  }
-  cursor = skipTrivia(code, component.end, buildBodyEnd);
-  if (code[cursor] !== '(') {
-    return null;
-  }
-  const argumentsEnd = findMatching(code, cursor, buildBodyEnd, '(', ')');
-  if (argumentsEnd < 0) {
-    return null;
-  }
-  cursor = skipTrivia(code, argumentsEnd + 1, buildBodyEnd);
-  if (code[cursor] !== '{') {
-    return null;
-  }
-  const childEnd = findMatching(code, cursor, buildBodyEnd, '{', '}');
-  if (childEnd < 0) {
-    return null;
-  }
-  cursor = childEnd + 1;
+function argumentRange(source: any, call: any): SourceRange {
+  // Include comments and newlines before the closing parenthesis when reusing an argument.
+  return { start: call.arguments.pos, end: call.getLastToken(source).getStart(source) };
+}
+
+function findRootExpression(ts: TypeScriptApi, source: any, code: string,
+  build: MethodRange): RootExpression | null {
+  const first = build.node.body.statements[0];
+  if (!first || (!ts.isExpressionStatement(first) && !ts.isReturnStatement(first)) || !first.expression) return null;
+  const { base, modifiers } = componentChain(ts, first.expression);
+  if (!ts.isEtsComponentExpression(base) || !base.body) return null;
   let idExpression: string | null = null;
   let hasAreaChange = false;
   let hasTouch = false;
   let touchArgument: SourceRange | undefined;
-
-  // Consume the root's chained modifiers. The next token outside that chain is
-  // a sibling statement or the build-method closing brace.
-  while (cursor < buildBodyEnd) {
-    const modifierStart = skipTrivia(code, cursor, buildBodyEnd);
-    if (code[modifierStart] !== '.') {
-      break;
-    }
-    const modifierName = readIdentifier(code, modifierStart + 1, buildBodyEnd);
-    if (modifierName === null) {
-      break;
-    }
-    let afterModifier = skipTrivia(code, modifierName.end, buildBodyEnd);
-    if (code[afterModifier] !== '(') {
-      break;
-    }
-    const modifierEnd = findMatching(code, afterModifier, buildBodyEnd, '(', ')');
-    if (modifierEnd < 0) {
-      return null;
-    }
-    if (code.slice(modifierName.start, modifierName.end) === 'id') {
-      // Keep newlines after line comments when reusing the expression in calls.
-      const argument = code.slice(afterModifier + 1, modifierEnd);
-      if (argument.trim().length > 0) {
-        idExpression = argument;
-      }
-    }
-    if (code.slice(modifierName.start, modifierName.end) === 'onAreaChange') {
-      hasAreaChange = true;
-    }
-    if (code.slice(modifierName.start, modifierName.end) === 'onTouch') {
+  modifiers.forEach((call: any) => {
+    const name = call.expression.name.text;
+    const range = argumentRange(source, call);
+    if (name === 'id' && call.arguments.length === 1) idExpression = code.slice(range.start, range.end);
+    if (name === 'onAreaChange') hasAreaChange = true;
+    if (name === 'onTouch') {
       hasTouch = true;
-      touchArgument = { start: afterModifier + 1, end: modifierEnd };
+      if (call.arguments.length === 1) touchArgument = range;
     }
-    cursor = modifierEnd + 1;
-  }
-  return { end: cursor, idExpression, hasAreaChange, hasTouch, touchArgument };
+  });
+  return { end: first.expression.end, idExpression, hasAreaChange, hasTouch, touchArgument };
 }
 
 function applyInjections(code: string, injections: Injection[]): string {
@@ -365,70 +174,45 @@ function applyInjections(code: string, injections: Injection[]): string {
   return transformed;
 }
 
-function addTransitionInjections(code: string, injections: Injection[], entry: EntryStruct,
-  bridgeName: string, tokenField: string, rootExpression: string): void {
-  const method = findTopLevelMethod(code, entry.bodyStart, entry.bodyEnd, 'pageTransition');
-  if (method === null) {
+function addTransitionInjections(ts: TypeScriptApi, source: any, code: string, injections: Injection[],
+  entry: EntryStruct, bridgeName: string, tokenField: string, rootExpression: string): void {
+  const method = entry.methods.get('pageTransition');
+  if (!method) {
     const indentation = `${lineIndentation(code, entry.bodyEnd)}  `;
-    // An empty effect list keeps ArkUI's default transition. The method is
-    // invoked by the real Router animation, including its outgoing page.
     injections.push({ position: entry.bodyEnd, content: `\n${indentation}pageTransition(): void {\n` +
       `${indentation}  if (${bridgeName}.defaultTransitionStarted(this.${tokenField})) {}\n${indentation}}\n` });
     return;
   }
-  let cursor = method.bodyStart + 1;
   let nextSpec = 0;
-  while (cursor < method.bodyEnd) {
-    const character = code[cursor];
-    if (character === '"' || character === '\'' || character === '`') {
-      cursor = skipString(code, cursor, method.bodyEnd);
-      continue;
-    }
-    if (character === '/' && (code[cursor + 1] === '/' || code[cursor + 1] === '*')) {
-      cursor = skipTrivia(code, cursor, method.bodyEnd);
-      continue;
-    }
-    const identifier = readIdentifier(code, cursor, method.bodyEnd);
-    if (identifier === null) { cursor++; continue; }
-    cursor = identifier.end;
-    const name = code.slice(identifier.start, identifier.end);
-    if (name !== 'PageTransitionEnter' && name !== 'PageTransitionExit') continue;
-    const argumentsStart = skipTrivia(code, cursor, method.bodyEnd);
-    if (code[argumentsStart] !== '(') continue;
-    const argumentsEnd = findMatching(code, argumentsStart, method.bodyEnd, '(', ')');
-    if (argumentsEnd < 0) continue;
+  method.node.body.statements.forEach((statement: any) => {
+    if (!ts.isExpressionStatement(statement)) return;
+    const { base, modifiers } = componentChain(ts, statement.expression);
+    if ((!ts.isCallExpression(base) && !ts.isEtsComponentExpression(base)) || !ts.isIdentifier(base.expression)) return;
+    const name = base.expression.text;
+    if (name !== 'PageTransitionEnter' && name !== 'PageTransitionExit') return;
     const entering = name === 'PageTransitionEnter';
     const callbackName = entering ? 'onEnter' : 'onExit';
     const spec = JSON.stringify(`transition-${nextSpec++}`);
     const prefix = `this.${tokenField}, ${rootExpression}, ${spec}, ${entering}`;
     let callback: SourceRange | undefined;
-    cursor = argumentsEnd + 1;
-    while (cursor < method.bodyEnd) {
-      const start = skipTrivia(code, cursor, method.bodyEnd);
-      if (code[start] !== '.') break;
-      const modifier = readIdentifier(code, start + 1, method.bodyEnd);
-      if (modifier === null) break;
-      const open = skipTrivia(code, modifier.end, method.bodyEnd);
-      if (code[open] !== '(') break;
-      const close = findMatching(code, open, method.bodyEnd, '(', ')');
-      if (close < 0) break;
-      const modifierName = code.slice(modifier.start, modifier.end);
-      if (modifierName === 'slide' || modifierName === 'opacity') {
+    modifiers.forEach((call: any) => {
+      const modifierName = call.expression.name.text;
+      const range = argumentRange(source, call);
+      if ((modifierName === 'slide' || modifierName === 'opacity') && call.arguments.length === 1) {
         const hook = modifierName === 'slide' ? 'transitionSlide' : 'transitionOpacity';
-        injections.push({ position: open + 1,
+        injections.push({ position: range.start,
           content: `${bridgeName}.${hook}(this.${tokenField}, ${spec}, ` });
-        injections.push({ position: close, content: ')' });
-      } else if (modifierName === callbackName) callback = { start: open + 1, end: close };
-      cursor = close + 1;
-    }
-    if (callback !== undefined) {
+        injections.push({ position: range.end, content: ')' });
+      } else if (modifierName === callbackName && call.arguments.length === 1) callback = range;
+    });
+    if (callback) {
       injections.push({ position: callback.start, content: `${bridgeName}.wrapTransition(${prefix}, ` });
       injections.push({ position: callback.end, content: ')' });
     } else {
-      injections.push({ position: cursor,
+      injections.push({ position: statement.expression.end,
         content: `.${callbackName}((type: RouteType, progress: number) => { ${bridgeName}.transitionProgress(${prefix}, progress); })` });
     }
-  }
+  });
 }
 
 function lifecycleCall(bridgeName: string, tokenField: string, method: 'pageShown' | 'pageHidden' | 'pageDisposed',
@@ -450,26 +234,24 @@ function addLifecycleInjection(
   runtimeMethod: 'pageShown' | 'pageHidden' | 'pageDisposed',
   rootExpression: string
 ): void {
-  const existing = findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, methodName);
+  const existing = struct.methods.get(methodName);
   const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression,
-    findTopLevelMethod(code, struct.bodyStart, struct.bodyEnd, 'pageTransition') === null);
-  if (existing !== null) {
+    !struct.methods.has('pageTransition'));
+  if (existing) {
     const indentation = `${lineIndentation(code, existing.nameStart)}  `;
     injections.push({ position: existing.bodyStart + 1, content: `\n${indentation}${call}` });
     return;
   }
   const indentation = lineIndentation(code, buildMethod.nameStart);
   injections.push({
-    position: lineStart(code, buildMethod.nameStart),
-    content: `${indentation}${methodName}(): void {\n${indentation}  ${call}\n${indentation}}\n\n`
+    position: buildMethod.memberStart,
+    content: `\n${indentation}${methodName}(): void {\n${indentation}  ${call}\n${indentation}}\n\n`
   });
 }
 
 /**
  * Adds an opaque root ID and page lifecycle registration to every @Entry page.
- * TypeScript locates import declarations; ArkTS declarative component syntax
- * is scanned conservatively so the transform works with the compiler's
- * ArkTS source reader.
+ * ArkTS nodes locate real decorators, struct members and component expressions.
  */
 export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
   if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
@@ -478,7 +260,13 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
     return code;
   }
 
-  const entries = collectEntryStructs(code);
+  if (typeof ts.isStructDeclaration !== 'function' || typeof ts.isEtsComponentExpression !== 'function') return code;
+  // The parser needs component names to recognize declarative child blocks.
+  // This superset configures parsing only; eligibility is decided by AST nodes.
+  const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS,
+    { ets: { components: Array.from(collectIdentifiers(code)), render: { method: ['build', 'pageTransition'] } } });
+  if (source.parseDiagnostics.length > 0) return code;
+  const entries = collectEntryStructs(ts, source);
   if (entries.length === 0) {
     return code;
   }
@@ -490,18 +278,18 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
   const injections: Injection[] = [];
 
   entries.forEach((entry: EntryStruct): void => {
-    const buildMethod = findTopLevelMethod(code, entry.bodyStart, entry.bodyEnd, 'build');
-    if (buildMethod === null) {
+    const buildMethod = entry.methods.get('build');
+    if (!buildMethod) {
       return;
     }
-    const root = findRootExpression(code, buildMethod.bodyStart, buildMethod.bodyEnd);
+    const root = findRootExpression(ts, source, code, buildMethod);
     if (root === null) {
       return;
     }
     const indentation = lineIndentation(code, buildMethod.nameStart);
     injections.push({
-      position: lineStart(code, buildMethod.nameStart),
-      content: `${indentation}private ${tokenField}: string = ${bridgeName}.createRootToken(${JSON.stringify(sourceKey)});\n\n`
+      position: buildMethod.memberStart,
+      content: `\n${indentation}private ${tokenField}: string = ${bridgeName}.createRootToken(${JSON.stringify(sourceKey)});\n\n`
     });
 
     const rootExpression = root.idExpression === null ? `this.${tokenField}` : root.idExpression;
@@ -535,7 +323,7 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
       'onPageHide', 'pageHidden', rootExpression);
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
       'aboutToDisappear', 'pageDisposed', rootExpression);
-    addTransitionInjections(code, injections, entry, bridgeName, tokenField, rootExpression);
+    addTransitionInjections(ts, source, code, injections, entry, bridgeName, tokenField, rootExpression);
   });
 
   if (injections.length === 0) {
