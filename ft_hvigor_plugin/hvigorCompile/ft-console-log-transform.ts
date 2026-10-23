@@ -25,6 +25,7 @@ interface TransformCandidate {
 interface SourceRange {
   start: number;
   end: number;
+  spread: boolean;
 }
 
 const HILOG_MODULES: string[] = ['@ohos.hilog', '@kit.PerformanceAnalysisKit'];
@@ -148,7 +149,8 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
 
     const callArguments: SourceRange[] = node.arguments.map((argument: any) => ({
       start: argument.getStart(sourceFile),
-      end: argument.end
+      end: argument.end,
+      spread: ts.isSpreadElement(argument)
     }));
     const statementSeparator = needsStatementSeparator(ts, node);
     if (delegateName === 'console' && !consoleIsShadowed && CONSOLE_LEVELS.includes(level)) {
@@ -157,7 +159,7 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
       return;
     }
     if (hiLogBindings.has(delegateName) && !shadowedHiLogBindings.has(delegateName) &&
-      HILOG_LEVELS.includes(level) && callArguments.length >= 3) {
+      HILOG_LEVELS.includes(level) && (callArguments.length >= 3 || callArguments.some(argument => argument.spread))) {
       candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'hilog', callArguments,
         needsStatementSeparator: statementSeparator });
     }
@@ -206,6 +208,21 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
   const renderedArguments = candidate.callArguments.map((argument: SourceRange) =>
     renderCandidates(code, candidates, bridgeName, argument.start, argument.end));
   const statementSeparator = candidate.needsStatementSeparator ? ';' : '';
+  if (candidate.callArguments.some(argument => argument.spread)) {
+    // One rest binding receives the expanded values, rather than one parameter
+    // per syntax argument. Array construction preserves iteration/evaluation order.
+    if (candidate.source === 'console') {
+      return `${statementSeparator}((...__ftConsoleArgs: Object[]): void => ${bridgeName}.console('${candidate.level}', ` +
+        `(): void => ${candidate.delegate}.${candidate.level}(...(__ftConsoleArgs as string[])), ` +
+        `...__ftConsoleArgs))(${renderedArguments.join(', ')})`;
+    }
+    const header = '__ftHiLogArgs[0] as number, __ftHiLogArgs[1] as string, __ftHiLogArgs[2] as string';
+    return `${statementSeparator}((...__ftHiLogArgs: Object[]): void => { ` +
+      `const __ftHiLogValues: Object[] = __ftHiLogArgs.slice(3); ` +
+      `${bridgeName}.hilog('${candidate.level}', ${header}, ` +
+      `(): void => ${candidate.delegate}.${candidate.level}(${header}, ...__ftHiLogValues), ` +
+      `...__ftHiLogValues); })(${renderedArguments.join(', ')})`;
+  }
   if (candidate.source === 'console') {
     const argumentNames = renderedArguments.map((_argument: string, index: number) => `__ftConsoleArg${index}`);
     const parameterDeclarations = argumentNames.map((name: string) => `${name}: Object`).join(', ');
