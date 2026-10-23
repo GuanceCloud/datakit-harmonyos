@@ -9,6 +9,7 @@
 
 import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
+import { allocateName, collectIdentifierNames } from './ft-generated-names';
 
 type TypeScriptApi = any;
 
@@ -21,6 +22,7 @@ interface TransformCandidate {
   source: 'console' | 'hilog';
   callArguments: SourceRange[];
   needsStatementSeparator: boolean;
+  generatedNames?: string[];
 }
 
 interface SourceRange {
@@ -48,16 +50,6 @@ export function isApplicationArkTsSource(id: string): boolean {
 function visit(ts: TypeScriptApi, node: any, visitor: (current: any) => void): void {
   visitor(node);
   ts.forEachChild(node, (child: any) => visit(ts, child, visitor));
-}
-
-function collectIdentifierNames(ts: TypeScriptApi, sourceFile: any): Set<string> {
-  const identifiers = new Set<string>();
-  visit(ts, sourceFile, (node: any) => {
-    if (ts.isIdentifier(node)) {
-      identifiers.add(node.text);
-    }
-  });
-  return identifiers;
 }
 
 function collectHiLogBindings(ts: TypeScriptApi, sourceFile: any): Map<string, any> {
@@ -144,15 +136,14 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
   return candidates;
 }
 
-function selectBridgeName(identifiers: Set<string>): string {
-  const baseName = '__ftConsoleLogBridge';
-  let bridgeName = baseName;
-  let suffix = 1;
-  while (identifiers.has(bridgeName)) {
-    bridgeName = `${baseName}${suffix}`;
-    suffix++;
+function allocateCandidateNames(candidate: TransformCandidate, identifiers: Set<string>): string[] {
+  if (candidate.callArguments.some(argument => argument.spread)) {
+    return candidate.source === 'console' ? [allocateName(identifiers, '__ftConsoleArgs')]
+      : [allocateName(identifiers, '__ftHiLogArgs'), allocateName(identifiers, '__ftHiLogValues')];
   }
-  return bridgeName;
+  return candidate.callArguments.map((_argument, index) => allocateName(identifiers,
+    candidate.source === 'console' ? `__ftConsoleArg${index}` :
+      ['__ftHiLogDomain', '__ftHiLogTag', '__ftHiLogFormat'][index] || `__ftHiLogArg${index - 3}`));
 }
 
 function isNestedIn(candidate: TransformCandidate, parent: TransformCandidate): boolean {
@@ -185,23 +176,26 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
   const renderedArguments = candidate.callArguments.map((argument: SourceRange) =>
     renderCandidates(code, candidates, bridgeName, argument.start, argument.end));
   const statementSeparator = candidate.needsStatementSeparator ? ';' : '';
+  const names = candidate.generatedNames!;
   if (candidate.callArguments.some(argument => argument.spread)) {
     // One rest binding receives the expanded values, rather than one parameter
     // per syntax argument. Array construction preserves iteration/evaluation order.
     if (candidate.source === 'console') {
-      return `${statementSeparator}((...__ftConsoleArgs: Object[]): void => ${bridgeName}.console('${candidate.level}', ` +
-        `(): void => ${candidate.delegate}.${candidate.level}(...(__ftConsoleArgs as string[])), ` +
-        `...__ftConsoleArgs))(${renderedArguments.join(', ')})`;
+      const args = names[0];
+      return `${statementSeparator}((...${args}: Object[]): void => ${bridgeName}.console('${candidate.level}', ` +
+        `(): void => ${candidate.delegate}.${candidate.level}(...(${args} as string[])), ` +
+        `...${args}))(${renderedArguments.join(', ')})`;
     }
-    const header = '__ftHiLogArgs[0] as number, __ftHiLogArgs[1] as string, __ftHiLogArgs[2] as string';
-    return `${statementSeparator}((...__ftHiLogArgs: Object[]): void => { ` +
-      `const __ftHiLogValues: Object[] = __ftHiLogArgs.slice(3); ` +
+    const [args, values] = names;
+    const header = `${args}[0] as number, ${args}[1] as string, ${args}[2] as string`;
+    return `${statementSeparator}((...${args}: Object[]): void => { ` +
+      `const ${values}: Object[] = ${args}.slice(3); ` +
       `${bridgeName}.hilog('${candidate.level}', ${header}, ` +
-      `(): void => ${candidate.delegate}.${candidate.level}(${header}, ...__ftHiLogValues), ` +
-      `...__ftHiLogValues); })(${renderedArguments.join(', ')})`;
+      `(): void => ${candidate.delegate}.${candidate.level}(${header}, ...${values}), ` +
+      `...${values}); })(${renderedArguments.join(', ')})`;
   }
   if (candidate.source === 'console') {
-    const argumentNames = renderedArguments.map((_argument: string, index: number) => `__ftConsoleArg${index}`);
+    const argumentNames = names;
     const parameterDeclarations = argumentNames.map((name: string) => `${name}: Object`).join(', ');
     const originalCallArguments = argumentNames.map((name: string) => `${name} as string`);
     const originalCall = `${candidate.delegate}.${candidate.level}(${originalCallArguments.join(', ')})`;
@@ -210,18 +204,7 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
       `(): void => ${originalCall}${captureArguments}))(${renderedArguments.join(', ')})`;
   }
 
-  const argumentNames = renderedArguments.map((_argument: string, index: number) => {
-    if (index === 0) {
-      return '__ftHiLogDomain';
-    }
-    if (index === 1) {
-      return '__ftHiLogTag';
-    }
-    if (index === 2) {
-      return '__ftHiLogFormat';
-    }
-    return `__ftHiLogArg${index - 3}`;
-  });
+  const argumentNames = names;
   const parameterDeclarations = argumentNames.map((name: string, index: number) => {
     if (index === 0) {
       return `${name}: number`;
@@ -259,7 +242,9 @@ export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: s
     return code;
   }
 
-  const bridgeName = selectBridgeName(collectIdentifierNames(ts, sourceFile));
+  const identifiers = collectIdentifierNames(ts, sourceFile);
+  const bridgeName = allocateName(identifiers, '__ftConsoleLogBridge');
+  candidates.forEach(candidate => { candidate.generatedNames = allocateCandidateNames(candidate, identifiers); });
   const transformedCode = renderCandidates(code, candidates, bridgeName, 0, code.length);
   const insertionOffset = findImportInsertionOffset(ts, sourceFile);
   const transformedInsertionOffset = renderCandidates(code, candidates, bridgeName, 0, insertionOffset).length;

@@ -2,6 +2,7 @@
 import { isApplicationArkTsSource } from './ft-console-log-transform';
 import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
+import { allocateName, collectIdentifierNames } from './ft-generated-names';
 
 type TypeScriptApi = any;
 interface Injection { position: number; content: string; }
@@ -15,12 +16,11 @@ export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: st
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_session_replay', readSource)) return code;
 
   const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
-  const identifiers = new Set<string>();
+  const identifiers = collectIdentifierNames(ts, source);
   const constructors: any[] = [];
   const resolve = createLexicalResolver(ts, source);
   let importEnd = 0;
   const visit = (node: any): void => {
-    if (ts.isIdentifier(node)) identifiers.add(node.text);
     if (ts.isImportDeclaration(node)) importEnd = Math.max(importEnd, node.end);
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Web' &&
       node.arguments.length === 1 && !ts.isSpreadElement(node.arguments[0]) &&
@@ -30,9 +30,7 @@ export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: st
   visit(source);
   if (constructors.length === 0) return code;
 
-  let bridge = '__ftWebReplayBridge';
-  let suffix = 0;
-  while (identifiers.has(bridge)) bridge = `__ftWebReplayBridge${++suffix}`;
+  const bridge = allocateName(identifiers, '__ftWebReplayBridge');
   const injections: Injection[] = [];
   for (const constructor of constructors) {
     const options = constructor.arguments[0];

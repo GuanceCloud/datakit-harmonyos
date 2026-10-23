@@ -8,6 +8,7 @@
     "hvigorCompile/ft-source-transform-host.ts",
     "hvigorCompile/ft-transform-context.ts",
     "hvigorCompile/ft-lexical-scope.ts",
+    "hvigorCompile/ft-generated-names.ts",
     "hvigorCompile/ft-console-log-transform.ts",
     "hvigorCompile/ft-cold-launch-transform.ts",
     "hvigorCompile/ft-session-replay-transform.ts",

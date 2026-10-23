@@ -7,6 +7,7 @@
 
 import { hasRuntimeDependency } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
+import { allocateName as selectIdentifierName, collectIdentifierNames } from './ft-generated-names';
 
 declare const require: any;
 declare const __dirname: string;
@@ -55,27 +56,6 @@ export function isApplicationArkTsSource(id: string): boolean {
 function visit(ts: TypeScriptApi, node: any, visitor: (current: any) => void): void {
   visitor(node);
   ts.forEachChild(node, (child: any) => visit(ts, child, visitor));
-}
-
-function collectIdentifierNames(ts: TypeScriptApi, sourceFile: any): Set<string> {
-  const identifiers = new Set<string>();
-  visit(ts, sourceFile, (node: any) => {
-    if (ts.isIdentifier(node)) {
-      identifiers.add(node.text);
-    }
-  });
-  return identifiers;
-}
-
-function selectIdentifierName(identifiers: Set<string>, baseName: string): string {
-  let bridgeName = baseName;
-  let suffix = 1;
-  while (identifiers.has(bridgeName)) {
-    bridgeName = `${baseName}${suffix}`;
-    suffix++;
-  }
-  identifiers.add(bridgeName);
-  return bridgeName;
 }
 
 function getPluginVersion(): string {

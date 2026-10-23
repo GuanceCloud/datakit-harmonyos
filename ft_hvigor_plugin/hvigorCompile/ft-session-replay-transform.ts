@@ -9,6 +9,7 @@
 
 import { isApplicationArkTsSource } from './ft-console-log-transform';
 import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { allocateName as selectUniqueName } from './ft-generated-names';
 
 type TypeScriptApi = any;
 
@@ -60,17 +61,6 @@ function collectIdentifiers(code: string): Set<string> {
     identifiers.add(match[0]);
   }
   return identifiers;
-}
-
-function selectUniqueName(identifiers: Set<string>, base: string): string {
-  let candidate = base;
-  let suffix = 1;
-  while (identifiers.has(candidate)) {
-    candidate = `${base}${suffix}`;
-    suffix++;
-  }
-  identifiers.add(candidate);
-  return candidate;
 }
 
 /** A stable opaque source key. Do not emit customers' project paths into UI IDs. */
@@ -263,8 +253,18 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
   if (typeof ts.isStructDeclaration !== 'function' || typeof ts.isEtsComponentExpression !== 'function') return code;
   // The parser needs component names to recognize declarative child blocks.
   // This superset configures parsing only; eligibility is decided by AST nodes.
+  const components = Array.from(collectIdentifiers(code));
   const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS,
-    { ets: { components: Array.from(collectIdentifiers(code)), render: { method: ['build', 'pageTransition'] } } });
+    { ets: {
+      components,
+      render: { method: ['build', 'pageTransition'], decorator: ['Builder', 'LocalBuilder'] },
+      extend: { decorator: ['Extend', 'AnimatableExtend'], components: components.map(name =>
+        ({ name, type: `${name}Attribute`, instance: `${name}Instance` })) },
+      styles: { decorator: 'Styles', component: { name: 'Common', type: 'T', instance: 'CommonInstance' }, property: 'stateStyles' },
+      concurrent: { decorator: 'Concurrent' },
+      customComponent: 'CustomComponent',
+      syntaxComponents: { paramsUICallback: ['ForEach', 'LazyForEach'], attrUICallback: [{ name: 'Repeat', attributes: ['each', 'template'] }] }
+    } });
   if (source.parseDiagnostics.length > 0) return code;
   const entries = collectEntryStructs(ts, source);
   if (entries.length === 0) {
