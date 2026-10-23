@@ -2,6 +2,8 @@
 
 ## [0.1.2-alpha.1] - 2026-10-19
 
+- Guarded every transform by runtime dependencies declared in the source file's owning module, including HAR/HSP sources; comments and devDependencies no longer enable instrumentation.
+
 - Fixed ArkTS import-order errors in UIAbility modules without an AbilityStage entry by placing generated initialization calls after leading imports.
 - Added a UIAbility module-execution fallback for application initialization when a HAP has no AbilityStage entry, while preserving configured AbilityStage timing.
 - Fixed cold-launch instrumentation through application UIAbility inheritance, including relative imports and re-exports, without masking inherited lifecycle implementations.

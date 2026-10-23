@@ -5,6 +5,8 @@
  * the compiler's in-memory source. Application files are never modified.
  */
 
+import { hasRuntimeDependency } from './ft-transform-context';
+
 declare const require: any;
 declare const __dirname: string;
 
@@ -638,7 +640,8 @@ function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection
 
 export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: string,
   readSource?: SourceReader): string {
-  if (!isApplicationArkTsSource(id) || code.includes(COLD_LAUNCH_TRANSFORM_MARKER)) {
+  if (!isApplicationArkTsSource(id) || code.includes(COLD_LAUNCH_TRANSFORM_MARKER) ||
+    !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource)) {
     return code;
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);

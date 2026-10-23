@@ -7,6 +7,8 @@
  * never changed.
  */
 
+import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+
 type TypeScriptApi = any;
 
 interface TransformCandidate {
@@ -252,8 +254,9 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
   return offset;
 }
 
-export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: string): string {
-  if (!isApplicationArkTsSource(id) || code.includes(TRANSFORM_MARKER)) {
+export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
+  if (!isApplicationArkTsSource(id) || code.includes(TRANSFORM_MARKER) ||
+    !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource)) {
     return code;
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);

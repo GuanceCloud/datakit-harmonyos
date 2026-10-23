@@ -8,8 +8,7 @@
  */
 
 import { isApplicationArkTsSource } from './ft-console-log-transform';
-
-declare const require: any;
+import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
 
 type TypeScriptApi = any;
 
@@ -44,7 +43,6 @@ interface Injection {
 
 const REPLAY_BRIDGE_IMPORT = '@guancecloud/ft_session_replay';
 const REPLAY_ROOT_TRANSFORM_MARKER = '/* guance-session-replay-root-transform:instrumented */';
-const replayRuntimeAvailability: Map<string, boolean> = new Map();
 
 function isIdentifierStart(character: string): boolean {
   return /[A-Za-z_$]/.test(character);
@@ -177,41 +175,6 @@ function createSourceKey(id: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(36);
-}
-
-/**
- * Replay is an optional HAR. Do not make existing console/cold-launch plugin
- * consumers fail compilation by emitting an import they did not declare.
- */
-export function hasRuntimeDependency(id: string, packageName: string): boolean {
-  const normalized = id.replace(/\\/g, '/');
-  const sourceMarker = '/src/main/ets/';
-  const sourceIndex = normalized.indexOf(sourceMarker);
-  if (sourceIndex < 0) {
-    return false;
-  }
-  const moduleRoot = normalized.slice(0, sourceIndex);
-  const cacheKey = `${moduleRoot}:${packageName}`;
-  const cached = replayRuntimeAvailability.get(cacheKey);
-  if (cached !== undefined) {
-    return cached;
-  }
-  let available = false;
-  try {
-    const nodeRequire = require.main && typeof require.main.require === 'function'
-      ? require.main.require.bind(require.main)
-      : require;
-    const path = nodeRequire('path');
-    const fileSystem = nodeRequire('fs');
-    const packagePath = path.join(moduleRoot, 'oh-package.json5');
-    const packageText = fileSystem.readFileSync(packagePath, 'utf8').toString();
-    const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    available = new RegExp(`["']${escapedName}["']\\s*:`).test(packageText);
-  } catch (_) {
-    available = false;
-  }
-  replayRuntimeAvailability.set(cacheKey, available);
-  return available;
 }
 
 function findImportInsertionOffset(ts: TypeScriptApi, id: string, code: string): number {
@@ -508,9 +471,10 @@ function addLifecycleInjection(
  * is scanned conservatively so the transform works with the compiler's
  * ArkTS source reader.
  */
-export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string): string {
+export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
   if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
-    !hasRuntimeDependency(id, REPLAY_BRIDGE_IMPORT)) {
+    !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource) ||
+    !hasRuntimeDependency(ts, id, REPLAY_BRIDGE_IMPORT, readSource)) {
     return code;
   }
 

@@ -1,6 +1,6 @@
 /** Associate every native Web with its controller without replacing application IDs or callbacks. */
 import { isApplicationArkTsSource } from './ft-console-log-transform';
-import { hasRuntimeDependency } from './ft-session-replay-transform';
+import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
 
 type TypeScriptApi = any;
 interface Injection { position: number; content: string; }
@@ -8,10 +8,10 @@ interface Injection { position: number; content: string; }
 const MARKER = '/* guance-web-replay-transform:instrumented */';
 const SDK_IMPORT = '@guancecloud/ft_sdk/Index';
 
-export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: string): string {
+export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
   if (!isApplicationArkTsSource(id) || code.includes(MARKER) ||
-    !hasRuntimeDependency(id, '@guancecloud/ft_sdk') ||
-    !hasRuntimeDependency(id, '@guancecloud/ft_session_replay')) return code;
+    !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource) ||
+    !hasRuntimeDependency(ts, id, '@guancecloud/ft_session_replay', readSource)) return code;
 
   const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
   const identifiers = new Set<string>();
