@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
+    "pages/HvigorSyntaxVerificationPage",
     "pages/BackgroundLaunchWorkSchedulerPage",
     "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",

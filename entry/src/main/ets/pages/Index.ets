@@ -63,6 +63,13 @@ struct Index {
           .borderRadius(8)
 
           List() {
+            ListItem() {
+              Button('构建插件语法验证')
+                .id('hvigor-syntax-open').width(CommonConstants.FULL_PERCENT).height(50)
+                .backgroundColor('#2563EB')
+                .onClick(() => { router.pushUrl({ url: 'pages/HvigorSyntaxVerificationPage' }); })
+            }.margin({ bottom: 10 })
+
             // Separate-process WorkScheduler background-launch diagnostics
             ListItem() {
               Button() {
