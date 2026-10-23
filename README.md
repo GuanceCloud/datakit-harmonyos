@@ -76,11 +76,6 @@ permission list consistent with the HAR manifest when publishing.
 `ft_sdk_ext` only attaches HTTP interceptors and declares no permissions of its
 own. Its `ft_sdk` dependency supplies the core permissions above.
 
-For cold-launch phase timing, enable the Guance Hvigor compiler plugin. It
-injects the required Ability lifecycle and first-frame hooks during the build,
-so the host application does not add timing calls. See the module
-[cold-launch timing guide](ft_sdk/README.md#cold-launch-timing).
-
 ## Bytecode HAR Integration
 
 SDK HARs are configured to build as bytecode HARs. An application that depends on any of these packages must enable normalized OHMUrl in its root `build-profile.json5`:
@@ -157,6 +152,26 @@ export default class EntryAbility extends UIAbility {
   }
 }
 ```
+
+## Cold Launch Monitoring
+
+Enable the [Guance Hvigor plugin](ft_hvigor_plugin/README.md) and initialize RUM
+with `FTRUMConfig.setEnableTraceUserAction(true)` through
+`FTSDK.installRUMConfig(...)`. No manual lifecycle timing calls are required.
+
+Automatic first-frame tracking requires API 22 or later. Configure an
+`AbilityStage` as the HAP module's `srcEntry` for complete application-initialization
+timing. See [Cold Launch Timing](ft_sdk/README.md#cold-launch-timing) for
+background-launch behavior.
+
+## Print Custom Logs to Console
+
+`FTLoggerConfig.setPrintCustomLogToConsole(true)` also prints logs sent through
+`FTLogger.logBackground(...)` to HiLog (default: `false`). Enable
+`setEnableCustomLog(true)` and `FTSDKConfig.setDebug(true)` as well; output levels
+follow `FTSDKConfig.setSdkLogLevel(...)`. This is independent of automatic
+console/HiLog collection and does not require the Hvigor plugin. See the
+[configuration example](ft_sdk/README.md#print-custom-logs-to-console).
 
 ## Automatic Console and HiLog Collection
 

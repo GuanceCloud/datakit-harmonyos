@@ -5,8 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.0-alpha01] - 2026-10-19
+## [0.1.0-alpha02] - 2026-10-23
+- Added automatic Replay package-version registration in the core SDK's `sdk_pkg_info.replay` field during initialization.
+- Fixed embedded ArkWeb Replay height mismatches by aligning Browser Meta and viewport-resize records with the measured native `Web` wireframe.
 
+## [0.1.0-alpha01] - 2026-10-19
 - Added ArkUI and ArkWeb Session Replay. Configure `FTSessionReplayConfig`, then call `FTSessionReplay.getInstance().init(config, filesDir)` after core SDK and RUM initialization. Automatic ArkUI collection requires `@cloudcare/hvigor-ohos-plugin`.
 - Added automatic capture of text and inline content, layouts, scrolling, supported animations, viewport changes, Router and Navigation transitions, native controls, overlays, and system icons.
 - Added Replay sampling through `setSampleRate(...)` and error-triggered recording through `setSessionReplayOnErrorSampleRate(...)`. Rates use values from `0` to `1`; error-triggered recording keeps a one-minute pre-error window by default.

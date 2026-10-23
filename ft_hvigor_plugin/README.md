@@ -32,6 +32,8 @@ export default {
 
 The plugin preserves the original console/HiLog output, reports its installed version through `sdk_pkg_info.track`, and collects cold-launch timing automatically. Do not add manual cold-launch timing calls to application code.
 
+Configure an `AbilityStage` as the HAP module's `srcEntry` for accurate application-initialization timing. Without an `AbilityStage`, initialization timing is approximate.
+
 ## Automatic Session Replay
 
 When the HAP declares `@guancecloud/ft_session_replay`, the plugin automatically registers supported `@Entry` pages and tracks their visibility. Existing root IDs and callbacks are preserved. Session Replay collection is not enabled when the Replay package is absent.
@@ -48,4 +50,13 @@ Router page changes and explicit `PageTransitionEnter/Exit` slide and opacity an
 
 The plugin is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). Console/HiLog and cold-launch instrumentation require `@guancecloud/ft_sdk` `0.1.17` or later. Automatic Session Replay additionally requires `@guancecloud/ft_sdk` `0.1.18` or later and `@guancecloud/ft_session_replay` `0.1.0` or later.
 
-`@ohos/hvigor-ohos-plugin` is supplied by DevEco Studio's Hvigor runtime. Declare `@guancecloud/ft_sdk` in the application for log and cold-launch collection, and also declare `@guancecloud/ft_session_replay` when Session Replay is required.
+`@ohos/hvigor-ohos-plugin` is supplied by DevEco Studio's Hvigor runtime.
+
+Each module that needs automatic collection must declare these SDK packages under `dependencies` in its own `oh-package.json5`:
+
+- `@guancecloud/ft_sdk`: required for console/HiLog and cold-launch collection.
+- `@guancecloud/ft_session_replay`: additionally required for Session Replay.
+
+The plugin checks SDK dependencies in the `oh-package.json5` of the module that contains each source file (HAP, HAR or HSP). Declaring an SDK only in the project-root `oh-package.json5`, another module, or `devDependencies` does not enable automatic collection for that source file.
+
+Optional logging calls such as `console?.info(...)` and `hilog.info?.(...)` are not automatically collected.

@@ -216,6 +216,29 @@ const rumConfig = new FTRUMConfig()
   .setResourceUrlHandler(new ResourceUrlFilter());
 ```
 
+## Print Custom Logs to Console
+
+`FTLoggerConfig.setPrintCustomLogToConsole(true)` also prints custom logs sent
+through `FTLogger.logBackground(...)` to HiLog. It defaults to `false`. Enable
+custom logging and SDK debug output as shown below; output levels follow
+`FTSDKConfig.setSdkLogLevel(...)`.
+
+```ts
+const sdkConfig = FTSDKConfig.builder('YOUR_DATAKIT_OR_DATAWAY_URL')
+  .setDebug(true)
+  .setSdkLogLevel(SDKLogLevel.D)
+FTSDK.install(sdkConfig, this.context)
+
+const loggerConfig = new FTLoggerConfig()
+  .setEnableCustomLog(true)
+  .setPrintCustomLogToConsole(true)
+FTSDK.installLogConfig(loggerConfig)
+```
+
+This setting does not require the Hvigor plugin or enable automatic console/HiLog
+collection (`setEnableConsoleLog(...)`). It does not apply to `FTLogger.d(...)`,
+`i(...)`, `w(...)`, `e(...)`, or `batchLog(...)`.
+
 ## Hvigor Compiler Plugin
 
 The Guance Hvigor compiler plugin provides automatic console/HiLog collection and cold-launch lifecycle tracking. `FTLoggerConfig.setEnableConsoleLog(...)` controls automatic application-console collection; `setEnableCustomLog(...)` remains independent and controls only manual `FTLogger` calls.
@@ -269,51 +292,34 @@ To verify the switches, repeat with `setEnableConsoleLog(false)` and confirm tha
 If the compiler plugin is absent, automatic console/HiLog collection is unavailable even when `setEnableConsoleLog(true)` is set. The SDK emits one diagnostic when its log configuration is installed; this is intentional parity with Android's plugin prerequisite. There is no runtime interception fallback. Use `FTLogger` for manual logs, or install the plugin for automatic collection.
 ## Cold Launch Timing
 
-Cold-launch durations use the monotonic
-`systemDateTime.getUptime(TimeType.STARTUP, true)` clock. The SDK retains the
-measured boundaries until RUM Action collection is ready, then emits exactly
-one `launch_cold` Action after the first UI frame. Its `duration` spans from
-the process-start boundary to the first rendered frame;
-the Action timestamp remains an epoch timestamp for compatibility with the
-existing data pipeline.
+Enable the [Hvigor compiler plugin](#hvigor-compiler-plugin) and initialize RUM
+early with `FTRUMConfig.setEnableTraceUserAction(true)`. Startup timing is collected
+automatically; no manual lifecycle timing calls are required.
 
-Enable the Guance Hvigor compiler plugin described above and keep the
-`AbilityStage` file as the module `srcEntry`. The plugin injects application
-initialization, first-UIAbility creation, and first-frame observation at build
-time; do not call `FTSDK.recordAppApplicationInit(...)`,
-`recordAppFirstUIAbilityCreate(...)`, or `recordAppFirstFrame(...)` from host
-application code. API 22 and later records the real first draw. On earlier API
-levels, the first-frame phase is omitted rather than approximated.
+- Configure an `AbilityStage` as the module's `srcEntry` to collect complete
+  application-initialization timing.
+- Automatic first-frame tracking requires API 22 or later. Without a first-frame
+  observation, no cold-launch Action is reported.
+- For background entries that need monitoring, initialize the SDK and RUM there.
+  See [Device ID and Process Scope](#device-id-and-process-scope) for secondary-process setup.
 
-Foreground launches emit these Action Fields only when each pair of boundaries
-is present and strictly increasing:
+The SDK reports at most one `launch_cold` Action per process, subject to session
+sampling and Action filtering. Its `duration` is measured in nanoseconds from
+process start to the first rendered UI frame using a monotonic clock.
 
-- `app_launch_type = foreground`
+`app_launch_type` identifies the original launch as `foreground` or `background`.
+For a background launch, reporting waits for the first UI frame in that same
+process, and `duration` includes the background wait. Later foregrounding does
+not change the original launch type. A process that never renders UI does not
+report a cold-launch Action.
+
+Phase fields are included only when their timing boundaries are available:
+
 - `app_pre_application_init_time`: process start to application initialization
 - `app_application_init_time`: application initialization to first UIAbility creation
 - `app_first_frame_init_time`: first UIAbility creation to first rendered frame
 
-At application initialization, the core first obtains and preserves the current process state from
-`ApplicationContext.getRunningProcessInformation()` (foreground/active or
-background). It does not depend only on `applicationStateChange`; that event
-continues to correct foreground/background races. A generation-reset,
-two-consecutive-turn lifecycle quiescence barrier replaces the former single
-`setTimeout(0)`: first UIAbility creation, application-state changes, and
-WindowStage SHOWN/ACTIVE reset the barrier before a no-UI launch can settle.
-No `RUNNING_STATE_OBSERVER` appManager listener or permission is used.
-
-For a background-originated launch, the initial snapshot must
-be `background` and the quiescence barrier must complete without a UIAbility,
-foreground state, or shown/active Window. The SDK records that classification
-but does not emit a no-UI `launch_cold` Action. If a UIAbility is later created,
-the first frame emits one Action with `app_launch_type = background` and a
-duration from the process-start boundary to the first frame; a process that remains background-only emits no launch
-Action. Hot-start Actions do not carry these cold-launch fields.
-
-RUM must be initialized before the first UI frame. For AppService/push entries,
-initialize it from AbilityStage or the entry itself when those processes also
-need RUM data; a background-only process does not emit `launch_cold` in this
-case.
+Hot-start Actions do not include these cold-launch phase fields.
 
 ## Automatic View Filtering
 

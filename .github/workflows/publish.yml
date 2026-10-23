@@ -110,8 +110,11 @@ jobs:
             'CHANGELOG.md', 'LICENSE', 'README.md', 'index.js', 'package.json',
             'hvigorCompile/ft-cold-launch-transform.ts',
             'hvigorCompile/ft-console-log-transform.ts',
+            'hvigorCompile/ft-generated-names.ts',
+            'hvigorCompile/ft-lexical-scope.ts',
             'hvigorCompile/ft-session-replay-transform.ts',
             'hvigorCompile/ft-source-transform-host.ts',
+            'hvigorCompile/ft-transform-context.ts',
             'hvigorCompile/ft-web-replay-transform.ts'
           ].sort();
           assert.equal(pack.name, '@cloudcare/hvigor-ohos-plugin');

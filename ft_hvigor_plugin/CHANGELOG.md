@@ -2,33 +2,13 @@
 
 ## [0.1.2-alpha.1] - 2026-10-19
 
-- Accepted nullable console/HiLog arguments with existing runtime HARs and captured native logging methods before argument evaluation.
-- Preserved optional-call short-circuit behavior by retaining optional logging and loadContent calls unchanged.
-- Captured the rendered Replay root ID once, including trailing-comma arguments, and handled page-show events that precede rendering without repeating business expressions.
-- Instrumented inspectable lifecycle function properties without duplicate declarations and used parameter syntax boundaries instead of comment-sensitive text searches.
-- Added descendant lifecycle forwarding when a source-visible base module cannot import the SDK, preserving inherited business calls, receiver binding and return values.
-- Kept the shared source hook active until every build owner finishes, retaining the compiler provider belonging to the remaining context.
-
-- Allocated generated names consistently across transforms, including log IIFE parameters and spread temporaries, preventing collisions with HiLog import aliases and user variables.
-- Resolved console, HiLog and Web value bindings at each call site, covering imports, parameters, destructuring, block/function scopes and catch bindings without suppressing unrelated system calls.
-- Preserved complete console/HiLog spread arguments, evaluating ordinary arguments and each spread once in source order.
-- Captured the actual WindowStage separately for each loadContent callback, avoiding parameter/local shadowing and ignoring calls bound to other lexical declarations.
-- Replaced Replay text matching with ArkTS decorator, struct, member and component nodes; single-line pages and nested templates preserve valid member boundaries, including files with top-level Builder/Extend decorators.
-- Guarded every transform by runtime dependencies declared in the source file's owning module, including HAR/HSP sources; comments and devDependencies no longer enable instrumentation.
-
-- Fixed ArkTS import-order errors in UIAbility modules without an AbilityStage entry by placing generated initialization calls after leading imports.
-- Added a UIAbility module-execution fallback for application initialization when a HAP has no AbilityStage entry, while preserving configured AbilityStage timing.
-- Fixed cold-launch instrumentation through application UIAbility inheritance, including relative imports and re-exports, without masking inherited lifecycle implementations.
-- Stopped recording application initialization from UIAbility creation; plugin detection and version registration now run independently of timing boundaries.
-- Fixed console/HiLog instrumentation in semicolon-free source by separating generated IIFE statements from preceding statements.
-- Fixed Session Replay import placement with semicolon-free imports and import-like text in comments.
-- Fixed cold-launch and Session Replay import offsets when imports follow instrumented classes or pages.
-- Preserved line-comment boundaries when reusing existing Session Replay root ID expressions.
-- Fixed cold-launch source classification in the SDK and build plugin, preserving the initial foreground/background origin and preventing later intent invocations from overriding it.
-- Added automatic page registration and lifecycle tracking for supported ArkUI `@Entry` pages. After adding `@guancecloud/ft_session_replay` to the HAP and initializing `FTSessionReplay`, applications no longer need to register visible page roots manually.
-- Added automatic ArkWeb component association for Session Replay, linking supported Web content to the correct Replay page without manual component IDs or controller registration.
-- Added automatic touch capture for Session Replay, removing the need to forward page touch events manually. Touch coordinates are recorded only when `TouchPrivacy.SHOW` is configured.
-- Added Router transition capture for `PageTransitionEnter/Exit` slide and opacity animations and default Router page changes. Default system transition playback may be approximate.
+- Added automatic Session Replay integration for supported ArkUI `@Entry` pages, ArkWeb components and touch events, without manual page registration or event forwarding. Requires `@guancecloud/ft_session_replay` in the HAP and Replay initialization; touch coordinates require `TouchPrivacy.SHOW`.
+- Added automatic recording of Router page-switch animations for Session Replay, including slide and fade effects. Default system animations may differ during playback.
+- Fixed build/runtime errors and missing log arguments when automatic console/HiLog collection is enabled.
+- Fixed cold-launch instrumentation for inherited UIAbilities and InsightIntent entries, preserving existing lifecycle callbacks. Apps without an AbilityStage now use approximate application-initialization timing.
+- Fixed build errors and repeated execution of page `.id()` expressions caused by automatic Replay collection.
+- Changed automatic collection to run only in modules that declare the required SDK packages in their own `oh-package.json5` `dependencies`; other modules are left unchanged.
+- Fixed automatic logging, cold-launch or Replay code being omitted from some application modules when multiple HAP modules are built together.
 
 ## [0.1.1] - 2026-09-14
 

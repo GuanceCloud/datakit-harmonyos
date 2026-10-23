@@ -5,8 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## [0.1.18-alpha04] - 2026-10-19
+## [0.1.18-alpha05] - 2026-10-23
+- Added `sdk_pkg_info.replay` to SDK package information when the optional Session Replay module registers its version.
+- Fixed background cold-launch tracking to preserve `app_launch_type=background` , reporting only after the same process renders its first UI frame.
+- Fixed the SDK's WebView Replay bridge not forwarding viewport updates when the native `Web` component changes size.
 
+## [0.1.18-alpha04] - 2026-10-19
 - Added core SDK support for the optional `@guancecloud/ft_session_replay` module, including the ArkWeb bridge and Replay entry points for associated RUM data while recording is active.
 - Changed automatically collected HTTPS Resource timings so `resource_tcp` and `resource_connect_time` include the SSL/TLS handshake.
 - Fixed RUM user attribution after initialization or account changes, preventing restored or newly bound user information from being mixed in View data.
