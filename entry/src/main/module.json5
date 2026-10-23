@@ -48,6 +48,17 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true
+      },
+      {
+        "name": "LaunchSuspendTestAbility",
+        "srcEntry": "./ets/launchsuspendability/LaunchSuspendTestAbility.ets",
+        "description": "Offline launch-source and suspension clock verification",
+        "launchType": "singleton",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
       }
     ],
 

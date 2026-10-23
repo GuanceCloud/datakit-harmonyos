@@ -6,6 +6,7 @@ import { LengthMetrics } from '@kit.ArkUI';
 import { promptAction } from '@kit.ArkUI';
 import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
+import { common } from '@kit.AbilityKit';
 
 const TAG = 'Index';
 
@@ -68,6 +69,20 @@ struct Index {
                 .id('hvigor-syntax-open').width(CommonConstants.FULL_PERCENT).height(50)
                 .backgroundColor('#2563EB')
                 .onClick(() => { router.pushUrl({ url: 'pages/HvigorSyntaxVerificationPage' }); })
+            }.margin({ bottom: 10 })
+
+            ListItem() {
+              Button('启动来源与挂起计时（重启测试）')
+                .id('launch-suspend-open').width(CommonConstants.FULL_PERCENT).height(50)
+                .backgroundColor('#0F766E')
+                .onClick(() => {
+                  const context = getContext(this) as common.UIAbilityContext;
+                  context.restartApp({ bundleName: context.abilityInfo.bundleName,
+                    moduleName: 'entry', abilityName: 'LaunchSuspendTestAbility' })
+                    .catch((error: Error): void => {
+                      promptAction.showToast({ message: `无法打开启动挂起测试：${error.message}` });
+                    });
+                })
             }.margin({ bottom: 10 })
 
             // Separate-process WorkScheduler background-launch diagnostics

@@ -2,6 +2,7 @@
   "src": [
     "pages/Index",
     "pages/HvigorSyntaxVerificationPage",
+    "pages/LaunchSuspendTestPage",
     "pages/BackgroundLaunchWorkSchedulerPage",
     "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",
