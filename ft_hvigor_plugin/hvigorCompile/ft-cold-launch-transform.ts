@@ -6,6 +6,7 @@
  */
 
 import { hasRuntimeDependency } from './ft-transform-context';
+import { createLexicalResolver } from './ft-lexical-scope';
 
 declare const require: any;
 declare const __dirname: string;
@@ -32,6 +33,7 @@ interface LaunchParameterTypes {
 
 interface ColdLaunchInjection {
   position: number;
+  end?: number;
   content: string;
 }
 
@@ -434,33 +436,63 @@ function collectWindowStageParameterNames(ts: TypeScriptApi, sourceFile: any, me
 }
 
 function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, code: string,
-  method: any, bridgeName: string, windowStageNames: Set<string>): ColdLaunchInjection[] {
-  const injections: ColdLaunchInjection[] = [];
+  method: any, bridgeName: string, windowStageNames: Set<string>, identifiers: Set<string>,
+  resolve: (location: any, name: string) => any | undefined): ColdLaunchInjection[] {
+  const candidates: any[] = [];
   visit(ts, method.body, (node: any) => {
-    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
-      return;
-    }
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return;
     const delegate = node.expression.expression;
     if (!ts.isIdentifier(delegate) || !windowStageNames.has(delegate.text) ||
-      node.expression.name.text !== 'loadContent' || node.arguments.length === 0) {
-      return;
-    }
-    const windowStageName = delegate.text;
+      node.expression.name.text !== 'loadContent' || node.arguments.length < 2 || node.arguments.length > 3) return;
+    const parameter = resolve(delegate, delegate.text);
+    if (!parameter || !method.parameters.includes(parameter)) return;
     const callback = node.arguments[node.arguments.length - 1];
-    if ((!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) || !ts.isBlock(callback.body)) {
-      return;
-    }
-    const indentation = blockIndentation(code, callback.body);
-    const errorParameter = callback.parameters.length > 0 && ts.isIdentifier(callback.parameters[0].name)
-      ? callback.parameters[0].name.text : null;
-    const retry = `${bridgeName}.observeFirstFrame(${windowStageName});`;
-    const content = errorParameter === null
-      ? `\n${indentation}${retry}`
-      : `\n${indentation}if (!${errorParameter} || !${errorParameter}.code) {\n` +
-        `${indentation}  ${retry}\n${indentation}}`;
-    injections.push({ position: callback.body.getStart(sourceFile) + 1, content });
+    if ((!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) || !ts.isBlock(callback.body)) return;
+    candidates.push({ node, callback, parameter,
+      stage: selectIdentifierName(identifiers, '__ftWindowStage'),
+      arguments: node.arguments.slice(0, -1).map((_arg: any, index: number) =>
+        selectIdentifierName(identifiers, index === 0 ? '__ftContentUrl' : '__ftContentStorage')) });
   });
-  return injections;
+  const start = (candidate: any): number => candidate.node.getStart(sourceFile);
+  const contains = (outer: any, inner: any): boolean => outer !== inner &&
+    start(outer) <= start(inner) && outer.node.end >= inner.node.end;
+  const render = (from: number, to: number): string => {
+    const included = candidates.filter(item => start(item) >= from && item.node.end <= to);
+    const direct = included.filter(item => !included.some(outer => contains(outer, item)))
+      .sort((left, right) => start(right) - start(left));
+    let output = code.slice(from, to);
+    for (const candidate of direct) {
+      const rendered = renderCandidate(candidate);
+      output = output.slice(0, start(candidate) - from) + rendered + output.slice(candidate.node.end - from);
+    }
+    return output;
+  };
+  const renderCandidate = (candidate: any): string => {
+    const { node, callback, parameter, stage } = candidate;
+    const bodyStart = callback.body.getStart(sourceFile) + 1;
+    const indentation = blockIndentation(code, callback.body);
+    const error = callback.parameters.length > 0 && ts.isIdentifier(callback.parameters[0].name)
+      ? callback.parameters[0].name.text : null;
+    const retry = `${bridgeName}.observeFirstFrame(${stage});`;
+    const hook = error === null ? `\n${indentation}${retry}` :
+      `\n${indentation}if (!${error} || !${error}.code) {\n${indentation}  ${retry}\n${indentation}}`;
+    const callbackCode = code.slice(callback.getStart(sourceFile), bodyStart) + hook + render(bodyStart, callback.end);
+    const argumentNames: string[] = candidate.arguments;
+    const parameterType = parameter.type ? parameter.type.getText(sourceFile) : 'Object';
+    const declarations = [`${stage}: ${parameterType}`, ...argumentNames.map((name: string, index: number) =>
+      `${name}: ${index === 0 ? 'string' : 'LocalStorage'}`)];
+    // Evaluate the receiver and non-callback arguments at the original call site.
+    // Each execution captures a separate stage; callbacks cannot shadow or overwrite it.
+    const values = [node.expression.expression.getText(sourceFile), ...node.arguments.slice(0, -1)
+      .map((argument: any) => render(argument.getStart(sourceFile), argument.end))];
+    const statement = node.parent;
+    const separator = ts.isExpressionStatement(statement) && (ts.isBlock(statement.parent) ||
+      ts.isSourceFile(statement.parent) || ts.isCaseClause(statement.parent) || ts.isDefaultClause(statement.parent)) ? ';' : '';
+    return `${separator}((${declarations.join(', ')}) => ${stage}.loadContent(${argumentNames.join(', ')}, ` +
+      `${callbackCode}))(${values.join(', ')})`;
+  };
+  return candidates.filter(item => !candidates.some(outer => contains(outer, item)))
+    .map(item => ({ position: start(item), end: item.node.end, content: renderCandidate(item) }));
 }
 
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
@@ -468,6 +500,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
   launchTypes: LaunchParameterTypes, readSource?: SourceReader): ColdLaunchInjections {
   const injections: ColdLaunchInjection[] = [];
   let hasUIAbility = false;
+  const resolve = createLexicalResolver(ts, sourceFile);
   const resolveClass = createAbilityClassResolver(ts, sourceFile, readSource);
   const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
   visit(ts, sourceFile, (node: any) => {
@@ -577,7 +610,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
         const windowStageNames = collectWindowStageParameterNames(ts, sourceFile, member);
         if (windowStageNames.size > 0) {
           injections.push(...createFirstFrameRetryInjections(
-            ts, sourceFile, code, member, bridgeName, windowStageNames));
+            ts, sourceFile, code, member, bridgeName, windowStageNames, identifiers, resolve));
         }
       });
     }
@@ -624,16 +657,18 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
 
 function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection[]): string {
   const contentsByPosition = new Map<number, string[]>();
+  const ends = new Map<number, number>();
   injections.forEach((injection: ColdLaunchInjection) => {
     const contents = contentsByPosition.get(injection.position) || [];
     contents.push(injection.content);
     contentsByPosition.set(injection.position, contents);
+    ends.set(injection.position, Math.max(ends.get(injection.position) || injection.position, injection.end || injection.position));
   });
   const positions = Array.from(contentsByPosition.keys()).sort((left: number, right: number) => right - left);
   let transformedCode = code;
   positions.forEach((position: number) => {
     const content = (contentsByPosition.get(position) || []).join('');
-    transformedCode = transformedCode.slice(0, position) + content + transformedCode.slice(position);
+    transformedCode = transformedCode.slice(0, position) + content + transformedCode.slice(ends.get(position));
   });
   return transformedCode;
 }

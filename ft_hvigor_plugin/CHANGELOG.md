@@ -2,6 +2,7 @@
 
 ## [0.1.2-alpha.1] - 2026-10-19
 
+- Captured the actual WindowStage separately for each loadContent callback, avoiding parameter/local shadowing and ignoring calls bound to other lexical declarations.
 - Replaced Replay text matching with ArkTS decorator, struct, member and component nodes; single-line pages and nested templates preserve valid member boundaries.
 - Guarded every transform by runtime dependencies declared in the source file's owning module, including HAR/HSP sources; comments and devDependencies no longer enable instrumentation.
 
