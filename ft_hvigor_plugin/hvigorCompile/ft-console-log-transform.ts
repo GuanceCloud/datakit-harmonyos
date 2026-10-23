@@ -8,6 +8,7 @@
  */
 
 import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { createLexicalResolver } from './ft-lexical-scope';
 
 type TypeScriptApi = any;
 
@@ -59,48 +60,30 @@ function collectIdentifierNames(ts: TypeScriptApi, sourceFile: any): Set<string>
   return identifiers;
 }
 
-function isNameDeclaredOutsideImports(ts: TypeScriptApi, sourceFile: any, name: string): boolean {
-  let declared = false;
-  visit(ts, sourceFile, (node: any) => {
-    if (declared || ts.isImportDeclaration(node)) {
-      return;
-    }
-    if (ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) ||
-      ts.isParameter(node) || ts.isEnumDeclaration(node) || ts.isInterfaceDeclaration(node) ||
-      ts.isTypeAliasDeclaration(node)) {
-      const declarationName = node.name;
-      if (declarationName && ts.isIdentifier(declarationName) && declarationName.text === name) {
-        declared = true;
-      }
-    }
-  });
-  return declared;
-}
-
-function collectHiLogBindings(ts: TypeScriptApi, sourceFile: any): Set<string> {
-  const bindings = new Set<string>();
+function collectHiLogBindings(ts: TypeScriptApi, sourceFile: any): Map<string, any> {
+  const bindings = new Map<string, any>();
   sourceFile.statements.forEach((statement: any) => {
     if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier ||
       !ts.isStringLiteral(statement.moduleSpecifier) ||
-      !HILOG_MODULES.includes(statement.moduleSpecifier.text) || !statement.importClause) {
+      !HILOG_MODULES.includes(statement.moduleSpecifier.text) || !statement.importClause || statement.importClause.isTypeOnly) {
       return;
     }
 
     const importClause = statement.importClause;
     if (importClause.name) {
-      bindings.add(importClause.name.text);
+      bindings.set(importClause.name.text, importClause);
     }
     if (!importClause.namedBindings) {
       return;
     }
     if (ts.isNamespaceImport(importClause.namedBindings)) {
-      bindings.add(importClause.namedBindings.name.text);
+      bindings.set(importClause.namedBindings.name.text, importClause.namedBindings);
       return;
     }
     importClause.namedBindings.elements.forEach((element: any) => {
       const importedName = element.propertyName ? element.propertyName.text : element.name.text;
-      if (importedName === 'hilog') {
-        bindings.add(element.name.text);
+      if (importedName === 'hilog' && !element.isTypeOnly) {
+        bindings.set(element.name.text, element);
       }
     });
   });
@@ -122,13 +105,7 @@ function needsStatementSeparator(ts: TypeScriptApi, node: any): boolean {
 function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): TransformCandidate[] {
   const candidates: TransformCandidate[] = [];
   const hiLogBindings = collectHiLogBindings(ts, sourceFile);
-  const consoleIsShadowed = isNameDeclaredOutsideImports(ts, sourceFile, 'console');
-  const shadowedHiLogBindings = new Set<string>();
-  hiLogBindings.forEach((binding: string) => {
-    if (isNameDeclaredOutsideImports(ts, sourceFile, binding)) {
-      shadowedHiLogBindings.add(binding);
-    }
-  });
+  const resolve = createLexicalResolver(ts, sourceFile);
 
   visit(ts, sourceFile, (node: any) => {
     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
@@ -153,12 +130,12 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
       spread: ts.isSpreadElement(argument)
     }));
     const statementSeparator = needsStatementSeparator(ts, node);
-    if (delegateName === 'console' && !consoleIsShadowed && CONSOLE_LEVELS.includes(level)) {
+    if (delegateName === 'console' && !resolve(delegate, delegateName) && CONSOLE_LEVELS.includes(level)) {
       candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'console', callArguments,
         needsStatementSeparator: statementSeparator });
       return;
     }
-    if (hiLogBindings.has(delegateName) && !shadowedHiLogBindings.has(delegateName) &&
+    if (hiLogBindings.has(delegateName) && resolve(delegate, delegateName) === hiLogBindings.get(delegateName) &&
       HILOG_LEVELS.includes(level) && (callArguments.length >= 3 || callArguments.some(argument => argument.spread))) {
       candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'hilog', callArguments,
         needsStatementSeparator: statementSeparator });

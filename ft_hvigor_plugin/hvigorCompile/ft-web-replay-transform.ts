@@ -1,6 +1,7 @@
 /** Associate every native Web with its controller without replacing application IDs or callbacks. */
 import { isApplicationArkTsSource } from './ft-console-log-transform';
 import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { createLexicalResolver } from './ft-lexical-scope';
 
 type TypeScriptApi = any;
 interface Injection { position: number; content: string; }
@@ -16,22 +17,18 @@ export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: st
   const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
   const identifiers = new Set<string>();
   const constructors: any[] = [];
-  let shadowed = /\bstruct\s+Web\b/.test(code);
+  const resolve = createLexicalResolver(ts, source);
   let importEnd = 0;
   const visit = (node: any): void => {
     if (ts.isIdentifier(node)) identifiers.add(node.text);
     if (ts.isImportDeclaration(node)) importEnd = Math.max(importEnd, node.end);
-    // Never instrument a user-defined/imported function or component named Web.
-    if ((ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) ||
-      ts.isParameter(node) || ts.isBindingElement(node) || ts.isImportClause(node) ||
-      ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) &&
-      node.name && ts.isIdentifier(node.name) && node.name.text === 'Web') shadowed = true;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Web' &&
-      node.arguments.length === 1 && !ts.isSpreadElement(node.arguments[0])) constructors.push(node);
+      node.arguments.length === 1 && !ts.isSpreadElement(node.arguments[0]) &&
+      !resolve(node.expression, 'Web')) constructors.push(node);
     ts.forEachChild(node, visit);
   };
   visit(source);
-  if (shadowed || constructors.length === 0) return code;
+  if (constructors.length === 0) return code;
 
   let bridge = '__ftWebReplayBridge';
   let suffix = 0;

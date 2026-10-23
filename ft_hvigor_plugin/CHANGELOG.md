@@ -2,6 +2,7 @@
 
 ## [0.1.2-alpha.1] - 2026-10-19
 
+- Resolved console, HiLog and Web value bindings at each call site, covering imports, parameters, destructuring, block/function scopes and catch bindings without suppressing unrelated system calls.
 - Preserved complete console/HiLog spread arguments, evaluating ordinary arguments and each spread once in source order.
 - Captured the actual WindowStage separately for each loadContent callback, avoiding parameter/local shadowing and ignoring calls bound to other lexical declarations.
 - Replaced Replay text matching with ArkTS decorator, struct, member and component nodes; single-line pages and nested templates preserve valid member boundaries.

@@ -16,22 +16,25 @@ export function createLexicalResolver(ts: any, source: any): (location: any, nam
     });
   };
   const walk = (node: any, outer: Scope): void => {
-    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) && node.name) {
+    const struct = typeof ts.isStructDeclaration === 'function' && ts.isStructDeclaration(node);
+    const classLike = ts.isClassDeclaration(node) || ts.isClassExpression(node) || struct;
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || struct || ts.isEnumDeclaration(node) ||
+      ts.isModuleDeclaration(node)) && node.name) {
       bind(outer, node.name, node);
     }
     let scope = outer;
     const functionLike = ts.isFunctionLike(node);
     if (functionLike || ts.isBlock(node) || ts.isCaseBlock(node) || ts.isCatchClause(node) ||
       ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node) ||
-      ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
-      scope = { parent: outer, functionScope: functionLike, bindings: new Map() };
+      ts.isModuleBlock(node) || classLike) {
+      scope = { parent: outer, functionScope: functionLike || ts.isModuleBlock(node), bindings: new Map() };
     }
     scopes.set(node, scope);
     if (functionLike) {
       if (ts.isFunctionExpression(node) && node.name) bind(scope, node.name, node);
       node.parameters.forEach((parameter: any) => bind(scope, parameter.name, parameter));
     }
-    if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name) bind(scope, node.name, node);
+    if (classLike && node.name) bind(scope, node.name, node);
     if (ts.isVariableDeclaration(node)) {
       const list = node.parent;
       let target = scope;
