@@ -214,13 +214,15 @@ export function hasRuntimeDependency(id: string, packageName: string): boolean {
   return available;
 }
 
-function findImportInsertionOffset(code: string): number {
-  const expression = /(^|\n)\s*import\s+[\s\S]*?;(?=\s*(?:\n|$))/g;
+function findImportInsertionOffset(ts: TypeScriptApi, id: string, code: string): number {
+  const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true,
+    ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
   let offset = 0;
-  let match: RegExpExecArray | null;
-  while ((match = expression.exec(code)) !== null) {
-    offset = match.index + match[0].length;
-  }
+  sourceFile.statements.forEach((statement: any): void => {
+    if (ts.isImportDeclaration(statement)) {
+      offset = statement.end;
+    }
+  });
   return offset;
 }
 
@@ -367,8 +369,9 @@ function findRootExpression(code: string, buildBodyStart: number, buildBodyEnd: 
       return null;
     }
     if (code.slice(modifierName.start, modifierName.end) === 'id') {
-      const argument = code.slice(afterModifier + 1, modifierEnd).trim();
-      if (argument.length > 0) {
+      // Keep newlines after line comments when reusing the expression in calls.
+      const argument = code.slice(afterModifier + 1, modifierEnd);
+      if (argument.trim().length > 0) {
         idExpression = argument;
       }
     }
@@ -501,11 +504,11 @@ function addLifecycleInjection(
 
 /**
  * Adds an opaque root ID and page lifecycle registration to every @Entry page.
- * The TypeScript argument is intentionally accepted for the shared transform
- * host signature; ArkTS declarative component syntax is parsed conservatively
- * here so the transform works with the compiler's ArkTS source reader.
+ * TypeScript locates import declarations; ArkTS declarative component syntax
+ * is scanned conservatively so the transform works with the compiler's
+ * ArkTS source reader.
  */
-export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, code: string): string {
+export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string): string {
   if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
     !hasRuntimeDependency(id, REPLAY_BRIDGE_IMPORT)) {
     return code;
@@ -574,9 +577,9 @@ export function transformSessionReplaySource(_ts: TypeScriptApi, id: string, cod
   if (injections.length === 0) {
     return code;
   }
-  const transformed = applyInjections(code, injections);
-  const importOffset = findImportInsertionOffset(code);
+  const importOffset = findImportInsertionOffset(ts, id, code);
   const importStatement = `\n${REPLAY_ROOT_TRANSFORM_MARKER}\n` +
     `import { FTSessionReplayAutoRootBridge as ${bridgeName} } from '${REPLAY_BRIDGE_IMPORT}';\n`;
-  return transformed.slice(0, importOffset) + importStatement + transformed.slice(importOffset);
+  injections.push({ position: importOffset, content: importStatement });
+  return applyInjections(code, injections);
 }

@@ -17,6 +17,7 @@ interface TransformCandidate {
   level: string;
   source: 'console' | 'hilog';
   callArguments: SourceRange[];
+  needsStatementSeparator: boolean;
 }
 
 interface SourceRange {
@@ -103,6 +104,18 @@ function collectHiLogBindings(ts: TypeScriptApi, sourceFile: any): Set<string> {
   return bindings;
 }
 
+function needsStatementSeparator(ts: TypeScriptApi, node: any): boolean {
+  const statement = node.parent;
+  if (!ts.isExpressionStatement(statement)) {
+    return false;
+  }
+  const container = statement.parent;
+  // Only statement lists accept a leading empty statement. In an unbraced
+  // if/loop body it would replace the body; inside an expression it is invalid.
+  return ts.isSourceFile(container) || ts.isBlock(container) || ts.isModuleBlock(container) ||
+    ts.isCaseClause(container) || ts.isDefaultClause(container);
+}
+
 function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): TransformCandidate[] {
   const candidates: TransformCandidate[] = [];
   const hiLogBindings = collectHiLogBindings(ts, sourceFile);
@@ -135,13 +148,16 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
       start: argument.getStart(sourceFile),
       end: argument.end
     }));
+    const statementSeparator = needsStatementSeparator(ts, node);
     if (delegateName === 'console' && !consoleIsShadowed && CONSOLE_LEVELS.includes(level)) {
-      candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'console', callArguments });
+      candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'console', callArguments,
+        needsStatementSeparator: statementSeparator });
       return;
     }
     if (hiLogBindings.has(delegateName) && !shadowedHiLogBindings.has(delegateName) &&
       HILOG_LEVELS.includes(level) && callArguments.length >= 3) {
-      candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'hilog', callArguments });
+      candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'hilog', callArguments,
+        needsStatementSeparator: statementSeparator });
     }
   });
   return candidates;
@@ -187,13 +203,14 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
   candidate: TransformCandidate): string {
   const renderedArguments = candidate.callArguments.map((argument: SourceRange) =>
     renderCandidates(code, candidates, bridgeName, argument.start, argument.end));
+  const statementSeparator = candidate.needsStatementSeparator ? ';' : '';
   if (candidate.source === 'console') {
     const argumentNames = renderedArguments.map((_argument: string, index: number) => `__ftConsoleArg${index}`);
     const parameterDeclarations = argumentNames.map((name: string) => `${name}: Object`).join(', ');
     const originalCallArguments = argumentNames.map((name: string) => `${name} as string`);
     const originalCall = `${candidate.delegate}.${candidate.level}(${originalCallArguments.join(', ')})`;
     const captureArguments = argumentNames.length > 0 ? `, ${argumentNames.join(', ')}` : '';
-    return `((${parameterDeclarations}): void => ${bridgeName}.console('${candidate.level}', ` +
+    return `${statementSeparator}((${parameterDeclarations}): void => ${bridgeName}.console('${candidate.level}', ` +
       `(): void => ${originalCall}${captureArguments}))(${renderedArguments.join(', ')})`;
   }
 
@@ -220,7 +237,7 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
   }).join(', ');
   const originalCall = `${candidate.delegate}.${candidate.level}(${argumentNames.join(', ')})`;
   const captureArguments = argumentNames.length > 3 ? `, ${argumentNames.slice(3).join(', ')}` : '';
-  return `((${parameterDeclarations}): void => ${bridgeName}.hilog('${candidate.level}', ` +
+  return `${statementSeparator}((${parameterDeclarations}): void => ${bridgeName}.hilog('${candidate.level}', ` +
     `${argumentNames[0]}, ${argumentNames[1]}, ${argumentNames[2]}, (): void => ${originalCall}` +
     `${captureArguments}))(${renderedArguments.join(', ')})`;
 }

@@ -22,7 +22,8 @@ declare const require: {
 };
 
 type TypeScriptApi = any;
-type SourceTransform = (ts: TypeScriptApi, fileName: string, code: string) => string;
+type SourceReader = (fileName: string) => string | undefined;
+type SourceTransform = (ts: TypeScriptApi, fileName: string, code: string, readSource?: SourceReader) => string;
 
 interface CompilePluginContext {
   share: {
@@ -82,9 +83,16 @@ function installSourceReader(context: CompilePluginContext): void {
     };
   }
 
+  const readSource: SourceReader = (fileName: string): string | undefined => {
+    try {
+      return registry!.originalReadFile(fileName, 'utf8').toString();
+    } catch (_) {
+      return undefined;
+    }
+  };
   SOURCE_TRANSFORMS.forEach((definition: SourceTransformDefinition) => {
     registry!.transforms.set(definition.id, (fileName: string, code: string) =>
-      definition.transform(ts, fileName, code));
+      definition.transform(ts, fileName, code, readSource));
   });
   registeredFileSystem = fileSystem;
 }

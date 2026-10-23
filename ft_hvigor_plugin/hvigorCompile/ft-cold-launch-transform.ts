@@ -5,15 +5,22 @@
  * the compiler's in-memory source. Application files are never modified.
  */
 
-declare const require: {
-  main: {
-    require(moduleName: string): any;
-  };
-};
+declare const require: any;
 declare const __dirname: string;
 
 type TypeScriptApi = any;
 type AbilityClassKind = 'stage' | 'ui' | 'other' | 'intent' | 'legacyIntent';
+type SourceReader = (fileName: string) => string | undefined;
+
+interface AbilityClassInfo {
+  kind: AbilityClassKind | null;
+  applicationBase: boolean;
+}
+
+interface AbilityBase {
+  kind: AbilityClassKind | null;
+  declaration?: any;
+}
 
 interface LaunchParameterTypes {
   want: string;
@@ -24,6 +31,11 @@ interface LaunchParameterTypes {
 interface ColdLaunchInjection {
   position: number;
   content: string;
+}
+
+interface ColdLaunchInjections {
+  injections: ColdLaunchInjection[];
+  hasUIAbility: boolean;
 }
 
 const COLD_LAUNCH_BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
@@ -88,6 +100,50 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
   return offset;
 }
 
+/** Only opt in when a readable HAP manifest explicitly has no module entry. */
+function needsUIAbilityModuleFallback(ts: TypeScriptApi, id: string, readSource?: SourceReader): boolean {
+  const normalized = id.replace(/\\/g, '/');
+  const sourceIndex = normalized.lastIndexOf('/src/main/ets/');
+  if (sourceIndex < 0) {
+    return false;
+  }
+  const manifestPath = normalized.slice(0, sourceIndex) + '/src/main/module.json5';
+  try {
+    const nodeRequire = require.main && typeof require.main.require === 'function'
+      ? require.main.require.bind(require.main) : require;
+    const code = readSource ? readSource(manifestPath) : nodeRequire('fs').readFileSync(manifestPath, 'utf8');
+    if (typeof code !== 'string') {
+      return false;
+    }
+    // Parsing an object initializer accepts JSON5 comments, single quotes and
+    // unquoted keys without mistaking nested ability srcEntry fields for Stage.
+    const parsed = ts.createSourceFile(manifestPath, `const __manifest = ${code}`,
+      ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    if (parsed.parseDiagnostics.length > 0 || parsed.statements.length !== 1 ||
+      !ts.isVariableStatement(parsed.statements[0])) {
+      return false;
+    }
+    const root = parsed.statements[0].declarationList.declarations[0].initializer;
+    const property = (object: any, name: string): any | undefined => {
+      if (!object || !ts.isObjectLiteralExpression(object)) {
+        return undefined;
+      }
+      const matches = object.properties.filter((item: any) => ts.isPropertyAssignment(item) &&
+        (ts.isIdentifier(item.name) || ts.isStringLiteral(item.name)) && item.name.text === name);
+      return matches.length > 0 ? matches[matches.length - 1].initializer : undefined;
+    };
+    const module = property(root, 'module');
+    const type = property(module, 'type');
+    if (!type || !ts.isStringLiteral(type) || (type.text !== 'entry' && type.text !== 'feature')) {
+      return false;
+    }
+    const stageEntry = property(module, 'srcEntry');
+    return stageEntry === undefined || (ts.isStringLiteral(stageEntry) && stageEntry.text.trim().length === 0);
+  } catch (_) {
+    return false;
+  }
+}
+
 function classifyAbilityBaseName(name: string): AbilityClassKind | null {
   if (name === 'InsightIntentEntryExecutor') {
     return 'intent';
@@ -107,54 +163,218 @@ function classifyAbilityBaseName(name: string): AbilityClassKind | null {
   return null;
 }
 
-function collectAbilityBindings(ts: TypeScriptApi, sourceFile: any): Map<string, AbilityClassKind> {
-  const bindings = new Map<string, AbilityClassKind>();
-  sourceFile.statements.forEach((statement: any) => {
-    if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier ||
-      !ts.isStringLiteral(statement.moduleSpecifier) || !statement.importClause) {
-      return;
-    }
-    const moduleName = statement.moduleSpecifier.text;
-    if (!moduleName.startsWith('@ohos.app.ability.') && moduleName !== '@kit.AbilityKit') {
-      return;
-    }
-    const importClause = statement.importClause;
-    if (importClause.name) {
-      const defaultKind = classifyAbilityBaseName(moduleName.substring(moduleName.lastIndexOf('.') + 1));
-      if (defaultKind) {
-        bindings.set(importClause.name.text, defaultKind);
-      }
-    }
-    if (!importClause.namedBindings || !ts.isNamedImports(importClause.namedBindings)) {
-      return;
-    }
-    importClause.namedBindings.elements.forEach((element: any) => {
-      const importedName = element.propertyName ? element.propertyName.text : element.name.text;
-      const kind = classifyAbilityBaseName(importedName);
-      if (kind) {
-        bindings.set(element.name.text, kind);
-      }
-    });
-  });
-  return bindings;
+function bindingContains(ts: TypeScriptApi, binding: any, name: string): boolean {
+  if (ts.isIdentifier(binding)) {
+    return binding.text === name;
+  }
+  return !!binding.elements && binding.elements.some((element: any) =>
+    ts.isBindingElement(element) && bindingContains(ts, element.name, name));
 }
 
-function classAbilityKind(ts: TypeScriptApi, classDeclaration: any,
-  abilityBindings: Map<string, AbilityClassKind>): AbilityClassKind | null {
-  if (!classDeclaration.heritageClauses) {
-    return null;
-  }
-  for (const clause of classDeclaration.heritageClauses) {
-    if (clause.token !== ts.SyntaxKind.ExtendsKeyword || clause.types.length === 0) {
-      continue;
+function findValueDeclaration(ts: TypeScriptApi, location: any, name: string): any | null {
+  for (let scope = location.parent; scope; scope = scope.parent) {
+    if (ts.isClassDeclaration(scope) && scope.name && scope.name.text === name) {
+      return scope;
     }
-    const expression = clause.types[0].expression;
-    if (!ts.isIdentifier(expression)) {
-      continue;
+    if (ts.isFunctionLike(scope)) {
+      const parameter = scope.parameters.find((item: any) => bindingContains(ts, item.name, name));
+      if (parameter) {
+        return parameter;
+      }
     }
-    return abilityBindings.get(expression.text) || classifyAbilityBaseName(expression.text);
+    for (const statement of scope.statements || []) {
+      if (ts.isImportDeclaration(statement) && statement.importClause) {
+        const clause = statement.importClause;
+        if (clause.name && clause.name.text === name) {
+          return clause;
+        }
+        if (clause.namedBindings) {
+          if (ts.isNamespaceImport(clause.namedBindings) && clause.namedBindings.name.text === name) {
+            return clause.namedBindings;
+          }
+          if (ts.isNamedImports(clause.namedBindings)) {
+            const imported = clause.namedBindings.elements.find((item: any) => item.name.text === name);
+            if (imported) {
+              return imported;
+            }
+          }
+        }
+      }
+      if ((ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement) ||
+        ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) &&
+        statement.name && statement.name.text === name) {
+        return statement;
+      }
+      if (ts.isVariableStatement(statement)) {
+        const variable = statement.declarationList.declarations.find((item: any) =>
+          bindingContains(ts, item.name, name));
+        if (variable) {
+          return variable;
+        }
+      }
+    }
   }
   return null;
+}
+
+/** Resolve source-visible inheritance without reading through our own transform hook. */
+function createAbilityClassResolver(ts: TypeScriptApi, sourceFile: any, readSource?: SourceReader):
+  (declaration: any) => AbilityClassInfo {
+  const nodeRequire = require.main && typeof require.main.require === 'function'
+    ? require.main.require.bind(require.main) : require;
+  const path = nodeRequire('path');
+  const sources = new Map<string, any | null>();
+  sources.set(path.resolve(sourceFile.fileName), sourceFile);
+  const classCache = new Map<any, AbilityClassInfo>();
+  const resolvingClasses = new Set<any>();
+  const resolvingExports = new Set<string>();
+  const unknown: AbilityBase = { kind: null };
+
+  const loadRelativeSource = (from: any, moduleName: string): any | null => {
+    if (!moduleName.startsWith('.')) {
+      return null;
+    }
+    const base = path.resolve(path.dirname(from.fileName), moduleName);
+    const candidates = /\.(ets|ts)$/.test(base) ? [base] :
+      [base + '.ets', base + '.ts', path.join(base, 'Index.ets'), path.join(base, 'index.ets'),
+        path.join(base, 'Index.ts'), path.join(base, 'index.ts')];
+    for (const fileName of candidates) {
+      if (!isApplicationArkTsSource(fileName)) {
+        continue;
+      }
+      if (!sources.has(fileName)) {
+        let parsed: any | null = null;
+        try {
+          const code = readSource ? readSource(fileName) : nodeRequire('fs').readFileSync(fileName, 'utf8');
+          if (typeof code === 'string') {
+            parsed = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+          }
+        } catch (_) {
+          // A missing or unresolved source is not evidence of an Ability base.
+        }
+        sources.set(fileName, parsed);
+      }
+      if (sources.get(fileName)) {
+        return sources.get(fileName);
+      }
+    }
+    return null;
+  };
+
+  const resolveModule = (from: any, moduleName: string, exportedName: string): AbilityBase => {
+    const name = exportedName === 'default' ? moduleName.slice(moduleName.lastIndexOf('.') + 1) : exportedName;
+    const kind = classifyAbilityBaseName(name);
+    if (moduleName === '@kit.AbilityKit' || moduleName.startsWith('@ohos.app.ability.') ||
+      (kind === 'other' && (moduleName.startsWith('@kit.') || moduleName.startsWith('@ohos.')))) {
+      return { kind };
+    }
+    const imported = loadRelativeSource(from, moduleName);
+    return imported ? resolveExport(imported, exportedName) : unknown;
+  };
+
+  const resolveBinding = (declaration: any, member?: string): AbilityBase => {
+    if (!declaration) {
+      return unknown;
+    }
+    if (ts.isClassDeclaration(declaration)) {
+      return { kind: resolveClass(declaration).kind, declaration };
+    }
+    let importDeclaration = declaration;
+    while (importDeclaration && !ts.isImportDeclaration(importDeclaration)) {
+      importDeclaration = importDeclaration.parent;
+    }
+    if (!importDeclaration || importDeclaration.importClause.isTypeOnly || declaration.isTypeOnly) {
+      return unknown;
+    }
+    let exportedName: string;
+    if (ts.isImportClause(declaration)) {
+      exportedName = 'default';
+    } else if (ts.isImportSpecifier(declaration)) {
+      exportedName = (declaration.propertyName || declaration.name).text;
+    } else if (ts.isNamespaceImport(declaration) && member) {
+      exportedName = member;
+    } else {
+      return unknown;
+    }
+    return resolveModule(importDeclaration.getSourceFile(), importDeclaration.moduleSpecifier.text, exportedName);
+  };
+
+  const resolveExpression = (expression: any): AbilityBase => {
+    if (ts.isIdentifier(expression)) {
+      return resolveBinding(findValueDeclaration(ts, expression, expression.text));
+    }
+    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      return resolveBinding(findValueDeclaration(ts, expression, expression.expression.text), expression.name.text);
+    }
+    return unknown;
+  };
+
+  const resolveExport = (source: any, name: string): AbilityBase => {
+    const key = `${source.fileName}:${name}`;
+    if (resolvingExports.has(key)) {
+      return unknown;
+    }
+    resolvingExports.add(key);
+    try {
+      for (const statement of source.statements) {
+        if (ts.isClassDeclaration(statement)) {
+          const modifiers = statement.modifiers || [];
+          const isDefault = modifiers.some((item: any) => item.kind === ts.SyntaxKind.DefaultKeyword);
+          const isExported = modifiers.some((item: any) => item.kind === ts.SyntaxKind.ExportKeyword);
+          if ((name === 'default' && isDefault) ||
+            (name !== 'default' && isExported && statement.name && statement.name.text === name)) {
+            return resolveBinding(statement);
+          }
+        }
+        if (name === 'default' && ts.isExportAssignment(statement) && !statement.isExportEquals) {
+          return resolveExpression(statement.expression);
+        }
+        if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) {
+          continue;
+        }
+        if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+          const exported = statement.exportClause.elements.find((item: any) => item.name.text === name);
+          if (exported && !exported.isTypeOnly) {
+            const localName = (exported.propertyName || exported.name).text;
+            return statement.moduleSpecifier
+              ? resolveModule(source, statement.moduleSpecifier.text, localName)
+              : resolveBinding(findValueDeclaration(ts, statement, localName));
+          }
+        } else if (!statement.exportClause && statement.moduleSpecifier && name !== 'default') {
+          const resolved = resolveModule(source, statement.moduleSpecifier.text, name);
+          if (resolved.kind) {
+            return resolved;
+          }
+        }
+      }
+      return unknown;
+    } finally {
+      resolvingExports.delete(key);
+    }
+  };
+
+  const resolveClass = (declaration: any): AbilityClassInfo => {
+    const cached = classCache.get(declaration);
+    if (cached) {
+      return cached;
+    }
+    if (resolvingClasses.has(declaration)) {
+      return { kind: null, applicationBase: false };
+    }
+    resolvingClasses.add(declaration);
+    let base: AbilityBase = unknown;
+    for (const clause of declaration.heritageClauses || []) {
+      if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
+        base = resolveExpression(clause.types[0].expression);
+        break;
+      }
+    }
+    const info: AbilityClassInfo = { kind: base.kind, applicationBase: !!base.declaration };
+    resolvingClasses.delete(declaration);
+    classCache.set(declaration, info);
+    return info;
+  };
+  return resolveClass;
 }
 
 function methodIndentation(code: string, method: any): string {
@@ -243,17 +463,22 @@ function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, cod
 
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
   bridgeName: string, pluginVersion: string, identifiers: Set<string>,
-  launchTypes: LaunchParameterTypes): ColdLaunchInjection[] {
+  launchTypes: LaunchParameterTypes, readSource?: SourceReader): ColdLaunchInjections {
   const injections: ColdLaunchInjection[] = [];
-  const abilityBindings = collectAbilityBindings(ts, sourceFile);
+  let hasUIAbility = false;
+  const resolveClass = createAbilityClassResolver(ts, sourceFile, readSource);
   const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
   visit(ts, sourceFile, (node: any) => {
     if (!ts.isClassDeclaration(node)) {
       return;
     }
-    const kind = classAbilityKind(ts, node, abilityBindings);
+    const classification = resolveClass(node);
+    const kind = classification.kind;
     if (!kind) {
       return;
+    }
+    if (kind === 'ui') {
+      hasUIAbility = true;
     }
     let hasOnCreate = false;
     let hasOnForeground = false;
@@ -286,7 +511,8 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       }
       if (member.name.text === 'onCreate') {
         hasOnCreate = true;
-        let content = `\n${indentation}${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
+        let content = kind === 'ui' ? '' :
+          `\n${indentation}${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
         if (kind === 'ui') {
           const parameters = member.parameters;
           let wantName = parameters.length > 0 && ts.isIdentifier(parameters[0].name)
@@ -353,7 +579,9 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
         }
       });
     }
-    if (kind === 'stage' && !hasOnCreate) {
+    // Application bases receive their own hooks. Do not synthesize overrides
+    // in subclasses that would hide inherited application lifecycle behavior.
+    if (kind === 'stage' && !hasOnCreate && !classification.applicationBase) {
       const indentation = classIndentation(code, node);
       injections.push({
         position: node.end - 1,
@@ -362,7 +590,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
           `${indentation}  }\n`
       });
     }
-    if (kind === 'ui' && !hasOnCreate) {
+    if (kind === 'ui' && !hasOnCreate && !classification.applicationBase) {
       launchTypes.needed = true;
       const indentation = classIndentation(code, node);
       const wantName = selectIdentifierName(identifiers, '__ftLaunchWant');
@@ -371,12 +599,11 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
         position: node.end - 1,
         content: `\n${indentation}  onCreate(${wantName}: ${launchTypes.want}, ` +
           `${paramName}: ${launchTypes.abilityConstant}.LaunchParam): void {\n` +
-          `${indentation}    ${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});\n` +
           `${indentation}    ${bridgeName}.recordFirstUIAbilityCreate(${paramName}, ${wantName}, this);\n` +
           `${indentation}  }\n`
       });
     }
-    if (kind === 'ui') {
+    if (kind === 'ui' && !classification.applicationBase) {
       const indentation = classIndentation(code, node);
       for (const [method, hook, exists] of [
         ['onForeground', 'recordUIAbilityForeground', hasOnForeground],
@@ -390,7 +617,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       }
     }
   });
-  return injections;
+  return { injections, hasUIAbility };
 }
 
 function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection[]): string {
@@ -409,7 +636,8 @@ function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection
   return transformedCode;
 }
 
-export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: string): string {
+export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: string,
+  readSource?: SourceReader): string {
   if (!isApplicationArkTsSource(id) || code.includes(COLD_LAUNCH_TRANSFORM_MARKER)) {
     return code;
   }
@@ -422,15 +650,34 @@ export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: s
     needed: false
   };
   const version = getPluginVersion();
-  const injections = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version, identifiers, launchTypes);
-  if (injections.length === 0) {
+  const result = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version, identifiers,
+    launchTypes, readSource);
+  const injections = result.injections;
+  const moduleFallback = result.hasUIAbility && needsUIAbilityModuleFallback(ts, id, readSource);
+  if (injections.length === 0 && !moduleFallback) {
     return code;
   }
-  const insertionOffset = findImportInsertionOffset(ts, sourceFile);
+  // Keep generated imports separate from initialization calls: ArkTS requires
+  // imports before other statements, while the no-Stage fallback must still
+  // run before executable application code.
+  const insertionOffset = moduleFallback
+    ? (code.startsWith('#!') ? code.indexOf('\n') + 1 : 0)
+    : findImportInsertionOffset(ts, sourceFile);
+  const firstApplicationStatement = sourceFile.statements.find((statement: any) => !ts.isImportDeclaration(statement));
+  const initializationOffset = moduleFallback && firstApplicationStatement
+    ? firstApplicationStatement.getStart(sourceFile) : insertionOffset;
+  const installBridgeName = selectIdentifierName(identifiers, '__ftColdLaunchInstallBridge');
+  const sdkName = selectIdentifierName(identifiers, '__ftColdLaunchSDK');
   const bridgeImport = `\n${COLD_LAUNCH_TRANSFORM_MARKER}\n` +
-    `import { FTColdLaunchBridge as ${bridgeName} } from '${COLD_LAUNCH_BRIDGE_IMPORT}';\n` +
+    `import { FTColdLaunchBridge as ${bridgeName}, FTConsoleLogBridge as ${installBridgeName}` +
+    (version.length > 0 ? `, FTSDK as ${sdkName}` : '') + ` } from '${COLD_LAUNCH_BRIDGE_IMPORT}';\n` +
     (launchTypes.needed ? `import { Want as ${launchTypes.want}, AbilityConstant as ${launchTypes.abilityConstant} } ` +
       `from '@kit.AbilityKit';\n` : '');
-  const transformedCode = applyColdLaunchInjections(code, injections);
-  return transformedCode.slice(0, insertionOffset) + bridgeImport + transformedCode.slice(insertionOffset);
+  const initialization = `\n${installBridgeName}.markCompilerPluginInstalled();\n` +
+    (version.length > 0 ? `${sdkName}.registerHvigorPluginVersion(${JSON.stringify(version)});\n` : '') +
+    (moduleFallback ? '// Application-init fallback: UIAbility module evaluation without an AbilityStage entry.\n' +
+      `${bridgeName}.recordApplicationInit(undefined, ${JSON.stringify(version)});\n` : '');
+  injections.push({ position: insertionOffset, content: bridgeImport });
+  injections.push({ position: initializationOffset, content: initialization });
+  return applyColdLaunchInjections(code, injections);
 }
