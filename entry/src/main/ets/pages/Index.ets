@@ -85,6 +85,20 @@ struct Index {
                 })
             }.margin({ bottom: 10 })
 
+            ListItem() {
+              Button('应用对象堆压力（273 MiB）')
+                .id('app-heap-open').width(CommonConstants.FULL_PERCENT).height(50)
+                .backgroundColor('#9A3412')
+                .onClick(() => {
+                  const context = getContext(this) as common.UIAbilityContext;
+                  context.restartApp({ bundleName: context.abilityInfo.bundleName,
+                    moduleName: 'entry', abilityName: 'HeapPressureTestAbility' })
+                    .catch((error: Error): void => {
+                      promptAction.showToast({ message: `无法启动堆压力入口：${error.message}` });
+                    });
+                })
+            }.margin({ bottom: 10 })
+
             // Separate-process WorkScheduler background-launch diagnostics
             ListItem() {
               Button() {

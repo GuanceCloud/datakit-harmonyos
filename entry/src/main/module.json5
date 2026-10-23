@@ -59,6 +59,17 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true
+      },
+      {
+        "name": "HeapPressureTestAbility",
+        "srcEntry": "./ets/heappressureability/HeapPressureTestAbility.ets",
+        "description": "Application-owned heap pressure verification",
+        "launchType": "singleton",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
       }
     ],
 
