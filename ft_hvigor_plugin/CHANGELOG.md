@@ -2,6 +2,13 @@
 
 ## [0.1.2-alpha.1] - 2026-10-19
 
+- Accepted nullable console/HiLog arguments with existing runtime HARs and captured native logging methods before argument evaluation.
+- Preserved optional-call short-circuit behavior by retaining optional logging and loadContent calls unchanged.
+- Captured the rendered Replay root ID once, including trailing-comma arguments, and handled page-show events that precede rendering without repeating business expressions.
+- Instrumented inspectable lifecycle function properties without duplicate declarations and used parameter syntax boundaries instead of comment-sensitive text searches.
+- Added descendant lifecycle forwarding when a source-visible base module cannot import the SDK, preserving inherited business calls, receiver binding and return values.
+- Kept the shared source hook active until every build owner finishes, retaining the compiler provider belonging to the remaining context.
+
 - Allocated generated names consistently across transforms, including log IIFE parameters and spread temporaries, preventing collisions with HiLog import aliases and user variables.
 - Resolved console, HiLog and Web value bindings at each call site, covering imports, parameters, destructuring, block/function scopes and catch bindings without suppressing unrelated system calls.
 - Preserved complete console/HiLog spread arguments, evaluating ordinary arguments and each spread once in source order.

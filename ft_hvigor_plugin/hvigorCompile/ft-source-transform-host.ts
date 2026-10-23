@@ -42,6 +42,7 @@ interface SharedSourceTransformRegistry {
   originalReadFile: (fileName: string, options?: any) => any;
   buffer: any;
   transforms: Map<string, (fileName: string, code: string) => string>;
+  owners: Map<object, Map<string, (fileName: string, code: string) => string>>;
 }
 
 const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
@@ -52,13 +53,14 @@ const SOURCE_TRANSFORMS: SourceTransformDefinition[] = [
   { id: 'guance-web-replay-transform', transform: transformWebReplaySource }
 ];
 
-let registeredFileSystem: any = null;
+const registrations: Array<{ fileSystem: any; owner: object; context: CompilePluginContext }> = [];
+
+function refreshTransforms(registry: SharedSourceTransformRegistry): void {
+  registry.transforms.clear();
+  registry.owners.forEach(transforms => transforms.forEach((transform, id) => registry.transforms.set(id, transform)));
+}
 
 function installSourceReader(context: CompilePluginContext): void {
-  if (registeredFileSystem !== null) {
-    return;
-  }
-
   const typeScriptPath = `${context.share.projectConfig.etsLoaderPath}/node_modules/typescript`;
   const ts = require.main.require(typeScriptPath);
   const fileSystem = require.main.require('fs');
@@ -67,7 +69,8 @@ function installSourceReader(context: CompilePluginContext): void {
     registry = {
       originalReadFile: fileSystem.readFileSync as (fileName: string, options?: any) => any,
       buffer: require.main.require('buffer'),
-      transforms: new Map<string, (fileName: string, code: string) => string>()
+      transforms: new Map<string, (fileName: string, code: string) => string>(),
+      owners: new Map()
     };
     fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] = registry;
     fileSystem.readFileSync = (fileName: string, options?: any): any => {
@@ -90,26 +93,34 @@ function installSourceReader(context: CompilePluginContext): void {
       return undefined;
     }
   };
+  const owner = {};
+  const transforms = new Map<string, (fileName: string, code: string) => string>();
   SOURCE_TRANSFORMS.forEach((definition: SourceTransformDefinition) => {
-    registry!.transforms.set(definition.id, (fileName: string, code: string) =>
+    transforms.set(definition.id, (fileName: string, code: string) =>
       definition.transform(ts, fileName, code, readSource));
   });
-  registeredFileSystem = fileSystem;
+  registry.owners.set(owner, transforms);
+  refreshTransforms(registry);
+  registrations.push({ fileSystem, owner, context });
 }
 
-function restoreSourceReader(): void {
-  if (registeredFileSystem === null) {
-    return;
+function restoreSourceReader(context: CompilePluginContext): void {
+  let index = registrations.length - 1;
+  for (let candidate = registrations.length - 1; candidate >= 0; candidate--) {
+    if (registrations[candidate].context === context) { index = candidate; break; }
   }
-  const registry = registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
+  const registration = index < 0 ? undefined : registrations.splice(index, 1)[0];
+  if (!registration) return;
+  const { fileSystem, owner } = registration;
+  const registry = fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] as SharedSourceTransformRegistry | undefined;
   if (registry) {
-    SOURCE_TRANSFORMS.forEach((definition: SourceTransformDefinition) => registry!.transforms.delete(definition.id));
-    if (registry.transforms.size === 0) {
-      registeredFileSystem.readFileSync = registry.originalReadFile;
-      delete registeredFileSystem[SOURCE_TRANSFORM_REGISTRY_KEY];
+    registry.owners.delete(owner);
+    refreshTransforms(registry);
+    if (registry.owners.size === 0) {
+      fileSystem.readFileSync = registry.originalReadFile;
+      delete fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY];
     }
   }
-  registeredFileSystem = null;
 }
 
 export default {
@@ -118,7 +129,7 @@ export default {
   buildStart(this: CompilePluginContext): void {
     installSourceReader(this);
   },
-  buildEnd(): void {
-    restoreSourceReader();
+  buildEnd(this: CompilePluginContext): void {
+    restoreSourceReader(this);
   }
 };

@@ -100,7 +100,10 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
   const resolve = createLexicalResolver(ts, sourceFile);
 
   visit(ts, sourceFile, (node: any) => {
-    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+    // Retain optional calls verbatim so their receiver/method short-circuit also
+    // controls argument evaluation. Nested ordinary calls remain eligible.
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) ||
+      (ts.isOptionalChain && ts.isOptionalChain(node))) {
       return;
     }
     const delegate = node.expression.expression;
@@ -137,13 +140,8 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
 }
 
 function allocateCandidateNames(candidate: TransformCandidate, identifiers: Set<string>): string[] {
-  if (candidate.callArguments.some(argument => argument.spread)) {
-    return candidate.source === 'console' ? [allocateName(identifiers, '__ftConsoleArgs')]
-      : [allocateName(identifiers, '__ftHiLogArgs'), allocateName(identifiers, '__ftHiLogValues')];
-  }
-  return candidate.callArguments.map((_argument, index) => allocateName(identifiers,
-    candidate.source === 'console' ? `__ftConsoleArg${index}` :
-      ['__ftHiLogDomain', '__ftHiLogTag', '__ftHiLogFormat'][index] || `__ftHiLogArg${index - 3}`));
+  const prefix = candidate.source === 'console' ? '__ftConsole' : '__ftHiLog';
+  return ['Call', 'Args', 'Values'].map(suffix => allocateName(identifiers, prefix + suffix));
 }
 
 function isNestedIn(candidate: TransformCandidate, parent: TransformCandidate): boolean {
@@ -176,49 +174,30 @@ function renderCandidate(code: string, candidates: TransformCandidate[], bridgeN
   const renderedArguments = candidate.callArguments.map((argument: SourceRange) =>
     renderCandidates(code, candidates, bridgeName, argument.start, argument.end));
   const statementSeparator = candidate.needsStatementSeparator ? ';' : '';
-  const names = candidate.generatedNames!;
-  if (candidate.callArguments.some(argument => argument.spread)) {
-    // One rest binding receives the expanded values, rather than one parameter
-    // per syntax argument. Array construction preserves iteration/evaluation order.
-    if (candidate.source === 'console') {
-      const args = names[0];
-      return `${statementSeparator}((...${args}: Object[]): void => ${bridgeName}.console('${candidate.level}', ` +
-        `(): void => ${candidate.delegate}.${candidate.level}(...(${args} as string[])), ` +
-        `...${args}))(${renderedArguments.join(', ')})`;
-    }
-    const [args, values] = names;
-    const header = `${args}[0] as number, ${args}[1] as string, ${args}[2] as string`;
-    return `${statementSeparator}((...${args}: Object[]): void => { ` +
-      `const ${values}: Object[] = ${args}.slice(3); ` +
-      `${bridgeName}.hilog('${candidate.level}', ${header}, ` +
-      `(): void => ${candidate.delegate}.${candidate.level}(${header}, ...${values}), ` +
-      `...${values}); })(${renderedArguments.join(', ')})`;
-  }
+  const [original, args, values] = candidate.generatedNames!;
+  const valueType = '(Object | null | undefined)';
+  const originalType = candidate.source === 'console' ? `(...${args}: ${valueType}[]) => void` :
+    `(domain: number, tag: string, format: string, ...${values}: ${valueType}[]) => void`;
+  let body: string;
   if (candidate.source === 'console') {
-    const argumentNames = names;
-    const parameterDeclarations = argumentNames.map((name: string) => `${name}: Object`).join(', ');
-    const originalCallArguments = argumentNames.map((name: string) => `${name} as string`);
-    const originalCall = `${candidate.delegate}.${candidate.level}(${originalCallArguments.join(', ')})`;
-    const captureArguments = argumentNames.length > 0 ? `, ${argumentNames.join(', ')}` : '';
-    return `${statementSeparator}((${parameterDeclarations}): void => ${bridgeName}.console('${candidate.level}', ` +
-      `(): void => ${originalCall}${captureArguments}))(${renderedArguments.join(', ')})`;
+    body = `${bridgeName}.console('${candidate.level}', (): void => ${original}(...${args}), ` +
+      `...(${args} as Object[]))`;
+  } else {
+    const header = `${args}[0] as number, ${args}[1] as string, ${args}[2] as string`;
+    body = `{ const ${values}: ${valueType}[] = ${args}.slice(3); ` +
+      `${bridgeName}.hilog('${candidate.level}', ${header}, (): void => ${original}(${header}, ...${values}), ` +
+      `...(${values} as Object[])); }`;
   }
-
-  const argumentNames = names;
-  const parameterDeclarations = argumentNames.map((name: string, index: number) => {
-    if (index === 0) {
-      return `${name}: number`;
-    }
-    if (index === 1 || index === 2) {
-      return `${name}: string`;
-    }
-    return `${name}: Object`;
-  }).join(', ');
-  const originalCall = `${candidate.delegate}.${candidate.level}(${argumentNames.join(', ')})`;
-  const captureArguments = argumentNames.length > 3 ? `, ${argumentNames.slice(3).join(', ')}` : '';
-  return `${statementSeparator}((${parameterDeclarations}): void => ${bridgeName}.hilog('${candidate.level}', ` +
-    `${argumentNames[0]}, ${argumentNames[1]}, ${argumentNames[2]}, (): void => ${originalCall}` +
-    `${captureArguments}))(${renderedArguments.join(', ')})`;
+  // Resolve and bind the original method before evaluating its arguments.
+  // Casting only the capture array keeps compatibility with older runtime HARs;
+  // null/undefined values themselves are forwarded unchanged.
+  // HiLog is a platform namespace, not an ArkTS object receiver. Its exported
+  // functions are static; console methods retain their receiver through bind.
+  const callee = `${candidate.delegate}.${candidate.level}`;
+  const captured = candidate.source === 'console' ? `${callee}.bind(${candidate.delegate})` : callee;
+  const argumentsText = renderedArguments.length > 0 ? ', ' + renderedArguments.join(', ') : '';
+  return `${statementSeparator}((${original}: ${originalType}, ...${args}: ${valueType}[]): void => ${body})` +
+    `(${captured} as ${originalType}${argumentsText})`;
 }
 
 function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {

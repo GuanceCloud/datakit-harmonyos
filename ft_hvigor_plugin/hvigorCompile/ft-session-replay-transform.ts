@@ -28,7 +28,7 @@ interface MethodRange {
 
 interface RootExpression {
   end: number;
-  idExpression: string | null;
+  idArgument?: SourceRange;
   hasAreaChange: boolean;
   hasTouch: boolean;
   touchArgument?: SourceRange;
@@ -132,21 +132,24 @@ function findRootExpression(ts: TypeScriptApi, source: any, code: string,
   if (!first || (!ts.isExpressionStatement(first) && !ts.isReturnStatement(first)) || !first.expression) return null;
   const { base, modifiers } = componentChain(ts, first.expression);
   if (!ts.isEtsComponentExpression(base) || !base.body) return null;
-  let idExpression: string | null = null;
+  let idArgument: SourceRange | undefined;
   let hasAreaChange = false;
   let hasTouch = false;
   let touchArgument: SourceRange | undefined;
   modifiers.forEach((call: any) => {
     const name = call.expression.name.text;
     const range = argumentRange(source, call);
-    if (name === 'id' && call.arguments.length === 1) idExpression = code.slice(range.start, range.end);
+    if (name === 'id' && call.arguments.length === 1) {
+      const argument = call.arguments[0];
+      idArgument = { start: argument.getStart(source), end: argument.end };
+    }
     if (name === 'onAreaChange') hasAreaChange = true;
     if (name === 'onTouch') {
       hasTouch = true;
       if (call.arguments.length === 1) touchArgument = range;
     }
   });
-  return { end: first.expression.end, idExpression, hasAreaChange, hasTouch, touchArgument };
+  return { end: first.expression.end, idArgument, hasAreaChange, hasTouch, touchArgument };
 }
 
 function applyInjections(code: string, injections: Injection[]): string {
@@ -222,11 +225,15 @@ function addLifecycleInjection(
   tokenField: string,
   methodName: 'onPageShow' | 'onPageHide' | 'aboutToDisappear',
   runtimeMethod: 'pageShown' | 'pageHidden' | 'pageDisposed',
-  rootExpression: string
+  rootExpression: string,
+  visibleField?: string
 ): void {
   const existing = struct.methods.get(methodName);
-  const call = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression,
+  const rawCall = lifecycleCall(bridgeName, tokenField, runtimeMethod, rootExpression,
     !struct.methods.has('pageTransition'));
+  const call = !visibleField ? rawCall : methodName === 'onPageShow'
+    ? `this.${visibleField} = true; if (${rootExpression}.length > 0) { ${rawCall} }`
+    : `this.${visibleField} = false; ${rawCall}`;
   if (existing) {
     const indentation = `${lineIndentation(code, existing.nameStart)}  `;
     injections.push({ position: existing.bodyStart + 1, content: `\n${indentation}${call}` });
@@ -292,8 +299,27 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
       content: `\n${indentation}private ${tokenField}: string = ${bridgeName}.createRootToken(${JSON.stringify(sourceKey)});\n\n`
     });
 
-    const rootExpression = root.idExpression === null ? `this.${tokenField}` : root.idExpression;
-    if (root.idExpression === null) {
+    let rootExpression = `this.${tokenField}`;
+    let visibleField: string | undefined;
+    if (root.idArgument) {
+      const idField = selectUniqueName(identifiers, '__ftSessionReplayRootId');
+      visibleField = selectUniqueName(identifiers, '__ftSessionReplayVisible');
+      const capture = selectUniqueName(identifiers, '__ftSessionReplayCaptureId');
+      const value = selectUniqueName(identifiers, '__ftSessionReplayIdValue');
+      rootExpression = `this.${idField}`;
+      const shown = lifecycleCall(bridgeName, tokenField, 'pageShown', rootExpression,
+        !entry.methods.has('pageTransition'));
+      injections.push({ position: buildMethod.memberStart,
+        content: `\n${indentation}private ${idField}: string = '';\n` +
+          `${indentation}private ${visibleField}: boolean = false;\n` +
+          `${indentation}private ${capture}(${value}: string): string {\n` +
+          `${indentation}  const changed: boolean = this.${idField} !== ${value};\n` +
+          `${indentation}  this.${idField} = ${value};\n` +
+          `${indentation}  if (changed && this.${visibleField} && ${value}.length > 0) { ${shown} }\n` +
+          `${indentation}  return ${value};\n${indentation}}\n` });
+      injections.push({ position: root.idArgument.start, content: `this.${capture}(` });
+      injections.push({ position: root.idArgument.end, content: ')' });
+    } else {
       injections.push({ position: root.end, content: `.id(${rootExpression})` });
     }
     // Root area changes are ArkUI's public layout/draw boundary. Emit a
@@ -318,11 +344,11 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
       injections.push({ position: root.touchArgument.end, content: ')' });
     }
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
-      'onPageShow', 'pageShown', rootExpression);
+      'onPageShow', 'pageShown', rootExpression, visibleField);
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
-      'onPageHide', 'pageHidden', rootExpression);
+      'onPageHide', 'pageHidden', rootExpression, visibleField);
     addLifecycleInjection(code, injections, entry, buildMethod, bridgeName, tokenField,
-      'aboutToDisappear', 'pageDisposed', rootExpression);
+      'aboutToDisappear', 'pageDisposed', rootExpression, visibleField);
     addTransitionInjections(ts, source, code, injections, entry, bridgeName, tokenField, rootExpression);
   });
 

@@ -19,6 +19,7 @@ type SourceReader = (fileName: string) => string | undefined;
 interface AbilityClassInfo {
   kind: AbilityClassKind | null;
   applicationBase: boolean;
+  base?: any;
 }
 
 interface AbilityBase {
@@ -353,7 +354,7 @@ function createAbilityClassResolver(ts: TypeScriptApi, sourceFile: any, readSour
         break;
       }
     }
-    const info: AbilityClassInfo = { kind: base.kind, applicationBase: !!base.declaration };
+    const info: AbilityClassInfo = { kind: base.kind, applicationBase: !!base.declaration, base: base.declaration };
     resolvingClasses.delete(declaration);
     classCache.set(declaration, info);
     return info;
@@ -401,6 +402,31 @@ function intentDecoratorString(ts: TypeScriptApi, declaration: any, field: strin
   return "''";
 }
 
+function callableMember(ts: TypeScriptApi, member: any): any | undefined {
+  if (ts.isMethodDeclaration(member) && member.body) return member;
+  if (ts.isPropertyDeclaration(member) && member.initializer &&
+    (ts.isArrowFunction(member.initializer) || ts.isFunctionExpression(member.initializer))) return member.initializer;
+  return undefined;
+}
+
+function memberName(ts: TypeScriptApi, member: any): string | undefined {
+  return member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) ? member.name.text : undefined;
+}
+
+/** Insert into the actual parameter list, ignoring parentheses in return types/comments. */
+function addLaunchParameters(ts: TypeScriptApi, sourceFile: any, callable: any,
+  added: string[], injections: ColdLaunchInjection[]): void {
+  const close = callable.getChildren(sourceFile).find((child: any) => child.kind === ts.SyntaxKind.CloseParenToken);
+  if (close) {
+    const separator = callable.parameters.length > 0 && !callable.parameters.hasTrailingComma ? ', ' : '';
+    injections.push({ position: close.getStart(sourceFile), content: separator + added.join(', ') });
+  } else {
+    // A single unparenthesized arrow parameter must become a parameter list.
+    injections.push({ position: callable.parameters[0].getStart(sourceFile), content: '(' });
+    injections.push({ position: callable.parameters.end, content: ', ' + added.join(', ') + ')' });
+  }
+}
+
 function collectWindowStageParameterNames(ts: TypeScriptApi, sourceFile: any, method: any): Set<string> {
   const names = new Set<string>();
   method.parameters.forEach((parameter: any) => {
@@ -420,7 +446,8 @@ function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, cod
   resolve: (location: any, name: string) => any | undefined): ColdLaunchInjection[] {
   const candidates: any[] = [];
   visit(ts, method.body, (node: any) => {
-    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return;
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) ||
+      (ts.isOptionalChain && ts.isOptionalChain(node))) return;
     const delegate = node.expression.expression;
     if (!ts.isIdentifier(delegate) || !windowStageNames.has(delegate.text) ||
       node.expression.name.text !== 'loadContent' || node.arguments.length < 2 || node.arguments.length > 3) return;
@@ -483,6 +510,44 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
   const resolve = createLexicalResolver(ts, sourceFile);
   const resolveClass = createAbilityClassResolver(ts, sourceFile, readSource);
   const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
+  const availability = new Map<string, boolean>();
+  const inheritedState = (declaration: any, method: string): { covered: boolean; member?: any } => {
+    const seen = new Set<any>();
+    for (let base = resolveClass(declaration).base; base && !seen.has(base); base = resolveClass(base).base) {
+      seen.add(base);
+      const id = base.getSourceFile().fileName;
+      if (!availability.has(id)) availability.set(id, hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource));
+      // An instrumented intermediate class either owns the hook or supplies a forwarding hook.
+      if (availability.get(id)) return { covered: true };
+      const member = base.members.find((item: any) => memberName(ts, item) === method &&
+        !(item.modifiers || []).some((modifier: any) => modifier.kind === ts.SyntaxKind.StaticKeyword));
+      if (member) return { covered: false, member };
+    }
+    return { covered: false };
+  };
+  const wrapInherited = (declaration: any, name: string, hook: string, launch: boolean, inherited: any): void => {
+    const original = selectIdentifierName(identifiers, '__ftInheritedCall');
+    const want = selectIdentifierName(identifiers, '__ftInheritedWant');
+    const param = selectIdentifierName(identifiers, '__ftInheritedLaunch');
+    if (launch) launchTypes.needed = true;
+    const baseType = declaration.heritageClauses.find((item: any) => item.token === ts.SyntaxKind.ExtendsKeyword)
+      .types[0].getText(sourceFile);
+    const callable = callableMember(ts, inherited);
+    const signature = callable || (inherited.type && ts.isFunctionTypeNode(inherited.type) ? inherited.type : undefined);
+    const count = signature && !signature.parameters.some((parameter: any) => parameter.dotDotDotToken)
+      ? signature.parameters.length : 2;
+    const parameters = launch ? `${want}?: ${launchTypes.want}, ${param}?: ${launchTypes.abilityConstant}.LaunchParam` : '';
+    const passed = launch ? [`${want} as ${launchTypes.want}`, `${param} as ${launchTypes.abilityConstant}.LaunchParam`]
+      .slice(0, count).join(', ') : '';
+    const hookText = hook.replace(/\$want/g, want).replace(/\$launch/g, param);
+    // Store the original callable on the same instance. Calling this slot keeps
+    // its receiver and concrete return type, including inherited function fields,
+    // without bind's dynamic return type or unsupported generic inference.
+    injections.push({ position: declaration.end - 1,
+      content: `\n  private ${original} = (this as Object as ${baseType}).${name};\n` +
+        `  ${name} = (${parameters}) => { ${hookText} return this.${original}(${passed}); };\n` });
+  };
+
   visit(ts, sourceFile, (node: any) => {
     if (!ts.isClassDeclaration(node)) {
       return;
@@ -499,19 +564,40 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
     let hasOnForeground = false;
     let hasOnBackground = false;
     let hasOnNewWant = false;
-    node.members.forEach((member: any) => {
-      if (!ts.isMethodDeclaration(member) || !member.body || !member.name || !ts.isIdentifier(member.name)) {
-        return;
+    node.members.forEach((declaration: any) => {
+      if ((declaration.modifiers || []).some((modifier: any) => modifier.kind === ts.SyntaxKind.StaticKeyword)) return;
+      const name = memberName(ts, declaration);
+      if (name === 'onCreate') hasOnCreate = true;
+      if (name === 'onForeground') hasOnForeground = true;
+      if (name === 'onBackground') hasOnBackground = true;
+      if (name === 'onNewWant') hasOnNewWant = true;
+      const member = callableMember(ts, declaration);
+      if (!member || !name) return;
+      const indentation = methodIndentation(code, declaration);
+      const block = ts.isBlock(member.body);
+      const position = member.body.getStart(sourceFile) + (block ? 1 : 0);
+      // Expression-bodied lifecycle properties retain their expression result.
+      if (!block) {
+        const recognized = kind === 'intent' ? name === 'onExecute' : kind === 'legacyIntent'
+          ? ['onExecuteInUIAbilityForegroundMode', 'onExecuteInUIAbilityBackgroundMode'].includes(name)
+          : name === 'onCreate' || (kind === 'ui' &&
+            (['onForeground', 'onBackground', 'onNewWant'].includes(name) ||
+            (name === 'onWindowStageCreate' && member.parameters.length > 0 && ts.isIdentifier(member.parameters[0].name))));
+        if (recognized) {
+          injections.push({ position, content: '{' });
+          injections.push({ position: member.body.end, content: '; }' });
+        }
       }
-      const indentation = methodIndentation(code, member);
-      const position = member.body.getStart(sourceFile) + 1;
+      const finish = (): void => {
+        if (!block) injections.push({ position, content: '\n' + indentation + 'return ' });
+      };
       if (kind === 'intent' || kind === 'legacyIntent') {
         let mode: string | null = null;
-        if (kind === 'intent' && member.name.text === 'onExecute') {
+        if (kind === 'intent' && name === 'onExecute') {
           mode = 'this.executeMode';
-        } else if (kind === 'legacyIntent' && member.name.text === 'onExecuteInUIAbilityForegroundMode') {
+        } else if (kind === 'legacyIntent' && name === 'onExecuteInUIAbilityForegroundMode') {
           mode = '0';
-        } else if (kind === 'legacyIntent' && member.name.text === 'onExecuteInUIAbilityBackgroundMode') {
+        } else if (kind === 'legacyIntent' && name === 'onExecuteInUIAbilityBackgroundMode') {
           mode = '1';
         }
         if (mode !== null) {
@@ -522,9 +608,10 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
           injections.push({ position, content: `\n${indentation}${bridgeName}.recordInsightIntentExecute(` +
             `${mode}, ${intentName}, this.context, ${abilityName});` });
         }
+        if (mode !== null) finish();
         return;
       }
-      if (member.name.text === 'onCreate') {
+      if (name === 'onCreate') {
         hasOnCreate = true;
         let content = kind === 'ui' ? '' :
           `\n${indentation}${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
@@ -546,30 +633,30 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
             }
             launchParamName = selectIdentifierName(identifiers, '__ftLaunchParam');
             added.push(`${launchParamName}?: ${launchTypes.abilityConstant}.LaunchParam`);
-            const beforeClose = code.lastIndexOf(')', member.body.getStart(sourceFile));
-            const separator = parameters.length > 0 && !parameters.hasTrailingComma ? ', ' : '';
-            injections.push({ position: beforeClose, content: separator + added.join(', ') });
+            addLaunchParameters(ts, sourceFile, member, added, injections);
           }
           content += `\n${indentation}${bridgeName}.recordFirstUIAbilityCreate(${launchParamName}, ${wantName}, this);`;
         }
         injections.push({ position, content });
+        finish();
         return;
       }
-      if (kind === 'ui' && (member.name.text === 'onForeground' || member.name.text === 'onBackground' ||
-        member.name.text === 'onNewWant')) {
-        if (member.name.text === 'onForeground') {
+      if (kind === 'ui' && (name === 'onForeground' || name === 'onBackground' ||
+        name === 'onNewWant')) {
+        if (name === 'onForeground') {
           hasOnForeground = true;
-        } else if (member.name.text === 'onBackground') {
+        } else if (name === 'onBackground') {
           hasOnBackground = true;
         } else {
           hasOnNewWant = true;
         }
-        const hook = member.name.text === 'onForeground' ? 'recordUIAbilityForeground' :
-          (member.name.text === 'onBackground' ? 'recordUIAbilityBackground' : 'recordUIAbilityNewWant');
+        const hook = name === 'onForeground' ? 'recordUIAbilityForeground' :
+          (name === 'onBackground' ? 'recordUIAbilityBackground' : 'recordUIAbilityNewWant');
         injections.push({ position, content: `\n${indentation}${bridgeName}.${hook}(this);` });
+        finish();
         return;
       }
-      if (kind !== 'ui' || member.name.text !== 'onWindowStageCreate' || member.parameters.length === 0) {
+      if (kind !== 'ui' || name !== 'onWindowStageCreate' || member.parameters.length === 0) {
         return;
       }
       const windowStageParameter = member.parameters[0];
@@ -579,14 +666,15 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       const windowStageName = windowStageParameter.name.text;
       injections.push({
         position,
-        content: `\n${indentation}${bridgeName}.observeFirstFrame(${windowStageName});`
+        content: `\n${indentation}if (${windowStageName}) { ${bridgeName}.observeFirstFrame(${windowStageName}); }`
       });
+      finish();
     });
     if (kind === 'ui') {
-      node.members.forEach((member: any) => {
-        if (!ts.isMethodDeclaration(member) || !member.body) {
-          return;
-        }
+      node.members.forEach((declaration: any) => {
+        if ((declaration.modifiers || []).some((modifier: any) => modifier.kind === ts.SyntaxKind.StaticKeyword)) return;
+        const member = callableMember(ts, declaration);
+        if (!member) return;
         const windowStageNames = collectWindowStageParameterNames(ts, sourceFile, member);
         if (windowStageNames.size > 0) {
           injections.push(...createFirstFrameRetryInjections(
@@ -594,41 +682,42 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
         }
       });
     }
-    // Application bases receive their own hooks. Do not synthesize overrides
-    // in subclasses that would hide inherited application lifecycle behavior.
-    if (kind === 'stage' && !hasOnCreate && !classification.applicationBase) {
-      const indentation = classIndentation(code, node);
-      injections.push({
-        position: node.end - 1,
-        content: `\n${indentation}  onCreate(): void {\n` +
-          `${indentation}    ${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});\n` +
-          `${indentation}  }\n`
-      });
+    if (kind === 'stage' && !hasOnCreate) {
+      const inherited = inheritedState(node, 'onCreate');
+      if (!inherited.covered) {
+        const hook = `${bridgeName}.recordApplicationInit(this.context${pluginVersionArgument});`;
+        if (inherited.member) wrapInherited(node, 'onCreate', hook, false, inherited.member);
+        else injections.push({ position: node.end - 1,
+          content: `\n  onCreate(): void { ${hook} }\n` });
+      }
     }
-    if (kind === 'ui' && !hasOnCreate && !classification.applicationBase) {
-      launchTypes.needed = true;
-      const indentation = classIndentation(code, node);
-      const wantName = selectIdentifierName(identifiers, '__ftLaunchWant');
-      const paramName = selectIdentifierName(identifiers, '__ftLaunchParam');
-      injections.push({
-        position: node.end - 1,
-        content: `\n${indentation}  onCreate(${wantName}: ${launchTypes.want}, ` +
-          `${paramName}: ${launchTypes.abilityConstant}.LaunchParam): void {\n` +
-          `${indentation}    ${bridgeName}.recordFirstUIAbilityCreate(${paramName}, ${wantName}, this);\n` +
-          `${indentation}  }\n`
-      });
+    if (kind === 'ui' && !hasOnCreate) {
+      const inherited = inheritedState(node, 'onCreate');
+      if (!inherited.covered) {
+        launchTypes.needed = true;
+        if (inherited.member) {
+          wrapInherited(node, 'onCreate', `${bridgeName}.recordFirstUIAbilityCreate($launch, $want, this);`, true, inherited.member);
+        } else {
+          const wantName = selectIdentifierName(identifiers, '__ftLaunchWant');
+          const paramName = selectIdentifierName(identifiers, '__ftLaunchParam');
+          injections.push({ position: node.end - 1, content: `\n  onCreate(${wantName}: ${launchTypes.want}, ` +
+            `${paramName}: ${launchTypes.abilityConstant}.LaunchParam): void {\n` +
+            `    ${bridgeName}.recordFirstUIAbilityCreate(${paramName}, ${wantName}, this);\n  }\n` });
+        }
+      }
     }
-    if (kind === 'ui' && !classification.applicationBase) {
-      const indentation = classIndentation(code, node);
+    if (kind === 'ui') {
       for (const [method, hook, exists] of [
         ['onForeground', 'recordUIAbilityForeground', hasOnForeground],
         ['onBackground', 'recordUIAbilityBackground', hasOnBackground],
         ['onNewWant', 'recordUIAbilityNewWant', hasOnNewWant]
       ]) {
-        if (!exists) {
-          injections.push({ position: node.end - 1, content: `\n${indentation}  ${method}(): void {\n` +
-            `${indentation}    ${bridgeName}.${hook}(this);\n${indentation}  }\n` });
-        }
+        if (exists) continue;
+        const inherited = inheritedState(node, method as string);
+        if (inherited.covered) continue;
+        const call = `${bridgeName}.${hook}(this);`;
+        if (inherited.member) wrapInherited(node, method as string, call, method === 'onNewWant', inherited.member);
+        else injections.push({ position: node.end - 1, content: `\n  ${method}(): void { ${call} }\n` });
       }
     }
   });
