@@ -302,6 +302,17 @@ interface RUMViewCloseScope {
   longTaskReady: Promise<void>;
 }
 
+/** Event identity is captured from one View and only its matching Action. */
+interface RUMEventIdentity {
+  sessionId: string;
+  viewId: string;
+  viewName: string;
+  viewReferrer: string;
+  actionId: string;
+  actionName: string;
+  hasReplay: boolean;
+}
+
 
 const TAG = "FTRUMInnerManager";
 
@@ -367,6 +378,7 @@ export class FTRUMInnerManager {
   private syntheticViewReady: Map<string, Promise<void>> = new Map();
   private syntheticCloseBarrier: Promise<void> = Promise.resolve();
   private viewInitializationReady: Map<string, Promise<void>> = new Map();
+  private viewStorageContexts: Map<string, Context> = new Map();
   private longTaskDurationUpdates: Map<string, Promise<void>> = new Map();
   private appState: AppState = AppState.RUN;
   private activeAction: ActiveActionBean | null = null;
@@ -2547,6 +2559,7 @@ export class FTRUMInnerManager {
     this.preferencesInitialized = false;
     this.preferencesInitPromise = null;
     this.pendingViewClosures.clear();
+    this.viewStorageContexts.clear();
     this.protectedCrashRecoveryViewIds.clear();
   }
   
@@ -2635,9 +2648,16 @@ export class FTRUMInnerManager {
   public async saveRumContextAsync(): Promise<void> {
     const generation = this.lifecycleGeneration;
     if (!this.isLifecycleCurrent(generation)) return;
-    const viewId = this.activeView?.getId() || '';
-    const viewName = this.activeView?.getViewName() || '';
-    const viewReferrer = this.activeView?.getViewReferrer() || '';
+    let view = this.appState === AppState.BACKGROUND ?
+      this.syntheticViews.get(Constants.VIEW_NAME_BACKGROUND) || null : this.activeView;
+    if (view === null || view.getSessionId() !== this.sessionId) {
+      view = this.launchView?.getSessionId() === this.sessionId ? this.launchView :
+        this.syntheticViews.get(Constants.VIEW_NAME_ROOT_FALLBACK) || null;
+    }
+    if (view !== null && view.getSessionId() !== this.sessionId) view = null;
+    const viewId = view?.getId() || '';
+    const viewName = view?.getViewName() || '';
+    const viewReferrer = view?.getViewReferrer() || '';
     const sessionId = this.sessionId;
     const snapshot: FTRUMCrashRecoveryContext = { viewId, viewName, viewReferrer, sessionId };
 
@@ -2763,7 +2783,7 @@ export class FTRUMInnerManager {
    */
   public initParams(config: FTRUMConfig): void {
     const wasRunning = this.lifecycleState === RUMManagerLifecycle.RUNNING;
-    this.lifecycleGeneration++;
+    const generation = ++this.lifecycleGeneration;
     this.lifecycleState = RUMManagerLifecycle.RUNNING;
     this.shutdownTask = null;
     this.initSessionTimer();
@@ -2784,18 +2804,25 @@ export class FTRUMInnerManager {
     this.sessionErrorSampleRate = config.getSessionErrorSampleRate();
     
     // Generate new session ID (aligned with Android)
-    this.sessionId = Utils.generateUUID();
+    const nextSessionId = Utils.generateUUID();
     this.lastSessionTime = Utils.getCurrentNanoTime();
     this.lastUserActiveTime = this.lastSessionTime;
     
     // Check session keep based on sampling rate
-    this.checkSessionKeep(this.sessionId, this.sampleRate, this.sessionErrorSampleRate);
+    this.checkSessionKeep(nextSessionId, this.sampleRate, this.sessionErrorSampleRate);
     
     // Close all existing actions and views (aligned with Android)
     // This is done asynchronously to avoid blocking initialization
     if (this.context) {
-      this.startupViewRecovery = this.closeAllActionAndViewAsync(this.context, this.lifecycleGeneration);
+      this.startupViewRecovery = this.closeAllActionAndViewAsync(this.context, generation);
     }
+    const hadViewContext = this.activeView !== null || this.syntheticViews.size > 0;
+    const closing = this.publishSessionContext(nextSessionId, generation);
+    void Promise.all(closing).catch((error: Error): void => {
+      FTInnerLogger.e(TAG, `Failed to close the previous Session context: ${error}`);
+    });
+    // Do not overwrite predecessor-process crash context during a cold install.
+    if (hadViewContext && this.isLifecycleCurrent(generation)) this.saveRumContext();
     
   }
 
@@ -3488,10 +3515,7 @@ export class FTRUMInnerManager {
       }
       
       this.lastActionTime = currentTime;
-      const view = this.resolveEventView();
-      const viewId = view.getId();
-      const viewName = view.getViewName();
-      const viewReferrer = view.getViewReferrer();
+      const identity = this.captureEventIdentity();
       
       // Refresh session
       this.checkSessionRefresh(true);
@@ -3504,17 +3528,17 @@ export class FTRUMInnerManager {
         this.activeAction = new ActiveActionBean(
           actionName, 
           actionType, 
-          this.sessionId, 
-          viewId, 
-          viewName, 
-          viewReferrer, 
+          identity.sessionId,
+          identity.viewId,
+          identity.viewName,
+          identity.viewReferrer,
           needWait
         );
         
         const recordingId = FTSessionReplayBridgeRegistry.getActionRecordingId(this.activeAction.getStartTime());
         this.activeAction.setReplayRecordingId(recordingId);
         this.activeAction.setHasReplay(this.hasSessionReplayForAction(
-          this.getSemanticRumAppId(), this.sessionId, viewId, recordingId));
+          this.getSemanticRumAppId(), identity.sessionId, identity.viewId, recordingId));
         // Set properties
         if (property && this.hasProperties(property)) {
           this.activeAction.setProperty(property);
@@ -3551,6 +3575,11 @@ export class FTRUMInnerManager {
     const existing = this.syntheticViews.get(viewName);
     if (existing && !existing.isClose() && existing.getSessionId() === this.sessionId) {
       return existing;
+    }
+    if (existing && !existing.isClose()) {
+      existing.close();
+      void this.finishViewClose(existing, true, this.syntheticViewReady.get(viewName) || Promise.resolve())
+        .catch((error: Error): void => { FTInnerLogger.e(TAG, `Failed to close stale synthetic View: ${error}`); });
     }
     const view = new ActiveViewBean(viewName, Constants.VIEW_NAME_ROOT, -1, this.sessionId);
     view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
@@ -3649,16 +3678,45 @@ export class FTRUMInnerManager {
 
   private resolveEventView(state?: AppState): ActiveViewBean {
     const effectiveState = state === AppState.BACKGROUND ? state : this.appState;
-    if (effectiveState !== AppState.BACKGROUND && this.activeView && !this.activeView.isClose()) {
+    if (effectiveState !== AppState.BACKGROUND && this.activeView && !this.activeView.isClose() &&
+      this.activeView.getSessionId() === this.sessionId) {
       return this.activeView;
     }
     if (effectiveState === AppState.BACKGROUND) {
       return this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
     }
-    if (this.launchView && !this.launchView.isClose()) {
+    if (this.launchView && !this.launchView.isClose() && this.launchView.getSessionId() === this.sessionId) {
       return this.launchView;
     }
     return this.ensureSyntheticView(Constants.VIEW_NAME_ROOT_FALLBACK);
+  }
+
+  private captureEventIdentity(state?: AppState, eventView?: ActiveViewBean): RUMEventIdentity {
+    const view = eventView || this.resolveEventView(state);
+    const sessionId = view.getSessionId();
+    const viewId = view.getId();
+    const action = this.activeAction;
+    const matchingAction = action !== null && !action.isActionClose() &&
+      action.getSessionId() === sessionId && action.getViewId() === viewId;
+    return {
+      sessionId,
+      viewId,
+      viewName: view.getViewName(),
+      viewReferrer: view.getViewReferrer(),
+      actionId: matchingAction ? action!.getId() : '',
+      actionName: matchingAction ? action!.getActionName() : '',
+      hasReplay: view.isHasReplay()
+    };
+  }
+
+  private copyViewForSession(previous: ActiveViewBean, sessionId: string): ActiveViewBean {
+    const view = new ActiveViewBean(previous.getViewName(), previous.getViewReferrer(),
+      previous.getLoadTime(), sessionId);
+    const property = previous.getProperty();
+    for (const key of Object.keys(property)) view.addProperty(key, property[key]);
+    view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());
+    view.setCollectType(this.checkSessionWillCollect(sessionId));
+    return view;
   }
 
   private findCurrentViewById(viewId: string): ActiveViewBean | null {
@@ -3771,18 +3829,16 @@ export class FTRUMInnerManager {
       const actualDuration = (isLaunchAction ? duration >= 0 : duration > 0)
         ? duration : Math.max(0, Utils.getCurrentNanoTime() - actualStartTime);
       const view = isLaunchAction ? this.ensureLaunchView(actualStartTime, actionType) : this.resolveEventView();
-      const viewId = view.getId();
-      const viewName = view.getViewName();
-      const viewReferrer = view.getViewReferrer();
-      const collectType = this.checkSessionWillCollect(this.sessionId);
+      const identity = this.captureEventIdentity(undefined, view);
+      const collectType = this.checkSessionWillCollect(identity.sessionId);
       const replayRecordingId = FTSessionReplayBridgeRegistry.getActionRecordingId(actualStartTime);
       const hasReplay = this.hasSessionReplayForAction(
-        this.getSemanticRumAppId(), this.sessionId, viewId, replayRecordingId);
+        this.getSemanticRumAppId(), identity.sessionId, identity.viewId, replayRecordingId);
       let actualProperty: Record<string, object> = {};
       if (property && this.hasProperties(property)) {
         actualProperty = property;
       }
-      this.increaseActionCountInMemory(viewId);
+      this.increaseActionCountInMemory(identity.viewId);
       const payload: SDKRumCompletedActionDTO = {
         dataType: DataType.RUM_APP.toString(),
         customDataType: this.getRumCustomDataType(collectType),
@@ -3793,10 +3849,10 @@ export class FTRUMInnerManager {
         actionId,
         actionName,
         actionType,
-        sessionId: this.sessionId,
-        viewId,
-        viewName,
-        viewReferrer,
+        sessionId: identity.sessionId,
+        viewId: identity.viewId,
+        viewName: identity.viewName,
+        viewReferrer: identity.viewReferrer,
         duration: actualDuration,
         hasReplay,
         replayRecordingId,
@@ -3838,22 +3894,25 @@ export class FTRUMInnerManager {
   }
 
   private createCurrentResourceContext(fallbackActionId: string = '', state?: AppState): SDKRumResourceContextDTO {
-    const view = this.resolveEventView(state);
-    let actionId = fallbackActionId || '';
-    let actionName = '';
-    if (this.activeAction && !this.activeAction.isActionClose()) {
-      actionId = this.activeAction.getId();
-      actionName = this.activeAction.getActionName();
+    const identity = this.captureEventIdentity(state);
+    // A fallback may refer to a closed Action, but never to a different View
+    // or Session. Stored Resource contexts remain authoritative at completion.
+    const fallback = this.activeAction;
+    if (identity.actionId.length === 0 && fallbackActionId.length > 0 && fallback &&
+      fallback.getId() === fallbackActionId && fallback.getSessionId() === identity.sessionId &&
+      fallback.getViewId() === identity.viewId) {
+      identity.actionId = fallback.getId();
+      identity.actionName = fallback.getActionName();
     }
     return {
-      sessionId: this.sessionId,
-      viewId: view.getId(),
-      viewName: view.getViewName(),
-      viewReferrer: view.getViewReferrer(),
-      actionId,
-      actionName,
+      sessionId: identity.sessionId,
+      viewId: identity.viewId,
+      viewName: identity.viewName,
+      viewReferrer: identity.viewReferrer,
+      actionId: identity.actionId,
+      actionName: identity.actionName,
       rumAppId: this.getSemanticRumAppId(),
-      hasReplay: view.isHasReplay(),
+      hasReplay: identity.hasReplay,
       dynamicTags: FTRUMConfigManager.getInstance().getRUMPublicDynamicTags(),
       // The listener owns all platform I/O. Resource creation only copies its
       // cached value, so a request never observes its completion-time network.
@@ -5056,15 +5115,64 @@ export class FTRUMInnerManager {
     return -1;
   }
   
-  /**
-   * Check session refresh
-   */
-  /**
-   * Check reset session_id
-   * Aligned with Android: FTRUMInnerManager.checkSessionRefresh(boolean checkRefreshView)
-   * 
-   * @param checkRefreshView Whether to refresh view when session is refreshed (aligned with Android)
-   */
+  /** Publish Session, View and Action as one synchronous state transition. */
+  private publishSessionContext(
+    nextSessionId: string,
+    generation: number,
+    previousSessionId?: string
+  ): Promise<void>[] {
+    if (!this.isLifecycleCurrent(generation)) return [];
+    const previousView = this.activeView;
+    const previousAction = this.activeAction;
+    const previousLaunch = this.launchView;
+    const previousLaunchReady = this.launchViewReady;
+    const closePage = previousView !== null && !previousView.isClose();
+    const closeLaunch = previousLaunch !== null && !previousLaunch.isClose();
+    const closeAction = previousAction !== null && !previousAction.isActionClose();
+    const nextView = closePage && this.appState !== AppState.BACKGROUND ?
+      this.copyViewForSession(previousView!, nextSessionId) : null;
+
+    // Publish the complete in-memory identity without an await in between.
+    // Timer/startView checks must rotate a visible page even with a false flag.
+    if (closePage) previousView!.close();
+    if (closeLaunch) previousLaunch!.close();
+    if (closeAction) previousAction!.close();
+    this.sessionId = nextSessionId;
+    this.activeView = nextView || previousView;
+    this.activeAction = null;
+
+    // Accepted old writes retain their original identity and storage owner.
+    const closing: Promise<void>[] = [];
+    if (closePage) closing.push(this.finishViewClose(previousView!));
+    if (closeLaunch) closing.push(this.finishViewClose(previousLaunch!, true, previousLaunchReady));
+    if (closeAction) this.closeAction(previousAction!);
+    // Another fallback may have been created during the earlier close await.
+    for (const name of this.syntheticViews.keys()) {
+      const view = this.syntheticViews.get(name);
+      if (view && !view.isClose() && view.getSessionId() !== nextSessionId) {
+        view.close();
+        closing.push(this.finishViewClose(view, true, this.syntheticViewReady.get(name) || Promise.resolve()));
+      }
+    }
+    if (this.appState === AppState.BACKGROUND && this.syntheticViews.has(Constants.VIEW_NAME_BACKGROUND)) {
+      this.ensureSyntheticView(Constants.VIEW_NAME_BACKGROUND);
+    } else if (nextView === null && this.syntheticViews.has(Constants.VIEW_NAME_ROOT_FALLBACK)) {
+      this.ensureSyntheticView(Constants.VIEW_NAME_ROOT_FALLBACK);
+    }
+    if (closePage) this.notifySessionReplayViewStopped(previousView!);
+    if (previousSessionId !== undefined && this.isLifecycleCurrent(generation)) {
+      this.notifySessionReplaySessionRenewed(previousSessionId, nextSessionId);
+    }
+    if (this.isLifecycleCurrent(generation) && nextView !== null && this.activeView === nextView) {
+      FTMonitorManager.getInstance().addMonitor(nextView.getId());
+      this.collectInitialViewMetrics(nextView);
+      this.notifySessionReplayViewStarted(nextView);
+      if (this.isLifecycleCurrent(generation)) this.initView(nextView);
+    }
+    return closing;
+  }
+
+  /** Serialize checks; the caller's flag is diagnostic, expired View identity always rotates. */
   private checkSessionRefresh(checkRefreshView: boolean): Promise<void> {
     const generation = this.lifecycleGeneration;
     if (!this.isLifecycleCurrent(generation)) return Promise.resolve();
@@ -5088,79 +5196,29 @@ export class FTRUMInnerManager {
     generation: number = this.lifecycleGeneration
   ): Promise<void> {
     if (!this.isLifecycleCurrent(generation)) return;
-    const now = Utils.getCurrentNanoTime(); // Use nanoseconds (aligned with Android)
+    const now = Utils.getCurrentNanoTime();
     const longResting = now - this.lastUserActiveTime > FTRUMInnerManager.MAX_RESTING_TIME;
     const longTimeSession = now - this.lastSessionTime > FTRUMInnerManager.SESSION_EXPIRE_TIME;
-    
+
     if (longTimeSession || longResting) {
-      const oldSessionId = this.sessionId;
       await this.syntheticCloseBarrier;
       if (!this.isLifecycleCurrent(generation)) return;
       await this.closeSyntheticViews('', generation);
       if (!this.isLifecycleCurrent(generation)) return;
-      this.lastSessionTime = now;
-      this.sessionId = Utils.generateUUID();
-      this.notifySessionReplaySessionRenewed(oldSessionId, this.sessionId);
-      
-      FTInnerLogger.d(TAG, `Session Track -> New SessionId: ${this.sessionId}, longTimeSessionReset: ${longTimeSession}`);
-      
-      // Recalculate sampling rate
-      this.checkSessionKeep(this.sessionId, this.sampleRate, this.sessionErrorSampleRate);
-      
-      // Refresh view if needed (aligned with Android)
-      if (checkRefreshView) {
-        await this.closeLaunchView(undefined, true, generation);
-        if (!this.isLifecycleCurrent(generation)) return;
-        if (this.activeView && !this.activeView.isClose()) {
-          const previousView = this.activeView;
-          this.notifySessionReplayViewStopped(previousView);
-          previousView.close();
-          // Close the predecessor with its original Session and sampling decision.
-          await this.finishViewClose(previousView);
-          if (!this.isLifecycleCurrent(generation)) return;
-          if (this.activeView !== previousView) {
-            this.lastUserActiveTime = now;
-            this.saveRumContext();
-            return;
-          }
-          if (this.appState === AppState.BACKGROUND) {
-            this.lastUserActiveTime = now;
-            this.saveRumContext();
-            return;
-          }
-          
-          const viewName = previousView.getViewName();
-          const viewReferrer = previousView.getViewReferrer();
-          const property = previousView.getProperty();
-          const loadTime = previousView.getLoadTime();
-          
-          // Create new view with new session ID
-          this.activeView = new ActiveViewBean(viewName, viewReferrer, loadTime, this.sessionId);
-          if (property && Object.keys(property).length > 0) {
-            // Use addProperty to add each property individually (aligned with Android's putAll behavior)
-            const propertyKeys = Object.keys(property);
-            for (let i = 0; i < propertyKeys.length; i++) {
-              const key = propertyKeys[i];
-              const value = (property as Record<string, object>)[key];
-              this.activeView.addProperty(key, value);
-            }
-          }
-          this.activeView.setCollectType(this.checkSessionWillCollect(this.sessionId));
-          FTMonitorManager.getInstance().addMonitor(this.activeView.getId());
-          this.collectInitialViewMetrics(this.activeView);
-          this.notifySessionReplayViewStarted(this.activeView);
-          this.initView(this.activeView);
-          
-          FTInnerLogger.d(TAG, `Session Track -> checkRefreshView sessionId: ${this.activeView.getSessionId()}, viewId: ${this.activeView.getId()}`);
-        }
-      }
 
-      // Save RUM context to preferences for crash recovery
-      this.saveRumContext();
+      const oldSessionId = this.sessionId;
+      const nextSessionId = Utils.generateUUID();
+      this.checkSessionKeep(nextSessionId, this.sampleRate, this.sessionErrorSampleRate);
+      this.lastSessionTime = now;
+      const closing = this.publishSessionContext(nextSessionId, generation, oldSessionId);
+      if (this.isLifecycleCurrent(generation)) {
+        FTInnerLogger.d(TAG, 'Session Track -> New SessionId: ' + nextSessionId +
+          ', longTimeSessionReset: ' + longTimeSession + ', refreshViewRequested: ' + checkRefreshView);
+        this.saveRumContext();
+      }
+      await Promise.all(closing);
+      if (!this.isLifecycleCurrent(generation)) return;
     }
-  
-    // As long as there is RUM data collection activity, the user time will be extended, including background
-    // Aligned with Android: always update lastUserActiveTime (not just for user actions)
     this.lastUserActiveTime = now;
   }
   
@@ -5258,6 +5316,7 @@ export class FTRUMInnerManager {
     activeViewBean.setCollectType(this.checkSessionWillCollect(activeViewBean.getSessionId()));
     const viewBean = activeViewBean.convertToViewBean();
     
+    if (this.context) this.viewStorageContexts.set(activeViewBean.getId(), this.context);
     const ready = this.context ? this.initViewAsync(this.context, viewBean) : Promise.resolve();
     this.viewInitializationReady.set(activeViewBean.getId(), ready);
     return ready;
@@ -5298,7 +5357,7 @@ export class FTRUMInnerManager {
     if (existing) return existing;
     const scope: RUMViewCloseScope = {
       generation: this.lifecycleGeneration,
-      context: this.context,
+      context: this.viewStorageContexts.get(viewId) || this.context,
       initializationReady: this.viewInitializationReady.get(viewId) || Promise.resolve(),
       longTaskReady: this.longTaskDurationUpdates.get(viewId) || Promise.resolve()
     };
@@ -5378,6 +5437,9 @@ export class FTRUMInnerManager {
       if (this.isLifecycleCurrent(scope.generation, true)) {
         this.viewInitializationReady.delete(activeViewBean.getId());
         this.longTaskDurationUpdates.delete(activeViewBean.getId());
+      }
+      if (this.viewStorageContexts.get(activeViewBean.getId()) === scope.context) {
+        this.viewStorageContexts.delete(activeViewBean.getId());
       }
       
     } catch (error) {
@@ -5590,49 +5652,26 @@ export class FTRUMInnerManager {
    * @param isUserAction Whether this is a user action
    */
   public attachRUMRelative(tags: Record<string, string>, isUserAction: boolean, state?: AppState): void {
-    // Associate current view and action
-    // Aligned with Android SDK: only set actionId if activeAction exists and is not closed
-    // Android SDK logic: if (withAction) { if (activeAction != null && !activeAction.isClose()) { ... } }
-    if (isUserAction) {
-      if (this.activeAction && !this.activeAction.isActionClose()) {
-        tags[Constants.KEY_RUM_ACTION_ID] = this.activeAction.getId();
-        tags[Constants.KEY_RUM_ACTION_NAME] = this.activeAction.getActionName();
-      }
+    const identity = this.captureEventIdentity(state);
+    if (tags[Constants.KEY_RUM_ACTION_ID] !== undefined) tags[Constants.KEY_RUM_ACTION_ID] = '';
+    if (tags[Constants.KEY_RUM_ACTION_NAME] !== undefined) tags[Constants.KEY_RUM_ACTION_NAME] = '';
+    if (isUserAction && identity.actionId.length > 0) {
+      tags[Constants.KEY_RUM_ACTION_ID] = identity.actionId;
+      tags[Constants.KEY_RUM_ACTION_NAME] = identity.actionName;
     }
-    
-    const view = this.resolveEventView(state);
-    tags[Constants.KEY_RUM_VIEW_ID] = view.getId();
-    tags[Constants.KEY_RUM_VIEW_NAME] = view.getViewName();
-    tags[Constants.KEY_RUM_VIEW_REFERRER] = view.getViewReferrer();
-    
-    tags[Constants.KEY_RUM_SESSION_ID] = this.sessionId;
+    tags[Constants.KEY_RUM_VIEW_ID] = identity.viewId;
+    tags[Constants.KEY_RUM_VIEW_NAME] = identity.viewName;
+    tags[Constants.KEY_RUM_VIEW_REFERRER] = identity.viewReferrer;
+    tags[Constants.KEY_RUM_SESSION_ID] = identity.sessionId;
   }
 
-  /**
-   * Associate RUM context for resource
-   */
+  /** Preserve the identity captured when a legacy Resource was started. */
   private attachRUMRelativeForResource(resourceBean: ResourceBean): void {
-    const sessionId = this.sessionId;
-    const view = this.resolveEventView();
-    const viewId = view.getId();
-    const viewName = view.getViewName();
-    const viewReferrer = view.getViewReferrer();
-    
-    // Aligned with Android SDK: only set actionId if activeAction exists and is not closed
-    // Android SDK logic: if (activeAction != null && !activeAction.isClose()) { bean.actionId = getActionId(); }
-    // If action is closed or doesn't exist, preserve existing actionId in ResourceBean (don't overwrite with empty string)
-    let actionId = resourceBean.actionId || ""; // Preserve existing actionId if action is closed
-    let actionName = resourceBean.actionName || ""; // Preserve existing actionName if action is closed
-    if (this.activeAction && !this.activeAction.isActionClose()) {
-      actionId = this.activeAction.getId();
-      actionName = this.activeAction.getActionName();
-      FTInnerLogger.d(TAG, `attachRUMRelativeForResource: Setting actionId=${actionId}, actionName=${actionName} for resource`);
-    } else {
-      FTInnerLogger.d(TAG, `attachRUMRelativeForResource: No activeAction or action is closed, preserving existing actionId=${actionId}. activeAction=${this.activeAction ? 'exists' : 'null'}, isActionClose=${this.activeAction ? this.activeAction.isActionClose() : 'N/A'}`);
-    }
-    
-    resourceBean.setRUMContext(sessionId, viewId, viewName, viewReferrer, actionId, actionName);
-    resourceBean.hasSessionReplay = view.isHasReplay();
+    if (resourceBean.sessionId.length > 0 && resourceBean.viewId.length > 0) return;
+    const identity = this.captureEventIdentity();
+    resourceBean.setRUMContext(identity.sessionId, identity.viewId, identity.viewName,
+      identity.viewReferrer, identity.actionId, identity.actionName);
+    resourceBean.hasSessionReplay = identity.hasReplay;
   }
   
   
@@ -6168,6 +6207,7 @@ export class FTRUMInnerManager {
       this.syntheticViewReady.clear();
       this.syntheticCloseBarrier = Promise.resolve();
       this.viewInitializationReady.clear();
+      this.viewStorageContexts.clear();
       this.longTaskDurationUpdates.clear();
       this.appState = AppState.RUN;
       
