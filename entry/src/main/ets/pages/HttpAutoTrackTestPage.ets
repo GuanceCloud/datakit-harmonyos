@@ -31,6 +31,13 @@ import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
 import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 import {
+  HTTP_CHAIN_A_BATCH_SIZE,
+  HTTP_CHAIN_B_BATCH_SIZE,
+  HTTP_CHAIN_B_CONCURRENCY,
+  runHttpChainAControl,
+  runHttpChainBControl
+} from '../utils/HttpInterceptorRetentionControl';
+import {
   preInitChainClientInfo,
   preInitCompatClientInfo,
   preInitControlChainClientInfo,
@@ -88,12 +95,23 @@ export struct HttpAutoTrackTestPage {
   @State errorCount: number = 0;
   @State axiosMode: AxiosAutoTrackMode = 'compat';
   @State localNetworkErrorFilterEnabled: boolean = false;
+  @State chainAControlRuns: number = 0;
+  @State chainAControlAdded: number = 0;
+  @State chainAControlStatus: string = '等待执行 A 组对照';
+  @State chainBControlRuns: number = 0;
+  @State chainBControlApplied: number = 0;
+  @State chainBControlRunning: boolean = false;
+  @State chainBControlStatus: string = '等待执行 B 组对照';
+  @State chainBControlUrl: string = '';
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
   @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
 
   aboutToAppear() {
     this.checkAutoTrackStatus();
+    if (!this.chainBControlUrl) {
+      this.chainBControlUrl = this.getResourceTestUrl('http-chain-b-control', 'https://httpbin.org/get');
+    }
   }
 
   private createRCPSession(baseAddress?: string): rcp.Session {
@@ -118,6 +136,49 @@ export struct HttpAutoTrackTestPage {
 
   private getLocalFailureUrl(source: string): string {
     return `http://127.0.0.1:1/ft-local-network-failure?source=${source}&time=${Date.now()}`;
+  }
+
+  private testHttpChainAControl(): void {
+    const result = runHttpChainAControl();
+    this.chainAControlRuns++;
+    this.chainAControlAdded += result.addedChains;
+    this.chainAControlStatus = `第 ${this.chainAControlRuns} 轮：成功 ${result.addedChains}，失败 ${result.failedChains}；` +
+      `累计成功创建 ${this.chainAControlAdded} 条链。调用已返回，请手动 GC 后比较快照。`;
+    this.addTestResult(`[HTTP-Chain-A] run=${this.chainAControlRuns}, added=${result.addedChains}, ` +
+      `failed=${result.failedChains}, totalAdded=${this.chainAControlAdded}` +
+      (result.lastError ? `, lastError=${result.lastError}` : ''));
+  }
+
+  private async testHttpChainBControl(): Promise<void> {
+    if (this.chainBControlRunning) return;
+    const url = this.chainBControlUrl.trim();
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      this.chainBControlStatus = '请填写有效的 HTTP(S) 测试地址';
+      return;
+    }
+    this.chainBControlRunning = true;
+    this.chainBControlRuns++;
+    this.chainBControlStatus = `第 ${this.chainBControlRuns} 轮：已结束 0/${HTTP_CHAIN_B_BATCH_SIZE} 个请求`;
+    try {
+      const result = await runHttpChainBControl(url, (completed: number): void => {
+        this.chainBControlStatus = `第 ${this.chainBControlRuns} 轮：已结束 ${completed}/${HTTP_CHAIN_B_BATCH_SIZE} 个请求`;
+      });
+      this.chainBControlApplied += result.appliedChains;
+      this.chainBControlStatus = `第 ${this.chainBControlRuns} 轮完成：add=${result.addedChains}，` +
+        `apply=${result.appliedChains}，HTTP 返回=${result.httpResponses}，请求失败=${result.requestFailures}，` +
+        `安装失败=${result.setupFailures}，destroy=${result.destroyedRequests}，销毁失败=${result.destroyFailures}；` +
+        `累计 apply=${this.chainBControlApplied}。请手动 GC 后比较快照。`;
+      this.addTestResult(`[HTTP-Chain-B] run=${this.chainBControlRuns}, added=${result.addedChains}, ` +
+        `applied=${result.appliedChains}, responses=${result.httpResponses}, requestFailures=${result.requestFailures}, ` +
+        `setupFailures=${result.setupFailures}, destroyed=${result.destroyedRequests}, ` +
+        `destroyFailures=${result.destroyFailures}, totalApplied=${this.chainBControlApplied}` +
+        (result.lastError ? `, lastError=${result.lastError}` : ''));
+    } catch (error) {
+      this.chainBControlStatus = `B 组执行异常：${String(error)}`;
+      this.addTestResult(`[HTTP-Chain-B] ${this.chainBControlStatus}`);
+    } finally {
+      this.chainBControlRunning = false;
+    }
   }
 
   private async executeHttpRequest(
@@ -1052,6 +1113,76 @@ export struct HttpAutoTrackTestPage {
 
       Scroll() {
         Column() {
+          Text('A 组对照：仅创建拦截链（API 22+）')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text('每轮创建 100 条原生链，仅调用 addChain()；不执行 apply()，不发起网络请求。执行结束后，在 Profiler 手动 GC。')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 8 })
+
+          Button(`执行 A 组对照（${HTTP_CHAIN_A_BATCH_SIZE} 条链）`)
+            .id('test-http-chain-a-control-btn')
+            .width('100%')
+            .enabled(!this.chainBControlRunning)
+            .backgroundColor('#607D8B')
+            .margin({ bottom: 8 })
+            .onClick(() => this.testHttpChainAControl())
+            .customProperty('test-http-chain-a-control-btn', 'HTTP Chain A Control')
+
+          Text(this.chainAControlStatus)
+            .fontSize(12)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text('快照筛选：HttpChainAInitialInterceptor、HttpChainAFinalInterceptor。每轮 GC 后与基线比较实例数；此处显示的是创建数，不代表存活数。')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 16 })
+
+          Text('B 组对照：应用拦截链并请求（API 22+）')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text(`每轮 ${HTTP_CHAIN_B_BATCH_SIZE} 个 GET 请求，最多 ${HTTP_CHAIN_B_CONCURRENCY} 个并发。空拦截器执行 addChain → apply → 请求 → finally destroy，不安装 SDK 采集。连接、读取超时各 5 秒。`)
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 8 })
+
+          TextInput({ text: this.chainBControlUrl, placeholder: 'B 组 HTTP(S) 测试地址' })
+            .width('100%')
+            .enabled(!this.chainBControlRunning)
+            .margin({ bottom: 8 })
+            .onChange((value: string) => this.chainBControlUrl = value)
+
+          Button(this.chainBControlRunning ? 'B 组运行中…' : `执行 B 组对照（${HTTP_CHAIN_B_BATCH_SIZE} 个请求）`)
+            .id('test-http-chain-b-control-btn')
+            .width('100%')
+            .enabled(!this.chainBControlRunning)
+            .backgroundColor('#455A64')
+            .margin({ bottom: 8 })
+            .onClick(() => this.testHttpChainBControl())
+            .customProperty('test-http-chain-b-control-btn', 'HTTP Chain B Control')
+
+          Text(this.chainBControlStatus)
+            .fontSize(12)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text('等待本轮完成、确认 apply 和 destroy 数量后再手动 GC。快照筛选：HttpChainBInitialInterceptor、HttpChainBFinalInterceptor；与各自基线比较。')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 16 })
+
           Text('Trace configuration: switch, not a global network hook')
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
