@@ -101,6 +101,13 @@ struct Index {
             }.margin({ bottom: 10 })
 
             ListItem() {
+              Button('RUM 完整集成崩溃复现')
+                .id('rum-integrated-open').width(CommonConstants.FULL_PERCENT).height(50)
+                .backgroundColor('#B45309')
+                .onClick(() => { router.pushUrl({ url: 'pages/RUMIntegratedReproPage' }); })
+            }.margin({ bottom: 10 })
+
+            ListItem() {
               Button('RUM Session Lifecycle A/B（重启测试）')
                 .id('rum-lifecycle-open')
                 .width(CommonConstants.FULL_PERCENT)
