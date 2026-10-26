@@ -8,6 +8,8 @@
 export {
   createFTHttpInterceptorChain,
   applyFTAxiosChainMethodBridge,
+  removeFTAxiosChainMethodBridge,
+  disposeFTHttpTrack,
   applyFTHttpTrack,
   HttpInitialRequestInterceptor,
   HttpFinalResponseInterceptor,

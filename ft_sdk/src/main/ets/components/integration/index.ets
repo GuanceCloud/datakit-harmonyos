@@ -6,4 +6,5 @@ export {
   FTSDKExtensionRequestInput,
   FTSDKExtensionPreparedRequest,
   FTSDKExtensionResponseInput,
+  FTSDKExtensionCleanup,
 } from './FTSDKExtensionBridge';

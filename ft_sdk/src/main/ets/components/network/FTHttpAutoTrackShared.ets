@@ -258,6 +258,8 @@ export function createFTNetStatusBean(timing: FTResourceTiming): NetStatusBean {
 
 export interface HttpAutoTrackState {
   resourceId: string;
+  uniqueId?: string;
+  generation?: number;
   url: string;
   method: string;
   startTime: number;
@@ -650,6 +652,9 @@ export interface FTAutoTrackOptions {
 export class HttpAutoTrackStateStore {
   private static instance: HttpAutoTrackStateStore | null = null;
   private readonly stateMap: Map<string, HttpAutoTrackState> = new Map();
+  private readonly resourceIdByUniqueId: Map<string, string> = new Map();
+
+  public static clearExisting(): void { HttpAutoTrackStateStore.instance?.clear(); }
 
   public static getInstance(): HttpAutoTrackStateStore {
     if (HttpAutoTrackStateStore.instance === null) {
@@ -661,21 +666,34 @@ export class HttpAutoTrackStateStore {
   public put(state: HttpAutoTrackState): void {
     if (this.stateMap.size > Constants.MAX_MAP_SIZE_RESOURCE) {
       FTInnerLogger.w(TAG, `[HTTP-AutoTrack] stateMap size (${this.stateMap.size}) exceeds limit, clearing stale states`);
-      this.stateMap.clear();
+      this.clear();
     }
     this.stateMap.set(state.resourceId, state);
+    const uniqueId = state.uniqueId || state.requestHeaders[FT_RESOURCE_ID_HEADER];
+    if (uniqueId) this.resourceIdByUniqueId.set(uniqueId, state.resourceId);
   }
 
   public get(resourceId: string): HttpAutoTrackState | undefined {
     return this.stateMap.get(resourceId);
   }
 
+  public getByUniqueId(uniqueId: string): HttpAutoTrackState | undefined {
+    const resourceId = this.resourceIdByUniqueId.get(uniqueId);
+    return resourceId ? this.stateMap.get(resourceId) : undefined;
+  }
+
   public delete(resourceId: string): void {
+    const state = this.stateMap.get(resourceId);
+    const uniqueId = state ? state.uniqueId || state.requestHeaders[FT_RESOURCE_ID_HEADER] : undefined;
+    if (uniqueId && this.resourceIdByUniqueId.get(uniqueId) === resourceId) {
+      this.resourceIdByUniqueId.delete(uniqueId);
+    }
     this.stateMap.delete(resourceId);
   }
 
   public clear(): void {
     this.stateMap.clear();
+    this.resourceIdByUniqueId.clear();
   }
 
   public size(): number {
@@ -691,6 +709,7 @@ export class HttpAutoTrackStateStore {
 export class HttpAutoTrackCompletionStore {
   private static instance: HttpAutoTrackCompletionStore | null = null;
   private readonly completedResourceIds: Set<string> = new Set();
+  public static clearExisting(): void { HttpAutoTrackCompletionStore.instance?.clear(); }
 
   public static getInstance(): HttpAutoTrackCompletionStore {
     if (HttpAutoTrackCompletionStore.instance === null) {
@@ -723,6 +742,7 @@ export class HttpAutoTrackCompletionStore {
 export class AxiosChainMethodStore {
   private static instance: AxiosChainMethodStore | null = null;
   private readonly methodMap: Map<string, string> = new Map();
+  public static clearExisting(): void { AxiosChainMethodStore.instance?.clear(); }
 
   public static getInstance(): AxiosChainMethodStore {
     if (AxiosChainMethodStore.instance === null) {

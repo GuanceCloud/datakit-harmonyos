@@ -218,6 +218,7 @@ export {
   FTSDKExtensionRequestInput,
   FTSDKExtensionPreparedRequest,
   FTSDKExtensionResponseInput,
+  FTSDKExtensionCleanup,
 } from './src/main/ets/components/integration';
 
 // ============================================================================

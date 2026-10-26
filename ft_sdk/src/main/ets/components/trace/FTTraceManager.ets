@@ -55,12 +55,10 @@ class SizeLimitedConcurrentMap<K, V> {
   }
   
   public   put(key: K, value: V): void {
-    if (this.map.size >= this.maxSize) {
+    if (!this.map.has(key) && this.map.size >= this.maxSize) {
       // Remove oldest entries
-      const keys = Array.from(this.map.keys());
-      if (keys.length > 0) {
-        this.map.delete(keys[0]);
-      }
+      const oldest = this.map.keys().next();
+      if (!oldest.done) this.map.delete(oldest.value);
     }
     this.map.set(key, value);
   }
@@ -107,6 +105,7 @@ export class FTTraceManager {
   private static customTaskSequence: number = 0;
   private cleanupTimer: number | null = null;
   private cleanupTaskRunning: boolean = false;
+  private resourceOwners: Map<string, number> = new Map();
   
   /**
    * Trace handler mapping table, limited to 1000 entries
@@ -128,6 +127,31 @@ export class FTTraceManager {
     }
     return FTTraceManager.instance;
   }
+
+  /** Resource interceptors can surround a Trace interceptor in either order. */
+  public static retainAutoResource(key: string): FTTraceManager | null {
+    if (!FTTraceManager.instance && !FTTraceConfigManager.getInstance().isAutoTraceEnabled()) return null;
+    const manager = FTTraceManager.getInstance();
+    manager.resourceOwners.set(key, (manager.resourceOwners.get(key) || 0) + 1);
+    return manager;
+  }
+
+  public releaseAutoResource(key: string): void {
+    const remaining = (this.resourceOwners.get(key) || 0) - 1;
+    if (remaining > 0) {
+      this.resourceOwners.set(key, remaining);
+    } else {
+      this.resourceOwners.delete(key);
+      this.removeHandler(key);
+    }
+  }
+
+  public static releaseAutoTrace(key: string): void {
+    const manager = FTTraceManager.instance;
+    if (manager && !manager.resourceOwners.has(key)) manager.removeHandler(key);
+  }
+
+  public static shutdownExisting(): void { FTTraceManager.instance?.destroy(); }
   
   /**
    * Add Trace handler
@@ -335,6 +359,7 @@ export class FTTraceManager {
    */
   public clearAllHandlers(): void {
     this.handlerMap.clear();
+    this.resourceOwners.clear();
     FTInnerLogger.d(TAG, "Cleared all trace handlers");
   }
   

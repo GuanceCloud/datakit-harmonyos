@@ -13,6 +13,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { FTTraceManager } from '../trace/FTTraceManager';
 import { FTTraceHandler } from '../trace/FTTraceHandler';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
+import { FTNetworkDisposable, FTNetworkLifecycle } from './FTNetworkLifecycle';
 import {
   createFTNetworkErrorContext,
   FTNetworkErrorContext,
@@ -67,6 +68,14 @@ class RcpPlatformMetricStore {
   private static instance: RcpPlatformMetricStore | null = null;
   private readonly trackedRequestIds: Set<string> = new Set();
   private readonly uploadedBytesByRequestId: Map<string, number> = new Map();
+  private cleanupId: number = 0;
+
+  public dispose(): void {
+    this.trackedRequestIds.clear();
+    this.uploadedBytesByRequestId.clear();
+    FTNetworkLifecycle.unregister(this.cleanupId);
+    this.cleanupId = 0;
+  }
 
   public static getInstance(): RcpPlatformMetricStore {
     if (RcpPlatformMetricStore.instance === null) {
@@ -76,6 +85,7 @@ class RcpPlatformMetricStore {
   }
 
   public track(requestId: string): void {
+    if (!this.cleanupId) this.cleanupId = FTNetworkLifecycle.register(this);
     if (requestId && requestId.length > 0) {
       this.trackedRequestIds.add(requestId);
     }
@@ -250,12 +260,24 @@ function createRCPResourceTiming(timeInfo: TimeInfoStructure, fallbackLoadNs: nu
  * RCP Resource Interceptor
  * Automatically intercepts HTTP requests and collects resource data
  */
-export class RCPResourceInterceptor implements rcp.Interceptor {
+export class RCPResourceInterceptor implements rcp.Interceptor, FTNetworkDisposable {
+  private generation: number = FTNetworkLifecycle.capture();
+  private cleanupId: number = FTNetworkLifecycle.register(this);
+
+  public dispose(): void {
+    this.isEnabled = false;
+    this.resourceActionMap.clear();
+    this.resourceTransportMetricsMap.clear();
+    this.networkErrorHandler = undefined;
+    this.resourceTransportMetricsProvider = undefined;
+    FTNetworkLifecycle.unregister(this.cleanupId);
+  }
+
   private isEnabled: boolean = true;
   private resourceActionMap: Map<string, string> = new Map();
   private resourceTransportMetricsMap: Map<string, FTResourceTransportMetricsInput> = new Map();
-  private readonly networkErrorHandler: FTNetworkErrorHandler | undefined;
-  private readonly resourceTransportMetricsProvider: FTResourceTransportMetricsProvider | undefined;
+  private networkErrorHandler: FTNetworkErrorHandler | undefined;
+  private resourceTransportMetricsProvider: FTResourceTransportMetricsProvider | undefined;
 
   constructor(
     networkErrorHandler?: FTNetworkErrorHandler,
@@ -348,7 +370,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
   }
 
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
-    if (!this.isEnabled) {
+    if (!this.isEnabled || !FTNetworkLifecycle.isCurrent(this.generation)) {
       return await next.handle(context);
     }
 
@@ -379,227 +401,240 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
     }
 
     const resourceId = `${method}_${url}_${uniqueId}`;
-    RcpPlatformMetricStore.getInstance().track(context.request.id);
-
-    const savedRequestHeaders: Record<string, string> = {};
-    if (context.request.headers) {
-      const headerKeys = Object.keys(context.request.headers);
-      for (let i = 0; i < headerKeys.length; i++) {
-        const key = headerKeys[i];
-        const value = context.request.headers[key];
-        if (typeof value === 'string') {
-          savedRequestHeaders[key] = value;
-        } else if (Array.isArray(value) && value.length > 0) {
-          savedRequestHeaders[key] = value[0] as string;
-        }
-      }
-    }
-
-    const traceManager = FTTraceManager.getInstance();
-    const traceContext = traceManager.getTraceContext(resourceId);
-    if (traceContext) {
-      try {
-        const contextHeaders = traceContext.headers;
-        const contextHeaderKeys = Object.keys(contextHeaders);
-        for (let i = 0; i < contextHeaderKeys.length; i++) {
-          const key = contextHeaderKeys[i];
-          savedRequestHeaders[key] = contextHeaders[key];
-        }
-      } catch (error) {
-        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to get trace headers from TraceContext: ${error}`);
-      }
-    }
-
-    if (!context.request.headers) {
-      context.request.headers = {};
-    }
-    const savedHeaderKeys = Object.keys(savedRequestHeaders);
-    for (let i = 0; i < savedHeaderKeys.length; i++) {
-      const key = savedHeaderKeys[i];
-      if (context.request.headers[key] === undefined) {
-        context.request.headers[key] = savedRequestHeaders[key];
-      }
-    }
-    if (this.resourceTransportMetricsProvider) {
-      try {
-        const requestWithContent = context.request as Object as FTRCPRequestWithContent;
-        const metrics = this.resourceTransportMetricsProvider({
-          url: url,
-          method: method,
-          headers: savedRequestHeaders,
-          body: requestWithContent.content
-        });
-        if (metrics) {
-          this.resourceTransportMetricsMap.set(resourceId, metrics);
-        }
-      } catch (error) {
-        FTInnerLogger.w(TAG, `[RCP-Resource] Ignored transport metrics provider error for resourceId=${resourceId}: ${error}`);
-      }
-    }
-    FTInnerLogger.d(TAG, `[RCP-Resource] Tracking request ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(savedRequestHeaders)}`);
-
-    FTRUMInnerManager.getInstance().startResource(resourceId);
-
-    const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
-    if (activeAction && !activeAction.isActionClose()) {
-      this.resourceActionMap.set(resourceId, activeAction.getId());
-    }
-
-    const startTime = Date.now();
-
-    let response: rcp.Response;
+    const traceOwner = FTTraceManager.retainAutoResource(resourceId);
     try {
-      response = await next.handle(context);
-    } catch (err) {
-      try {
-        this.completeLocalFailure(
-          resourceId,
-          context.request.id,
-          url,
-          method,
-          savedRequestHeaders,
-          context.request.headers as Object,
-          getRcpRequestBody(context.request),
-          startTime,
-          err
-        );
-      } catch (trackingError) {
-        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
-      }
-      // ArkTS permits throwing Error values only. Preserve the native Error
-      // object unchanged; primitive/non-Error adapter rejections retain the
-      // SDK's existing compatibility wrapper.
-      if (err instanceof Error) {
-        throw err;
-      }
-      throw new Error(String(err));
-    }
+      RcpPlatformMetricStore.getInstance().track(context.request.id);
 
-    // A positive status is the only shape that represents a real HTTP
-    // response. Should an RCP version resolve a status-0 Response for a local
-    // failure, handle it before Error creation but preserve that Response for
-    // the caller unchanged.
-    if ((response.statusCode || 0) <= 0) {
-      try {
-        this.completeLocalFailure(
-          resourceId,
-          context.request.id,
-          url,
-          method,
-          savedRequestHeaders,
-          context.request.headers as Object,
-          getRcpRequestBody(context.request),
-          startTime,
-          new Error('RCP request completed without an HTTP response (statusCode=0)')
-        );
-      } catch (trackingError) {
-        FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record status-zero response for resourceId=${resourceId}: ${trackingError}`);
-      }
-      return response;
-    }
-
-    const responseTime = Date.now() - startTime;
-    const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
-    let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
-    let netStatusBean = createFTNetStatusBean(resourceTiming);
-
-    const resourceParams = new ResourceParams();
-    resourceParams.setUrl(url);
-    resourceParams.setResourceMethod(method);
-    resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
-    resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
-    resourceParams.setResourceStatus(response.statusCode || 0);
-    applyIntegrationTransportMetrics(resourceParams, this.resourceTransportMetricsMap.get(resourceId));
-    const uploadedBytes = RcpPlatformMetricStore.getInstance().takeUploadedBytes(response.request.id);
-    if (uploadedBytes !== undefined) {
-      resourceParams.setPlatformRequestBodySize(uploadedBytes);
-    }
-    const outgoingHeaderBytes = getRcpOutgoingHeaderByteSize(response);
-    if (outgoingHeaderBytes !== undefined) {
-      resourceParams.setPlatformRequestHeaderSize(outgoingHeaderBytes);
-    }
-    const httpProtocol = normalizeRcpHttpVersion(response.httpVersion);
-    if (httpProtocol !== undefined) {
-      resourceParams.setPlatformHttpProtocol(httpProtocol);
-    }
-    applyHeaderInferredTransportMetrics(
-      resourceParams,
-      createHeaderInferredTransportMetrics(
-        response.request.headers as Object,
-        savedRequestHeaders,
-        getRcpRequestBody(response.request)
-      )
-    );
-
-    // A response has already been received. Header and timing collection are
-    // best-effort only: a malformed platform value must not turn an HTTP
-    // response (including 4xx/5xx) into a local network failure with status 0.
-    try {
-      if (response.headers) {
-        const responseHeaders = normalizeObjectHeaders(response.headers as Object);
-        const responseHeader = JSON.stringify(response.headers);
-        resourceParams.setResponseHeaderMap(buildResponseHeaderMap(responseHeaders));
-        resourceParams.setResponseHeader(responseHeader);
-
-        const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
-        const contentLength = responseHeaders['content-length'] || responseHeaders['Content-Length'];
-        const contentEncoding = responseHeaders['content-encoding'] || responseHeaders['Content-Encoding'];
-        const connection = responseHeaders['connection'] || responseHeaders['Connection'];
-
-        if (contentType) {
-          resourceParams.setResponseContentType(contentType);
-        }
-        if (contentLength) {
-          const length = parseInt(contentLength, 10);
-          if (!isNaN(length)) {
-            resourceParams.setResponseContentLength(length);
+      const savedRequestHeaders: Record<string, string> = {};
+      if (context.request.headers) {
+        const headerKeys = Object.keys(context.request.headers);
+        for (let i = 0; i < headerKeys.length; i++) {
+          const key = headerKeys[i];
+          const value = context.request.headers[key];
+          if (typeof value === 'string') {
+            savedRequestHeaders[key] = value;
+          } else if (Array.isArray(value) && value.length > 0) {
+            savedRequestHeaders[key] = value[0] as string;
           }
         }
-        if (contentEncoding) {
-          resourceParams.setResponseContentEncoding(contentEncoding);
-        }
-        if (connection) {
-          resourceParams.setResponseConnection(connection);
+      }
+
+      const traceManager = FTTraceManager.getInstance();
+      const traceContext = traceManager.getTraceContext(resourceId);
+      if (traceContext) {
+        try {
+          const contextHeaders = traceContext.headers;
+          const contextHeaderKeys = Object.keys(contextHeaders);
+          for (let i = 0; i < contextHeaderKeys.length; i++) {
+            const key = contextHeaderKeys[i];
+            savedRequestHeaders[key] = contextHeaders[key];
+          }
+        } catch (error) {
+          FTInnerLogger.w(TAG, `[RCP-Resource] Failed to get trace headers from TraceContext: ${error}`);
         }
       }
-    } catch (error) {
-      FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid response headers for resourceId=${resourceId}: ${error}`);
-    }
 
-    try {
-      if (response.timeInfo) {
-        const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
-        resourceTiming = createRCPResourceTiming(timeInfoObj, fallbackLoadNs);
-        netStatusBean = createFTNetStatusBean(resourceTiming);
-        FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
+      if (!context.request.headers) {
+        context.request.headers = {};
       }
-    } catch (error) {
-      FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid timing data for resourceId=${resourceId}: ${error}`);
-    }
+      const savedHeaderKeys = Object.keys(savedRequestHeaders);
+      for (let i = 0; i < savedHeaderKeys.length; i++) {
+        const key = savedHeaderKeys[i];
+        if (context.request.headers[key] === undefined) {
+          context.request.headers[key] = savedRequestHeaders[key];
+        }
+      }
+      if (this.resourceTransportMetricsProvider) {
+        try {
+          const requestWithContent = context.request as Object as FTRCPRequestWithContent;
+          const metrics = this.resourceTransportMetricsProvider({
+            url: url,
+            method: method,
+            headers: savedRequestHeaders,
+            body: requestWithContent.content
+          });
+          if (metrics) {
+            this.resourceTransportMetricsMap.set(resourceId, metrics);
+          }
+        } catch (error) {
+          FTInnerLogger.w(TAG, `[RCP-Resource] Ignored transport metrics provider error for resourceId=${resourceId}: ${error}`);
+        }
+      }
+      FTInnerLogger.d(TAG, `[RCP-Resource] Tracking request ${method} ${url}, resourceId=${resourceId}, ${summarizeHeaderKeys(savedRequestHeaders)}`);
 
-    try {
-      FTInnerLogger.d(
-        TAG,
-        `[RCP-Resource] Completed ${method} ${url}, status=${resourceParams.resourceStatus}, duration=${responseTime}ms, contentType=${resourceParams.responseContentType}, contentLength=${resourceParams.responseContentLength}`
-      );
+      FTRUMInnerManager.getInstance().startResource(resourceId);
 
-      if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
-        FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate completion ignored: ${resourceId}`);
+      const activeAction = FTRUMInnerManager.getInstance().getActiveAction();
+      if (activeAction && !activeAction.isActionClose()) {
+        this.resourceActionMap.set(resourceId, activeAction.getId());
+      }
+
+      const startTime = Date.now();
+
+      let response: rcp.Response;
+      try {
+        response = await next.handle(context);
+      } catch (err) {
+        try {
+          if (FTNetworkLifecycle.isCurrent(this.generation)) this.completeLocalFailure(
+            resourceId,
+            context.request.id,
+            url,
+            method,
+            savedRequestHeaders,
+            context.request.headers as Object,
+            getRcpRequestBody(context.request),
+            startTime,
+            err
+          );
+        } catch (trackingError) {
+          FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
+        }
+        // ArkTS permits throwing Error values only. Preserve the native Error
+        // object unchanged; primitive/non-Error adapter rejections retain the
+        // SDK's existing compatibility wrapper.
+        if (err instanceof Error) {
+          throw err;
+        }
+        throw new Error(String(err));
+      }
+
+      if (!FTNetworkLifecycle.isCurrent(this.generation)) return response;
+
+      // A positive status is the only shape that represents a real HTTP
+      // response. Should an RCP version resolve a status-0 Response for a local
+      // failure, handle it before Error creation but preserve that Response for
+      // the caller unchanged.
+      if ((response.statusCode || 0) <= 0) {
+        try {
+          this.completeLocalFailure(
+            resourceId,
+            context.request.id,
+            url,
+            method,
+            savedRequestHeaders,
+            context.request.headers as Object,
+            getRcpRequestBody(context.request),
+            startTime,
+            new Error('RCP request completed without an HTTP response (statusCode=0)')
+          );
+        } catch (trackingError) {
+          FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record status-zero response for resourceId=${resourceId}: ${trackingError}`);
+        }
         return response;
       }
-      FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
-      FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
-      const fallbackActionId = this.resourceActionMap.get(resourceId);
-      FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
-      if (fallbackActionId) {
-        this.resourceActionMap.delete(resourceId);
+
+      const responseTime = Date.now() - startTime;
+      const fallbackLoadNs = Math.max(responseTime, 1) * MS_TO_NS;
+      let resourceTiming = createFallbackFTResourceTiming(fallbackLoadNs);
+      let netStatusBean = createFTNetStatusBean(resourceTiming);
+
+      const resourceParams = new ResourceParams();
+      resourceParams.setUrl(url);
+      resourceParams.setResourceMethod(method);
+      resourceParams.setRequestHeaderMap(buildRequestHeaderMap(savedRequestHeaders));
+      resourceParams.setRequestHeader(JSON.stringify(savedRequestHeaders));
+      resourceParams.setResourceStatus(response.statusCode || 0);
+      applyIntegrationTransportMetrics(resourceParams, this.resourceTransportMetricsMap.get(resourceId));
+      const uploadedBytes = RcpPlatformMetricStore.getInstance().takeUploadedBytes(response.request.id);
+      if (uploadedBytes !== undefined) {
+        resourceParams.setPlatformRequestBodySize(uploadedBytes);
       }
-    } catch (error) {
-      FTInnerLogger.e(TAG, `[RCP-Resource] Failed to record completed response for resourceId=${resourceId}: ${error}`);
+      const outgoingHeaderBytes = getRcpOutgoingHeaderByteSize(response);
+      if (outgoingHeaderBytes !== undefined) {
+        resourceParams.setPlatformRequestHeaderSize(outgoingHeaderBytes);
+      }
+      const httpProtocol = normalizeRcpHttpVersion(response.httpVersion);
+      if (httpProtocol !== undefined) {
+        resourceParams.setPlatformHttpProtocol(httpProtocol);
+      }
+      applyHeaderInferredTransportMetrics(
+        resourceParams,
+        createHeaderInferredTransportMetrics(
+          response.request.headers as Object,
+          savedRequestHeaders,
+          getRcpRequestBody(response.request)
+        )
+      );
+
+      // A response has already been received. Header and timing collection are
+      // best-effort only: a malformed platform value must not turn an HTTP
+      // response (including 4xx/5xx) into a local network failure with status 0.
+      try {
+        if (response.headers) {
+          const responseHeaders = normalizeObjectHeaders(response.headers as Object);
+          const responseHeader = JSON.stringify(response.headers);
+          resourceParams.setResponseHeaderMap(buildResponseHeaderMap(responseHeaders));
+          resourceParams.setResponseHeader(responseHeader);
+
+          const contentType = responseHeaders['content-type'] || responseHeaders['Content-Type'];
+          const contentLength = responseHeaders['content-length'] || responseHeaders['Content-Length'];
+          const contentEncoding = responseHeaders['content-encoding'] || responseHeaders['Content-Encoding'];
+          const connection = responseHeaders['connection'] || responseHeaders['Connection'];
+
+          if (contentType) {
+            resourceParams.setResponseContentType(contentType);
+          }
+          if (contentLength) {
+            const length = parseInt(contentLength, 10);
+            if (!isNaN(length)) {
+              resourceParams.setResponseContentLength(length);
+            }
+          }
+          if (contentEncoding) {
+            resourceParams.setResponseContentEncoding(contentEncoding);
+          }
+          if (connection) {
+            resourceParams.setResponseConnection(connection);
+          }
+        }
+      } catch (error) {
+        FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid response headers for resourceId=${resourceId}: ${error}`);
+      }
+
+      try {
+        if (response.timeInfo) {
+          const timeInfoObj = response.timeInfo as object as TimeInfoStructure;
+          resourceTiming = createRCPResourceTiming(timeInfoObj, fallbackLoadNs);
+          netStatusBean = createFTNetStatusBean(resourceTiming);
+          FTInnerLogger.d(TAG, `[RCP-Resource] Performance metrics extracted for resourceId=${resourceId}: ${summarizePerformanceMetrics(resourceTiming.performanceMetrics)}`);
+        }
+      } catch (error) {
+        FTInnerLogger.w(TAG, `[RCP-Resource] Ignored invalid timing data for resourceId=${resourceId}: ${error}`);
+      }
+
+      try {
+        FTInnerLogger.d(
+          TAG,
+          `[RCP-Resource] Completed ${method} ${url}, status=${resourceParams.resourceStatus}, duration=${responseTime}ms, contentType=${resourceParams.responseContentType}, contentLength=${resourceParams.responseContentLength}`
+        );
+
+        if (!HttpAutoTrackCompletionStore.getInstance().tryClaim(resourceId)) {
+          FTInnerLogger.d(TAG, `[RCP-Resource] Duplicate completion ignored: ${resourceId}`);
+          return response;
+        }
+        FTRUMInnerManager.getInstance().setTransformContent(resourceId, resourceParams);
+        FTRUMInnerManager.getInstance().setNetState(resourceId, netStatusBean);
+        const fallbackActionId = this.resourceActionMap.get(resourceId);
+        FTRUMInnerManager.getInstance().stopResourceInternal(resourceId, fallbackActionId);
+        if (fallbackActionId) {
+          this.resourceActionMap.delete(resourceId);
+        }
+      } catch (error) {
+        FTInnerLogger.e(TAG, `[RCP-Resource] Failed to record completed response for resourceId=${resourceId}: ${error}`);
+      } finally {
+        this.resourceTransportMetricsMap.delete(resourceId);
+      }
+      return response;
     } finally {
+      // Duplicate completions and transport exceptions still release local ownership.
+      this.resourceActionMap.delete(resourceId);
       this.resourceTransportMetricsMap.delete(resourceId);
+      if (FTNetworkLifecycle.isCurrent(this.generation)) {
+        RcpPlatformMetricStore.getInstance().takeUploadedBytes(context.request.id);
+      }
+      traceOwner?.releaseAutoResource(resourceId);
     }
-    return response;
   }
 }
 
@@ -607,7 +642,15 @@ export class RCPResourceInterceptor implements rcp.Interceptor {
  * RCP Trace Interceptor
  * Automatically adds trace headers to HTTP requests
  */
-export class RCPTraceInterceptor implements rcp.Interceptor {
+export class RCPTraceInterceptor implements rcp.Interceptor, FTNetworkDisposable {
+  private generation: number = FTNetworkLifecycle.capture();
+  private cleanupId: number = FTNetworkLifecycle.register(this);
+
+  public dispose(): void {
+    this.disable();
+    FTNetworkLifecycle.unregister(this.cleanupId);
+  }
+
   private traceInterceptor: FTTraceInterceptor | null = null;
   private isEnabled: boolean = false;
 
@@ -647,12 +690,13 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
   }
 
   async intercept(context: rcp.RequestContext, next: rcp.RequestHandler): Promise<rcp.Response> {
-    if (!this.isEnabled || !this.traceInterceptor) {
+    if (!this.isEnabled || !this.traceInterceptor || !FTNetworkLifecycle.isCurrent(this.generation)) {
       return await next.handle(context);
     }
 
     const url = context.request.url.href;
     const method = context.request.method || 'GET';
+    let resourceId = '';
     let finalTraceId: string | undefined = undefined;
     let finalSpanId: string | undefined = undefined;
     try {
@@ -672,7 +716,7 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
         context.request.headers['X-FT-Resource-ID'] = uniqueId;
       }
 
-      const resourceId = `${method}_${url}_${uniqueId}`;
+      resourceId = `${method}_${url}_${uniqueId}`;
       const headersMap = new Map<string, string>();
       if (context.request.headers) {
         const headerKeys = Object.keys(context.request.headers);
@@ -753,45 +797,49 @@ export class RCPTraceInterceptor implements rcp.Interceptor {
       FTInnerLogger.e(TAG, `[RCP-Trace] Failed to prepare trace request: ${error}`);
     }
 
-    // A transport failure belongs to the caller. Never retry the request from
-    // an instrumentation catch block (especially for non-idempotent requests).
-    const response = await next.handle(context);
     try {
-      if (response) {
-        const responseHeadersMap = new Map<string, string>();
-        if (response.headers) {
-          const respHeaderKeys = Object.keys(response.headers);
-          for (let i = 0; i < respHeaderKeys.length; i++) {
-            const key = respHeaderKeys[i];
-            const value = response.headers[key];
-            if (typeof value === 'string') {
-              responseHeadersMap.set(key, value);
-            } else if (Array.isArray(value) && value.length > 0) {
-              responseHeadersMap.set(key, value[0] as string);
+      // A transport failure belongs to the caller. Never retry the request from
+      // an instrumentation catch block (especially for non-idempotent requests).
+      const response = await next.handle(context);
+      try {
+        if (response && this.traceInterceptor && FTNetworkLifecycle.isCurrent(this.generation)) {
+          const responseHeadersMap = new Map<string, string>();
+          if (response.headers) {
+            const respHeaderKeys = Object.keys(response.headers);
+            for (let i = 0; i < respHeaderKeys.length; i++) {
+              const key = respHeaderKeys[i];
+              const value = response.headers[key];
+              if (typeof value === 'string') {
+                responseHeadersMap.set(key, value);
+              } else if (Array.isArray(value) && value.length > 0) {
+                responseHeadersMap.set(key, value[0] as string);
+              }
             }
           }
+
+          const responseData: HttpResponseData = {
+            url: context.request.url.href,
+            statusCode: response.statusCode || 0,
+            headers: responseHeadersMap,
+            body: undefined,
+            timestamp: Date.now(),
+            traceId: finalTraceId,
+            spanId: finalSpanId
+          };
+          this.traceInterceptor.interceptResponse(responseData);
+          FTInnerLogger.d(
+            TAG,
+            `[RCP-Trace] Processed trace response for ${method} ${url}, status=${response.statusCode || 0}, ${summarizeResponseHeaders(response.headers ?? {})}`
+          );
         }
 
-        const responseData: HttpResponseData = {
-          url: context.request.url.href,
-          statusCode: response.statusCode || 0,
-          headers: responseHeadersMap,
-          body: undefined,
-          timestamp: Date.now(),
-          traceId: finalTraceId,
-          spanId: finalSpanId
-        };
-        this.traceInterceptor.interceptResponse(responseData);
-        FTInnerLogger.d(
-          TAG,
-          `[RCP-Trace] Processed trace response for ${method} ${url}, status=${response.statusCode || 0}, ${summarizeResponseHeaders(response.headers ?? {})}`
-        );
+      } catch (error) {
+        FTInnerLogger.e(TAG, `[RCP-Trace] Failed to process trace response: ${error}`);
       }
-
-    } catch (error) {
-      FTInnerLogger.e(TAG, `[RCP-Trace] Failed to process trace response: ${error}`);
+      return response;
+    } finally {
+      if (FTNetworkLifecycle.isCurrent(this.generation)) FTTraceManager.releaseAutoTrace(resourceId);
     }
-    return response;
   }
 }
 
@@ -842,6 +890,7 @@ export interface FTAxiosErrorTarget {
 }
 
 export interface FTAxiosInterceptorManager<T> {
+  eject?(id: number): void;
   use(
     onFulfilled?: (value: T) => T | Promise<T>,
     onRejected?: (error: Object) => Object | Promise<Object>
@@ -860,9 +909,12 @@ export interface FTAxiosInterceptorTarget {
 export interface FTAxiosTrackRegistration {
   requestInterceptorId: number;
   responseInterceptorId: number;
+  /** Detaches this SDK registration without retaining the Axios client. */
+  dispose(): void;
 }
 
 interface FTAxiosAutoTrackState extends HttpAutoTrackState {
+  progressOwner?: FTNetworkDisposable;
   traceEnabled: boolean;
   resourceEnabled: boolean;
   networkErrorHandler?: FTNetworkErrorHandler;
@@ -924,6 +976,105 @@ interface FTAxiosHeadersSerializable {
 }
 
 const FT_AXIOS_AUTOTRACK_CONTEXT_KEY = '__ftAxiosAutoTrackState';
+
+type AxiosProgressCallback = (progress: FTAxiosUploadProgressTarget) => void;
+
+class AxiosProgressOwner implements FTNetworkDisposable {
+  private state?: FTAxiosAutoTrackState;
+  private config?: WeakRef<FTAxiosRequestConfigTarget>;
+  private original?: AxiosProgressCallback;
+  private callback: AxiosProgressCallback;
+  private cleanupId: number;
+
+  constructor(config: FTAxiosRequestConfigTarget, state: FTAxiosAutoTrackState) {
+    this.state = state;
+    this.config = new WeakRef(config);
+    this.original = config.onUploadProgress;
+    this.callback = this.createCallback();
+    this.cleanupId = FTNetworkLifecycle.register(this, state.uniqueId || '');
+    config.onUploadProgress = this.callback;
+  }
+
+  private createCallback(): AxiosProgressCallback {
+    const original = this.original;
+    return (progress: FTAxiosUploadProgressTarget): void => {
+      const state = this.state;
+      if (!state || !FTNetworkLifecycle.isCurrent(state.generation!)) {
+        original?.(progress);
+        return;
+      }
+      const uploadedBytes = progress ? progress.loaded : undefined;
+      if (uploadedBytes !== undefined && Number.isFinite(uploadedBytes) && uploadedBytes >= 0) {
+        if (!state.platformTransportMetrics) state.platformTransportMetrics = {};
+        const previous = state.platformTransportMetrics.requestBodySize;
+        if (previous === undefined || uploadedBytes > previous) {
+          state.platformTransportMetrics.requestBodySize = uploadedBytes;
+        }
+      }
+      original?.(progress);
+    };
+  }
+
+  public dispose(): void {
+    const config = this.config?.deref();
+    if (config && config.onUploadProgress === this.callback) config.onUploadProgress = this.original;
+    this.state = undefined;
+    this.config = undefined;
+    this.original = undefined;
+    FTNetworkLifecycle.unregister(this.cleanupId);
+  }
+}
+
+class AxiosTrackRegistration implements FTAxiosTrackRegistration {
+  requestInterceptorId: number;
+  responseInterceptorId: number;
+  private owner: AxiosTrackOwner;
+  constructor(requestInterceptorId: number, responseInterceptorId: number, owner: AxiosTrackOwner) {
+    this.requestInterceptorId = requestInterceptorId;
+    this.responseInterceptorId = responseInterceptorId;
+    this.owner = owner;
+  }
+  public dispose(): void { this.owner.dispose(); }
+}
+
+class AxiosTrackOwner implements FTNetworkDisposable {
+  active: boolean = true;
+  generation: number = FTNetworkLifecycle.capture();
+  options?: FTAutoTrackOptions;
+  requestId: number = -1;
+  responseId: number = -1;
+  private target: WeakRef<FTAxiosInterceptorTarget>;
+  private cleanupId: number;
+  private registration?: FTAxiosTrackRegistration;
+
+  constructor(target: FTAxiosInterceptorTarget, options: FTAutoTrackOptions) {
+    this.target = new WeakRef(target);
+    this.options = options;
+    this.cleanupId = FTNetworkLifecycle.register(this);
+  }
+
+  public getRegistration(): FTAxiosTrackRegistration {
+    if (!this.registration) {
+      this.registration = new AxiosTrackRegistration(this.requestId, this.responseId, this);
+    }
+    return this.registration;
+  }
+
+  public dispose(): void {
+    if (!this.active) return;
+    this.active = false;
+    this.options = undefined;
+    const target = this.target.deref();
+    if (target) {
+      try { target.interceptors.request.eject?.(this.requestId); } catch (_) {}
+      try { target.interceptors.response.eject?.(this.responseId); } catch (_) {}
+      if (axiosTrackOwners.get(target) === this) axiosTrackOwners.delete(target);
+    }
+    FTNetworkLifecycle.unregister(this.cleanupId);
+  }
+}
+
+const axiosTrackOwners: WeakMap<Object, AxiosTrackOwner> = new WeakMap();
 
 function resolveAxiosFullUrl(config: FTAxiosRequestConfigTarget): string {
   const requestUrl = config.url || '';
@@ -1037,6 +1188,17 @@ function clearAxiosAutoTrackState(config?: FTAxiosRequestConfigTarget): void {
     return;
   }
   const context = config.context as Record<string, Object>;
+  const state = context[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as FTAxiosAutoTrackState | undefined;
+  if (state) {
+    if (state.generation === undefined || FTNetworkLifecycle.isCurrent(state.generation)) {
+      const uniqueId = state.uniqueId || state.requestHeaders['X-FT-Resource-ID'];
+      if (uniqueId) AxiosChainMethodStore.getInstance().delete(uniqueId);
+      if (uniqueId) FTNetworkLifecycle.finishRequest(uniqueId);
+      FTTraceManager.releaseAutoTrace(state.resourceId);
+    }
+    state.progressOwner?.dispose();
+    state.progressOwner = undefined;
+  }
   const cleanContext: Record<string, Object> = {};
   const contextKeys = Object.keys(context);
   for (let i = 0; i < contextKeys.length; i++) {
@@ -1159,6 +1321,8 @@ function buildAxiosAutoTrackState(
 
   const state: FTAxiosAutoTrackState = {
     resourceId: resourceId,
+    uniqueId: uniqueId,
+    generation: FTNetworkLifecycle.capture(),
     url: url,
     method: method,
     startTime: Date.now(),
@@ -1169,23 +1333,7 @@ function buildAxiosAutoTrackState(
     transportMetrics: transportMetrics,
     headerInferredTransportMetrics: headerInferredTransportMetrics
   };
-  const applicationUploadProgress = config.onUploadProgress;
-  config.onUploadProgress = (progress: FTAxiosUploadProgressTarget): void => {
-    const uploadedBytes = progress ? progress.loaded : undefined;
-    if (uploadedBytes !== undefined && Number.isFinite(uploadedBytes) && uploadedBytes >= 0) {
-      if (!state.platformTransportMetrics) {
-        state.platformTransportMetrics = {};
-      }
-      const existing = state.platformTransportMetrics.requestBodySize;
-      if (existing === undefined || uploadedBytes > existing) {
-        state.platformTransportMetrics.requestBodySize = uploadedBytes;
-      }
-    }
-    // Preserve the application's Axios callback and its error behavior.
-    if (applicationUploadProgress) {
-      applicationUploadProgress(progress);
-    }
-  };
+  state.progressOwner = new AxiosProgressOwner(config, state);
   return state;
 }
 
@@ -1364,21 +1512,29 @@ export function applyFTAxiosTrack(
   options: FTAutoTrackOptions = {}
 ): FTAxiosTrackRegistration {
   const target = axiosTarget as FTAxiosInterceptorTarget;
-  const traceEnabled = options.enableTraceInterceptor !== undefined
-    ? options.enableTraceInterceptor
-    : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
-  const resourceEnabled = options.enableResourceInterceptor !== undefined
-    ? options.enableResourceInterceptor
-    : FTRUMConfigManager.getInstance().isResourceTraceEnable();
-  const networkErrorHandler = resolveNetworkErrorHandler(options.networkErrorHandler);
-
+  const existing = axiosTrackOwners.get(axiosTarget);
+  if (existing && existing.active && FTNetworkLifecycle.isCurrent(existing.generation)) {
+    existing.options = options;
+    return existing.getRegistration();
+  }
+  existing?.dispose();
+  const owner = new AxiosTrackOwner(target, options);
+  axiosTrackOwners.set(axiosTarget, owner);
   const requestInterceptorId = target.interceptors.request.use((config: FTAxiosRequestConfigTarget) => {
+    if (!owner.active || !FTNetworkLifecycle.isCurrent(owner.generation)) return config;
+    clearAxiosAutoTrackState(config);
+    const currentOptions = owner.options || {};
+    const traceEnabled = currentOptions.enableTraceInterceptor !== undefined
+      ? currentOptions.enableTraceInterceptor : FTTraceConfigManager.getInstance().isAutoTraceEnabled();
+    const resourceEnabled = currentOptions.enableResourceInterceptor !== undefined
+      ? currentOptions.enableResourceInterceptor : FTRUMConfigManager.getInstance().isResourceTraceEnable();
+    const networkErrorHandler = resolveNetworkErrorHandler(currentOptions.networkErrorHandler);
     const state = buildAxiosAutoTrackState(
       config,
       traceEnabled,
       resourceEnabled,
       networkErrorHandler,
-      options.resourceTransportMetricsProvider
+      currentOptions.resourceTransportMetricsProvider
     );
     config.headers = state.requestHeaders as Object;
 
@@ -1406,7 +1562,8 @@ export function applyFTAxiosTrack(
   const responseInterceptorId = target.interceptors.response.use(
     (response: FTAxiosResponseTarget) => {
       const state = getAxiosAutoTrackState(response.config);
-      if (!state) {
+      if (!state || !FTNetworkLifecycle.isCurrent(state.generation ?? owner.generation)) {
+        clearAxiosAutoTrackState(response.config);
         return response;
       }
 
@@ -1431,7 +1588,7 @@ export function applyFTAxiosTrack(
       const error = rawError as FTAxiosErrorTarget;
       const responseConfig = error.config || (error.response ? error.response.config : undefined);
       const state = getAxiosAutoTrackState(responseConfig);
-      if (state) {
+      if (state && FTNetworkLifecycle.isCurrent(state.generation ?? owner.generation)) {
         try {
           const snapshot = captureAxiosResponseSnapshot(error.response, state.resourceId);
           completeAxiosTraceSafely(state, snapshot);
@@ -1472,6 +1629,10 @@ export function applyFTAxiosTrack(
         }
       }
 
+      if (state && !FTNetworkLifecycle.isCurrent(state.generation ?? owner.generation)) {
+        clearAxiosAutoTrackState(responseConfig);
+      }
+
       // Preserve the business error object. The fallback is required by
       // ArkTS, which rejects throws of arbitrary values.
       if (rawError instanceof Error) {
@@ -1481,10 +1642,9 @@ export function applyFTAxiosTrack(
     }
   );
 
-  return {
-    requestInterceptorId: requestInterceptorId,
-    responseInterceptorId: responseInterceptorId
-  };
+  owner.requestId = requestInterceptorId;
+  owner.responseId = responseInterceptorId;
+  return owner.getRegistration();
 }
 
 /**

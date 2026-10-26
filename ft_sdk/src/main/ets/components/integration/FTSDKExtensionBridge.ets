@@ -1,3 +1,4 @@
+import { FTNetworkDisposable, FTNetworkLifecycle } from '../network/FTNetworkLifecycle';
 import { FTInnerLogger } from '../log/FTLogger';
 import { FTRUMConfigManager } from '../rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../rum/FTRUMInnerManager';
@@ -82,7 +83,12 @@ export interface FTSDKExtensionRequestInput {
   transportMetrics?: FTResourceTransportMetricsInput;
 }
 
+export interface FTSDKExtensionCleanup {
+  dispose(): void;
+}
+
 export interface FTSDKExtensionPreparedRequest {
+  generation?: number;
   url: string;
   method: string;
   resourceId: string;
@@ -93,6 +99,8 @@ export interface FTSDKExtensionPreparedRequest {
 }
 
 export interface FTSDKExtensionResponseInput {
+  resourceId?: string;
+  generation?: number;
   url: string;
   method?: string;
   uniqueId?: string;
@@ -123,6 +131,44 @@ interface FTSDKExtensionHttpState extends HttpAutoTrackState {
 }
 
 export class FTSDKExtensionBridge {
+  public static captureNetworkGeneration(): number { return FTNetworkLifecycle.capture(); }
+  public static isNetworkGenerationCurrent(generation: number): boolean {
+    return FTNetworkLifecycle.isCurrent(generation);
+  }
+  public static registerNetworkCleanup(owner: FTSDKExtensionCleanup, uniqueId: string = ''): number {
+    return FTNetworkLifecycle.register(owner as FTNetworkDisposable, uniqueId);
+  }
+  public static unregisterNetworkCleanup(id: number): void { FTNetworkLifecycle.unregister(id); }
+  public static finishNetworkRequest(uniqueId: string): void {
+    FTNetworkLifecycle.finishRequest(uniqueId);
+    FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
+  }
+
+  private static findResponseState(response: FTSDKExtensionResponseInput): FTSDKExtensionHttpState | undefined {
+    if (response.generation !== undefined && !FTNetworkLifecycle.isCurrent(response.generation)) return undefined;
+    let headers: Record<string, string> = {};
+    try { headers = FTSDKExtensionBridge.normalizeHeaders(response.requestHeaders); } catch (error) {
+      FTInnerLogger.w(TAG, `Invalid completion headers: ${error}`);
+    }
+    const uniqueId = FTSDKExtensionBridge.resolveUniqueId(response.uniqueId, headers);
+    const store = HttpAutoTrackStateStore.getInstance();
+    // The start identity survives redirects and platform method normalization.
+    const state = (response.resourceId ? store.get(response.resourceId) : undefined) ||
+      (uniqueId ? store.getByUniqueId(uniqueId) : undefined);
+    if (!state || (state.generation !== undefined && !FTNetworkLifecycle.isCurrent(state.generation))) {
+      if (uniqueId) FTSDKExtensionBridge.finishNetworkRequest(uniqueId);
+      return undefined;
+    }
+    return state as FTSDKExtensionHttpState;
+  }
+
+  private static releaseResponseState(state: FTSDKExtensionHttpState): void {
+    const uniqueId = state.uniqueId || FTSDKExtensionBridge.resolveUniqueId(undefined, state.requestHeaders);
+    if (uniqueId) FTSDKExtensionBridge.finishNetworkRequest(uniqueId);
+    HttpAutoTrackStateStore.getInstance().delete(state.resourceId);
+    FTTraceManager.releaseAutoTrace(state.resourceId);
+  }
+
   public static resolveAutoTrackOptions(
     options: FTSDKExtensionAutoTrackOptions = {}
   ): FTSDKExtensionResolvedAutoTrackOptions {
@@ -180,6 +226,11 @@ export class FTSDKExtensionBridge {
     const uniqueId = ensureHttpResourceId(headers);
     const method = FTSDKExtensionBridge.resolveMethod(request.method, headers);
     const resourceId = buildAutoTrackResourceId(method, request.url, uniqueId);
+    const generation = FTNetworkLifecycle.capture();
+    if (!FTNetworkLifecycle.isCurrent(generation)) {
+      return { url: request.url, method: method, resourceId: resourceId, uniqueId: uniqueId,
+        headers: headers, traceEnabled: false, resourceEnabled: false, generation: generation };
+    }
     AxiosChainMethodStore.getInstance().put(uniqueId, method);
 
     let finalHeaders = headers;
@@ -218,6 +269,8 @@ export class FTSDKExtensionBridge {
       }
       const state: FTSDKExtensionHttpState = {
         resourceId: resourceId,
+        uniqueId: uniqueId,
+        generation: generation,
         url: request.url,
         method: method,
         startTime: Date.now(),
@@ -248,6 +301,7 @@ export class FTSDKExtensionBridge {
       method: method,
       resourceId: resourceId,
       uniqueId: uniqueId,
+      generation: generation,
       headers: finalHeaders,
       traceEnabled: resolvedOptions.enableTraceInterceptor,
       resourceEnabled: resourceEnabled
@@ -255,21 +309,8 @@ export class FTSDKExtensionBridge {
   }
 
   public static completeHttpResponse(response: FTSDKExtensionResponseInput): boolean {
-    const requestHeaders = FTSDKExtensionBridge.normalizeHeaders(response.requestHeaders);
-    const uniqueId = FTSDKExtensionBridge.resolveUniqueId(response.uniqueId, requestHeaders);
-    if (!uniqueId) {
-      FTInnerLogger.w(TAG, `[HTTP-Final] Missing resource id for ${response.url}`);
-      return false;
-    }
-
-    const method = FTSDKExtensionBridge.resolveMethod(response.method, requestHeaders);
-    const fallbackResourceId = buildAutoTrackResourceId(method, response.url, uniqueId);
-    const state = HttpAutoTrackStateStore.getInstance().get(fallbackResourceId) as FTSDKExtensionHttpState | undefined;
-    if (!state) {
-      FTInnerLogger.w(TAG, `[HTTP-Final] Missing initial interceptor state for ${response.url}, uniqueId=${uniqueId}`);
-      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
-      return false;
-    }
+    const state = FTSDKExtensionBridge.findResponseState(response);
+    if (!state) return false;
 
     const resourceId = state.resourceId;
     let resourceCompletionClaimed = false;
@@ -311,29 +352,15 @@ export class FTSDKExtensionBridge {
     } catch (error) {
       FTInnerLogger.e(TAG, `[HTTP-Final] Failed to complete response for ${resourceId}: ${error}`);
     } finally {
-      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
-      HttpAutoTrackStateStore.getInstance().delete(resourceId);
+      FTSDKExtensionBridge.releaseResponseState(state);
     }
 
     return true;
   }
 
   public static completeHttpError(response: FTSDKExtensionResponseInput): boolean {
-    const requestHeaders = FTSDKExtensionBridge.normalizeHeaders(response.requestHeaders);
-    const uniqueId = FTSDKExtensionBridge.resolveUniqueId(response.uniqueId, requestHeaders);
-    if (!uniqueId) {
-      FTInnerLogger.w(TAG, `[HTTP-Error] Missing resource id for ${response.url}`);
-      return false;
-    }
-
-    const method = FTSDKExtensionBridge.resolveMethod(response.method, requestHeaders);
-    const fallbackResourceId = buildAutoTrackResourceId(method, response.url, uniqueId);
-    const state = HttpAutoTrackStateStore.getInstance().get(fallbackResourceId) as FTSDKExtensionHttpState | undefined;
-    if (!state) {
-      FTInnerLogger.w(TAG, `[HTTP-Error] Missing initial interceptor state for ${response.url}, uniqueId=${uniqueId}`);
-      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
-      return false;
-    }
+    const state = FTSDKExtensionBridge.findResponseState(response);
+    if (!state) return false;
 
     let resourceCompletionClaimed = false;
     try {
@@ -381,8 +408,7 @@ export class FTSDKExtensionBridge {
           response.performanceTiming);
       }
     } finally {
-      FTSDKExtensionBridge.clearAxiosMethod(uniqueId);
-      HttpAutoTrackStateStore.getInstance().delete(state.resourceId);
+      FTSDKExtensionBridge.releaseResponseState(state);
     }
 
     return true;

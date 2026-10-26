@@ -1,3 +1,6 @@
+import { FTNetworkLifecycle } from './network/FTNetworkLifecycle';
+import { AxiosChainMethodStore, HttpAutoTrackCompletionStore, HttpAutoTrackStateStore } from './network/FTHttpAutoTrackShared';
+import { FTTraceManager } from './trace/FTTraceManager';
 import {
   clearRuntimeUploadEndpointInternal,
   FTLoggerConfig,
@@ -458,6 +461,7 @@ export class FTSDK {
         return;
       }
 
+      FTNetworkLifecycle.resume();
       FTSDK.resetInitializationSeparatorState();
       FTLogSeparator.initialization(TAG, "FTSDK 初始化开始");
 
@@ -842,6 +846,12 @@ export class FTSDK {
 
 
   static shutDown() {
+    // Invalidate late transport callbacks before clearing RUM state.
+    FTNetworkLifecycle.shutdown();
+    HttpAutoTrackStateStore.clearExisting();
+    AxiosChainMethodStore.clearExisting();
+    HttpAutoTrackCompletionStore.clearExisting();
+    FTTraceManager.shutdownExisting();
     FTUIBlockManager.getInstance().release();
     FTCrashFreeDurationManager.getInstance().shutdown().catch((error: Error): void => {
       FTInnerLogger.w(TAG, `Unable to persist crash-free duration at shutdown: ${error.message}`);
