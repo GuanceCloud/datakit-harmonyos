@@ -45,10 +45,56 @@ export class FTActionTracker {
   // (e.g., when both NetworkImage and its internal Image component trigger willClick)
   // Key: uniqueId, Value: ProcessedClickInfo
   private processedClickIds: Map<string, ProcessedClickInfo> = new Map();
+  private processedClickCleanupTimer: number | null = null;
+  private static readonly CLICK_ID_RETENTION_MS: number = 1000;
   
   // Maximum size for Map collections to prevent memory leak (using Constants.MAX_MAP_SIZE_CLICK)
 
   private constructor() {}
+
+  private cleanupProcessedClicks(now: number): void {
+    const expired: string[] = [];
+    this.processedClickIds.forEach((info: ProcessedClickInfo, id: string): void => {
+      if (now - info.timestamp >= FTActionTracker.CLICK_ID_RETENTION_MS || now < info.timestamp) {
+        expired.push(id);
+      }
+    });
+    for (const id of expired) {
+      this.processedClickIds.delete(id);
+    }
+  }
+
+  /** One timer for the next expiry, including when the application stops clicking. */
+  private scheduleProcessedClickCleanup(): void {
+    if (this.processedClickCleanupTimer !== null || this.processedClickIds.size === 0) {
+      return;
+    }
+    let expiresAt = Number.MAX_VALUE;
+    this.processedClickIds.forEach((info: ProcessedClickInfo): void => {
+      expiresAt = Math.min(expiresAt, info.timestamp + FTActionTracker.CLICK_ID_RETENTION_MS);
+    });
+    this.processedClickCleanupTimer = setTimeout((): void => {
+      this.processedClickCleanupTimer = null;
+      this.cleanupProcessedClicks(Date.now());
+      this.scheduleProcessedClickCleanup();
+    }, Math.max(1, expiresAt - Date.now())) as number;
+  }
+
+  private rememberProcessedClick(id: string, info: ProcessedClickInfo): void {
+    if (!this.processedClickIds.has(id) && this.processedClickIds.size >= Constants.MAX_MAP_SIZE_CLICK) {
+      let oldestId = '';
+      let oldestTime = Number.MAX_VALUE;
+      this.processedClickIds.forEach((entry: ProcessedClickInfo, key: string): void => {
+        if (entry.timestamp < oldestTime) {
+          oldestId = key;
+          oldestTime = entry.timestamp;
+        }
+      });
+      this.processedClickIds.delete(oldestId);
+    }
+    this.processedClickIds.set(id, info);
+    this.scheduleProcessedClickCleanup();
+  }
 
   /**
    * Get singleton instance
@@ -140,6 +186,7 @@ export class FTActionTracker {
       // 3. If nodeType is 'Image' and we recently processed a '__Common__' component with same nodeId within 50ms, skip
       //    (This handles NetworkImage -> Image case where parent and child both trigger willClick)
       const currentTime = Date.now();
+      this.cleanupProcessedClicks(currentTime);
       const existing = this.processedClickIds.get(uniqueId);
       
       if (existing !== undefined) {
@@ -194,39 +241,7 @@ export class FTActionTracker {
         nodeId: nodeId || '',
         nodeType: nodeType
       };
-      // Limit the size of processedClickIds to prevent memory leak
-      if (this.processedClickIds.size > Constants.MAX_MAP_SIZE_CLICK) {
-        FTInnerLogger.w(TAG, `processedClickIds size (${this.processedClickIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.processedClickIds.clear();
-      }
-      this.processedClickIds.set(uniqueId, clickInfo);
-      
-      // Limit the size of processedClickIds to prevent memory leak
-      if (this.processedClickIds.size > Constants.MAX_MAP_SIZE_CLICK) {
-        FTInnerLogger.w(TAG, `processedClickIds size (${this.processedClickIds.size}) exceeds limit, clearing to prevent memory leak`);
-        this.processedClickIds.clear();
-      }
-      
-      // Clean up old entries to prevent memory leak (remove entries older than 1 second)
-      if (this.processedClickIds.size > 100) {
-        const oneSecondAgo = currentTime - 1000;
-        const entries = this.processedClickIds.entries();
-        const idsToDelete: string[] = [];
-        for (let i = 0; i < this.processedClickIds.size; i++) {
-          const entry = entries.next();
-          if (entry.done) {
-            break;
-          }
-          const id = entry.value[0];
-          const info = entry.value[1];
-          if (info.timestamp < oneSecondAgo) {
-            idsToDelete.push(id);
-          }
-        }
-        for (let i = 0; i < idsToDelete.length; i++) {
-          this.processedClickIds.delete(idsToDelete[i]);
-        }
-      }
+      this.rememberProcessedClick(uniqueId, clickInfo);
 
       // For custom components that return system components (like NetworkImage -> Image),
       // check if there's a __component_type__ customProperty to identify the actual component type
@@ -502,6 +517,10 @@ export class FTActionTracker {
    * Clean up and unregister listeners, release UIContext reference
    */
   public destroy(): void {
+    if (this.processedClickCleanupTimer !== null) {
+      clearTimeout(this.processedClickCleanupTimer);
+      this.processedClickCleanupTimer = null;
+    }
     const observer = this.uiObserver;
     this.uiObserver = null;
     this.isInitialized = false;

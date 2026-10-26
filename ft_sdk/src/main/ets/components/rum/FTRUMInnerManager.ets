@@ -265,6 +265,15 @@ interface PendingActionCloseState {
   actionBean: ActionBean;
   closeInFlight: boolean;
   waitingForResource: boolean;
+  waitReason?: string;
+}
+
+/** Latest closed identity only; never retains Action properties, tags or the bean. */
+interface ClosedActionIdentity {
+  actionId: string;
+  actionName: string;
+  sessionId: string;
+  viewId: string;
 }
 
 interface RumSemanticJournalEntry {
@@ -384,6 +393,7 @@ export class FTRUMInnerManager {
   private longTaskDurationUpdates: Map<string, Promise<void>> = new Map();
   private appState: AppState = AppState.RUN;
   private activeAction: ActiveActionBean | null = null;
+  private lastClosedActionIdentity: ClosedActionIdentity | null = null;
   
   // Resource management
   private resourceBeanMap: Map<string, ResourceBean> = new Map();
@@ -458,9 +468,6 @@ export class FTRUMInnerManager {
   private committedRumSemanticResponseOrder: string[] = [];
   private committedRumSemanticResponseOrderHead: number = 0;
   private resourceDraftIdsById: Map<string, RumResourceDraftIds> = new Map();
-  /** Prefix queue used to evict the oldest resource draft state at capacity. */
-  private resourceDraftIdOrder: string[] = [];
-  private resourceDraftIdOrderHead: number = 0;
   private completedRumResourceIds: Set<string> = new Set();
   /**
    * One reference is held for every resource command from its pending queue
@@ -1066,6 +1073,11 @@ export class FTRUMInnerManager {
   }
 
   private compactRumSemanticJournalIfNeeded(): void {
+    if (this.rumSemanticJournalHead >= this.rumSemanticJournal.length) {
+      this.rumSemanticJournal = [];
+      this.rumSemanticJournalHead = 0;
+      return;
+    }
     if (this.rumSemanticJournalHead < FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX ||
       this.rumSemanticJournalHead * 2 < this.rumSemanticJournal.length) {
       return;
@@ -1098,13 +1110,12 @@ export class FTRUMInnerManager {
 
   private trimResourceDraftStateForLatest(): void {
     let evicted = 0;
-    while (this.resourceDraftIdsById.size >= FTRUMInnerManager.RUM_RESOURCE_DRAFT_HIGH_WATERMARK &&
-      this.resourceDraftIdOrderHead < this.resourceDraftIdOrder.length) {
-      const resourceId = this.resourceDraftIdOrder[this.resourceDraftIdOrderHead];
-      this.resourceDraftIdOrderHead++;
-      if (!this.resourceDraftIdsById.has(resourceId)) {
-        continue;
+    while (this.resourceDraftIdsById.size >= FTRUMInnerManager.RUM_RESOURCE_DRAFT_HIGH_WATERMARK) {
+      const oldest = this.resourceDraftIdsById.keys().next();
+      if (oldest.done) {
+        break;
       }
+      const resourceId = oldest.value;
       this.resourceDraftIdsById.delete(resourceId);
       this.clearResourceLifecycleRegistration(resourceId);
       this.resourceContentSubmittedIds.delete(resourceId);
@@ -1113,11 +1124,6 @@ export class FTRUMInnerManager {
       this.resourceContextById.delete(resourceId);
       this.completedRumResourceIds.delete(resourceId);
       evicted++;
-    }
-    if (this.resourceDraftIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
-      this.resourceDraftIdOrderHead * 2 >= this.resourceDraftIdOrder.length) {
-      this.resourceDraftIdOrder = this.resourceDraftIdOrder.slice(this.resourceDraftIdOrderHead);
-      this.resourceDraftIdOrderHead = 0;
     }
     if (evicted > 0) {
       this.logRumStateEviction('resourceDraft', evicted);
@@ -1241,7 +1247,6 @@ export class FTRUMInnerManager {
         errorUuid: Utils.generateUUID()
       };
       this.resourceDraftIdsById.set(resourceId, ids);
-      this.resourceDraftIdOrder.push(resourceId);
     }
     return ids;
   }
@@ -2524,8 +2529,6 @@ export class FTRUMInnerManager {
     this.committedRumSemanticResponseOrder = [];
     this.committedRumSemanticResponseOrderHead = 0;
     this.resourceDraftIdsById.clear();
-    this.resourceDraftIdOrder = [];
-    this.resourceDraftIdOrderHead = 0;
     this.completedRumResourceIds.clear();
     this.resourcePendingOrJournalRefCounts.clear();
     this.lastRumStateEvictionLogAt = 0;
@@ -2541,6 +2544,7 @@ export class FTRUMInnerManager {
     this.launchViewKey = '';
     this.launchViewReady = Promise.resolve();
     this.activeAction = null;
+    this.lastClosedActionIdentity = null;
     this.resourceBeanMap.clear();
     this.viewList = [];
     this.notCollectArr = [];
@@ -3558,6 +3562,7 @@ export class FTRUMInnerManager {
           identity.viewReferrer,
           needWait
         );
+        this.lastClosedActionIdentity = null;
         
         const recordingId = FTSessionReplayBridgeRegistry.getActionRecordingId(this.activeAction.getStartTime());
         this.activeAction.setReplayRecordingId(recordingId);
@@ -3937,6 +3942,13 @@ export class FTRUMInnerManager {
       fallback.getViewId() === identity.viewId) {
       identity.actionId = fallback.getId();
       identity.actionName = fallback.getActionName();
+    } else if (identity.actionId.length === 0 && fallbackActionId.length > 0 && !fallback) {
+      const closed = this.lastClosedActionIdentity;
+      if (closed && closed.actionId === fallbackActionId && closed.sessionId === identity.sessionId &&
+        closed.viewId === identity.viewId) {
+        identity.actionId = closed.actionId;
+        identity.actionName = closed.actionName;
+      }
     }
     return {
       sessionId: identity.sessionId,
@@ -5182,6 +5194,7 @@ export class FTRUMInnerManager {
     this.sessionId = nextSessionId;
     this.activeView = nextView || previousView;
     this.activeAction = null;
+    this.lastClosedActionIdentity = null;
 
     // Accepted old writes retain their original identity and storage owner.
     const closing: Promise<void>[] = [];
@@ -5583,6 +5596,23 @@ export class FTRUMInnerManager {
     try {
       const actionBean = activeActionBean.convertToActionBean();
       this.requestActionClose(actionBean);
+      // Durable close/counter state owns its ActionBean independently. Keep
+      // only the identity needed by late Resource fallback, not the full bean.
+      // A close continuation must never detach a newer active Action.
+      if (activeActionBean.isActionClose() && this.activeAction === activeActionBean) {
+        const identity: ClosedActionIdentity = {
+          actionId: activeActionBean.getId(),
+          actionName: activeActionBean.getActionName(),
+          sessionId: activeActionBean.getSessionId(),
+          viewId: activeActionBean.getViewId()
+        };
+        this.lastClosedActionIdentity = identity;
+        this.activeAction = null;
+        if (this.actionCheckTimer !== null) {
+          clearTimeout(this.actionCheckTimer);
+          this.actionCheckTimer = null;
+        }
+      }
     } catch (error) {
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action: ${error}`);
     }
@@ -5656,14 +5686,17 @@ export class FTRUMInnerManager {
     // counter delta reaches RDB. Do not close the Action in that gap.
     if (this.hasStartedResourceForAction(actionId)) {
       pending.waitingForResource = true;
+      pending.waitReason = 'host-resource';
       return;
     }
 
     pending.closeInFlight = true;
+    const generation = this.lifecycleGeneration;
     try {
       const insertion = this.pendingActionInsertions.get(actionId);
       if (insertion) {
         const inserted = await insertion;
+        if (!this.isLifecycleCurrent(generation) || this.pendingActionCloseStates.get(actionId) !== pending) return;
         if (!inserted) {
           FTInnerLogger.e(TAG, `Action insert failed before close: ${actionId}`);
           this.pendingActionCloseStates.delete(actionId);
@@ -5676,6 +5709,7 @@ export class FTRUMInnerManager {
         actionId,
         pending.actionBean.getDuration()
       );
+      if (!this.isLifecycleCurrent(generation) || this.pendingActionCloseStates.get(actionId) !== pending) return;
       if (closeResult.wasClosed) {
         this.pendingActionCloseStates.delete(actionId);
         // Generate the Action only after its close transition is durable.
@@ -5684,13 +5718,28 @@ export class FTRUMInnerManager {
       }
 
       pending.waitingForResource = closeResult.hadPendingResource;
+      const reason = closeResult.hadPendingResource ? 'persisted-resource' :
+        closeResult.actionExists === false ? 'missing-action-row' : 'database-retry';
+      if (pending.waitReason !== reason) {
+        FTInnerLogger.d(TAG, `Action close waiting: ${actionId}, reason=${reason}`);
+        pending.waitReason = reason;
+      }
+      // A missing durable Action with no Host Resource cannot become closable.
+      // Do not synthesize an Action or discard genuine in-flight counters.
+      if (closeResult.actionExists === false && !closeResult.hadPendingResource &&
+        !this.hasStartedResourceForAction(actionId)) {
+        this.pendingActionCloseStates.delete(actionId);
+      } else if (!closeResult.hadPendingResource) {
+        this.schedulePendingActionCloseRetry();
+      }
     } catch (error) {
+      if (!this.isLifecycleCurrent(generation) || this.pendingActionCloseStates.get(actionId) !== pending) return;
       const errorMessage = error instanceof Error ? error.message : String(error);
       FTInnerLogger.e(TAG, `<FT-ACTION-TEST> [STEP-CLOSE-ERROR] Error closing action in database: ${errorMessage}`);
       this.schedulePendingActionCloseRetry();
     } finally {
       const current = this.pendingActionCloseStates.get(actionId);
-      if (current) {
+      if (current === pending) {
         current.closeInFlight = false;
       }
     }
@@ -6283,6 +6332,7 @@ export class FTRUMInnerManager {
       await Promise.all(Array.from(this.pendingViewClosures.values()));
       if (!this.isLifecycleCurrent(generation, true)) return;
       this.activeAction = null;
+      this.lastClosedActionIdentity = null;
       this.activeView = null;
       this.launchView = null;
       this.launchViewKey = '';
@@ -6364,8 +6414,6 @@ export class FTRUMInnerManager {
       this.committedRumSemanticResponseOrder = [];
       this.committedRumSemanticResponseOrderHead = 0;
       this.resourceDraftIdsById.clear();
-      this.resourceDraftIdOrder = [];
-      this.resourceDraftIdOrderHead = 0;
       this.completedRumResourceIds.clear();
       this.resourcePendingOrJournalRefCounts.clear();
 

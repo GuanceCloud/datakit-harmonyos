@@ -125,7 +125,7 @@ export class FTRumFileStore {
         break;
       }
       case 'closeRumAction':
-        response.closeAction = { wasClosed: false, hadPendingResource: !!action && action.pendingResource > 0 };
+        response.closeAction = { actionExists: !!action, wasClosed: false, hadPendingResource: !!action && action.pendingResource > 0 };
         if (action && (request.force || action.pendingResource <= 0)) {
           action.isClose = true; action.actionDuration = request.duration || 0;
           response.closeAction.wasClosed = true;

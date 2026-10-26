@@ -175,6 +175,7 @@ export interface FTDBTaskPoolActionCountsDTO {
 }
 
 export interface FTDBTaskPoolCloseActionResponse {
+  actionExists?: boolean;
   wasClosed: boolean;
   hadPendingResource: boolean;
 }

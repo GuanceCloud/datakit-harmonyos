@@ -177,6 +177,7 @@ export interface FTDBTaskPoolActionCountsDTO {
 }
 
 export interface FTDBTaskPoolCloseActionResponse {
+  actionExists?: boolean;
   wasClosed: boolean;
   hadPendingResource: boolean;
 }
@@ -2879,6 +2880,7 @@ async function closeRumActionInTaskPool(
   duration: number
 ): Promise<FTDBTaskPoolCloseActionResponse> {
   const response: FTDBTaskPoolCloseActionResponse = {
+    actionExists: false,
     wasClosed: false,
     hadPendingResource: false
   };
@@ -2893,6 +2895,7 @@ async function closeRumActionInTaskPool(
     if (!resultSet.goToFirstRow()) {
       return response;
     }
+    response.actionExists = true;
     pendingResource = resultSet.getLong(resultSet.getColumnIndex(FTSQL.RUM_COLUMN_PENDING_RESOURCE));
   } finally {
     resultSet.close();
