@@ -176,17 +176,23 @@ export class RUMSessionLifecycleVerifier {
         let stable = before.timerId !== null;
         for (let index = 0; index < 100; index++) {
           stable = stable && FTRUMInnerManager.getInstance() === manager;
+          const foregroundTimer = manager.getSessionLifecycleStateForTest().timerId;
           manager.initParams(new FTRUMConfig());
+          stable = stable && manager.getSessionLifecycleStateForTest().timerId === foregroundTimer;
           manager.onAppBackground();
+          stable = stable && manager.getSessionLifecycleStateForTest().timerId === null;
           manager.onAppBackground();
+          stable = stable && manager.getSessionLifecycleStateForTest().timerId === null;
           manager.onAppForeground();
+          const resumedTimer = manager.getSessionLifecycleStateForTest().timerId;
+          stable = stable && resumedTimer !== null;
           manager.onAppForeground();
-          stable = stable && manager.getSessionLifecycleStateForTest().timerId === before.timerId;
+          stable = stable && manager.getSessionLifecycleStateForTest().timerId === resumedTimer;
         }
         // Drain the lifecycle closure work before cleanup.
         await delay(100);
         result.status = stable ? 'PASS' : 'FAIL';
-        result.detail = `100 次调用；timerId=${before.timerId}；单例与定时器标识保持不变=${stable}。不代表全局定时器计数审计。`;
+        result.detail = `100 次调用；单例稳定、后台暂停、前台恢复且重复回调不重建定时器=${stable}。不代表全局定时器计数审计。`;
       });
 
       await this.record('normal_expiry', '对照：真实定时器刷新过期 Session', async (result): Promise<void> => {

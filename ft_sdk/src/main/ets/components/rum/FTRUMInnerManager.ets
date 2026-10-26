@@ -311,13 +311,7 @@ interface RUMViewCloseScope {
 }
 
 /** Event identity is captured from one View and only its matching Action. */
-interface RUMEventIdentity {
-  sessionId: string;
-  viewId: string;
-  viewName: string;
-  viewReferrer: string;
-  actionId: string;
-  actionName: string;
+interface RUMEventIdentity extends SDKRumResourceContextDTO {
   hasReplay: boolean;
 }
 
@@ -3328,7 +3322,7 @@ export class FTRUMInnerManager {
       this.updateViewList(viewName);
       
       // Refresh session
-      await this.checkSessionRefresh(false);
+      this.prepareSessionForEvent();
       if (!this.isLifecycleCurrent(generation)) return;
       await this.syntheticCloseBarrier;
       if (!this.isLifecycleCurrent(generation)) return;
@@ -3547,10 +3541,8 @@ export class FTRUMInnerManager {
       }
       
       this.lastActionTime = currentTime;
+      this.prepareSessionForEvent();
       const identity = this.captureEventIdentity();
-      
-      // Refresh session
-      this.checkSessionRefresh(true);
 
       // Close current action
       this.checkActionClose();
@@ -3582,8 +3574,7 @@ export class FTRUMInnerManager {
         // Initialize action
         this.initAction(this.activeAction, false);
         
-        // Note: lastUserActiveTime is updated in checkSessionRefresh() (aligned with Android)
-        // Android: // this.lastUserActiveTime = activeAction.getStartTime(); (commented out)
+        // New Action collection records activity; passive timer checks do not.
         
         // Set action check timer
         this.scheduleActionCheck();
@@ -3624,10 +3615,14 @@ export class FTRUMInnerManager {
   private async closeSyntheticViews(
     exceptName: string = '',
     generation: number = this.lifecycleGeneration,
-    allowStopping: boolean = false
+    allowStopping: boolean = false,
+    expectedSessionId?: string,
+    timerGeneration?: number
   ): Promise<void> {
     for (const name of this.syntheticViews.keys()) {
-      if (!this.isLifecycleCurrent(generation, allowStopping)) return;
+      if (!this.isLifecycleCurrent(generation, allowStopping) ||
+        (expectedSessionId !== undefined && this.sessionId !== expectedSessionId) ||
+        (timerGeneration !== undefined && !this.isSessionCheckCurrent(generation, timerGeneration))) return;
       const view = this.syntheticViews.get(name);
       if (!view || name === exceptName) {
         continue;
@@ -3663,6 +3658,9 @@ export class FTRUMInnerManager {
       return;
     }
     this.appState = AppState.BACKGROUND;
+    // Suspend only proactive polling, not RUM collection or accepted writes.
+    // The timer epoch also rejects deliveries already queued before clearInterval.
+    this.stopSessionTimer();
     // ApplicationLaunch is stored separately from the other synthetic Views.
     // Close it here even when automatic page tracking is disabled.
     const launchClose = this.closeLaunchView();
@@ -3696,6 +3694,10 @@ export class FTRUMInnerManager {
       return;
     }
     this.appState = AppState.RUN;
+    // A foreground signal checks expiry but is not itself collection activity.
+    // Publish the new identity before a page or event can obtain its context.
+    this.prepareSessionForEvent(false);
+    this.initSessionTimer();
     // Background time ends at the application foreground boundary, even if
     // no real page is restored or that restoration is still waiting on I/O.
     const backgroundView = this.syntheticViews.get(Constants.VIEW_NAME_BACKGROUND);
@@ -3825,7 +3827,7 @@ export class FTRUMInnerManager {
         if (this.launchViewKey === `${actionType}:${actualStartTime}`) {
           return;
         }
-        await this.checkSessionRefresh(true);
+        this.prepareSessionForEvent();
         if (!this.isLifecycleCurrent(generation)) return;
         await this.closeLaunchView(undefined, true, generation);
         if (!this.isLifecycleCurrent(generation)) return;
@@ -3852,7 +3854,7 @@ export class FTRUMInnerManager {
     try {
       // Refresh session
       if (!this.isLaunchActionType(actionType)) {
-        this.checkSessionRefresh(true);
+        this.prepareSessionForEvent();
       }
 
       const actionId = Utils.generateUUID();
@@ -4608,7 +4610,7 @@ export class FTRUMInnerManager {
         return;
       }
       // Refresh session
-      this.checkSessionRefresh(true);
+      this.prepareSessionForEvent();
 
       const context = this.createCurrentResourceContext();
       const startTime = Utils.getCurrentNanoTime();
@@ -4716,7 +4718,8 @@ export class FTRUMInnerManager {
     nativeCrashRecoveryId?: string,
     recoveryContext?: FTRUMCrashRecoveryContext | null
   ): Promise<void> {
-    if (!this.isLifecycleCurrent(this.lifecycleGeneration)) return;
+    const generation = this.lifecycleGeneration;
+    if (!this.isLifecycleCurrent(generation)) return;
     const actualDateline = dateline !== undefined ? dateline : Utils.getCurrentNanoTime();
     const actualProperty = property !== undefined ? property : null;
     const actualCallBack = callBack !== undefined ? callBack : null;
@@ -4724,9 +4727,14 @@ export class FTRUMInnerManager {
       hasFTRUMCrashRecoveryContext(recoveryContext) ? recoveryContext as FTRUMCrashRecoveryContext : null;
     try {
       this.notifySessionReplayPersistedCrashError(actualProperty, actualDateline, errorType, state, validRecoveryContext);
-      // Refresh session
-      this.checkSessionRefresh(true);
-      const collectType = this.checkSessionWillCollect(this.sessionId);
+      // Historical crash recovery is not new activity in the current process.
+      if (validRecoveryContext === null && this.readCrashPropertyText(actualProperty, IS_PRE_CRASH) !== 'true') {
+        this.prepareSessionForEvent();
+      }
+      const eventContext = validRecoveryContext !== null ?
+        this.createCrashRecoveryResourceContext(validRecoveryContext) : this.createCurrentResourceContext('', state);
+      const eventView = this.findCurrentViewById(eventContext.viewId);
+      const collectType = this.checkSessionWillCollect(eventContext.sessionId);
 
       // Check if session should collect error data (aligned with Android)
       // Android SDK logic: error sampling is determined by session sampling state only
@@ -4762,6 +4770,7 @@ export class FTRUMInnerManager {
         effectiveProperty,
         nativeCrashRecoveryId
       );
+      if (!this.isLifecycleCurrent(generation)) return;
       // A native crash id is acknowledged only after its Error data is stored.
       // Suppress an already-acknowledged crash file before it reaches counters.
       if (crashFreeDuration === null && this.isCrashFreeDurationError(errorType)) {
@@ -4777,10 +4786,10 @@ export class FTRUMInnerManager {
         // This enables collection of data within 1 minute before and after the error
         // Aligned with Android: SyncTaskManager.get().setErrorTimeLine(dateline, activeView)
         // Set lastErrorTime on activeView if available
-        if (this.activeView) {
-          this.activeView.setLastErrorTime(actualDateline);
+        if (eventView) {
+          eventView.setLastErrorTime(actualDateline);
           // Also set on ViewBean for SyncTaskManager (aligned with Android)
-          const viewBean = this.activeView.convertToViewBean();
+          const viewBean = eventView.convertToViewBean();
           SyncTaskManager.getInstance().setErrorTimeLine(actualDateline, viewBean);
         } else {
           SyncTaskManager.getInstance().setErrorTimeLine(actualDateline, null);
@@ -4788,7 +4797,7 @@ export class FTRUMInnerManager {
 	      }
 
       if (validRecoveryContext === null && !crashFreeDuration?.isPreCrash) {
-        this.notifySessionReplayError(this.activeView, actualDateline, errorType, state);
+        this.notifySessionReplayError(eventView, actualDateline, errorType, state);
       }
 
       effectiveProperty = this.stripCrashRecoveryProperty(effectiveProperty);
@@ -4797,11 +4806,12 @@ export class FTRUMInnerManager {
         this.createCrashRecoveryResourceContext(validRecoveryContext) : null;
       if (recoveredReplayContext !== null) {
         await this.applyStoredResourceReplayMetadata(recoveredReplayContext);
+        if (!this.isLifecycleCurrent(generation)) return;
       }
 
 	      if (actualCallBack === null && crashFreeDuration === undefined) {
 	        const context = recoveredReplayContext !== null ?
-	          recoveredReplayContext : this.createCurrentResourceContext('', state);
+	          recoveredReplayContext : eventContext;
 	        this.increaseErrorMemoryCount(context);
 	        this.submitErrorWorkerCommand({
 	          context,
@@ -4841,7 +4851,7 @@ export class FTRUMInnerManager {
       if (validRecoveryContext !== null) {
         applyFTRUMCrashRecoveryContext(allTags, validRecoveryContext);
       } else {
-        this.attachRUMRelative(allTags, true, state);
+        this.attachCapturedRUMRelative(allTags, eventContext, true);
       }
 
       const errorDeviceTagKeys = Object.keys(errorDeviceData.tags);
@@ -5204,19 +5214,64 @@ export class FTRUMInnerManager {
     return closing;
   }
 
-  /** Serialize checks; the caller's flag is diagnostic, expired View identity always rotates. */
-  private checkSessionRefresh(checkRefreshView: boolean): Promise<void> {
+  /** Serialize passive checks; expiry rotates View identity regardless of the legacy caller flag. */
+  private checkSessionRefresh(checkRefreshView: boolean, timerGeneration?: number): Promise<void> {
     const generation = this.lifecycleGeneration;
-    if (!this.isLifecycleCurrent(generation)) return Promise.resolve();
+    if (!this.isSessionCheckCurrent(generation, timerGeneration)) return Promise.resolve();
     // Use Promise-based lock to ensure thread-safe session refresh
     // Prevents race condition where multiple threads generate different sessionIds simultaneously
     this.sessionRefreshLock = this.sessionRefreshLock.then(() => {
-      if (!this.isLifecycleCurrent(generation)) return;
-      return this.doCheckSessionRefresh(checkRefreshView, generation);
+      if (!this.isSessionCheckCurrent(generation, timerGeneration)) return;
+      return this.doCheckSessionRefresh(checkRefreshView, generation, timerGeneration);
     }).catch((error: Error) => {
       FTInnerLogger.e(TAG, `[FT-SESSION-REFRESH] Error in sessionRefreshLock: ${error}`);
     });
     return this.sessionRefreshLock;
+  }
+
+  private isSessionCheckCurrent(generation: number, timerGeneration?: number): boolean {
+    return this.isLifecycleCurrent(generation) && (timerGeneration === undefined ||
+      (timerGeneration === this.sessionTimerGeneration && this.appState !== AppState.BACKGROUND));
+  }
+
+  /**
+   * Only new View/Action/Resource/Error/LongTask and RUM-linked business logs
+   * mark activity. Timer checks, foreground signals, old Resource completion,
+   * persistence and upload do not. Keep the public void event APIs synchronous:
+   * publish identity first; accepted old View writes finish asynchronously.
+   */
+  private prepareSessionForEvent(recordActivity: boolean = true): void {
+    const generation = this.lifecycleGeneration;
+    if (!this.isLifecycleCurrent(generation)) return;
+    const now = Utils.getCurrentNanoTime();
+    const closing = this.renewSessionIfExpired(now, generation);
+    if (recordActivity && this.isLifecycleCurrent(generation)) this.lastUserActiveTime = now;
+    void Promise.all(closing).catch((error: Error): void => {
+      FTInnerLogger.e(TAG, `Failed to persist expired Session context: ${error}`);
+    });
+  }
+
+  private isSessionExpired(now: number): boolean {
+    // A passive renewal must not be counted as activity, nor renew again on
+    // every subsequent tick because the last real activity precedes that Session.
+    return now - Math.max(this.lastUserActiveTime, this.lastSessionTime) >= FTRUMInnerManager.MAX_RESTING_TIME ||
+      now - this.lastSessionTime >= FTRUMInnerManager.SESSION_EXPIRE_TIME;
+  }
+
+  private renewSessionIfExpired(now: number, generation: number): Promise<void>[] {
+    if (!this.isLifecycleCurrent(generation) || !this.isSessionExpired(now)) return [];
+    const oldSessionId = this.sessionId;
+    const nextSessionId = Utils.generateUUID();
+    const longTimeSession = now - this.lastSessionTime >= FTRUMInnerManager.SESSION_EXPIRE_TIME;
+    this.checkSessionKeep(nextSessionId, this.sampleRate, this.sessionErrorSampleRate);
+    this.lastSessionTime = now;
+    const closing = this.publishSessionContext(nextSessionId, generation, oldSessionId);
+    if (this.isLifecycleCurrent(generation)) {
+      FTInnerLogger.d(TAG, 'Session Track -> New SessionId: ' + nextSessionId +
+        ', longTimeSessionReset: ' + longTimeSession);
+      this.saveRumContext();
+    }
+    return closing;
   }
 
   /**
@@ -5225,33 +5280,22 @@ export class FTRUMInnerManager {
    */
   private async doCheckSessionRefresh(
     checkRefreshView: boolean,
-    generation: number = this.lifecycleGeneration
+    generation: number = this.lifecycleGeneration,
+    timerGeneration?: number
   ): Promise<void> {
-    if (!this.isLifecycleCurrent(generation)) return;
+    if (!this.isSessionCheckCurrent(generation, timerGeneration)) return;
     const now = Utils.getCurrentNanoTime();
-    const longResting = now - this.lastUserActiveTime > FTRUMInnerManager.MAX_RESTING_TIME;
-    const longTimeSession = now - this.lastSessionTime > FTRUMInnerManager.SESSION_EXPIRE_TIME;
-
-    if (longTimeSession || longResting) {
+    const checkedSessionId = this.sessionId;
+    if (this.isSessionExpired(now)) {
       await this.syntheticCloseBarrier;
-      if (!this.isLifecycleCurrent(generation)) return;
-      await this.closeSyntheticViews('', generation);
-      if (!this.isLifecycleCurrent(generation)) return;
-
-      const oldSessionId = this.sessionId;
-      const nextSessionId = Utils.generateUUID();
-      this.checkSessionKeep(nextSessionId, this.sampleRate, this.sessionErrorSampleRate);
-      this.lastSessionTime = now;
-      const closing = this.publishSessionContext(nextSessionId, generation, oldSessionId);
-      if (this.isLifecycleCurrent(generation)) {
-        FTInnerLogger.d(TAG, 'Session Track -> New SessionId: ' + nextSessionId +
-          ', longTimeSessionReset: ' + longTimeSession + ', refreshViewRequested: ' + checkRefreshView);
-        this.saveRumContext();
-      }
+      if (!this.isSessionCheckCurrent(generation, timerGeneration) || this.sessionId !== checkedSessionId) return;
+      await this.closeSyntheticViews('', generation, false, checkedSessionId, timerGeneration);
+      if (!this.isSessionCheckCurrent(generation, timerGeneration) || this.sessionId !== checkedSessionId) return;
+      // A real event may have renewed or extended this Session while we waited.
+      const closing = this.renewSessionIfExpired(Utils.getCurrentNanoTime(), generation);
       await Promise.all(closing);
-      if (!this.isLifecycleCurrent(generation)) return;
+      if (!this.isSessionCheckCurrent(generation, timerGeneration)) return;
     }
-    this.lastUserActiveTime = now;
   }
   
   
@@ -5314,12 +5358,13 @@ export class FTRUMInnerManager {
    * Initialize session timer
    */
   private initSessionTimer(): void {
-    if (this.sessionCheckTimer !== null || this.lifecycleState !== RUMManagerLifecycle.RUNNING) return;
+    if (this.sessionCheckTimer !== null || this.lifecycleState !== RUMManagerLifecycle.RUNNING ||
+      this.appState === AppState.BACKGROUND) return;
     const timerGeneration = ++this.sessionTimerGeneration;
     this.sessionCheckTimer = setInterval(() => {
       if (this.sessionTimerGeneration !== timerGeneration ||
-        this.lifecycleState !== RUMManagerLifecycle.RUNNING) return;
-      this.checkSessionRefresh(false);
+        this.lifecycleState !== RUMManagerLifecycle.RUNNING || this.appState === AppState.BACKGROUND) return;
+      this.checkSessionRefresh(false, timerGeneration);
       // Clean up Set collections periodically to prevent memory leak
       this.cleanupSetCollections();
     }, 60000); // Check session every minute
@@ -5684,7 +5729,14 @@ export class FTRUMInnerManager {
    * @param isUserAction Whether this is a user action
    */
   public attachRUMRelative(tags: Record<string, string>, isUserAction: boolean, state?: AppState): void {
-    const identity = this.captureEventIdentity(state);
+    if (!this.isLifecycleCurrent(this.lifecycleGeneration)) return;
+    this.prepareSessionForEvent();
+    this.attachCapturedRUMRelative(tags, this.captureEventIdentity(state), isUserAction);
+  }
+
+  private attachCapturedRUMRelative(
+    tags: Record<string, string>, identity: SDKRumResourceContextDTO, isUserAction: boolean
+  ): void {
     if (tags[Constants.KEY_RUM_ACTION_ID] !== undefined) tags[Constants.KEY_RUM_ACTION_ID] = '';
     if (tags[Constants.KEY_RUM_ACTION_NAME] !== undefined) tags[Constants.KEY_RUM_ACTION_NAME] = '';
     if (isUserAction && identity.actionId.length > 0) {
@@ -6356,7 +6408,7 @@ export class FTRUMInnerManager {
     if (!this.isLifecycleCurrent(this.lifecycleGeneration)) return;
     try {
       // Check session refresh
-      this.checkSessionRefresh(true);
+      this.prepareSessionForEvent();
       
       // Check if session will collect data
       const collectType = this.checkSessionWillCollect(this.sessionId);
@@ -6391,12 +6443,6 @@ export class FTRUMInnerManager {
       }
 
       this.attachRUMRelative(allTags,true);
-      // Aligned with Android SDK: only set actionId if activeAction exists and is not closed
-      // Android SDK uses attachRUMRelative(tags, true) which checks: if (activeAction != null && !activeAction.isClose())
-      if (this.activeAction && !this.activeAction.isActionClose()) {
-        allTags[Constants.KEY_RUM_ACTION_ID] = this.activeAction.getId();
-        allTags[Constants.KEY_RUM_ACTION_NAME] = this.activeAction.getActionName();
-      }
       
       // Build all fields (aligned with Android field names)
       const allFields: Record<string, string> = {};
