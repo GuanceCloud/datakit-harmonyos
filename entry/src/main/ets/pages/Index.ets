@@ -7,6 +7,7 @@ import { promptAction } from '@kit.ArkUI';
 import { FTSDK } from '@guancecloud/ft_sdk/Index';
 import { DemoLogger } from '../utils/DemoLogger';
 import { common } from '@kit.AbilityKit';
+import process from '@ohos.process';
 
 const TAG = 'Index';
 
@@ -96,6 +97,32 @@ struct Index {
                     .catch((error: Error): void => {
                       promptAction.showToast({ message: `无法启动堆压力入口：${error.message}` });
                     });
+                })
+            }.margin({ bottom: 10 })
+
+            ListItem() {
+              Button('RUM Session Lifecycle A/B（重启测试）')
+                .id('rum-lifecycle-open')
+                .width(CommonConstants.FULL_PERCENT)
+                .height(50)
+                .backgroundColor('#7C3AED')
+                .onClick(() => {
+                  const context = getContext(this) as common.UIAbilityContext;
+                  AlertDialog.show({
+                    title: '重启到专用测试入口',
+                    message: '将重启 Demo，不清除应用数据。测试进程不初始化正常业务 SDK，在真实主线程运行生命周期验证。完成后可重启回 Demo。',
+                    primaryButton: { value: '取消', action: (): void => {} },
+                    secondaryButton: { value: '重启进入', action: (): void => {
+                      context.restartApp({
+                        bundleName: context.abilityInfo.bundleName,
+                        abilityName: 'RUMSessionLifecycleTestAbility',
+                        moduleName: 'entry',
+                        parameters: { lifecycleParentPid: process.pid }
+                      }).catch((error: Error): void => {
+                        promptAction.showToast({ message: `无法打开隔离测试页：${error.message}` });
+                      });
+                    } }
+                  });
                 })
             }.margin({ bottom: 10 })
 

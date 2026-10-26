@@ -70,6 +70,17 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true
+      },
+      {
+        "name": "RUMSessionLifecycleTestAbility",
+        "srcEntry": "./ets/rumlifecycleability/RUMSessionLifecycleTestAbility.ets",
+        "description": "Offline RUM session lifecycle verification",
+        "launchType": "singleton",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": false
       }
     ],
 

@@ -4,6 +4,7 @@
     "pages/HvigorSyntaxVerificationPage",
     "pages/LaunchSuspendTestPage",
     "pages/ApplicationHeapPressurePage",
+    "pages/RUMSessionLifecycleTestPage",
     "pages/BackgroundLaunchWorkSchedulerPage",
     "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",

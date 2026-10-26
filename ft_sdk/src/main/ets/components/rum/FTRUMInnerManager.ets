@@ -288,6 +288,14 @@ interface RumResourceDraftIds {
   errorUuid: string;
 }
 
+/** Snapshot for internal lifecycle device tests; intentionally absent from the package exports. */
+export interface FTRUMSessionLifecycleState {
+  sessionId: string;
+  lastSessionTime: number;
+  lastUserActiveTime: number;
+  timerId: number | null;
+}
+
 enum RUMManagerLifecycle {
   RUNNING,
   STOPPING,
@@ -2870,6 +2878,30 @@ export class FTRUMInnerManager {
   public expireSessionForTest(): void {
     this.lastSessionTime = 0;
     this.lastUserActiveTime = 0;
+  }
+
+  /** Internal device-test access only; not exported by Index.ets. No timer/refresh behavior is replaced. */
+  public getSessionLifecycleStateForTest(): FTRUMSessionLifecycleState {
+    return {
+      sessionId: this.sessionId,
+      lastSessionTime: this.lastSessionTime,
+      lastUserActiveTime: this.lastUserActiveTime,
+      timerId: this.sessionCheckTimer
+    };
+  }
+
+  public getSessionRefreshQueueForTest(): Promise<void> {
+    return this.sessionRefreshLock;
+  }
+
+  /** Hold the queue before a real platform timer tick is delivered. */
+  public holdSessionRefreshQueueForTest(barrier: Promise<void>): void {
+    this.sessionRefreshLock = this.sessionRefreshLock.then((): Promise<void> => barrier);
+  }
+
+  /** Model unfinished asynchronous View work without replacing the refresh implementation. */
+  public holdSyntheticCloseForTest(barrier: Promise<void>): void {
+    this.syntheticCloseBarrier = this.syntheticCloseBarrier.then((): Promise<void> => barrier);
   }
 
   /**
