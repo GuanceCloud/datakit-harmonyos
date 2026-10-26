@@ -1,5 +1,6 @@
 import {
   AppState,
+  applyFTAxiosTrack,
   createFTRCPTrackConfig,
   ErrorType,
   FTLogger,
@@ -21,9 +22,21 @@ import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { hidebug } from '@kit.PerformanceAnalysisKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
+import { http } from '@kit.NetworkKit';
+import { applyFTHttpTrack, disposeFTHttpTrack } from '@guancecloud/ft_sdk_ext/Index';
+import axios, { AbortController, AxiosInstance, AxiosRequestConfig, AxiosResponse } from '@ohos/axios';
 import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
 import { StressLogTimestampSequencer } from './StressLogTimestampSequencer';
+import {
+  buildStressResourceUrl,
+  createStressResourceRequestPlan,
+  normalizeStressResourceClient,
+  normalizeStressResourceScenario,
+  StressResourceClient,
+  StressResourceRequestPlan,
+  StressResourceScenario
+} from './StressResourceScenarios';
 
 const TAG = "StressTestManager";
 const STRESS_TEST_LOG_TAG = "stress_test";
@@ -95,6 +108,8 @@ export interface StressTestConfig {
   resourceThreadCount: number;
   resourceIntervalMs: number;
   realResourceUrl: string;
+  realResourceClient: StressResourceClient;
+  realResourceScenario: StressResourceScenario;
   navigationIntervalMs: number;
   errorBatchSize: number;
   errorIntervalMs: number;
@@ -299,6 +314,8 @@ export function createDefaultStressTestConfig(
     resourceThreadCount: 2,
     resourceIntervalMs: 200,
     realResourceUrl: "",
+    realResourceClient: 'mixed',
+    realResourceScenario: 'custom',
     navigationIntervalMs: 1000,
     errorBatchSize: 1,
     errorIntervalMs: 1000,
@@ -365,6 +382,9 @@ export class StressTestManager {
 
   private rumManager: FTRUMGlobalManager | null = null;
   private realResourceSession: rcp.Session | null = null;
+  private realResourceAxiosClient: AxiosInstance | null = null;
+  private activeHttpRequests: http.HttpRequest[] = [];
+  private activeAxiosControllers: AbortController[] = [];
   private currentConfig: StressTestConfig = createDefaultStressTestConfig(0, false);
   private currentStats: StressTestStats = createEmptyStressTestStats();
   private lastReport: StressTestReport | null = null;
@@ -407,19 +427,19 @@ export class StressTestManager {
     return StressTestManager.instance;
   }
 
-  private getTraceTestUrl(resourceIndex: number): string {
+  private getTraceTestUrls(): string[] {
     const stressUrls = this.parseResourceUrls(this.currentConfig.realResourceUrl);
     if (stressUrls.length > 0) {
-      return this.selectRoundRobinUrl(stressUrls, resourceIndex);
+      return stressUrls;
     }
 
     const configuredUrl = ((AppStorage.get(KEY_TRACE_URL) as string | undefined) ?? "").trim();
     const configuredUrls = this.parseResourceUrls(configuredUrl);
     if (configuredUrls.length > 0) {
-      return this.selectRoundRobinUrl(configuredUrls, resourceIndex);
+      return configuredUrls;
     }
 
-    return DEFAULT_REAL_TRAFFIC_URL;
+    return [DEFAULT_REAL_TRAFFIC_URL];
   }
 
   private parseResourceUrls(rawUrls: string): string[] {
@@ -443,11 +463,6 @@ export class StressTestManager {
     if (trimmedUrl.length > 0) {
       urls.push(trimmedUrl);
     }
-  }
-
-  private selectRoundRobinUrl(urls: string[], resourceIndex: number): string {
-    const safeIndex = Math.max(0, Math.floor(resourceIndex));
-    return urls[safeIndex % urls.length];
   }
 
   private formatResourceUrlSummary(rawUrls: string): string {
@@ -517,7 +532,7 @@ export class StressTestManager {
     this.isRunning = true;
     this.startTime = Date.now();
     this.durationSeconds = normalizedConfig.durationSeconds;
-    this.closeRealResourceSession();
+    this.closeRealResourceClients();
     this.clearFinalUploadFlushTimer();
     this.currentConfig = normalizedConfig;
     this.lastReport = null;
@@ -672,6 +687,8 @@ export class StressTestManager {
       resourceThreadCount: Math.max(0, Math.floor(config.resourceThreadCount)),
       resourceIntervalMs: Math.max(50, Math.floor(config.resourceIntervalMs)),
       realResourceUrl: (config.realResourceUrl ?? "").trim(),
+      realResourceClient: normalizeStressResourceClient(config.realResourceClient ?? 'mixed'),
+      realResourceScenario: normalizeStressResourceScenario(config.realResourceScenario ?? 'custom'),
       navigationIntervalMs: Math.max(250, Math.floor(config.navigationIntervalMs)),
       errorBatchSize: Math.max(1, Math.floor(config.errorBatchSize)),
       errorIntervalMs: Math.max(250, Math.floor(config.errorIntervalMs)),
@@ -879,12 +896,18 @@ export class StressTestManager {
           clearInterval(intervalId);
           return;
         }
+        const runStats = this.currentStats;
         this.sendResource(threadIndex).catch((error: Error) => {
+          if (!this.isRunning || this.currentStats !== runStats) {
+            return;
+          }
           this.currentStats.resourcesFailed += 1;
           this.recordErrorMessage(`sendResource failed: ${error.message}`);
           DemoLogger.e(TAG, `Error in sendResource for timer ${threadIndex}: ${error}`);
         }).then((): void => {
-          this.finishTotalCountStressIfComplete();
+          if (this.isRunning && this.currentStats === runStats) {
+            this.finishTotalCountStressIfComplete();
+          }
         });
       }, config.resourceIntervalMs);
       this.resourceIntervalIds.push(intervalId);
@@ -980,6 +1003,7 @@ export class StressTestManager {
 
     const resourceIndex = this.resourceCounter++;
     this.currentStats.resourcesGenerated += 1;
+    const runStats = this.currentStats;
 
     try {
       if (this.currentConfig.trafficMode === 'real') {
@@ -987,9 +1011,15 @@ export class StressTestManager {
       } else {
         this.sendFakeResource(threadIndex, resourceIndex);
       }
-      this.currentStats.resourcesSucceeded += 1;
+      if (!this.isRunning || this.currentStats !== runStats) {
+        return;
+      }
+      runStats.resourcesSucceeded += 1;
     } catch (error) {
-      this.currentStats.resourcesFailed += 1;
+      if (!this.isRunning || this.currentStats !== runStats) {
+        return;
+      }
+      runStats.resourcesFailed += 1;
       this.recordErrorMessage(`resource failed: ${error}`);
       DemoLogger.e(TAG, `Failed to send resource from timer ${threadIndex}: ${error}`);
     }
@@ -997,13 +1027,125 @@ export class StressTestManager {
   }
 
   private async sendRealResource(threadIndex: number, resourceIndex: number): Promise<void> {
-    const realApiUrl = this.getTraceTestUrl(resourceIndex);
-    const separator = realApiUrl.indexOf('?') >= 0 ? '&' : '?';
-    const url =
-      `${realApiUrl}${separator}tag=${STRESS_TEST_LOG_TAG}&stress_thread=${threadIndex}&stress_resource=${resourceIndex}&ts=${Date.now()}`;
+    const plan = createStressResourceRequestPlan(
+      this.currentConfig.realResourceClient,
+      this.currentConfig.realResourceScenario,
+      resourceIndex,
+      this.getTraceTestUrls()
+    );
+    const url = buildStressResourceUrl(plan, threadIndex, resourceIndex, Date.now());
+    let statusCode: number;
+    switch (plan.client) {
+      case 'http':
+        statusCode = await this.sendRealHttpResource(url, plan.timeoutMs);
+        break;
+      case 'axios':
+        statusCode = await this.sendRealAxiosResource(url, plan.timeoutMs);
+        break;
+      default:
+        statusCode = await this.sendRealRcpResource(url, plan);
+        break;
+    }
+    if (statusCode < 200 || statusCode >= 400) {
+      throw new Error(`${plan.client}/${plan.scenario}: HTTP ${statusCode}, url=${url}`);
+    }
+  }
+
+  private async sendRealRcpResource(url: string, plan: StressResourceRequestPlan): Promise<number> {
     const session = this.getRealResourceSession();
     const request = new rcp.Request(url, 'GET');
-    await session.fetch(request);
+    request.configuration = {
+      transfer: {
+        timeout: {
+          connectMs: Math.min(REAL_RESOURCE_CONNECT_TIMEOUT_MS, plan.timeoutMs),
+          transferMs: plan.timeoutMs,
+          inactivityMs: Math.min(REAL_RESOURCE_INACTIVITY_TIMEOUT_MS, plan.timeoutMs)
+        }
+      }
+    };
+    const response = await session.fetch(request);
+    return response.statusCode;
+  }
+
+  private async sendRealHttpResource(url: string, timeoutMs: number): Promise<number> {
+    const request = http.createHttp();
+    this.activeHttpRequests.push(request);
+    try {
+      applyFTHttpTrack(request);
+      const response = await request.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: Math.min(REAL_RESOURCE_CONNECT_TIMEOUT_MS, timeoutMs),
+        readTimeout: timeoutMs,
+        usingCache: false,
+        expectDataType: http.HttpDataType.STRING
+      });
+      return response.responseCode;
+    } finally {
+      const index = this.activeHttpRequests.indexOf(request);
+      if (index >= 0) {
+        this.activeHttpRequests.splice(index, 1);
+        try {
+          disposeFTHttpTrack(request);
+        } catch (error) {
+          DemoLogger.w(TAG, `Failed to dispose real HTTP tracking: ${error}`);
+        } finally {
+          request.destroy();
+        }
+      }
+    }
+  }
+
+  private async sendRealAxiosResource(url: string, timeoutMs: number): Promise<number> {
+    if (this.realResourceAxiosClient === null) {
+      this.realResourceAxiosClient = axios.create();
+      applyFTAxiosTrack(this.realResourceAxiosClient);
+    }
+    const controller = new AbortController();
+    this.activeAxiosControllers.push(controller);
+    try {
+      const options: AxiosRequestConfig<Object> = {
+        timeout: timeoutMs,
+        connectTimeout: Math.min(REAL_RESOURCE_CONNECT_TIMEOUT_MS, timeoutMs),
+        readTimeout: timeoutMs,
+        responseType: 'string',
+        signal: controller.signal,
+        // Classify HTTP errors consistently across all three clients.
+        validateStatus: (_status: number): boolean => true
+      };
+      const response = await this.realResourceAxiosClient.get<string, AxiosResponse<string, Object>, Object>(url, options);
+      return response.status;
+    } finally {
+      const index = this.activeAxiosControllers.indexOf(controller);
+      if (index >= 0) {
+        this.activeAxiosControllers.splice(index, 1);
+      }
+    }
+  }
+
+  private closeRealResourceClients(): void {
+    this.closeRealResourceSession();
+    for (let i = 0; i < this.activeHttpRequests.length; i++) {
+      try {
+        disposeFTHttpTrack(this.activeHttpRequests[i]);
+      } catch (error) {
+        DemoLogger.w(TAG, `Failed to dispose real HTTP tracking while stopping: ${error}`);
+      }
+      try {
+        this.activeHttpRequests[i].destroy();
+      } catch (error) {
+        DemoLogger.w(TAG, `Failed to destroy real HTTP request: ${error}`);
+      }
+    }
+    this.activeHttpRequests = [];
+    for (let i = 0; i < this.activeAxiosControllers.length; i++) {
+      try {
+        this.activeAxiosControllers[i].abort();
+      } catch (error) {
+        DemoLogger.w(TAG, `Failed to abort real Axios request: ${error}`);
+      }
+    }
+    this.activeAxiosControllers = [];
+    this.realResourceAxiosClient = null;
   }
 
   private getRealResourceSession(): rcp.Session {
@@ -1985,7 +2127,7 @@ export class StressTestManager {
     const elapsedSeconds = this.getElapsedSeconds();
     this.isRunning = false;
     this.clearAllTimers();
-    this.closeRealResourceSession();
+    this.closeRealResourceClients();
     if (this.currentStats.enableLogs && this.currentStats.logsGenerated > 0) {
       FTLogger.flush();
     }

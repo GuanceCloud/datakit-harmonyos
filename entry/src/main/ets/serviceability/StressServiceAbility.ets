@@ -7,6 +7,7 @@ import {
   StressTrafficMode
 } from '../utils/StressTestManager';
 import { DemoLogger } from '../utils/DemoLogger';
+import { normalizeStressResourceClient, normalizeStressResourceScenario } from '../utils/StressResourceScenarios';
 import {
   markStressServiceError,
   markStressServiceEvent,
@@ -136,6 +137,12 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     config.resourceThreadCount = this.readNumber(want, 'resourceThreadCount', config.resourceThreadCount);
     config.resourceIntervalMs = this.readNumber(want, 'resourceIntervalMs', config.resourceIntervalMs);
     config.realResourceUrl = this.readString(want, 'realResourceUrl', config.realResourceUrl).trim();
+    config.realResourceClient = normalizeStressResourceClient(
+      this.readString(want, 'realResourceClient', config.realResourceClient)
+    );
+    config.realResourceScenario = normalizeStressResourceScenario(
+      this.readString(want, 'realResourceScenario', config.realResourceScenario)
+    );
     config.navigationIntervalMs = this.readNumber(want, 'navigationIntervalMs', config.navigationIntervalMs);
     config.errorBatchSize = this.readNumber(want, 'errorBatchSize', config.errorBatchSize);
     config.errorIntervalMs = this.readNumber(want, 'errorIntervalMs', config.errorIntervalMs);

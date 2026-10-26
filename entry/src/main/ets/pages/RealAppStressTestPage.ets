@@ -17,6 +17,16 @@ import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
+  normalizeStressResourceClient,
+  normalizeStressResourceScenario,
+  STRESS_RESOURCE_CLIENT_OPTIONS,
+  STRESS_RESOURCE_SCENARIO_OPTIONS,
+  StressResourceClient,
+  StressResourceClientOption,
+  StressResourceScenario,
+  StressResourceScenarioOption
+} from '../utils/StressResourceScenarios';
+import {
   KEY_STRESS_SERVICE_LAST_ERROR,
   KEY_STRESS_SERVICE_LAST_EVENT,
   KEY_STRESS_SERVICE_LAST_EVENT_TIME_MS,
@@ -55,6 +65,8 @@ const KEY_ENABLE_ERRORS = 'enable_errors';
 const KEY_ENABLE_LONG_TASKS = 'enable_long_tasks';
 const KEY_ENABLE_BACKGROUND_SERVICE = 'enable_background_service';
 const KEY_REAL_RESOURCE_URL = 'real_resource_url';
+const KEY_REAL_RESOURCE_CLIENT = 'real_resource_client';
+const KEY_REAL_RESOURCE_SCENARIO = 'real_resource_scenario';
 const KEY_STRESS_LOG_BATCH_SIZE = 'stress_log_batch_size';
 const KEY_STRESS_LOG_INTERVAL_MS = 'stress_log_interval_ms';
 const KEY_STRESS_ACTION_TIMER_COUNT = 'stress_action_timer_count';
@@ -82,6 +94,12 @@ const DEFAULT_STRESS_ERROR_INTERVAL_MS = 1000;
 const DEFAULT_STRESS_LONG_TASK_BATCH_SIZE = 1;
 const DEFAULT_STRESS_LONG_TASK_INTERVAL_MS = 1500;
 const DEFAULT_REAL_RESOURCE_URL = '';
+const RESOURCE_CLIENT_SELECT_OPTIONS: SelectOption[] = STRESS_RESOURCE_CLIENT_OPTIONS.map(
+  (option: StressResourceClientOption): SelectOption => ({ value: option.label })
+);
+const RESOURCE_SCENARIO_SELECT_OPTIONS: SelectOption[] = STRESS_RESOURCE_SCENARIO_OPTIONS.map(
+  (option: StressResourceScenarioOption): SelectOption => ({ value: option.label })
+);
 const MIN_STRESS_LOG_BATCH_SIZE = 1;
 const MIN_STRESS_LOG_INTERVAL_MS = 16;
 const MIN_STRESS_ACTION_TIMER_COUNT = 1;
@@ -130,6 +148,8 @@ export struct RealAppStressTestPage {
   @State enableLongTasks: boolean = false;
   @State enableBackgroundService: boolean = false;
   @State realResourceUrls: string[] = [DEFAULT_REAL_RESOURCE_URL];
+  @State realResourceClient: StressResourceClient = 'mixed';
+  @State realResourceScenario: StressResourceScenario = 'custom';
   @State stressLogBatchSize: number = DEFAULT_STRESS_LOG_BATCH_SIZE;
   @State stressLogIntervalMs: number = DEFAULT_STRESS_LOG_INTERVAL_MS;
   @State stressActionTimerCount: number = DEFAULT_STRESS_ACTION_TIMER_COUNT;
@@ -385,6 +405,8 @@ export struct RealAppStressTestPage {
     config.resourceThreadCount = this.stressResourceTimerCount;
     config.resourceIntervalMs = this.stressResourceIntervalMs;
     config.realResourceUrl = this.serializeRealResourceUrls();
+    config.realResourceClient = this.realResourceClient;
+    config.realResourceScenario = this.realResourceScenario;
     config.navigationIntervalMs = this.stressNavigationIntervalMs;
     config.errorBatchSize = this.stressErrorBatchSize;
     config.errorIntervalMs = this.stressErrorIntervalMs;
@@ -504,6 +526,12 @@ export struct RealAppStressTestPage {
         const savedRealResourceUrl =
           await this.preferencesStore.get(KEY_REAL_RESOURCE_URL, DEFAULT_REAL_RESOURCE_URL) as string;
         this.realResourceUrls = this.normalizeRealResourceUrlInputs(this.parseRealResourceUrls(savedRealResourceUrl));
+        this.realResourceClient = normalizeStressResourceClient(
+          await this.preferencesStore.get(KEY_REAL_RESOURCE_CLIENT, 'mixed') as string
+        );
+        this.realResourceScenario = normalizeStressResourceScenario(
+          await this.preferencesStore.get(KEY_REAL_RESOURCE_SCENARIO, 'custom') as string
+        );
         this.stressLogBatchSize =
           await this.preferencesStore.get(KEY_STRESS_LOG_BATCH_SIZE, DEFAULT_STRESS_LOG_BATCH_SIZE) as number;
         this.stressLogIntervalMs =
@@ -558,6 +586,8 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_ENABLE_LONG_TASKS, this.enableLongTasks);
         await this.preferencesStore.put(KEY_ENABLE_BACKGROUND_SERVICE, this.enableBackgroundService);
         await this.preferencesStore.put(KEY_REAL_RESOURCE_URL, this.serializeRealResourceUrls());
+        await this.preferencesStore.put(KEY_REAL_RESOURCE_CLIENT, this.realResourceClient);
+        await this.preferencesStore.put(KEY_REAL_RESOURCE_SCENARIO, this.realResourceScenario);
         await this.preferencesStore.put(KEY_STRESS_LOG_BATCH_SIZE, this.stressLogBatchSize);
         await this.preferencesStore.put(KEY_STRESS_LOG_INTERVAL_MS, this.stressLogIntervalMs);
         await this.preferencesStore.put(KEY_STRESS_ACTION_TIMER_COUNT, this.stressActionTimerCount);
@@ -604,6 +634,8 @@ export struct RealAppStressTestPage {
       this.enableLongTasks,
       this.enableBackgroundService,
       this.serializeRealResourceUrls(),
+      this.realResourceClient,
+      this.realResourceScenario,
       this.stressLogBatchSize,
       this.stressLogIntervalMs,
       this.stressActionTimerCount,
@@ -942,6 +974,37 @@ export struct RealAppStressTestPage {
     return urlCount > 0 ? `${urlCount} configured` : 'traceUrl/default';
   }
 
+  private getRealResourceClientIndex(): number {
+    return STRESS_RESOURCE_CLIENT_OPTIONS.findIndex(
+      (option: StressResourceClientOption): boolean => option.value === this.realResourceClient
+    );
+  }
+
+  private getRealResourceScenarioIndex(): number {
+    return STRESS_RESOURCE_SCENARIO_OPTIONS.findIndex(
+      (option: StressResourceScenarioOption): boolean => option.value === this.realResourceScenario
+    );
+  }
+
+  private describeRealResourceScenario(): string {
+    switch (this.realResourceScenario) {
+      case 'mixed':
+        return 'Cycle: short / 5s delay / HTTP 404 / HTTP 500 / 1s timeout / connection failure. Mixed clients exercise every scenario (18 requests per cycle).';
+      case 'short':
+        return 'HTTPS GET: httpbin.org/get, timeout 15s.';
+      case 'long':
+        return 'HTTPS GET: httpbin.org/delay/5, server delay 5s, timeout 60s.';
+      case 'http-error':
+        return 'HTTPS GET: httpbin.org/status/404 and /status/500 in rotation, timeout 15s. Both count as failed.';
+      case 'timeout':
+        return 'HTTPS GET: httpbin.org/delay/5 with a 1s timeout.';
+      case 'network-error':
+        return 'HTTPS GET: 127.0.0.1:1 (closed port), timeout 5s.';
+      default:
+        return 'GET each configured URL in rotation, timeout 300s. Mixed clients exercise each URL before advancing.';
+    }
+  }
+
   private clampNumber(value: number, minValue: number): number {
     if (value < minValue) {
       return minValue;
@@ -974,6 +1037,8 @@ export struct RealAppStressTestPage {
   resetStressResourceSettings(): void {
     this.useRealTraffic = false;
     this.realResourceUrls = [DEFAULT_REAL_RESOURCE_URL];
+    this.realResourceClient = 'mixed';
+    this.realResourceScenario = 'custom';
     this.stressResourceTimerCount = DEFAULT_STRESS_RESOURCE_TIMER_COUNT;
     this.stressResourceIntervalMs = DEFAULT_STRESS_RESOURCE_INTERVAL_MS;
     this.saveSettings();
@@ -2148,10 +2213,10 @@ export struct RealAppStressTestPage {
                   })
                   .enabled(!this.isTestRunning)
                 Column({ space: 4 }) {
-                  Text(this.useRealTraffic ? 'Real RCP Resource Traffic' : 'Synthetic Resource Traffic')
+                  Text(this.useRealTraffic ? 'Real Network Resource Traffic' : 'Synthetic Resource Traffic')
                     .fontSize(16)
                     .fontWeight(FontWeight.Medium)
-                  Text(this.useRealTraffic ? 'RCP GET requests from Resource URLs' : 'Local Resource timing data')
+                  Text(this.useRealTraffic ? 'RCP / HTTP(S) / Axios GET requests' : 'Local Resource timing data')
                     .fontSize(12)
                     .fontColor(Color.Gray)
                 }
@@ -2163,6 +2228,42 @@ export struct RealAppStressTestPage {
             .width('100%')
 
             if (this.useRealTraffic) {
+              Column({ space: 8 }) {
+                Text('Network Client')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Select(RESOURCE_CLIENT_SELECT_OPTIONS)
+                  .selected(this.getRealResourceClientIndex())
+                  .value(STRESS_RESOURCE_CLIENT_OPTIONS[this.getRealResourceClientIndex()].label)
+                  .width('100%')
+                  .enabled(!this.isTestRunning)
+                  .onSelect((index: number) => {
+                    this.realResourceClient = STRESS_RESOURCE_CLIENT_OPTIONS[index].value;
+                    this.saveSettings();
+                  })
+
+                Text('Request Scenario')
+                  .fontSize(14)
+                  .fontColor(Color.Gray)
+                Select(RESOURCE_SCENARIO_SELECT_OPTIONS)
+                  .selected(this.getRealResourceScenarioIndex())
+                  .value(STRESS_RESOURCE_SCENARIO_OPTIONS[this.getRealResourceScenarioIndex()].label)
+                  .width('100%')
+                  .enabled(!this.isTestRunning)
+                  .onSelect((index: number) => {
+                    this.realResourceScenario = STRESS_RESOURCE_SCENARIO_OPTIONS[index].value;
+                    this.saveSettings();
+                  })
+
+                Text(this.describeRealResourceScenario())
+                  .fontSize(12)
+                  .fontColor(Color.Gray)
+                  .width('100%')
+              }
+              .width('100%')
+            }
+
+            if (this.useRealTraffic && this.realResourceScenario === 'custom') {
               Column({ space: 6 }) {
                 Text('Resource Real Traffic URLs')
                   .fontSize(14)
@@ -2204,7 +2305,7 @@ export struct RealAppStressTestPage {
                   })
 
                 Text(this.serializeRealResourceUrls().length > 0 ?
-                  'Resource URL mapping: urls[N % urls.length]' :
+                  'Each URL is exercised by the selected network client(s) in rotation' :
                   'Resource URL fallback: launch traceUrl/default')
                   .fontSize(12)
                   .fontColor(Color.Gray)
