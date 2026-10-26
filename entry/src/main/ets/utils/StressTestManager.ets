@@ -155,6 +155,7 @@ export interface StressTestStats {
 
 export interface StressCapabilityLaneMetric {
   laneName: string;
+  maxConcurrency: number;
   backend: string;
   lastError: string;
   submitted: number;
@@ -1898,6 +1899,7 @@ export class StressTestManager {
     const avgCostMs = this.roundMetric(pool.averageCostTime, 2);
     return {
       laneName: `${type}`,
+      maxConcurrency: pool.maxConcurrency,
       backend: pool.backend,
       lastError: pool.lastError,
       submitted: pool.submittedTasks,
@@ -1970,6 +1972,7 @@ export class StressTestManager {
   private createEmptyLaneMetric(): StressCapabilityLaneMetric {
     return {
       laneName: 'none',
+      maxConcurrency: 0,
       backend: 'none',
       lastError: '',
       submitted: 0,

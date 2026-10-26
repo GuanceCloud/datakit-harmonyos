@@ -4,14 +4,13 @@ import { promptAction } from '@kit.ArkUI';
 import {
   createEmptyStressTestStats,
   DEFAULT_REAL_TRAFFIC_URL,
+  StressCapabilityLaneMetric,
   StressTestConfig,
   StressTestManager,
   StressTestReport,
   StressRunMode,
   StressTestStats
 } from '../utils/StressTestManager';
-import { SDKDedicatedPoolManager } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKDedicatedPoolManager';
-import { SDKDedicatedPoolType } from '@guancecloud/ft_sdk/src/main/ets/components/thread/SDKWorkerProtocol';
 import preferences from '@ohos.data.preferences';
 import { TestPageHeader } from '../components/TestPageHeader';
 import { TestPageTheme } from '../constants/TestPageTheme';
@@ -112,8 +111,8 @@ const MIN_STRESS_ERROR_INTERVAL_MS = 250;
 const MIN_STRESS_LONG_TASK_BATCH_SIZE = 1;
 const MIN_STRESS_LONG_TASK_INTERVAL_MS = 250;
 const MIN_STRESS_TOTAL_COUNT = 1;
-const SDK_LOG_LANE = 'log';
-const SDK_EVENT_LANE = 'event';
+const SDK_LOG_LANE = 'log-consumer';
+const SDK_EVENT_LANE = 'event-consumer';
 const SDK_DATA_PROCESS_LANE = 'data-process';
 const SDK_LOG_FLUSH_BATCH_SIZE = 20;
 const SDK_LOG_PROCESS_COALESCE_MS = 100;
@@ -139,6 +138,7 @@ export struct RealAppStressTestPage {
   @State elapsedSeconds: number = 0;
   @State stats: StressTestStats = createEmptyStressTestStats();
   @State reportText: string = "";
+  @State completedCapabilityLanes: StressCapabilityLaneMetric[] = [];
   @State useRealTraffic: boolean = false;
   @State enableLogs: boolean = true;
   @State enableActions: boolean = true;
@@ -180,6 +180,7 @@ export struct RealAppStressTestPage {
     await this.loadSettings();
     this.syncCurrentStatsSnapshot();
     if (this.isTestRunning) {
+      this.completedCapabilityLanes = [];
       DemoLogger.i(TAG, `Stress test is already running: elapsed=${this.elapsedSeconds}s, duration=${this.testDuration}s`);
     } else {
       this.refreshReportFromManager(false);
@@ -226,8 +227,7 @@ export struct RealAppStressTestPage {
       return;
     }
 
-    this.lastReportEndedAtMs = report.endedAtMs;
-    this.reportText = this.stressTestManager.formatReport(report);
+    this.refreshReportFromReport(report);
     if (showToast) {
       promptAction.showToast({
         message: `Test completed (${report.elapsedSeconds}s)`,
@@ -264,6 +264,7 @@ export struct RealAppStressTestPage {
       }
 
       this.reportText = "";
+      this.completedCapabilityLanes = [];
       this.lastReportEndedAtMs = 0;
       if (this.enableBackgroundService) {
         resetStressServiceStatus();
@@ -372,10 +373,11 @@ export struct RealAppStressTestPage {
   }
 
   private refreshReportFromReport(report: StressTestReport | null): void {
-    if (report === null) {
+    if (report === null || report.endedAtMs === this.lastReportEndedAtMs) {
       return;
     }
     this.lastReportEndedAtMs = report.endedAtMs;
+    this.completedCapabilityLanes = report.capabilityReport?.lanes ?? [];
     this.reportText = this.stressTestManager.formatReport(report);
   }
 
@@ -1453,39 +1455,23 @@ export struct RealAppStressTestPage {
   }
 
   private getSdkLaneConcurrency(laneName: string, fallback: number): number {
-    try {
-      const poolType = this.getSdkPoolType(laneName);
-      const pool = SDKDedicatedPoolManager.getInstance().getStatus().pools[poolType];
-      if (pool !== undefined && pool.maxConcurrency > 0) {
-        return pool.maxConcurrency;
+    for (let i = 0; i < this.completedCapabilityLanes.length; i++) {
+      const lane = this.completedCapabilityLanes[i];
+      if (lane.laneName === laneName && lane.maxConcurrency > 0) {
+        return lane.maxConcurrency;
       }
-    } catch (error) {
-      DemoLogger.w(TAG, `Failed to read SDK pool status for ${laneName}: ${error}`);
     }
     return fallback;
   }
 
   private getSdkLaneAverageCostMs(laneName: string, fallback: number): number {
-    try {
-      const poolType = this.getSdkPoolType(laneName);
-      const pool = SDKDedicatedPoolManager.getInstance().getStatus().pools[poolType];
-      if (pool !== undefined && pool.averageCostTime > 0) {
-        return pool.averageCostTime;
+    for (let i = 0; i < this.completedCapabilityLanes.length; i++) {
+      const lane = this.completedCapabilityLanes[i];
+      if (lane.laneName === laneName && lane.avgCostMs > 0) {
+        return lane.avgCostMs;
       }
-    } catch (error) {
-      DemoLogger.w(TAG, `Failed to read SDK pool cost for ${laneName}: ${error}`);
     }
     return fallback;
-  }
-
-  private getSdkPoolType(laneName: string): SDKDedicatedPoolType {
-    if (laneName === SDK_EVENT_LANE) {
-      return SDKDedicatedPoolType.EVENT_CONSUMER;
-    }
-    if (laneName === SDK_LOG_LANE) {
-      return SDKDedicatedPoolType.LOG_CONSUMER;
-    }
-    return SDKDedicatedPoolType.DATA_PROCESS;
   }
 
   private estimateSdkLaneRate(laneName: string, fallbackConcurrency: number, fallbackCostMs: number): number {
@@ -1509,6 +1495,9 @@ export struct RealAppStressTestPage {
   }
 
   private formatLogSdkCapacityPeak(): string {
+    if (this.completedCapabilityLanes.length === 0) {
+      return '--';
+    }
     const logLaneConcurrency = this.getSdkLaneConcurrency(SDK_LOG_LANE, 1);
     const dataLaneConcurrency = this.getSdkLaneConcurrency(SDK_DATA_PROCESS_LANE, 2);
     const estimatedRate =
@@ -1520,6 +1509,9 @@ export struct RealAppStressTestPage {
   }
 
   private formatRumSdkCapacityPeak(unit: string, prefix: string = 'EVENT'): string {
+    if (this.completedCapabilityLanes.length === 0) {
+      return '--';
+    }
     const eventLaneConcurrency = this.getSdkLaneConcurrency(SDK_EVENT_LANE, 1);
     const dataLaneConcurrency = this.getSdkLaneConcurrency(SDK_DATA_PROCESS_LANE, 2);
     return this.formatSdkCapacityPeak(
@@ -1585,6 +1577,9 @@ export struct RealAppStressTestPage {
   }
 
   private formatMaxNavigationPeak(): string {
+    if (this.completedCapabilityLanes.length === 0) {
+      return '--';
+    }
     return this.formatSdkCapacityPeak(
       `~${this.formatRateValue(1000 / MIN_STRESS_NAVIGATION_INTERVAL_MS)} switch/s`,
       `router timer min ${MIN_STRESS_NAVIGATION_INTERVAL_MS}ms\nforeground only`
@@ -2776,6 +2771,11 @@ export struct RealAppStressTestPage {
             Text(`UI Drift: max=${this.stats.uiJankMaxDriftMs}ms, avg=${this.stats.uiJankAvgDriftMs}ms, >=50ms=${this.stats.uiJankOver50Count}, >=100ms=${this.stats.uiJankOver100Count}, signal=${this.formatRealtimeUiJankSignal()}`)
               .fontSize(13)
               .fontColor(this.getRealtimeUiJankColor())
+              .width('100%')
+
+            Text('Max Peak / avg: updated after the stress test ends.')
+              .fontSize(12)
+              .fontColor(Color.Gray)
               .width('100%')
 
             Column({ space: 4 }) {
