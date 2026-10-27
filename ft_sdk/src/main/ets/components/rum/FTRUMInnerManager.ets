@@ -53,6 +53,7 @@ import {
   SDKWorkerResponse
 } from '../thread/SDKWorkerProtocol';
 import { Utils } from '../utils/Utils';
+import { FTExpiringIdCache } from '../utils/FTExpiringIdCache';
 import { DeviceUtils } from '../utils/DeviceUtils';
 import { FTNetworkListener } from '../utils/FTNetworkListener';
 import { Constants } from '../Constants';
@@ -464,9 +465,9 @@ export class FTRUMInnerManager {
   /** Crash finalization waits for a counter-flush response after its DB delta is applied. */
   private rumSemanticApplyWaiters: Map<string, RumSemanticApplyWaiter[]> = new Map();
   private rumSemanticSequence: number = 0;
-  private committedRumSemanticResponseIds: Map<string, boolean> = new Map();
-  private committedRumSemanticResponseOrder: string[] = [];
-  private committedRumSemanticResponseOrderHead: number = 0;
+  private committedRumSemanticResponseIds: FTExpiringIdCache = new FTExpiringIdCache(
+    FTRUMInnerManager.RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY, Constants.DEDUP_RETENTION_MS
+  );
   private resourceDraftIdsById: Map<string, RumResourceDraftIds> = new Map();
   private completedRumResourceIds: Set<string> = new Set();
   /**
@@ -512,17 +513,15 @@ export class FTRUMInnerManager {
   private rumDataGenerateTimer: number | null = null;
   private rumDataGenerateViewSummary: boolean = false;
   
-  // Set to track processed action IDs to prevent duplicate inserts
-  // This ensures that even if an action is queried multiple times, it will only be inserted once
+  // Current Action attempts stay guarded until durable completion or failure.
   private processedActionIds: Set<string> = new Set();
-  private processedActionIdOrder: string[] = [];
-  private processedActionIdOrderHead: number = 0;
   
-  // Set to track inserted action IDs to prevent duplicate uploads
-  // This ensures that even if completed action submission is triggered multiple times, it will only upload once.
+  // Submitted Action attempts prevent duplicate worker dispatch while pending.
   private insertedActionIds: Set<string> = new Set();
-  private insertedActionIdOrder: string[] = [];
-  private insertedActionIdOrderHead: number = 0;
+  /** Expiry starts only after the final write and aggregate cleanup succeed. */
+  private completedActionIds: FTExpiringIdCache = new FTExpiringIdCache(
+    FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY, Constants.DEDUP_RETENTION_MS
+  );
   private lastRumCounterMailboxFailureLogAt: number = 0;
   
   // Promise-based lock to ensure thread-safe insertion of actions
@@ -636,7 +635,16 @@ export class FTRUMInnerManager {
       if (entry.request.command === SDKWorkerCommand.EVENT_RUM_COMPLETED_ACTION_BATCH && this.context) {
         const payload = entry.request.payload as Object as SDKRumCompletedActionBatchDTO;
         const ids = payload.actions.map((a: SDKRumCompletedActionDTO) => a.actionId);
-        FTDBTaskPoolExecutor.cleanCloseActionData(this.context, ids).catch((error: Error) => {
+        const generation = this.lifecycleGeneration;
+        FTDBTaskPoolExecutor.cleanCloseActionData(this.context, ids).then((): void => {
+          if (!this.isLifecycleCurrent(generation)) { return; }
+          for (const id of ids) {
+            this.completedActionIds.add(id);
+            this.forgetInsertedActionId(id);
+            this.forgetProcessedActionId(id);
+          }
+        }).catch((error: Error) => {
+          if (!this.isLifecycleCurrent(generation)) { return; }
           for (const id of ids) { this.forgetInsertedActionId(id); this.forgetProcessedActionId(id); }
           FTInnerLogger.e(TAG, `Completed action cleanup failed: ${error.message}`);
         });
@@ -831,120 +839,45 @@ export class FTRUMInnerManager {
   }
 
   private rememberCommittedRumSemanticResponse(requestId: string): void {
-    if (!requestId || this.committedRumSemanticResponseIds.has(requestId)) {
-      return;
-    }
-    this.committedRumSemanticResponseIds.set(requestId, true);
-    this.committedRumSemanticResponseOrder.push(requestId);
-    while (this.committedRumSemanticResponseOrder.length - this.committedRumSemanticResponseOrderHead >
-      FTRUMInnerManager.RUM_SEMANTIC_RESPONSE_DEDUP_CAPACITY) {
-      const oldest = this.committedRumSemanticResponseOrder[this.committedRumSemanticResponseOrderHead];
-      this.committedRumSemanticResponseOrderHead++;
-      this.committedRumSemanticResponseIds.delete(oldest);
-    }
-    this.compactCommittedRumSemanticResponseOrder();
-  }
-
-  private compactCommittedRumSemanticResponseOrder(): void {
-    if (this.committedRumSemanticResponseOrderHead === 0) {
-      return;
-    }
-    if (this.committedRumSemanticResponseOrderHead >= this.committedRumSemanticResponseOrder.length) {
-      this.committedRumSemanticResponseOrder = [];
-      this.committedRumSemanticResponseOrderHead = 0;
-      return;
-    }
-    if (this.committedRumSemanticResponseOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
-      this.committedRumSemanticResponseOrderHead * 2 >= this.committedRumSemanticResponseOrder.length) {
-      this.committedRumSemanticResponseOrder =
-        this.committedRumSemanticResponseOrder.slice(this.committedRumSemanticResponseOrderHead);
-      this.committedRumSemanticResponseOrderHead = 0;
-    }
+    this.committedRumSemanticResponseIds.add(requestId);
   }
 
   private rememberProcessedActionId(actionId: string): void {
     if (!actionId || this.processedActionIds.has(actionId)) {
       return;
     }
-    this.compactProcessedActionIdOrder();
-    while (this.processedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY &&
-      this.processedActionIdOrderHead < this.processedActionIdOrder.length) {
-      const oldest = this.processedActionIdOrder[this.processedActionIdOrderHead];
-      this.processedActionIdOrderHead++;
+    while (this.processedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY) {
+      const oldest = this.processedActionIds.values().next().value as string | undefined;
+      if (oldest === undefined) { break; }
       this.processedActionIds.delete(oldest);
     }
     this.processedActionIds.add(actionId);
-    this.processedActionIdOrder.push(actionId);
-    this.compactProcessedActionIdOrder();
   }
 
   private forgetProcessedActionId(actionId: string): void {
     this.processedActionIds.delete(actionId);
-    this.compactProcessedActionIdOrder();
-  }
-
-  private compactProcessedActionIdOrder(): void {
-    while (this.processedActionIdOrderHead < this.processedActionIdOrder.length &&
-      !this.processedActionIds.has(this.processedActionIdOrder[this.processedActionIdOrderHead])) {
-      this.processedActionIdOrderHead++;
-    }
-    if (this.processedActionIdOrderHead >= this.processedActionIdOrder.length) {
-      this.processedActionIdOrder = [];
-      this.processedActionIdOrderHead = 0;
-      return;
-    }
-    if (this.processedActionIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
-      this.processedActionIdOrderHead * 2 >= this.processedActionIdOrder.length) {
-      this.processedActionIdOrder = this.processedActionIdOrder.slice(this.processedActionIdOrderHead);
-      this.processedActionIdOrderHead = 0;
-    }
   }
 
   private rememberInsertedActionId(actionId: string): void {
     if (!actionId || this.insertedActionIds.has(actionId)) {
       return;
     }
-    this.compactInsertedActionIdOrder();
-    while (this.insertedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY &&
-      this.insertedActionIdOrderHead < this.insertedActionIdOrder.length) {
-      const oldest = this.insertedActionIdOrder[this.insertedActionIdOrderHead];
-      this.insertedActionIdOrderHead++;
+    while (this.insertedActionIds.size >= FTRUMInnerManager.RUM_ACTION_ID_DEDUP_CAPACITY) {
+      const oldest = this.insertedActionIds.values().next().value as string | undefined;
+      if (oldest === undefined) { break; }
       this.insertedActionIds.delete(oldest);
     }
     this.insertedActionIds.add(actionId);
-    this.insertedActionIdOrder.push(actionId);
-    this.compactInsertedActionIdOrder();
   }
 
   private forgetInsertedActionId(actionId: string): void {
     this.insertedActionIds.delete(actionId);
-    this.compactInsertedActionIdOrder();
-  }
-
-  private compactInsertedActionIdOrder(): void {
-    while (this.insertedActionIdOrderHead < this.insertedActionIdOrder.length &&
-      !this.insertedActionIds.has(this.insertedActionIdOrder[this.insertedActionIdOrderHead])) {
-      this.insertedActionIdOrderHead++;
-    }
-    if (this.insertedActionIdOrderHead >= this.insertedActionIdOrder.length) {
-      this.insertedActionIdOrder = [];
-      this.insertedActionIdOrderHead = 0;
-      return;
-    }
-    if (this.insertedActionIdOrderHead >= FTRUMInnerManager.RUM_JOURNAL_COMPACTION_MIN_PREFIX &&
-      this.insertedActionIdOrderHead * 2 >= this.insertedActionIdOrder.length) {
-      this.insertedActionIdOrder = this.insertedActionIdOrder.slice(this.insertedActionIdOrderHead);
-      this.insertedActionIdOrderHead = 0;
-    }
   }
 
   private clearActionIdLedgers(): void {
     this.processedActionIds.clear();
-    this.processedActionIdOrder = [];
-    this.processedActionIdOrderHead = 0;
     this.insertedActionIds.clear();
-    this.insertedActionIdOrder = [];
-    this.insertedActionIdOrderHead = 0;
+    this.completedActionIds.clear();
   }
 
   private cleanupCompletedResourceDraftId(resourceId: string): void {
@@ -1531,7 +1464,7 @@ export class FTRUMInnerManager {
   private submitCompletedActionWorkerInput(actionBean: ActionBean, traceBaseName: string): void {
     const actionId = actionBean.getId();
     try {
-      if (this.insertedActionIds.has(actionId)) {
+      if (this.insertedActionIds.has(actionId) || this.completedActionIds.has(actionId)) {
         FTInnerLogger.d(TAG, `[FT-ACTION-DEBUG] Action ${actionId} (${actionBean.getActionName()}) already inserted, skipping duplicate insert`);
         return;
       }
@@ -1559,7 +1492,7 @@ export class FTRUMInnerManager {
     traceBaseName: string
   ): void {
     try {
-      if (this.insertedActionIds.has(actionId)) {
+      if (this.insertedActionIds.has(actionId) || this.completedActionIds.has(actionId)) {
         FTInnerLogger.d(TAG, `[FT-ACTION-DEBUG] Action ${actionId} (${actionName}) already inserted, skipping duplicate insert`);
         return;
       }
@@ -1963,7 +1896,8 @@ export class FTRUMInnerManager {
           for (const bean of beans) {
             const actionId = bean.getId();
             // Skip if already processed OR already inserted (double check for safety)
-            if (this.processedActionIds.has(actionId) || this.insertedActionIds.has(actionId)) {
+            if (this.processedActionIds.has(actionId) || this.insertedActionIds.has(actionId) ||
+              this.completedActionIds.has(actionId)) {
               // The worker result has not necessarily reached durable storage yet.
             } else {
               // Mark as processed immediately to prevent duplicate processing
@@ -2526,8 +2460,6 @@ export class FTRUMInnerManager {
     this.cancelRumSemanticApplyWaiters();
     this.rumSemanticSequence = 0;
     this.committedRumSemanticResponseIds.clear();
-    this.committedRumSemanticResponseOrder = [];
-    this.committedRumSemanticResponseOrderHead = 0;
     this.resourceDraftIdsById.clear();
     this.completedRumResourceIds.clear();
     this.resourcePendingOrJournalRefCounts.clear();
@@ -5389,12 +5321,9 @@ export class FTRUMInnerManager {
     }, 60000); // Check session every minute
   }
   
-  /** Maintains compact FIFO prefixes for the bounded action de-dup windows. */
+  /** Maintains auxiliary state; completion windows expire on their own timers. */
   private cleanupSetCollections(): void {
     try {
-      this.compactProcessedActionIdOrder();
-      this.compactInsertedActionIdOrder();
-      
       // Clean up preActivityDuration (Map type, use MAX_MAP_SIZE_RESOURCE)
       if (this.preActivityDuration.size > Constants.MAX_MAP_SIZE_RESOURCE) {
         FTInnerLogger.w(TAG, `preActivityDuration size (${this.preActivityDuration.size}) exceeds limit, clearing to prevent memory leak`);
@@ -6417,8 +6346,6 @@ export class FTRUMInnerManager {
       this.rumSemanticJournalByRequestId.clear();
       this.cancelRumSemanticApplyWaiters();
       this.committedRumSemanticResponseIds.clear();
-      this.committedRumSemanticResponseOrder = [];
-      this.committedRumSemanticResponseOrderHead = 0;
       this.resourceDraftIdsById.clear();
       this.completedRumResourceIds.clear();
       this.resourcePendingOrJournalRefCounts.clear();

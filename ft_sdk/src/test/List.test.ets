@@ -14,6 +14,7 @@ import configUnitTest from './unit/ConfigUnit.test';
 import dataModifierUnitTest from './unit/DataModifierUnit.test';
 import deviceUUIDManagerUnitTest from './unit/DeviceUUIDManagerUnit.test';
 import ftExceptionHandlerUnitTest from './unit/FTExceptionHandlerUnit.test';
+import ftExpiringIdCacheUnitTest from './unit/FTExpiringIdCacheUnit.test';
 import ftNetworkErrorHandlerUnitTest from './unit/FTNetworkErrorHandlerUnit.test';
 import ftNetworkListenerUnitTest from './unit/FTNetworkListenerUnit.test';
 import ftAppLaunchTrackerUnitTest from './unit/FTAppLaunchTrackerUnit.test';
@@ -65,6 +66,7 @@ export default function testsuite() {
   sdkDedicatedPoolManagerUnitTest();
   sdkWorkerRetryPolicyUnitTest();
   ftExceptionHandlerUnitTest();
+  ftExpiringIdCacheUnitTest();
   ftNetworkErrorHandlerUnitTest();
   ftNetworkListenerUnitTest();
   ftDBSpoolUnitTest();

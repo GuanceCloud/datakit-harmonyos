@@ -116,6 +116,17 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(completionStore.tryClaim('another-request')).assertTrue();
     });
 
+    it('completionCapacityShouldPreserveRecentTerminalOwners', 0, () => {
+      const completionStore = HttpAutoTrackCompletionStore.getInstance();
+      for (let i = 0; i <= Constants.MAX_MAP_SIZE_RESOURCE; i++) {
+        expect(completionStore.tryClaim(`completed-${i}`)).assertTrue();
+      }
+      expect(completionStore.size()).assertEqual(Constants.MAX_MAP_SIZE_RESOURCE);
+      expect(completionStore.tryClaim(`completed-${Constants.MAX_MAP_SIZE_RESOURCE}`)).assertFalse();
+      expect(completionStore.tryClaim('completed-1')).assertFalse();
+      expect(completionStore.tryClaim('completed-0')).assertTrue();
+    });
+
     it('platformTransportMetricsShouldOutrankIntegrationAndKeepFalse', 0, () => {
       const metrics = new ResourceTransportMetrics();
       metrics.setRequestBodySize(12, 'integration');

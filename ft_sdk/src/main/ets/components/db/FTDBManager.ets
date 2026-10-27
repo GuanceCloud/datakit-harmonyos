@@ -22,6 +22,7 @@ import { FTDBCachePolicy } from './FTDBCachePolicy';
 import { Constants } from '../Constants';
 import { FTCacheContext } from './FTCacheContext';
 import { Utils } from '../utils/Utils';
+import { FTExpiringIdCache } from '../utils/FTExpiringIdCache';
 
 const TAG = "FTDBManager";
 const DELETE_BATCH_CHUNK_SIZE: number = 500;
@@ -126,7 +127,12 @@ export class FTDBManager extends DBManager {
 
   // Deduplication cache, updated only from the DB write section.
   // Key format: "dataType:uniqueId" (e.g., "rum_app:action_id=xxx" or "log:uuid=xxx")
-  private insertedDataIds: Map<string, boolean> = new Map();
+  private insertedDataIds: FTExpiringIdCache = new FTExpiringIdCache(
+    Constants.MAX_MAP_SIZE_DB, Constants.DEDUP_RETENTION_MS
+  );
+  private pendingSyncDataWrites: number = 0;
+  private clearInsertedDataWhenIdle: boolean = false;
+  private insertedDataGeneration: number = 0;
 
   // Maximum size for Map collections to prevent memory leak (using Constants.MAX_MAP_SIZE_DB)
 
@@ -136,9 +142,32 @@ export class FTDBManager extends DBManager {
   }
 
   public static resetInstanceInternal(): void {
+    if (FTDBManager.instance) {
+      FTDBManager.instance.insertedDataIds.clear();
+      FTDBManager.instance.insertedDataGeneration++;
+    }
     FTDBManager.instance = null;
     FTDBManager.forcedSyncDataWriteFailureCount = 0;
     DatabaseHelper.resetInstanceInternal();
+  }
+
+  /** Keep accepted writes intact; their final callbacks clear the cache at idle. */
+  public static clearExistingDeduplicationWhenIdleInternal(): void {
+    const instance = FTDBManager.instance;
+    if (!instance) { return; }
+    instance.clearInsertedDataWhenIdle = true;
+    if (instance.pendingSyncDataWrites === 0) {
+      instance.insertedDataIds.clear();
+    }
+  }
+
+  /** An old write must not repopulate the completion window of a new install. */
+  public static resumeExistingDeduplicationInternal(): void {
+    const instance = FTDBManager.instance;
+    if (!instance || !instance.clearInsertedDataWhenIdle) { return; }
+    instance.insertedDataGeneration++;
+    instance.clearInsertedDataWhenIdle = false;
+    instance.insertedDataIds.clear();
   }
 
   public static forceNextSyncDataWriteFailureInternal(): void {
@@ -726,13 +755,7 @@ export class FTDBManager extends DBManager {
     if (!key) {
       return;
     }
-    if (!this.insertedDataIds.has(key) && this.insertedDataIds.size >= Constants.MAX_MAP_SIZE_DB) {
-      const firstKey = this.insertedDataIds.keys().next().value as string | undefined;
-      if (firstKey !== undefined) {
-        this.insertedDataIds.delete(firstKey);
-      }
-    }
-    this.insertedDataIds.set(key, true);
+    this.insertedDataIds.add(key);
   }
 
   private async resolveAllowedInsertCountLocked(
@@ -1068,6 +1091,23 @@ export class FTDBManager extends DBManager {
     dataList: SyncData[],
     options: SyncDataWriteOptions = {}
   ): Promise<SyncDataWriteResult> {
+    this.pendingSyncDataWrites++;
+    try {
+      return await this.writeSyncDataWithDeduplication(source, dataList, options, this.insertedDataGeneration);
+    } finally {
+      this.pendingSyncDataWrites--;
+      if (this.clearInsertedDataWhenIdle && this.pendingSyncDataWrites === 0) {
+        this.insertedDataIds.clear();
+      }
+    }
+  }
+
+  private async writeSyncDataWithDeduplication(
+    source: string,
+    dataList: SyncData[],
+    options: SyncDataWriteOptions,
+    generation: number
+  ): Promise<SyncDataWriteResult> {
     const requested = dataList ? dataList.length : 0;
     const result = this.createSyncDataWriteResult(source, requested);
     if (!dataList || dataList.length === 0) {
@@ -1117,7 +1157,8 @@ export class FTDBManager extends DBManager {
         result.deletedOld += taskPoolResult.deletedOld;
         result.duplicateSkipped += taskPoolResult.duplicateSkipped;
         result.errorMessage = taskPoolResult.errorMessage;
-        if (result.success && result.inserted + result.updated > 0) {
+        if (result.success && result.inserted + result.updated > 0 &&
+          generation === this.insertedDataGeneration) {
           this.markTaskPoolDataAsInserted(dataToWrite, reInsert);
         }
       }
@@ -1760,6 +1801,7 @@ export class FTDBManager extends DBManager {
   public async release(): Promise<void> {
     const instance = FTDBManager.instance;
     if (instance) {
+      FTDBManager.clearExistingDeduplicationWhenIdleInternal();
       await instance.shutDown();
       FTDBManager.instance = null;
     }

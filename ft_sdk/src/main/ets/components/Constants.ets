@@ -309,6 +309,9 @@ export class Constants {
    * This reduces memory fragmentation caused by frequent cleanup operations
    */
   static readonly MAX_MAP_SIZE_DB: number = 5000;
+
+  /** Recent completions suppress late callbacks for five minutes after commit. */
+  static readonly DEDUP_RETENTION_MS: number = 5 * 60 * 1000;
   
   /**
    * Maximum size for click event deduplication Map (FTActionTracker.processedClickIds)

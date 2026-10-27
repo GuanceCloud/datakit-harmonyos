@@ -2,6 +2,7 @@ import { Constants } from '../Constants';
 import { FTInnerLogger } from '../log/FTLogger';
 import { NetStatusBean } from '../rum/bean/NetStatusBean';
 import { Utils } from '../utils/Utils';
+import { FTExpiringIdCache } from '../utils/FTExpiringIdCache';
 import { FTNetworkErrorHandler } from './FTNetworkErrorHandler';
 import { ResourceParams } from '../rum/bean/ResourceParams';
 
@@ -708,7 +709,9 @@ export class HttpAutoTrackStateStore {
  */
 export class HttpAutoTrackCompletionStore {
   private static instance: HttpAutoTrackCompletionStore | null = null;
-  private readonly completedResourceIds: Set<string> = new Set();
+  private readonly completedResourceIds: FTExpiringIdCache = new FTExpiringIdCache(
+    Constants.MAX_MAP_SIZE_RESOURCE, Constants.DEDUP_RETENTION_MS
+  );
   public static clearExisting(): void { HttpAutoTrackCompletionStore.instance?.clear(); }
 
   public static getInstance(): HttpAutoTrackCompletionStore {
@@ -721,10 +724,6 @@ export class HttpAutoTrackCompletionStore {
   public tryClaim(resourceId: string): boolean {
     if (!resourceId || resourceId.length === 0 || this.completedResourceIds.has(resourceId)) {
       return false;
-    }
-    if (this.completedResourceIds.size >= Constants.MAX_MAP_SIZE_RESOURCE) {
-      FTInnerLogger.w(TAG, '[HTTP-AutoTrack] completion ledger reached its limit, clearing old completions');
-      this.completedResourceIds.clear();
     }
     this.completedResourceIds.add(resourceId);
     return true;

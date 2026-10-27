@@ -462,6 +462,7 @@ export class FTSDK {
       }
 
       FTNetworkLifecycle.resume();
+      FTDBManager.resumeExistingDeduplicationInternal();
       FTSDK.resetInitializationSeparatorState();
       FTLogSeparator.initialization(TAG, "FTSDK 初始化开始");
 
@@ -873,6 +874,7 @@ export class FTSDK {
 
     // Release RUM manager state to avoid timers and context references surviving SDK shutdown.
     FTRUMInnerManager.shutdownInternal();
+    FTDBManager.clearExistingDeduplicationWhenIdleInternal();
     FTLogger.resetBatchStateInternal();
 
     // Release the HarmonyOS network listener.
