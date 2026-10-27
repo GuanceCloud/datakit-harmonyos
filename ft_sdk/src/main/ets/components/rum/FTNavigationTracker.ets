@@ -32,7 +32,9 @@ export class FTNavigationTracker {
   // The View name currently reported to RUM. It can differ from the route name
   // when an application configures an automatic View tracking handler.
   private currentViewName: string = '';
-  private currentViewId: string = '';
+  // Session renewal changes view_id, not the visible page's ownership.
+  // A manually started View gets a new owner even if its name is identical.
+  private currentViewLifecycleId: string = '';
   // Retain the visible source page, not the handler's previous result. Android
   // resolves its View handler on every Activity/Fragment resume.
   private lastVisibleContext: FTViewTrackingContext | null = null;
@@ -165,7 +167,7 @@ export class FTNavigationTracker {
       }
     }
     this.currentViewName = '';
-    this.currentViewId = '';
+    this.currentViewLifecycleId = '';
     this.lastVisibleContext = null;
     this.foregroundResumeInProgress = false;
     this.currentRouteName = '';
@@ -403,17 +405,18 @@ export class FTNavigationTracker {
 
     if (info.state === 3) {
       if (this.isCurrentRouterPageHiding(pageKey, toName, info)) {
-        const viewId = this.currentViewId;
+        const lifecycleId = this.currentViewLifecycleId;
         this.currentPageKey = '';
         const resumeStartTime = Utils.getCurrentNanoTime();
         this.pageResumeStartTimeMap.set('_pending_resume', resumeStartTime);
         this.currentRouteName = '';
         this.currentViewName = '';
-        this.currentViewId = '';
+        this.currentViewLifecycleId = '';
         this.lastVisibleContext = null;
-        if (viewId.length > 0 && FTRUMInnerManager.getInstance().getActiveView()?.getId() === viewId) {
+        const manager = FTRUMInnerManager.getInstance();
+        if (lifecycleId.length > 0 && manager.getActiveView()?.getLifecycleId() === lifecycleId) {
           try {
-            await FTRUMGlobalManager.getInstance().stopView();
+            await manager.stopView({}, true, lifecycleId);
           } catch (error) {
             FTInnerLogger.w(TAG, `Failed to stop hidden Router View: ${error}`);
           }
@@ -442,7 +445,7 @@ export class FTNavigationTracker {
       if (this.isCurrentAutomaticPage(pageKey, toName, info, hadCreationEvent)) {
         if (hadCreationEvent) {
           this.pendingRouterHandlerViews.delete(pageKey);
-          if (FTRUMInnerManager.getInstance().getActiveView()?.getId() === this.currentViewId) {
+          if (FTRUMInnerManager.getInstance().getActiveView()?.getLifecycleId() === this.currentViewLifecycleId) {
             this.recordRouterViewLoadTime(pageKey, this.currentViewName, false, true);
           } else {
             this.pageCreateStartTimeMap.delete(pageKey);
@@ -633,16 +636,17 @@ export class FTNavigationTracker {
   private async startAutomaticView(routeName: string, handlerView: HandlerView | null, pageKey: string): Promise<void> {
     const rum = FTRUMGlobalManager.getInstance();
     try {
+      const manager = FTRUMInnerManager.getInstance();
       if (this.currentViewName.length > 0 &&
-        FTRUMInnerManager.getInstance().getActiveView()?.getId() === this.currentViewId) {
-        await rum.stopView();
+        manager.getActiveView()?.getLifecycleId() === this.currentViewLifecycleId) {
+        await manager.stopView({}, true, this.currentViewLifecycleId);
       }
     } catch (e) {
       FTInnerLogger.w(TAG, `stopView failed: ${e}`);
     }
 
     this.currentViewName = '';
-    this.currentViewId = '';
+    this.currentViewLifecycleId = '';
     this.currentRouteName = '';
     this.currentPageKey = '';
     this.pageResumeStartTimeMap.delete('_pending_resume');
@@ -656,7 +660,7 @@ export class FTNavigationTracker {
       const property = this.copyViewProperty(handlerView.getProperty());
       await rum.startView(handlerView.getViewName(), property);
       this.currentViewName = handlerView.getViewName();
-      this.currentViewId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
+      this.currentViewLifecycleId = FTRUMInnerManager.getInstance().getActiveView()?.getLifecycleId() ?? '';
       this.currentRouteName = routeName;
       this.currentPageKey = pageKey;
     } catch (e) {
@@ -687,7 +691,7 @@ export class FTNavigationTracker {
     const activeView = FTRUMInnerManager.getInstance().getActiveView();
     // A manual View may have replaced the automatic one. Leave it to its owner.
     if (activeView && (!activeView.isClose() ||
-      (this.currentViewId.length > 0 && activeView.getId() !== this.currentViewId))) {
+      (this.currentViewLifecycleId.length > 0 && activeView.getLifecycleId() !== this.currentViewLifecycleId))) {
       return;
     }
     if (!this.lastVisibleContext) {
@@ -706,7 +710,7 @@ export class FTNavigationTracker {
       const handlerView = this.resolveAutomaticViewHandler(context.trackingType, context.viewName, context, source);
       if (handlerView === null) {
         this.currentViewName = '';
-        this.currentViewId = '';
+        this.currentViewLifecycleId = '';
         this.currentRouteName = '';
         this.currentPageKey = '';
         return;
@@ -714,7 +718,7 @@ export class FTNavigationTracker {
       await FTRUMGlobalManager.getInstance().startView(handlerView.getViewName(),
         this.copyViewProperty(handlerView.getProperty()));
       this.currentViewName = handlerView.getViewName();
-      this.currentViewId = FTRUMInnerManager.getInstance().getActiveView()?.getId() ?? '';
+      this.currentViewLifecycleId = FTRUMInnerManager.getInstance().getActiveView()?.getLifecycleId() ?? '';
       this.currentRouteName = context.viewName;
       this.currentPageKey = context.trackingType === FTViewTrackingType.ROUTER
         ? this.getRouterPageKey(context.routerPageInfo, context.viewName)

@@ -3447,7 +3447,8 @@ export class FTRUMInnerManager {
    */
   public async stopView(
     property: Record<string, object> = {},
-    shouldGenerateSummary: boolean = true
+    shouldGenerateSummary: boolean = true,
+    expectedLifecycleId?: string
   ): Promise<void> {
     const generation = this.lifecycleGeneration;
     if (!this.isLifecycleCurrent(generation)) return;
@@ -3458,6 +3459,11 @@ export class FTRUMInnerManager {
       if (!this.isLifecycleCurrent(generation)) return;
       if (!this.activeView) {
         FTInnerLogger.w(TAG, "stopView ignored: no active view");
+        return;
+      }
+      // Automatic hide/transition work may wait behind a manual startView.
+      // Session-only replacements keep this owner; unrelated/manual Views do not.
+      if (expectedLifecycleId !== undefined && this.activeView.getLifecycleId() !== expectedLifecycleId) {
         return;
       }
       
@@ -3750,7 +3756,7 @@ export class FTRUMInnerManager {
 
   private copyViewForSession(previous: ActiveViewBean, sessionId: string): ActiveViewBean {
     const view = new ActiveViewBean(previous.getViewName(), previous.getViewReferrer(),
-      previous.getLoadTime(), sessionId);
+      previous.getLoadTime(), sessionId, previous.getLifecycleId());
     const property = previous.getProperty();
     for (const key of Object.keys(property)) view.addProperty(key, property[key]);
     view.setTags(FTRUMConfigManager.getInstance().getRUMPublicDynamicTags());

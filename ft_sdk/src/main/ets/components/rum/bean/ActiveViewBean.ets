@@ -35,6 +35,9 @@ interface ActiveViewBeanJSON {
  */
 export class ActiveViewBean {
   private id: string;
+  // In-memory ownership survives Session-only View replacement. It is not
+  // persisted or sent as a RUM field and retains no predecessor View object.
+  private lifecycleId: string;
   private viewName: string;
   private viewReferrer: string;
   private sessionId: string;
@@ -64,8 +67,10 @@ export class ActiveViewBean {
   // Time spent when view is closed (nanoseconds) - aligned with Android: timeSpent is calculated in close()
   private timeSpent: number = 0;
   
-  constructor(viewName: string, viewReferrer: string, loadTime: number, sessionId: string) {
+  constructor(viewName: string, viewReferrer: string, loadTime: number, sessionId: string,
+    lifecycleId: string = '') {
     this.id = Utils.generateUUID();
+    this.lifecycleId = lifecycleId.length > 0 ? lifecycleId : this.id;
     this.viewName = viewName || "";
     this.viewReferrer = viewReferrer || Constants.VIEW_NAME_ROOT;
     this.sessionId = sessionId || "";
@@ -79,6 +84,11 @@ export class ActiveViewBean {
    */
   public getId(): string {
     return this.id;
+  }
+
+  /** Internal logical View owner, independent of the per-Session event ID. */
+  public getLifecycleId(): string {
+    return this.lifecycleId;
   }
   
   /**
