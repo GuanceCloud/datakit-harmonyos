@@ -13,7 +13,7 @@ import {
 interface TestNetworkFailure {
   name: string;
   message: string;
-  code: string;
+  code: string | number;
 }
 
 class FilteringNetworkErrorHandler implements FTNetworkErrorHandler {
@@ -36,6 +36,30 @@ class ThrowingNetworkErrorHandler implements FTNetworkErrorHandler {
 
 export default function ftNetworkErrorHandlerUnitTest() {
   describe('FTNetworkErrorHandlerUnit', () => {
+    it('unavailableMethodShouldRemainUnknown', 0, () => {
+      const context = createFTNetworkErrorContext('https://example.com', 'UNKNOWN',
+        FTNetworkErrorSource.HTTP_CHAIN, new Error('connection refused'));
+      expect(context.method).assertEqual('UNKNOWN');
+    });
+
+    it('nativeNumericCodesShouldClassifyWithoutEnglishMessages', 0, () => {
+      const codes: number[] = [2300005, 2300006, 1007900006, 2300028, 1007900028,
+        1007900042, 1007900992, 2300035, 2300058, 2300060, 1007900077, 1007900090,
+        2300007, 1007900056, 2300999];
+      const kinds: FTNetworkErrorKind[] = [FTNetworkErrorKind.DNS, FTNetworkErrorKind.DNS, FTNetworkErrorKind.DNS,
+        FTNetworkErrorKind.TIMEOUT, FTNetworkErrorKind.TIMEOUT, FTNetworkErrorKind.CANCELED, FTNetworkErrorKind.CANCELED,
+        FTNetworkErrorKind.CERTIFICATE, FTNetworkErrorKind.CERTIFICATE, FTNetworkErrorKind.CERTIFICATE,
+        FTNetworkErrorKind.CERTIFICATE, FTNetworkErrorKind.CERTIFICATE,
+        FTNetworkErrorKind.CONNECTION, FTNetworkErrorKind.CONNECTION, FTNetworkErrorKind.UNKNOWN];
+      for (let i = 0; i < codes.length; i++) {
+        const failure: TestNetworkFailure = { name: 'BusinessError', message: '请求失败', code: codes[i] };
+        const context = createFTNetworkErrorContext('https://example.com', 'GET', FTNetworkErrorSource.HTTP_CHAIN, failure);
+        expect(context.exception === failure).assertTrue();
+        expect(context.errorCode).assertEqual(codes[i]);
+        expect(context.kind).assertEqual(kinds[i]);
+      }
+    });
+
     it('handlerShouldReceiveOriginalFailureAndFilterDns', 0, () => {
       const rawFailure: TestNetworkFailure = {
         name: 'NetworkError',

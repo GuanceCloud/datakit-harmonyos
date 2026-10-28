@@ -40,11 +40,17 @@ class AxiosGlobalNetworkErrorHandler implements FTNetworkErrorHandler {
 
 class CountingAxiosNetworkErrorHandler implements FTNetworkErrorHandler {
   callCount: number = 0;
+  lastContext?: FTNetworkErrorContext;
 
-  onExceptionWithFilter(_context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
+  onExceptionWithFilter(context: FTNetworkErrorContext, _resourceFields: FTNetworkResourceFields): boolean {
     this.callCount++;
+    this.lastContext = context;
     return true;
   }
+}
+
+interface PlainAxiosFailure extends FTAxiosErrorTarget {
+  code: string;
 }
 
 type AxiosRequestFulfilled = (value: FTAxiosRequestConfigTarget) => FTAxiosRequestConfigTarget | Promise<FTAxiosRequestConfigTarget>;
@@ -145,6 +151,29 @@ export default function httpAutoTrackAxiosUnitTest() {
     afterEach(() => {
       TestReset.resetP0State();
       FTRUMConfigManager.getInstance().release();
+    });
+
+    it('axiosShouldPreservePlainFailureAndClassifyTimeoutCode', 0, async () => {
+      const target = new FakeAxiosTarget();
+      const handler = new CountingAxiosNetworkErrorHandler();
+      applyFTAxiosTrack(target as Object, {
+        enableTraceInterceptor: false, enableResourceInterceptor: true, networkErrorHandler: handler
+      });
+      const config = createPreparedConfig(target);
+      const failure: PlainAxiosFailure = { config, code: 'ECONNABORTED', message: '请求失败' };
+      let rejected = false;
+      try {
+        await target.responseManager.rejected!(failure);
+      } catch (error) {
+        rejected = true;
+        expect(error === failure).assertTrue();
+      }
+      expect(rejected).assertTrue();
+      expect(handler.callCount).assertEqual(1);
+      expect(handler.lastContext!.exception === failure).assertTrue();
+      expect(handler.lastContext!.errorCode).assertEqual('ECONNABORTED');
+      expect(handler.lastContext!.kind).assertEqual('timeout');
+      expect(getContext(config)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] === undefined).assertTrue();
     });
 
     it('axiosSuccessShouldClearState', 0, () => {

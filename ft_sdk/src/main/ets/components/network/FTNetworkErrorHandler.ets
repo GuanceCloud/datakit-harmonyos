@@ -57,6 +57,7 @@ export enum FTNetworkErrorKind {
 
 export interface FTNetworkErrorContext {
   readonly url: string;
+  /** UNKNOWN when the transport did not expose a request method. */
   readonly method: string;
   readonly source: FTNetworkErrorSource;
   /** Original platform or client failure. The SDK never wraps this value. */
@@ -150,13 +151,26 @@ export function classifyFTNetworkError(
   message: string,
   errorCode?: string | number
 ): FTNetworkErrorKind {
+  // NetworkKit and RCP use different prefixes for the same transport codes.
+  // Read the documented numeric codes before message heuristics, since native
+  // BusinessError messages may be localized or simply say "request failed".
+  const numericCode = Number(errorCode);
+  const transportCode = numericCode >= 1007900000 && numericCode < 1007901000 ? numericCode - 1007900000 :
+    numericCode >= 2300000 && numericCode < 2301000 ? numericCode - 2300000 : -1;
+  if (transportCode === 5 || transportCode === 6) return FTNetworkErrorKind.DNS;
+  if (transportCode === 28) return FTNetworkErrorKind.TIMEOUT;
+  if (transportCode === 42 || numericCode === 1007900992) return FTNetworkErrorKind.CANCELED;
+  if ([35, 58, 59, 60, 77, 90].includes(transportCode)) return FTNetworkErrorKind.CERTIFICATE;
+  if ([7, 52, 55, 56].includes(transportCode)) return FTNetworkErrorKind.CONNECTION;
   const candidate = getErrorLike(rawError);
   const name = candidate && candidate.name ? candidate.name : '';
   const combined = `${name} ${errorCode === undefined ? '' : String(errorCode)} ${message}`.toLowerCase();
-  if (combined.includes('dns') || combined.includes('enotfound') || combined.includes('host not found')) {
+  if (combined.includes('dns') || combined.includes('enotfound') || combined.includes('eai_again') ||
+    combined.includes('host not found')) {
     return FTNetworkErrorKind.DNS;
   }
-  if (combined.includes('timeout') || combined.includes('timed out') || combined.includes('etimedout')) {
+  if (combined.includes('timeout') || combined.includes('timed out') || combined.includes('etimedout') ||
+    combined.includes('econnaborted')) {
     return FTNetworkErrorKind.TIMEOUT;
   }
   if (combined.includes('cancel') || combined.includes('abort')) {

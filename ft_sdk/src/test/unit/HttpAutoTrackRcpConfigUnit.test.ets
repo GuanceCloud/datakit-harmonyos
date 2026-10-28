@@ -142,6 +142,18 @@ class SingleDispatchHandler implements rcp.RequestHandler {
   }
 }
 
+interface PlainRcpFailure {
+  code: number;
+  message: string;
+}
+
+class RejectingRcpHandler implements rcp.RequestHandler {
+  failure: PlainRcpFailure = { code: 1007900028, message: '请求失败' };
+  handle(_context: rcp.RequestContext): Promise<rcp.Response> {
+    return Promise.reject<rcp.Response>(this.failure);
+  }
+}
+
 function getTracing(config: rcp.SessionConfiguration): rcp.TracingConfiguration {
   expect(config.requestConfiguration !== undefined).assertTrue();
   expect(config.requestConfiguration!.tracing !== undefined).assertTrue();
@@ -164,6 +176,26 @@ export default function httpAutoTrackRcpConfigUnitTest() {
     afterEach(() => {
       TestReset.resetP0State();
       FTRUMConfigManager.getInstance().release();
+    });
+
+    it('rcpShouldPreservePlainBusinessErrorRejection', 0, async () => {
+      const handler = new RecordingRcpNetworkErrorHandler(true);
+      const interceptor = new RCPResourceInterceptor(handler);
+      const request = createTestRcpRequest('https://example.com/plain-error', 'GET');
+      const context: rcp.RequestContext = { request, session: createTestRcpSession() };
+      const next = new RejectingRcpHandler();
+      let rejected = false;
+      try {
+        await interceptor.intercept(context, next);
+      } catch (error) {
+        rejected = true;
+        expect(error === next.failure).assertTrue();
+      }
+      expect(rejected).assertTrue();
+      expect(handler.callCount).assertEqual(1);
+      expect(handler.lastContext!.exception === next.failure).assertTrue();
+      expect(handler.lastContext!.errorCode).assertEqual(1007900028);
+      expect(handler.lastContext!.kind).assertEqual('timeout');
     });
 
     it('rcpTraceShouldDispatchExactlyOnce', 0, async () => {

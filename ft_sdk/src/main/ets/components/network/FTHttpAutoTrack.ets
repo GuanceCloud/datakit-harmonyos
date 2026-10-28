@@ -490,13 +490,12 @@ export class RCPResourceInterceptor implements rcp.Interceptor, FTNetworkDisposa
         } catch (trackingError) {
           FTInnerLogger.w(TAG, `[RCP-Resource] Failed to record local failure for resourceId=${resourceId}: ${trackingError}`);
         }
-        // ArkTS permits throwing Error values only. Preserve the native Error
-        // object unchanged; primitive/non-Error adapter rejections retain the
-        // SDK's existing compatibility wrapper.
+        // Promise.reject also preserves BusinessError objects and primitive
+        // adapter rejections, which ArkTS does not permit in a throw statement.
         if (err instanceof Error) {
           throw err;
         }
-        throw new Error(String(err));
+        return Promise.reject<rcp.Response>(err);
       }
 
       if (!FTNetworkLifecycle.isCurrent(this.generation)) return response;
@@ -1585,7 +1584,7 @@ export function applyFTAxiosTrack(
       return response;
     },
     (rawError: Object) => {
-      const error = rawError as FTAxiosErrorTarget;
+      const error = (rawError || {}) as FTAxiosErrorTarget;
       const responseConfig = error.config || (error.response ? error.response.config : undefined);
       const state = getAxiosAutoTrackState(responseConfig);
       if (state && FTNetworkLifecycle.isCurrent(state.generation ?? owner.generation)) {
@@ -1633,12 +1632,11 @@ export function applyFTAxiosTrack(
         clearAxiosAutoTrackState(responseConfig);
       }
 
-      // Preserve the business error object. The fallback is required by
-      // ArkTS, which rejects throws of arbitrary values.
+      // Keep the original rejection value even when it is not an Error.
       if (rawError instanceof Error) {
         throw rawError;
       }
-      throw new Error(String(rawError));
+      return Promise.reject<Object>(rawError);
     }
   );
 

@@ -391,8 +391,8 @@ export class FTSDKExtensionBridge {
         FTSDKExtensionBridge.completeResourceError(
           state,
           response.url,
-          response.errorMessage || 'Unknown error',
-          response.errorStack,
+          errorContext?.message || response.errorMessage || 'Unknown error',
+          errorContext?.stack || response.errorStack,
           response.performanceTiming,
           response.transportMetrics,
           response.platformTransportMetrics,
