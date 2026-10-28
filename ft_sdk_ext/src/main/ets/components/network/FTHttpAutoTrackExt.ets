@@ -1,4 +1,5 @@
 import { http } from '@kit.NetworkKit';
+import { FTHttpRequestObserver, observeHttpChainApply } from './FTHttpRequestObserver';
 import {
   FTSDKExtensionBridge,
   FTSDKExtensionCleanup,
@@ -109,16 +110,46 @@ class NetworkKitResponseInput implements FTSDKExtensionResponseInput {
  */
 class NetworkKitRequestMetricCollector implements FTSDKExtensionCleanup {
   prepared?: FTSDKExtensionPreparedRequest;
+  requestMethod?: string;
   enabled: boolean = true;
+  generation: number = FTSDKExtensionBridge.captureNetworkGeneration();
   private httpRequest: WeakRef<http.HttpRequest>;
   private progressListener: (progress: http.DataSendProgressInfo) => void;
   private subscribed: boolean = false;
   private cleanupId: number;
+  private observer: FTHttpRequestObserver;
+  private pendingFailure?: FTSDKExtensionResponseInput;
 
   constructor(httpRequest: http.HttpRequest) {
     this.httpRequest = new WeakRef(httpRequest);
     this.progressListener = this.createListener();
     this.cleanupId = FTSDKExtensionBridge.registerNetworkCleanup(this);
+    this.observer = new FTHttpRequestObserver(httpRequest, error => this.completeFailure(error), () => {
+      // Some adapters resolve a status-0 result. Complete that fallback only
+      // after the public result has had a chance to expose a real exception.
+      if (this.pendingFailure) {
+        FTSDKExtensionBridge.completeHttpError(this.pendingFailure);
+      }
+      this.dispose();
+    }, (_url: string, options?: http.HttpRequestOptions): void => {
+      this.requestMethod = options?.method;
+    });
+  }
+
+  public deferFailure(input: FTSDKExtensionResponseInput): void {
+    this.pendingFailure = input;
+  }
+
+  private completeFailure(error: Object | string | number | boolean | null | undefined): void {
+    const prepared = this.prepared;
+    if (!prepared || !this.enabled) return;
+    const input: FTSDKExtensionResponseInput = this.pendingFailure || {
+      url: prepared.url, resourceId: prepared.resourceId, uniqueId: prepared.uniqueId,
+      generation: prepared.generation, statusCode: 0
+    };
+    input.transportError = error;
+    FTSDKExtensionBridge.completeHttpError(input);
+    this.pendingFailure = undefined;
   }
 
   private createListener(): (progress: http.DataSendProgressInfo) => void {
@@ -151,18 +182,22 @@ class NetworkKitRequestMetricCollector implements FTSDKExtensionCleanup {
       }
     }
     this.subscribed = false;
+    this.pendingFailure = undefined;
     this.prepared = undefined;
+    this.requestMethod = undefined;
     FTSDKExtensionBridge.unregisterNetworkCleanup(this.cleanupId);
     this.cleanupId = 0;
   }
 
-  public deactivate(): void {
+  public deactivate(canceled: boolean = false): void {
     this.enabled = false;
+    this.observer.dispose();
     const prepared = this.prepared;
     try {
       if (prepared) FTSDKExtensionBridge.completeHttpError({
         url: prepared.url, resourceId: prepared.resourceId, uniqueId: prepared.uniqueId,
-        generation: prepared.generation, statusCode: 0, errorMessage: 'HTTP tracking disposed before completion'
+        generation: prepared.generation, statusCode: 0,
+        errorMessage: canceled ? 'Request canceled before HTTP tracking completion' : 'HTTP tracking disposed before completion'
       });
     } finally { this.dispose(); }
   }
@@ -171,6 +206,7 @@ class NetworkKitRequestMetricCollector implements FTSDKExtensionCleanup {
 class NetworkKitTrackBinding {
   chain: http.HttpInterceptorChain;
   collector: NetworkKitRequestMetricCollector;
+  applied: boolean = false;
   constructor(chain: http.HttpInterceptorChain, collector: NetworkKitRequestMetricCollector) {
     this.chain = chain;
     this.collector = collector;
@@ -272,7 +308,7 @@ export class HttpInitialRequestInterceptor implements http.HttpInterceptor, FTSD
       const preparedRequest = FTSDKExtensionBridge.prepareHttpRequest(
         {
           url: reqContext.url,
-          method: requestTarget.method,
+          method: collector ? collector.requestMethod : requestTarget.method,
           headers: reqContext.header,
           body: requestBody
         },
@@ -315,6 +351,7 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
     if (!FTSDKExtensionBridge.isNetworkGenerationCurrent(this.generation) ||
       (this.platformMetricCollector && (!collector || !collector.enabled))) return true;
     const statusCode = rspContext.responseCode || 0;
+    let deferred = false;
     try {
       const input = new NetworkKitResponseInput(reqContext, rspContext, statusCode);
       input.resourceId = collector?.prepared?.resourceId;
@@ -325,10 +362,14 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
       // responseCode=0. The normal response path has no error stack and would
       // produce a Resource without the corresponding network Error.
       if (!statusCode) {
-        const error = new Error('NetworkKit request failed without an HTTP response');
+        const error = new Error('Request failed without an HTTP response');
         input.errorMessage = error.message;
         input.errorStack = error.stack;
-        input.errorCode = 0;
+        if (collector) {
+          collector.deferFailure(input);
+          deferred = true;
+          return true;
+        }
         FTSDKExtensionBridge.completeHttpError(input);
         return true;
       }
@@ -340,7 +381,7 @@ export class HttpFinalResponseInterceptor implements http.HttpInterceptor {
       FTSDKExtensionBridge.logError(TAG,
         `[HTTP-Final] Failed to process response with status=${statusCode}: ${error}`);
     } finally {
-      collector?.dispose();
+      if (!deferred) collector?.dispose();
     }
     return true;
   }
@@ -395,10 +436,44 @@ function createFTHttpInterceptorChainInternal(
   return chain;
 }
 
+class NetworkKitChainOptionsOwner implements FTSDKExtensionCleanup {
+  options: FTSDKExtensionResolvedAutoTrackOptions;
+  private cleanupId: number;
+  constructor(options: FTSDKExtensionResolvedAutoTrackOptions) {
+    this.options = options;
+    this.cleanupId = FTSDKExtensionBridge.registerNetworkCleanup(this);
+  }
+  public dispose(): void {
+    this.options.networkErrorHandler = undefined;
+    this.options.resourceTransportMetricsProvider = undefined;
+    FTSDKExtensionBridge.unregisterNetworkCleanup(this.cleanupId);
+  }
+}
+
 export function createFTHttpInterceptorChain(
   options: FTHttpInterceptorChainOptions = {}
 ): http.HttpInterceptorChain {
-  return createFTHttpInterceptorChainInternal(options);
+  const chain = createFTHttpInterceptorChainInternal(options);
+  const generation = FTSDKExtensionBridge.captureNetworkGeneration();
+  const owner = new NetworkKitChainOptionsOwner(FTSDKExtensionBridge.resolveAutoTrackOptions(options));
+  // A chain may be shared by concurrent Axios/native requests. Bind a separate
+  // collector when NetworkKit supplies the actual HttpRequest to apply().
+  observeHttpChainApply(chain, (request: http.HttpRequest): boolean => {
+    const customInterceptors: http.HttpInterceptor[] = [];
+    for (const interceptor of chain.getChain()) {
+      if (!(interceptor instanceof HttpInitialRequestInterceptor) &&
+        !(interceptor instanceof HttpFinalResponseInterceptor)) customInterceptors.push(interceptor);
+    }
+    applyFTHttpTrack(request, {
+      enableTraceInterceptor: owner.options.enableTraceInterceptor,
+      enableResourceInterceptor: owner.options.enableResourceInterceptor,
+      networkErrorHandler: owner.options.networkErrorHandler,
+      resourceTransportMetricsProvider: owner.options.resourceTransportMetricsProvider,
+      interceptors: customInterceptors
+    });
+    return httpTrackBindings.get(request)?.applied || false;
+  }, (): boolean => FTSDKExtensionBridge.isNetworkGenerationCurrent(generation));
+  return chain;
 }
 
 type AxiosUploadCallback = (progress: FTAxiosUploadProgressTarget) => void;
@@ -508,7 +583,8 @@ export function applyFTHttpTrackToChain(
 /** Call before cancelling/destroying a request if no FINAL_RESPONSE will arrive. */
 export function disposeFTHttpTrack(httpRequest: http.HttpRequest): void {
   const binding = httpTrackBindings.get(httpRequest);
-  binding?.collector.deactivate();
+  binding?.collector.deactivate(true);
+  httpTrackBindings.delete(httpRequest);
   if (binding) {
     for (const interceptor of binding.chain.getChain()) {
       if (interceptor instanceof HttpInitialRequestInterceptor) interceptor.dispose();
@@ -521,12 +597,16 @@ export function applyFTHttpTrack(
   options: FTHttpInterceptorChainOptions = {}
 ): http.HttpInterceptorChain {
   const existing = httpTrackBindings.get(httpRequest);
-  if (existing) return existing.chain;
+  if (existing && existing.collector.enabled &&
+    FTSDKExtensionBridge.isNetworkGenerationCurrent(existing.collector.generation)) return existing.chain;
+  if (existing) disposeFTHttpTrack(httpRequest);
   const collector = new NetworkKitRequestMetricCollector(httpRequest);
   const chain = createFTHttpInterceptorChainInternal(options, collector);
-  httpTrackBindings.set(httpRequest, new NetworkKitTrackBinding(chain, collector));
+  const binding = new NetworkKitTrackBinding(chain, collector);
+  httpTrackBindings.set(httpRequest, binding);
   try {
-    if (!chain.apply(httpRequest)) collector.deactivate();
+    binding.applied = chain.apply(httpRequest);
+    if (!binding.applied) collector.deactivate();
   } catch (error) {
     collector.deactivate();
     FTSDKExtensionBridge.logError(TAG, `[HTTP-Chain] Failed to apply interceptor chain: ${error}`);

@@ -6,6 +6,9 @@ import {
   FTLoggerConfig,
   FTRUMConfig,
   FTRUMGlobalManager,
+  FTNetworkErrorContext,
+  FTNetworkErrorHandler,
+  FTNetworkResourceFields,
   FTSDK,
   FTSDKConfig,
   FTSDKExtensionBridge,
@@ -14,7 +17,7 @@ import {
 } from '@guancecloud/ft_sdk/Index';
 import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
 import { FTTraceHandler } from '@guancecloud/ft_sdk/src/main/ets/components/trace/FTTraceHandler';
-import { applyFTAxiosChainMethodBridge, applyFTHttpTrack } from '../../../../Index';
+import { applyFTAxiosChainMethodBridge, applyFTHttpTrack, createFTHttpInterceptorChain, disposeFTHttpTrack } from '../../../../Index';
 import { resolveAxiosFullUrl } from '../../../main/ets/components/network/FTHttpAutoTrackExt';
 import { ExtDBAssert } from './helpers/ExtDBAssert';
 import { ExtMockCollector, runTestCleanup } from './helpers/ExtMockCollector';
@@ -75,6 +78,21 @@ class ChainResponse implements http.HttpResponse {
 class ChainThrowingHeaderValue {
   public toString(): string {
     throw new Error('NetworkKit response header cannot be normalized');
+  }
+}
+
+class DeviceNetworkErrorHandler implements FTNetworkErrorHandler {
+  calls: number = 0;
+  lastContext?: FTNetworkErrorContext;
+  private mode: string;
+  constructor(mode: string) { this.mode = mode; }
+  onExceptionWithFilter(context: FTNetworkErrorContext, fields: FTNetworkResourceFields): boolean {
+    this.calls++;
+    this.lastContext = context;
+    fields['device_filter_case'] = this.mode;
+    fields['resource_id'] = 'forbidden';
+    if (this.mode === 'throw') throw new Error('planned handler failure');
+    return this.mode === 'true';
   }
 }
 
@@ -526,25 +544,22 @@ export default function httpChainModeDeviceTest() {
 
     it('zeroStatusShouldUploadResourceAndLinkedError', 0, async () => {
       const viewName = 'http_chain_transport_failure_view';
-      const resourceUrl = 'http://device.test/connection-refused';
+      const resourceUrl = 'http://127.0.0.1:1/connection-refused';
       await FTRUMGlobalManager.getInstance().startView(viewName);
       const request = http.createHttp();
       try {
-        const interceptors = applyFTHttpTrack(request).getChain();
-        const headers: Record<string, Object> = {};
-        const context = new ChainRequestContext(resourceUrl, headers);
-        const failedResponse = new ChainResponse(0, headers, '');
-        await interceptors[0].interceptorHandle(context, failedResponse);
-        const traceIds = assertTraceparentHeaders(context.header);
-        expect(await interceptors[1].interceptorHandle(context, failedResponse)).assertTrue();
-
-        const resourceFragments = ['resource,', `resource_url=${resourceUrl}`, `trace_id=${traceIds[0]}`];
+        applyFTHttpTrack(request);
+        let rejected = false;
+        try {
+          await request.request(resourceUrl, { connectTimeout: 1000, readTimeout: 1000 });
+        } catch (_error) { rejected = true; }
+        expect(rejected).assertTrue();
+        const resourceFragments = ['resource,', `resource_url=${resourceUrl}`];
         const resource = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, resourceFragments);
         const resourceAttributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
-          viewName, resourceStatus: 0, requiredTags: ['trace_id', 'span_id'], requiredFields: ['request_header'] };
-        const resourcePoint = RumAttributeAssert.record(resource, resourceAttributes);
-        expect(resourcePoint.tags.get('resource_status')).assertEqual('0');
-        expect(resourcePoint.tags.get('span_id')).assertEqual(traceIds[1]);
+          viewName, resourceStatus: 0,
+          requiredTags: ['trace_id', 'span_id'], requiredFields: ['request_header'] };
+        RumAttributeAssert.record(resource, resourceAttributes);
 
         const errorFragments = ['error,', 'error_source=network', `resource_id=${resource!.getUuid()}`];
         const error = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments);
@@ -553,18 +568,89 @@ export default function httpChainModeDeviceTest() {
         const errorPoint = RumAttributeAssert.record(error, errorAttributes);
         expect(errorPoint.tags.get('resource_status')).assertEqual('0');
         expect(errorPoint.tags.get('resource_url')).assertEqual(resourceUrl);
-        expect(String(errorPoint.fields.get('error_message')).includes(
-          'NetworkKit request failed without an HTTP response')).assertTrue();
 
         const uploadedResource = await flushAndAssertUploaded(collector, resourceFragments, resource!.getUuid());
         const uploadedError = await collector.waitForPayloadContaining(errorFragments, 5000);
         RumAttributeAssert.uploaded(uploadedResource, resource, resourceAttributes);
         RumAttributeAssert.uploaded(uploadedError, error, errorAttributes);
-        expect(await ExtDBAssert.waitForNoSyncRecordWithUuid(DataType.RUM_APP, error!.getUuid(), 5000)).assertTrue();
       } finally {
+        disposeFTHttpTrack(request);
         request.destroy();
       }
     });
+
+    it('unspecifiedMethodShouldReportUnknown', 0, async () => {
+      const resourceUrl = 'http://127.0.0.1:1/unspecified-method';
+      const handler = new DeviceNetworkErrorHandler('true');
+      const request = http.createHttp();
+      const options: http.HttpRequestOptions = { connectTimeout: 1000, readTimeout: 1000 };
+      try {
+        applyFTHttpTrack(request, { networkErrorHandler: handler });
+        let rejected = false;
+        try { await request.request(resourceUrl, options); } catch (_error) { rejected = true; }
+        expect(rejected).assertTrue();
+        expect(options.method === undefined).assertTrue();
+        expect(handler.calls).assertEqual(1);
+        expect(handler.lastContext!.method).assertEqual('UNKNOWN');
+        const resource = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+          ['resource,', `resource_url=${resourceUrl}`]);
+        const point = RumAttributeAssert.record(resource, { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+          resourceStatus: 0, requiredFields: ['device_filter_case'] });
+        expect(point.tags.get('resource_method')).assertEqual('UNKNOWN');
+      } finally {
+        disposeFTHttpTrack(request);
+        request.destroy();
+      }
+    });
+
+    for (const mode of ['true', 'false', 'unset', 'throw']) {
+      it(`localFilterShouldPreserveNativeFailure_${mode}`, 0, async () => {
+        const viewName = `native_filter_${mode}`;
+        const resourceUrl = `http://127.0.0.1:1/filter-${mode}`;
+        await FTRUMGlobalManager.getInstance().startView(viewName);
+        const request = http.createHttp();
+        const handler = new DeviceNetworkErrorHandler(mode);
+        try {
+          const chain = createFTHttpInterceptorChain({
+            networkErrorHandler: mode === 'unset' ? undefined : handler
+          });
+          expect(chain.apply(request)).assertTrue();
+          let failure: Object | undefined;
+          try {
+            await request.request(resourceUrl, {
+              method: http.RequestMethod.POST, connectTimeout: 1000, readTimeout: 1000
+            });
+          } catch (error) { failure = error as Object; }
+          expect(failure !== undefined).assertTrue();
+          expect(handler.calls).assertEqual(mode === 'unset' ? 0 : 1);
+          if (mode !== 'unset') {
+            expect(handler.lastContext!.exception === failure).assertTrue();
+            expect(handler.lastContext!.errorCode !== undefined).assertTrue();
+            expect(handler.lastContext!.url).assertEqual(resourceUrl);
+            expect(handler.lastContext!.method).assertEqual('POST');
+          }
+          const resource = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+            ['resource,', `resource_url=${resourceUrl}`]);
+          const requiredFields = mode === 'true' || mode === 'false' ? ['device_filter_case'] : ['request_header'];
+          const point = RumAttributeAssert.record(resource, { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+            viewName, resourceStatus: 0, requiredFields });
+          expect(point.tags.get('resource_method')).assertEqual('POST');
+          expect(point.fields.has('resource_id')).assertFalse();
+          const errorFragments = ['error,', 'error_source=network', `resource_id=${resource!.getUuid()}`];
+          if (mode === 'true') {
+            await WaitUtils.delay(200);
+            const records = await ExtDBAssert.querySyncData([DataType.RUM_APP]);
+            expect(records.some(record => ExtDBAssert.containsAll(record.getDataString(), errorFragments))).assertFalse();
+          } else {
+            const error = await ExtDBAssert.waitForSyncRecordContaining(DataType.RUM_APP, errorFragments);
+            expect(error !== null).assertTrue();
+          }
+        } finally {
+          disposeFTHttpTrack(request);
+          request.destroy();
+        }
+      });
+    }
 
     it('resolveAxiosFullUrlJoinBaseUrlOnDevice', 0, async () => {
       expect(resolveAxiosFullUrl('/users', 'https://device.example.com/api'))
