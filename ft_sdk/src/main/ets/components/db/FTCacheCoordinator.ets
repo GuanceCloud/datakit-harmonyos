@@ -9,6 +9,7 @@ import { FTInnerLogger } from '../log/FTLogger';
 import { SyncDataJSON } from './bean/SyncData';
 import { runFTDBSpoolTaskPoolExecute } from './FTDBSpoolTaskPoolOperations';
 import { FTDBSpoolTaskPoolRequest, FTDBSpoolTaskPoolResponse } from './FTDBSpoolTaskPoolExecutor';
+import { CRASH_FREE_COMMITS_KEY, decodeCrashFreeCommits } from '../monitor/FTCrashFreeState';
 
 interface FTCacheMigration { state: string; afterId: number; legacyDone: boolean; }
 const TAG = 'FTCacheCoordinator';
@@ -143,6 +144,14 @@ export class FTCacheCoordinator {
       }
       const timeline = await FTCacheCoordinator.checked(sqlite, { command: 'getLastErrorTimeLine' });
       await target.execute({ command: 'updateLastErrorTimeLine', errorTimeLine: timeline.count });
+      // Receipts outlive upload/delete of their Error rows, and must survive
+      // the SQLite -> FileStore switch before the old database is cleared.
+      const receipts = await FTCacheCoordinator.checked(sqlite, { command: 'queryCrashFreeCommits' });
+      const receiptBody = (receipts.strings || ['[]'])[0];
+      decodeCrashFreeCommits(receiptBody);
+      if (!await target.commit([{ path: target.path('meta', CRASH_FREE_COMMITS_KEY), body: receiptBody }])) {
+        throw new Error('CACHE_CRASH_RECEIPT_MIGRATION_FAILED');
+      }
       await FTCacheCoordinator.verify(target, sqlite, rum);
       state.state = 'verified'; FTCacheFiles.atomicWrite(path, JSON.stringify(state));
     }
@@ -291,7 +300,7 @@ export class FTCacheCoordinator {
   /** Read-only commands do not need a FileStore mirror transaction. */
   private static mirrorsCommand(command: string): boolean {
     return !['init', 'hasSyncData', 'querySyncData', 'queryUploadData', 'queryTotalCount', 'getDbSize',
-      'getLastErrorTimeLine', 'getActionInfo', 'getActionCounts', 'getRumPendingResource', 'getPendingRumResource',
+      'getLastErrorTimeLine', 'queryCrashFreeCommits', 'getActionInfo', 'getActionCounts', 'getRumPendingResource', 'getPendingRumResource',
       'queryPendingRumActions', 'querySumAction', 'querySumView', 'queryRumViewById', 'queryRelatedUUIDsByActionId',
       'exportRumState', 'queryMigrationPage', 'compactCacheIndex'].includes(command);
   }

@@ -292,8 +292,12 @@ export class FTSDK {
    * cannot replace this snapshot.
    */
   private static captureInitialAppVisibility(context?: Object): void {
-    if (FTSDK.launchInitialVisibilityCaptureStarted || !context ||
-      FTAppLaunchTracker.getInstance().getSnapshot().initialVisibility !== 'unknown') {
+    if (FTSDK.launchInitialVisibilityCaptureStarted || !context) {
+      return;
+    }
+    const crashFreeManager = FTCrashFreeDurationManager.getInstance();
+    if (FTAppLaunchTracker.getInstance().getSnapshot().initialVisibility !== 'unknown' &&
+      crashFreeManager.getCurrentAppState() !== AppState.UNKNOWN) {
       return;
     }
     FTSDK.launchInitialVisibilityCaptureStarted = true;
@@ -316,6 +320,13 @@ export class FTSDK {
         .then((processes: Array<FTRunningProcessInformation>): void => {
           const visibility = FTSDK.resolveInitialVisibility(processes);
           FTAppLaunchTracker.getInstance().recordInitialVisibility(visibility);
+          if (visibility !== 'unknown') {
+            crashFreeManager.recordInitialAppState(
+              visibility === 'background' ? AppState.BACKGROUND : AppState.RUN
+            ).catch((error: Error): void => {
+              FTInnerLogger.w(TAG, `Unable to initialize crash-free app visibility: ${error.message}`);
+            });
+          }
           FTSDK.launchInitialVisibilityCaptureStarted = false;
         })
         .catch((error: Error): void => {
@@ -577,7 +588,9 @@ export class FTSDK {
         }
       });
       FTRUMInnerManager.getInstance().initContext(context);
-      FTCrashFreeDurationManager.getInstance().initialize(context, AppState.RUN);
+      FTCrashFreeDurationManager.getInstance().initialize(context);
+      FTSDK.registerAppLaunchStateListener(context);
+      FTSDK.captureInitialAppVisibility(context);
       FTSDK.initRemoteDataFilters(config);
     } else {
       FTInnerLogger.w(TAG, " Context is null, skipping FTTrackInner and FTRUMInnerManager initialization");

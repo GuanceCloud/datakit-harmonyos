@@ -1,3 +1,4 @@
+import { FTCrashFreeCommit } from '../monitor/FTCrashFreeState';
 /**
  * Internal worker message protocol for dedicated SDK pools.
  *
@@ -418,6 +419,7 @@ export interface SDKSyncDataDraftDTO {
   dataString: string;
   uuid: string;
   time: number;
+  crashFreeCommit?: FTCrashFreeCommit;
 }
 
 export interface SDKCrashFileDTO {

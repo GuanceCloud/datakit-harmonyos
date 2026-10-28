@@ -1396,7 +1396,8 @@ export class FTDBManager extends DBManager {
         dataType: this.toDataType(draft.dataType, fallbackDataType),
         dataString: draft.dataString,
         uuid: draft.uuid,
-        time: draft.time
+        time: draft.time,
+        crashFreeCommit: draft.crashFreeCommit
       };
       if (draft.customDataType && draft.customDataType.length > 0) {
         row.customDataTypeString = draft.customDataType;

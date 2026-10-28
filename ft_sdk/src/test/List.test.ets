@@ -19,6 +19,7 @@ import ftNetworkErrorHandlerUnitTest from './unit/FTNetworkErrorHandlerUnit.test
 import ftNetworkListenerUnitTest from './unit/FTNetworkListenerUnit.test';
 import ftAppLaunchTrackerUnitTest from './unit/FTAppLaunchTrackerUnit.test';
 import ftCrashFreeDurationManagerUnitTest from './unit/FTCrashFreeDurationManagerUnit.test';
+import ftCrashFreeRecoveryUnitTest from './unit/FTCrashFreeRecoveryUnit.test';
 import ftDataFilterUnitTest from './unit/FTDataFilterUnit.test';
 import ftDBSpoolUnitTest from './unit/FTDBSpoolUnit.test';
 import ftSDKExtensionBridgeUnitTest from './unit/FTSDKExtensionBridgeUnit.test';
@@ -45,6 +46,7 @@ export default function testsuite() {
   configUnitTest();
   ftAppLaunchTrackerUnitTest();
   ftCrashFreeDurationManagerUnitTest();
+  ftCrashFreeRecoveryUnitTest();
 
   // Data formatting, trace, HTTP, extension and auto-track protocol guards.
   lineProtocolEscapeTest();

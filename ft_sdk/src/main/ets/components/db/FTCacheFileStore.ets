@@ -9,6 +9,9 @@ import { SyncDataJSON } from './bean/SyncData';
 import { SDKUploadRowDTO } from '../thread/SDKWorkerProtocol';
 import { DataType } from '../enum/Enums';
 import { FTInnerLogger } from '../log/FTLogger';
+import {
+  appendCrashFreeCommit, CRASH_FREE_COMMITS_KEY, decodeCrashFreeCommits, FTCrashFreeCommit
+} from '../monitor/FTCrashFreeState';
 
 export type FTSqliteRunner = (request: FTDBTaskPoolRequest) => Promise<FTDBTaskPoolResponse>;
 
@@ -285,6 +288,9 @@ export class FTCacheFileStore implements FTRumStoreAccess {
   }
 
   async execute(request: FTDBTaskPoolRequest): Promise<FTDBTaskPoolResponse> {
+    if (request.command === 'queryCrashFreeCommits') {
+      return { ok: true, strings: [this.read('meta', CRASH_FREE_COMMITS_KEY) || '[]'] };
+    }
     if (FTRumFileStore.handles(request.command)) { return await new FTRumFileStore(this).execute(request); }
     switch (request.command) {
       case 'init': await this.enforceLimit(); return { ok: true };
@@ -363,6 +369,11 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     const timing: FTCacheWriteTiming = { recoverMs: this.lastRecoveryMs, reserveMs: 0, journalMs: 0, fsyncMs: 0, evictionMs: 0 };
     const changes: FTCacheMutation[] = [];
     const pendingRows: SyncDataJSON[] = [];
+    const hasCrashCommit = rows.some((row: SyncDataJSON): boolean => row.crashFreeCommit !== undefined);
+    let commits: FTCrashFreeCommit[] = hasCrashCommit ?
+      decodeCrashFreeCommits(this.read('meta', CRASH_FREE_COMMITS_KEY) || '[]') : [];
+    const newCommits: FTCrashFreeCommit[] = [];
+    const pendingTokens: Set<string> = new Set<string>();
     const plannedUuids = new Set<string>();
     let pendingLog = 0; let pendingRum = 0;
     let nextId = Number(this.read('meta', 'nextId') || '1');
@@ -372,6 +383,11 @@ export class FTCacheFileStore implements FTRumStoreAccess {
     try {
       for (const row of rows) {
         if (!row.uuid || !row.dataString || !(row.time > 0)) { response.result.dropped++; continue; }
+        if (row.crashFreeCommit && request.options?.reInsert !== true &&
+          (pendingTokens.has(row.crashFreeCommit.reportToken) ||
+            commits.some((commit: FTCrashFreeCommit): boolean => commit.reportToken === row.crashFreeCommit!.reportToken))) {
+          response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
+        }
         // A duplicate in the same batch used to be observed after the first
         // per-row commit. Preserve that result without paying for a second journal.
         if (plannedUuids.has(row.uuid)) {
@@ -379,9 +395,11 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         }
         const existing = this.sync(row.uuid);
         if (existing && this.digest(existing) === this.digest(row)) {
+          if (row.crashFreeCommit) { pendingTokens.add(row.crashFreeCommit.reportToken); }
           response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
         }
         if (existing && request.options?.updateOrInsertByUuid !== true) {
+          if (row.crashFreeCommit) { pendingTokens.add(row.crashFreeCommit.reportToken); }
           response.result.duplicateSkipped++; response.result.acceptedUuids.push(row.uuid); continue;
         }
         if (!existing && !await this.admitCount(row, request, pendingLog, pendingRum)) { response.result.dropped++; continue; }
@@ -392,10 +410,20 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         if (!existing) { nextId++; needsNextId = true; }
         changes.push({ path: this.path('sync', row.uuid), body });
         pendingRows.push(row); plannedUuids.add(row.uuid);
+        if (row.crashFreeCommit) { pendingTokens.add(row.crashFreeCommit.reportToken); }
         if (this.type(row) === 'log' && !existing) { pendingLog++; }
         else if (['rum_app', 'rum_webview'].includes(this.type(row)) && !existing) { pendingRum++; }
         if (existing) { response.result.updated++; } else { response.result.inserted++; }
         response.result.acceptedUuids.push(row.uuid);
+      }
+      for (const row of rows) {
+        if (row.crashFreeCommit && response.result.acceptedUuids.includes(row.uuid)) {
+          const next = appendCrashFreeCommit(commits, row.crashFreeCommit);
+          if (next !== commits) { newCommits.push(row.crashFreeCommit); commits = next; }
+        }
+      }
+      if (newCommits.length > 0) {
+        changes.push({ path: this.path('meta', CRASH_FREE_COMMITS_KEY), body: JSON.stringify(commits) });
       }
       if (needsNextId) { changes.push({ path: this.path('meta', 'nextId'), body: String(nextId) }); }
       if (request.options?.lastErrorTimeLine !== undefined && pendingRows.length > 0) {
@@ -414,6 +442,14 @@ export class FTCacheFileStore implements FTRumStoreAccess {
         response.result.dropped += committed;
         response.result.inserted = 0; response.result.updated = 0;
         response.result.acceptedUuids = response.result.acceptedUuids.filter((uuid: string) => !plannedUuids.has(uuid));
+        if (newCommits.length > 0) {
+          // No receipt became durable either; an existing row is insufficient
+          // to acknowledge a new crash cycle when the journal was rejected.
+          response.result.success = false;
+          response.result.duplicateSkipped = 0;
+          response.result.acceptedUuids = [];
+          response.result.errorMessage = 'Crash Error/receipt transaction rejected';
+        }
       } else if (pendingRows.length > 0) {
         await this.repairProjection();
       }
@@ -654,7 +690,7 @@ export class FTCacheFileStore implements FTRumStoreAccess {
       const type = draft.dataType || request.fallbackDataType || 'log';
       rows.push({ id: 0, uuid: draft.uuid, dataString: draft.dataString, time: draft.time,
         dataType: type === 'log' ? DataType.LOG : type === 'rum_webview' ? DataType.RUM_WEBVIEW : DataType.RUM_APP,
-        customDataTypeString: draft.customDataType });
+        customDataTypeString: draft.customDataType, crashFreeCommit: draft.crashFreeCommit });
     }
     return rows;
   }

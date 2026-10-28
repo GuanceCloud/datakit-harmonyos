@@ -1,3 +1,6 @@
+import {
+  appendCrashFreeCommit, CRASH_FREE_COMMITS_KEY, decodeCrashFreeCommits, FTCrashFreeCommit
+} from '../monitor/FTCrashFreeState';
 import { Context } from '@kit.AbilityKit';
 import relationalStore from '@ohos.data.relationalStore';
 import { Constants } from '../Constants';
@@ -116,6 +119,7 @@ export interface FTDBTaskPoolSyncDraftDTO {
   dataString: string;
   uuid: string;
   time: number;
+  crashFreeCommit?: FTCrashFreeCommit;
 }
 
 export interface FTDBTaskPoolWriteResponse {
@@ -430,6 +434,8 @@ export async function runFTSqliteTaskPoolExecute(contextObject: Object, requestO
         return okCountResponse(await getCurrentDbSizeInTaskPool(rdbStore, createTiming()));
       case FTDBTaskPoolCommand.GET_LAST_ERROR_TIMELINE:
         return okCountResponse(await getLastErrorTimeLineInTaskPool(rdbStore));
+      case 'queryCrashFreeCommits':
+        return { ok: true, strings: [JSON.stringify(await queryCrashFreeCommitsInTaskPool(rdbStore))] } as FTDBTaskPoolResponse as Object;
       case FTDBTaskPoolCommand.UPDATE_LAST_ERROR_TIMELINE:
         await updateLastErrorTimeLineInTaskPool(rdbStore, request.errorTimeLine || -1);
         return okResponse();
@@ -778,7 +784,8 @@ function syncDraftsToRows(drafts: FTDBTaskPoolSyncDraftDTO[], fallbackDataType: 
       dataType: dataTypeToEnum(draft.dataType || fallback.toString()),
       dataString: draft.dataString,
       uuid: draft.uuid,
-      time: draft.time || 0
+      time: draft.time || 0,
+      crashFreeCommit: draft.crashFreeCommit
     };
     if (draft.customDataType && draft.customDataType.length > 0) {
       row.customDataTypeString = draft.customDataType;
@@ -1076,6 +1083,27 @@ async function getLastErrorTimeLineInTaskPool(rdbStore: relationalStore.RdbStore
   } finally {
     resultSet.close();
   }
+}
+
+async function queryCrashFreeCommitsInTaskPool(rdbStore: relationalStore.RdbStore): Promise<FTCrashFreeCommit[]> {
+  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_SDK_META);
+  predicates.equalTo(FTSQL.SDK_META_COLUMN_KEY, CRASH_FREE_COMMITS_KEY);
+  const resultSet = await rdbStore.query(predicates, [FTSQL.SDK_META_COLUMN_VALUE]);
+  try {
+    return resultSet.goToFirstRow() ? decodeCrashFreeCommits(resultSet.getString(0)) : [];
+  } finally {
+    resultSet.close();
+  }
+}
+
+async function writeCrashFreeCommitsInTaskPool(
+  rdbStore: relationalStore.RdbStore, commits: FTCrashFreeCommit[]
+): Promise<void> {
+  const values = {} as relationalStore.ValuesBucket;
+  values[FTSQL.SDK_META_COLUMN_KEY] = CRASH_FREE_COMMITS_KEY;
+  values[FTSQL.SDK_META_COLUMN_VALUE] = JSON.stringify(commits);
+  const rowId = await rdbStore.insert(FTSQL.FT_TABLE_SDK_META, values, relationalStore.ConflictResolution.ON_CONFLICT_REPLACE);
+  if (!(rowId > 0)) { throw new Error('Crash-free receipt was not inserted'); }
 }
 
 /**
@@ -1451,15 +1479,40 @@ async function writeSyncDataInTaskPool(
   const result = createWriteResult(source, records.length);
   const delta = createCountDelta();
   const timing = createTiming();
+  const hasCrashCommit = records.some((row: SyncDataJSON): boolean => row.crashFreeCommit !== undefined);
   const shouldTransaction =
     options.forceTransaction || options.applyCachePolicy || options.updateOrInsertByUuid ||
-    options.lastErrorTimeLine !== undefined || records.length > TRANSACTION_LIMIT_COUNT;
+    hasCrashCommit || options.lastErrorTimeLine !== undefined || records.length > TRANSACTION_LIMIT_COUNT;
 
   try {
     if (shouldTransaction) {
       rdbStore.beginTransaction();
     }
-    await writeSyncDataBody(rdbStore, records, options, policy, result, delta, timing);
+    let commits = hasCrashCommit ? await queryCrashFreeCommitsInTaskPool(rdbStore) : [];
+    const candidates: SyncDataJSON[] = [];
+    const pendingTokens: Set<string> = new Set<string>();
+    for (const row of records) {
+      const token = row.crashFreeCommit?.reportToken;
+      if (token && !options.reInsert && (pendingTokens.has(token) ||
+        commits.some((commit: FTCrashFreeCommit): boolean => commit.reportToken === token))) {
+        result.duplicateSkipped++;
+        continue;
+      }
+      candidates.push(row);
+      if (token) { pendingTokens.add(token); }
+    }
+    await writeSyncDataBody(rdbStore, candidates, options, policy, result, delta, timing);
+    if (hasCrashCommit && !result.success) {
+      throw new Error(result.errorMessage || 'Crash Error transaction failed');
+    }
+    let changedCommits = false;
+    for (const row of candidates) {
+      if (row.crashFreeCommit && result.acceptedUuids.includes(row.uuid)) {
+        const next = appendCrashFreeCommit(commits, row.crashFreeCommit);
+        if (next !== commits) { changedCommits = true; commits = next; }
+      }
+    }
+    if (changedCommits) { await writeCrashFreeCommitsInTaskPool(rdbStore, commits); }
     const resolvedRecords = result.inserted + result.updated + result.dropped + result.duplicateSkipped;
     if (result.success && resolvedRecords < result.requested) {
       throw new Error(`Incomplete DB write: resolved=${resolvedRecords}, requested=${result.requested}`);

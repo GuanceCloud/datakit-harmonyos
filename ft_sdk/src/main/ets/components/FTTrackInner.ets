@@ -1083,6 +1083,9 @@ class FTTrackInner {
       return true;
     }
 
+    if (callBack?.crashFreeCommit && normalizedDrafts.length === 1) {
+      normalizedDrafts[0].crashFreeCommit = callBack.crashFreeCommit;
+    }
     const writeResult = await this.writeWorkerDraftsToDb(source, normalizedDrafts, dataType, errorTimeLine);
     const result = this.getWriteAffectedCount(writeResult) > 0;
     const firstUuid = normalizedDrafts[0].uuid;

@@ -1,3 +1,4 @@
+import { decodeCrashFreeCommits, FTCrashFreeCommit } from '../monitor/FTCrashFreeState';
 import { Context } from '@kit.AbilityKit';
 import taskpool from '@ohos.taskpool';
 import { SyncData, SyncDataJSON } from './bean/SyncData';
@@ -106,6 +107,7 @@ export interface FTDBTaskPoolSyncDraftDTO {
   dataString: string;
   uuid: string;
   time: number;
+  crashFreeCommit?: FTCrashFreeCommit;
 }
 
 export interface FTDBTaskPoolWriteResponse {
@@ -277,6 +279,11 @@ export interface FTDBTaskPoolDeleteAllResult {
 
 export class FTDBTaskPoolExecutor {
   private static dbLaneTail: Promise<void> = Promise.resolve();
+
+  public static async queryCrashFreeCommits(context: Context): Promise<FTCrashFreeCommit[]> {
+    const response = await FTDBTaskPoolExecutor.execute(context, { command: 'queryCrashFreeCommits' });
+    return decodeCrashFreeCommits((response.strings || ['[]'])[0]);
+  }
 
   /** Internal diagnostics; intentionally not exported by the package Index. */
   public static async getCacheStatus(context: Context): Promise<string> {

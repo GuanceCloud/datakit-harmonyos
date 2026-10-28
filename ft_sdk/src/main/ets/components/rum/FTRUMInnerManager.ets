@@ -79,6 +79,7 @@ import {
   FTSessionReplayViewMetadata
 } from '../sessionreplay/FTSessionReplayBridge';
 import { FTCrashFreeDuration, FTCrashFreeDurationManager } from '../monitor/FTCrashFreeDurationManager';
+import { FTCrashFreeCommit } from '../monitor/FTCrashFreeState';
 
 /**
  * Property wrapper interface for error properties
@@ -4855,7 +4856,11 @@ export class FTRUMInnerManager {
       const self = this;
 
       class ErrorCallback implements RunnerCompleteCallBack {
+        public crashFreeCommit: FTCrashFreeCommit | undefined = crashFreeDuration?.commit;
+        private completed: boolean = false;
         onComplete(): void {
+          if (this.completed) { return; }
+          this.completed = true;
           self.increaseError(allTags);
           const completeError = (): void => {
             if (actualCallBack != null) {

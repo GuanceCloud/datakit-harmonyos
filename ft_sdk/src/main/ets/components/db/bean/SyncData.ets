@@ -4,6 +4,7 @@
 import { DataType } from '../../enum/Enums';
 import { Utils } from '../../utils';
 import { Constants } from '../../Constants';
+import { FTCrashFreeCommit } from '../../monitor/FTCrashFreeState';
 
 /**
  * SyncData JSON Interface
@@ -15,6 +16,7 @@ export interface SyncDataJSON {
   uuid: string;
   time: number;
   customDataTypeString?: string;
+  crashFreeCommit?: FTCrashFreeCommit;
 }
 
 /**
@@ -51,6 +53,7 @@ export class SyncData {
    * Operation time
    */
   private time: number = 0;
+  private crashFreeCommit?: FTCrashFreeCommit;
 
   /**
    * Constructor
@@ -190,6 +193,7 @@ export class SyncData {
     cloned.uuid = this.uuid;
     cloned.time = this.time;
     cloned.customDataTypeString = this.customDataTypeString;
+    cloned.crashFreeCommit = this.crashFreeCommit;
     return cloned;
   }
 
@@ -212,7 +216,8 @@ export class SyncData {
       dataString: this.dataString,
       uuid: this.uuid,
       time: this.time,
-      customDataTypeString: this.customDataTypeString
+      customDataTypeString: this.customDataTypeString,
+      crashFreeCommit: this.crashFreeCommit
     };
   }
 
@@ -227,6 +232,7 @@ export class SyncData {
     syncData.dataString = json.dataString || "";
     syncData.uuid = json.uuid || "";
     syncData.time = json.time || Date.now();
+    syncData.crashFreeCommit = json.crashFreeCommit;
     if (json.customDataTypeString && json.customDataTypeString.length > 0) {
       syncData.customDataTypeString = json.customDataTypeString;
     }
@@ -253,6 +259,7 @@ export class SyncData {
     this.id = 0;
     this.dataString = "";
     this.uuid = "";
+    this.crashFreeCommit = undefined;
     this.time = Date.now();
   }
 }
