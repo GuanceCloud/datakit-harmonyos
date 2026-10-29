@@ -20,6 +20,7 @@ import {
   SDKRumResourceCommandBatchDTO,
   SDKRumResourceCommandDTO,
   SDKRumResourceContextDTO,
+  SDKRumResourceNetworkSnapshotDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
   SDKStringRecord,
@@ -1480,6 +1481,89 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       expect(offlineLine.includes('network_downlink_kbps=')).assertFalse();
       expect(offlineLine.includes('network_uplink_kbps=')).assertFalse();
       expect(offlineLine.includes('network_signal_strength=')).assertFalse();
+    });
+
+    it('resourceNetworkSnapshotShouldRejectCustomAndGlobalOverrides', 0, async () => {
+      const snapshots: Array<SDKRumResourceNetworkSnapshotDTO | undefined> = [
+        { available: false }, { available: true },
+        { available: true, validated: false, downlinkKbps: 1200, uplinkKbps: 600, signalStrength: 0 },
+        undefined
+      ];
+      const keys: string[] = ['network_available', 'network_validated', 'network_downlink_kbps',
+        'network_uplink_kbps', 'network_signal_strength'];
+      for (let index = 0; index < snapshots.length; index++) {
+        for (const mode of ['line', 'raw']) {
+          const snapshot = snapshots[index];
+          const resourceId = `protected-network-${index}-${mode}`;
+          const context: SDKRumResourceContextDTO = {
+            sessionId: 'protected-network-session', viewId: 'protected-network-view', viewName: 'NetworkView',
+            viewReferrer: '', actionId: '', actionName: '', networkSnapshot: snapshot,
+            dynamicTags: { network_available: 'fake-tag', network_signal_strength: 'fake-tag' }
+          };
+          const property = new Object() as SDKPropertyRecord;
+          for (const key of keys) {
+            const value: SDKCompletedActionPropertyTestValue = { value: '999' };
+            property[key] = value;
+          }
+          const marker: SDKCompletedActionPropertyTestValue = { value: 'kept' };
+          property['snapshot_custom_marker'] = marker;
+          const params: SDKRumResourceParamsDTO = {
+            url: 'https://example.com/protected-snapshot', requestHeader: '', responseHeader: '',
+            responseConnection: '', responseContentType: '', responseContentEncoding: '',
+            responseContentLength: 0, resourceMethod: 'GET', responseBody: '', resourceStatus: 200,
+            resourceType: 'network', requestErrorStack: '', requestErrorMsg: '', property
+          };
+          const batch: SDKRumResourceCommandBatchDTO = {
+            commands: [{ commandType: 'start', resourceId, context, property, startTime: 10 },
+              { commandType: 'setContent', resourceId, context, params, eventTime: 20 },
+              { commandType: 'setNetState', resourceId, context,
+                netStatus: { holeRequestTime: 10 } as SDKRumResourceNetStatusDTO, eventTime: 20 },
+              { commandType: 'stop', resourceId, context, property, endTime: 20 }]
+          };
+          if (mode === 'line') {
+            batch.lineContext = createRumWorkerLineContext();
+            for (const key of keys) {
+              batch.lineContext.dynamicRumTags[key] = 'fake-tag';
+              batch.lineContext.rumStaticFields[key] = '999';
+            }
+          }
+          const response = await executeWorkerCommandForUnit({
+            id: resourceId, pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+            command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+            payload: batch as Object as SDKWorkerPayload
+          });
+          if (mode === 'line') {
+            const drafts = getPayloadArray(response.payload, 'syncDrafts');
+            expect(drafts.length).assertEqual(1);
+            const line = String((drafts[0] as Record<string, object>)['dataString']);
+            const tags = line.split(' ')[0];
+            for (const key of keys) expect(tags.includes(`${key}=`)).assertFalse();
+            expect(line.includes('snapshot_custom_marker="kept"')).assertTrue();
+            for (const key of keys) expect(line.includes(`${key}=999`)).assertFalse();
+            if (snapshot) expect(line.includes(`network_available=${snapshot.available}`)).assertTrue();
+            else expect(line.includes('network_available=')).assertFalse();
+            if (index === 2) {
+              expect(line.includes('network_validated=false')).assertTrue();
+              expect(line.includes('network_downlink_kbps=1200i')).assertTrue();
+              expect(line.includes('network_uplink_kbps=600i')).assertTrue();
+              expect(line.includes('network_signal_strength=0i')).assertTrue();
+            } else {
+              for (const key of keys.slice(1)) expect(line.includes(`${key}=`)).assertFalse();
+            }
+          } else {
+            const events = getPayloadArray(response.payload, 'rawEvents');
+            expect(events.length).assertEqual(1);
+            const event = events[0] as Object as SDKRumEventDTO;
+            expect(event.fields['snapshot_custom_marker']).assertEqual('kept');
+            for (const key of keys) expect(event.tags[key] === undefined).assertTrue();
+            if (snapshot) expect(event.fields['network_available']).assertEqual(String(snapshot.available));
+            else expect(event.fields['network_available'] === undefined).assertTrue();
+            if (index !== 2) {
+              for (const key of keys.slice(1)) expect(event.fields[key] === undefined).assertTrue();
+            }
+          }
+        }
+      }
     });
 
     it('suppressedLocalResourceShouldKeepResourceWithoutErrorSideEffects', 0, async () => {

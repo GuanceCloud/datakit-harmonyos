@@ -41,6 +41,10 @@ import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { RumAttributeAssert, RumAttributeExpectation } from './helpers/RumAttributeAssert';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
 import { WaitUtils } from './helpers/WaitUtils';
+import { FTNetworkListener } from '../../../main/ets/components/utils/FTNetworkListener';
+import { Constants } from '../../../main/ets/components/Constants';
+import { ResourceParams } from '../../../main/ets/components/rum/bean/ResourceParams';
+import { NetStatusBean } from '../../../main/ets/components/rum/bean/NetStatusBean';
 import {
   SDKDedicatedPoolType,
   SDKTaskPriority,
@@ -562,6 +566,47 @@ export default function resourceAutoTrackDeviceTest() {
         async () => { await DBAssert.cleanupAll(); },
         async () => { await SdkTestLifecycle.resetRuntimeState(); }
       ]);
+    });
+
+    it('manualResourceShouldProtectAndUploadItsStartNetworkSnapshot', 0, async () => {
+      const rum = FTRUMGlobalManager.getInstance();
+      const resourceId = 'manual-protected-network-snapshot';
+      const property: Record<string, object> = {};
+      const params = new ResourceParams();
+      params.url = 'https://example.com/manual-protected-network-snapshot';
+      params.resourceMethod = 'GET';
+      params.resourceStatus = 200;
+      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+        property[key] = new String('999');
+        params.property.set(key, new String('999'));
+      }
+      params.property.set('snapshot_custom_marker', new String('kept'));
+      const network = new NetStatusBean();
+      network.setHoleRequestTime(1000);
+      const started = FTNetworkListener.getInstance().getResourceNetworkSnapshot();
+      rum.startResource(resourceId, property);
+      rum.stopResource(resourceId, property);
+      rum.addResource(resourceId, params, network);
+      const fragments = ['resource,', 'resource_url_path=/manual-protected-network-snapshot'];
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP, fragments);
+      const attributes: RumAttributeExpectation = { measurement: 'resource', appId: TEST_FAKE_RUM_ID,
+        resourceStatus: 200, requiredFields: ['snapshot_custom_marker'] };
+      const point = RumAttributeAssert.record(record, attributes);
+      expect(point.fields.get('network_available')).assertEqual(started.available);
+      const optionalValues: Array<boolean | number | undefined> = [started.validated, started.downlinkKbps,
+        started.uplinkKbps, started.signalStrength];
+      for (let index = 0; index < Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.length; index++) {
+        const key = Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS[index];
+        expect(point.tags.has(key)).assertFalse();
+        if (index > 0) {
+          const expected = started.available ? optionalValues[index - 1] : undefined;
+          if (expected === undefined) expect(point.fields.has(key)).assertFalse();
+          else expect(point.fields.get(key)).assertEqual(expected);
+        }
+      }
+      FTSDK.flushSyncData();
+      const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(uploaded, record, attributes);
     });
 
     it('httpBridgeShouldUploadAndDelete', 0, async () => {

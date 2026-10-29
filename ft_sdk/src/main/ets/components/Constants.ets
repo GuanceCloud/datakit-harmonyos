@@ -160,6 +160,13 @@ export class Constants {
   static readonly KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS = "network_downlink_kbps";
   static readonly KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS = "network_uplink_kbps";
   static readonly KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH = "network_signal_strength";
+  static readonly RESOURCE_NETWORK_SNAPSHOT_FIELDS: string[] = [
+    Constants.KEY_RUM_RESOURCE_NETWORK_AVAILABLE,
+    Constants.KEY_RUM_RESOURCE_NETWORK_VALIDATED,
+    Constants.KEY_RUM_RESOURCE_NETWORK_DOWNLINK_KBPS,
+    Constants.KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS,
+    Constants.KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH
+  ];
   
   /**
    * RUM error related keys

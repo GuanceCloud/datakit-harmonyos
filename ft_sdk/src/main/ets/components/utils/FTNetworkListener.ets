@@ -58,7 +58,7 @@ export class FTNetworkListener {
     this.onWifiRssiChanged(rssi);
   };
 
-  private constructor() {
+  protected constructor() {
   }
 
   public static getInstance(): FTNetworkListener {
@@ -134,8 +134,8 @@ export class FTNetworkListener {
       // Resource request path.
       this.registerWifiRssiListener();
 
-      // Seed the cache before the first Resource can be started. Failure keeps
-      // the conservative initial unavailable value and never blocks callers.
+      // Seed the cache before the first Resource can be started. Optional
+      // capability failures must not hide a confirmed available network.
       this.refreshSnapshotFromDefaultNetwork();
 
       this.netConnection.register((error: BusinessError) => {
@@ -234,14 +234,7 @@ export class FTNetworkListener {
 
       this.hasInternetCapability = true;
       if (data.netId > 0 && this.isCurrentDefaultNetwork(data.netId)) {
-        if (this.currentNetId !== data.netId) {
-          this.updateCurrentNetworkIdentity(data.netId, false);
-          // Capabilities can arrive after netAvailable. Record availability now
-          // and let capability callbacks fill optional values when available.
-          this.resourceNetworkSnapshot = { available: true };
-        } else if (!this.resourceNetworkSnapshot.available) {
-          this.resourceNetworkSnapshot = { available: true };
-        }
+        this.markNetworkAvailable(data.netId);
       }
       this.refreshSnapshotFromDefaultNetwork();
       this.fetchNetworkState().catch((err: ESObject) => {
@@ -310,36 +303,67 @@ export class FTNetworkListener {
     return false;
   }
 
-  private refreshSnapshotFromDefaultNetwork(): void {
+  // These platform reads stay on listener work. The protected boundary lets
+  // internal tests exercise permission failures and network handover directly.
+  protected hasDefaultNetwork(): boolean {
+    return connection.hasDefaultNetSync();
+  }
+
+  protected getDefaultNetworkHandle(): connection.NetHandle {
+    return connection.getDefaultNetSync();
+  }
+
+  protected getNetworkCapabilities(netHandle: connection.NetHandle): connection.NetCapabilities {
+    return connection.getNetCapabilitiesSync(netHandle);
+  }
+
+  private markNetworkAvailable(netId: number): void {
+    if (this.currentNetId !== netId || !this.resourceNetworkSnapshot.available) {
+      this.updateCurrentNetworkIdentity(netId, false);
+      this.resourceNetworkSnapshot = { available: true };
+      FTSessionReplayBridgeRegistry.updateReplayUploadNetworkAvailability(true);
+    }
+  }
+
+  protected refreshSnapshotFromDefaultNetwork(): void {
+    let observedNetId: number = 0;
     try {
-      if (!connection.hasDefaultNetSync()) {
+      if (!this.hasDefaultNetwork()) {
         this.setNetworkUnavailable();
         return;
       }
-      const netHandle = connection.getDefaultNetSync();
+      const netHandle = this.getDefaultNetworkHandle();
       if (!netHandle || netHandle.netId <= 0) {
         this.setNetworkUnavailable();
         return;
       }
-      const netCapabilities = connection.getNetCapabilitiesSync(netHandle);
+      observedNetId = netHandle.netId;
+      // A confirmed new network invalidates all metrics from its predecessor,
+      // even when querying the new network's capabilities subsequently fails.
+      this.markNetworkAvailable(observedNetId);
+      const netCapabilities = this.getNetworkCapabilities(netHandle);
       this.updateSnapshotFromCapabilities(netHandle.netId, netCapabilities);
     } catch (err) {
-      // A permission/API failure is an unknown capability state, not evidence
-      // that a previously known network disappeared. Keep the last safe value.
+      // Availability is independent from capabilities. Keep a confirmed
+      // default network available, but never retain unverified optional data
+      // or allow an outstanding Wi-Fi read to fill it after this failure.
+      const available = observedNetId > 0 || this.resourceNetworkSnapshot.available;
+      this.updateCurrentNetworkIdentity(observedNetId > 0 ? observedNetId : this.currentNetId, false);
+      this.resourceNetworkSnapshot = { available };
       FTInnerLogger.w(TAG, `[refreshSnapshotFromDefaultNetwork] ${this.getErrorMessage(err)}`);
     }
   }
 
   private isCurrentDefaultNetwork(netId: number): boolean {
     try {
-      if (!connection.hasDefaultNetSync()) {
+      if (!this.hasDefaultNetwork()) {
         return false;
       }
-      return connection.getDefaultNetSync().netId === netId;
+      return this.getDefaultNetworkHandle().netId === netId;
     } catch (err) {
       // Do not replace the current cache with an arbitrary stale callback when
       // the default network can no longer be queried.
-      return this.currentNetId === netId;
+      return false;
     }
   }
 
@@ -428,7 +452,7 @@ export class FTNetworkListener {
       const signalLevel = signals[0].signalLevel;
       // signalLevel is a native discrete level. Zero is retained only when it
       // was actually supplied by the platform, unlike bandwidth's sentinel 0.
-      return Number.isInteger(signalLevel) && signalLevel >= 0 ? signalLevel : undefined;
+      return Number.isInteger(signalLevel) && signalLevel >= 0 && signalLevel <= 5 ? signalLevel : undefined;
     } catch (err) {
       FTInnerLogger.w(TAG, `[readCellularSignalStrength] ${this.getErrorMessage(err)}`);
       return undefined;
@@ -446,25 +470,33 @@ export class FTNetworkListener {
       return;
     }
     this.wifiSignalRefreshRevision = networkRevision;
-    wifiManager.getLinkedInfo()
-      .then((linkedInfo: wifiManager.WifiLinkedInfo): void => {
-        if (this.wifiSignalRefreshRevision === networkRevision) {
-          this.wifiSignalRefreshRevision = 0;
-        }
-        if (!this.isCurrentWifiNetwork(netId, networkRevision)) {
-          return;
-        }
-        const signalLevel = this.readWifiSignalLevel(linkedInfo.rssi, linkedInfo.band);
-        if (signalLevel !== undefined) {
-          this.mergeCurrentWifiSignal(netId, networkRevision, signalLevel);
-        }
-      })
-      .catch((err: ESObject): void => {
-        if (this.wifiSignalRefreshRevision === networkRevision) {
-          this.wifiSignalRefreshRevision = 0;
-        }
-        FTInnerLogger.w(TAG, `[refreshWifiSignal] ${this.getErrorMessage(err)}`);
-      });
+    try {
+      wifiManager.getLinkedInfo()
+        .then((linkedInfo: wifiManager.WifiLinkedInfo): void => {
+          if (this.wifiSignalRefreshRevision === networkRevision) {
+            this.wifiSignalRefreshRevision = 0;
+          }
+          if (!this.isCurrentWifiNetwork(netId, networkRevision)) {
+            return;
+          }
+          const signalLevel = this.readWifiSignalLevel(linkedInfo.rssi, linkedInfo.band);
+          if (signalLevel !== undefined) {
+            this.mergeCurrentWifiSignal(netId, networkRevision, signalLevel);
+          }
+        })
+        .catch((err: ESObject): void => {
+          this.onWifiSignalReadFailed(networkRevision, err);
+        });
+    } catch (err) {
+      this.onWifiSignalReadFailed(networkRevision, err as ESObject);
+    }
+  }
+
+  private onWifiSignalReadFailed(networkRevision: number, err: ESObject): void {
+    if (this.wifiSignalRefreshRevision === networkRevision) {
+      this.wifiSignalRefreshRevision = 0;
+    }
+    FTInnerLogger.w(TAG, `[refreshWifiSignal] ${this.getErrorMessage(err)}`);
   }
 
   private onWifiRssiChanged(_rssi: number): void {

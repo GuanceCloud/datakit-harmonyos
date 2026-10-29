@@ -102,6 +102,12 @@ export default function ftNetworkErrorHandlerUnitTest() {
       fields['resource_id'] = 'attempted-override';
       fields['view_id'] = 'attempted-view-override';
       fields['handler_reason'] = 'timeout';
+      fields['network_available'] = true;
+      fields['network_validated'] = true;
+      fields['network_downlink_kbps'] = 999;
+      fields['network_uplink_kbps'] = 999;
+      fields['network_signal_strength'] = 4;
+      fields['NETWORK_AVAILABLE'] = true;
 
       const sanitized = sanitizeFTNetworkResourceFields(fields);
 

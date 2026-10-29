@@ -81,6 +81,31 @@ export default function syncDataHelperUnitTest() {
       expect(compatibleLine.includes('integer_value=1')).assertTrue();
     });
 
+    it('resourceNetworkSnapshotShouldRemainFieldsAfterHostContextMerge', 0, () => {
+      const helper = new SyncDataHelper();
+      helper.initBaseConfig(FTSDKConfig.builder(TEST_FAKE_URL));
+      helper.initRUMConfig(new FTRUMConfig().setRumAppId('snapshot-test'));
+      const globalContext = new Map<string, string>();
+      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) globalContext.set(key, 'fake-tag');
+      helper.appendGlobalContext(globalContext);
+      helper.appendRUMGlobalContext(globalContext);
+      const fields = new Map<string, string>();
+      fields.set('network_available', 'false');
+      const body = helper.getBodyContent('resource', new Map<string, string>(), fields,
+        TEST_TIMESTAMP, DataType.RUM_APP, 'network-snapshot-host');
+      expect(body.includes('network_available=false')).assertTrue();
+      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+        expect(body.split(' ')[0].includes(`${key}=`)).assertFalse();
+      }
+      const prepared = helper.prepareLineProtocolContent('resource', new Map<string, string>(), fields,
+        TEST_TIMESTAMP, DataType.RUM_APP, 'network-snapshot-worker');
+      expect(prepared.fields['network_available']).assertEqual('false');
+      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+        expect(prepared.tags[key] === undefined).assertTrue();
+      }
+      expect(prepared.fields['network_validated'] === undefined).assertTrue();
+    });
+
     it('bodyContentShouldMergeLogContext', 0, () => {
       const helper = new SyncDataHelper();
       const baseConfig = FTSDKConfig.builder(TEST_FAKE_URL)

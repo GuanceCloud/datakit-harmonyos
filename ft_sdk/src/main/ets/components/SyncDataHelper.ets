@@ -383,6 +383,7 @@ export class SyncDataHelper {
         this.rumStaticFields.forEach((value, key) => {
           fields.set(key, value);
         });
+        this.removeResourceNetworkSnapshotTags(measurement, mergeTags);
         this.applyLineDataModifier(measurement, mergeTags, fields);
         bodyContent = SyncDataHelper.convertToLineProtocolLine(
           measurement,
@@ -560,6 +561,7 @@ export class SyncDataHelper {
         this.rumStaticFields.forEach((value, key) => {
           fields.set(key, value);
         });
+        this.removeResourceNetworkSnapshotTags(measurement, mergeTags);
         this.applyLineDataModifier(measurement, mergeTags, fields);
         break;
       case DataType.RUM_WEBVIEW:
@@ -626,6 +628,14 @@ export class SyncDataHelper {
         fields.set(key, lineValue);
       }
     });
+  }
+
+  private removeResourceNetworkSnapshotTags(measurement: string, tags: Map<string, string>): void {
+    if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+        tags.delete(key);
+      }
+    }
   }
 
   private prepareWebViewLineProtocolContent(

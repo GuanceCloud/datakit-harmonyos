@@ -275,6 +275,46 @@ export default function ftDBManagerDeviceTest() {
       expect(Object.keys(restoredAction!.getProperty()).includes(Constants.KEY_RUM_COLLECT_TYPE)).assertFalse();
     });
 
+    it('pendingResourceNetworkSnapshotShouldSafelyRestoreUnknownAndOfflineValues', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const store = await DatabaseHelper.getInstance(context).initDatabase();
+      const resourceId = 'pending-network-snapshot-validation';
+      expect(await FTDBTaskPoolExecutor.registerPendingRumResource(
+        context, new PendingRumResourceFixture(resourceId, '')
+      )).assertTrue();
+      const values: string[] = [
+        '{"available":false,"validated":true,"downlinkKbps":1200,"signalStrength":3}',
+        '{"available":true,"validated":false,"downlinkKbps":0,"uplinkKbps":-1,"signalStrength":0}',
+        '', '{', '{"available":"true"}',
+        '{"available":true,"downlinkKbps":2.5,"signalStrength":-1}'
+      ];
+      for (let index = 0; index < values.length; index++) {
+        await store.executeSql(
+          `UPDATE ${FTSQL.FT_TABLE_PENDING_RUM_RESOURCE} SET ` +
+          `${FTSQL.PENDING_RESOURCE_COLUMN_NETWORK_SNAPSHOT} = ? WHERE ${FTSQL.PENDING_RESOURCE_COLUMN_ID} = ?`,
+          [values[index], resourceId]
+        );
+        const restored = await FTDBTaskPoolExecutor.getPendingRumResource(context, resourceId);
+        expect(restored !== null).assertTrue();
+        const snapshot = restored!.context.networkSnapshot;
+        if (index >= 2 && index <= 4) {
+          expect(snapshot === undefined).assertTrue();
+        } else {
+          expect(snapshot !== undefined).assertTrue();
+          expect(snapshot!.available).assertEqual(index !== 0);
+          expect(snapshot!.downlinkKbps === undefined).assertTrue();
+          expect(snapshot!.uplinkKbps === undefined).assertTrue();
+          if (index === 1) {
+            expect(snapshot!.validated).assertFalse();
+            expect(snapshot!.signalStrength).assertEqual(0);
+          } else {
+            expect(snapshot!.validated === undefined).assertTrue();
+            expect(snapshot!.signalStrength === undefined).assertTrue();
+          }
+        }
+      }
+    });
+
     it('pendingResourceAssociationPersistsAndReferenceCountsAction', 0, async () => {
       const context = await DBAssert.getAppContext();
       const actionId = 'pending-resource-action';

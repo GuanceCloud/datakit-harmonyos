@@ -32,7 +32,9 @@ const RESERVED_RESOURCE_FIELD_NAMES: Set<string> = new Set([
   'resource_trans', 'resource_first_byte', 'resource_download_time',
   'resourcedns', 'resourcetcp', 'resourcessl', 'resourcettfb', 'resourcetrans',
   'resourcefirstbyte', 'resourcedownloadtime', 'resourceload',
-  'network_error_kind', 'network_error_message', 'network_error_stack'
+  'network_error_kind', 'network_error_message', 'network_error_stack',
+  'network_available', 'network_validated', 'network_downlink_kbps',
+  'network_uplink_kbps', 'network_signal_strength'
 ]);
 
 export type FTNetworkErrorRaw = object | string | number | boolean | null | undefined;

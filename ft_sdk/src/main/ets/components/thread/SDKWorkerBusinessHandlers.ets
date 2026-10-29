@@ -1000,6 +1000,13 @@ function prepareRumAppLineRecords(
   mergeStringRecords(tags, event.tags || {});
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
   mergeStringRecords(fields, lineContext.rumStaticFields);
+  if (event.measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
+    for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+      // Empty entries are omitted by the serializer (ArkTS has no delete).
+      tags[key] = '';
+      fields[key] = event.fields?.[key] || '';
+    }
+  }
   // Native RUM Replay availability must survive global custom context.
   if (event.measurement === Constants.FT_MEASUREMENT_RUM_VIEW ||
     event.measurement === Constants.FT_MEASUREMENT_RUM_ACTION ||
@@ -1840,7 +1847,12 @@ function createResourceErrorRumEvent(resource: SDKRumWorkerResourceState): SDKRu
 
 function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const tags: SDKStringRecord = {};
-  mergeStringRecords(tags, resource.context.dynamicTags || {});
+  const dynamicTags = resource.context.dynamicTags || {};
+  for (const key of Object.keys(dynamicTags)) {
+    if (!Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.includes(key)) {
+      tags[key] = dynamicTags[key];
+    }
+  }
   tags[Constants.KEY_RUM_RESOURCE_ID] = resource.draftUuid;
   tags[Constants.KEY_RUM_SESSION_ID] = resource.context.sessionId;
   tags[Constants.KEY_RUM_VIEW_ID] = resource.context.viewId;
@@ -1897,7 +1909,6 @@ function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecor
 
 function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRecord {
   const fields: SDKStringRecord = {};
-  appendResourceNetworkSnapshot(fields, resource.context.networkSnapshot);
   if (resource.resourceSize > 0) {
     fields[Constants.KEY_RUM_RESOURCE_SIZE] = String(resource.resourceSize);
   }
@@ -1942,7 +1953,12 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
   if (resource.responseHeader.length > 0) {
     fields[Constants.KEY_RUM_RESOURCE_RESPONSE_HEADER] = resource.responseHeader;
   }
-  mergeStringRecords(fields, resource.properties);
+  for (const key of Object.keys(resource.properties)) {
+    if (!Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.includes(key)) {
+      fields[key] = resource.properties[key];
+    }
+  }
+  appendResourceNetworkSnapshot(fields, resource.context.networkSnapshot);
   // These are Resource Fields, never Tags. Add them after custom properties
   // so callers cannot weaken a platform/integration transport observation by
   // supplying a same-named generic property.
