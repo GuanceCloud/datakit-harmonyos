@@ -29,13 +29,15 @@ import {
 } from '../entryability/EntryAbility';
 import { ENTRY_UI_TEST_ACTIVE } from '../utils/EntryTestConfig';
 import { DemoLogger } from '../utils/DemoLogger';
-import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
+import { DemoGlobalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 import {
   HTTP_CHAIN_A_BATCH_SIZE,
   HTTP_CHAIN_B_BATCH_SIZE,
   HTTP_CHAIN_B_CONCURRENCY,
+  HTTP_CHAIN_C_BATCH_SIZE,
   runHttpChainAControl,
-  runHttpChainBControl
+  runHttpChainBControl,
+  runHttpChainCControl
 } from '../utils/HttpInterceptorRetentionControl';
 import {
   preInitChainClientInfo,
@@ -103,6 +105,9 @@ export struct HttpAutoTrackTestPage {
   @State chainBControlRunning: boolean = false;
   @State chainBControlStatus: string = '等待执行 B 组对照';
   @State chainBControlUrl: string = '';
+  @State chainCControlRuns: number = 0;
+  @State chainCControlApplied: number = 0;
+  @State chainCControlStatus: string = '等待执行 C 组对照';
   @StorageLink(KEY_TRACE_URL) storedTraceUrl: string = "";
   @StorageLink(KEY_RESOURCE_TEST_URL) resourceTestUrl: string = "";
   @StorageProp(ENTRY_UI_TEST_ACTIVE) isUITest: boolean = false;
@@ -129,9 +134,9 @@ export struct HttpAutoTrackTestPage {
   }
 
   private createNetworkErrorHandler(): FTNetworkErrorHandler | null | undefined {
-    // An enabled local filter overrides the FTRUMConfig default. Leaving this
-    // undefined deliberately inherits the app-wide default instead.
-    return this.localNetworkErrorFilterEnabled ? new DemoLocalNetworkErrorFilter() : undefined;
+    // Override the global default in both positions so the same local failure
+    // visibly produces an Error only while the Demo switch is off.
+    return this.localNetworkErrorFilterEnabled ? new DemoGlobalNetworkErrorFilter() : null;
   }
 
   private getLocalFailureUrl(source: string): string {
@@ -179,6 +184,22 @@ export struct HttpAutoTrackTestPage {
     } finally {
       this.chainBControlRunning = false;
     }
+  }
+
+  private testHttpChainCControl(): void {
+    if (this.chainBControlRunning) return;
+    const result = runHttpChainCControl();
+    this.chainCControlRuns++;
+    this.chainCControlApplied += result.appliedChains;
+    this.chainCControlStatus = `第 ${this.chainCControlRuns} 轮完成：add=${result.addedChains}，` +
+      `apply=${result.appliedChains}，安装失败=${result.setupFailures}，` +
+      `destroy=${result.destroyedRequests}，销毁失败=${result.destroyFailures}；` +
+      `累计 apply=${this.chainCControlApplied}。调用已返回，请手动 GC 后比较快照。`;
+    this.addTestResult(`[HTTP-Chain-C] run=${this.chainCControlRuns}, added=${result.addedChains}, ` +
+      `applied=${result.appliedChains}, setupFailures=${result.setupFailures}, ` +
+      `destroyed=${result.destroyedRequests}, destroyFailures=${result.destroyFailures}, ` +
+      `totalApplied=${this.chainCControlApplied}` +
+      (result.lastError ? `, lastError=${result.lastError}` : ''));
   }
 
   private async executeHttpRequest(
@@ -841,7 +862,7 @@ export struct HttpAutoTrackTestPage {
       }
 
       const response = await this.executeHttpRequest(this.getResourceTestUrl('network-http', 'https://httpbin.org/get'), {
-        method: http.RequestMethod.GET,
+        // method: http.RequestMethod.GET,
         connectTimeout: 10000,
         readTimeout: 10000,
         header: {
@@ -882,7 +903,7 @@ export struct HttpAutoTrackTestPage {
         timestamp: Date.now()
       });
       const response = await this.executeHttpRequest('https://httpbin.org/post', {
-        method: http.RequestMethod.POST,
+        // method: http.RequestMethod.POST,
         header: {
           'Content-Type': 'application/json'
         },
@@ -1178,6 +1199,38 @@ export struct HttpAutoTrackTestPage {
             .margin({ bottom: 6 })
 
           Text('等待本轮完成、确认 apply 和 destroy 数量后再手动 GC。快照筛选：HttpChainBInitialInterceptor、HttpChainBFinalInterceptor；与各自基线比较。')
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 16 })
+
+          Text('C 组对照：应用拦截链后直接销毁（API 22+）')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text(`每轮创建 ${HTTP_CHAIN_C_BATCH_SIZE} 个 HttpRequest，空拦截器执行 addChain → apply → finally destroy。不调用 request()，不发起网络请求，不安装 SDK 采集。`)
+            .fontSize(12)
+            .fontColor('#4E5969')
+            .width('100%')
+            .margin({ bottom: 8 })
+
+          Button(`执行 C 组对照（${HTTP_CHAIN_C_BATCH_SIZE} 次）`)
+            .id('test-http-chain-c-control-btn')
+            .width('100%')
+            .enabled(!this.chainBControlRunning)
+            .backgroundColor('#546E7A')
+            .margin({ bottom: 8 })
+            .onClick(() => this.testHttpChainCControl())
+            .customProperty('test-http-chain-c-control-btn', 'HTTP Chain C Control')
+
+          Text(this.chainCControlStatus)
+            .fontSize(12)
+            .width('100%')
+            .margin({ bottom: 6 })
+
+          Text('确认 add、apply、destroy 数量后再手动 GC。快照筛选：HttpChainCInitialInterceptor、HttpChainCFinalInterceptor。累计 apply 是执行计数，不代表存活对象数。')
             .fontSize(12)
             .fontColor('#4E5969')
             .width('100%')

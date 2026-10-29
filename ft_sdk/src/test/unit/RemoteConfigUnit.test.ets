@@ -11,6 +11,7 @@ import { MemoryRemoteConfigStorage } from '../../main/ets/components/remote/Remo
 import { SyncTaskManager } from '../../main/ets/components/SyncTaskManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { Status as LogLevel } from '../../main/ets/components/bean/Status';
+import { resolveAllowedWebViewHosts } from '../../main/ets/components/web/FTWebViewHostPolicy';
 
 interface RemoteConfigTestContent {
   env?: string;
@@ -27,7 +28,7 @@ interface RemoteConfigTestContent {
   rumEnableResourceHostIP?: boolean;
   rumEnableTrackAppUIBlock?: boolean;
   rumBlockDurationMs?: number;
-  rumAllowWebViewHost?: string[];
+  rumAllowWebViewHost?: string[] | null;
   logSampleRate?: number;
   logSamplingRate?: number;
   logLevelFilters?: string[];
@@ -85,6 +86,37 @@ class RecordingFetchResult implements FTRemoteConfigFetchResult {
 
 export default function remoteConfigUnitTest() {
   describe('RemoteConfigUnit', () => {
+    it('Host updates persist all three states and release overrides when absent', 0, async () => {
+      const base = FTSDKConfig.builder('http://datakit.local').setAllowWebViewHost(['base.test']);
+      const rum = new FTRUMConfig().setAllowWebViewHost(['legacy.test']);
+      const client = new FakeRemoteConfigHttpClient({ code: 200,
+        body: stringifyRemoteConfig({ content: { rumAllowWebViewHost: [] } }) });
+      const storage = new MemoryRemoteConfigStorage();
+      const manager = new FTRemoteConfigManager(base, 0, storage, null, client, () => 100,
+        (value: string): string => value);
+      manager.setConfigAppliedListener(() => manager.mergeSDKConfigFromCache(base));
+      await manager.initFromRemote('rum-app');
+      expect(resolveAllowedWebViewHosts(base, rum.getAllowWebViewHost())!.length).assertEqual(0);
+      // Invalid updates preserve the last accepted list, including after cache restoration.
+      client.response = { code: 200, body: '{"content":{"rumAllowWebViewHost":[null]}}' };
+      await manager.updateRemoteConfig(0);
+      const restored = new FTRemoteConfigManager(base, 0, storage, null, client);
+      restored.initFromLocalCache();
+      restored.mergeSDKConfigFromCache(base);
+      expect(base.hasRemoteAllowWebViewHostInternal()).assertTrue();
+      expect(base.getRemoteAllowWebViewHostInternal()!.length).assertEqual(0);
+      client.response = { code: 200, body: stringifyRemoteConfig({ content: { rumAllowWebViewHost: null } }) };
+      await manager.updateRemoteConfig(0);
+      expect(resolveAllowedWebViewHosts(base, rum.getAllowWebViewHost())).assertNull();
+      expect(storage.loadConfig()!.includes('"rumAllowWebViewHost":null')).assertTrue();
+      client.response = { code: 200, body: stringifyRemoteConfig({ content: {} }) };
+      await manager.updateRemoteConfig(0);
+      expect(resolveAllowedWebViewHosts(base, rum.getAllowWebViewHost())!.join(',')).assertEqual('base.test');
+      expect(rum.getAllowWebViewHost()!.join(',')).assertEqual('legacy.test');
+      manager.close();
+      restored.close();
+    });
+
     beforeEach(() => {
       SyncTaskManager.resetStateInternal();
     });
@@ -269,7 +301,9 @@ export default function remoteConfigUnitTest() {
       expect(rumConfig.isEnableTraceUserAction()).assertTrue();
       expect(rumConfig.isEnableResourceHostIP()).assertTrue();
       expect(rumConfig.getBlockDurationMS()).assertEqual(700);
-      expect(rumConfig.getAllowWebViewHost()![0]).assertEqual('example.com');
+      expect(rumConfig.getAllowWebViewHost() === null).assertTrue();
+      expect(sdkConfig.hasRemoteAllowWebViewHostInternal()).assertTrue();
+      expect(sdkConfig.getRemoteAllowWebViewHostInternal()![0]).assertEqual('example.com');
       expect(logConfig.getSamplingRate()).assertEqual(0.2);
       expect(logConfig.isEnableCustomLog()).assertFalse();
       expect(logConfig.isEnableConsoleLog()).assertTrue();
@@ -317,7 +351,7 @@ export default function remoteConfigUnitTest() {
       expect(rum.getSamplingRate()).assertEqual(0);
       expect(rum.getSessionErrorSampleRate()).assertEqual(0.001);
       expect(log.getSamplingRate()).assertEqual(0.01);
-      expect(trace.getSamplingRate()).assertEqual(0.999);
+      expect(Math.abs(trace.getSamplingRate() - 0.999) < 1e-12).assertTrue();
     });
 
     it('invalidNewRemoteSamplingRateShouldKeepPreviousValueAndCacheIt', 0, async () => {

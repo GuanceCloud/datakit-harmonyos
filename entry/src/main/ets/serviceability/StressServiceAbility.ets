@@ -100,8 +100,13 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     const config = this.readConfig(want);
     DemoLogger.i(TAG,
       `Starting background stress test: duration=${config.durationSeconds}s, traffic=${config.trafficMode}, logs=${config.enableLogs}, actions=${config.enableActions}, resources=${config.enableResources}, navigation=${config.enableNavigation}, navigationInterval=${config.navigationIntervalMs}, errors=${config.enableErrors}, longTasks=${config.enableLongTasks}`);
-    this.stressTestManager.runWithConfig(config);
-    markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'start command', startId);
+    try {
+      this.stressTestManager.runWithConfig(config);
+      markStressServiceEvent(STRESS_SERVICE_STATE_STARTED, 'start command', startId);
+    } catch (error) {
+      markStressServiceError('start failed', String(error), startId);
+      DemoLogger.e(TAG, `Failed to start background stress test: ${String(error)}`);
+    }
   }
 
   private resolveAction(want: Want): string {
@@ -128,6 +133,11 @@ export default class StressServiceAbility extends AppServiceExtensionAbility {
     config.enableNavigation = this.readBoolean(want, 'enableNavigation', true);
     config.enableErrors = this.readBoolean(want, 'enableErrors', false);
     config.enableLongTasks = this.readBoolean(want, 'enableLongTasks', false);
+    config.useRealLogs = this.readBoolean(want, 'useRealLogs', false);
+    config.useRealActions = this.readBoolean(want, 'useRealActions', false);
+    config.useRealErrors = this.readBoolean(want, 'useRealErrors', false);
+    config.useRealLongTasks = this.readBoolean(want, 'useRealLongTasks', false);
+    config.realLongTaskDurationMs = this.readNumber(want, 'realLongTaskDurationMs', config.realLongTaskDurationMs ?? 600);
     config.logThreadCount = this.readNumber(want, 'logThreadCount', config.logThreadCount);
     config.logTotalCount = this.readNumber(want, 'logTotalCount', config.logTotalCount);
     config.logBatchSize = this.readNumber(want, 'logBatchSize', config.logBatchSize);

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebView Host probe</title>
+<style>body{font:14px sans-serif;padding:12px}button{padding:10px;margin:4px}pre{white-space:pre-wrap;word-break:break-all}</style>
+<h3>ArkWeb Host 验证页</h3>
+<p>离线页使用 loadData 的 baseUrl/historyUrl 验证真实 JS Bridge；不会请求这个地址。</p>
+<button onclick="report(inspect())">检查 Bridge</button>
+<button onclick="emit(false)">按 Browser Host 规则发送</button>
+<button onclick="emit(true)">直接调用 Native（验证拒收）</button>
+<button onclick="startBrowser()">启动真实 Browser RUM / Log</button>
+<button onclick="startReplay()">启动 Browser Replay</button>
+<pre id="result"></pre>
+<script>
+  // The configuration is supplied by the Demo, not read from event payload URLs.
+  const config = window.HOST_PROBE_CONFIG || {};
+  let marker = '';
+  function bridge() { return window.FTWebViewJavascriptBridge; }
+  function inspect() {
+    const b = bridge();
+    const wire = b && b.getAllowedWebViewHosts ? b.getAllowedWebViewHosts() : undefined;
+    const hosts = wire == null ? null : JSON.parse(wire);
+    // Same exact-host / dot-boundary rule used by datakit-js eventBridge.js.
+    const canUse = !!b && (hosts === null || hosts.some(function (host) {
+      return location.hostname === host || location.hostname.endsWith('.' + host);
+    }));
+    return { href: location.href, hostname: location.hostname, wire: wire === undefined ? 'missing' : wire,
+      canUse: canUse, capabilities: b && b.getCapabilities ? b.getCapabilities() : null,
+      privacy: b && b.getPrivacyLevel ? b.getPrivacyLevel() : null, marker: marker };
+  }
+  function report(value) {
+    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    document.getElementById('result').textContent = text;
+    return text;
+  }
+  function emit(force) {
+    marker = 'web_host_probe_' + Date.now();
+    const state = inspect();
+    if (!bridge() || (!force && !state.canUse)) return report({ marker: marker, sent: false, state: state });
+    const data = { measurement: 'action', tags: { service: 'web-host-probe', sdk_version: 'host-probe',
+      view_id: 'host-probe-view', view_name: 'host-probe-view', action_name: marker, action_type: 'custom' },
+      fields: { action_id: marker, duration: 1 }, time: Date.now() };
+    bridge().sendEvent(JSON.stringify({ name: 'rum', data: data, _tag: marker }));
+    bridge().sendEvent(JSON.stringify({ name: 'log', data: { message: marker, status: 'info', date: Date.now(),
+      host_probe: true }, _tag: marker + '_log' }));
+    return report({ marker: marker, nativeAttempted: true, state: state });
+  }
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      const script = document.createElement('script'); script.src = src;
+      script.onload = resolve; script.onerror = function () { reject(new Error('SDK 加载失败：' + src)); };
+      document.head.appendChild(script);
+    });
+  }
+  async function startBrowser() {
+    try {
+      if (!window.DATAFLUX_RUM) {
+        await loadScript('https://static.guance.com/browser-sdk/v3/dataflux-rum.js');
+        DATAFLUX_RUM.init({ applicationId: config.appId || 'host-probe',
+          datakitOrigin: config.datakitOrigin || 'http://127.0.0.1', service: 'web-host-probe',
+          env: 'test', sessionSampleRate: 100, sessionReplaySampleRate: 100, trackInteractions: true });
+      }
+      if (!window.DATAFLUX_LOGS) {
+        await loadScript('https://static.guance.com/browser-sdk/v3/dataflux-logs.js');
+        DATAFLUX_LOGS.init({ datakitOrigin: config.datakitOrigin || 'http://127.0.0.1',
+          service: 'web-host-probe', env: 'test' });
+      }
+      marker = 'browser_host_probe_' + Date.now();
+      DATAFLUX_RUM.addAction(marker);
+      DATAFLUX_LOGS.logger.info(marker);
+      report({ actualBrowserSDK: true, state: inspect() });
+    } catch (error) { report(String(error.message || error)); }
+  }
+  function startReplay() {
+    try {
+      const state = inspect();
+      if (!window.DATAFLUX_RUM) throw new Error('请先启动真实 Browser SDK');
+      if (!state.canUse || !state.capabilities || !JSON.parse(state.capabilities).includes('records')) {
+        throw new Error('当前 Host 或原生 Replay 不开放 records');
+      }
+      DATAFLUX_RUM.startSessionReplayRecording();
+      document.body.dataset.replayProbe = String(Date.now());
+      report({ replayRequested: true, state: state });
+    } catch (error) { report(String(error.message || error)); }
+  }
+  window.webHostProbe = { inspect: inspect, emit: emit, report: report };
+  report(inspect());
+</script></html>

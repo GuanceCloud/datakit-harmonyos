@@ -5,6 +5,10 @@
  * Based on Android SDK's WebAppInterface.java
  */
 export interface JsReceiver {
+  /** Browser SDK negotiation. Null permits every Host; "[]" permits none. */
+  getAllowedWebViewHosts?(): string | null;
+  getPrivacyLevel?(): string | null;
+  getCapabilities?(): string | null;
   /**
    * Send event to native without callback
    * @param event Event data as JSON string

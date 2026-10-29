@@ -12,6 +12,7 @@ import { FTViewTrackingHandler } from "./rum/handler/FTViewTrackingHandler";
 import { FTViewTrackingType } from "./rum/enum/FTViewTrackingType";
 import { FTRemoteConfigFetchResult } from './remote/RemoteConfigTypes';
 import { FTNetworkErrorHandler } from './network/FTNetworkErrorHandler';
+import { FTWebViewHostConfiguration, normalizeWebViewHosts } from './web/FTWebViewHostPolicy';
 
 export type LogGlobalContextValue = string | number | boolean | String | Number | Boolean | object | null | undefined;
 export type LogGlobalContextDictionary = Map<string, LogGlobalContextValue> | Record<string, LogGlobalContextValue>;
@@ -354,9 +355,9 @@ export class FTRUMConfig {
     return this;
   }
 
-  /** Limit the WebView bridge to the supplied host allow-list. Null allows all hosts. */
+  /** Legacy Host policy. Base explicit and remote policies take precedence. */
   public setAllowWebViewHost(allowWebViewHost: Array<string> | null): FTRUMConfig {
-    this.allowWebViewHost = allowWebViewHost === null ? null : allowWebViewHost.slice();
+    this.allowWebViewHost = normalizeWebViewHosts(allowWebViewHost);
     return this;
   }
 
@@ -578,6 +579,8 @@ export class FTLoggerConfig {
    * Whether to enable custom log
    */
   private enableCustomLog: boolean = false;
+  /** Browser Logs forwarding is independent of console/custom Native logging. */
+  private enableWebViewLog: boolean = false;
   /**
    * Service name {@link Constants#KEY_SERVICE }, defaults to {@link Constants#DEFAULT_SERVICE_NAME}
    */
@@ -669,6 +672,13 @@ export class FTLoggerConfig {
     this.enableCustomLog = enableCustomLog;
     return this;
   }
+
+  public setEnableWebViewLog(enableWebViewLog: boolean): FTLoggerConfig {
+    this.enableWebViewLog = enableWebViewLog;
+    return this;
+  }
+
+  public isEnableWebViewLog(): boolean { return this.enableWebViewLog; }
 
   /**
    * Get service name
@@ -906,7 +916,36 @@ export class FTLoggerConfig {
   }
 }
 
-export class FTSDKConfig {
+export class FTSDKConfig implements FTWebViewHostConfiguration {
+  private allowWebViewHost: string[] | null = null;
+  private allowWebViewHostConfigured: boolean = false;
+  private remoteAllowWebViewHost: string[] | null = null;
+  private remoteAllowWebViewHostConfigured: boolean = false;
+
+  /** Null allows all Hosts; [] disables Bridge collection. Applied to new bindings. */
+  public setAllowWebViewHost(hosts: string[] | null): FTSDKConfig {
+    this.allowWebViewHost = normalizeWebViewHosts(hosts);
+    this.allowWebViewHostConfigured = true;
+    return this;
+  }
+
+  public getAllowWebViewHost(): string[] | null {
+    return this.allowWebViewHost === null ? null : this.allowWebViewHost.slice();
+  }
+
+  public isAllowWebViewHostConfigured(): boolean { return this.allowWebViewHostConfigured; }
+
+  /** @internal Preserve remote field presence, including an explicit null. */
+  public setRemoteAllowWebViewHostInternal(hosts: string[] | null, configured: boolean): void {
+    this.remoteAllowWebViewHost = configured ? normalizeWebViewHosts(hosts) : null;
+    this.remoteAllowWebViewHostConfigured = configured;
+  }
+
+  public hasRemoteAllowWebViewHostInternal(): boolean { return this.remoteAllowWebViewHostConfigured; }
+
+  public getRemoteAllowWebViewHostInternal(): string[] | null {
+    return this.remoteAllowWebViewHost === null ? null : this.remoteAllowWebViewHost.slice();
+  }
   // DataKit data write address
   private datakitUrl: string;
   // DataWay data write address

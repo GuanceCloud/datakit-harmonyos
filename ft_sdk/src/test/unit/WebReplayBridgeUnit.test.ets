@@ -1,7 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { webview } from '@kit.ArkWeb';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { FTRUMConfig } from '../../main/ets/components/Configs';
+import { FTRUMConfig, FTSDKConfig } from '../../main/ets/components/Configs';
+import { FTWebViewHostPolicy } from '../../main/ets/components/web/FTWebViewHostPolicy';
 import { FTRUMConfigManager } from '../../main/ets/components/rum/FTRUMConfigManager';
 import { FTRUMInnerManager } from '../../main/ets/components/rum/FTRUMInnerManager';
 import { FTWebViewHandler } from '../../main/ets/components/web/FTWebViewHandler';
@@ -32,6 +33,8 @@ class ReplayBridgeFixture implements FTSessionReplayBridge {
 }
 
 class ReplayControllerFixture {
+  public url: string = 'https://sub.example.com/replay';
+  public getUrl(): string { return this.url; }
   public snapshotRequests: number = 0;
   public registerJavaScriptProxy(_receiver: Object, _name: string, _methods: Array<string>): void {}
   public deleteJavaScriptRegister(_name: string): void {}
@@ -47,11 +50,54 @@ function rrwebEvent(viewId: string): string {
 
 export default function webReplayBridgeUnitTest() {
   describe('WebReplayBridgeUnit', () => {
+    it('uses the same Host decision for privacy capabilities and Replay records', 0, () => {
+      const manager = FTRUMConfigManager.getInstance();
+      const previous = manager.getConfig();
+      manager.initWithConfig(new FTRUMConfig().setRumAppId('host-replay-app').setEnableTraceWebView(true));
+      const base = FTSDKConfig.builder('http://localhost').setAllowWebViewHost(['example.com']);
+      FTWebViewHostPolicy.install(base);
+      const registry = FTSessionReplayBridgeRegistry;
+      const bridge = new ReplayBridgeFixture();
+      const handler = new FTWebViewHandler();
+      const controller = new ReplayControllerFixture();
+      registry.register(bridge);
+      try {
+        handler.getJavaScriptProxy(controller as Object as webview.WebviewController);
+        const componentId = FTWebViewReplayBridge.bindingId(controller);
+        registry.observeWebReplaySlots('host-replay-app', FTRUMInnerManager.getInstance().getSessionId(),
+          'native-host', [{ componentId, slotId: '9001' }], Date.now());
+        const receiver = handler.getMessageReceiver();
+        expect(receiver.getCapabilities()).assertEqual('["records"]');
+        expect(receiver.getPrivacyLevel()).assertEqual('mask');
+        receiver.sendEvent(rrwebEvent('allowed-host'));
+        expect(bridge.views.join(',')).assertEqual('allowed-host');
+        controller.url = 'https://example.com.evil.test/replay';
+        expect(receiver.getCapabilities()).assertNull();
+        expect(receiver.getPrivacyLevel()).assertNull();
+        receiver.sendEvent(rrwebEvent('denied-host'));
+        expect(bridge.views.length).assertEqual(1);
+        base.setAllowWebViewHost([]);
+        controller.url = 'https://example.com';
+        expect(receiver.getCapabilities()).assertEqual('["records"]');
+        handler.clearWebController();
+        handler.setWebView(controller as Object as webview.WebviewController);
+        expect(handler.getMessageReceiver().getCapabilities()).assertNull();
+        expect(receiver.getAllowedWebViewHosts()).assertEqual('[]');
+        expect(receiver.getCapabilities()).assertNull();
+      } finally {
+        handler.clearWebController();
+        registry.unregister(bridge);
+        FTWebViewHostPolicy.install(null);
+        if (previous !== null) manager.initWithConfig(previous);
+        else FTRUMConfigManager.resetStateInternal();
+      }
+    });
+
     it('shares network availability with Replay and notifies only on transitions', 0, () => {
       const registry = FTSessionReplayBridgeRegistry;
       const updates: Array<boolean> = [];
       registry.updateReplayUploadNetworkAvailability(null);
-      registry.setReplayUploadNetworkListener((available: boolean): void => updates.push(available));
+      registry.setReplayUploadNetworkListener((available: boolean): void => { updates.push(available); });
       try {
         expect(registry.getReplayUploadNetworkAvailability()).assertNull();
         registry.updateReplayUploadNetworkAvailability(false);

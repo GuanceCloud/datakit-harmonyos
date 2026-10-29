@@ -33,17 +33,21 @@ export class EntryRecordCapture extends DefaultSyncTaskManagerRuntime {
     this.records.set(type, values);
   }
 
+  async matchingRecords(type: DataType, fragments: string[]): Promise<string[]> {
+    for (const row of await EntryDBAssert.querySyncRecords([type], 1000, true)) {
+      this.remember(type, row.getDataString());
+    }
+    return (this.records.get(type) ?? []).filter((data: string) =>
+      fragments.every((fragment: string) => data.includes(fragment)));
+  }
+
   async waitForRecord(type: DataType, fragments: string[], timeoutMs: number): Promise<string | null> {
     let matched: string | null = null;
     await EntryWaitUtils.waitUntil(async () => {
-      for (const row of await EntryDBAssert.querySyncRecords([type], 1000, true)) {
-        this.remember(type, row.getDataString());
-      }
-      for (const data of this.records.get(type) ?? []) {
-        if (fragments.every((fragment: string) => data.includes(fragment))) {
-          matched = data;
-          return true;
-        }
+      const records = await this.matchingRecords(type, fragments);
+      if (records.length > 0) {
+        matched = records[0];
+        return true;
       }
       return false;
     }, timeoutMs);

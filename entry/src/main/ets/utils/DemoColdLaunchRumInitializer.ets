@@ -155,5 +155,6 @@ function createSdkConfig(settings: ColdLaunchRumSettings): FTSDKConfig {
     .setDebug(true)
     // This bootstrap is also used by independent ExtensionAbility processes.
     .setOnlySupportMainProcess(false)
+    .setCompressIntakeRequests(false)
     .setServiceName('HarmonyOS-Test-App');
 }

@@ -29,9 +29,9 @@ const RESULT_LIMIT = 6000;
 @Entry
 @Component
 export struct RuntimeEndpointVerificationPage {
-  @State datakitUrl: string = '';
-  @State datawayUrl: string = '';
-  @State clientToken: string = '';
+  @State datakitUrl: string = 'http://10.100.64.166:9529';
+  @State datawayUrl: string = 'http://testing-openway.dataflux.cn';
+  @State clientToken: string = '6f9661e3a4d048dd8571a7b7ddaca06e';
   @State activeMode: string = 'Not changed on this page';
   @State resultLog: string = '';
   @State datakitVerified: boolean = false;

@@ -64,7 +64,7 @@ export default function webReplayUnitTest() {
     });
 
     it('gates latest slots, background, unbound identities and the exact two-second tail', 0, () => {
-      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(100));
       recorder.start();
       const registry = FTSessionReplayBridgeRegistry;
       registry.setWebReplayAppForeground(true);
@@ -132,7 +132,7 @@ export default function webReplayUnitTest() {
     });
 
     it('normalizes Browser Meta and resize heights to the native Web wireframe', 0, () => {
-      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(100));
       const registry = FTSessionReplayBridgeRegistry;
       const componentId = 'viewport-normalization-web';
       const slotId = '1000000320';
@@ -175,7 +175,7 @@ export default function webReplayUnitTest() {
       const collector = new ArkUIReplayCollector();
       const first = collector.materializeLightSnapshot(webSnapshot('ignored-alias', 0, 1, 1000000126));
       const web = (first.data as FullSnapshotData).wireframes[0] as ReplayWebViewWireframe;
-      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(100));
       const registry = FTSessionReplayBridgeRegistry;
       recorder.start();
       registry.setWebReplayAppForeground(true);

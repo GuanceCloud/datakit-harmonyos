@@ -1,4 +1,5 @@
 import { FTNetworkLifecycle } from './network/FTNetworkLifecycle';
+import { FTWebViewHostPolicy } from './web/FTWebViewHostPolicy';
 import { AxiosChainMethodStore, HttpAutoTrackCompletionStore, HttpAutoTrackStateStore } from './network/FTHttpAutoTrackShared';
 import { FTTraceManager } from './trace/FTTraceManager';
 import {
@@ -214,6 +215,7 @@ export class FTSDK {
   }
 
   protected static resetInternalState(): void {
+    FTWebViewHostPolicy.install(null);
     FTUIBlockManager.getInstance().release();
     const config = FTSDK.getInstalledConfig();
     if (config !== null) {
@@ -458,6 +460,7 @@ export class FTSDK {
 
   constructor(sdkConfig: FTSDKConfig) {
     this.ftSDKConfig = sdkConfig;
+    FTWebViewHostPolicy.install(sdkConfig);
   }
 
   static install(sdkConfig: FTSDKConfig | null, context?: Context): void {
@@ -493,6 +496,7 @@ export class FTSDK {
   }
 
   initFTConfig(config: FTSDKConfig): void {
+    config.setRemoteAllowWebViewHostInternal(null, false);
     // Enable/disable FTInnerLogger debug logs based on FTSDKConfig.setDebug() setting
     FTInnerLogger.setDebugEnabled(config.isDebugMode());
     FTInnerLogger.setSDKLogLevel(config.getSdkLogLevel());
@@ -860,6 +864,7 @@ export class FTSDK {
 
 
   static shutDown() {
+    FTWebViewHostPolicy.install(null);
     // Invalidate late transport callbacks before clearing RUM state.
     FTNetworkLifecycle.shutdown();
     HttpAutoTrackStateStore.clearExisting();
@@ -1372,6 +1377,7 @@ export class FTSDK {
     if (baseConfig === null) {
       return;
     }
+    baseConfig.setRemoteAllowWebViewHostInternal(bean.getRumAllowWebViewHost(), bean.hasRumAllowWebViewHost());
     if (bean.getAutoSync() !== null) {
       baseConfig.setAutoSync(bean.getAutoSync()!);
     }

@@ -24,7 +24,7 @@ export enum TouchPrivacy {
  * these policies before any text or image bytes are retained or uploaded.
  */
 export class FTSessionReplayConfig {
-  private sampleRate: number = 1;
+  private sampleRate: number = 100;
   private sessionReplayOnErrorSampleRate: number = 0;
   private textAndInputPrivacy: TextAndInputPrivacy = TextAndInputPrivacy.MASK_ALL;
   private captureVisiblePassword: boolean = false;
@@ -55,20 +55,24 @@ export class FTSessionReplayConfig {
   private uploadUrl: string = '';
   private delayInit: boolean = false;
 
+  /** Sets the session sampling percentage in [0,100]. Default: 100; 1 means 1%. */
   public setSampleRate(sampleRate: number): FTSessionReplayConfig {
     this.sampleRate = clampRate(sampleRate);
     return this;
   }
 
+  /** Returns the session sampling percentage in [0,100]. */
   public getSampleRate(): number {
     return this.sampleRate;
   }
 
+  /** Sets the error-session sampling percentage in [0,100]. Default: 0; 1 means 1%. */
   public setSessionReplayOnErrorSampleRate(sampleRate: number): FTSessionReplayConfig {
     this.sessionReplayOnErrorSampleRate = clampRate(sampleRate);
     return this;
   }
 
+  /** Returns the error-session sampling percentage in [0,100]. */
   public getSessionReplayOnErrorSampleRate(): number {
     return this.sessionReplayOnErrorSampleRate;
   }
@@ -259,5 +263,5 @@ function clampRate(value: number): number {
   if (!Number.isFinite(value)) {
     return 0;
   }
-  return Math.max(0, Math.min(1, value));
+  return Math.max(0, Math.min(100, value));
 }

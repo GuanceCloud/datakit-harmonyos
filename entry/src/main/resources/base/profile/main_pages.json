@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
+    "pages/ComplexFeaturesPage",
     "pages/HvigorSyntaxVerificationPage",
     "pages/LaunchSuspendTestPage",
     "pages/ApplicationHeapPressurePage",
@@ -11,6 +12,7 @@
     "pages/BackgroundLaunchWorkSchedulerPage",
     "pages/SecondaryLaunchAbilityPage",
     "pages/WebViewPage",
+    "pages/WebViewHostTestPage",
     "pages/NavigationStackDemoPage",
     "pages/NavigationWebSwitchVerificationPage",
     "pages/NavSubPage1",

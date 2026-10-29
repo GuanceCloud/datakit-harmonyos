@@ -29,6 +29,17 @@ import { KEY_TRACE_URL } from '../entryability/EntryAbility';
 import { DemoLogger } from './DemoLogger';
 import { StressLogTimestampSequencer } from './StressLogTimestampSequencer';
 import {
+  captureStressRuntimeError,
+  DEFAULT_REAL_LONG_TASK_DURATION_MS,
+  emitStressRuntimeLog,
+  isStressCollectionForeground,
+  normalizeRealLongTaskDuration,
+  runStressMainThreadBlock,
+  STRESS_REAL_LOG_DOMAIN,
+  STRESS_REAL_LOG_PREFIX,
+  STRESS_REAL_LOG_TAG
+} from './StressRealCollection';
+import {
   buildStressResourceUrl,
   createStressResourceRequestPlan,
   normalizeStressResourceClient,
@@ -88,6 +99,11 @@ export type StressRunSource = 'foreground' | 'background-service';
 export type StressRunMode = 'duration' | 'total';
 
 export interface StressTestConfig {
+  useRealLogs?: boolean;
+  useRealActions?: boolean;
+  useRealErrors?: boolean;
+  useRealLongTasks?: boolean;
+  realLongTaskDurationMs?: number;
   durationSeconds: number;
   runMode: StressRunMode;
   totalTargetCount: number;
@@ -118,6 +134,11 @@ export interface StressTestConfig {
 }
 
 export interface StressTestStats {
+  useRealLogs: boolean;
+  useRealActions: boolean;
+  useRealErrors: boolean;
+  useRealLongTasks: boolean;
+  lastRealLongTaskDurationMs: number;
   isRunning: boolean;
   startedAtMs: number;
   endedAtMs: number;
@@ -295,6 +316,11 @@ export function createDefaultStressTestConfig(
   source: StressRunSource = 'foreground'
 ): StressTestConfig {
   return {
+    useRealLogs: false,
+    useRealActions: false,
+    useRealErrors: false,
+    useRealLongTasks: false,
+    realLongTaskDurationMs: DEFAULT_REAL_LONG_TASK_DURATION_MS,
     durationSeconds,
     runMode: 'duration',
     totalTargetCount: 0,
@@ -327,6 +353,11 @@ export function createDefaultStressTestConfig(
 
 export function createEmptyStressTestStats(): StressTestStats {
   return {
+    useRealLogs: false,
+    useRealActions: false,
+    useRealErrors: false,
+    useRealLongTasks: false,
+    lastRealLongTaskDurationMs: 0,
     isRunning: false,
     startedAtMs: 0,
     endedAtMs: 0,
@@ -529,6 +560,10 @@ export class StressTestManager {
     }
 
     const normalizedConfig = this.normalizeConfig(config);
+    const realCollectionError = this.getRealCollectionConfigError(normalizedConfig);
+    if (realCollectionError.length > 0) {
+      throw new Error(realCollectionError);
+    }
     this.initRUM();
     this.isRunning = true;
     this.startTime = Date.now();
@@ -568,7 +603,7 @@ export class StressTestManager {
     if (normalizedConfig.enableLogs) {
       this.startLogTimers(normalizedConfig);
     }
-    if (normalizedConfig.enableActions) {
+    if (normalizedConfig.enableActions && !normalizedConfig.useRealActions) {
       this.startActionTimers(normalizedConfig);
     }
     if (normalizedConfig.enableResources) {
@@ -577,7 +612,7 @@ export class StressTestManager {
     if (normalizedConfig.enableErrors) {
       this.startCustomErrorTimer(normalizedConfig);
     }
-    if (normalizedConfig.enableLongTasks) {
+    if (normalizedConfig.enableLongTasks && !normalizedConfig.useRealLongTasks) {
       this.startLongTaskTimer(normalizedConfig);
     }
     if (normalizedConfig.runMode === 'duration' && normalizedConfig.durationSeconds > 0) {
@@ -600,6 +635,36 @@ export class StressTestManager {
       config.enableResources ||
       config.enableErrors ||
       config.enableLongTasks;
+  }
+
+  private getRealCollectionConfigError(config: StressTestConfig): string {
+    const realActions = config.enableActions && config.useRealActions;
+    const realLongTasks = config.enableLongTasks && config.useRealLongTasks;
+    if (config.source === 'background-service' && (realActions || realLongTasks)) {
+      return 'Real Actions and Long Tasks require a foreground UI. Disable Background Service for these scenarios.';
+    }
+    const rumConfig = FTSDK.getRumConfig();
+    if (realActions && (rumConfig === null || rumConfig.getRumAppId().length === 0 ||
+      !rumConfig.isEnableTraceUserAction())) {
+      return 'Enable SDK automatic Action tracking before starting Real Actions.';
+    }
+    if (realLongTasks && (rumConfig === null || rumConfig.getRumAppId().length === 0 ||
+      !rumConfig.isEnableTrackAppUIBlock())) {
+      return 'Enable SDK UI Block monitoring before starting Real Long Tasks.';
+    }
+    if (realLongTasks && rumConfig !== null &&
+      (config.realLongTaskDurationMs ?? DEFAULT_REAL_LONG_TASK_DURATION_MS) <= rumConfig.getBlockDurationMS()) {
+      return 'Real block duration must exceed the configured SDK UI Block threshold.';
+    }
+    if (config.enableLogs && config.useRealLogs) {
+      const logConfig = TrackLogManager.getInstance().getLogConfig();
+      if (logConfig === null || !logConfig.isEnableConsoleLog() ||
+        !logConfig.checkConsoleLogFilter(STRESS_REAL_LOG_PREFIX, 'hilog', STRESS_REAL_LOG_TAG,
+          String(STRESS_REAL_LOG_DOMAIN))) {
+        return 'Enable HiLog automatic collection and allow FTStressRealLog in the log filter before starting Real Logs.';
+      }
+    }
+    return '';
   }
 
   private scheduleLogBatch(batchSize: number = 2, tag: string = STRESS_TEST_LOG_TAG): void {
@@ -635,6 +700,16 @@ export class StressTestManager {
 
   private sendLogBatchChunk(batchSize: number, tag: string): void {
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
+    if (this.currentConfig.useRealLogs) {
+      const generatedBefore = this.currentStats.logsGenerated;
+      for (let i = 0; i < normalizedBatchSize; i++) {
+        this.sendLog(0);
+      }
+      if (this.currentStats.logsGenerated > generatedBefore) {
+        this.currentStats.logBatchesGenerated += 1;
+      }
+      return;
+    }
     const batchLogs: LogEntry[] = [];
     const chunkTimestampMs = Date.now();
 
@@ -668,6 +743,11 @@ export class StressTestManager {
     const runMode: StressRunMode = config.runMode === 'total' ? 'total' : 'duration';
     const normalizedTotalTarget = Math.max(0, Math.floor(config.totalTargetCount));
     return {
+      useRealLogs: config.useRealLogs === true,
+      useRealActions: config.useRealActions === true,
+      useRealErrors: config.useRealErrors === true,
+      useRealLongTasks: config.useRealLongTasks === true,
+      realLongTaskDurationMs: normalizeRealLongTaskDuration(config.realLongTaskDurationMs),
       durationSeconds: runMode === 'duration' ? Math.max(0, Math.floor(config.durationSeconds)) : 0,
       runMode,
       totalTargetCount: runMode === 'total' ? Math.max(1, normalizedTotalTarget) : normalizedTotalTarget,
@@ -700,6 +780,10 @@ export class StressTestManager {
 
   private createStatsForStart(config: StressTestConfig, startedAtMs: number): StressTestStats {
     const stats = createEmptyStressTestStats();
+    stats.useRealLogs = config.useRealLogs === true;
+    stats.useRealActions = config.useRealActions === true;
+    stats.useRealErrors = config.useRealErrors === true;
+    stats.useRealLongTasks = config.useRealLongTasks === true;
     stats.isRunning = true;
     stats.startedAtMs = startedAtMs;
     stats.durationSeconds = config.durationSeconds;
@@ -948,6 +1032,12 @@ export class StressTestManager {
   private sendLog(threadIndex: number): void {
     try {
       const logIndex = this.logCounter++;
+      if (this.currentConfig.useRealLogs) {
+        emitStressRuntimeLog(logIndex, this.startTime);
+        this.currentStats.logsGenerated += 1;
+        this.sampleCapabilityIfDue('real-log');
+        return;
+      }
       const logMessage = `Stress test log from timer ${threadIndex}, index ${logIndex}`;
       FTLogger.batchLog([{
         tag: STRESS_TEST_LOG_TAG,
@@ -964,6 +1054,9 @@ export class StressTestManager {
   }
 
   private sendAction(threadIndex: number): void {
+    if (this.currentConfig.useRealActions) {
+      return;
+    }
     try {
       if (this.rumManager === null) {
         DemoLogger.w(TAG, `rumManager is null, cannot send action from timer ${threadIndex}`);
@@ -1249,11 +1342,14 @@ export class StressTestManager {
         "error_index": new StringWrapper(errorIndex.toString()),
         "source": new StringWrapper(this.currentConfig.source)
       };
+      const runtimeError = this.currentConfig.useRealErrors ? captureStressRuntimeError(errorIndex) : null;
+      property['collection_mode'] = new StringWrapper(runtimeError !== null ? 'real-caught-exception' : 'synthetic');
       this.rumManager.addError(
-        `Error: Stress custom error ${errorIndex}\n  at StressTestManager.sendCustomError`,
-        `Stress custom error ${errorIndex}`,
+        runtimeError !== null ? (runtimeError.stack ?? `${runtimeError.name}: ${runtimeError.message}`) :
+          `Error: Stress custom error ${errorIndex}\n  at StressTestManager.sendCustomError`,
+        runtimeError !== null ? runtimeError.message : `Stress custom error ${errorIndex}`,
         ErrorType.CUSTOM,
-        AppState.RUN,
+        runtimeError !== null && !isStressCollectionForeground() ? AppState.BACKGROUND : AppState.RUN,
         property
       );
       this.currentStats.errorsGenerated += 1;
@@ -1307,10 +1403,22 @@ export class StressTestManager {
 
   private sendLongTask(): void {
     try {
+      if (this.currentConfig.useRealLongTasks && !isStressCollectionForeground()) {
+        return;
+      }
       if (this.rumManager === null || !this.isRumEnabled()) {
         return;
       }
       const longTaskIndex = this.longTaskCounter++;
+      if (this.currentConfig.useRealLongTasks) {
+        this.currentStats.lastRealLongTaskDurationMs =
+          runStressMainThreadBlock(this.currentConfig.realLongTaskDurationMs ?? DEFAULT_REAL_LONG_TASK_DURATION_MS);
+        // Count triggered work only. MAIN_THREAD_JANK delivery is asynchronous,
+        // system-limited, and independent of this run's production counters.
+        this.currentStats.longTasksGenerated += 1;
+        this.sampleCapabilityIfDue('real-long-task');
+        return;
+      }
       const durationNs = 350 * MS_TO_NS;
       this.rumManager.addLongTask(`Stress long task ${longTaskIndex}`, durationNs, {
         "tag": STRESS_TEST_LOG_TAG,
@@ -1326,6 +1434,9 @@ export class StressTestManager {
   }
 
   private sendLongTaskBatch(batchSize: number): boolean {
+    if (this.currentConfig.useRealLongTasks && !isStressCollectionForeground()) {
+      return true;
+    }
     if (this.longTaskBatchRunning) {
       return true;
     }
@@ -1343,13 +1454,18 @@ export class StressTestManager {
   }
 
   private drainLongTaskBatch(remainingCount: number): void {
+    if (this.currentConfig.useRealLongTasks && !isStressCollectionForeground()) {
+      this.longTaskBatchRunning = false;
+      return;
+    }
     if (!this.isRunning || remainingCount <= 0) {
       this.longTaskBatchRunning = false;
       this.finishTotalCountStressIfComplete();
       return;
     }
 
-    const chunkSize = Math.min(STRESS_PRODUCTION_CHUNK_SIZE, remainingCount);
+    // Yield after every real block so stop/navigation/input can run between tasks.
+    const chunkSize = Math.min(this.currentConfig.useRealLongTasks ? 1 : STRESS_PRODUCTION_CHUNK_SIZE, remainingCount);
     for (let i = 0; i < chunkSize; i++) {
       this.sendLongTask();
     }
@@ -2266,6 +2382,36 @@ export class StressTestManager {
       !this.isScenarioTargetReached(this.currentStats.navigationSwitches, this.currentConfig);
   }
 
+  public isRealActionScenarioEnabled(): boolean {
+    return this.isRunning && isStressCollectionForeground() &&
+      this.currentConfig.enableActions && this.currentConfig.useRealActions === true &&
+      !this.isScenarioTargetReached(this.currentStats.actionsGenerated, this.currentConfig);
+  }
+
+  public recordRealActionClick(): void {
+    if (!this.isRealActionScenarioEnabled()) {
+      return;
+    }
+    // FTActionTracker observes the actual UI click. Do not submit a second Action.
+    this.currentStats.actionsGenerated += 1;
+    this.sampleCapabilityIfDue('real-action-click');
+    this.finishTotalCountStressIfComplete();
+  }
+
+  public isRealLongTaskScenarioEnabled(): boolean {
+    return this.isRunning && isStressCollectionForeground() &&
+      this.currentConfig.enableLongTasks && this.currentConfig.useRealLongTasks === true &&
+      !this.isScenarioTargetReached(this.currentStats.longTasksGenerated, this.currentConfig);
+  }
+
+  public recordRealLongTaskClick(): void {
+    if (!this.isRealLongTaskScenarioEnabled()) return;
+    // Keep the measured work in the actual ArkUI click dispatch. Timer callbacks
+    // do not provide the same platform main-thread-jank observation boundary.
+    this.sendLongTask();
+    this.finishTotalCountStressIfComplete();
+  }
+
   public getNavigationIntervalMs(): number {
     return this.currentConfig.navigationIntervalMs;
   }
@@ -2316,6 +2462,10 @@ export class StressTestManager {
       `Mode: ${stats.runMode}${stats.runMode === 'total' ? `, Target: ${stats.totalTargetCount}` : ''}`,
       `Elapsed: ${report.elapsedSeconds}s / ${report.durationSeconds > 0 ? `${report.durationSeconds}s` : 'indefinite'}`,
       `Traffic: ${stats.trafficMode}, Source: ${stats.source}`,
+      `Collection: logs=${stats.useRealLogs ? 'HiLog auto' : 'synthetic'}, ` +
+        `actions=${stats.useRealActions ? 'UI input / auto' : 'synthetic'}, ` +
+        `errors=${stats.useRealErrors ? 'caught runtime exceptions' : 'synthetic'}, ` +
+        `longTasks=${stats.useRealLongTasks ? 'real blocks / system observer' : 'synthetic'}`,
       `Logs: ${stats.logsGenerated} (${stats.logBatchesGenerated} batches)`,
       `Actions: ${stats.actionsGenerated}`,
       `Resources: ${stats.resourcesGenerated}, OK: ${stats.resourcesSucceeded}, Failed: ${stats.resourcesFailed}, Success: ${successRate}%`,
@@ -2323,6 +2473,12 @@ export class StressTestManager {
       `Errors: ${stats.errorsGenerated}, LongTasks: ${stats.longTasksGenerated}`,
       stats.lastErrorMessage.length > 0 ? `Last Error: ${stats.lastErrorMessage}` : "Last Error: none"
     ];
+    if (stats.useRealActions || stats.useRealLogs || stats.useRealLongTasks) {
+      lines.push('Real counters record triggered inputs/output/workloads, not SDK collection or server acknowledgements.');
+    }
+    if (stats.useRealLongTasks) {
+      lines.push(`Last real block: ${stats.lastRealLongTaskDurationMs}ms; system LongTask delivery can be delayed or rate-limited.`);
+    }
 
     if (report.capabilityReport !== null) {
       lines.push('');
@@ -2438,6 +2594,11 @@ export class StressTestManager {
 
   private copyStats(stats: StressTestStats): StressTestStats {
     return {
+      useRealLogs: stats.useRealLogs,
+      useRealActions: stats.useRealActions,
+      useRealErrors: stats.useRealErrors,
+      useRealLongTasks: stats.useRealLongTasks,
+      lastRealLongTaskDurationMs: stats.lastRealLongTaskDurationMs,
       isRunning: stats.isRunning,
       startedAtMs: stats.startedAtMs,
       endedAtMs: stats.endedAtMs,

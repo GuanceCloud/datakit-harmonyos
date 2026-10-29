@@ -176,7 +176,7 @@ export default function sessionReplayMutationUITest(): void {
       }
       const replayTestDir = `${delegator.getAppContext().filesDir}/replay-mutation-ui-${Date.now()}`;
       fileIo.mkdirSync(replayTestDir);
-      replay.init(new FTSessionReplayConfig().setSampleRate(1).setDelayInit(true).setUploadIntervalMs(0)
+      replay.init(new FTSessionReplayConfig().setSampleRate(100).setDelayInit(true).setUploadIntervalMs(0)
         .setTextAndInputPrivacy(TextAndInputPrivacy.MASK_SENSITIVE_INPUTS).setImagePrivacy(ImagePrivacy.MASK_NONE)
         .setTouchPrivacy(TouchPrivacy.SHOW),
         replayTestDir);
