@@ -33,8 +33,19 @@ function sourceRank(source?: ResourceTransportMetricSource): number {
   return 0;
 }
 
-function isKnownSize(value: number): boolean {
-  return Number.isFinite(value) && value >= 0;
+export function isValidResourceByteSize(value: number | undefined): boolean {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Shared by manual Resources, automatic collectors and recovered Worker DTOs. */
+export function normalizeResourceHttpProtocol(protocol?: string): string | undefined {
+  const value = typeof protocol === 'string' ? protocol.trim().toLowerCase() : '';
+  if (value === '1.0' || value === 'http/1.0') return 'http/1.0';
+  if (value === '1.1' || value === 'http/1.1') return 'http/1.1';
+  if (value === '2' || value === 'h2' || value === 'http/2' || value === 'http/2.0' ||
+    value === 'http/2 over tls') return 'h2';
+  if (value === '3' || value === 'h3' || value === 'http/3' || value === 'http/3.0') return 'h3';
+  return undefined;
 }
 
 /**
@@ -56,7 +67,7 @@ export class ResourceTransportMetrics {
   private connectionReuseSource?: ResourceTransportMetricSource;
 
   public setRequestBodySize(value: number, source: ResourceTransportMetricSource): void {
-    if (!isKnownSize(value) || sourceRank(source) < sourceRank(this.requestBodySizeSource)) {
+    if (!isValidResourceByteSize(value) || sourceRank(source) < sourceRank(this.requestBodySizeSource)) {
       return;
     }
     this.requestBodySize = value;
@@ -65,7 +76,7 @@ export class ResourceTransportMetrics {
   }
 
   public setRequestHeaderSize(value: number, source: ResourceTransportMetricSource): void {
-    if (!isKnownSize(value) || sourceRank(source) < sourceRank(this.requestHeaderSizeSource)) {
+    if (!isValidResourceByteSize(value) || sourceRank(source) < sourceRank(this.requestHeaderSizeSource)) {
       return;
     }
     this.requestHeaderSize = value;
@@ -74,7 +85,7 @@ export class ResourceTransportMetrics {
   }
 
   public setRequestSize(value: number, source: ResourceTransportMetricSource): void {
-    if (!isKnownSize(value) || sourceRank(source) < sourceRank(this.requestSizeSource)) {
+    if (!isValidResourceByteSize(value) || sourceRank(source) < sourceRank(this.requestSizeSource)) {
       return;
     }
     this.requestSize = value;
@@ -83,8 +94,8 @@ export class ResourceTransportMetrics {
   }
 
   public setHttpProtocol(value: string, source: ResourceTransportMetricSource): void {
-    const normalized = value ? value.trim() : '';
-    if (normalized.length === 0 || sourceRank(source) < sourceRank(this.httpProtocolSource)) {
+    const normalized = normalizeResourceHttpProtocol(value);
+    if (normalized === undefined || sourceRank(source) < sourceRank(this.httpProtocolSource)) {
       return;
     }
     this.httpProtocol = normalized;
@@ -92,7 +103,7 @@ export class ResourceTransportMetrics {
   }
 
   public setConnectionReuse(value: boolean | undefined, source: ResourceTransportMetricSource): void {
-    if (value === undefined || sourceRank(source) < sourceRank(this.connectionReuseSource)) {
+    if (typeof value !== 'boolean' || sourceRank(source) < sourceRank(this.connectionReuseSource)) {
       return;
     }
     this.connectionReuse = value;
@@ -140,7 +151,7 @@ export class ResourceTransportMetrics {
   }
 
   private deriveRequestSizeIfPossible(): void {
-    if (!isKnownSize(this.requestBodySize) || !isKnownSize(this.requestHeaderSize) ||
+    if (!isValidResourceByteSize(this.requestBodySize) || !isValidResourceByteSize(this.requestHeaderSize) ||
       !this.requestBodySizeSource || !this.requestHeaderSizeSource) {
       return;
     }
@@ -160,7 +171,16 @@ export class ResourceTransportMetrics {
       sourceRank(this.requestSizeSource) >= sourceRank(componentSource)) {
       return;
     }
-    this.requestSize = this.requestBodySize + this.requestHeaderSize;
+    const total = this.requestBodySize + this.requestHeaderSize;
+    if (!isValidResourceByteSize(total)) {
+      if (this.requestSizeIsDerived) {
+        this.requestSize = -1;
+        this.requestSizeSource = undefined;
+        this.requestSizeIsDerived = false;
+      }
+      return;
+    }
+    this.requestSize = total;
     this.requestSizeSource = componentSource;
     this.requestSizeIsDerived = true;
   }

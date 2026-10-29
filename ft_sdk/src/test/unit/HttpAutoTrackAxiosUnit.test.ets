@@ -340,6 +340,19 @@ export default function httpAutoTrackAxiosUnitTest() {
       expect(applicationUploadedBytes).assertEqual(10);
     });
 
+    it('axiosCompletionShouldUseFinalHeadersAndTransformedBody', 0, () => {
+      const target = new FakeAxiosTarget();
+      applyFTAxiosTrack(target as Object, { enableTraceInterceptor: false, enableResourceInterceptor: true });
+      const prepared = createPreparedConfig(target);
+      const state = getContext(prepared)[FT_AXIOS_AUTOTRACK_CONTEXT_KEY] as StoredAxiosAutoTrackState;
+      const finalHeaders: Record<string, string> = { 'X-Final': '✓' };
+      prepared.headers = finalHeaders;
+      prepared.data = 'A你😀';
+      target.responseManager.fulfilled!(new FakeAxiosResponse(prepared));
+      expect(state.headerInferredTransportMetrics!.requestHeaderSize).assertEqual(16);
+      expect(state.headerInferredTransportMetrics!.requestBodySize).assertEqual(8);
+    });
+
     it('axiosShouldUseGlobalNetworkErrorHandlerUnlessOverridden', 0, () => {
       const globalHandler = new AxiosGlobalNetworkErrorHandler();
       const explicitHandler = new AxiosGlobalNetworkErrorHandler();

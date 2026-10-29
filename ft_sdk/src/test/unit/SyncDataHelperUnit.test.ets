@@ -106,6 +106,38 @@ export default function syncDataHelperUnitTest() {
       expect(prepared.fields['network_validated'] === undefined).assertTrue();
     });
 
+    it('resourceTransportShouldStayFieldsThroughHostAndWorkerPreparation', 0, () => {
+      const helper = new SyncDataHelper();
+      helper.initBaseConfig(FTSDKConfig.builder(TEST_FAKE_URL));
+      helper.initRUMConfig(new FTRUMConfig().setRumAppId('transport-test'));
+      const context = new Map<string, string>();
+      for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) context.set(key, 'fake-tag');
+      helper.appendGlobalContext(context);
+      helper.appendRUMGlobalContext(context);
+      const fields = new Map<string, string>();
+      fields.set('resource_request_size', '28');
+      fields.set('resource_http_protocol', 'h2');
+      fields.set('resource_connection_reuse', 'false');
+      const line = helper.getBodyContent('resource', new Map<string, string>(), fields,
+        TEST_TIMESTAMP, DataType.RUM_APP, 'transport-host');
+      expect(line.includes('resource_request_size=28i')).assertTrue();
+      expect(line.includes('resource_http_protocol="h2"')).assertTrue();
+      expect(line.includes('resource_connection_reuse=false')).assertTrue();
+      const prepared = helper.prepareLineProtocolContent('resource', new Map<string, string>(), fields,
+        TEST_TIMESTAMP, DataType.RUM_APP, 'transport-worker');
+      for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) {
+        expect(line.split(' ')[0].includes(`${key}=`)).assertFalse();
+        expect(prepared.tags[key] === undefined).assertTrue();
+        expect(prepared.fields[key]).assertEqual(fields.get(key));
+      }
+      const empty = helper.prepareLineProtocolContent('resource', new Map<string, string>(), new Map<string, string>(),
+        TEST_TIMESTAMP, DataType.RUM_APP, 'transport-unknown');
+      for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) {
+        expect(empty.tags[key] === undefined).assertTrue();
+        expect(empty.fields[key] === undefined).assertTrue();
+      }
+    });
+
     it('bodyContentShouldMergeLogContext', 0, () => {
       const helper = new SyncDataHelper();
       const baseConfig = FTSDKConfig.builder(TEST_FAKE_URL)

@@ -381,9 +381,11 @@ export class SyncDataHelper {
         this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.rumTags);
         // Aligned with Android: add rumStaticFields to fields (fields.putAll(rumStaticFields))
         this.rumStaticFields.forEach((value, key) => {
-          fields.set(key, value);
+          if (measurement !== Constants.FT_MEASUREMENT_RUM_RESOURCE || !Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
+            fields.set(key, value);
+          }
         });
-        this.removeResourceNetworkSnapshotTags(measurement, mergeTags);
+        this.removeReservedResourceTags(measurement, mergeTags);
         this.applyLineDataModifier(measurement, mergeTags, fields);
         bodyContent = SyncDataHelper.convertToLineProtocolLine(
           measurement,
@@ -559,9 +561,11 @@ export class SyncDataHelper {
       case DataType.RUM_APP:
         this.mergeDynamicTags(mergeTags, this.dynamicBaseTags, this.dynamicRumTags, this.rumTags);
         this.rumStaticFields.forEach((value, key) => {
-          fields.set(key, value);
+          if (measurement !== Constants.FT_MEASUREMENT_RUM_RESOURCE || !Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
+            fields.set(key, value);
+          }
         });
-        this.removeResourceNetworkSnapshotTags(measurement, mergeTags);
+        this.removeReservedResourceTags(measurement, mergeTags);
         this.applyLineDataModifier(measurement, mergeTags, fields);
         break;
       case DataType.RUM_WEBVIEW:
@@ -630,9 +634,9 @@ export class SyncDataHelper {
     });
   }
 
-  private removeResourceNetworkSnapshotTags(measurement: string, tags: Map<string, string>): void {
+  private removeReservedResourceTags(measurement: string, tags: Map<string, string>): void {
     if (measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
-      for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+      for (const key of Constants.RESOURCE_RESERVED_FIELDS) {
         tags.delete(key);
       }
     }

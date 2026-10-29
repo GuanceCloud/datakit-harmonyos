@@ -317,6 +317,14 @@ class ResourceFakeRcpTerminalHandler implements rcp.RequestHandler {
   }
 }
 
+class ResourceRewritingRcpTerminalHandler implements rcp.RequestHandler {
+  async handle(context: rcp.RequestContext): Promise<rcp.Response> {
+    const headers: rcp.RequestHeaders = { 'X-Final': ['✓', 'a'] };
+    context.request.headers = headers;
+    return new ResourceFakeRcpResponse(context.request, 200, 'ok', 'text/plain');
+  }
+}
+
 class ResourceDelayedFailingRcpTerminalHandler implements rcp.RequestHandler {
   private readonly delayMs: number;
 
@@ -607,6 +615,113 @@ export default function resourceAutoTrackDeviceTest() {
       FTSDK.flushSyncData();
       const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
       RumAttributeAssert.uploaded(uploaded, record, attributes);
+    });
+
+    it('manualTransportFieldsShouldSurviveDeferredUpdatesAndCacheUpload', 0, async () => {
+      const rum = FTRUMGlobalManager.getInstance();
+      for (const known of [true, false]) {
+        const id = `manual-transport-${known}`;
+        const property: Record<string, object> = {};
+        const params = new ResourceParams();
+        params.url = `https://example.com/${id}`;
+        params.resourceMethod = 'POST';
+        params.resourceStatus = 200;
+        for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) {
+          property[key] = new String('999');
+          params.property.set(key, new String('999'));
+        }
+        const network = new NetStatusBean();
+        network.setHoleRequestTime(80);
+        if (known) {
+          params.setRequestBodySize(20);
+          params.setRequestHeaderSize(20);
+          params.setRequestSize(40);
+          params.setHttpProtocol('HTTP/1.1');
+          network.setPlatformRequestBodySize(30);
+          network.setPlatformRequestHeaderSize(50);
+          network.setPlatformHttpProtocol('HTTP/2.0');
+          network.setPlatformConnectionReuse(false);
+        } else {
+          params.setRequestSize(1.5);
+          params.setHttpProtocol('Unknown/Non-HTTP');
+        }
+        rum.startResource(id, property);
+        rum.stopResource(id, property);
+        rum.addResource(id, params, network);
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+          ['resource,', `resource_url_path=/${id}`]);
+        const expected: RumAttributeExpectation = {
+          measurement: 'resource', appId: TEST_FAKE_RUM_ID, resourceStatus: 200
+        };
+        const point = RumAttributeAssert.record(record, expected);
+        for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) {
+          expect(point.tags.has(key)).assertFalse();
+          expect(point.fields.has(key)).assertEqual(known);
+        }
+        if (known) {
+          expect(point.fields.get('resource_request_size')).assertEqual(80);
+          expect(point.fields.get('resource_http_protocol')).assertEqual('h2');
+          expect(point.fields.get('resource_connection_reuse')).assertEqual(false);
+        }
+        FTSDK.flushSyncData();
+        const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+        RumAttributeAssert.uploaded(uploaded, record, expected);
+      }
+    });
+
+    it('httpBridgeShouldCountFinalNormalizedHeadersAndKeepTransportFields', 0, async () => {
+      const requestHeaders: Record<string, Object> = { 'X-Old': 'removed', 'X-Multi': ['one', '二'] };
+      const prepared = FTSDKExtensionBridge.prepareHttpRequest({
+        url: 'https://example.com/transport-final-headers', method: 'POST', headers: requestHeaders, body: 'A你😀'
+      }, { enableTraceInterceptor: false, enableResourceInterceptor: true });
+      const finalHeaders: Record<string, Object> = {
+        'X-FT-Resource-ID': prepared.uniqueId, 'X-Final': '✓'
+      };
+      const responseHeaders: Record<string, Object> = {};
+      const response: FTSDKExtensionResponseInput = {
+        url: prepared.url, resourceId: prepared.resourceId, requestHeaders: finalHeaders,
+        statusCode: 200, responseHeaders, platformTransportMetrics: { httpProtocol: 'HTTP/2', connectionReuse: false }
+      };
+      FTSDKExtensionBridge.completeHttpResponse(response);
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource,', 'resource_url_path=/transport-final-headers']);
+      const expected: RumAttributeExpectation = {
+        measurement: 'resource', appId: TEST_FAKE_RUM_ID, resourceStatus: 200,
+        requiredFields: Constants.RESOURCE_TRANSPORT_FIELDS
+      };
+      const point = RumAttributeAssert.record(record, expected);
+      const expectedBytes = 2 + 'X-FT-Resource-ID'.length + 4 + prepared.uniqueId.length + 'X-Final'.length + 4 + 3 + 8;
+      expect(point.fields.get('resource_request_size')).assertEqual(expectedBytes);
+      expect(point.fields.get('resource_http_protocol')).assertEqual('h2');
+      expect(point.fields.get('resource_connection_reuse')).assertEqual(false);
+      for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) expect(point.tags.has(key)).assertFalse();
+      FTSDK.flushSyncData();
+      const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(uploaded, record, expected);
+    });
+
+    it('rcpTransportShouldUseFinalMultiValueHeadersAndUtf8Body', 0, async () => {
+      const config = createFTRCPTrackConfig({ enableTraceInterceptor: false, enableResourceInterceptor: true });
+      const context = new ResourceFakeRcpRequestContext('https://example.com/rcp-final-transport', 'POST');
+      context.request.content = 'A你😀';
+      const originalHeaders: rcp.RequestHeaders = { 'X-Old': 'removed' };
+      context.request.headers = originalHeaders;
+      const handler = new ResourceFakeRcpChainHandler(config.interceptors ?? [], 0, new ResourceRewritingRcpTerminalHandler());
+      await handler.handle(context);
+      const record = await DBAssert.waitForSyncRecordContaining(DataType.RUM_APP,
+        ['resource,', 'resource_url_path=/rcp-final-transport']);
+      const expected: RumAttributeExpectation = {
+        measurement: 'resource', appId: TEST_FAKE_RUM_ID, resourceStatus: 200,
+        requiredFields: ['resource_request_size']
+      };
+      const point = RumAttributeAssert.record(record, expected);
+      expect(point.fields.get('resource_request_size')).assertEqual(36);
+      expect(point.fields.has('resource_http_protocol')).assertFalse();
+      expect(point.fields.has('resource_connection_reuse')).assertFalse();
+      for (const key of Constants.RESOURCE_TRANSPORT_FIELDS) expect(point.tags.has(key)).assertFalse();
+      FTSDK.flushSyncData();
+      const uploaded = await collector.waitForPayloadContaining([record!.getUuid()], 5000);
+      RumAttributeAssert.uploaded(uploaded, record, expected);
     });
 
     it('httpBridgeShouldUploadAndDelete', 0, async () => {

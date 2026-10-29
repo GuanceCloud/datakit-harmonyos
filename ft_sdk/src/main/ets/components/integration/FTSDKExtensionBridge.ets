@@ -159,6 +159,18 @@ export class FTSDKExtensionBridge {
       if (uniqueId) FTSDKExtensionBridge.finishNetworkRequest(uniqueId);
       return undefined;
     }
+    // INITIAL_REQUEST may be followed by application interceptors that rewrite
+    // headers. Reconcile only this Resource's final visible request headers.
+    if (response.requestHeaders !== undefined && response.requestHeaders !== null) {
+      try {
+        state.headerInferredTransportMetrics = mergeResourceTransportMetricsInput(
+          state.headerInferredTransportMetrics,
+          createHeaderInferredTransportMetrics(response.requestHeaders, response.requestHeaders)
+        );
+      } catch (error) {
+        FTInnerLogger.w(TAG, `Ignored invalid final request headers: ${error}`);
+      }
+    }
     return state as FTSDKExtensionHttpState;
   }
 

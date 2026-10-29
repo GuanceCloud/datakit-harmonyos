@@ -167,6 +167,13 @@ export class Constants {
     Constants.KEY_RUM_RESOURCE_NETWORK_UPLINK_KBPS,
     Constants.KEY_RUM_RESOURCE_NETWORK_SIGNAL_STRENGTH
   ];
+  static readonly RESOURCE_TRANSPORT_FIELDS: string[] = [
+    Constants.KEY_RUM_RESOURCE_REQUEST_SIZE,
+    Constants.KEY_RUM_RESOURCE_HTTP_PROTOCOL,
+    Constants.KEY_RUM_RESOURCE_CONNECTION_REUSE
+  ];
+  static readonly RESOURCE_RESERVED_FIELDS: string[] =
+    Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.concat(Constants.RESOURCE_TRANSPORT_FIELDS);
   
   /**
    * RUM error related keys

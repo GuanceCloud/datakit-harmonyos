@@ -5,6 +5,9 @@ import { Utils } from '../utils/Utils';
 import { FTExpiringIdCache } from '../utils/FTExpiringIdCache';
 import { FTNetworkErrorHandler } from './FTNetworkErrorHandler';
 import { ResourceParams } from '../rum/bean/ResourceParams';
+import { isValidResourceByteSize, normalizeResourceHttpProtocol } from '../rum/bean/ResourceTransportMetrics';
+
+export { normalizeResourceHttpProtocol };
 
 const TAG = "FTHttpAutoTrack";
 const FT_RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
@@ -310,19 +313,19 @@ export function mergeResourceTransportMetricsInput(
     return undefined;
   }
   const result: FTResourceTransportMetricsInput = {};
-  const requestBodySize = second && second.requestBodySize !== undefined
+  const requestBodySize = second && isValidResourceByteSize(second.requestBodySize)
     ? second.requestBodySize
     : first?.requestBodySize;
-  const requestHeaderSize = second && second.requestHeaderSize !== undefined
+  const requestHeaderSize = second && isValidResourceByteSize(second.requestHeaderSize)
     ? second.requestHeaderSize
     : first?.requestHeaderSize;
-  const requestSize = second && second.requestSize !== undefined
+  const requestSize = second && isValidResourceByteSize(second.requestSize)
     ? second.requestSize
     : first?.requestSize;
-  const httpProtocol = second && second.httpProtocol !== undefined
+  const httpProtocol = second && normalizeResourceHttpProtocol(second.httpProtocol) !== undefined
     ? second.httpProtocol
     : first?.httpProtocol;
-  const connectionReuse = second && second.connectionReuse !== undefined
+  const connectionReuse = second && typeof second.connectionReuse === 'boolean'
     ? second.connectionReuse
     : first?.connectionReuse;
   if (requestBodySize !== undefined) {
@@ -343,25 +346,8 @@ export function mergeResourceTransportMetricsInput(
   return result;
 }
 
-export function normalizeResourceHttpProtocol(protocol?: string): string | undefined {
-  const value = protocol ? protocol.trim().toLowerCase() : '';
-  if (value === '1.0' || value === 'http/1.0') {
-    return 'http/1.0';
-  }
-  if (value === '1.1' || value === 'http/1.1') {
-    return 'http/1.1';
-  }
-  if (value === '2' || value === 'h2' || value === 'http/2' || value === 'http/2.0') {
-    return 'h2';
-  }
-  if (value === '3' || value === 'h3' || value === 'http/3' || value === 'http/3.0') {
-    return 'h3';
-  }
-  return undefined;
-}
-
 function isKnownTransportSize(size: number | undefined): boolean {
-  return size !== undefined && Number.isFinite(size) && size >= 0;
+  return isValidResourceByteSize(size);
 }
 
 /** Apply integration-supplied values without allowing generic properties to override them. */
@@ -470,35 +456,17 @@ export function normalizeHeaderValues(headers?: Object | null): Record<string, F
   return normalized;
 }
 
-function containsHeaderIgnoreCase(headers: Record<string, FTHeaderValue>, key: string): boolean {
-  const normalizedKey = key.toLowerCase();
-  const keys = Object.keys(headers);
-  for (let i = 0; i < keys.length; i++) {
-    if (keys[i].toLowerCase() === normalizedKey) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /**
- * Starts from the caller's multi-value headers, then appends interceptor-added
- * headers such as trace/resource identifiers. Existing values are retained
- * because they are already part of the final normalized request.
+ * Count only the headers present in the final transport request. The original
+ * argument is retained for existing callers, but cannot restore overwritten or
+ * removed values. Multi-value headers are counted only if they survive in the
+ * final request; adapters that flatten them are measured after flattening.
  */
 export function buildHeaderValuesForFinalRequest(
-  rawHeaders: Object | null | undefined,
-  finalHeaders: Record<string, string>
+  _rawHeaders: Object | null | undefined,
+  finalHeaders: Object
 ): Record<string, FTHeaderValue> {
-  const result = normalizeHeaderValues(rawHeaders);
-  const finalKeys = Object.keys(finalHeaders);
-  for (let i = 0; i < finalKeys.length; i++) {
-    const key = finalKeys[i];
-    if (!containsHeaderIgnoreCase(result, key)) {
-      result[key] = finalHeaders[key];
-    }
-  }
-  return result;
+  return normalizeHeaderValues(finalHeaders);
 }
 
 function utf8ByteLength(value: string): number {
@@ -534,7 +502,7 @@ function parseNonNegativeDecimal(value: string): number | undefined {
     return undefined;
   }
   const parsed = parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return isValidResourceByteSize(parsed) ? parsed : undefined;
 }
 
 function getHeaderValuesIgnoreCase(
@@ -627,7 +595,7 @@ export function getKnownRequestBodyByteSize(
 /** Builds low-priority byte estimates without guessing protocol or connection reuse. */
 export function createHeaderInferredTransportMetrics(
   rawHeaders: Object | null | undefined,
-  finalHeaders: Record<string, string>,
+  finalHeaders: Object,
   body?: string | Object | ArrayBuffer
 ): FTResourceTransportMetricsInput {
   const headers = buildHeaderValuesForFinalRequest(rawHeaders, finalHeaders);

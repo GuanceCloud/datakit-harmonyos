@@ -54,6 +54,7 @@ import {
 import { Constants } from '../Constants';
 import { NetCodeStatus } from '../http/HttpEngine';
 import { ErrorType } from '../rum/enum/RUMEnums';
+import { isValidResourceByteSize, normalizeResourceHttpProtocol } from '../rum/bean/ResourceTransportMetrics';
 import {
   DATA_UPLOAD_BODY_TARGET_BYTES,
   DATA_UPLOAD_LIMIT_RETRY_DELAY_MS,
@@ -1001,7 +1002,7 @@ function prepareRumAppLineRecords(
   tags[Constants.KEY_SDK_DATA_FLAG] = event.uuid || '';
   mergeStringRecords(fields, lineContext.rumStaticFields);
   if (event.measurement === Constants.FT_MEASUREMENT_RUM_RESOURCE) {
-    for (const key of Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS) {
+    for (const key of Constants.RESOURCE_RESERVED_FIELDS) {
       // Empty entries are omitted by the serializer (ArkTS has no delete).
       tags[key] = '';
       fields[key] = event.fields?.[key] || '';
@@ -1543,7 +1544,7 @@ function resourceTransportSourceRank(source?: string): number {
 }
 
 function isKnownResourceRequestSize(value: number): boolean {
-  return Number.isFinite(value) && value >= 0;
+  return isValidResourceByteSize(value);
 }
 
 /**
@@ -1574,12 +1575,13 @@ function mergeResourceTransportMetrics(
     resource.requestSizeSource = metrics.requestSizeSource;
     resource.requestSizeIsDerived = false;
   }
-  if (metrics.httpProtocolSource && metrics.httpProtocol && metrics.httpProtocol.trim().length > 0 &&
+  const protocol = normalizeResourceHttpProtocol(metrics.httpProtocol);
+  if (metrics.httpProtocolSource && protocol !== undefined &&
     resourceTransportSourceRank(metrics.httpProtocolSource) >= resourceTransportSourceRank(resource.httpProtocolSource)) {
-    resource.httpProtocol = metrics.httpProtocol.trim();
+    resource.httpProtocol = protocol;
     resource.httpProtocolSource = metrics.httpProtocolSource;
   }
-  if (metrics.connectionReuseSource && metrics.connectionReuse !== undefined &&
+  if (metrics.connectionReuseSource && typeof metrics.connectionReuse === 'boolean' &&
     resourceTransportSourceRank(metrics.connectionReuseSource) >= resourceTransportSourceRank(resource.connectionReuseSource)) {
     resource.connectionReuse = metrics.connectionReuse;
     resource.connectionReuseSource = metrics.connectionReuseSource;
@@ -1603,7 +1605,16 @@ function deriveResourceRequestSize(resource: SDKRumWorkerResourceState): void {
     resourceTransportSourceRank(resource.requestSizeSource) >= resourceTransportSourceRank(componentSource)) {
     return;
   }
-  resource.requestSize = resource.requestBodySize + resource.requestHeaderSize;
+  const total = resource.requestBodySize + resource.requestHeaderSize;
+  if (!isValidResourceByteSize(total)) {
+    if (resource.requestSizeIsDerived) {
+      resource.requestSize = -1;
+      resource.requestSizeSource = undefined;
+      resource.requestSizeIsDerived = false;
+    }
+    return;
+  }
+  resource.requestSize = total;
   resource.requestSizeSource = componentSource;
   resource.requestSizeIsDerived = true;
 }
@@ -1849,7 +1860,7 @@ function createResourceTags(resource: SDKRumWorkerResourceState): SDKStringRecor
   const tags: SDKStringRecord = {};
   const dynamicTags = resource.context.dynamicTags || {};
   for (const key of Object.keys(dynamicTags)) {
-    if (!Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.includes(key)) {
+    if (!Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
       tags[key] = dynamicTags[key];
     }
   }
@@ -1954,7 +1965,7 @@ function createResourceFields(resource: SDKRumWorkerResourceState): SDKStringRec
     fields[Constants.KEY_RUM_RESOURCE_RESPONSE_HEADER] = resource.responseHeader;
   }
   for (const key of Object.keys(resource.properties)) {
-    if (!Constants.RESOURCE_NETWORK_SNAPSHOT_FIELDS.includes(key)) {
+    if (!Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
       fields[key] = resource.properties[key];
     }
   }

@@ -18,6 +18,9 @@ import { FTTraceConfigManager } from '../../main/ets/components/trace/FTTraceCon
 import { FTTraceManager } from '../../main/ets/components/trace/FTTraceManager';
 import { TraceType } from '../../main/ets/components/trace/TraceType';
 import { ResourceTransportMetrics } from '../../main/ets/components/rum/bean/ResourceTransportMetrics';
+import { ResourceParams } from '../../main/ets/components/rum/bean/ResourceParams';
+import { ResourceBean } from '../../main/ets/components/rum/bean/ResourceBean';
+import { NetStatusBean } from '../../main/ets/components/rum/bean/NetStatusBean';
 import { TestReset } from '../helpers/TestReset';
 
 const RESOURCE_ID_HEADER = 'X-FT-Resource-ID';
@@ -196,7 +199,9 @@ export default function httpAutoTrackSharedUnitTest() {
       rawHeaders['X-Name'] = '值' as Object;
       rawHeaders['X-Multi'] = ['one', '二'] as Object;
       rawHeaders['X-Ignored'] = new Map<string, string>() as Object;
-      const finalHeaders: Record<string, string> = { 'X-Added': '✓' };
+      const finalHeaders: Record<string, Object> = {
+        'X-Name': '值', 'X-Multi': ['one', '二'], 'X-Added': '✓'
+      };
       const normalized = buildHeaderValuesForFinalRequest(rawHeaders, finalHeaders);
 
       // X-Name: 6 + 2 + 3 + 2; X-Multi: (7 + 2 + 3 + 2) +
@@ -208,6 +213,9 @@ export default function httpAutoTrackSharedUnitTest() {
       expect(getKnownRequestBodyByteSize('\uD800', normalized)).assertEqual(3);
       expect(getKnownRequestBodyByteSize(new ArrayBuffer(6), normalized)).assertEqual(6);
       expect(getKnownRequestBodyByteSize(new Uint8Array(5), normalized)).assertEqual(5);
+      const binary = new Uint8Array(12);
+      expect(getKnownRequestBodyByteSize(binary.subarray(3, 8), normalized)).assertEqual(5);
+      expect(getKnownRequestBodyByteSize(new DataView(binary.buffer, 2, 4), normalized)).assertEqual(4);
       expect(getKnownRequestBodyByteSize(new Map<string, string>(), normalized)).assertEqual(undefined);
 
       const streamRawHeaders: Record<string, string> = { 'Content-Length': '7' };
@@ -216,6 +224,77 @@ export default function httpAutoTrackSharedUnitTest() {
       const inferred = createHeaderInferredTransportMetrics(rawHeaders, finalHeaders, '');
       expect(inferred.requestHeaderSize).assertEqual(57);
       expect(inferred.requestBodySize).assertEqual(0);
+    });
+
+    it('finalHeadersShouldReplaceRemovedAndFlattenedOriginalValues', 0, () => {
+      const raw: Record<string, Object> = { 'X-Test': 'old', 'X-Removed': 'gone', 'X-Multi': ['a', 'b'] };
+      const finalHeaders: Record<string, string> = { 'x-test': 'a-much-longer-new-value', 'X-Multi': 'a' };
+      const result = buildHeaderValuesForFinalRequest(raw, finalHeaders);
+      expect(result['X-Removed'] === undefined).assertTrue();
+      expect(result['X-Test'] === undefined).assertTrue();
+      expect(estimateRequestHeaderByteSize(result)).assertEqual(47);
+      expect(createHeaderInferredTransportMetrics(raw, finalHeaders, '').requestHeaderSize).assertEqual(47);
+      expect(estimateRequestHeaderByteSize(buildHeaderValuesForFinalRequest(raw, {}))).assertEqual(2);
+    });
+
+    it('transportSizesShouldRejectInvalidNumbersAndOverflow', 0, () => {
+      for (const invalid of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        const metrics = new ResourceTransportMetrics();
+        metrics.setRequestBodySize(invalid, 'platform');
+        metrics.setRequestHeaderSize(invalid, 'platform');
+        metrics.setRequestSize(invalid, 'platform');
+        expect(metrics.snapshot().requestSize).assertEqual(-1);
+        expect(metrics.snapshot().requestBodySize).assertEqual(-1);
+        expect(metrics.snapshot().requestHeaderSize).assertEqual(-1);
+      }
+      const metrics = new ResourceTransportMetrics();
+      metrics.setRequestBodySize(1, 'header');
+      metrics.setRequestHeaderSize(1, 'header');
+      expect(metrics.snapshot().requestSize).assertEqual(2);
+      metrics.setRequestBodySize(Number.MAX_SAFE_INTEGER, 'platform');
+      expect(metrics.snapshot().requestSize).assertEqual(-1);
+      metrics.setRequestHeaderSize(0, 'platform');
+      expect(metrics.snapshot().requestSize).assertEqual(Number.MAX_SAFE_INTEGER);
+    });
+
+    it('invalidTransportUpdatesShouldKeepEarlierValidValues', 0, () => {
+      const merged = mergeResourceTransportMetricsInput(
+        { requestBodySize: 12, requestHeaderSize: 8, requestSize: 20, httpProtocol: 'h2', connectionReuse: false },
+        { requestBodySize: -1, requestHeaderSize: 1.5, requestSize: Infinity, httpProtocol: 'unknown' }
+      );
+      expect(merged!.requestBodySize).assertEqual(12);
+      expect(merged!.requestHeaderSize).assertEqual(8);
+      expect(merged!.requestSize).assertEqual(20);
+      expect(merged!.httpProtocol).assertEqual('h2');
+      expect(merged!.connectionReuse === false).assertTrue();
+    });
+
+    it('manualAndDeferredTransportModelsShouldNormalizeProtocols', 0, () => {
+      const params = new ResourceParams();
+      params.setHttpProtocol(' HTTP/2.0 ');
+      params.setConnectionReuse(false);
+      const bean = new ResourceBean();
+      bean.mergeTransportMetrics(params.getTransportMetrics());
+      const netStatus = new NetStatusBean();
+      netStatus.setPlatformHttpProtocol('HTTP/3');
+      bean.mergeTransportMetrics(netStatus.getTransportMetrics());
+      bean.setHttpProtocol('http/1.1');
+      expect(params.getTransportMetrics().httpProtocol).assertEqual('h2');
+      expect(bean.getTransportMetrics().httpProtocol).assertEqual('h3');
+      expect(bean.getTransportMetrics().connectionReuse === false).assertTrue();
+      bean.setPlatformHttpProtocol('Unknown/Non-HTTP');
+      expect(bean.getTransportMetrics().httpProtocol).assertEqual('h3');
+      expect(normalizeResourceHttpProtocol('HTTP/2 over TLS')).assertEqual('h2');
+    });
+
+    it('opaqueBodyShouldOnlyUseConsistentSafeContentLength', 0, () => {
+      const opaque = new Map<string, string>();
+      expect(getKnownRequestBodyByteSize(opaque, { 'Content-Length': ['7', '7'] })).assertEqual(7);
+      expect(getKnownRequestBodyByteSize(opaque, { 'Content-Length': ['7', '8'] })).assertEqual(undefined);
+      expect(getKnownRequestBodyByteSize(opaque, { 'Content-Length': '9007199254740992' })).assertEqual(undefined);
+      expect(getKnownRequestBodyByteSize(opaque, { 'Content-Length': '-1' })).assertEqual(undefined);
+      expect(getKnownRequestBodyByteSize(opaque, { 'Content-Length': '0' })).assertEqual(0);
+      expect(getKnownRequestBodyByteSize(opaque, {})).assertEqual(undefined);
     });
 
   });

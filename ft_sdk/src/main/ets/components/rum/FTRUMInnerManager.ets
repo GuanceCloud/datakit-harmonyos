@@ -5887,7 +5887,9 @@ export class FTRUMInnerManager {
       const dynamicKeys = Object.keys(dynamicTags);
       for (let i = 0; i < dynamicKeys.length; i++) {
         const key = dynamicKeys[i];
-        allTags[key] = dynamicTags[key];
+        if (!Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
+          allTags[key] = dynamicTags[key];
+        }
       }
       
       // Layer 3: RUM association (session, view, action)
@@ -6697,6 +6699,9 @@ export class FTRUMInnerManager {
       const propertyKeys = Object.keys(resourceBean.property);
       for (let i = 0; i < propertyKeys.length; i++) {
         const key = propertyKeys[i];
+        if (Constants.RESOURCE_RESERVED_FIELDS.includes(key)) {
+          continue;
+        }
         
         // Skip performance metrics that are already handled above (aligned with Android)
         // These are stored in ResourceBean fields, not in property

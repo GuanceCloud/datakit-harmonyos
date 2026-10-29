@@ -340,7 +340,7 @@ export class RCPResourceInterceptor implements rcp.Interceptor, FTNetworkDisposa
     }
     applyHeaderInferredTransportMetrics(
       resourceParams,
-      createHeaderInferredTransportMetrics(finalRequestHeaders, savedRequestHeaders, requestBody)
+      createHeaderInferredTransportMetrics(savedRequestHeaders, finalRequestHeaders, requestBody)
     );
     addNetworkErrorFields(resourceParams, handling, errorContext);
 
@@ -550,8 +550,8 @@ export class RCPResourceInterceptor implements rcp.Interceptor, FTNetworkDisposa
       applyHeaderInferredTransportMetrics(
         resourceParams,
         createHeaderInferredTransportMetrics(
-          response.request.headers as Object,
           savedRequestHeaders,
+          response.request.headers as Object,
           getRcpRequestBody(response.request)
         )
       );
@@ -1336,6 +1336,22 @@ function buildAxiosAutoTrackState(
   return state;
 }
 
+function refreshAxiosRequestMetrics(state: FTAxiosAutoTrackState, config?: FTAxiosRequestConfigTarget): void {
+  if (!config) return;
+  try {
+    const headers = getAxiosRawHeaders(config.headers);
+    const emptyHeaders: Record<string, string> = {};
+    state.requestHeaders = normalizeObjectHeaders(headers);
+    // Axios transforms data after request interceptors. Use the final visible
+    // body rather than preserving an estimate of the pre-transform value.
+    state.headerInferredTransportMetrics = createHeaderInferredTransportMetrics(
+      headers, headers || emptyHeaders, config.data === undefined ? '' : config.data
+    );
+  } catch (error) {
+    FTInnerLogger.w(TAG, `[Axios-Resource] Ignored final request metrics for resourceId=${state.resourceId}: ${error}`);
+  }
+}
+
 function completeAxiosTrace(state: FTAxiosAutoTrackState, status: number, headers: Record<string, string>, body?: string): void {
   if (!state.traceEnabled) {
     return;
@@ -1567,6 +1583,7 @@ export function applyFTAxiosTrack(
       }
 
       try {
+        refreshAxiosRequestMetrics(state, response.config);
         const snapshot = captureAxiosResponseSnapshot(response, state.resourceId);
         completeAxiosTraceSafely(state, snapshot);
         if (state.resourceEnabled && HttpAutoTrackCompletionStore.getInstance().tryClaim(state.resourceId)) {
@@ -1589,6 +1606,7 @@ export function applyFTAxiosTrack(
       const state = getAxiosAutoTrackState(responseConfig);
       if (state && FTNetworkLifecycle.isCurrent(state.generation ?? owner.generation)) {
         try {
+          refreshAxiosRequestMetrics(state, responseConfig);
           const snapshot = captureAxiosResponseSnapshot(error.response, state.resourceId);
           completeAxiosTraceSafely(state, snapshot);
           const resourceCompletionClaimed = state.resourceEnabled &&

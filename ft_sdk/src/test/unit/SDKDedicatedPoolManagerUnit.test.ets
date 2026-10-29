@@ -23,6 +23,7 @@ import {
   SDKRumResourceNetworkSnapshotDTO,
   SDKRumResourceNetStatusDTO,
   SDKRumResourceParamsDTO,
+  SDKRumResourceTransportMetricsDTO,
   SDKStringRecord,
   SDKUploadCommitPageDTO,
   SDKUploadCommitPageResultDTO,
@@ -187,6 +188,34 @@ function getPayloadArray(payload: SDKWorkerPayload | undefined, key: string): ob
 }
 
 let unitWorkerStates: Record<string, SDKWorkerRuntimeState> = {};
+
+function createTransportResourceCommandsForUnit(
+  resourceId: string,
+  metrics?: SDKRumResourceTransportMetricsDTO,
+  deferred?: SDKRumResourceTransportMetricsDTO
+): SDKRumResourceCommandDTO[] {
+  const context: SDKRumResourceContextDTO = {
+    sessionId: 'transport-session', viewId: 'transport-view', viewName: 'TransportView',
+    viewReferrer: '', actionId: 'transport-action', actionName: 'request'
+  };
+  const params: SDKRumResourceParamsDTO = {
+    url: 'https://example.com/same-url', requestHeader: '', responseHeader: '', responseConnection: '',
+    responseContentType: '', responseContentEncoding: '', responseContentLength: 0, resourceMethod: 'POST',
+    responseBody: '', resourceStatus: 200, resourceType: 'network', requestErrorStack: '', requestErrorMsg: '',
+    property: {}, transportMetrics: metrics
+  };
+  const netStatus: SDKRumResourceNetStatusDTO = {
+    dnsTime: 0, dnsStartTime: 0, tcpTime: 0, tcpStartTime: 0, sslTime: 0, sslStartTime: 0,
+    ttfbTime: 0, responseTime: 0, firstByteTime: 0, firstByteStartTime: 0, downloadTime: 0,
+    downloadStartTime: 0, holeRequestTime: 80, resourceHostIP: '', transportMetrics: deferred
+  };
+  return [
+    { commandType: 'start', resourceId, context, startTime: 100, draftUuid: resourceId },
+    { commandType: 'setContent', resourceId, context, params, eventTime: 120 },
+    { commandType: 'setNetState', resourceId, context, netStatus, eventTime: 140 },
+    { commandType: 'stop', resourceId, context, endTime: 180 }
+  ];
+}
 
 function resetUnitWorkerStates(): void {
   unitWorkerStates = {};
@@ -1390,6 +1419,126 @@ export default function sdkDedicatedPoolManagerUnitTest() {
       }
       expect(actionPendingDelta).assertEqual(0);
       expect(actionResourceDelta).assertEqual(1);
+    });
+
+    it('resourceTransportFieldsShouldRejectCustomAndGlobalOverrides', 0, async () => {
+      for (const known of [true, false]) {
+        for (const mode of ['line', 'raw']) {
+          const metrics: SDKRumResourceTransportMetricsDTO = {
+            requestBodySize: 8, requestBodySizeSource: 'integration', requestHeaderSize: 20,
+            requestHeaderSizeSource: 'integration', requestSize: -1,
+            httpProtocol: 'HTTP/2.0', httpProtocolSource: 'platform',
+            connectionReuse: false, connectionReuseSource: 'integration'
+          };
+          const id = `transport-protected-${known}-${mode}`;
+          const commands = createTransportResourceCommandsForUnit(id, known ? metrics : undefined);
+          for (const command of commands) {
+            command.context!.dynamicTags = {
+              resource_request_size: '999', resource_http_protocol: 'wrong', resource_connection_reuse: 'true'
+            };
+            command.property = {
+              resource_request_size: '999', resource_http_protocol: 'wrong', resource_connection_reuse: 'true',
+              transport_marker: 'kept'
+            };
+          }
+          const batch: SDKRumResourceCommandBatchDTO = { commands };
+          if (mode === 'line') {
+            batch.lineContext = createRumWorkerLineContext();
+            batch.lineContext.dynamicRumTags = commands[0].context!.dynamicTags!;
+            batch.lineContext.rumStaticFields = commands[0].context!.dynamicTags!;
+          }
+          const response = await executeWorkerCommandForUnit({
+            id, pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+            command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+            payload: batch as Object as SDKWorkerPayload
+          });
+          if (mode === 'line') {
+            const drafts = getPayloadArray(response.payload, 'syncDrafts');
+            expect(drafts.length).assertEqual(1);
+            const line = String((drafts[0] as Record<string, object>)['dataString']);
+            for (const key of ['resource_request_size', 'resource_http_protocol', 'resource_connection_reuse']) {
+              expect(line.split(' ')[0].includes(`${key}=`)).assertFalse();
+              expect(line.includes(`${key}=`)).assertEqual(known);
+            }
+            if (known) {
+              expect(line.includes('resource_request_size=28i')).assertTrue();
+              expect(line.includes('resource_http_protocol="h2"')).assertTrue();
+              expect(line.includes('resource_connection_reuse=false')).assertTrue();
+            }
+            expect(line.includes('transport_marker="kept"')).assertTrue();
+          } else {
+            const events = getPayloadArray(response.payload, 'rawEvents');
+            expect(events.length).assertEqual(1);
+            const event = events[0] as Object as SDKRumEventDTO;
+            expect(event.tags['resource_http_protocol'] === undefined).assertTrue();
+            expect(event.fields['resource_request_size']).assertEqual(known ? '28' : undefined);
+            expect(event.fields['resource_http_protocol']).assertEqual(known ? 'h2' : undefined);
+            expect(event.fields['resource_connection_reuse']).assertEqual(known ? 'false' : undefined);
+          }
+        }
+      }
+    });
+
+    it('resourceTransportShouldMergeDeferredValuesAfterSerializationWithoutMixingSameUrl', 0, async () => {
+      const initial: SDKRumResourceTransportMetricsDTO = {
+        requestBodySize: 20, requestBodySizeSource: 'integration', requestHeaderSize: 20,
+        requestHeaderSizeSource: 'integration', requestSize: 40, requestSizeSource: 'integration',
+        httpProtocol: 'http/1.1', httpProtocolSource: 'integration'
+      };
+      const platform: SDKRumResourceTransportMetricsDTO = {
+        requestBodySize: 30, requestBodySizeSource: 'platform', requestHeaderSize: 50,
+        requestHeaderSizeSource: 'platform', requestSize: -1, httpProtocol: 'HTTP/2', httpProtocolSource: 'platform',
+        connectionReuse: false, connectionReuseSource: 'platform'
+      };
+      const one = createTransportResourceCommandsForUnit('transport-one', initial, platform);
+      const two = createTransportResourceCommandsForUnit('transport-two', initial);
+      const serialized = JSON.stringify([one[0], two[0], one[1], two[1], two[2], one[2], two[3], one[3], one[3]]);
+      const commands = JSON.parse(serialized) as SDKRumResourceCommandDTO[];
+      const batch: SDKRumResourceCommandBatchDTO = { commands, lineContext: createRumWorkerLineContext() };
+      const response = await executeWorkerCommandForUnit({
+        id: 'transport-concurrent', pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+        command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+        payload: batch as Object as SDKWorkerPayload
+      });
+      const drafts = getPayloadArray(response.payload, 'syncDrafts');
+      expect(drafts.length).assertEqual(2);
+      const secondLine = String((drafts[0] as Record<string, object>)['dataString']);
+      const firstLine = String((drafts[1] as Record<string, object>)['dataString']);
+      expect(secondLine.includes('resource_id=transport-two')).assertTrue();
+      expect(secondLine.includes('resource_request_size=40i')).assertTrue();
+      expect(secondLine.includes('resource_http_protocol="http/1.1"')).assertTrue();
+      expect(secondLine.includes('resource_connection_reuse=')).assertFalse();
+      expect(firstLine.includes('resource_id=transport-one')).assertTrue();
+      expect(firstLine.includes('resource_request_size=80i')).assertTrue();
+      expect(firstLine.includes('resource_http_protocol="h2"')).assertTrue();
+      expect(firstLine.includes('resource_connection_reuse=false')).assertTrue();
+      expect(firstLine.includes('action_id=transport-action')).assertTrue();
+      expect(firstLine.endsWith(' 100')).assertTrue();
+    });
+
+    it('resourceTransportShouldOmitInvalidRecoveredBytesAndProtocol', 0, async () => {
+      for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity]) {
+        const metrics: SDKRumResourceTransportMetricsDTO = {
+          requestBodySize: invalid, requestBodySizeSource: 'platform', requestHeaderSize: 8,
+          requestHeaderSizeSource: 'header', requestSize: invalid, requestSizeSource: 'platform',
+          httpProtocol: 'Unknown/Non-HTTP', httpProtocolSource: 'platform'
+        };
+        const batch: SDKRumResourceCommandBatchDTO = {
+          commands: createTransportResourceCommandsForUnit(`invalid-${invalid}`, metrics),
+          lineContext: createRumWorkerLineContext()
+        };
+        const response = await executeWorkerCommandForUnit({
+          id: `invalid-${invalid}`, pool: SDKDedicatedPoolType.EVENT_CONSUMER,
+          command: SDKWorkerCommand.EVENT_RUM_RESOURCE_COMMAND_BATCH, priority: 7, createdAt: Date.now(),
+          payload: batch as Object as SDKWorkerPayload
+        });
+        const drafts = getPayloadArray(response.payload, 'syncDrafts');
+        expect(drafts.length).assertEqual(1);
+        const line = String((drafts[0] as Record<string, object>)['dataString']);
+        expect(line.includes('resource_request_size=')).assertFalse();
+        expect(line.includes('resource_http_protocol=')).assertFalse();
+        expect(line.includes('resource_connection_reuse=')).assertFalse();
+      }
     });
 
     it('resourceNetworkSnapshotUsesStartContextAndOmitsUnknownMetrics', 0, async () => {

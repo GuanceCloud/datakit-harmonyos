@@ -108,6 +108,10 @@ export default function ftNetworkErrorHandlerUnitTest() {
       fields['network_uplink_kbps'] = 999;
       fields['network_signal_strength'] = 4;
       fields['NETWORK_AVAILABLE'] = true;
+      fields['resource_request_size'] = 1.5;
+      fields['resource_http_protocol'] = 'wrong';
+      fields['resource_connection_reuse'] = true;
+      fields['RESOURCE_HTTP_PROTOCOL'] = 'wrong';
 
       const sanitized = sanitizeFTNetworkResourceFields(fields);
 
