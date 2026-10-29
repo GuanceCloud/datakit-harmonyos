@@ -491,6 +491,7 @@ export default class EntryAbility extends UIAbility {
         .setPrintCustomLogToConsole(true)
         .setLogLevelFilters([Status.ERROR, Status.DEBUG, Status.INFO])
         .setLogCacheDiscardStrategy(LogCacheDiscard.DISCARD_OLDEST)
+        // .setEnableWebViewLog(true)
         .setEnableLinkRumData(true);
       FTSDK.installLogConfig(logConfig);
 

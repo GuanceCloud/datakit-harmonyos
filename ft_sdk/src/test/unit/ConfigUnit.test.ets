@@ -1261,6 +1261,54 @@ export default function configUnitTest() {
       expect(config.getGlobalContext().has(Constants.KEY_DEVICE_UUID)).assertTrue();
     });
 
+    it('publicLogConfigShouldBeNullUntilInstalled', 0, () => {
+      // An internal manager's leftover config is not an SDK installation.
+      const previous = new FTLoggerConfig().setEnableCustomLog(true);
+      TrackLogManager.getInstance().setLogConfig(previous);
+      expect(FTSDK.getLogConfig() === null).assertTrue();
+      FTSDK.installLogConfig(previous);
+      expect(FTSDK.getLogConfig() === null).assertTrue();
+
+      SdkInternalTestAccess.setRuntime(new FakeFTSDKRuntime());
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), createFakeContext());
+      expect(FTSDK.getLogConfig() === null).assertTrue();
+    });
+
+    it('publicLogConfigShouldReturnCurrentInstalledInstance', 0, () => {
+      SdkInternalTestAccess.setRuntime(new FakeFTSDKRuntime());
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), createFakeContext());
+      const config = new FTLoggerConfig().setEnableCustomLog(true).setLogSamplingRate(42);
+      FTSDK.installLogConfig(config);
+      const installed = FTSDK.getLogConfig();
+      expect(installed === config).assertTrue();
+      expect(installed === TrackLogManager.getInstance().getLogConfig()).assertTrue();
+      FTSDK.installLogConfig(installed!.setEnableWebViewLog(true));
+      expect(FTSDK.getLogConfig()!.isEnableWebViewLog()).assertTrue();
+      expect(FTSDK.getLogConfig()!.isEnableCustomLog()).assertTrue();
+      expect(FTSDK.getLogConfig()!.getLogSamplingRate()).assertEqual(42);
+
+      const replacement = new FTLoggerConfig().setEnableWebViewLog(false);
+      FTSDK.installLogConfig(replacement);
+      expect(FTSDK.getLogConfig() === replacement).assertTrue();
+      expect(FTSDK.getLogConfig() === config).assertFalse();
+    });
+
+    it('publicLogConfigShouldNotExposePreviousInstallation', 0, () => {
+      SdkInternalTestAccess.setRuntime(new FakeFTSDKRuntime());
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), createFakeContext());
+      const previous = new FTLoggerConfig().setEnableWebViewLog(true);
+      FTSDK.installLogConfig(previous);
+      expect(FTSDK.getLogConfig() === previous).assertTrue();
+
+      SdkInternalTestAccess.resetState();
+      expect(FTSDK.getLogConfig() === null).assertTrue();
+      FTSDK.install(FTSDKConfig.builder(TEST_FAKE_URL).setAutoSync(false), createFakeContext());
+      expect(FTSDK.getLogConfig() === null).assertTrue();
+      const current = new FTLoggerConfig();
+      FTSDK.installLogConfig(current);
+      expect(FTSDK.getLogConfig() === current).assertTrue();
+    });
+
     it('installedConfigsShouldReachManagers', 0, () => {
       const runtime = new FakeFTSDKRuntime();
       SdkInternalTestAccess.setRuntime(runtime);
@@ -1272,7 +1320,8 @@ export default function configUnitTest() {
         .setLogLevelFilters([LogLevel.ERROR]);
       FTSDK.installLogConfig(loggerConfig);
 
-      const installedLogConfig = TrackLogManager.getInstance().getLogConfig();
+      const installedLogConfig = FTSDK.getLogConfig();
+      expect(installedLogConfig === loggerConfig).assertTrue();
       expect(installedLogConfig !== null).assertTrue();
       if (installedLogConfig) {
         expect(installedLogConfig.isPrintCustomLogToConsole()).assertTrue();
