@@ -3,11 +3,15 @@
  * /v1/env_variable. Unknown content keys are retained when a fetch callback
  * modifies and persists the configuration.
  */
+import { normalizeWebViewHosts } from '../web/FTWebViewHostPolicy';
+
 enum PercentageSamplingRateState {
   ABSENT,
   VALID,
   INVALID
 }
+
+enum WebViewHostState { ABSENT, VALID, INVALID }
 
 interface PercentageSamplingRateValue {
   state: PercentageSamplingRateState;
@@ -70,6 +74,7 @@ export class RemoteConfigBean {
   private rumEnableTrackAppANR: boolean | null = null;
   private rumEnableTraceWebView: boolean | null = null;
   private rumAllowWebViewHost: Array<string> | null = null;
+  private rumAllowWebViewHostState: WebViewHostState = WebViewHostState.ABSENT;
   private logSampleRate: number | null = null;
   private logSamplingRate: number | null = null;
   private logSamplingRateState: PercentageSamplingRateState = PercentageSamplingRateState.ABSENT;
@@ -142,7 +147,7 @@ export class RemoteConfigBean {
       this.rumEnableTrackAppCrash = RemoteConfigBean.readBoolean(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACK_APP_CRASH);
       this.rumEnableTrackAppANR = RemoteConfigBean.readBoolean(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACK_APP_ANR);
       this.rumEnableTraceWebView = RemoteConfigBean.readBoolean(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACE_WEB_VIEW);
-      this.rumAllowWebViewHost = RemoteConfigBean.readStringArray(content, RemoteConfigBean.KEY_RUM_ALLOW_WEB_VIEW_HOST);
+      this.parseWebViewHosts(content);
       this.logSampleRate = RemoteConfigBean.readNumber(content, RemoteConfigBean.KEY_LOG_SAMPLE_RATE);
       const logSamplingRate = RemoteConfigBean.readPercentageSamplingRate(
         content,
@@ -216,6 +221,27 @@ export class RemoteConfigBean {
     // Preserve the legacy remote-key behavior: its numeric value is clamped
     // by the old [0,1] configuration setter rather than reinterpreted.
     return Math.min(1, Math.max(0, value));
+  }
+
+  private parseWebViewHosts(content: Record<string, Object>): void {
+    const key = RemoteConfigBean.KEY_RUM_ALLOW_WEB_VIEW_HOST;
+    if (!Object.keys(content).includes(key)) return;
+    try {
+      let value = content[key];
+      if (typeof value === 'string') value = JSON.parse(value) as Object;
+      this.rumAllowWebViewHost = normalizeWebViewHosts(value as string[] | null);
+      this.rumAllowWebViewHostState = WebViewHostState.VALID;
+    } catch (_) {
+      this.rumAllowWebViewHostState = WebViewHostState.INVALID;
+    }
+  }
+
+  /** An invalid remote list cannot clear a previous valid Host restriction. */
+  public preservePreviousValidWebViewHosts(previous: RemoteConfigBean | null): void {
+    if (this.rumAllowWebViewHostState === WebViewHostState.INVALID &&
+      previous !== null && previous.hasRumAllowWebViewHost()) {
+      this.setRumAllowWebViewHost(previous.getRumAllowWebViewHost());
+    }
   }
 
   private static readStringArray(content: Record<string, Object>, key: string): Array<string> | null {
@@ -310,6 +336,7 @@ export class RemoteConfigBean {
         content = JSON.parse(this.contentJsonString) as Record<string, Object>;
       }
       const excludedSamplingKeys: Array<string> = [];
+      if (!this.hasRumAllowWebViewHost()) excludedSamplingKeys.push(RemoteConfigBean.KEY_RUM_ALLOW_WEB_VIEW_HOST);
       if (this.sessionSamplingRateState !== PercentageSamplingRateState.VALID) {
         excludedSamplingKeys.push(RemoteConfigBean.KEY_SESSION_SAMPLING_RATE);
       }
@@ -364,7 +391,9 @@ export class RemoteConfigBean {
       this.writeToContent(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACK_APP_CRASH, this.rumEnableTrackAppCrash as Object | null);
       this.writeToContent(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACK_APP_ANR, this.rumEnableTrackAppANR as Object | null);
       this.writeToContent(content, RemoteConfigBean.KEY_RUM_ENABLE_TRACE_WEB_VIEW, this.rumEnableTraceWebView as Object | null);
-      this.writeToContent(content, RemoteConfigBean.KEY_RUM_ALLOW_WEB_VIEW_HOST, this.rumAllowWebViewHost as Object | null);
+      if (this.hasRumAllowWebViewHost()) {
+        content[RemoteConfigBean.KEY_RUM_ALLOW_WEB_VIEW_HOST] = this.rumAllowWebViewHost as Object;
+      }
       this.writeToContent(content, RemoteConfigBean.KEY_LOG_SAMPLE_RATE, this.logSampleRate as Object | null);
       this.writePercentageSamplingRateToContent(
         content,
@@ -452,6 +481,7 @@ export class RemoteConfigBean {
   public getRumEnableTrackAppANR(): boolean | null { return this.rumEnableTrackAppANR; }
   public getRumEnableTraceWebView(): boolean | null { return this.rumEnableTraceWebView; }
   public getRumAllowWebViewHost(): Array<string> | null { return this.rumAllowWebViewHost === null ? null : this.rumAllowWebViewHost.slice(); }
+  public hasRumAllowWebViewHost(): boolean { return this.rumAllowWebViewHostState === WebViewHostState.VALID; }
   /** @deprecated Use getLogSamplingRate(). The value uses the legacy [0,1] unit. */
   public getLogSampleRate(): number | null { return this.logSampleRate; }
   /** Returns the new percentage remote field when it is valid. */
@@ -525,7 +555,10 @@ export class RemoteConfigBean {
   public setRumEnableTrackAppCrash(value: boolean | null): void { this.rumEnableTrackAppCrash = value; }
   public setRumEnableTrackAppANR(value: boolean | null): void { this.rumEnableTrackAppANR = value; }
   public setRumEnableTraceWebView(value: boolean | null): void { this.rumEnableTraceWebView = value; }
-  public setRumAllowWebViewHost(value: Array<string> | null): void { this.rumAllowWebViewHost = value === null ? null : value.slice(); }
+  public setRumAllowWebViewHost(value: Array<string> | null): void {
+    this.rumAllowWebViewHost = normalizeWebViewHosts(value);
+    this.rumAllowWebViewHostState = WebViewHostState.VALID;
+  }
   /** @deprecated Use setLogSamplingRate(). The value uses the legacy [0,1] unit. */
   public setLogSampleRate(value: number | null): void { this.logSampleRate = value; }
   public setLogSamplingRate(value: number | null): void {

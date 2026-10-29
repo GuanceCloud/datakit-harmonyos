@@ -12,6 +12,9 @@ import { Utils } from '../utils/Utils';
 import { Constants } from '../Constants';
 import { FTSessionReplayBridgeRegistry } from '../sessionreplay/FTSessionReplayBridge';
 import { FTWebViewReplayBridge } from './FTWebViewReplayBridge';
+import { FTWebViewHostPolicy, isWebViewHostAllowed, serializeWebViewHosts } from './FTWebViewHostPolicy';
+import { TrackLogManager } from '../log/TrackLogManager';
+import { mapWebViewLogEvent } from './FTWebViewLogEventMapper';
 
 const TAG = "FTWebViewHandler";
 
@@ -104,16 +107,19 @@ class WebViewMessageReceiver implements JsReceiver {
    * Returns the configured host allow-list, or null when no restriction is configured.
    */
   getAllowedWebViewHosts(): string | null {
+    if (!this.handler.isCurrentProxy(this.generation)) return '[]';
     return this.handler.getAllowedWebViewHosts();
   }
 
   /** Android-compatible Browser SDK privacy negotiation for Session Replay. */
   getPrivacyLevel(): string | null {
+    if (!this.handler.isCurrentProxy(this.generation)) return null;
     return this.handler.getSessionReplayPrivacyLevel();
   }
 
   /** Android-compatible Browser SDK capability negotiation for Session Replay. */
   getCapabilities(): string | null {
+    if (!this.handler.isCurrentProxy(this.generation)) return null;
     return this.handler.getSessionReplayCapabilities();
   }
 }
@@ -176,6 +182,7 @@ export class FTWebViewHandler implements JsReceiver {
   private sessionReplayBrowserViewId: string = '';
   private sessionReplayHasBrowserRecords: boolean = false;
   private allowWebViewHost: string[] | null = null;
+  private hostPolicyBound: boolean = false;
   private webViewId: string = '';
   private webReplayLinkContext: Record<string, string | number | boolean> = {};
   private readonly webReplayContexts: Map<string, Record<string, string | number | boolean>> = new Map();
@@ -207,10 +214,22 @@ export class FTWebViewHandler implements JsReceiver {
    * Returns null to allow all hosts (browser-sdk expects null or undefined to enable bridge)
    */
   public getAllowedWebViewHosts(): string | null {
-    if (this.allowWebViewHost === null || this.allowWebViewHost.length === 0) {
-      return null;
-    }
-    return JSON.stringify(this.allowWebViewHost);
+    return serializeWebViewHosts(this.getBoundHosts(), this.getDocumentUrl());
+  }
+
+  private getBoundHosts(): string[] | null {
+    if (this.hostPolicyBound) return this.allowWebViewHost;
+    const legacy = FTRUMConfigManager.getInstance().getConfig()?.getAllowWebViewHost() ?? null;
+    return FTWebViewHostPolicy.resolve(legacy);
+  }
+
+  private getDocumentUrl(): string {
+    try { return this.webController?.getUrl() ?? ''; } catch (_) { return ''; }
+  }
+
+  /** All Browser channels use the same binding snapshot and controller URL. */
+  private isBridgeHostAllowed(): boolean {
+    return isWebViewHostAllowed(this.getBoundHosts(), this.getDocumentUrl());
   }
 
   /** Returns String(native wireframe.id), or empty before native collection. */
@@ -227,7 +246,7 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Android checks the current installed RUM configuration again for every incoming event. */
   private isRumWebViewEnabled(): boolean {
-    return this.getRumWebViewDisabledReason().length === 0;
+    return this.getRumWebViewDisabledReason().length === 0 && this.isBridgeHostAllowed();
   }
 
   private getRumWebViewDisabledReason(): string {
@@ -270,6 +289,7 @@ export class FTWebViewHandler implements JsReceiver {
    * @returns JavaScriptProxy object with object, name, methodList, and controller
    */
   public getJavaScriptProxy(webController: webview.WebviewController): JavaScriptProxy {
+    this.prepareWebView(webController);
     // Get or create message receiver instance
     const receiver = this.getMessageReceiver();
     
@@ -285,25 +305,32 @@ export class FTWebViewHandler implements JsReceiver {
 
   /** Install the Bridge using global RUM configuration and automatic controller/node association. */
   public setWebView(webController: webview.WebviewController): void {
+    if (this.prepareWebView(webController)) this.registerJavaScriptProxy();
+  }
+
+  private prepareWebView(webController: webview.WebviewController): boolean {
     if (!webController) {
       FTInnerLogger.e(TAG, '[WEBVIEW-DEBUG] Bridge setup skipped: reason=controller_missing');
-      return;
+      return false;
     }
+
+    if (this.webController && this.webController !== webController) this.clearWebController();
+    if (!this.hostPolicyBound) {
+      this.allowWebViewHost = this.getBoundHosts();
+      this.hostPolicyBound = true;
+    }
+    this.webController = webController;
     
-    const config = FTRUMConfigManager.getInstance().getConfig();
-    if (config === null || !this.isRumWebViewEnabled()) {
+    const rumEnabled = this.getRumWebViewDisabledReason().length === 0;
+    const logEnabled = TrackLogManager.getInstance().getLogConfig()?.isEnableWebViewLog() === true;
+    if (!rumEnabled && !logEnabled) {
       this.stopSessionReplaySnapshotTimer();
       this.sessionReplayBindingKey = '';
       this.sessionReplayViewportKey = '';
       this.logIgnoredWebViewEvent('setup', this.getRumWebViewDisabledReason());
-      return;
+      return false;
     }
     
-    // If we already have a controller and it's different, clear the old one
-    if (this.webController && this.webController !== webController) {
-      this.clearWebController();
-    }
-
     // The compiler plugin writes this controller's token onto the actual Web node.
     const bindingId = FTWebViewReplayBridge.bindingId(webController);
     if (bindingId !== this.sessionReplayComponentId) {
@@ -314,7 +341,7 @@ export class FTWebViewHandler implements JsReceiver {
       this.sessionReplayBindingKey = '';
       this.sessionReplayComponentId = bindingId;
     }
-    if (this.sessionReplayComponentId.length > 0 && !this.sessionReplayComponentRegistered) {
+    if (rumEnabled && this.sessionReplayComponentId.length > 0 && !this.sessionReplayComponentRegistered) {
       this.sessionReplayComponentRegistered =
         FTSessionReplayBridgeRegistry.registerWebReplayComponent(this.sessionReplayComponentId);
       if (!this.sessionReplayComponentRegistered) {
@@ -328,12 +355,8 @@ export class FTWebViewHandler implements JsReceiver {
     this.webController = webController;
     this.sessionReplaySlotActive = true;
     
-    // Bridge installation and Browser host verification share the installed RUM config.
-    this.allowWebViewHost = config.getAllowWebViewHost();
-    
-    // The controller must be attached; ArkWeb applies this registration on the next load.
-    this.registerJavaScriptProxy();
     this.refreshSessionReplaySnapshotTimer();
+    return true;
   }
 
   /**
@@ -367,6 +390,8 @@ export class FTWebViewHandler implements JsReceiver {
     this.sessionReplayBrowserViewId = '';
     this.sessionReplayHasBrowserRecords = false;
     this.webController = null;
+    this.hostPolicyBound = false;
+    this.allowWebViewHost = null;
     this.messageReceiver = null;
     this.webViewId = '';
     this.webReplayLinkContext = {};
@@ -403,7 +428,7 @@ export class FTWebViewHandler implements JsReceiver {
       );
       const hosts = this.allowWebViewHost;
       FTInnerLogger.d(TAG, `[WEBVIEW-DEBUG] Bridge registration succeeded: component=${this.sessionReplayComponentId}, ` +
-        `proxy=${this.PROXY_OBJECT_NAME}, hosts=${hosts === null || hosts.length === 0 ? 'all' : `allow_list(${hosts.length})`}, ` +
+        `proxy=${this.PROXY_OBJECT_NAME}, hosts=${hosts === null ? 'all' : hosts.length === 0 ? 'none' : `allow_list(${hosts.length})`}, ` +
         'effective=next_page_load');
     } catch (error) {
       this.logWebViewError('register_proxy', error as BusinessError);
@@ -446,6 +471,13 @@ export class FTWebViewHandler implements JsReceiver {
       }
       if (tagValue && typeof tagValue === 'string') {
         tag = tagValue;
+      }
+
+      if ((name === WEB_JS_TYPE_RUM || name === WEB_JS_TYPE_LOG || name === WEB_JS_TYPE_SESSION_REPLAY) &&
+        !this.isBridgeHostAllowed()) {
+        this.stopSessionReplaySnapshotTimer();
+        this.logIgnoredWebViewEvent(name, 'host_not_allowed');
+        return;
       }
 
       // Successful RUM processing is summarized by syncDataBackground:batch;
@@ -754,8 +786,18 @@ export class FTWebViewHandler implements JsReceiver {
         // Not used in current implementation
         this.logIgnoredWebViewEvent(WEB_JS_TYPE_TRACK, 'not_implemented');
       } else if (name === WEB_JS_TYPE_LOG) {
-        // Not used in current implementation
-        this.logIgnoredWebViewEvent(WEB_JS_TYPE_LOG, 'not_implemented');
+        const manager = TrackLogManager.getInstance();
+        const loggerConfig = manager.getLogConfig();
+        if (loggerConfig === null || !loggerConfig.isEnableWebViewLog()) {
+          this.logIgnoredWebViewEvent(WEB_JS_TYPE_LOG, 'webview_log_disabled');
+          return;
+        }
+        const log = dataJson === null ? null : mapWebViewLogEvent(dataJson, loggerConfig.isEnableLinkRumData());
+        if (log === null) {
+          this.logIgnoredWebViewEvent(WEB_JS_TYPE_LOG, 'invalid_log');
+          return;
+        }
+        manager.trackWebViewLog(log);
       } else if (name === WEB_JS_TYPE_URL_VERIFY) {
         // Not used in current implementation
         this.logIgnoredWebViewEvent(WEB_JS_TYPE_URL_VERIFY, 'not_implemented');

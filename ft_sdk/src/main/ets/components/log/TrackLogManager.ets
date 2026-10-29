@@ -139,6 +139,17 @@ export class TrackLogManager {
     this.enqueueLogDTO(this.toLogDTO(logBean, isSilence));
   }
 
+  /** Browser Log capture has its own switch and shares normal sampling/modifiers/storage. */
+  public trackWebViewLog(logBean: LogBean): void {
+    this.submittedCount++;
+    if (!this.shouldProcessLog(logBean, false, true)) {
+      this.filteredCount++;
+      return;
+    }
+    this.acceptedCount++;
+    this.enqueueLogDTO(this.toLogDTO(logBean, false));
+  }
+
   /**
    * Track a log emitted by the compiler-instrumented console/HiLog bridge.
    * Console capture is controlled by FTLoggerConfig.enableConsoleLog and is
@@ -243,7 +254,7 @@ export class TrackLogManager {
   /**
    * Determine whether log should be processed
    */
-  private shouldProcessLog(logBean: LogBean, isConsoleLog: boolean): boolean {
+  private shouldProcessLog(logBean: LogBean, isConsoleLog: boolean, isWebViewLog: boolean = false): boolean {
     if (!this.logConfig) {
       FTInnerLogger.w(TAG, "Log config not set, discarding log");
       return false;
@@ -254,7 +265,9 @@ export class TrackLogManager {
       return false;
     }
 
-    if (!isConsoleLog && !this.logConfig.isEnableCustomLog()) {
+    if (isWebViewLog && !this.logConfig.isEnableWebViewLog()) return false;
+
+    if (!isConsoleLog && !isWebViewLog && !this.logConfig.isEnableCustomLog()) {
       FTInnerLogger.d(TAG, "Custom log disabled, discarding log");
       return false;
     }

@@ -1,13 +1,15 @@
 import { describe, beforeEach, afterEach, it, expect } from '@ohos/hypium';
 import { Context } from '@kit.AbilityKit';
 import { webview } from '@kit.ArkWeb';
+import preferences from '@ohos.data.preferences';
 import { FTSDK } from '../../../main/ets/components/FTSDK';
-import { FTSDKConfig, FTRUMConfig } from '../../../main/ets/components/Configs';
+import { FTSDKConfig, FTRUMConfig, FTLoggerConfig } from '../../../main/ets/components/Configs';
 import { Constants } from '../../../main/ets/components/Constants';
 import { DataType, EnvType } from '../../../main/ets/components/enum/Enums';
 import { FTRUMGlobalManager } from '../../../main/ets/components/rum/FTRUMGlobalManager';
 import { SdkInternalTestAccess } from '../../../main/ets/components/internal/testaccess/SdkInternalTestAccess';
 import { FTWebViewHandler } from '../../../main/ets/components/web/FTWebViewHandler';
+import { FTRemoteConfigFetchResult } from '../../../main/ets/components/remote/RemoteConfigTypes';
 import { DBAssert } from './helpers/DBAssert';
 import { MockCollector, runTestCleanup } from './helpers/MockCollector';
 import { SdkTestLifecycle } from './helpers/SdkTestLifecycle';
@@ -20,6 +22,11 @@ const WEB_SDK_VERSION = '4.0.0';
 const WEB_EVENT_TIME_MS = 1710000000000;
 
 type JavaScriptCallback = (err?: Object) => void;
+
+class HostFetchResult implements FTRemoteConfigFetchResult {
+  public completed: number = 0;
+  onResult(_success: boolean): void { this.completed++; }
+}
 
 class FakeWebviewController {
   url: string;
@@ -62,6 +69,7 @@ interface WebViewProxyReceiver {
   sendEventWithCallback(event: string, callbackMethod: string): void;
   addEventListener(event: string, callbackMethod: string): void;
   getAllowedWebViewHosts(): string | null;
+  getCapabilities(): string | null;
 }
 
 class WebViewRumEvent {
@@ -276,6 +284,171 @@ export default function webViewAutoTrackDeviceTest() {
         async () => { await DBAssert.cleanupAll(); }
       ]);
       SdkInternalTestAccess.resetRuntime();
+    });
+
+    it('emptyPolicyShouldRejectRumAndLogBeforePersistence', 0, async () => {
+      FTSDK.getSDKConfig()!.setAllowWebViewHost([]);
+      FTSDK.installLogConfig(new FTLoggerConfig().setEnableWebViewLog(true));
+      const handler = new FTWebViewHandler();
+      const controller = new FakeWebviewController('https://webview.test/empty');
+      const receiver = handler.getJavaScriptProxy(controller as Object as webview.WebviewController)
+        .object as Object as WebViewProxyReceiver;
+      try {
+        expect(receiver.getAllowedWebViewHosts()).assertEqual('[]');
+        expect(receiver.getCapabilities()).assertNull();
+        receiver.sendEvent(buildWebViewRumEvent(Constants.FT_MEASUREMENT_RUM_VIEW,
+          new WebViewViewTags('denied-host-view', 'denied-host-view'), new WebViewViewFields(1, 1), 'deny'));
+        receiver.sendEvent('{"name":"log","data":{"message":"denied-host-log","status":"info"}}');
+        await WaitUtils.delay(500);
+        expect(await DBAssert.querySyncCount([DataType.RUM_WEBVIEW, DataType.LOG])).assertEqual(0);
+      } finally { handler.clearWebController(); }
+    });
+
+    it('SDKRemoteFetchShouldUpdateNewBindingsAndRestoreTheCachedPolicy', 0, async () => {
+      const store = preferences.getPreferencesSync(context, { name: 'ft_remote_config' });
+      const previousConfig = store.getSync(Constants.FT_REMOTE_CONFIG, '');
+      const previousTime = store.getSync(Constants.FT_REMOTE_CONFIG_FETCH_TIME, 0);
+      const oldHandler = new FTWebViewHandler();
+      const nextHandler = new FTWebViewHandler();
+      try {
+        await SdkTestLifecycle.resetRuntimeState();
+        SdkInternalTestAccess.setRuntime(new NoNavigationTestRuntime());
+        store.putSync(Constants.FT_REMOTE_CONFIG, '');
+        store.putSync(Constants.FT_REMOTE_CONFIG_FETCH_TIME, 0);
+        await store.flush();
+        collector.setResponse(200, '{"content":{"rumAllowWebViewHost":[]}}');
+        collector.start();
+        const callback = new HostFetchResult();
+        const base = FTSDKConfig.builder(TEST_HOST).setAutoSync(false).setAllowWebViewHost(['base.test'])
+          .setRemoteConfiguration(true).setRemoteConfigMiniUpdateInterval(0)
+          .setRemoteConfigurationCallBack(callback);
+        FTSDK.install(base, context);
+        FTSDK.installRUMConfig(buildRumConfig().setAllowWebViewHost(['legacy.test']));
+        expect(await WaitUtils.waitUntil(async (): Promise<boolean> => callback.completed > 0)).assertTrue();
+        oldHandler.setWebView(new FakeWebviewController('https://remote.test') as Object as webview.WebviewController);
+        expect(oldHandler.getAllowedWebViewHosts()).assertEqual('[]');
+        collector.setResponse(200, '{"content":{"rumAllowWebViewHost":null}}');
+        const count = callback.completed;
+        FTSDK.updateRemoteConfig(0);
+        expect(await WaitUtils.waitUntil(async (): Promise<boolean> => callback.completed > count)).assertTrue();
+        expect(oldHandler.getAllowedWebViewHosts()).assertEqual('[]');
+        nextHandler.setWebView(new FakeWebviewController('https://any.test') as Object as webview.WebviewController);
+        expect(nextHandler.getAllowedWebViewHosts()).assertNull();
+        nextHandler.clearWebController();
+        // Reinstallation reads persisted explicit null before the failing new fetch.
+        await SdkTestLifecycle.resetRuntimeState();
+        SdkInternalTestAccess.setRuntime(new NoNavigationTestRuntime());
+        collector.setResponse(500, '');
+        collector.start();
+        const restoredCallback = new HostFetchResult();
+        FTSDK.install(FTSDKConfig.builder(TEST_HOST).setAutoSync(false).setAllowWebViewHost([])
+          .setRemoteConfiguration(true).setRemoteConfigurationCallBack(restoredCallback), context);
+        FTSDK.installRUMConfig(buildRumConfig());
+        expect(await WaitUtils.waitUntil(async (): Promise<boolean> => restoredCallback.completed > 0)).assertTrue();
+        nextHandler.setWebView(new FakeWebviewController('https://any.test') as Object as webview.WebviewController);
+        expect(nextHandler.getAllowedWebViewHosts()).assertNull();
+        nextHandler.clearWebController();
+        collector.setResponse(200, '{"content":{}}');
+        const removed = new HostFetchResult();
+        FTSDK.updateRemoteConfig(0, removed);
+        expect(await WaitUtils.waitUntil(async (): Promise<boolean> => removed.completed > 0)).assertTrue();
+        nextHandler.setWebView(new FakeWebviewController('https://any.test') as Object as webview.WebviewController);
+        expect(nextHandler.getAllowedWebViewHosts()).assertEqual('[]');
+      } finally {
+        oldHandler.clearWebController();
+        nextHandler.clearWebController();
+        await SdkTestLifecycle.resetRuntimeState();
+        store.putSync(Constants.FT_REMOTE_CONFIG, previousConfig);
+        store.putSync(Constants.FT_REMOTE_CONFIG_FETCH_TIME, previousTime);
+        await store.flush();
+      }
+    });
+
+    it('declarativeProxyShouldUseBasePolicyAndKeepBindingSnapshot', 0, () => {
+      const base = FTSDK.getSDKConfig()!;
+      rumConfig.setAllowWebViewHost([]);
+      base.setAllowWebViewHost(['WEBVIEW.TEST.']);
+      const handler = new FTWebViewHandler();
+      const controller = new FakeWebviewController('https://sub.webview.test/a');
+      const receiver = handler.getJavaScriptProxy(controller as Object as webview.WebviewController)
+        .object as Object as WebViewProxyReceiver;
+      try {
+        expect(receiver.getAllowedWebViewHosts()).assertEqual('["webview.test"]');
+        base.setAllowWebViewHost([]);
+        handler.setWebView(controller as Object as webview.WebviewController);
+        expect(receiver.getAllowedWebViewHosts()).assertEqual('["webview.test"]');
+        const second = new FTWebViewHandler();
+        second.setWebView(new FakeWebviewController('https://webview.test/new') as Object as webview.WebviewController);
+        expect(second.getAllowedWebViewHosts()).assertEqual('[]');
+        second.clearWebController();
+        handler.clearWebController();
+        handler.setWebView(controller as Object as webview.WebviewController);
+        expect(handler.getAllowedWebViewHosts()).assertEqual('[]');
+        expect(receiver.getAllowedWebViewHosts()).assertEqual('[]');
+      } finally { handler.clearWebController(); }
+    });
+
+    it('subdomainShouldCollectAndNavigationToDifferentHostShouldReject', 0, async () => {
+      FTSDK.getSDKConfig()!.setAllowWebViewHost(['webview.test']);
+      const handler = new FTWebViewHandler();
+      const controller = new FakeWebviewController('https://sub.webview.test/start');
+      handler.setWebView(controller as Object as webview.WebviewController);
+      try {
+        handler.sendEvent(buildWebViewRumEvent(Constants.FT_MEASUREMENT_RUM_VIEW,
+          new WebViewViewTags('allowed-subdomain', 'allowed-subdomain'), new WebViewViewFields(1, 1), 'allow'));
+        expect(await DBAssert.waitForSyncRecordContaining(DataType.RUM_WEBVIEW,
+          ['view_id=allowed-subdomain'], 5000) !== null).assertTrue();
+        controller.url = 'https://webview.test.evil.test/next';
+        handler.sendEvent(buildWebViewRumEvent(Constants.FT_MEASUREMENT_RUM_VIEW,
+          new WebViewViewTags('denied-navigation', 'denied-navigation'), new WebViewViewFields(1, 1), 'deny'));
+        await WaitUtils.delay(500);
+        expect(await countWebViewSyncRecordsContaining(['view_id=denied-navigation'])).assertEqual(0);
+      } finally { handler.clearWebController(); }
+    });
+
+    it('explicitBaseNullShouldOverrideLegacyEmptyList', 0, () => {
+      rumConfig.setAllowWebViewHost([]);
+      FTSDK.getSDKConfig()!.setAllowWebViewHost(null);
+      const handler = new FTWebViewHandler();
+      try {
+        handler.setWebView(new FakeWebviewController('https://any.test') as Object as webview.WebviewController);
+        expect(handler.getAllowedWebViewHosts()).assertNull();
+      } finally { handler.clearWebController(); }
+    });
+
+    it('logOnlyBridgeShouldPersistAndUploadThroughNormalLogPipeline', 0, async () => {
+      rumConfig.setEnableTraceWebView(false);
+      FTSDK.getSDKConfig()!.setAllowWebViewHost(['webview.test']);
+      FTSDK.installLogConfig(new FTLoggerConfig().setEnableWebViewLog(true)
+        .setEnableCustomLog(false).setEnableConsoleLog(false).setEnableLinkRumData(false));
+      const handler = new FTWebViewHandler();
+      const controller = new FakeWebviewController('https://webview.test/log-only');
+      handler.setWebView(controller as Object as webview.WebviewController);
+      try {
+        expect(controller.registerCount).assertEqual(1);
+        expect(handler.getSessionReplayCapabilities()).assertNull();
+        handler.sendEvent('{"name":"log","data":{"message":"host-log-only-probe","status":"warn",' +
+          '"date":1700000000000,"custom_probe":"kept","session":{"id":"browser-session"}}}');
+        const record = await DBAssert.waitForSyncRecordContaining(DataType.LOG,
+          ['host-log-only-probe', 'is_web_view=true', 'log_source=webview', 'custom_probe="kept"'], 5000);
+        expect(record !== null).assertTrue();
+        const line = record?.getDataString() ?? '';
+        expect(line.includes('browser-session')).assertFalse();
+        expect(line.endsWith('1700000000000000000')).assertTrue();
+        FTSDK.flushSyncData();
+        expect((await collector.waitForPayloadContaining(['host-log-only-probe'], 5000)).length > 0).assertTrue();
+      } finally { handler.clearWebController(); }
+    });
+
+    it('WebLogDefaultOffShouldNotPersistBrowserLog', 0, async () => {
+      FTSDK.installLogConfig(new FTLoggerConfig().setEnableCustomLog(true));
+      const handler = new FTWebViewHandler();
+      handler.setWebView(new FakeWebviewController('https://webview.test') as Object as webview.WebviewController);
+      try {
+        handler.sendEvent('{"name":"log","data":{"message":"web-log-default-off","status":"info"}}');
+        await WaitUtils.delay(300);
+        expect(await DBAssert.querySyncCount([DataType.LOG])).assertEqual(0);
+      } finally { handler.clearWebController(); }
     });
 
     it('webViewHandlerShouldGateBridge', 0, () => {

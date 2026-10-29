@@ -44,8 +44,9 @@ import {
   TouchPrivacy
 } from '@guancecloud/ft_session_replay';
 import { DemoLogger } from '../utils/DemoLogger';
+import { setStressCollectionForeground, STRESS_REAL_LOG_FILTER } from '../utils/StressRealCollection';
 import { DemoDataModifier, DemoLineDataModifier } from '../utils/DataModifierDemo';
-import { DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
+import { DemoGlobalNetworkErrorFilter, DemoLocalNetworkErrorFilter } from '../utils/DemoLocalNetworkErrorFilter';
 
 const LOG_TAG = "EntryAbility";
 const PREFERENCES_NAME = "entry_ability_runtime_config";
@@ -77,7 +78,7 @@ const FILTERED_AUTOMATIC_RESOURCE_URL_PREFIXES: Array<string> = [
 // verification button. The SDK configuration is installed once here so its
 // RUM linkage (including app_id) remains active for automatic logs.
 const LOG_FILTER_TEST_RULE = "{ log_source = 'hilog' and tag = 'FTLogFilterTest' and domain = '852011' " +
-  "and message match ['^LOG_FILTER_KEEP_'] }";
+  "and message match ['^LOG_FILTER_KEEP_'] }" + STRESS_REAL_LOG_FILTER;
 
 export const KEY_WEB_VIEW_URL = "webViewUrl";
 export const KEY_TRACE_URL = "traceUrl";
@@ -515,7 +516,7 @@ export default class EntryAbility extends UIAbility {
         .setViewTrackingHandler(new DemoViewTrackingHandler(), FTViewTrackingType.ALL)
         .setActionTrackingHandler(new DemoActionTrackingHandler())
         .setResourceUrlHandler(new DemoResourceUrlHandler())
-        .setNetworkErrorHandler(new DemoLocalNetworkErrorFilter())
+        .setNetworkErrorHandler(new DemoGlobalNetworkErrorFilter())
         .addGlobalContext("custom_key",new String("custom_value"))
         .setExtraMonitorTypeWithError(ErrorMonitorType.ALL)
         .setDeviceMetricsMonitorType(DeviceMetricsMonitorType.ALL, DetectFrequency.DEFAULT)
@@ -526,7 +527,7 @@ export default class EntryAbility extends UIAbility {
       // SHOW is intentional for the demo touch-signal verification button;
       // production integrations should keep the SDK default of HIDE.
       const sessionReplayConfig = new FTSessionReplayConfig()
-        .setSampleRate(1)
+        .setSampleRate(100)
         .setSessionReplayOnErrorSampleRate(0)
         // .setUploadIntervalMs(0)
         // .setSnapshotIntervalMs(16)
@@ -597,12 +598,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    setStressCollectionForeground(true);
     // App enters foreground
     // Similar to Android's onActivityResumed(), but HarmonyOS doesn't auto-start view here
     // View will be started by FTNavigationTracker when page loads
   }
 
   onBackground(): void {
+    setStressCollectionForeground(false);
     // Lifecycle monitoring is now handled automatically by SDK via applicationContext
     // No manual stopView() call needed - SDK's FTAbilityLifecycleListener handles this
   }

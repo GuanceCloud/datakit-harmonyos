@@ -112,7 +112,7 @@ export default function sessionReplayProtocolUnitTest() {
       expect(config.getTextAndInputPrivacy()).assertEqual(TextAndInputPrivacy.MASK_ALL);
       expect(config.getImagePrivacy()).assertEqual(ImagePrivacy.MASK_ALL);
       expect(config.getTouchPrivacy()).assertEqual(TouchPrivacy.HIDE);
-      expect(config.setSampleRate(2).getSampleRate()).assertEqual(1);
+      expect(config.setSampleRate(200).getSampleRate()).assertEqual(100);
       expect(config.setSessionReplayOnErrorSampleRate(-1).getSessionReplayOnErrorSampleRate()).assertEqual(0);
       expect(config.setSnapshotIntervalMs(1).getSnapshotIntervalMs()).assertEqual(16);
       expect(config.setSnapshotIntervalMs(20000).getSnapshotIntervalMs()).assertEqual(10000);
@@ -433,14 +433,14 @@ export default function sessionReplayProtocolUnitTest() {
 
     it('keeps regular and error sampling decisions independent', 0, () => {
       const regularConfig = new FTSessionReplayConfig()
-        .setSampleRate(1)
-        .setSessionReplayOnErrorSampleRate(1);
+        .setSampleRate(100)
+        .setSessionReplayOnErrorSampleRate(100);
       expect(new SessionReplaySampler(regularConfig).decide('regular-session'))
         .assertEqual(SessionReplaySamplingMode.REGULAR);
 
       const errorConfig = new FTSessionReplayConfig()
         .setSampleRate(0)
-        .setSessionReplayOnErrorSampleRate(1);
+        .setSessionReplayOnErrorSampleRate(100);
       expect(new SessionReplaySampler(errorConfig).decide('error-session'))
         .assertEqual(SessionReplaySamplingMode.ERROR);
 
@@ -467,7 +467,7 @@ export default function sessionReplayProtocolUnitTest() {
     });
 
     it('forwards Browser records only while the WebView slot is active or in grace period', 0, () => {
-      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(1));
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(100));
       recorder.start();
       expect(recorder.getWebViewOptions()?.privacyLevel).assertEqual('mask');
       const now = Date.now();

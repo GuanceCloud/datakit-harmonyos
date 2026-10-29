@@ -13,6 +13,8 @@ import {
 } from '../utils/StressTestManager';
 import preferences from '@ohos.data.preferences';
 import { TestPageHeader } from '../components/TestPageHeader';
+import { StressCollectionModeToggle, StressRealActionControl, StressRealLongTaskControl } from '../components/StressCollectionControls';
+import { DEFAULT_REAL_LONG_TASK_DURATION_MS, normalizeRealLongTaskDuration } from '../utils/StressRealCollection';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
 import {
@@ -56,6 +58,11 @@ const KEY_TEST_SECONDS = 'test_seconds';
 const KEY_STRESS_RUN_MODE = 'stress_run_mode';
 const KEY_STRESS_TOTAL_COUNT = 'stress_total_count';
 const KEY_USE_REAL_TRAFFIC = 'use_real_traffic';
+const KEY_USE_REAL_LOGS = 'use_real_logs';
+const KEY_USE_REAL_ACTIONS = 'use_real_actions';
+const KEY_USE_REAL_ERRORS = 'use_real_errors';
+const KEY_USE_REAL_LONG_TASKS = 'use_real_long_tasks';
+const KEY_REAL_LONG_TASK_DURATION_MS = 'real_long_task_duration_ms';
 const KEY_ENABLE_LOGS = 'enable_logs';
 const KEY_ENABLE_ACTIONS = 'enable_actions';
 const KEY_ENABLE_RESOURCES = 'enable_resources';
@@ -140,6 +147,11 @@ export struct RealAppStressTestPage {
   @State reportText: string = "";
   @State completedCapabilityLanes: StressCapabilityLaneMetric[] = [];
   @State useRealTraffic: boolean = false;
+  @State useRealLogs: boolean = false;
+  @State useRealActions: boolean = false;
+  @State useRealErrors: boolean = false;
+  @State useRealLongTasks: boolean = false;
+  @State realLongTaskDurationMs: number = DEFAULT_REAL_LONG_TASK_DURATION_MS;
   @State enableLogs: boolean = true;
   @State enableActions: boolean = true;
   @State enableResources: boolean = true;
@@ -397,6 +409,11 @@ export struct RealAppStressTestPage {
       this.enableBackgroundService ? 'background-service' : 'foreground'
     );
     config.runMode = this.stressRunMode;
+    config.useRealLogs = this.useRealLogs;
+    config.useRealActions = this.useRealActions;
+    config.useRealErrors = this.useRealErrors;
+    config.useRealLongTasks = this.useRealLongTasks;
+    config.realLongTaskDurationMs = normalizeRealLongTaskDuration(this.realLongTaskDurationMs);
     config.totalTargetCount = totalTargetCount;
     config.logThreadCount = 1;
     config.logTotalCount = totalTargetCount;
@@ -515,6 +532,12 @@ export struct RealAppStressTestPage {
         this.stressTotalCount =
           await this.preferencesStore.get(KEY_STRESS_TOTAL_COUNT, DEFAULT_STRESS_TOTAL_COUNT) as number;
         this.useRealTraffic = await this.preferencesStore.get(KEY_USE_REAL_TRAFFIC, false) as boolean;
+        this.useRealLogs = await this.preferencesStore.get(KEY_USE_REAL_LOGS, false) as boolean;
+        this.useRealActions = await this.preferencesStore.get(KEY_USE_REAL_ACTIONS, false) as boolean;
+        this.useRealErrors = await this.preferencesStore.get(KEY_USE_REAL_ERRORS, false) as boolean;
+        this.useRealLongTasks = await this.preferencesStore.get(KEY_USE_REAL_LONG_TASKS, false) as boolean;
+        this.realLongTaskDurationMs = normalizeRealLongTaskDuration(
+          await this.preferencesStore.get(KEY_REAL_LONG_TASK_DURATION_MS, DEFAULT_REAL_LONG_TASK_DURATION_MS) as number);
         this.enableLogs = await this.preferencesStore.get(KEY_ENABLE_LOGS, true) as boolean;
         this.enableActions = await this.preferencesStore.get(KEY_ENABLE_ACTIONS, true) as boolean;
         this.enableResources = await this.preferencesStore.get(KEY_ENABLE_RESOURCES, true) as boolean;
@@ -580,6 +603,11 @@ export struct RealAppStressTestPage {
         await this.preferencesStore.put(KEY_STRESS_RUN_MODE, this.stressRunMode);
         await this.preferencesStore.put(KEY_STRESS_TOTAL_COUNT, this.stressTotalCount);
         await this.preferencesStore.put(KEY_USE_REAL_TRAFFIC, this.useRealTraffic);
+        await this.preferencesStore.put(KEY_USE_REAL_LOGS, this.useRealLogs);
+        await this.preferencesStore.put(KEY_USE_REAL_ACTIONS, this.useRealActions);
+        await this.preferencesStore.put(KEY_USE_REAL_ERRORS, this.useRealErrors);
+        await this.preferencesStore.put(KEY_USE_REAL_LONG_TASKS, this.useRealLongTasks);
+        await this.preferencesStore.put(KEY_REAL_LONG_TASK_DURATION_MS, this.realLongTaskDurationMs);
         await this.preferencesStore.put(KEY_ENABLE_LOGS, this.enableLogs);
         await this.preferencesStore.put(KEY_ENABLE_ACTIONS, this.enableActions);
         await this.preferencesStore.put(KEY_ENABLE_RESOURCES, this.enableResources);
@@ -628,6 +656,11 @@ export struct RealAppStressTestPage {
       this.stressRunMode,
       this.stressTotalCount,
       this.useRealTraffic,
+      this.useRealLogs,
+      this.useRealActions,
+      this.useRealErrors,
+      this.useRealLongTasks,
+      this.realLongTaskDurationMs,
       this.enableLogs,
       this.enableActions,
       this.enableResources,
@@ -1025,12 +1058,14 @@ export struct RealAppStressTestPage {
   }
 
   resetStressLogSettings(): void {
+    this.useRealLogs = false;
     this.stressLogBatchSize = DEFAULT_STRESS_LOG_BATCH_SIZE;
     this.stressLogIntervalMs = DEFAULT_STRESS_LOG_INTERVAL_MS;
     this.saveSettings();
   }
 
   resetStressActionSettings(): void {
+    this.useRealActions = false;
     this.stressActionTimerCount = DEFAULT_STRESS_ACTION_TIMER_COUNT;
     this.stressActionIntervalMs = DEFAULT_STRESS_ACTION_INTERVAL_MS;
     this.saveSettings();
@@ -1052,12 +1087,15 @@ export struct RealAppStressTestPage {
   }
 
   resetStressErrorSettings(): void {
+    this.useRealErrors = false;
     this.stressErrorBatchSize = DEFAULT_STRESS_ERROR_BATCH_SIZE;
     this.stressErrorIntervalMs = DEFAULT_STRESS_ERROR_INTERVAL_MS;
     this.saveSettings();
   }
 
   resetStressLongTaskSettings(): void {
+    this.useRealLongTasks = false;
+    this.realLongTaskDurationMs = DEFAULT_REAL_LONG_TASK_DURATION_MS;
     this.stressLongTaskBatchSize = DEFAULT_STRESS_LONG_TASK_BATCH_SIZE;
     this.stressLongTaskIntervalMs = DEFAULT_STRESS_LONG_TASK_INTERVAL_MS;
     this.saveSettings();
@@ -1542,14 +1580,23 @@ export struct RealAppStressTestPage {
   }
 
   private formatExpectedActionResult(): string {
+    if (this.useRealActions) {
+      return this.isRealtimeTotalMode() ? `${this.getRealtimeTotalTargetCount()} UI taps` : 'Actual UI taps';
+    }
     return this.formatExpectedTimedResult('actions', this.stressActionTimerCount, this.stressActionIntervalMs);
   }
 
   private formatExpectedActionRate(): string {
+    if (this.useRealActions) {
+      return 'Input driven';
+    }
     return this.formatExpectedRate(this.stressActionTimerCount, this.stressActionIntervalMs, 'action');
   }
 
   private formatMaxActionPeak(): string {
+    if (this.hasStatsRun() ? this.stats.useRealActions : this.useRealActions) {
+      return 'Input driven';
+    }
     return this.formatRumSdkCapacityPeak('action');
   }
 
@@ -1599,14 +1646,19 @@ export struct RealAppStressTestPage {
   }
 
   private formatExpectedLongTaskResult(): string {
+    if (this.useRealLongTasks) {
+      return this.isRealtimeTotalMode() ? `${this.getRealtimeTotalTargetCount()} UI blocks` : 'Actual UI blocks';
+    }
     return this.formatExpectedTimedResult('long tasks', this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs);
   }
 
   private formatExpectedLongTaskRate(): string {
+    if (this.useRealLongTasks) return 'Input driven';
     return this.formatExpectedRate(this.stressLongTaskBatchSize, this.stressLongTaskIntervalMs, 'long task');
   }
 
   private formatMaxLongTaskPeak(): string {
+    if (this.hasStatsRun() ? this.stats.useRealLongTasks : this.useRealLongTasks) return 'Input driven';
     return this.formatRumSdkCapacityPeak('long task');
   }
 
@@ -1623,6 +1675,9 @@ export struct RealAppStressTestPage {
       TestPageHeader({
         title: 'Real App Stress Test'
       })
+
+      StressRealActionControl({ running: this.isTestRunning && this.stats.enableActions && this.stats.useRealActions })
+      StressRealLongTaskControl({ running: this.isTestRunning && this.stats.enableLongTasks && this.stats.useRealLongTasks })
 
       Scroll() {
         Column({ space: 16 }) {
@@ -1806,6 +1861,9 @@ export struct RealAppStressTestPage {
               .fontSize(18)
               .fontWeight(FontWeight.Medium)
 
+            Text('Real modes collect actual UI input, HiLog output, caught exceptions or system-observed blocks. Counters record triggered work; SDK sampling and system limits still apply.')
+              .fontSize(12).fontColor(Color.Gray).width('100%')
+
             Row() {
               Toggle({ type: 0, isOn: this.enableLogs })
                 .onChange((isOn: boolean) => {
@@ -1981,6 +2039,12 @@ export struct RealAppStressTestPage {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
 
+              StressCollectionModeToggle({
+                useReal: this.useRealLogs, disabled: this.isTestRunning,
+                description: 'Outputs current elapsed time and VM heap to HiLog for automatic collection.',
+                onModeChange: (value: boolean): void => { this.useRealLogs = value; this.saveSettings(); }
+              })
+
             Column({ space: 5 }) {
               Text('Batch Size')
                 .fontSize(14)
@@ -2088,6 +2152,13 @@ export struct RealAppStressTestPage {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
 
+              StressCollectionModeToggle({
+                useReal: this.useRealActions, disabled: this.isTestRunning,
+                description: 'Tap the Real Action button after starting, manually or with UI automation. Foreground only; total mode waits for actual taps.',
+                onModeChange: (value: boolean): void => { this.useRealActions = value; this.saveSettings(); }
+              })
+
+              if (!this.useRealActions) {
             Column({ space: 5 }) {
               Text('Timer Count')
                 .fontSize(14)
@@ -2182,6 +2253,7 @@ export struct RealAppStressTestPage {
               .backgroundColor('#EAF3FF')
               .fontColor('#007DFF')
               .enabled(!this.isTestRunning)
+              }
           }
             .width('100%')
             .padding(18)
@@ -2415,6 +2487,12 @@ export struct RealAppStressTestPage {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
 
+              StressCollectionModeToggle({
+                useReal: this.useRealErrors, disabled: this.isTestRunning,
+                description: 'Executes a failing JSON parse and reports the caught exception with its runtime stack. Use Crash separately for unhandled exceptions.',
+                onModeChange: (value: boolean): void => { this.useRealErrors = value; this.saveSettings(); }
+              })
+
             Column({ space: 5 }) {
               Text('Batch Size')
                 .fontSize(14)
@@ -2495,7 +2573,7 @@ export struct RealAppStressTestPage {
             .width('100%')
             .alignItems(HorizontalAlign.Center)
 
-            Text(`Current: ${this.stressErrorBatchSize} custom errors every ${this.stressErrorIntervalMs}ms`)
+            Text(`Current: ${this.stressErrorBatchSize} ${this.useRealErrors ? 'runtime exceptions' : 'custom errors'} every ${this.stressErrorIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
@@ -2522,6 +2600,29 @@ export struct RealAppStressTestPage {
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
 
+              StressCollectionModeToggle({
+                useReal: this.useRealLongTasks, disabled: this.isTestRunning,
+                description: 'Use the block button or UI automation after starting. Actual UI dispatch is blocked; SDK collects system MAIN_THREAD_JANK events. Count = triggered blocks. Foreground only; timer settings do not generate real input.',
+                onModeChange: (value: boolean): void => { this.useRealLongTasks = value; this.saveSettings(); }
+              })
+              if (this.useRealLongTasks) {
+                Text('Real Block Duration (350–2000ms)').fontSize(14).fontColor(Color.Gray)
+                TextInput({ text: `${this.realLongTaskDurationMs}` })
+                  .id('stress-real-block-duration')
+                  .type(InputType.Number).enabled(!this.isTestRunning)
+                  .onChange((value: string) => {
+                    const parsed = Number(value);
+                    if (value.length > 0 && Number.isFinite(parsed)) {
+                      this.realLongTaskDurationMs = parsed;
+                    }
+                  })
+                  .onBlur(() => {
+                    this.realLongTaskDurationMs = normalizeRealLongTaskDuration(this.realLongTaskDurationMs);
+                    this.saveSettings();
+                  })
+              }
+
+              if (!this.useRealLongTasks) {
             Column({ space: 5 }) {
               Text('Batch Size')
                 .fontSize(14)
@@ -2602,7 +2703,7 @@ export struct RealAppStressTestPage {
             .width('100%')
             .alignItems(HorizontalAlign.Center)
 
-            Text(`Current: ${this.stressLongTaskBatchSize} long tasks every ${this.stressLongTaskIntervalMs}ms`)
+            Text(`Current: ${this.stressLongTaskBatchSize} ${this.useRealLongTasks ? 'real blocks' : 'long task events'} every ${this.stressLongTaskIntervalMs}ms`)
               .fontSize(13)
               .fontColor('#007DFF')
               .width('100%')
@@ -2616,6 +2717,7 @@ export struct RealAppStressTestPage {
               .backgroundColor('#EAF3FF')
               .fontColor('#007DFF')
               .enabled(!this.isTestRunning)
+              }
           }
             .width('100%')
             .padding(18)
@@ -2778,6 +2880,13 @@ export struct RealAppStressTestPage {
               .fontColor(Color.Gray)
               .width('100%')
 
+            Text(`Collection: Logs=${this.stats.useRealLogs ? 'HiLog' : 'synthetic'}, Actions=${this.stats.useRealActions ? 'UI taps' : 'synthetic'}, Errors=${this.stats.useRealErrors ? 'caught exceptions' : 'synthetic'}, LongTasks=${this.stats.useRealLongTasks ? 'system observer' : 'synthetic'}`)
+              .fontSize(12).fontColor(Color.Gray).width('100%')
+            if (this.stats.useRealLongTasks) {
+              Text(`Last actual block: ${this.stats.lastRealLongTaskDurationMs}ms. LongTasks counts triggered blocks; system collection can be delayed or limited.`)
+                .fontSize(12).fontColor(Color.Gray).width('100%')
+            }
+
             Column({ space: 4 }) {
               Row() {
                 Text('Feature')
@@ -2864,7 +2973,7 @@ export struct RealAppStressTestPage {
                     .fontColor('#6A4BC3')
                     .width('20%')
                     .textAlign(TextAlign.Center)
-                  Text(`${this.stats.actionsGenerated} actions`)
+                  Text(`${this.stats.actionsGenerated} ${this.stats.useRealActions ? 'UI taps' : 'actions'}`)
                     .fontSize(12)
                     .width('20%')
                     .textAlign(TextAlign.Center)
@@ -2992,7 +3101,7 @@ export struct RealAppStressTestPage {
                     .fontColor('#6A4BC3')
                     .width('20%')
                     .textAlign(TextAlign.Center)
-                  Text(`${this.stats.longTasksGenerated} long tasks`)
+                  Text(`${this.stats.longTasksGenerated} ${this.stats.useRealLongTasks ? 'blocks triggered' : 'long tasks'}`)
                     .fontSize(12)
                     .width('20%')
                     .textAlign(TextAlign.Center)

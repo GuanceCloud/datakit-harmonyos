@@ -3,6 +3,7 @@ import { http } from '@kit.NetworkKit';
 export const HTTP_CHAIN_A_BATCH_SIZE: number = 100;
 export const HTTP_CHAIN_B_BATCH_SIZE: number = 20;
 export const HTTP_CHAIN_B_CONCURRENCY: number = 4;
+export const HTTP_CHAIN_C_BATCH_SIZE: number = 20;
 
 export interface HttpChainAControlResult {
   addedChains: number;
@@ -15,6 +16,15 @@ export interface HttpChainBControlResult {
   appliedChains: number;
   httpResponses: number;
   requestFailures: number;
+  setupFailures: number;
+  destroyedRequests: number;
+  destroyFailures: number;
+  lastError: string;
+}
+
+export interface HttpChainCControlResult {
+  addedChains: number;
+  appliedChains: number;
   setupFailures: number;
   destroyedRequests: number;
   destroyFailures: number;
@@ -48,6 +58,22 @@ class HttpChainBInitialInterceptor implements http.HttpInterceptor {
 }
 
 class HttpChainBFinalInterceptor implements http.HttpInterceptor {
+  interceptorType: http.InterceptorType = http.InterceptorType.FINAL_RESPONSE;
+
+  async interceptorHandle(_request: http.HttpRequestContext, _response: http.HttpResponse): Promise<boolean> {
+    return true;
+  }
+}
+
+class HttpChainCInitialInterceptor implements http.HttpInterceptor {
+  interceptorType: http.InterceptorType = http.InterceptorType.INITIAL_REQUEST;
+
+  async interceptorHandle(_request: http.HttpRequestContext, _response: http.HttpResponse): Promise<boolean> {
+    return true;
+  }
+}
+
+class HttpChainCFinalInterceptor implements http.HttpInterceptor {
   interceptorType: http.InterceptorType = http.InterceptorType.FINAL_RESPONSE;
 
   async interceptorHandle(_request: http.HttpRequestContext, _response: http.HttpResponse): Promise<boolean> {
@@ -188,5 +214,57 @@ export async function runHttpChainBControl(
     workers.push(runWorker());
   }
   await Promise.all(workers);
+  return result;
+}
+
+/** Applies each local chain, then destroys its request without starting network traffic. */
+export function runHttpChainCControl(): HttpChainCControlResult {
+  const result: HttpChainCControlResult = {
+    addedChains: 0,
+    appliedChains: 0,
+    setupFailures: 0,
+    destroyedRequests: 0,
+    destroyFailures: 0,
+    lastError: ''
+  };
+  for (let index = 0; index < HTTP_CHAIN_C_BATCH_SIZE; index++) {
+    let request: http.HttpRequest | undefined = undefined;
+    try {
+      request = http.createHttp();
+      const chain = new http.HttpInterceptorChain();
+      const interceptors: http.HttpInterceptor[] = [
+        new HttpChainCInitialInterceptor(),
+        new HttpChainCFinalInterceptor()
+      ];
+      if (!chain.addChain(interceptors)) {
+        result.setupFailures++;
+        result.lastError = 'addChain returned false';
+        continue;
+      }
+      result.addedChains++;
+      if (!chain.apply(request)) {
+        result.setupFailures++;
+        result.lastError = 'apply returned false';
+        continue;
+      }
+      result.appliedChains++;
+      // Do not call request/requestInStream or install SDK tracking. Only
+      // primitive diagnostics leave this scope; no platform objects are retained.
+    } catch (error) {
+      result.setupFailures++;
+      result.lastError = String(error);
+    } finally {
+      if (request) {
+        try {
+          request.destroy();
+          result.destroyedRequests++;
+        } catch (error) {
+          result.destroyFailures++;
+          result.lastError = String(error);
+        }
+        request = undefined;
+      }
+    }
+  }
   return result;
 }

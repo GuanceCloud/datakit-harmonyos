@@ -124,6 +124,8 @@ export class FTRemoteConfigManager {
   /** Apply persisted base-SDK values before dependent managers are initialized. */
   public mergeSDKConfigFromCache(config: FTSDKConfig): void {
     const bean = this.remoteConfig;
+    config.setRemoteAllowWebViewHostInternal(bean?.getRumAllowWebViewHost() ?? null,
+      bean?.hasRumAllowWebViewHost() ?? false);
     if (bean === null) {
       return;
     }
@@ -185,9 +187,8 @@ export class FTRemoteConfigManager {
     if (bean.getRumEnableTraceWebView() !== null) {
       config.setEnableTraceWebView(bean.getRumEnableTraceWebView()!);
     }
-    if (bean.getRumAllowWebViewHost() !== null) {
-      config.setAllowWebViewHost(bean.getRumAllowWebViewHost());
-    }
+    // Host overrides are retained on Base Config. Do not mutate the legacy
+    // RUM value: it must become visible again when the remote key is removed.
   }
 
   /** Apply cached logger values before the logger manager is initialized. */
@@ -281,6 +282,7 @@ export class FTRemoteConfigManager {
         }
       }
       bean.preservePreviousValidSamplingRates(this.remoteConfig);
+      bean.preservePreviousValidWebViewHosts(this.remoteConfig);
       const serialized = bean.toJsonString();
       if (serialized.length === 0) {
         this.saveFetchTime(now);

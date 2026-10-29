@@ -7,6 +7,7 @@ import {
   StressTestStats
 } from '../utils/StressTestManager';
 import { TestPageHeader } from '../components/TestPageHeader';
+import { StressRealActionControl, StressRealLongTaskControl } from '../components/StressCollectionControls';
 import { TestPageTheme } from '../constants/TestPageTheme';
 import { DemoLogger } from '../utils/DemoLogger';
 
@@ -211,6 +212,9 @@ export struct StressTestBPage {
         title: 'Stress Test Page B',
         onBack: () => this.navigateBack()
       })
+
+      StressRealActionControl({ running: this.stats.isRunning && this.stats.enableActions && this.stats.useRealActions })
+      StressRealLongTaskControl({ running: this.stats.isRunning && this.stats.enableLongTasks && this.stats.useRealLongTasks })
 
       // Content
       Column({ space: 20 }) {

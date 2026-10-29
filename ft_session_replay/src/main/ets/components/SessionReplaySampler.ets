@@ -46,10 +46,10 @@ export class SessionReplaySampler {
     if (rate <= 0) {
       return false;
     }
-    if (rate >= 1) {
+    if (rate >= 100) {
       return true;
     }
-    return this.toUnitInterval(value) < rate;
+    return this.toUnitInterval(value) < rate / 100;
   }
 
   private toUnitInterval(value: string): number {
