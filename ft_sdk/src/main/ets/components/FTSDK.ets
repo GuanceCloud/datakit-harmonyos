@@ -129,6 +129,16 @@ export class FTSDK {
   }
 
   /**
+   * Returns the current instance installed by installLogConfig, or null before
+   * successful installation in this SDK lifecycle. Reinstall after changing
+   * configuration to synchronize the logging context and Workers.
+   */
+  public static getLogConfig(): FTLoggerConfig | null {
+    if (FTSDK.ftSdk === null || !FTSDK.logConfigReady) return null;
+    return TrackLogManager.getInstance().getLogConfig();
+  }
+
+  /**
    * Optionally inject the earliest application-start timestamp captured by the host app.
    * The value must use systemDateTime.getUptime(TimeType.STARTUP, true).
    */

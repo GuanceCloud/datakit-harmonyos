@@ -234,6 +234,8 @@ getAllHandlerKeys
 getAllStatuses
 getAllowWebViewHost
 getAllowedWebViewHosts
+getCapabilities
+getPrivacyLevel
 getAutoSync
 getBlockDurationMS
 getClientToken
@@ -303,6 +305,7 @@ getRumBlockDurationMs
 getRumCacheDiscardStrategy
 getRumCacheLimitCount
 getRumConfig
+getLogConfig
 getRumEnableResourceHostIP
 getRumEnableTraceUserAction
 getRumEnableTraceUserResource
@@ -440,6 +443,10 @@ servers
 serviceName
 setActionTrackingHandler
 setAllowWebViewHost
+isAllowWebViewHostConfigured
+setEnableWebViewLog
+isEnableWebViewLog
+hasRumAllowWebViewHost
 setAutoActionTrackingEnabled
 setAutoSync
 setCompressIntakeRequests

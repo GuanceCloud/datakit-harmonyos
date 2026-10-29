@@ -1,6 +1,6 @@
 import { webview } from '@kit.ArkWeb';
 import { util } from '@kit.ArkTS';
-import { FTSDK, FTLoggerConfig, FTWebViewHandler, FTRemoteConfigFetchResult } from '@guancecloud/ft_sdk/Index';
+import { FTSDK, FTWebViewHandler, FTRemoteConfigFetchResult } from '@guancecloud/ft_sdk/Index';
 import { FTSessionReplay } from '@guancecloud/ft_session_replay';
 import { TestPageHeader } from '../components/TestPageHeader';
 
@@ -131,8 +131,13 @@ export struct WebViewHostTestPage {
         Toggle({ type: ToggleType.Switch, isOn: this.declarative }).id('host-probe-mode')
           .onChange((value: boolean): void => { this.declarative = value; })
         Button('开启 Web Log').id('host-probe-log').onClick(() => {
-          FTSDK.installLogConfig(new FTLoggerConfig().setEnableWebViewLog(true));
-          this.result = 'Web Log 已开启；使用当前 Logger 默认配置，重启应用恢复 Demo 启动配置。';
+          const logConfig = FTSDK.getLogConfig();
+          if (logConfig === null) {
+            this.result = '请先通过 FTSDK.installLogConfig 安装日志配置。';
+            return;
+          }
+          FTSDK.installLogConfig(logConfig.setEnableWebViewLog(true));
+          this.result = 'Web Log 已开启，当前日志配置的其他设置保持不变。';
         })
       }
       Row({ space: 6 }) {
