@@ -2039,6 +2039,9 @@ export class FTRUMInnerManager {
       fieldsMap.set(Constants.KEY_RUM_VIEW_RESOURCE_COUNT, viewBean.getResourceCount().toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_ERROR_COUNT, viewBean.getErrorCount().toString());
       const timeSpent = viewBean.getIsClose() ? viewBean.getTimeSpent() : viewBean.getCurrentDuration();
+      // The persistence callback must checkpoint the elapsed time actually
+      // written to this summary, rather than the View's initial DB value.
+      viewBean.setTimeSpent(timeSpent);
       fieldsMap.set(Constants.KEY_RUM_VIEW_TIME_SPENT, timeSpent.toString());
       fieldsMap.set(Constants.KEY_RUM_VIEW_LONG_TASK_COUNT, viewBean.getLongTaskCount().toString());
       const currentView = this.findCurrentViewById(viewBean.getId());

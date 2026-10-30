@@ -10,6 +10,7 @@ import * as FTSQL from './FTSQL';
 import { SyncDataJSON } from './bean/SyncData';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { ViewBeanJSON } from './bean/ViewBean';
+import { applyDurableRumViewSnapshot, recoverRumView, rumViewDuration } from './FTRumViewRecovery';
 import { CollectType, parseCollectType } from '../rum/enum/RUMEnums';
 import {
   SDKRumResourceContextDTO,
@@ -2145,10 +2146,11 @@ async function closeRumViewInTaskPool(
   const values = {} as relationalStore.ValuesBucket;
   values[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
   values[FTSQL.RUM_COLUMN_VIEW_LOAD_TIME] = loadTime;
-  values[FTSQL.RUM_COLUMN_VIEW_TIME_SPENT] = timeSpent;
   // A Replay Worker can commit while closeView is awaiting monitor data.
   // Preserve newer Replay metadata when applying that older closure snapshot.
   const existingView = await queryRumViewByIdInTaskPool(rdbStore, viewId);
+  values[FTSQL.RUM_COLUMN_VIEW_TIME_SPENT] = Math.max(
+    rumViewDuration(timeSpent), rumViewDuration(existingView === null ? 0 : existingView.timeSpent));
   const incomingAttr = parseJsonRecord(attr);
   const incomingReplay = splitViewExtraAttr(attr);
   if (existingView !== null) {
@@ -2294,39 +2296,36 @@ async function updateViewUploadTimeInTaskPool(
 }
 
 // A delayed completion may describe an open View that has since closed, or a
-// closed View whose resource counters have changed. Only acknowledge its exact
-// snapshot, and delete it in the same transaction after successful persistence.
+// closed View whose resource counters have changed. Checkpoint its duration,
+// but acknowledge only its exact snapshot in the same transaction.
 async function acknowledgeViewInTaskPool(
   rdbStore: relationalStore.RdbStore,
   view: ViewBeanJSON | undefined,
   keepClosedView: boolean = false
 ): Promise<boolean> {
   if (!view || view.id.length === 0) return false;
-  const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-  predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
-  predicates.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, view.isClose ? 1 : 0);
-  predicates.equalTo(FTSQL.RUM_DATA_UPDATE_TIME, view.dataUpdateTime);
-  predicates.equalTo(FTSQL.RUM_VIEW_UPDATE_TIME, view.viewUpdateTime);
-  predicates.equalTo(FTSQL.RUM_COLUMN_PENDING_RESOURCE, view.pendingResource);
-  predicates.equalTo(FTSQL.RUM_COLUMN_ACTION_COUNT, view.actionCount);
-  predicates.equalTo(FTSQL.RUM_COLUMN_ERROR_COUNT, view.errorCount);
-  predicates.equalTo(FTSQL.RUM_COLUMN_RESOURCE_COUNT, view.resourceCount);
-  predicates.equalTo(FTSQL.RUM_COLUMN_LONG_TASK_COUNT, view.longTaskCount);
-  const values = {} as relationalStore.ValuesBucket;
-  // Keep a closed View queryable while unfinished resources can still update
-  // its counters before the final snapshot is acknowledged.
-  values[FTSQL.RUM_DATA_UPLOAD_TIME] = view.isClose && view.pendingResource > 0 ? 0 : view.dataUpdateTime;
-  values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime + 1;
   rdbStore.beginTransaction();
   try {
-    const updated = await rdbStore.update(values, predicates);
-    if (updated > 0 && view.isClose && view.pendingResource <= 0 && !keepClosedView) {
-      const closed = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
-      closed.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
-      await rdbStore.delete(closed);
+    const current = await queryRumViewByIdInTaskPool(rdbStore, view.id);
+    if (current === null) {
+      rdbStore.commit();
+      return false;
+    }
+    const result = applyDurableRumViewSnapshot(current, view, keepClosedView, Date.now());
+    const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+    predicates.equalTo(FTSQL.RUM_COLUMN_ID, current.id);
+    if (result.remove) {
+      await rdbStore.delete(predicates);
+    } else if (result.changed) {
+      const values = {} as relationalStore.ValuesBucket;
+      values[FTSQL.RUM_COLUMN_VIEW_TIME_SPENT] = current.timeSpent;
+      values[FTSQL.RUM_DATA_UPLOAD_TIME] = current.dataUploadTime;
+      values[FTSQL.RUM_VIEW_UPDATE_TIME] = current.viewUpdateTime;
+      values[FTSQL.RUM_DATA_UPDATE_TIME] = current.dataUpdateTime;
+      await rdbStore.update(values, predicates);
     }
     rdbStore.commit();
-    return updated > 0;
+    return result.acknowledged;
   } catch (error) {
     rdbStore.rollBack();
     throw new Error(String(error));
@@ -3132,16 +3131,35 @@ async function closeAllActionAndViewInTaskPool(
   let updated = 0;
   rdbStore.beginTransaction();
   try {
-    const viewValues = {} as relationalStore.ValuesBucket;
-    viewValues[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
-    viewValues[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = 0;
-    viewValues[FTSQL.RUM_DATA_UPDATE_TIME] = now;
-    updated += await rdbStore.update(viewValues, new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW));
+    const rows = await rdbStore.querySql(`SELECT * FROM ${FTSQL.FT_TABLE_VIEW}
+      WHERE ${FTSQL.RUM_COLUMN_IS_CLOSE} = 0 OR ${FTSQL.RUM_COLUMN_PENDING_RESOURCE} > 0`);
+    const views: ViewBeanJSON[] = [];
+    try {
+      if (rows.goToFirstRow()) {
+        do { views.push(readViewFromResultSet(rows)); } while (rows.goToNextRow());
+      }
+    } finally { rows.close(); }
+    for (const view of views) {
+      if (!recoverRumView(view, now)) continue;
+      const values = {} as relationalStore.ValuesBucket;
+      values[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
+      values[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = 0;
+      values[FTSQL.RUM_DATA_UPDATE_TIME] = view.dataUpdateTime;
+      values[FTSQL.RUM_VIEW_UPDATE_TIME] = view.viewUpdateTime;
+      const predicates = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_VIEW);
+      predicates.equalTo(FTSQL.RUM_COLUMN_ID, view.id);
+      updated += await rdbStore.update(values, predicates);
+    }
 
     const actionValues = {} as relationalStore.ValuesBucket;
     actionValues[FTSQL.RUM_COLUMN_IS_CLOSE] = 1;
     actionValues[FTSQL.RUM_COLUMN_PENDING_RESOURCE] = 0;
-    updated += await rdbStore.update(actionValues, new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION));
+    const openActions = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+    openActions.equalTo(FTSQL.RUM_COLUMN_IS_CLOSE, 0);
+    updated += await rdbStore.update(actionValues, openActions);
+    const pendingActions = new relationalStore.RdbPredicates(FTSQL.FT_TABLE_ACTION);
+    pendingActions.greaterThan(FTSQL.RUM_COLUMN_PENDING_RESOURCE, 0);
+    updated += await rdbStore.update(actionValues, pendingActions);
     await rdbStore.delete(new relationalStore.RdbPredicates(FTSQL.FT_TABLE_PENDING_RUM_RESOURCE));
     rdbStore.commit();
   } catch (error) {

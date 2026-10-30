@@ -8,6 +8,7 @@ import { ViewBeanJSON } from './bean/ViewBean';
 import { ActionBeanJSON } from './bean/ActionBean';
 import { Constants } from '../Constants';
 import { parseCollectType } from '../rum/enum/RUMEnums';
+import { applyDurableRumViewSnapshot, recoverRumView, rumViewDuration } from './FTRumViewRecovery';
 
 export interface FTRumStoreAccess {
   read(kind: string, id: string): string | null;
@@ -71,7 +72,8 @@ export class FTRumFileStore {
         response.value = view !== null;
         if (view) {
           view.isClose = true; view.viewLoadTime = request.loadTime || 0;
-          view.timeSpent = request.timeSpent || 0; view.dataUpdateTime = now;
+          view.timeSpent = Math.max(rumViewDuration(view.timeSpent), rumViewDuration(request.timeSpent || 0));
+          view.dataUpdateTime = now;
           if (request.newSessionId) { view.sessionId = request.newSessionId; }
           if (request.attr) { this.applyAttr(view, request.attr); }
           this.put(changes, 'view', view.id, view);
@@ -162,7 +164,7 @@ export class FTRumFileStore {
         }
         break;
       case 'acknowledgeView':
-        response.value = this.acknowledgeView(request.view, changes, request.keepClosedView === true);
+        response.value = this.acknowledgeView(request.view, changes, request.keepClosedView === true, now);
         break;
       case 'getActionInfo': response.actionInfo = action ? { startTime: action.startTime } : null; break;
       case 'getActionCounts':
@@ -229,10 +231,10 @@ export class FTRumFileStore {
       }
       case 'closeAllActionAndView':
         for (const candidate of this.views()) {
-          candidate.isClose = true; candidate.pendingResource = 0; candidate.dataUpdateTime = now;
-          this.put(changes, 'view', candidate.id, candidate);
+          if (recoverRumView(candidate, now)) this.put(changes, 'view', candidate.id, candidate);
         }
         for (const candidate of this.actions()) {
+          if (candidate.isClose && candidate.pendingResource <= 0) continue;
           candidate.isClose = true; candidate.pendingResource = 0;
           this.put(changes, 'action', candidate.id, candidate);
         }
@@ -302,35 +304,24 @@ export class FTRumFileStore {
   }
 
   // Keep the acknowledgement conditional so a delayed upload completion cannot
-  // overwrite or delete a newer View aggregate. This matches the SQLite
-  // acknowledgement predicates and updates both fields atomically in one commit.
+  // overwrite or delete a newer View aggregate. Share SQLite's snapshot rule
+  // and persist the duration checkpoint with the acknowledgement in one commit.
   private acknowledgeView(
     snapshot: ViewBeanJSON | undefined,
     changes: FTCacheMutation[],
-    keepClosedView: boolean = false
+    keepClosedView: boolean,
+    now: number
   ): boolean {
     if (!snapshot || snapshot.id.length === 0) { return false; }
     const current = this.view(snapshot.id);
-    if (!current || !this.matchesAcknowledgedView(current, snapshot)) { return false; }
-    if (current.isClose && current.pendingResource <= 0 && !keepClosedView) {
+    if (!current) return false;
+    const result = applyDurableRumViewSnapshot(current, snapshot, keepClosedView, now);
+    if (result.remove) {
       changes.push({ path: this.access.path('view', current.id), body: null });
-      return true;
+    } else if (result.changed) {
+      this.put(changes, 'view', current.id, current);
     }
-    current.dataUploadTime = current.isClose && current.pendingResource > 0 ? 0 : current.dataUpdateTime;
-    current.viewUpdateTime++;
-    this.put(changes, 'view', current.id, current);
-    return true;
-  }
-
-  private matchesAcknowledgedView(current: ViewBeanJSON, snapshot: ViewBeanJSON): boolean {
-    return current.isClose === snapshot.isClose &&
-      current.dataUpdateTime === snapshot.dataUpdateTime &&
-      current.viewUpdateTime === snapshot.viewUpdateTime &&
-      current.pendingResource === snapshot.pendingResource &&
-      current.actionCount === snapshot.actionCount &&
-      current.errorCount === snapshot.errorCount &&
-      current.resourceCount === snapshot.resourceCount &&
-      current.longTaskCount === snapshot.longTaskCount;
+    return result.acknowledged;
   }
 
   private applyAttr(view: ViewBeanJSON, attr: string): void {

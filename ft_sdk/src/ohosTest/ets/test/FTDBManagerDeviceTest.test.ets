@@ -126,6 +126,49 @@ export default function ftDBManagerDeviceTest() {
       await dbManager.delete();
     });
 
+    it('durableViewDurationSurvivesRestartClosure', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const startTime = 1793273881508197400;
+      const view = new ViewBean('restart-duration-view', 'SessionReplayPocPage', startTime);
+      view.setSessionId('predecessor-session');
+      view.setTimeSpent(35_520_312);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      const reported = ViewBean.fromJSON(view.toJSON());
+      reported.setTimeSpent(5_810_555_000);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, reported)).assertTrue();
+      await FTDBTaskPoolExecutor.closeAllActionAndView(context);
+      const restored = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(restored !== null).assertTrue();
+      expect(restored!.getIsClose()).assertTrue();
+      expect(restored!.getTimeSpent()).assertEqual(5_810_555_000);
+      expect(restored!.getStartTime()).assertEqual(startTime);
+      expect(restored!.getSessionId()).assertEqual('predecessor-session');
+      await FTDBTaskPoolExecutor.closeAllActionAndView(context);
+      const repeated = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(repeated!.getDataUpdateTime()).assertEqual(restored!.getDataUpdateTime());
+      expect(repeated!.getViewUpdateTime()).assertEqual(restored!.getViewUpdateTime());
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, repeated!)).assertTrue();
+      expect(await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId())).assertNull();
+    });
+
+    it('lateOpenSummaryPreservesNewCountersAndDuration', 0, async () => {
+      const context = await DBAssert.getAppContext();
+      const view = new ViewBean('late-duration-view', 'view', TEST_NOW_NS);
+      await FTDBTaskPoolExecutor.upsertRumView(context, view);
+      const newer = ViewBean.fromJSON(view.toJSON());
+      newer.setActionCount(2);
+      newer.setViewUpdateTime(view.getViewUpdateTime() + 1);
+      await FTDBTaskPoolExecutor.updateRumView(context, newer);
+      const reported = ViewBean.fromJSON(view.toJSON());
+      reported.setTimeSpent(5_000_000_000);
+      expect(await FTDBTaskPoolExecutor.acknowledgeView(context, reported)).assertFalse();
+      const restored = await FTDBTaskPoolExecutor.queryRumViewById(context, view.getId());
+      expect(restored!.getTimeSpent()).assertEqual(5_000_000_000);
+      expect(restored!.getActionCount()).assertEqual(2);
+      expect(restored!.getDataUploadTime()).assertEqual(0);
+      expect(restored!.getViewUpdateTime()).assertEqual(newer.getViewUpdateTime());
+    });
+
     it('staleOpenAckKeepsClosedView', 0, async () => {
       const context = await DBAssert.getAppContext();
       const open = new ViewBean('delayed-open-view', 'delayed-open-view', TEST_NOW_NS);

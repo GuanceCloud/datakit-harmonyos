@@ -211,7 +211,7 @@ export class ViewBean {
     if (startTime > 0) {
       const now = Utils.getMonotonicNanoTime();
       if (now >= startTime) {
-        return now - startTime;
+        return Math.max(this.timeSpent, now - startTime);
       }
     }
     return Math.max(0, this.timeSpent);
