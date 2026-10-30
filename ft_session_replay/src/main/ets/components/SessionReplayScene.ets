@@ -69,6 +69,9 @@ export interface ArkUIReplayLightNode {
   nodeType: string;
   inspectorInfo: Object | null;
   shouldCaptureAsText: boolean;
+  /** Detached native ancestry for inherited WebView clip presentation. */
+  parentId?: number;
+  clipsChildren?: boolean;
   /** Resolved on UI thread; the Worker cannot consult the core slot registry. */
   webViewSlotId?: string;
   /** Internal controller/node join key; never used as wireframe.id or permanentId. */
@@ -303,6 +306,7 @@ export class SessionReplayScene {
           id: source.id, x, y, width: source.width, height: source.height,
           componentId: source.componentId, nodeType: source.nodeType, inspectorInfo: source.inspectorInfo,
           shouldCaptureAsText: source.shouldCaptureAsText, isRoot: source.isRoot,
+          parentId: source.parentId, clipsChildren: source.clipsChildren,
           webViewSlotId: source.webViewSlotId,
           webViewBindingId: source.webViewBindingId,
           isSelectArrow: source.isSelectArrow,

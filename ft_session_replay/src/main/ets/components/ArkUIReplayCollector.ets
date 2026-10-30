@@ -12,6 +12,7 @@ import { normalizeReplayFontWeight, readReplayFontWeight } from './ReplayFontWei
 import { ReplayComponentRaster, ReplayRasterOptions } from './ReplayComponentRaster';
 import { ReplayVideoCapture, ReplayVideoFrameProvider, ReplayVideoState } from './ReplayVideoCapture';
 import { ReplayVideoWireframes } from './ReplayVideoWireframes';
+import { ReplayWebViewClipMasks } from './ReplayWebViewClipMasks';
 import { ReplayNativeControlPaint } from './ReplayNativeControlPaint';
 import { ReplayControlWireframes } from './ReplayControlWireframes';
 import { ReplayCalendarWireframes } from './ReplayCalendarWireframes';
@@ -833,7 +834,9 @@ export class ArkUIReplayCollector {
     const wireframes: Array<ReplayWireframe> = [];
     const frameSources: Map<number, ArkUIReplayLightNode> = new Map();
     let extraBudget = Math.max(0, this.maxNodes - snapshot.nodes.length);
-    let hasControlParts = false;
+    // Web clip masks can appear/disappear without replacing the Browser slot.
+    // Keep the same stacking representation on both sides of that mutation.
+    let hasControlParts = snapshot.nodes.some((node): boolean => node.webViewSlotId !== undefined);
     const pageZIndices: Map<number, Array<number>> = new Map();
     this.pendingImageResources = [];
     const retained = new Set<number>();
@@ -1027,6 +1030,14 @@ export class ArkUIReplayCollector {
         }
       }
     }
+    const clipMasks = ReplayWebViewClipMasks.create(snapshot.nodes, wireframes, frameSources, extraBudget);
+    for (let index = clipMasks.length - 1; index >= 0; index--) {
+      const mask = clipMasks[index];
+      const frame = this.controlVector(mask.svg, mask.frame);
+      wireframes.splice(mask.afterIndex + 1, 0, frame);
+      frameSources.set(frame.id, mask.owner);
+      retained.add(frame.id);
+    }
     this.propertyCache.forEach((cached: CachedReplayProperties, id: number): void => {
       if (!retained.has(id)) {
         this.propertyCache.delete(id);
@@ -1169,7 +1180,8 @@ export class ArkUIReplayCollector {
     if (parentType === 'Marquee' && marqueeTextX !== undefined) x = this.roundReplayMetric(marqueeTextX);
 
     const bounds = this.createClipRect(x, y, width, height);
-    const clipsDescendants = isRoot || this.isClipToFrame(node);
+    const clipsChildren = this.isClipToFrame(node);
+    const clipsDescendants = isRoot || clipsChildren;
     const childClip = clipsDescendants
       ? this.intersectClipRects(ancestorClip, bounds)
       : ancestorClip;
@@ -1252,6 +1264,8 @@ export class ArkUIReplayCollector {
         height,
         componentId: this.readComponentId(node),
         nodeType,
+        parentId: parentId > 0 ? this.toProtocolId(parentId) : undefined,
+        clipsChildren,
         systemIconSvg,
         systemIconZIndex,
         calendarTheme: nodeType === 'CalendarDialog' ?

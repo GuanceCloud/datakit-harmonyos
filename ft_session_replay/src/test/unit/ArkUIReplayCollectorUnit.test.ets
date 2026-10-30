@@ -248,6 +248,87 @@ export default function arkUIReplayCollectorUnitTest(): void {
       }
     });
 
+    it('restores a rounded native Web container with a reusable vector above its children and below its sibling', 0, () => {
+      const bindingId = '__guance_rounded_web';
+      FTSessionReplayBridgeRegistry.registerWebReplayComponent(bindingId);
+      try {
+        const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 500)
+          .withInspector({ 'backgroundColor': '#FFF5F7FB' } as Record<string, Object>);
+        const attrs: Record<string, Object> = { 'backgroundColor': '#FFF0FDFA', 'borderRadius': '10vp' };
+        const pane = root.append(new ReplayFrameNodeFixture(2, 12, 20, 12, 20, 276, 400, true).withInspector(attrs));
+        pane.append(new ReplayFrameNodeFixture(3, 13, 21, 13, 21, 274, 38).withNodeType('Text')
+          .withInspector({ 'content': 'Web heading', 'backgroundColor': '#FFCCFBF1' } as Record<string, Object>));
+        pane.append(new ReplayFrameNodeFixture(4, 13, 60, 13, 60, 274, 359, true).withNodeType('Row'))
+          .append(new ReplayFrameNodeFixture(5, 13, 60, 13, 60, 274, 359).withNodeType('Web')
+            .withCustomProperty(FTWebViewReplayBridge.PROPERTY, bindingId));
+        root.append(new ReplayFrameNodeFixture(6, 12, 450, 12, 450, 100, 30).withNodeType('Text'));
+        const pages: Array<ArkUIReplayScenePage> = [
+          { key: 'rounded-page', rootId: 'fixture-1', root: asFrameNode(root), retained: false }
+        ];
+        const collector = new ArkUIReplayCollector(1500, new FTSessionReplayConfig().setImagePrivacy(ImagePrivacy.MASK_ALL));
+        const capture = (): SessionReplayRecord => collector.materializeLightSnapshot(collector.captureSceneLight(
+          new EmptyInspectorInfo() as Object as UIContext, [], 1, 1234, new Map(),
+          { x: 0, y: 0, width: 300, height: 500 }, pages));
+        const first = capture();
+        const frames = (first.data as FullSnapshotData).wireframes;
+        const mask = frames.find((frame): boolean => frame.permanentId?.startsWith('ft-session-replay-web-clip:') === true) as ReplayImageWireframe;
+        expect(mask !== undefined).assertTrue();
+        expect(mask.type).assertEqual('image');
+        expect(mask.mimeType).assertEqual('svg+xml');
+        expect(mask.x).assertEqual(12);
+        expect(mask.y).assertEqual(20);
+        expect(mask.width).assertEqual(276);
+        expect(mask.height).assertEqual(400);
+        expect(frames.indexOf(mask) > frames.indexOf(findWireframe(frames, 5)!)).assertTrue();
+        expect(frames.indexOf(mask) < frames.indexOf(findWireframe(frames, 6)!)).assertTrue();
+        const web = findWireframe(frames, 5) as ReplayWebViewWireframe;
+        expect(web.y).assertEqual(60);
+        expect(web.height).assertEqual(359);
+        expect(web.clip?.bottom).assertEqual(0);
+        const resources = collector.takeCapturedImageResources();
+        expect(resources.length).assertEqual(1);
+        expect(resources[0].mimeType).assertEqual('image/svg+xml');
+        const repeated = (capture().data as FullSnapshotData).wireframes.find((frame): boolean => frame.id === mask.id) as ReplayImageWireframe;
+        expect(repeated.resourceId).assertEqual(mask.resourceId);
+        const processor = new ReplaySnapshotProcessor();
+        processor.setFullSnapshotBaseline(first);
+        attrs['borderRadius'] = '0vp';
+        const change = processor.createMutationRecord(capture())!.data as ReplayMutationData;
+        expect(change.removes.some((removed): boolean => removed.id === mask.id)).assertTrue();
+        expect(change.removes.some((removed): boolean => removed.id === web.id)).assertFalse();
+        attrs['borderRadius'] = '10vp';
+        const manual = collector.captureFrameNode(asFrameNode(root));
+        const manualWeb = findWireframe((manual.data as FullSnapshotData).wireframes, 5)!;
+        processor.setFullSnapshotBaseline(manual);
+        attrs['borderRadius'] = '0vp';
+        const manualChange = processor.createMutationRecord(collector.captureFrameNode(asFrameNode(root)))!.data as ReplayMutationData;
+        expect(manualChange.removes.some((removed): boolean => removed.id === manualWeb.id)).assertFalse();
+      } finally {
+        FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(bindingId);
+      }
+    });
+
+    it('does not fabricate Web corner masks for unclipped parents or unknown translucent backdrops', 0, () => {
+      const bindingId = '__guance_unclipped_web';
+      FTSessionReplayBridgeRegistry.registerWebReplayComponent(bindingId);
+      try {
+        for (const clips of [false, true]) {
+          const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 300, 500)
+            .withInspector({ 'backgroundColor': clips ? '#80F5F7FB' : '#FFF5F7FB' } as Record<string, Object>);
+          root.append(new ReplayFrameNodeFixture(2, 12, 20, 12, 20, 276, 400, clips)
+            .withInspector({ 'borderRadius': '10vp' } as Record<string, Object>))
+            .append(new ReplayFrameNodeFixture(3, 12, 20, 12, 20, 276, 400).withNodeType('Web')
+              .withCustomProperty(FTWebViewReplayBridge.PROPERTY, bindingId));
+          const collector = new ArkUIReplayCollector();
+          const frames = (collector.captureFrameNode(asFrameNode(root)).data as FullSnapshotData).wireframes;
+          expect(frames.some((frame): boolean => frame.permanentId?.startsWith('ft-session-replay-web-clip:') === true)).assertFalse();
+          expect(collector.takeCapturedImageResources().length).assertEqual(0);
+        }
+      } finally {
+        FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(bindingId);
+      }
+    });
+
     it('preserves initial native typography and ignores unset actual font sizes before a node update', 0, () => {
       const attrs: Record<string, Object> = { 'content': 'Initial text', 'fontFamily': 'HarmonyOS Sans',
         'fontColor': '#CE000000', 'fontSize': '16fp', 'actualFontSize': '0px', 'fontWeight': 'FontWeight.Normal' };
