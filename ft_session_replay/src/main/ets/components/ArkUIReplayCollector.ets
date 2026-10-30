@@ -471,7 +471,10 @@ export class ArkUIReplayCollector {
         if (!Number.isFinite(nativeX) || !Number.isFinite(nativeY) ||
           !Number.isFinite(layout.x) || !Number.isFinite(layout.y)) continue;
         const pageNodes: Array<ArkUIReplayLightNode> = [];
-        this.appendLightPreOrder(root, scale, pageNodes, true, undefined,
+        // Safe-area expansion can paint beyond the root's measured size.
+        // Scene composition owns the window clip; retain only native clips
+        // here rather than imposing an extra clip on every Router root.
+        this.appendLightPreOrder(root, scale, pageNodes, true, false, undefined,
           page.parentKey === undefined ? 1 : this.readAncestorOpacity(root), 0, 0, excludedIds,
           this.maxNodes - (page.parentKey === undefined ? 2 : 1));
         if (page.parentKey === undefined) {
@@ -531,7 +534,7 @@ export class ArkUIReplayCollector {
     for (const root of this.readWindowOverlayRoots(uiContext)) {
       try {
         const start = overlays.length;
-        this.appendLightPreOrder(root, scale, overlays, false, viewportClip,
+        this.appendLightPreOrder(root, scale, overlays, false, false, viewportClip,
           this.readAncestorOpacity(root), -viewport.x, -viewport.y, capturedIds, this.maxNodes - 1);
         overlayLayer += this.maxNodes + 1;
         for (let index = start; index < overlays.length; index++) {
@@ -1103,6 +1106,7 @@ export class ArkUIReplayCollector {
     vpToPxScale: number,
     output: Array<ArkUIReplayLightNode>,
     isRoot: boolean,
+    clipRootToBounds: boolean = true,
     ancestorClip: ReplayClipRect | null | undefined = undefined,
     ancestorOpacity: number = 1,
     sceneOffsetX: number = 0,
@@ -1181,7 +1185,7 @@ export class ArkUIReplayCollector {
 
     const bounds = this.createClipRect(x, y, width, height);
     const clipsChildren = this.isClipToFrame(node);
-    const clipsDescendants = isRoot || clipsChildren;
+    const clipsDescendants = (isRoot && clipRootToBounds) || clipsChildren;
     const childClip = clipsDescendants
       ? this.intersectClipRects(ancestorClip, bounds)
       : ancestorClip;
@@ -1326,7 +1330,7 @@ export class ArkUIReplayCollector {
         inlineRuns === undefined && nodeType !== 'RichEditor' && !(nodeType === 'Button' && hasNativeLabel) &&
         !(nodeType === 'Radio' && !String(controlAttrs['indicatorType'] ?? 'TICK').toUpperCase().includes('CUSTOM')) &&
         ((nodeType !== 'Text' && !this.controls.isSupported(nodeType)) || componentRasterKey === undefined)) {
-        this.appendLightPreOrder(child, vpToPxScale, output, false, childClip, opacity, sceneOffsetX, sceneOffsetY,
+        this.appendLightPreOrder(child, vpToPxScale, output, false, clipRootToBounds, childClip, opacity, sceneOffsetX, sceneOffsetY,
           excludedIds, nodeBudget, nodeType, parentType, nodeId, parentId, textX, modalProjection,
           childFontWeightOwnerId);
       }

@@ -171,6 +171,50 @@ export default function webReplayUnitTest() {
       }
     });
 
+    it('aligns Browser VisualViewport records while preserving zoom and scroll offsets', 0, () => {
+      const recorder = new FTSessionReplayRecorder(new FTSessionReplayConfig().setSampleRate(100));
+      const registry = FTSessionReplayBridgeRegistry;
+      const componentId = 'visual-viewport-web';
+      const slotId = '1000000321';
+      const now = Date.now();
+      const context: SessionReplayContext = { applicationId: 'visual-app', sessionId: 'visual-session',
+        viewId: 'browser-view' };
+      recorder.start();
+      registry.setWebReplayAppForeground(true);
+      registry.registerWebReplayComponent(componentId);
+      try {
+        registry.observeWebReplaySlots(context.applicationId, context.sessionId, 'native-view',
+          [{ componentId, slotId, width: 320, height: 560 }], now);
+        for (const scale of [1, 2, 0]) {
+          expect(recorder.onWebReplayData({
+            applicationId: context.applicationId, sessionId: context.sessionId, viewId: context.viewId,
+            slotId, linkContext: {}, timestamp: now,
+            payload: `{"timestamp":${now},"type":8,"data":{"width":320,"height":480,"scale":${scale},` +
+              '"offsetLeft":12,"offsetTop":24,"pageLeft":32,"pageTop":184}}'
+          })).assertTrue();
+        }
+        recorder.flushWebReplayData();
+        const records = recorder.getRecordedRecords(context);
+        expect(records.length).assertEqual(3);
+        for (let index = 0; index < records.length; index++) {
+          const data = records[index].data as Record<string, number>;
+          const scale = index === 1 ? 2 : 1;
+          expect(records[index].type as number).assertEqual(8);
+          expect(records[index].slotId).assertEqual(slotId);
+          expect(data.scale).assertEqual(scale);
+          expect(data.width * data.scale).assertEqual(320);
+          expect(data.height * data.scale).assertEqual(560);
+          expect(data.offsetLeft).assertEqual(12);
+          expect(data.offsetTop).assertEqual(24);
+          expect(data.pageLeft).assertEqual(32);
+          expect(data.pageTop).assertEqual(184);
+        }
+      } finally {
+        registry.unregisterWebReplayComponent(componentId);
+        recorder.stop();
+      }
+    });
+
     it('persists Browser records with the native wireframe ID and rejects retired IDs', 0, () => {
       const collector = new ArkUIReplayCollector();
       const first = collector.materializeLightSnapshot(webSnapshot('ignored-alias', 0, 1, 1000000126));

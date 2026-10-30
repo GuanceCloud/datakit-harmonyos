@@ -250,6 +250,57 @@ export default function webReplayBridgeUnitTest() {
       }
     });
 
+    it('refreshes the Browser visual viewport on native resize and clears it for a new Browser view', 0, async () => {
+      const manager = FTRUMConfigManager.getInstance();
+      const previous = manager.getConfig();
+      manager.initWithConfig(new FTRUMConfig().setRumAppId('visual-app').setEnableTraceWebView(true));
+      const registry = FTSessionReplayBridgeRegistry;
+      const bridge = new ReplayBridgeFixture();
+      const handler = new FTWebViewHandler();
+      const controller = new ReplayControllerFixture();
+      registry.register(bridge);
+      registry.setWebReplayAppForeground(true);
+      try {
+        handler.setWebView(controller as Object as webview.WebviewController);
+        const componentId = FTWebViewReplayBridge.bindingId(controller);
+        const session = FTRUMInnerManager.getInstance().getSessionId();
+        const observe = async (height: number): Promise<void> => {
+          registry.observeWebReplaySlots('visual-app', session, 'native-view',
+            [{ componentId, slotId: '3002', width: 320, height }], Date.now());
+          await new Promise<void>((resolve): void => { setTimeout(resolve, 10); });
+        };
+        await observe(480);
+        const receiver = handler.getMessageReceiver();
+        receiver.sendEvent('{"name":"session_replay","view":{"id":"browser-view"},"data":' +
+          `{"timestamp":${Date.now()},"type":8,"data":{"width":160,"height":240,"scale":2,` +
+          '"offsetLeft":12,"offsetTop":24,"pageLeft":32,"pageTop":184}}}');
+        await observe(560);
+        expect(controller.snapshotRequests).assertEqual(1);
+        expect(bridge.payloads.length).assertEqual(3);
+        const visual = JSON.parse(bridge.payloads[2]) as Record<string, number | Record<string, number>>;
+        expect(visual.type as number).assertEqual(8);
+        const data = visual.data as Record<string, number>;
+        expect(data.width).assertEqual(160);
+        expect(data.height).assertEqual(280);
+        expect(data.scale).assertEqual(2);
+        expect(data.offsetLeft).assertEqual(12);
+        expect(data.offsetTop).assertEqual(24);
+        expect(data.pageLeft).assertEqual(32);
+        expect(data.pageTop).assertEqual(184);
+        await observe(560);
+        expect(bridge.payloads.length).assertEqual(3);
+        receiver.sendEvent(rrwebEvent('next-browser-view'));
+        await observe(600);
+        expect(bridge.payloads.length).assertEqual(5);
+        expect(bridge.views[4]).assertEqual('next-browser-view');
+      } finally {
+        handler.clearWebController();
+        registry.unregister(bridge);
+        if (previous !== null) manager.initWithConfig(previous);
+        else FTRUMConfigManager.resetStateInternal();
+      }
+    });
+
     it('does not let a duplicate handler unregister the original controller binding', 0, () => {
       const manager = FTRUMConfigManager.getInstance();
       const previous = manager.getConfig();

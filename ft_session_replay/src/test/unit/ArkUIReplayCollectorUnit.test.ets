@@ -46,6 +46,12 @@ interface TextAlignmentCase {
   vertical: string;
 }
 
+interface SafeAreaSceneClipCase {
+  clipsRoot: boolean;
+  viewportHeight: number;
+  expectedBottom: number;
+}
+
 class PageInspectorInfo {
   public backgroundColor: string = '#00000000';
   public zIndex: number;
@@ -1634,6 +1640,46 @@ export default function arkUIReplayCollectorUnitTest(): void {
       expect(child?.height).assertEqual(40);
       expect(child?.clip?.left).assertEqual(10);
       expect(child?.clip?.bottom).assertEqual(10);
+    });
+
+    it('preserves safe-area-expanded Web content beyond the measured Router root without losing native clips', 0, () => {
+      // Device geometry: 1276x2848 window, 133px top / 98px bottom safe areas.
+      // NavDestination measures 2617px, but paints its children in the expanded
+      // window. The Web ends at 2705px and must not be cut off at 2617px.
+      const cases: Array<SafeAreaSceneClipCase> = [
+        { clipsRoot: false, viewportHeight: 813.71, expectedBottom: 0 },
+        { clipsRoot: true, viewportHeight: 813.71, expectedBottom: 25.14 },
+        { clipsRoot: false, viewportHeight: 750, expectedBottom: 22.85 }
+      ];
+      const bindingId = '__guance_safe_area_web';
+      FTSessionReplayBridgeRegistry.registerWebReplayComponent(bindingId);
+      try {
+        for (const testCase of cases) {
+          const root = new ReplayFrameNodeFixture(1, 0, 0, 0, 0, 1276, 2617, testCase.clipsRoot)
+            .withNodeType('NavDestination');
+          const content = root.append(new ReplayFrameNodeFixture(2, 0, 0, 0, 0, 1276, 2617)
+            .withNodeType('NavDestinationContent'));
+          const column = content.append(new ReplayFrameNodeFixture(3, 0, 38, 0, 38, 1276, 2617));
+          const row = column.append(new ReplayFrameNodeFixture(4, 12.86, 485.71, 12.86, 485.71, 1186, 1005, true)
+            .withNodeType('Row'));
+          row.append(new ReplayFrameNodeFixture(5, 12.86, 485.71, 12.86, 485.71, 1186, 1005)
+            .withNodeType('Web').withCustomProperty(FTWebViewReplayBridge.PROPERTY, bindingId));
+          const pages: Array<ArkUIReplayScenePage> = [
+            { key: 'router-web', rootId: 'fixture-1', root: asFrameNode(root), retained: false }
+          ];
+          const collector = new ArkUIReplayCollector();
+          const snapshot = collector.materializeLightSnapshot(collector.captureSceneLight(
+            new EmptyInspectorInfo() as Object as UIContext, [], 3.5, 1234, new Map(),
+            { x: 0, y: 0, width: 364.57, height: testCase.viewportHeight }, pages));
+          const web = findWireframe((snapshot.data as FullSnapshotData).wireframes, 5) as ReplayWebViewWireframe;
+          expect(web.type).assertEqual('webview');
+          expect(web.y).assertEqual(485.71);
+          expect(web.height).assertEqual(287.14);
+          expect(web.clip?.bottom).assertEqual(testCase.expectedBottom);
+        }
+      } finally {
+        FTSessionReplayBridgeRegistry.unregisterWebReplayComponent(bindingId);
+      }
     });
 
     it('records page backing and isolates zIndex without relayering the successor on release', 0, () => {

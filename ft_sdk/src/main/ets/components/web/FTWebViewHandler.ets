@@ -32,10 +32,20 @@ interface WebReplayViewportResizeData {
   height: number;
 }
 
+interface WebReplayVisualViewportData {
+  scale: number;
+  offsetLeft: number;
+  offsetTop: number;
+  pageLeft: number;
+  pageTop: number;
+  width: number;
+  height: number;
+}
+
 interface WebReplayViewportResizeRecord {
   timestamp: number;
   type: number;
-  data: WebReplayViewportResizeData;
+  data: WebReplayViewportResizeData | WebReplayVisualViewportData;
 }
 
 /**
@@ -181,6 +191,7 @@ export class FTWebViewHandler implements JsReceiver {
   private sessionReplayViewportKey: string = '';
   private sessionReplayBrowserViewId: string = '';
   private sessionReplayHasBrowserRecords: boolean = false;
+  private sessionReplayVisualViewport: WebReplayVisualViewportData | null = null;
   private allowWebViewHost: string[] | null = null;
   private hostPolicyBound: boolean = false;
   private webViewId: string = '';
@@ -389,6 +400,7 @@ export class FTWebViewHandler implements JsReceiver {
     this.sessionReplayViewportKey = '';
     this.sessionReplayBrowserViewId = '';
     this.sessionReplayHasBrowserRecords = false;
+    this.sessionReplayVisualViewport = null;
     this.webController = null;
     this.hostPolicyBound = false;
     this.allowWebViewHost = null;
@@ -879,8 +891,21 @@ export class FTWebViewHandler implements JsReceiver {
     if (!accepted) {
       this.logIgnoredWebViewEvent(WEB_JS_TYPE_SESSION_REPLAY, 'recorder_rejected');
     } else {
+      if (this.sessionReplayBrowserViewId !== viewId) this.sessionReplayVisualViewport = null;
       this.sessionReplayHasBrowserRecords = true;
       this.sessionReplayBrowserViewId = viewId;
+      if (dataJson['type'] === 8) {
+        const viewport = dataJson['data'] as WebReplayVisualViewportData;
+        if (viewport !== null && typeof viewport === 'object' &&
+          [viewport.scale, viewport.offsetLeft, viewport.offsetTop, viewport.pageLeft, viewport.pageTop,
+            viewport.width, viewport.height].every((value: number): boolean => Number.isFinite(value)) &&
+          viewport.scale > 0 && viewport.width > 0 && viewport.height > 0) {
+          this.sessionReplayVisualViewport = {
+            scale: viewport.scale, offsetLeft: viewport.offsetLeft, offsetTop: viewport.offsetTop,
+            pageLeft: viewport.pageLeft, pageTop: viewport.pageTop, width: viewport.width, height: viewport.height
+          };
+        }
+      }
     }
     this.refreshSessionReplaySnapshotTimer();
     return accepted;
@@ -1072,6 +1097,18 @@ export class FTWebViewHandler implements JsReceiver {
     record.data = viewport;
     this.handleSessionReplayWebEvent(
       record as Object as Record<string, string | number | object>, this.sessionReplayBrowserViewId);
+    // A previous type-8 clip survives a source-4 resize in the Browser player.
+    // Refresh both at the same boundary, retaining Browser zoom and scrolling.
+    const previous = this.sessionReplayVisualViewport;
+    if (previous === null) return;
+    const visual: WebReplayVisualViewportData = {
+      scale: previous.scale, offsetLeft: previous.offsetLeft, offsetTop: previous.offsetTop,
+      pageLeft: previous.pageLeft, pageTop: previous.pageTop,
+      width: width / previous.scale, height: height / previous.scale
+    };
+    const visualRecord: WebReplayViewportResizeRecord = { timestamp: record.timestamp, type: 8, data: visual };
+    this.handleSessionReplayWebEvent(
+      visualRecord as Object as Record<string, string | number | object>, this.sessionReplayBrowserViewId);
   }
 
   private requestSessionReplayFullSnapshot(): void {
