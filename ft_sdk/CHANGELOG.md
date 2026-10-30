@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.1.18-alpha06] - 2026-10-30
+- Fixed restored View durations falling below their last durable summary after a process restart. Delayed summary callbacks retain elapsed-time checkpoints without overwriting newer counters, and restart recovery preserves the original View timestamp and Session while avoiding repeated closure of completed Views.
+- Fixed embedded WebView Replay retaining an outdated Browser visual viewport after native layout changes; resize events now preserve Browser zoom and scroll offsets.
+- Added `FTSDK.getLogConfig()` to access the installed log configuration and preserve existing settings when updating it.
+- Fixed WebView Host allow-list semantics for empty lists, explicit Base configuration and remote overrides. RUM, Web Log and Replay now share the same per-binding Host policy; Browser Log forwarding is available through `setEnableWebViewLog(true)`.
+- Fixed Resource request-size estimates after header changes, normalized manual HTTP protocol values, and protected transport fields from custom-property and global-tag overrides. Invalid byte counts are now ignored.
+- Fixed Resource network snapshots retaining metrics from a previous network when capability queries fail, and protected snapshot fields from custom-property overrides.
+- Improved local network Error filtering with HarmonyOS error-code classification for DNS, timeout, cancellation, certificate and connection failures. RCP and Axios preserve the original request failure values.
+- Fixed inaccurate foreground/background crash-free durations after crash recovery, during background-only startup, and when the SDK is initialized late.
+- Added `dispose()` to the `applyFTAxiosTrack(...)` registration result for removing SDK interceptors when no longer needed, and fixed duplicate registration on the same Axios client.
+- Fixed automatic Router and Navigation View tracking across Session renewal, RUM reconfiguration, and foreground/background transitions, including page hiding, filtering, and unintended closure of manually started Views.
+- Fixed inconsistent Session, View, and Action associations after Session renewal or RUM reconfiguration. In-flight Resources retain their original request context.
+- Fixed stale callbacks after SDK shutdown, reset, or reinitialization overwriting new Session and View state, and preserved pending View closures and crash-recovery context during lifecycle changes.
+- Fixed Action completion and Resource counter updates when requests finish after their Action closes, while preserving collection of requests still in flight.
+- Optimized background Session handling by suspending periodic expiry checks while retaining background collection. New events and foreground return check expiry, and passive checks no longer extend the Session's activity time.
+- Optimized memory usage by releasing completed RUM data, network callbacks, Trace caches, and timers promptly, including during SDK shutdown.
+
 ## [0.1.18-alpha05] - 2026-10-23
 - Added `sdk_pkg_info.replay` to SDK package information when the optional Session Replay module registers its version.
 - Fixed background cold-launch tracking to preserve `app_launch_type=background` , reporting only after the same process renders its first UI frame.

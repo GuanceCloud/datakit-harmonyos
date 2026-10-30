@@ -164,6 +164,11 @@ Automatic first-frame tracking requires API 22 or later. Configure an
 timing. See [Cold Launch Timing](ft_sdk/README.md#cold-launch-timing) for
 background-launch behavior.
 
+`FTSDK.getLogConfig()` returns the installed `FTLoggerConfig`, or `null` before
+logs are configured. To preserve existing settings when making a change, update
+that instance and pass it to `FTSDK.installLogConfig(...)` again. See the
+[log configuration getter](ft_sdk/README.md#read-the-installed-log-configuration).
+
 ## Print Custom Logs to Console
 
 `FTLoggerConfig.setPrintCustomLogToConsole(true)` also prints logs sent through
@@ -365,6 +370,11 @@ sampling default to `100`; error-session supplemental sampling defaults to
 `setSessionErrorSampleRate(...)` methods remain deprecated compatibility APIs
 with their original `[0,1]` unit, so old `1` remains 100%.
 
+Session Replay's `FTSessionReplayConfig.setSampleRate(...)` and
+`setSessionReplayOnErrorSampleRate(...)` also use `[0,100]` percentages,
+with defaults of `100` and `0`. Their getters return percentages, and `1`
+always means 1%. See the [Replay sampling guide](ft_session_replay/README.md#sampling-rates).
+
 Remote configuration follows the same convention with
 `sessionSamplingRate`, `sessionOnErrorSamplingRate`, `logSamplingRate`, and
 `traceSamplingRate`. Valid new keys take priority over the legacy
@@ -412,6 +422,12 @@ const rumConfig = new FTRUMConfig()
 ```
 
 Add `@guancecloud/ft_native` to the application dependencies so `libftnativecrash.so` is packaged with the app. When crash tracking is enabled, `ft_sdk` initializes the native crash module internally.
+
+## WebView Bridge Host Configuration
+
+`FTSDKConfig.setAllowWebViewHost(...)` accepts `null` (all Hosts), `[]` (no Hosts), or Host names allowing exact matches and subdomains. Remote `rumAllowWebViewHost` takes precedence over an explicitly configured Base value, then the compatible `FTRUMConfig` setting. Policies are copied per Bridge binding; clear and rebuild an existing WebView to apply an update. Browser Log forwarding can be enabled separately with `FTLoggerConfig.setEnableWebViewLog(true)`.
+
+This config controls Browser SDK use of the Native Bridge and does not replace app navigation, certificate or Origin security policies. See the [core API guide](ft_sdk/README.md#webview-bridge-host-policy).
 
 ## Documentation
 

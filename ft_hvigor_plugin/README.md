@@ -46,6 +46,28 @@ The plugin automatically captures page touch events without changing existing `o
 
 Router page changes and explicit `PageTransitionEnter/Exit` slide and opacity animations are captured automatically. Existing transition callbacks are preserved; playback of default system transitions may be approximate.
 
+## Build diagnostics
+
+Search for `[GuanceBuild]` in DevEco Studio's Build output or `.hvigor/outputs/build-logs/build.log` to find instrumentation warnings. Each warning includes a feature name, source path, one-based line and column, skip reason, and explanation. These build-time warnings do not depend on `FTSDKConfig.setDebug(...)`.
+
+| Filter | Feature | Feature-specific skip reasons |
+| --- | --- | --- |
+| `[GuanceLog]` | Console/HiLog collection | `unsupported-log-call`: optional calls, missing HiLog arguments, or an unusable compiler source range |
+| `[GuanceColdLaunch]` | AbilityStage/UIAbility/InsightIntent lifecycle and first-frame hooks | `unresolved-ability-base`: a declared module entry's platform base cannot be resolved; `unsupported-lifecycle`: no instrumentable method/function body; `unsupported-lifecycle-parameters`: unsupported launch or WindowStage parameters |
+| `[GuanceReplay]` | Session Replay `@Entry` page root registration | `unsupported-parser`, `missing-build`, `unsupported-root` |
+| `[GuanceWebReplay]` | ArkWeb controller binding | `unsupported-web-call`: a `Web` call is optional, has a spread argument, or does not have exactly one options argument |
+
+All four features report `parse-error` when a relevant source file cannot be parsed, including the first compiler diagnostic and the number of additional parse errors. Unexpected transform exceptions report `transform-exception` and retain the original build failure. When an exception has no source position, its location is the file's `1:1`.
+
+```text
+[GuanceBuild][GuanceReplay] /project/entry/src/main/ets/pages/Example.ets:12:19: feature=session-replay-root; reason=parse-error; TS1109: Expression expected.
+[GuanceBuild][GuanceColdLaunch] /project/entry/src/main/ets/entryability/EntryAbility.ets:18:3: feature=cold-launch; reason=unsupported-lifecycle-parameters; onWindowStageCreate requires a named WindowStage parameter for automatic first-frame observation.
+```
+
+Warnings do not fail the build by themselves. Unsupported calls/hooks are left unchanged while other supported hooks can still be applied; a parse failure skips that feature's transformation for the file. Application files are never modified on disk. Locations refer to the original source when available; a warning explicitly identifies any location that refers to transformed source instead. Identical warnings are deduplicated per feature and source location within the active compilation.
+
+Modules without the required runtime dependencies, files with no matching calls/classes/pages, and locally shadowed names are skipped without warnings. The plugin does not infer that an arbitrary unresolved business class is an Ability. After updating the plugin, rebuild the application so the source transforms execute again. Existing `ArkTS:WARN` compiler diagnostics remain independent of these plugin warnings.
+
 ## Compatibility
 
 The plugin is verified with Node.js 18 or newer, Hvigor and `@ohos/hvigor-ohos-plugin` 6.23.5, and HarmonyOS SDK 6.0.2 (API 22). Console/HiLog and cold-launch instrumentation require `@guancecloud/ft_sdk` `0.1.17` or later. Automatic Session Replay additionally requires `@guancecloud/ft_sdk` `0.1.18` or later and `@guancecloud/ft_session_replay` `0.1.0` or later.
@@ -59,4 +81,4 @@ Each module that needs automatic collection must declare these SDK packages unde
 
 The plugin checks SDK dependencies in the `oh-package.json5` of the module that contains each source file (HAP, HAR or HSP). Declaring an SDK only in the project-root `oh-package.json5`, another module, or `devDependencies` does not enable automatic collection for that source file.
 
-Optional logging calls such as `console?.info(...)` and `hilog.info?.(...)` are not automatically collected.
+Optional logging calls such as `console?.info(...)` and `hilog.info?.(...)` are not automatically collected and produce `unsupported-log-call` warnings.

@@ -77,7 +77,7 @@ export default class EntryAbility extends UIAbility {
     FTSDK.installRUMConfig(rumConfig)
 
     const replayConfig = new FTSessionReplayConfig()
-      .setSampleRate(0.1)
+      .setSampleRate(10)
     FTSessionReplay.getInstance().init(replayConfig, this.context.filesDir)
   }
 }
@@ -138,13 +138,15 @@ explicit signals for content changes, scrolling, and animations.
 
 ## Sampling Rates
 
-Replay rates use values in `[0,1]`: `0.1` means **10%** and `1` means
-**100%**. Replay sampling is configured separately from the core SDK's
-percentage-based RUM sampling.
+Replay rates use percentages in `[0,100]`: `0.1` means **0.1%**, `1` means
+**1%**, and `100` means **100%**. Both setters and getters use this unit;
+values in `[0,1]` have no special compatibility interpretation. Finite values
+outside the range are clamped to the nearest bound; non-finite values become `0`.
+Replay sampling is configured separately from the core SDK's RUM sampling.
 
 | Capability | Setter | Default |
 | --- | --- | --- |
-| Session Replay | `setSampleRate(...)` | `1` |
+| Session Replay | `setSampleRate(...)` | `100` |
 | Error-triggered Replay | `setSessionReplayOnErrorSampleRate(...)` | `0` |
 
 To record only error-sampled sessions:
@@ -152,7 +154,7 @@ To record only error-sampled sessions:
 ```ts
 const replayConfig = new FTSessionReplayConfig()
   .setSampleRate(0)
-  .setSessionReplayOnErrorSampleRate(1)
+  .setSessionReplayOnErrorSampleRate(100)
 ```
 
 Error-triggered recordings keep a one-minute pre-error window locally and
@@ -250,7 +252,7 @@ requires passing `filesDir` to `init()`.
 | Configuration | Setter | Default |
 | --- | --- | --- |
 | Cache capacity | `setStorageMaxBytes(...)` | 10 MiB |
-| Upload interval | `setUploadIntervalMs(...)` | 15,000 ms |
+| Upload interval | `setUploadIntervalMs(...)` | 2,500 ms |
 | Upload endpoint | `setUploadUrl(...)` | Core SDK endpoint |
 
 Call `await FTSessionReplay.getInstance().flush()` for an immediate upload.

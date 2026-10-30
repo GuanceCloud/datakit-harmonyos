@@ -1,6 +1,6 @@
 {
   "name": "@guancecloud/ft_session_replay",
-  "version": "0.1.0-alpha02",
+  "version": "0.1.0-alpha03",
   "description": "Guance HarmonyOS Session Replay SDK.",
   "main": "Index.ets",
   "author": "Guance <lizhao@guance.com> (https://www.guance.com)",

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2-alpha.2] - 2026-10-30
+
+- Added build warnings with feature names, source paths, skip reasons and source locations for Console/HiLog, cold-launch lifecycle hooks, Session Replay root registration and ArkWeb binding.
+- Fixed automatic Session Replay page registration being skipped on pages that use UI enum values or `ForEach`/`LazyForEach`/`Repeat` child blocks, which could leave native View/Action events without `session_has_replay`.
+
 ## [0.1.2-alpha.1] - 2026-10-19
 
 - Added automatic Session Replay integration for supported ArkUI `@Entry` pages, ArkWeb components and touch events, without manual page registration or event forwarding. Requires `@guancecloud/ft_session_replay` in the HAP and Replay initialization; touch coordinates require `TouchPrivacy.SHOW`.

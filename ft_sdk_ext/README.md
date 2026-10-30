@@ -13,9 +13,20 @@ Guance HarmonyOS extension SDK for newer HarmonyOS compiler and platform capabil
 - Compatibility layer for newer HarmonyOS capabilities
 
 NetworkKit HTTP and Axios Chain transport failures (`responseCode=0`) produce
-both a Resource and its linked network Error. When the interceptor has no native
-failure details, the Error includes a diagnostic message and the interceptor's
-call stack. The request still fails normally for the caller.
+both a Resource and its linked network Error by default. The local Error filter
+receives the original transport failure and error code through the request's
+Promise rejection or callback. Returning `true` suppresses only the linked Error.
+The request still fails with its original value for the caller.
+
+HTTP Chain and Axios Chain Resource reporting supports `resource_request_size`,
+`resource_http_protocol`, and `resource_connection_reuse` as Fields. Request-size
+fallbacks use the final visible normalized headers and UTF-8/binary body bytes;
+opaque bodies require a reliable Content-Length or platform byte count.
+The API 22 chain does not expose negotiated protocol or a reliable reuse result.
+Supply verified values through `resourceTransportMetricsProvider` when available;
+unknown values are omitted. Explicit byte counts must be non-negative safe
+integers, and the three reserved measurements cannot be replaced by generic
+Resource properties or global tags.
 
 ## Package
 
@@ -61,6 +72,20 @@ const interceptorChain = createFTHttpInterceptorChain({
   enableTraceInterceptor: true,
   enableResourceInterceptor: true
 })
+```
+
+### Request cleanup
+
+Call `disposeFTHttpTrack(request)` before cancelling or destroying a native
+request tracked by `applyFTHttpTrack(...)`, for example when leaving a page or
+stopping a network task. Use a new `HttpRequest` for subsequent requests.
+
+```ts
+import { disposeFTHttpTrack } from '@guancecloud/ft_sdk_ext/Index'
+
+// In the owning page or task's cleanup method:
+disposeFTHttpTrack(request)
+request.destroy()
 ```
 
 ## Dependency

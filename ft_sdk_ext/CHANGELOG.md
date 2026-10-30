@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18-alpha06] - 2026-10-30
+- Fixed Resource request-size estimates to follow the final visible request headers, including rewritten and normalized multi-value headers.
+- Fixed NetworkKit HTTP and Axios Chain local Error filters not receiving the original transport failure and error code. Filtering keeps the Resource and preserves the application's request result.
+- Fixed NetworkKit upload listener cleanup and reduced strong retention through native interceptor chains. Added `disposeFTHttpTrack(request)` for cancellation paths without a final callback.
+- Made Axios method bridge registration idempotent, restored upload callbacks after completion, and added `removeFTAxiosChainMethodBridge(client)`.
+- Preserved request start identity across redirects and isolated late callbacks after SDK shutdown.
+
 ## [0.1.18-alpha05] - 2026-10-23
 - No extension API or runtime behavior changes.
 

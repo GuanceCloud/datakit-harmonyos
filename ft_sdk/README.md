@@ -116,9 +116,32 @@ Following the existing SDK contract, a collected Resource generates one linked N
 Resource records can also report request size, negotiated HTTP protocol, and
 connection reuse as Fields. RCP platform values take precedence; RCP, Axios,
 and NetworkKit HTTP Chain integrations can supply explicit values when the
-platform does not expose them. See
-[Resource transport metrics](RESOURCE_TRANSPORT_METRICS.md) for API examples,
-priority rules, byte-counting semantics, and HarmonyOS platform limitations.
+platform does not expose them.
+
+For manual reporting, use `ResourceParams.setRequestBodySize(...)`,
+`setRequestHeaderSize(...)` or `setRequestSize(...)`, `setHttpProtocol(...)`, and
+`setConnectionReuse(...)`. Byte counts must be non-negative safe integers.
+Protocol aliases are normalized; unknown protocol/reuse values remain absent.
+These reserved measurements cannot be replaced through generic properties or
+global tags.
+
+### Resource network snapshots
+
+Automatically tracked RCP, NetworkKit HTTP Chain and Axios requests, and manual
+Resources started with `startResource`, include network information without
+additional configuration. It reflects the network at request start,
+even if the network changes before the request completes.
+
+| Resource Field | Description |
+| --- | --- |
+| `network_available` | Whether a network is available. |
+| `network_validated` | Whether the system has confirmed Internet connectivity. |
+| `network_downlink_kbps` | Estimated downlink bandwidth in kb/s. |
+| `network_uplink_kbps` | Estimated uplink bandwidth in kb/s. |
+| `network_signal_strength` | Signal level: Wi-Fi 0–4, cellular 0–5; not dBm. |
+
+Fields unavailable from the system are omitted. When no network is available,
+only `network_available=false` is recorded.
 
 ### Filter local Network Errors
 
@@ -197,7 +220,8 @@ flow, but SDK-owned Resource, session, view, and action keys are ignored.
 The **HTTP Interceptor Test** demo page has a Local Error Filter switch and
 RCP, NetworkKit, and Axios actions that use an unused loopback port. With the
 switch on, verify one status-0 Resource with `demo_network_error_*` fields and
-no linked Error; with it off, verify the linked Error returns. Existing 404
+no linked Error; with it off, verify the linked Error returns. Both switch
+positions override the application's global handler explicitly. Existing 404
 actions must keep their Resource and Error in either mode.
 
 ### Filter automatically tracked Resources
@@ -214,6 +238,43 @@ class ResourceUrlFilter extends FTInTakeUrlHandler {
 const rumConfig = new FTRUMConfig()
   .setEnableTraceUserResource(true)
   .setResourceUrlHandler(new ResourceUrlFilter());
+```
+
+### Stop automatic Axios tracking
+
+Register tracking when initializing the Axios client, after SDK initialization
+and before sending requests:
+
+```ts
+const registration = applyFTAxiosTrack(axiosClient)
+```
+
+For a page- or feature-specific client, call `dispose()` in its cleanup method
+(for example, the page's `aboutToDisappear()`) when tracking is no longer needed:
+
+```ts
+registration.dispose()
+```
+
+Keep tracking active for an app-wide shared client and across individual requests.
+After SDK shutdown and reinitialization, call `applyFTAxiosTrack(...)` again.
+
+## Read the Installed Log Configuration
+
+`FTSDK.getLogConfig(): FTLoggerConfig | null` returns the current configuration
+instance installed through `FTSDK.installLogConfig(...)`. It returns `null`
+before a successful log installation, including after SDK reset or before logs
+are configured again following SDK reinstallation.
+
+The returned object is shared with the logging module. After changing settings,
+pass it to `installLogConfig(...)` again to synchronize the logging context and
+Workers while preserving the other settings:
+
+```ts
+const logConfig = FTSDK.getLogConfig()
+if (logConfig !== null) {
+  FTSDK.installLogConfig(logConfig.setEnableWebViewLog(true))
+}
 ```
 
 ## Print Custom Logs to Console
@@ -505,9 +566,13 @@ const traceConfig = new FTTraceConfig().setTraceSamplingRate(1)
 available but are deprecated. They retain their original `[0,1]` probability
 unit, defaults, and behavior: old `1` still means 100%. Do not select a unit
 by value; migrate the method name as well. When both local forms are set, the
-new percentage method wins regardless of call order. HarmonyOS does not expose
-a Session Replay sampling configuration, so this SDK does not introduce Replay
-or error-Replay placeholder APIs.
+new percentage method wins regardless of call order. Session Replay sampling
+is provided by the separate
+[`@guancecloud/ft_session_replay`](../ft_session_replay/README.md#sampling-rates)
+package through `FTSessionReplayConfig.setSampleRate` and
+`setSessionReplayOnErrorSampleRate`. These Replay setters and getters use
+`[0,100]` percentages: `1` means 1% and `100` means 100%, with no legacy
+probability-unit compatibility.
 
 ## Remote Configuration and Runtime Endpoint
 
@@ -641,6 +706,45 @@ FTSDK.install(sdkConfig, this.context)
 ```
 
 Use `DataModifier` for global key-based rules; it is the lower-overhead option. Use `LineDataModifier` only when a decision needs multiple values in the same record. Neither callback can add, remove, or move a key between tags and fields.
+
+## WebView Bridge Host Policy
+
+Use `setAllowWebViewHost(...)` to choose which WebView hosts can send Browser SDK
+data through the Native Bridge. Configure it before SDK installation:
+
+```ts
+import { FTSDK, FTSDKConfig, FTRUMConfig, FTLoggerConfig } from '@guancecloud/ft_sdk/Index'
+
+const sdkConfig = FTSDKConfig.builder('http://YOUR_DATAKIT:9529')
+  .setAllowWebViewHost(['example.com', 'second.example'])
+FTSDK.install(sdkConfig, this.context)
+
+const rumConfig = new FTRUMConfig()
+  .setRumAppId('YOUR_APP_ID')
+  .setEnableTraceWebView(true)
+FTSDK.installRUMConfig(rumConfig)
+
+// Optional: forward Browser SDK logs through the Native Bridge.
+FTSDK.installLogConfig(new FTLoggerConfig().setEnableWebViewLog(true))
+```
+
+Bind the WebView using `FTWebViewHandler` to enable Bridge collection.
+
+| Value | Allowed hosts |
+| --- | --- |
+| `null` | All hosts. |
+| `[]` | No hosts; disable collection through the Bridge. |
+| `['example.com']` | `example.com` and its subdomains. |
+
+Pass hostnames only, without a protocol, path, port, or wildcard.
+
+Remote `rumAllowWebViewHost` takes priority over local settings. For local
+configuration, an explicit `FTSDKConfig` setting takes priority over the legacy
+`FTRUMConfig.setAllowWebViewHost(...)` setting.
+
+Changed settings apply to newly bound WebViews. To update an existing WebView,
+call `clearWebController()`, recreate the WebView and controller, and bind again
+before loading the page.
 
 ## Main Exports
 

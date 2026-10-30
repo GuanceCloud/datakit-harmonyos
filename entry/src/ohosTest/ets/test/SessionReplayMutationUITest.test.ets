@@ -4,7 +4,9 @@ import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry
 import window from '@ohos.window';
 import { UIContext } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
-import { FTSDK, FTRUMConfig } from '@guancecloud/ft_sdk';
+import { FTSDK, FTRUMConfig, FTRUMGlobalManager } from '@guancecloud/ft_sdk';
+import { DataType } from '@guancecloud/ft_sdk/src/main/ets/components/enum/Enums';
+import { EntryRecordCapture } from './helpers/EntryRecordCapture';
 import {
   FTSessionReplay, FTSessionReplayConfig, TextAndInputPrivacy, ImagePrivacy, TouchPrivacy,
   FullSnapshotData, ReplayMutationData, ReplayPointerInteractionData, ReplayRecordType,
@@ -201,6 +203,23 @@ export default function sessionReplayMutationUITest(): void {
     });
 
     afterAll(() => { replay.disable(); });
+
+    it('writesReplayMarkersToNativeViewAndActionAfterAutomaticRootCapture', 0, async () => {
+      const records = new EntryRecordCapture();
+      const actionName = `replay_marker_${Date.now()}`;
+      FTRUMGlobalManager.getInstance().addAction(actionName, 'click');
+      const action = await records.waitForRecord(DataType.RUM_APP,
+        [actionName, `view_id=${context.viewId}`, 'session_has_replay=true'], 10000);
+      const view = await records.waitForRecord(DataType.RUM_APP,
+        ['view,', `view_id=${context.viewId}`, 'session_has_replay=true'], 10000);
+      for (const line of [action, view]) {
+        if (line === null) throw new Error('Native replay marker was not serialized after an automatic root snapshot');
+        const fields = line.slice(line.indexOf(' ') + 1);
+        expect(fields.includes('session_has_replay=true')).assertTrue();
+        expect(line.slice(0, line.indexOf(' ')).includes('session_has_replay')).assertFalse();
+        expect(fields.includes('session_has_replay="true"')).assertFalse();
+      }
+    });
 
     it('captures fixed-size text changes without an explicit Replay notification', 0, async () => {
       // Scroll into view before taking the baseline; only text changes after it.
