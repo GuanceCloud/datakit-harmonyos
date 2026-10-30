@@ -14,6 +14,7 @@ import {
 import { transformColdLaunchSource } from './ft-cold-launch-transform';
 import { transformSessionReplaySource } from './ft-session-replay-transform';
 import { transformWebReplaySource } from './ft-web-replay-transform';
+import { SourceDiagnosticReporter, SourceTransformDiagnostic } from './ft-transform-context';
 
 declare const require: {
   main: {
@@ -23,7 +24,8 @@ declare const require: {
 
 type TypeScriptApi = any;
 type SourceReader = (fileName: string) => string | undefined;
-type SourceTransform = (ts: TypeScriptApi, fileName: string, code: string, readSource?: SourceReader) => string;
+type SourceTransform = (ts: TypeScriptApi, fileName: string, code: string, readSource?: SourceReader,
+  reportDiagnostic?: SourceDiagnosticReporter) => string;
 
 interface CompilePluginContext {
   share: {
@@ -35,6 +37,8 @@ interface CompilePluginContext {
 
 interface SourceTransformDefinition {
   id: string;
+  prefix: string;
+  feature: string;
   transform: SourceTransform;
 }
 
@@ -43,14 +47,15 @@ interface SharedSourceTransformRegistry {
   buffer: any;
   transforms: Map<string, (fileName: string, code: string) => string>;
   owners: Map<object, Map<string, (fileName: string, code: string) => string>>;
+  reportedDiagnostics: Set<string>;
 }
 
 const SOURCE_TRANSFORM_REGISTRY_KEY = '__guanceHvigorSourceTransformRegistry';
 const SOURCE_TRANSFORMS: SourceTransformDefinition[] = [
-  { id: 'guance-console-log-transform', transform: transformConsoleLogSource },
-  { id: 'guance-cold-launch-transform', transform: transformColdLaunchSource },
-  { id: 'guance-session-replay-root-transform', transform: transformSessionReplaySource },
-  { id: 'guance-web-replay-transform', transform: transformWebReplaySource }
+  { id: 'guance-console-log-transform', prefix: 'GuanceLog', feature: 'console-log', transform: transformConsoleLogSource },
+  { id: 'guance-cold-launch-transform', prefix: 'GuanceColdLaunch', feature: 'cold-launch', transform: transformColdLaunchSource },
+  { id: 'guance-session-replay-root-transform', prefix: 'GuanceReplay', feature: 'session-replay-root', transform: transformSessionReplaySource },
+  { id: 'guance-web-replay-transform', prefix: 'GuanceWebReplay', feature: 'web-replay', transform: transformWebReplaySource }
 ];
 
 const registrations: Array<{ fileSystem: any; owner: object; context: CompilePluginContext }> = [];
@@ -58,6 +63,44 @@ const registrations: Array<{ fileSystem: any; owner: object; context: CompilePlu
 function refreshTransforms(registry: SharedSourceTransformRegistry): void {
   registry.transforms.clear();
   registry.owners.forEach(transforms => transforms.forEach((transform, id) => registry.transforms.set(id, transform)));
+}
+
+function createDiagnosticReporter(registry: SharedSourceTransformRegistry, ts: TypeScriptApi,
+  readSource: SourceReader, definition: SourceTransformDefinition):
+  (diagnostic: SourceTransformDiagnostic, inputFile: string, inputCode: string, occurrence?: number) => void {
+  let logger: { warn(message: string): void } | undefined;
+  return (diagnostic: SourceTransformDiagnostic, inputFile: string, inputCode: string, occurrence = 0): void => {
+    // Earlier transforms can insert imports or wrappers. Recheck only failed
+    // pages against the on-disk source so clickable locations refer to app code.
+    const originalCode = readSource(diagnostic.fileName);
+    if (diagnostic.reason !== 'transform-exception' && diagnostic.fileName === inputFile &&
+      originalCode !== undefined && originalCode !== inputCode) {
+      const originalDiagnostics: SourceTransformDiagnostic[] = [];
+      try {
+        definition.transform(ts, diagnostic.fileName, originalCode, readSource, candidate => {
+          if (candidate.reason === diagnostic.reason &&
+            (candidate.message === diagnostic.message || candidate.reason === 'parse-error')) originalDiagnostics.push(candidate);
+        });
+      } catch (_) {
+        // Location mapping is diagnostic-only and must not change build behavior.
+      }
+      diagnostic = originalDiagnostics[occurrence] ?? { ...diagnostic,
+        message: `${diagnostic.message} (Location refers to in-memory transformed source.)` };
+    }
+    const key = `${definition.id}:${JSON.stringify(diagnostic)}`;
+    if (registry.reportedDiagnostics.has(key)) return;
+    registry.reportedDiagnostics.add(key);
+    const message = `[GuanceBuild][${definition.prefix}] ${diagnostic.fileName}:${diagnostic.line}:${diagnostic.column}: ` +
+      `feature=${definition.feature}; reason=${diagnostic.reason}; ${diagnostic.message}`;
+    if (!logger) {
+      try {
+        logger = require.main.require('@ohos/hvigor').HvigorLogger.getLogger(definition.prefix);
+      } catch (_) {
+        logger = { warn: (value: string): void => console.warn(value) };
+      }
+    }
+    logger!.warn(message);
+  };
 }
 
 function installSourceReader(context: CompilePluginContext): void {
@@ -70,7 +113,8 @@ function installSourceReader(context: CompilePluginContext): void {
       originalReadFile: fileSystem.readFileSync as (fileName: string, options?: any) => any,
       buffer: require.main.require('buffer'),
       transforms: new Map<string, (fileName: string, code: string) => string>(),
-      owners: new Map()
+      owners: new Map(),
+      reportedDiagnostics: new Set()
     };
     fileSystem[SOURCE_TRANSFORM_REGISTRY_KEY] = registry;
     fileSystem.readFileSync = (fileName: string, options?: any): any => {
@@ -93,11 +137,33 @@ function installSourceReader(context: CompilePluginContext): void {
       return undefined;
     }
   };
+  // A daemon may retain a registry installed by an earlier plugin version.
+  registry.reportedDiagnostics ??= new Set();
   const owner = {};
   const transforms = new Map<string, (fileName: string, code: string) => string>();
   SOURCE_TRANSFORMS.forEach((definition: SourceTransformDefinition) => {
-    transforms.set(definition.id, (fileName: string, code: string) =>
-      definition.transform(ts, fileName, code, readSource));
+    const reportDiagnostic = createDiagnosticReporter(registry!, ts, readSource, definition);
+    transforms.set(definition.id, (fileName: string, code: string) => {
+      const occurrences = new Map<string, number>();
+      try {
+        return definition.transform(ts, fileName, code, readSource,
+          diagnostic => {
+            const key = `${diagnostic.reason}:${diagnostic.message}`;
+            const occurrence = occurrences.get(key) ?? 0;
+            occurrences.set(key, occurrence + 1);
+            reportDiagnostic(diagnostic, fileName, code, occurrence);
+          });
+      } catch (error) {
+        try {
+          reportDiagnostic({ fileName, line: 1, column: 1, reason: 'transform-exception',
+            message: `Source transform failed: ${error instanceof Error ? error.message : String(error)}` }, fileName, code);
+        } finally {
+          // Preserve the original failure: diagnostics must never turn a broken
+          // transform into a successful build or replace its exception.
+          throw error;
+        }
+      }
+    });
   });
   registry.owners.set(owner, transforms);
   refreshTransforms(registry);

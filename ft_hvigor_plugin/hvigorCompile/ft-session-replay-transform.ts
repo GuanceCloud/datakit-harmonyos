@@ -8,7 +8,8 @@
  */
 
 import { isApplicationArkTsSource } from './ft-console-log-transform';
-import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { hasRuntimeDependency, SourceReader, SourceDiagnosticReporter, parseApplicationSource,
+  reportSourceDiagnostic, reportSourceParseError } from './ft-transform-context';
 import { allocateName as selectUniqueName } from './ft-generated-names';
 
 type TypeScriptApi = any;
@@ -35,6 +36,7 @@ interface RootExpression {
 }
 
 interface EntryStruct {
+  node: any;
   bodyEnd: number;
   methods: Map<string, MethodRange>;
 }
@@ -86,6 +88,19 @@ function findImportInsertionOffset(ts: TypeScriptApi, id: string, code: string):
   return offset;
 }
 
+function findEntryDecorator(ts: TypeScriptApi, source: any): any {
+  let entry: any;
+  const visit = (node: any): void => {
+    if (ts.isDecorator(node)) {
+      const expression = ts.isCallExpression(node.expression) ? node.expression.expression : node.expression;
+      if (ts.isIdentifier(expression) && expression.text === 'Entry') entry ??= node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return entry;
+}
+
 /** Structs, decorators and members must come from the ArkTS parser, never text matches. */
 function collectEntryStructs(ts: TypeScriptApi, source: any): EntryStruct[] {
   const entries: EntryStruct[] = [];
@@ -106,7 +121,7 @@ function collectEntryStructs(ts: TypeScriptApi, source: any): EntryStruct[] {
           bodyStart: member.body.getStart(source), bodyEnd: member.body.end - 1 });
       }
     });
-    entries.push({ bodyEnd: node.end - 1, methods });
+    entries.push({ node, bodyEnd: node.end - 1, methods });
   });
   return entries;
 }
@@ -250,33 +265,31 @@ function addLifecycleInjection(
  * Adds an opaque root ID and page lifecycle registration to every @Entry page.
  * ArkTS nodes locate real decorators, struct members and component expressions.
  */
-export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
+export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader,
+  reportDiagnostic?: SourceDiagnosticReporter): string {
   if (!isApplicationArkTsSource(id) || code.includes(REPLAY_ROOT_TRANSFORM_MARKER) ||
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource) ||
     !hasRuntimeDependency(ts, id, REPLAY_BRIDGE_IMPORT, readSource)) {
     return code;
   }
 
-  if (typeof ts.isStructDeclaration !== 'function' || typeof ts.isEtsComponentExpression !== 'function') return code;
-  // The parser needs component names to recognize declarative child blocks.
-  // This superset configures parsing only; eligibility is decided by AST nodes.
-  const components = Array.from(collectIdentifiers(code));
-  const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS,
-    { ets: {
-      components,
-      render: { method: ['build', 'pageTransition'], decorator: ['Builder', 'LocalBuilder'] },
-      extend: { decorator: ['Extend', 'AnimatableExtend'], components: components.map(name =>
-        ({ name, type: `${name}Attribute`, instance: `${name}Instance` })) },
-      styles: { decorator: 'Styles', component: { name: 'Common', type: 'T', instance: 'CommonInstance' }, property: 'stateStyles' },
-      concurrent: { decorator: 'Concurrent' },
-      customComponent: 'CustomComponent',
-      syntaxComponents: { paramsUICallback: ['ForEach', 'LazyForEach'], attrUICallback: [{ name: 'Repeat', attributes: ['each', 'template'] }] }
-    } });
-  if (source.parseDiagnostics.length > 0) return code;
-  const entries = collectEntryStructs(ts, source);
-  if (entries.length === 0) {
+  const preliminarySource = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true,
+    ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
+  const report = (source: any, position: number, reason: string, message: string): void => {
+    reportSourceDiagnostic(source, position, reason, message, reportDiagnostic);
+  };
+  if (typeof ts.isStructDeclaration !== 'function' || typeof ts.isEtsComponentExpression !== 'function') {
+    // Even a standard TypeScript parser retains real decorator nodes. Do not
+    // mistake @Entry text inside comments or strings for a page needing Replay.
+    const entryDecorator = findEntryDecorator(ts, preliminarySource);
+    if (entryDecorator) report(preliminarySource, entryDecorator.getStart(preliminarySource), 'unsupported-parser',
+      'The installed compiler does not expose the ArkTS struct/component parser required for automatic Replay roots.');
     return code;
   }
+  const source = parseApplicationSource(ts, id, code, preliminarySource);
+  const entries = collectEntryStructs(ts, source);
+  if (entries.length === 0 && !findEntryDecorator(ts, source)) return code;
+  if (reportSourceParseError(ts, source, reportDiagnostic)) return code;
 
   const identifiers = collectIdentifiers(code);
   const bridgeName = selectUniqueName(identifiers, '__ftSessionReplayAutoRootBridge');
@@ -287,10 +300,15 @@ export function transformSessionReplaySource(ts: TypeScriptApi, id: string, code
   entries.forEach((entry: EntryStruct): void => {
     const buildMethod = entry.methods.get('build');
     if (!buildMethod) {
+      report(source, entry.node.name.getStart(source), 'missing-build',
+        'The @Entry page has no build() method with a body to instrument.');
       return;
     }
     const root = findRootExpression(ts, source, code, buildMethod);
     if (root === null) {
+      const first = buildMethod.node.body.statements[0];
+      report(source, first ? first.getStart(source) : buildMethod.bodyStart + 1, 'unsupported-root',
+        'build() must start with a supported ArkUI root component with a child block for automatic Replay registration.');
       return;
     }
     const indentation = lineIndentation(code, buildMethod.nameStart);

@@ -5,7 +5,8 @@
  * the compiler's in-memory source. Application files are never modified.
  */
 
-import { hasRuntimeDependency } from './ft-transform-context';
+import { hasRuntimeDependency, objectProperty, SourceDiagnosticReporter, SourceTransformDiagnostic,
+  parseApplicationSource, reportSourceDiagnostic, reportSourceParseError } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
 import { allocateName as selectIdentifierName, collectIdentifierNames } from './ft-generated-names';
 
@@ -42,6 +43,7 @@ interface ColdLaunchInjection {
 interface ColdLaunchInjections {
   injections: ColdLaunchInjection[];
   hasUIAbility: boolean;
+  hasAbility: boolean;
 }
 
 const COLD_LAUNCH_BRIDGE_IMPORT = '@guancecloud/ft_sdk/Index';
@@ -124,6 +126,37 @@ function needsUIAbilityModuleFallback(ts: TypeScriptApi, id: string, readSource?
     }
     const stageEntry = property(module, 'srcEntry');
     return stageEntry === undefined || (ts.isStringLiteral(stageEntry) && stageEntry.text.trim().length === 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** An unresolved business class is not necessarily an Ability; trust explicit module entries. */
+function isDeclaredAbilityEntry(ts: TypeScriptApi, id: string, readSource?: SourceReader): boolean {
+  const normalized = id.replace(/\\/g, '/');
+  const sourceIndex = normalized.lastIndexOf('/src/main/ets/');
+  if (sourceIndex < 0) return false;
+  const nodeRequire = require.main && typeof require.main.require === 'function'
+    ? require.main.require.bind(require.main) : require;
+  const path = nodeRequire('path');
+  const directory = normalized.slice(0, sourceIndex) + '/src/main';
+  try {
+    const manifest = directory + '/module.json5';
+    const code = readSource ? readSource(manifest) : nodeRequire('fs').readFileSync(manifest, 'utf8');
+    if (typeof code !== 'string') return false;
+    const source = ts.createSourceFile(manifest, `const __manifest = ${code}`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    if (source.parseDiagnostics.length > 0 || source.statements.length !== 1 ||
+      !ts.isVariableStatement(source.statements[0])) return false;
+    const root = source.statements[0].declarationList.declarations[0].initializer;
+    const module = objectProperty(ts, root, 'module');
+    const entries = [objectProperty(ts, module, 'srcEntry')];
+    for (const key of ['abilities', 'extensionAbilities']) {
+      const list = objectProperty(ts, module, key);
+      if (list && ts.isArrayLiteralExpression(list)) {
+        list.elements.forEach((item: any) => entries.push(objectProperty(ts, item, 'srcEntry')));
+      }
+    }
+    return entries.some(entry => entry && ts.isStringLiteral(entry) && path.resolve(directory, entry.text) === path.resolve(id));
   } catch (_) {
     return false;
   }
@@ -504,9 +537,11 @@ function createFirstFrameRetryInjections(ts: TypeScriptApi, sourceFile: any, cod
 
 function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: string,
   bridgeName: string, pluginVersion: string, identifiers: Set<string>,
-  launchTypes: LaunchParameterTypes, readSource?: SourceReader): ColdLaunchInjections {
+  launchTypes: LaunchParameterTypes, readSource?: SourceReader, reportDiagnostic?: SourceDiagnosticReporter): ColdLaunchInjections {
   const injections: ColdLaunchInjection[] = [];
   let hasUIAbility = false;
+  let hasAbility = false;
+  const declaredEntry = isDeclaredAbilityEntry(ts, sourceFile.fileName, readSource);
   const resolve = createLexicalResolver(ts, sourceFile);
   const resolveClass = createAbilityClassResolver(ts, sourceFile, readSource);
   const pluginVersionArgument = pluginVersion.length > 0 ? `, ${JSON.stringify(pluginVersion)}` : '';
@@ -555,8 +590,14 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
     const classification = resolveClass(node);
     const kind = classification.kind;
     if (!kind) {
+      if (declaredEntry && (node.modifiers || []).some((modifier: any) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+        reportSourceDiagnostic(sourceFile, node.getStart(sourceFile), 'unresolved-ability-base',
+          'This module entry has no resolvable platform Ability/AbilityStage/InsightIntent base; automatic lifecycle instrumentation was skipped.',
+          reportDiagnostic);
+      }
       return;
     }
+    hasAbility = true;
     if (kind === 'ui') {
       hasUIAbility = true;
     }
@@ -572,7 +613,30 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       if (name === 'onBackground') hasOnBackground = true;
       if (name === 'onNewWant') hasOnNewWant = true;
       const member = callableMember(ts, declaration);
-      if (!member || !name) return;
+      if (!name) return;
+      const expected = kind === 'intent' ? name === 'onExecute' : kind === 'legacyIntent'
+        ? ['onExecuteInUIAbilityForegroundMode', 'onExecuteInUIAbilityBackgroundMode'].includes(name)
+        : name === 'onCreate' || (kind === 'ui' &&
+          ['onForeground', 'onBackground', 'onNewWant', 'onWindowStageCreate'].includes(name));
+      if (!member) {
+        if (expected && !node.members.some((other: any) => memberName(ts, other) === name && callableMember(ts, other))) {
+          reportSourceDiagnostic(sourceFile, declaration.getStart(sourceFile), 'unsupported-lifecycle',
+            `${name} is not a method or function property with an instrumentable body; its automatic hook was skipped.`, reportDiagnostic);
+        }
+        return;
+      }
+      if (kind === 'ui' && name === 'onCreate' && member.parameters.slice(0, 2).some((parameter: any) =>
+        !ts.isIdentifier(parameter.name) || parameter.dotDotDotToken)) {
+        reportSourceDiagnostic(sourceFile, declaration.getStart(sourceFile), 'unsupported-lifecycle-parameters',
+          'onCreate uses destructured or rest parameters; automatic launch-reason capture was skipped.', reportDiagnostic);
+        return;
+      }
+      if (kind === 'ui' && name === 'onWindowStageCreate' && (member.parameters.length === 0 ||
+        !ts.isIdentifier(member.parameters[0].name) || member.parameters[0].dotDotDotToken)) {
+        reportSourceDiagnostic(sourceFile, declaration.getStart(sourceFile), 'unsupported-lifecycle-parameters',
+          'onWindowStageCreate requires a named WindowStage parameter for automatic first-frame observation.', reportDiagnostic);
+        return;
+      }
       const indentation = methodIndentation(code, declaration);
       const block = ts.isBlock(member.body);
       const position = member.body.getStart(sourceFile) + (block ? 1 : 0);
@@ -721,7 +785,7 @@ function createColdLaunchInjections(ts: TypeScriptApi, sourceFile: any, code: st
       }
     }
   });
-  return { injections, hasUIAbility };
+  return { injections, hasUIAbility, hasAbility };
 }
 
 function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection[]): string {
@@ -743,7 +807,7 @@ function applyColdLaunchInjections(code: string, injections: ColdLaunchInjection
 }
 
 export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: string,
-  readSource?: SourceReader): string {
+  readSource?: SourceReader, reportDiagnostic?: SourceDiagnosticReporter): string {
   if (!isApplicationArkTsSource(id) || code.includes(COLD_LAUNCH_TRANSFORM_MARKER) ||
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource)) {
     return code;
@@ -757,8 +821,13 @@ export function transformColdLaunchSource(ts: TypeScriptApi, id: string, code: s
     needed: false
   };
   const version = getPluginVersion();
+  const diagnostics: SourceTransformDiagnostic[] = [];
   const result = createColdLaunchInjections(ts, sourceFile, code, bridgeName, version, identifiers,
-    launchTypes, readSource);
+    launchTypes, readSource, diagnostic => diagnostics.push(diagnostic));
+  if (result.hasAbility || diagnostics.length > 0) {
+    if (reportSourceParseError(ts, parseApplicationSource(ts, id, code), reportDiagnostic)) return code;
+    diagnostics.forEach(diagnostic => reportDiagnostic?.(diagnostic));
+  }
   const injections = result.injections;
   const moduleFallback = result.hasUIAbility && needsUIAbilityModuleFallback(ts, id, readSource);
   if (injections.length === 0 && !moduleFallback) {

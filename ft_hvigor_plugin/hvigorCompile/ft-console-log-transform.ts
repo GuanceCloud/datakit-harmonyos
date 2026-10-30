@@ -7,7 +7,8 @@
  * never changed.
  */
 
-import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { hasRuntimeDependency, SourceReader, SourceDiagnosticReporter, parseApplicationSource,
+  reportSourceDiagnostic, reportSourceParseError } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
 import { allocateName, collectIdentifierNames } from './ft-generated-names';
 
@@ -94,16 +95,14 @@ function needsStatementSeparator(ts: TypeScriptApi, node: any): boolean {
     ts.isCaseClause(container) || ts.isDefaultClause(container);
 }
 
-function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): TransformCandidate[] {
+function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string,
+  unsupported: (node: any, message: string) => void): TransformCandidate[] {
   const candidates: TransformCandidate[] = [];
   const hiLogBindings = collectHiLogBindings(ts, sourceFile);
   const resolve = createLexicalResolver(ts, sourceFile);
 
   visit(ts, sourceFile, (node: any) => {
-    // Retain optional calls verbatim so their receiver/method short-circuit also
-    // controls argument evaluation. Nested ordinary calls remain eligible.
-    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) ||
-      (ts.isOptionalChain && ts.isOptionalChain(node))) {
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
       return;
     }
     const delegate = node.expression.expression;
@@ -112,10 +111,20 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
     }
     const delegateName = delegate.text;
     const level = node.expression.name.text;
+    const isConsole = delegateName === 'console' && !resolve(delegate, delegateName) && CONSOLE_LEVELS.includes(level);
+    const isHiLog = hiLogBindings.has(delegateName) &&
+      resolve(delegate, delegateName) === hiLogBindings.get(delegateName) && HILOG_LEVELS.includes(level);
+    if (!isConsole && !isHiLog) return;
+    // Preserve short-circuit semantics instead of transforming optional calls.
+    if (ts.isOptionalChain && ts.isOptionalChain(node)) {
+      unsupported(node, 'Optional Console/HiLog calls are left unchanged and are not automatically collected.');
+      return;
+    }
     const start = node.getStart(sourceFile);
     const end = node.end;
     const calleeEnd = node.expression.end;
     if (start < 0 || end > code.length || calleeEnd < start || calleeEnd > end) {
+      unsupported(node, 'The compiler returned an invalid source range for this logging call.');
       return;
     }
 
@@ -125,15 +134,16 @@ function collectCandidates(ts: TypeScriptApi, sourceFile: any, code: string): Tr
       spread: ts.isSpreadElement(argument)
     }));
     const statementSeparator = needsStatementSeparator(ts, node);
-    if (delegateName === 'console' && !resolve(delegate, delegateName) && CONSOLE_LEVELS.includes(level)) {
+    if (isConsole) {
       candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'console', callArguments,
         needsStatementSeparator: statementSeparator });
       return;
     }
-    if (hiLogBindings.has(delegateName) && resolve(delegate, delegateName) === hiLogBindings.get(delegateName) &&
-      HILOG_LEVELS.includes(level) && (callArguments.length >= 3 || callArguments.some(argument => argument.spread))) {
+    if (callArguments.length >= 3 || callArguments.some(argument => argument.spread)) {
       candidates.push({ start, end, calleeEnd, delegate: delegateName, level, source: 'hilog', callArguments,
         needsStatementSeparator: statementSeparator });
+    } else {
+      unsupported(node, 'HiLog collection requires domain, tag and format arguments, or a spread argument supplying them.');
     }
   });
   return candidates;
@@ -210,13 +220,19 @@ function findImportInsertionOffset(ts: TypeScriptApi, sourceFile: any): number {
   return offset;
 }
 
-export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
+export function transformConsoleLogSource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader,
+  reportDiagnostic?: SourceDiagnosticReporter): string {
   if (!isApplicationArkTsSource(id) || code.includes(TRANSFORM_MARKER) ||
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource)) {
     return code;
   }
   const sourceFile = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const candidates = collectCandidates(ts, sourceFile, code);
+  const unsupported: Array<{ node: any; message: string }> = [];
+  const candidates = collectCandidates(ts, sourceFile, code, (node, message) => unsupported.push({ node, message }));
+  if (candidates.length === 0 && unsupported.length === 0) return code;
+  if (reportSourceParseError(ts, parseApplicationSource(ts, id, code), reportDiagnostic)) return code;
+  unsupported.forEach(item => reportSourceDiagnostic(sourceFile, item.node.getStart(sourceFile),
+    'unsupported-log-call', item.message, reportDiagnostic));
   if (candidates.length === 0) {
     return code;
   }

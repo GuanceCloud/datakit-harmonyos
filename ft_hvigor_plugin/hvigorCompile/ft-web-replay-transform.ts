@@ -1,6 +1,7 @@
 /** Associate every native Web with its controller without replacing application IDs or callbacks. */
 import { isApplicationArkTsSource } from './ft-console-log-transform';
-import { hasRuntimeDependency, SourceReader } from './ft-transform-context';
+import { hasRuntimeDependency, SourceReader, SourceDiagnosticReporter, parseApplicationSource,
+  reportSourceDiagnostic, reportSourceParseError } from './ft-transform-context';
 import { createLexicalResolver } from './ft-lexical-scope';
 import { allocateName, collectIdentifierNames } from './ft-generated-names';
 
@@ -10,7 +11,8 @@ interface Injection { position: number; content: string; }
 const MARKER = '/* guance-web-replay-transform:instrumented */';
 const SDK_IMPORT = '@guancecloud/ft_sdk/Index';
 
-export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader): string {
+export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: string, readSource?: SourceReader,
+  reportDiagnostic?: SourceDiagnosticReporter): string {
   if (!isApplicationArkTsSource(id) || code.includes(MARKER) ||
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_sdk', readSource) ||
     !hasRuntimeDependency(ts, id, '@guancecloud/ft_session_replay', readSource)) return code;
@@ -18,16 +20,24 @@ export function transformWebReplaySource(ts: TypeScriptApi, id: string, code: st
   const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.ETS ?? ts.ScriptKind.TS);
   const identifiers = collectIdentifierNames(ts, source);
   const constructors: any[] = [];
+  const unsupported: any[] = [];
   const resolve = createLexicalResolver(ts, source);
   let importEnd = 0;
   const visit = (node: any): void => {
     if (ts.isImportDeclaration(node)) importEnd = Math.max(importEnd, node.end);
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Web' &&
-      node.arguments.length === 1 && !ts.isSpreadElement(node.arguments[0]) &&
-      !resolve(node.expression, 'Web')) constructors.push(node);
+      !resolve(node.expression, 'Web')) {
+      if (node.arguments.length === 1 && !ts.isSpreadElement(node.arguments[0]) &&
+        !(ts.isOptionalChain && ts.isOptionalChain(node))) constructors.push(node);
+      else unsupported.push(node);
+    }
     ts.forEachChild(node, visit);
   };
   visit(source);
+  if (constructors.length === 0 && unsupported.length === 0) return code;
+  if (reportSourceParseError(ts, parseApplicationSource(ts, id, code), reportDiagnostic)) return code;
+  unsupported.forEach(node => reportSourceDiagnostic(source, node.getStart(source), 'unsupported-web-call',
+    'Automatic ArkWeb binding requires a non-optional Web(options) call with exactly one non-spread argument.', reportDiagnostic));
   if (constructors.length === 0) return code;
 
   const bridge = allocateName(identifiers, '__ftWebReplayBridge');
